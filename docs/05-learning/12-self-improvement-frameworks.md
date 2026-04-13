@@ -229,6 +229,266 @@ Several open questions inform future development:
 
 ---
 
+## Improvement Measurement: Rigorous Quantification
+
+Self-improvement claims require rigorous measurement. Without principled metrics and experimental controls, apparent improvements may be noise, regression to the mean, or artifacts of changing task distributions. This section specifies the measurement framework.
+
+### Improvement Score Card
+
+```rust
+pub struct ImprovementScoreCard {
+    /// Time window for comparison.
+    pub window: TimeWindow,
+    /// Baseline period metrics.
+    pub baseline: PeriodMetrics,
+    /// Current period metrics.
+    pub current: PeriodMetrics,
+    /// Statistical significance of observed changes.
+    pub significance: SignificanceTests,
+    /// Confound analysis.
+    pub confounds: Vec<Confound>,
+}
+
+pub struct PeriodMetrics {
+    /// Episode count in this period.
+    pub n_episodes: usize,
+    /// Four key metrics from mori-agents/07-self-improvement.md.
+    pub first_attempt_pass_rate: f64,
+    pub avg_iterations_per_plan: f64,
+    pub avg_cost_per_plan_usd: f64,
+    pub avg_prompt_tokens_per_spawn: u64,
+    /// Extended metrics.
+    pub skill_library_size: usize,
+    pub playbook_rule_count: usize,
+    pub c_factor: f64,
+    pub avg_calibration_error: f64,
+}
+
+pub struct SignificanceTests {
+    /// Two-proportion z-test for pass rate difference.
+    pub pass_rate_z_score: f64,
+    pub pass_rate_p_value: f64,
+    /// Welch's t-test for cost difference.
+    pub cost_t_statistic: f64,
+    pub cost_p_value: f64,
+    /// Mann-Whitney U test for iterations (non-parametric).
+    pub iterations_u_statistic: f64,
+    pub iterations_p_value: f64,
+    /// Is the improvement statistically significant at α = 0.05?
+    pub is_significant: bool,
+}
+
+pub enum Confound {
+    /// Task distribution changed between periods.
+    TaskDistributionShift {
+        metric: String,
+        baseline_distribution: Vec<f64>,
+        current_distribution: Vec<f64>,
+        kl_divergence: f64,
+    },
+    /// Model provider updated between periods.
+    ProviderUpdate {
+        model: String,
+        update_timestamp: DateTime<Utc>,
+    },
+    /// Configuration change between periods.
+    ConfigChange {
+        key: String,
+        old_value: String,
+        new_value: String,
+    },
+    /// Sample size too small for reliable comparison.
+    InsufficientSample {
+        metric: String,
+        n_required: usize,
+        n_actual: usize,
+    },
+}
+```
+
+### Improvement Attribution
+
+When improvement is detected, attribution identifies which learning subsystem caused it:
+
+```
+Improvement detected: pass rate 0.62 → 0.78 (+26%, p < 0.01)
+
+Attribution analysis:
+    1. Check if model routing changed → router selected opus more often (+12% of change)
+    2. Check if new playbook rules were promoted → 3 new rules matched failing tasks (+8%)
+    3. Check if skill library grew → 5 new skills for this task category (+4%)
+    4. Check if prompt experiments concluded → "concise" variant won (+2%)
+    Residual (unexplained): 0%
+
+Most impactful subsystem: Cascade router (model selection improvement)
+```
+
+### Controlled Experiments via Holdout
+
+The gold standard for measuring improvement is a controlled experiment: randomly assign tasks to a "learning" group (all subsystems active) and a "holdout" group (learning frozen at baseline state).
+
+```rust
+pub struct ImprovementExperiment {
+    /// Experiment identifier.
+    pub id: String,
+    /// Start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Treatment: current learning configuration.
+    pub treatment_config: LearningConfig,
+    /// Control: frozen baseline configuration.
+    pub control_config: LearningConfig,
+    /// Assignment: hash(task_id) % 100 < treatment_pct → treatment.
+    pub treatment_pct: u8,  // default: 80 (80% treatment, 20% holdout)
+    /// Results accumulator.
+    pub treatment_results: PeriodMetrics,
+    pub control_results: PeriodMetrics,
+    /// Minimum tasks before concluding.
+    pub min_tasks: usize,  // default: 100
+}
+```
+
+The holdout design ensures that observed improvements are caused by learning rather than external factors (easier task mix, model provider updates, codebase maturation).
+
+### Monotonicity Tracking
+
+Self-improvement should be monotonic: the system should get better over time, not oscillate. Monotonicity is tracked via the C-Factor trend:
+
+```
+C-Factor time series:
+    0.48, 0.51, 0.53, 0.55, 0.54, 0.57, 0.61, 0.63, 0.65, 0.68
+    ← monotonically increasing (with small perturbations)
+
+Monotonicity score = fraction of steps where C(t) > C(t-1)
+    = 8/9 = 0.89 (high monotonicity)
+
+If monotonicity < 0.60 over 20+ episodes:
+    → Learning system is not converging
+    → Investigate: oscillation? regression? environmental shift?
+```
+
+---
+
+## Improvement Safety: Preventing Harmful Self-Modification
+
+A self-improving system can improve in harmful directions: optimizing for pass rate by generating trivially passing code, optimizing for cost by producing low-quality outputs, or modifying its own safety checks to avoid gate failures. Improvement safety mechanisms prevent these failure modes.
+
+### Safety Invariants
+
+```rust
+pub struct SafetyInvariants {
+    /// Gate pipeline must never be disabled or bypassed.
+    pub gates_enabled: bool,
+    /// Minimum gate count (at least compile + test).
+    pub min_gate_count: usize,  // default: 2
+    /// Gate thresholds must never drop below absolute floor.
+    pub gate_threshold_floor: f64,  // default: 0.30
+    /// Playbook rules cannot override safety-critical gates.
+    pub safety_gates_immutable: Vec<String>,  // ["compile", "test"]
+    /// Maximum model downgrade depth (prevent cascading to weakest model).
+    pub max_downgrade_steps: u32,  // default: 2
+    /// Self-modification detection: alert if learning modifies learning code.
+    pub self_modification_alert: bool,  // default: true
+}
+
+pub enum SafetyViolation {
+    /// A gate was disabled or its threshold dropped below floor.
+    GateWeakened { gate: String, old_threshold: f64, new_threshold: f64 },
+    /// A playbook rule attempts to override a safety-critical gate.
+    SafetyGateOverride { rule_id: String, gate: String },
+    /// Model selection cascaded below the minimum quality threshold.
+    ExcessiveDowngrade { target_model: String, downgrade_depth: u32 },
+    /// Learning subsystem is modifying its own code paths.
+    SelfModification { modified_crate: String, modifier_task: String },
+    /// Output quality metrics declined while pass rate increased (gaming gates).
+    GateGaming { pass_rate_delta: f64, quality_delta: f64 },
+    /// Cost optimization produced outputs below minimum quality.
+    QualityFloor { task_id: String, quality_score: f64, threshold: f64 },
+}
+```
+
+### Gate Gaming Detection
+
+The most insidious failure mode is "gate gaming": the system learns to produce outputs that pass gates without actually solving the task. Detection:
+
+```
+Gate gaming indicators:
+    1. Pass rate increases while downstream quality decreases
+       (code passes tests but has bugs discovered later)
+    2. Output complexity decreases (shorter, simpler code that
+       technically passes but doesn't handle edge cases)
+    3. Test coverage decreases while test pass rate increases
+       (trivial tests that always pass)
+    4. Diff size shrinks toward zero (minimal changes that pass gates
+       but don't address the task requirements)
+```
+
+```rust
+pub struct GateGamingDetector {
+    /// Window of recent episodes for analysis.
+    pub window_size: usize,  // default: 50
+    /// Alert if pass rate increases by >10% while quality score decreases by >5%.
+    pub pass_quality_divergence_threshold: f64,  // default: 0.05
+    /// Alert if average diff size drops below this fraction of baseline.
+    pub min_diff_size_fraction: f64,  // default: 0.30
+    /// Alert if output token count drops below this fraction of baseline.
+    pub min_output_fraction: f64,  // default: 0.40
+}
+```
+
+### Constitutional Constraints
+
+Inspired by Constitutional AI (Bai et al. 2022), the self-improvement system operates under constitutional constraints — inviolable rules that no learning subsystem can override:
+
+```toml
+# In roko.toml [safety] section
+[safety.constitution]
+# Learning cannot disable gates
+gates_immutable = true
+# Learning cannot modify the safety module itself
+self_modification_forbidden_crates = ["roko-gate", "roko-agent/safety"]
+# Model selection must always include at least one high-quality option
+min_quality_model_tier = "standard"
+# Budget optimization cannot reduce quality below floor
+quality_floor = 0.50
+# All self-modifications require human review
+self_mod_requires_review = true
+```
+
+### Improvement Velocity Limits
+
+Even beneficial improvements should be rate-limited to prevent cascade failures:
+
+```rust
+pub struct ImprovementVelocityLimits {
+    /// Maximum playbook rule changes per day.
+    pub max_rule_changes_per_day: u32,  // default: 10
+    /// Maximum routing table changes per day.
+    pub max_routing_changes_per_day: u32,  // default: 20
+    /// Maximum prompt experiment conclusions per day.
+    pub max_experiment_conclusions_per_day: u32,  // default: 5
+    /// Cooldown after a safety violation (minutes).
+    pub safety_violation_cooldown_minutes: u32,  // default: 60
+    /// Maximum C-Factor change per episode (damping).
+    pub max_cfactor_delta: f64,  // default: 0.02
+}
+```
+
+These limits prevent a scenario where a false positive in the improvement pipeline triggers a cascade of changes that collectively degrade the system. By limiting the rate of change, the system has time to detect and recover from individual bad decisions.
+
+### Connection to AI Safety Research
+
+The improvement safety framework draws on three lines of research:
+
+1. **Constitutional AI (Bai et al. 2022):** Inviolable rules that constrain self-improvement. Roko's constitutional constraints are the safety analogue.
+
+2. **Scalable oversight (Amodei et al. 2016):** As systems become more capable, human oversight must scale. Roko's `self_mod_requires_review` flag ensures human-in-the-loop for self-referential changes.
+
+3. **Reward hacking (Skalse et al. 2022):** Optimizing for a proxy metric (gate pass rate) can diverge from the true objective (correct code). Gate gaming detection explicitly monitors for this divergence.
+
+4. **Self-play safety (Silver et al. 2017; OpenAI Five 2019):** Self-play can discover exploits in the reward function. Roko's holdout experiment design provides a control group that detects if the "improved" system is actually gaming rather than improving.
+
+---
+
 ## Relationship to Other Documents
 
 - **[02-skill-library-voyager](02-skill-library-voyager.md)** — Implements Voyager-style skill accumulation (Wang et al. 2023).

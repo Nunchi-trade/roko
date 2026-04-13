@@ -508,3 +508,475 @@ in the `watchers` vector. No other code needs to change.
 | `watchers/test_failure_budget.rs` | ~202 | Test regression detection |
 | `watchers/time_overrun.rs` | ~182 | Timeout approach warning |
 | `watchers/context_window_pressure.rs` | ~233 | Token usage monitoring |
+
+---
+
+## Watcher Composition — Complex Pattern Detection
+
+Individual watchers answer narrow questions: "Did the agent ghost?"
+"Did compile errors repeat?" Real failures are rarely that tidy.
+A context window filling up while compile errors repeat while cost
+climbs — that compound pattern signals something no single watcher
+can catch alone.
+
+This section describes how watchers compose to detect those
+multi-signal patterns.
+
+### CEP-inspired pattern matching
+
+Complex Event Processing engines — Apache Flink's FlinkCEP, Esper
+EPL, Siddhi CQL — solve a structurally identical problem: detect
+temporal patterns in high-volume event streams. The core technique
+is NFA-based pattern matching over ordered signal sequences.
+
+Two categories of temporal patterns matter for watcher composition:
+
+**Sequence detection** — "Signal A followed by Signal B within time T."
+Example: "Agent retried 3+ times within 60 seconds."
+
+```
+PATTERN [every A{3,} within 60 sec]
+```
+
+**Absence detection** — "Signal A occurred, but Signal B did NOT
+follow within time T." Example: "Tool call without response within
+30 seconds."
+
+```
+PATTERN [A -> (not B where timer:within(30 sec))]
+```
+
+**Monotonic progression** — "Each successive signal exceeds the
+previous on some metric." Example: "Escalating latency: each turn
+slower than the last."
+
+```
+MATCH_RECOGNIZE(PATTERN (A B+ C) DEFINE B AS B.latency > A.latency)
+```
+
+These patterns translate directly to agent monitoring. The signal
+stream is the event source. Watchers produce the events. A composite
+pattern layer matches sequences across watcher outputs.
+
+The struct below captures this:
+
+```rust
+/// Composite pattern that matches sequences across multiple watchers.
+/// Inspired by NFA-based CEP engines (FlinkCEP, Esper EPL).
+pub struct CompositePattern {
+    /// Pattern stages — each stage matches one or more signal conditions.
+    stages: Vec<PatternStage>,
+    /// Maximum wall-clock duration for the entire pattern to complete.
+    within: Duration,
+    /// Contiguity: Strict (no gaps), Relaxed (skip non-matching), or NonDeterministic.
+    contiguity: Contiguity,
+}
+
+pub struct PatternStage {
+    /// Signal kind(s) this stage matches.
+    match_kinds: Vec<Kind>,
+    /// Predicate evaluated against the signal's tags and body.
+    predicate: Box<dyn Fn(&Signal) -> bool + Send + Sync>,
+    /// Quantifier: Exactly(n), AtLeast(n), Between(min, max).
+    quantifier: Quantifier,
+    /// Negation: if true, this stage matches the ABSENCE of the pattern.
+    negated: bool,
+}
+
+pub enum Contiguity { Strict, Relaxed, NonDeterministic }
+pub enum Quantifier { Exactly(usize), AtLeast(usize), Between(usize, usize) }
+```
+
+**Contiguity modes** control how strictly the pattern engine matches
+consecutive events:
+
+- **Strict**: Every signal between stages must match (no irrelevant
+  signals allowed in the gap).
+- **Relaxed**: Non-matching signals between stages are skipped.
+- **NonDeterministic**: Multiple partial matches can coexist,
+  branching on ambiguous signals.
+
+For agent monitoring, Relaxed contiguity is the right default. Agent
+signal streams contain many signal types; requiring strict adjacency
+between pattern stages would miss most real patterns.
+
+### Multi-watcher correlation
+
+When multiple watchers fire at the same time, the question is: one
+root cause, or multiple independent failures? The answer depends on
+which watchers fired.
+
+Watchers group into three families based on what they measure:
+
+**Resource family**: cost-overrun, context-window-pressure, time-overrun.
+These track consumption of finite budgets (money, tokens, wall-clock
+time). When two resource watchers fire together, the root cause is
+usually a single runaway process burning all three budgets
+simultaneously.
+
+**Behavioral family**: ghost-turn, stuck-pattern, compile-fail-repeat,
+iteration-loop. These detect degenerate agent behavior. Two behavioral
+watchers firing together confirms the agent is stuck — the specific
+failure mode is being caught from multiple angles.
+
+**Coordination family**: review-loop, spec-drift, test-failure-budget.
+These detect multi-agent coordination breakdowns. Two coordination
+watchers firing together indicates a systemic scoping or communication
+problem, not a single agent failure.
+
+```rust
+/// Watcher family grouping for correlated signal analysis.
+pub struct WatcherFamily {
+    pub name: &'static str,
+    pub members: Vec<&'static str>,
+}
+
+pub const WATCHER_FAMILIES: &[WatcherFamily] = &[
+    WatcherFamily { name: "resource", members: &["cost-overrun", "context-window-pressure", "time-overrun"] },
+    WatcherFamily { name: "behavioral", members: &["ghost-turn", "stuck-pattern", "compile-fail-repeat", "iteration-loop"] },
+    WatcherFamily { name: "coordination", members: &["review-loop", "spec-drift", "test-failure-budget"] },
+];
+```
+
+**Within-family correlation**: If 2+ watchers in the same family fire
+simultaneously, treat them as a single correlated event. The underlying
+cause is likely one issue manifesting in multiple metrics. De-duplicate
+before escalating — report the highest-severity watcher's signal,
+annotated with which other family members also fired.
+
+**Cross-family correlation**: If watchers from different families fire
+simultaneously, the situation is more severe. A behavioral failure
+(stuck-pattern) combined with a resource failure (cost-overrun) means
+the agent is both stuck AND burning budget doing it. Cross-family
+correlation should escalate severity by one level: a Warning from
+each family becomes a single Critical intervention.
+
+---
+
+## Watcher Priority and Conflict Resolution
+
+When multiple watchers fire in the same evaluation cycle, the
+Conductor must produce a single coherent intervention. The current
+approach is conservative. The alternatives below offer more nuance
+at the cost of more complexity.
+
+### Current approach: WorstSeverityPolicy
+
+`WorstSeverityPolicy` takes the maximum severity across all fired
+watchers. If ghost-turn fires at Warning and iteration-loop fires at
+Critical, the result is Critical.
+
+This is simple, conservative, and effective. It never under-reacts.
+The tradeoff: it can over-react when a low-confidence Critical
+watcher fires alongside high-confidence Warning watchers. Every
+alternative below addresses this tradeoff.
+
+### Bayesian fusion
+
+Instead of taking the max, combine watcher outputs probabilistically.
+Each watcher provides a likelihood ratio — how much more probable
+is this signal under "anomaly" than under "normal operation"?
+
+The combined posterior follows from log-odds addition:
+
+```
+log P(anomaly | signals) = log P(anomaly) + sum_i log LR_i(s_i)
+```
+
+A watcher that fires with a high likelihood ratio shifts the posterior
+strongly toward anomaly. A watcher that stays silent shifts it toward
+normal (by its silent likelihood ratio). The net effect: watchers
+that are historically accurate carry more weight than watchers that
+produce frequent false positives.
+
+```rust
+/// Bayesian fusion of watcher outputs for conflict resolution.
+pub struct BayesianFusionPolicy {
+    /// Prior probability of anomaly (before any watchers fire).
+    prior_log_odds: f64,
+    /// Per-watcher calibration: (log_likelihood_ratio_when_fired, log_likelihood_ratio_when_silent).
+    watcher_calibrations: HashMap<String, WatcherCalibration>,
+}
+
+pub struct WatcherCalibration {
+    /// log(P(fire | anomaly) / P(fire | normal)) — how informative is this watcher when it fires?
+    pub log_lr_fired: f64,
+    /// log(P(silent | anomaly) / P(silent | normal)) — how informative is silence?
+    pub log_lr_silent: f64,
+    /// Historical precision (true positives / all positives).
+    pub precision: f64,
+    /// Historical recall (true positives / all anomalies).
+    pub recall: f64,
+}
+```
+
+This requires calibration data: each watcher's true positive and
+false positive rates from historical runs. The learning system
+(roko-learn) already tracks per-gate precision via the adaptive
+threshold mechanism. Extending that tracking to watchers gives the
+calibration data Bayesian fusion needs.
+
+### Dempster-Shafer theory
+
+Bayesian fusion assumes watchers are well-calibrated probabilistic
+classifiers. In practice, watchers often express something weaker:
+"I think something is wrong, but I'm not sure what." Dempster-Shafer
+theory handles this uncertainty directly.
+
+Each watcher provides a mass function over three states:
+{anomaly}, {normal}, {anomaly, normal} (ignorance).
+
+A watcher that fires with high confidence assigns most mass to
+{anomaly}. A watcher that is uncertain assigns mass to
+{anomaly, normal} — expressing ignorance, NOT confidence in
+normality. This distinction matters: "I don't know" is different
+from "everything is fine."
+
+Combination follows Dempster's rule:
+
+```
+m_12(A) = sum_{B intersect C = A} m_1(B) * m_2(C) / (1 - K)
+```
+
+where K is the conflict mass — the sum of products where the
+intersection is empty. When K > 0.5, the watchers genuinely
+disagree about what is happening. This is itself a signal: high
+conflict between watchers means the system should escalate for human
+review rather than auto-resolve.
+
+**When to prefer Dempster-Shafer over Bayesian**: When watchers
+have poor calibration data (early in a project's lifecycle), when
+watchers express qualitative judgments rather than probabilistic
+scores, or when the "I don't know" state carries important
+information.
+
+### Weighted voting with online learning
+
+A lighter-weight alternative to full probabilistic fusion: weight
+each watcher's vote by its historical precision.
+
+Track per-watcher precision via an online confusion matrix. Each
+time a watcher fires and the outcome is later confirmed (task
+succeeded or failed), update the matrix. Weight each watcher's
+severity vote by its precision score.
+
+Use Thompson sampling — already available in roko-learn's bandit
+infrastructure — to adapt weights over time. Each watcher is an
+arm. The reward is correct prediction (watcher fired and the task
+genuinely failed, or watcher stayed silent and the task succeeded).
+Watchers with high false-positive rates get downweighted
+dynamically. Watchers with consistently accurate predictions gain
+influence.
+
+This approach requires less calibration data than Bayesian fusion
+and handles non-stationary watcher accuracy (a watcher that was
+accurate last month but is noisy this month gets downweighted
+automatically).
+
+### Temporal hysteresis
+
+Orthogonal to the fusion method: prevent single-spike false
+positives by requiring sustained firing before a watcher's output
+counts.
+
+A watcher must fire for N consecutive evaluations before its signal
+propagates to the intervention policy. Default N=1 (current
+behavior — no hysteresis). For noisy watchers, set N=3: the watcher
+must fire three times in a row before its output reaches the fusion
+layer.
+
+This prevents oscillation patterns: fire, restart, fire, restart.
+With hysteresis, the first two firings are absorbed. The third
+confirms the pattern is real and propagates the intervention.
+
+Hysteresis is per-watcher configurable. Stable watchers
+(iteration-loop, cost-overrun) should keep N=1 — they fire based
+on accumulated counts and are already resistant to transient noise.
+Noisy watchers (spec-drift, context-window-pressure) benefit from
+N=2 or N=3.
+
+---
+
+## Streaming Anomaly Detection Integration
+
+The threshold-based watchers above catch known failure modes:
+compile loops, ghost turns, cost overruns. They do not catch
+novel failures — patterns that nobody anticipated when writing
+the watcher catalog. Streaming anomaly detection fills that gap.
+
+### Online Isolation Forest
+
+The original Isolation Forest (Liu et al., 2008) builds random
+binary trees over a batch dataset. Points that isolate quickly
+(short average path length) are anomalies. The online variant
+(ICML 2024) adapts this to streaming data by maintaining a sliding
+window and splitting leaf nodes incrementally.
+
+Each node tracks a count and bounding box. When a leaf accumulates
+enough points, it splits on a random dimension at a random value
+within the bounding box. Old points outside the sliding window
+are decremented from leaf counts.
+
+Anomaly score:
+
+```
+s = 2^(-E(depth) / c(window_size))
+```
+
+where `E(depth)` is the expected depth of the point across all trees
+and `c(n)` is the average path length of an unsuccessful search in a
+binary search tree of size n (the normalization factor).
+
+For agent monitoring, each agent turn becomes a multivariate point:
+latency (ms), tokens consumed, tool calls made, error rate. A turn
+that scores above the threshold on the forest is flagged as
+anomalous — even if no individual watcher fires.
+
+```rust
+/// Online Isolation Forest for streaming anomaly detection.
+/// Reference: ICML 2024, "Online Isolation Forest"
+pub struct OnlineIsolationForest {
+    trees: Vec<IsolationTree>,
+    window_size: usize,       // omega: sliding window (default: 1000)
+    max_leaf_samples: usize,   // eta: split threshold (default: 8)
+    num_trees: usize,          // tau: ensemble size (default: 50)
+    score_threshold: f64,      // anomaly if score > threshold (default: 0.7)
+}
+
+pub struct IsolationTree {
+    root: IsolationNode,
+}
+
+pub enum IsolationNode {
+    Internal {
+        split_dim: usize,
+        split_val: f64,
+        count: usize,
+        bbox: BoundingBox,
+        left: Box<IsolationNode>,
+        right: Box<IsolationNode>,
+    },
+    Leaf {
+        count: usize,
+        bbox: BoundingBox,
+        samples: Vec<Vec<f64>>,  // retained for splitting
+    },
+}
+```
+
+**Default parameters**: tau=50 trees, omega=1000 window size,
+eta=8 max leaf samples, score threshold=0.7. These are standard
+values from the literature. For agent monitoring workloads with
+lower volume (hundreds of turns per plan, not millions), reduce
+omega to 100-200 to build the model faster.
+
+### CUSUM for per-watcher change detection
+
+EWMA z-scores (used by the existing watchers) detect spikes —
+single-turn anomalies that deviate sharply from the mean.
+CUSUM (Cumulative Sum, Page 1954) detects something different:
+sustained shifts. A metric that drifts upward by 0.5 sigma per
+turn won't trigger a z-score alarm for many turns, but CUSUM
+catches it quickly.
+
+The upper CUSUM statistic:
+
+```
+C_t = max(0, C_{t-1} + (x_t - mu_0 - k))
+```
+
+where `mu_0` is the baseline mean and `k` is the allowance
+parameter (typically delta/2, where delta is the shift magnitude
+to detect). When `C_t` exceeds the decision threshold `h`, CUSUM
+raises an alarm.
+
+The lower CUSUM statistic tracks negative shifts symmetrically.
+Together they detect both upward and downward sustained changes.
+
+```rust
+/// CUSUM change-point detector for sustained anomaly detection.
+/// Detects persistent shifts from a baseline, complementing EWMA spike detection.
+pub struct CusumDetector {
+    /// Target mean (baseline behavior).
+    mu_0: f64,
+    /// Allowance parameter (typically delta/2 where delta is the shift to detect).
+    k: f64,
+    /// Decision threshold (alarm when cumulative sum exceeds h).
+    h: f64,
+    /// Upper CUSUM statistic.
+    upper: f64,
+    /// Lower CUSUM statistic.
+    lower: f64,
+}
+
+impl CusumDetector {
+    pub fn update(&mut self, value: f64) -> Option<CusumAlarm> {
+        self.upper = (self.upper + (value - self.mu_0 - self.k)).max(0.0);
+        self.lower = (self.lower - (value - self.mu_0 + self.k)).max(0.0);
+        if self.upper > self.h {
+            Some(CusumAlarm::UpperShift { cumsum: self.upper })
+        } else if self.lower > self.h {
+            Some(CusumAlarm::LowerShift { cumsum: self.lower })
+        } else {
+            None
+        }
+    }
+}
+```
+
+**Operating characteristics**: With k = delta/2 and h = 4-5 sigma,
+the average run length before a false alarm (ARL_0) is roughly
+500 samples. The average run length to detect a 1-sigma shift
+(ARL_1) is roughly 26 samples. CUSUM detects sustained degradation
+10-50x faster than EWMA z-scores for the same false alarm rate.
+
+**Application**: Attach a CUSUM detector to each watcher's numeric
+output (cost per turn, latency per turn, drift ratio). The watcher's
+own threshold catches spikes; CUSUM catches gradual worsening that
+stays below the spike threshold but accumulates over time.
+
+### TraceAegis-style behavioral rules
+
+TraceAegis (arXiv 2510.11203, October 2024) monitors tool
+invocation traces at the gateway level. Instead of statistical
+anomaly detection, it defines explicit behavioral rules: expected
+call ordering, parameter constraints, intent-aligned state
+transitions.
+
+This approach detects a class of failures that statistical methods
+miss: an agent that calls tools in a valid but unauthorized order,
+modifies parameters within normal ranges but in a goal-misaligned
+way, or makes state transitions that are individually legal but
+collectively drift from the task intent.
+
+Behavioral rules for agent monitoring:
+
+- **Call ordering**: Tool A must precede Tool B (e.g., read a file
+  before editing it). Violations indicate the agent is operating
+  on stale or missing context.
+- **Parameter constraints**: Tool parameters must fall within
+  task-declared bounds (e.g., file edits restricted to declared
+  write paths). Violations overlap with spec-drift detection but
+  operate at the tool-call level rather than the file-change level.
+- **State transitions**: After a gate failure, the next action
+  should be a diagnostic step (read error output, inspect failing
+  test), not a blind retry. Violations indicate the agent is not
+  learning from feedback.
+- **API boundary enforcement**: Agents should not call tools
+  outside their declared capability set. An implementation agent
+  calling a deployment tool is a boundary violation.
+
+Validated F1 scores for TraceAegis-style rule checking range
+from 0.93 to 0.96 in their evaluated scenarios, making this a
+high-precision complement to the statistical methods above.
+
+### References
+
+- Liu, F. T., Ting, K. M., & Zhou, Z.-H. (2008). "Isolation Forest." ICDM.
+- Online Isolation Forest. ICML 2024.
+- Page, E. S. (1954). "Continuous Inspection Schemes." Biometrika.
+- TraceAegis. arXiv 2510.11203, October 2024.
+- Dempster, A. P. (1967). "Upper and Lower Probabilities Induced by a Multivalued Mapping." Annals of Mathematical Statistics.
+- Shafer, G. (1976). A Mathematical Theory of Evidence. Princeton University Press.
+- Apache Flink CEP documentation: https://nightlies.apache.org/flink/flink-docs-stable/docs/libs/cep/
+- Esper EPL documentation: https://www.espertech.com/esper/

@@ -386,6 +386,92 @@ Cross-cut signals arrive at Router:
 
 ---
 
+## 7. Functorial Analysis of Cross-Cuts
+
+Category theory provides a formal framework for understanding why cross-cuts compose correctly
+with the verb traits (see also Section 10 of 06-synapse-traits.md).
+
+### 7.1 Cross-Cuts as Endofunctors
+
+Each cross-cut defines an **endofunctor** F: Eng → Eng on the Engram category, where F maps:
+- Each trait implementation T to an enriched version F(T)
+- Each Engram to an enriched Engram (with additional metadata)
+
+| Cross-Cut | Functor F | F(Router) | F(Composer) |
+|---|---|---|---|
+| **Neuro** | Knowledge enrichment | Router with knowledge-informed selection | Composer with knowledge-enriched context |
+| **Daimon** | Affect modulation | Router with PAD-biased tier selection | Composer with arousal-adjusted token budget |
+| **Dreams** | Consolidation transformation | Router with replay-updated weights | Composer with consolidated knowledge |
+
+### 7.2 Natural Transformations Between Cross-Cuts
+
+The cross-cut interaction model (Section 5) defines natural transformations:
+
+```
+η_DN : Daimon → Neuro    (PAD assessment stored as knowledge)
+η_ND : Neuro → Daimon    (knowledge outcomes update PAD)
+η_NR : Neuro → Dreams    (episodes provided for replay)
+η_RN : Dreams → Neuro    (consolidated knowledge stored)
+η_DR : Daimon → Dreams   (PAD triggers consolidation)
+η_RD : Dreams → Daimon   (depotentiation updates PAD)
+```
+
+These form a **commuting triangle**: the composition Daimon → Neuro → Dreams must equal the
+direct path Daimon → Dreams for the system to be consistent. The arbitration protocol
+(Section 6) enforces this commutativity through the priority hierarchy: when paths conflict,
+the higher-priority cross-cut's transformation takes precedence, preventing inconsistent state.
+
+### 7.3 VSA Operations as Algebraic Structure
+
+The HDC vectors used by Neuro provide three algebraic operations that map to category theory:
+
+| HDC Operation | Categorical Analog | Knowledge Use |
+|---|---|---|
+| **Bind** (XOR) | Tensor product | Associating concept pairs: bind(tool, outcome) |
+| **Bundle** (majority vote) | Direct sum / coproduct | Combining multiple related concepts |
+| **Permute** (rotation) | Cyclic action | Sequencing: permute(step, position) |
+
+These operations make the HDC vector space a proper **Vector Symbolic Architecture** (VSA),
+which is algebraically richer than a simple embedding space. The bind/bundle/permute algebra
+enables compositional knowledge representation that is structurally compatible with the
+Engram's categorical structure.
+
+**Reference**: Kleyko, D. et al. (2022). "A Survey on Hyperdimensional Computing."
+Artificial Intelligence Review 56.
+
+---
+
+## 8. Cross-Domain Speed Mapping
+
+The three cognitive speeds (Gamma/Theta/Delta) apply uniformly across domains, but the
+cross-cuts modulate how each speed functions per domain:
+
+### 8.1 Coding Domain
+
+| Speed | Cross-Cut Modulation |
+|---|---|
+| **Gamma** (~5s) | Neuro: inject relevant code symbols. Daimon: if Struggling, include more safety context. |
+| **Theta** (~75s) | Neuro: check for stale heuristics about the codebase. Daimon: assess confidence trend over recent Gamma ticks. |
+| **Delta** (~hours) | Dreams: replay failed compilation episodes. Neuro: promote validated coding heuristics. |
+
+### 8.2 Chain Domain
+
+| Speed | Cross-Cut Modulation |
+|---|---|
+| **Gamma** (~5s) | Neuro: inject recent chain state (gas, liquidity). Daimon: if high arousal (market volatility), escalate to T2. |
+| **Theta** (~75s) | Neuro: check prediction accuracy for market conditions. Daimon: assess whether hedging is needed. |
+| **Delta** (~hours) | Dreams: replay MEV incidents for pattern extraction. Neuro: promote validated trading heuristics. |
+
+### 8.3 Research Domain
+
+| Speed | Cross-Cut Modulation |
+|---|---|
+| **Gamma** (~5s) | Neuro: inject relevant citations and prior findings. Daimon: exploration mode if novelty is high. |
+| **Theta** (~75s) | Neuro: check for contradictions with existing knowledge. Daimon: assess whether the research direction is productive. |
+| **Delta** (~hours) | Dreams: generate cross-domain hypotheses via HDC recombination. Neuro: promote peer-validated insights. |
+
+---
+
 ## Current Status and Gaps
 
 - **Neuro**: `roko-neuro` built. Knowledge types and tier system defined. HDC encoding via
@@ -395,12 +481,18 @@ Cross-cut signals arrive at Router:
 - **Dreams**: `roko-dreams` scaffolded but not fully implemented. Three-phase cycle specified.
   Hypnagogia engine specified. NREM replay and REM imagination not yet shipping.
 - **Gap**: Cross-cut interaction (Daimon ↔ Neuro ↔ Dreams) not yet fully wired.
+- **Gap**: Cross-cut functorial composition not formally verified; commutativity of
+  the Daimon↔Neuro↔Dreams triangle depends on arbitration protocol correctness.
+- **Opportunity**: VSA algebraic operations (bind/bundle/permute) on knowledge vectors
+  are defined but not yet exposed as composable operations on Engrams.
 
 ---
 
 ## Cross-References
 
 - [04-decay-variants.md](04-decay-variants.md) — Ebbinghaus decay in knowledge tiers
+- [06-synapse-traits.md](06-synapse-traits.md) — Categorical analysis of traits as morphisms
 - [10-three-cognitive-speeds.md](10-three-cognitive-speeds.md) — Delta frequency triggers Dreams
 - [11-dual-process-and-active-inference.md](11-dual-process-and-active-inference.md) — Daimon drives tier routing
 - [12-five-layer-taxonomy.md](12-five-layer-taxonomy.md) — Cross-cuts injected across layers
+- [23-architectural-analysis-improvements.md](23-architectural-analysis-improvements.md) — Full architectural analysis

@@ -469,6 +469,569 @@ Estimated LOC: ~90
 
 ---
 
+## Detailed Data Flow Specifications
+
+Each feedback loop has precise data flow requirements, latency constraints, and failure mode characteristics. This section formalizes these for implementation reference.
+
+### Loop 1: Health → Routing — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  Provider Response    │────►│  ProviderHealthRegistry │────►│  CascadeRouter   │
+│  (success/failure)    │     │  record_success/failure │     │  select()        │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+      Source type:                Transform:                   Sink type:
+      ProviderResponse            ErrorClassifier →            is_available() →
+      { status_code,              CircuitState update          bool filter on
+        latency_ms,               (Closed/Open/HalfOpen)       candidate set
+        error: Option }
+```
+
+**Latency requirement:** Real-time (< 1ms). Circuit state check is a HashMap lookup.
+
+**Failure mode if loop breaks:** Router sends requests to a degraded provider → timeouts → wasted budget → cascading failures as the provider's queue backs up. Recovery: manual provider blacklist in roko.toml.
+
+```rust
+// Source type
+pub struct ProviderResponse {
+    pub provider_id: String,
+    pub model: String,
+    pub status_code: u16,
+    pub latency_ms: u64,
+    pub error: Option<ProviderError>,
+    pub timestamp: DateTime<Utc>,
+}
+
+// Transform function
+fn health_to_routing_transform(response: &ProviderResponse) -> CircuitAction {
+    match response.error {
+        None => CircuitAction::RecordSuccess,
+        Some(ref err) => {
+            let class = ErrorClassifier::classify(err);
+            let cooldown = CooldownPolicy::for_class(&class);
+            CircuitAction::RecordFailure { class, cooldown }
+        }
+    }
+}
+
+// Sink: CascadeRouter reads circuit state during select()
+fn is_available(provider: &str, registry: &ProviderHealthRegistry) -> bool {
+    matches!(registry.state(provider), CircuitState::Closed | CircuitState::HalfOpen)
+}
+```
+
+---
+
+### Loop 2: Conductor → Routing — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  SystemLoadSnapshot   │────►│  Load Threshold Check   │────►│  CascadeRouter   │
+│  (cpu, mem, agents,   │     │  active_agents >=       │     │  routing bias    │
+│   queue_depth)        │     │  max_agents * 0.8?      │     │  adjustment      │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Batch (every 5 episodes). System load changes slowly relative to task execution.
+
+**Failure mode if loop breaks:** System routes to expensive models during high load → resource exhaustion → agent spawn failures → plan stalls. Recovery: manual cost ceiling in roko.toml.
+
+```rust
+// Source type (already exists in roko-conductor)
+pub struct SystemLoadSnapshot {
+    pub cpu_load: f32,
+    pub memory_pct: f32,
+    pub active_agents: u32,
+    pub queue_depth: u32,
+    pub timestamp: DateTime<Utc>,
+}
+
+// Transform function
+fn conductor_to_routing_transform(
+    load: &SystemLoadSnapshot,
+    config: &ConductorConfig,
+) -> RoutingBiasAdjustment {
+    let agent_utilization = load.active_agents as f64 / config.max_agents as f64;
+    let memory_pressure = load.memory_pct as f64 / 100.0;
+
+    if agent_utilization > 0.8 || memory_pressure > 0.85 {
+        RoutingBiasAdjustment::PreferCheaper { cost_weight_multiplier: 1.5 }
+    } else if agent_utilization < 0.3 && memory_pressure < 0.50 {
+        RoutingBiasAdjustment::AllowExpensive { quality_weight_multiplier: 1.2 }
+    } else {
+        RoutingBiasAdjustment::Neutral
+    }
+}
+
+pub enum RoutingBiasAdjustment {
+    PreferCheaper { cost_weight_multiplier: f64 },
+    AllowExpensive { quality_weight_multiplier: f64 },
+    Neutral,
+}
+```
+
+---
+
+### Loop 3: Section → Scaffold — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  PromptSectionMeta +  │────►│  SectionEffectiveness   │────►│  SectionWeights  │
+│  gate_passed (from    │     │  Tracker (conditional   │     │  (HashMap<String │
+│  efficiency events)   │     │  pass rate analysis)    │     │   , f32>)        │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Batch (every 20 episodes). Section effectiveness needs a meaningful sample before adjusting weights.
+
+**Failure mode if loop breaks:** Wasteful prompt sections consume tokens without contributing to success → inflated costs and potentially confused agents. Recovery: manual section weights in roko.toml prompt configuration.
+
+```rust
+// Source type (already exists in efficiency events)
+pub struct SectionEffectivenessInput {
+    pub section_name: String,
+    pub was_included: bool,
+    pub tokens_consumed: u64,
+    pub gate_passed: bool,
+    pub role: String,
+    pub complexity_band: String,
+}
+
+// Transform: conditional pass rate analysis
+pub struct SectionEffectivenessTracker {
+    /// Per-section: (included_count, included_pass_count, excluded_count, excluded_pass_count)
+    stats: HashMap<String, SectionStats>,
+}
+
+pub struct SectionStats {
+    pub included_count: u32,
+    pub included_pass_count: u32,
+    pub excluded_count: u32,
+    pub excluded_pass_count: u32,
+}
+
+impl SectionStats {
+    fn effectiveness_delta(&self) -> f64 {
+        let included_rate = self.included_pass_count as f64 / self.included_count.max(1) as f64;
+        let excluded_rate = self.excluded_pass_count as f64 / self.excluded_count.max(1) as f64;
+        included_rate - excluded_rate
+        // Positive = section helps, Negative = section hurts
+    }
+}
+
+fn section_to_scaffold_transform(
+    tracker: &SectionEffectivenessTracker,
+    min_samples: u32,  // default: 50
+    significance_delta: f64,  // default: 0.05
+) -> HashMap<String, f32> {
+    let mut weights = HashMap::new();
+    for (name, stats) in &tracker.stats {
+        if stats.included_count + stats.excluded_count < min_samples {
+            weights.insert(name.clone(), 1.0); // Not enough data, neutral weight
+            continue;
+        }
+        let delta = stats.effectiveness_delta();
+        if delta > significance_delta {
+            weights.insert(name.clone(), 1.0 + delta as f32); // Boost helpful sections
+        } else if delta < -significance_delta {
+            weights.insert(name.clone(), (1.0 + delta as f32).max(0.1)); // Reduce harmful sections
+        } else {
+            weights.insert(name.clone(), 1.0); // Neutral
+        }
+    }
+    weights
+}
+
+// Sink: SectionWeights in roko-compose
+pub struct SectionWeights {
+    pub weights: HashMap<String, f32>,
+    pub computed_at: DateTime<Utc>,
+    pub episode_count: usize,
+}
+```
+
+---
+
+### Loop 4: Failure → Replanning — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  Consecutive gate     │────►│  Failure Analyzer       │────►│  Plan Generator  │
+│  failures for task    │     │  (pattern detection,    │     │  (decompose into │
+│  (Vec<GateVerdict>)   │     │   root cause grouping)  │     │   subtasks)      │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Per-task (triggered after max_iterations failures). Must complete before plan executor moves to next task.
+
+**Failure mode if loop breaks:** System retries the same failing task indefinitely → budget burn on intractable tasks → plan stalls. Recovery: manual task skip or plan abort.
+
+```rust
+// Source type
+pub struct FailureSequence {
+    pub task_id: String,
+    pub plan_id: String,
+    pub failures: Vec<GateVerdict>,
+    pub total_cost_burned: f64,
+    pub models_tried: Vec<String>,
+}
+
+// Transform: failure analysis
+pub struct FailureAnalysis {
+    /// Are all failures the same error? (systematic issue)
+    pub is_repeated_error: bool,
+    /// Dominant error signature (if repeated).
+    pub dominant_signature: Option<String>,
+    /// Did model escalation help? (opus failed same as haiku = not a model issue)
+    pub model_escalation_helped: bool,
+    /// Recommended action.
+    pub recommendation: FailureRecommendation,
+}
+
+pub enum FailureRecommendation {
+    /// Decompose into smaller subtasks.
+    Decompose { suggested_split: Vec<String> },
+    /// Change approach entirely (different tool set, different strategy).
+    ChangeApproach { reason: String },
+    /// Escalate to human review.
+    HumanReview { context: String },
+    /// Skip task (it may be impossible given current capabilities).
+    Skip { reason: String },
+}
+
+fn failure_to_replan_transform(seq: &FailureSequence) -> FailureAnalysis {
+    let signatures: Vec<_> = seq.failures.iter()
+        .filter_map(|v| v.signature.as_ref())
+        .collect();
+
+    let is_repeated = signatures.windows(2).all(|w| w[0] == w[1]);
+    let model_set: HashSet<_> = seq.models_tried.iter().collect();
+    let tried_multiple_models = model_set.len() >= 2;
+
+    let recommendation = if is_repeated && tried_multiple_models {
+        // Same error with multiple models = fundamental approach problem
+        FailureRecommendation::Decompose {
+            suggested_split: suggest_decomposition(&seq.task_id),
+        }
+    } else if seq.failures.len() > 5 && seq.total_cost_burned > 10.0 {
+        // Many failures, high cost = escalate
+        FailureRecommendation::HumanReview {
+            context: format!("Task {} failed {} times, burned ${:.2}",
+                seq.task_id, seq.failures.len(), seq.total_cost_burned),
+        }
+    } else {
+        FailureRecommendation::ChangeApproach {
+            reason: "Varied errors suggest the approach needs revision".into(),
+        }
+    };
+
+    FailureAnalysis {
+        is_repeated_error: is_repeated,
+        dominant_signature: signatures.first().map(|s| s.to_string()),
+        model_escalation_helped: !is_repeated && tried_multiple_models,
+        recommendation,
+    }
+}
+```
+
+---
+
+### Loop 5: Skills → Prompts — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  SkillLibrary         │────►│  Skill Matcher          │────►│  SystemPrompt    │
+│  (accumulated skills  │     │  (tag + file + HDC      │     │  Builder layer 4 │
+│   with confidence)    │     │   similarity search)    │     │  ("skills" sect) │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Per-task (< 5ms). Must complete during prompt assembly before agent dispatch.
+
+**Failure mode if loop breaks:** Agents rediscover solutions that the skill library already contains → wasted iterations → higher cost. Recovery: skills still accumulate but aren't injected; no data loss.
+
+```rust
+// Source: SkillLibrary::search_by_task()
+pub struct SkillMatch {
+    pub skill_name: String,
+    pub confidence: f64,
+    pub match_type: SkillMatchType,
+    pub prompt_template: String,
+    pub max_tokens: usize,  // budget for this skill injection
+}
+
+pub enum SkillMatchType {
+    /// Matched by file path overlap.
+    FileMatch { overlap_files: Vec<String> },
+    /// Matched by tag overlap.
+    TagMatch { matching_tags: Vec<String> },
+    /// Matched by HDC similarity to task context.
+    HdcSimilarity { similarity: f64 },
+}
+
+// Transform: filter and rank
+fn skills_to_prompt_transform(
+    matches: Vec<SkillMatch>,
+    max_skills: usize,  // default: 3
+    min_confidence: f64,  // default: 0.50
+    max_total_tokens: usize,  // default: 500
+) -> Vec<SkillInjection> {
+    let mut qualified: Vec<_> = matches.into_iter()
+        .filter(|m| m.confidence >= min_confidence)
+        .collect();
+    qualified.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+
+    let mut injections = Vec::new();
+    let mut token_budget = max_total_tokens;
+    for skill in qualified.into_iter().take(max_skills) {
+        if skill.max_tokens <= token_budget {
+            token_budget -= skill.max_tokens;
+            injections.push(SkillInjection {
+                skill_name: skill.skill_name,
+                template: skill.prompt_template,
+                confidence: skill.confidence,
+            });
+        }
+    }
+    injections
+}
+
+// Sink: injected into SystemPromptBuilder
+pub struct SkillInjection {
+    pub skill_name: String,
+    pub template: String,
+    pub confidence: f64,
+}
+```
+
+---
+
+### Loop 6: Cost → Routing — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  CostsLog (running    │────►│  BudgetGuardrail        │────►│  CascadeRouter   │
+│  cost accumulator)    │     │  check() → action       │     │  cost_weight or  │
+│                       │     │                          │     │  candidate filter │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Per-task (< 1ms). Budget check is arithmetic comparison.
+
+**Failure mode if loop breaks:** System exceeds budget → unexpected charges → operator loses trust in automated execution. Recovery: hard stop at 100% budget via separate watchdog process.
+
+```rust
+// Source: accumulated costs
+pub struct BudgetState {
+    pub task_cost_usd: f64,
+    pub session_cost_usd: f64,
+    pub day_cost_usd: f64,
+    pub task_limit: f64,
+    pub session_limit: f64,
+    pub day_limit: f64,
+}
+
+// Transform: multi-level budget check
+fn cost_to_routing_transform(state: &BudgetState) -> BudgetRoutingAction {
+    // Check each level, return most restrictive action
+    let task_pct = state.task_cost_usd / state.task_limit;
+    let session_pct = state.session_cost_usd / state.session_limit;
+    let day_pct = state.day_cost_usd / state.day_limit;
+
+    let max_pct = task_pct.max(session_pct).max(day_pct);
+
+    if max_pct >= 1.0 {
+        BudgetRoutingAction::HardStop
+    } else if max_pct >= 0.95 {
+        BudgetRoutingAction::Block
+    } else if max_pct >= 0.80 {
+        BudgetRoutingAction::Downgrade {
+            max_cost_per_m: 0.50, // Only allow models cheaper than $0.50/M
+        }
+    } else {
+        BudgetRoutingAction::Continue
+    }
+}
+
+pub enum BudgetRoutingAction {
+    Continue,
+    Downgrade { max_cost_per_m: f64 },
+    Block,
+    HardStop,
+}
+```
+
+---
+
+### Loop 7: Latency → Reward — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  LatencyRegistry      │────►│  Latency Reward         │────►│  Bandit Update   │
+│  (EWMA per model,     │     │  Computation (SLA       │     │  (composite      │
+│   p50/p95/p99)        │     │   compliance scoring)   │     │   reward signal) │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Per-episode. Latency reward is computed as part of the bandit update.
+
+**Failure mode if loop breaks:** Bandit selects high-quality but slow models → SLA violations → user-facing delays. Recovery: manual latency SLA enforcement in roko.toml routing config.
+
+```rust
+// Source: LatencyRegistry state
+pub struct LatencyStats {
+    pub model: String,
+    pub provider: String,
+    pub ewma_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub sample_count: u64,
+}
+
+// Transform: latency → reward component
+fn latency_to_reward_transform(
+    stats: &LatencyStats,
+    sla_ms: u64,  // from RoutingConfig, default: 5000
+) -> f64 {
+    let sla = sla_ms as f64;
+    if stats.ewma_ms <= sla * 0.5 {
+        1.0  // Well within SLA → full reward
+    } else if stats.ewma_ms <= sla {
+        // Linear decay from 1.0 to 0.5 as latency approaches SLA
+        1.0 - 0.5 * ((stats.ewma_ms - sla * 0.5) / (sla * 0.5))
+    } else {
+        // Beyond SLA → penalty proportional to overshoot
+        (0.5 * sla / stats.ewma_ms).max(0.0)
+    }
+}
+
+// Sink: composite reward for bandit update
+fn composite_reward(
+    quality: f64,       // gate pass = 1.0, fail = 0.0
+    cost_reward: f64,   // 1.0 - normalized_cost
+    latency_reward: f64, // from transform above
+    weights: &RewardWeights,
+) -> f64 {
+    weights.quality * quality
+        + weights.cost * cost_reward
+        + weights.latency * latency_reward
+}
+
+pub struct RewardWeights {
+    pub quality: f64,   // default: 0.60
+    pub cost: f64,      // default: 0.25
+    pub latency: f64,   // default: 0.15
+}
+```
+
+---
+
+### Loop 8: Experiments → Static — Data Flow
+
+```
+┌──────────────────────┐     ┌────────────────────────┐     ┌─────────────────┐
+│  ExperimentStore      │────►│  Significance Tester    │────►│  Static Config   │
+│  (concluded expts     │     │  (chi-squared or        │     │  (roko.toml      │
+│   with variant data)  │     │   z-test for winner)    │     │   updates)       │
+└──────────────────────┘     └────────────────────────┘     └─────────────────┘
+```
+
+**Latency requirement:** Batch (on experiment conclusion, checked every 50 episodes). Config changes need human review.
+
+**Failure mode if loop breaks:** Experiment results are transient — winners aren't persisted, so the system re-runs the same experiments indefinitely. Recovery: manual config update based on experiment logs.
+
+```rust
+// Source: ExperimentStore concluded experiments
+pub struct ExperimentConclusion {
+    pub experiment_id: String,
+    pub section_name: String,
+    pub winner_variant: String,
+    pub winner_pass_rate: f64,
+    pub baseline_pass_rate: f64,
+    pub delta: f64,
+    pub p_value: f64,
+    pub sample_size: usize,
+}
+
+// Transform: statistical significance test
+fn experiments_to_static_transform(
+    conclusion: &ExperimentConclusion,
+    min_delta: f64,  // default: 0.05 (5% improvement required)
+    max_p_value: f64,  // default: 0.05
+    min_samples: usize,  // default: 50
+) -> Option<ConfigUpdate> {
+    if conclusion.delta < min_delta
+        || conclusion.p_value > max_p_value
+        || conclusion.sample_size < min_samples
+    {
+        return None; // Not significant enough to promote
+    }
+
+    Some(ConfigUpdate {
+        key: format!("prompt.{}.variant", conclusion.section_name),
+        old_value: "baseline".into(),
+        new_value: conclusion.winner_variant.clone(),
+        reason: format!(
+            "Experiment {} concluded: variant '{}' improved pass rate by {:.1}% (p={:.4}, n={})",
+            conclusion.experiment_id,
+            conclusion.winner_variant,
+            conclusion.delta * 100.0,
+            conclusion.p_value,
+            conclusion.sample_size,
+        ),
+        requires_review: true, // Human must approve config changes
+    })
+}
+
+// Sink: proposed config update
+pub struct ConfigUpdate {
+    pub key: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub reason: String,
+    pub requires_review: bool,
+}
+```
+
+---
+
+## Cross-Loop Interaction Matrix
+
+The eight loops do not operate independently — they interact. This matrix identifies the key interactions:
+
+| Source Loop | Affected Loop | Interaction |
+|-------------|---------------|-------------|
+| 1 (Health→Routing) | 6 (Cost→Routing) | Provider failure forces fallback to more expensive provider |
+| 2 (Conductor→Routing) | 7 (Latency→Reward) | High system load increases latency, penalizing reward signals |
+| 3 (Section→Scaffold) | 5 (Skills→Prompts) | Section weight changes may truncate skill injection section |
+| 4 (Failure→Replan) | 6 (Cost→Routing) | Replanning creates new tasks, increasing session cost |
+| 6 (Cost→Routing) | 1 (Health→Routing) | Cost-forced downgrade to cheap provider may hit rate limits |
+| 7 (Latency→Reward) | 2 (Conductor→Routing) | Latency-optimal routing may increase system load |
+| 8 (Experiments→Static) | 3 (Section→Scaffold) | Experiment winner changes section content, resetting effectiveness data |
+
+### Interaction-Aware Scheduling
+
+To prevent cascading oscillation from loop interactions, updates should be scheduled with awareness of dependencies:
+
+```
+Priority 1 (every episode): Loop 1 (Health), Loop 6 (Cost)
+    → Safety-critical: prevent provider failures and budget overruns
+
+Priority 2 (every 5 episodes): Loop 7 (Latency), Loop 2 (Conductor)
+    → Performance: optimize for speed and resource utilization
+
+Priority 3 (every 20 episodes): Loop 3 (Section), Loop 5 (Skills)
+    → Learning: adjust prompt composition based on accumulated evidence
+
+Priority 4 (every 50 episodes): Loop 4 (Failure→Replan), Loop 8 (Experiments)
+    → Strategic: make structural changes with high confidence requirements
+```
+
+This priority ordering ensures that safety-critical loops (health, cost) always run before learning loops (section, skills), preventing a scenario where a learning-driven change causes a safety-critical failure.
+
+---
+
 ## Relationship to Other Documents
 
 - **[04-cascade-router](04-cascade-router.md)** — The primary target for loops 1, 2, 6, 7, 8.

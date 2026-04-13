@@ -237,6 +237,296 @@ See [14-stability-mechanisms](14-stability-mechanisms.md) for how frequency sepa
 
 ---
 
+## Cascade Router with Lookahead
+
+Current routing considers only the immediate task. Lookahead routing predicts the sequence of upcoming tasks and makes routing decisions that optimize across the sequence — choosing a slightly more expensive model now if it will enable cheaper routing for subsequent tasks via KV cache reuse.
+
+### Sequence-Aware Routing
+
+```rust
+pub struct LookaheadRouter {
+    /// Base cascade router for individual decisions.
+    inner: CascadeRouter,
+    /// Task dependency graph for lookahead.
+    task_graph: TaskDag,
+    /// Lookahead horizon (default: 3 tasks ahead).
+    pub horizon: usize,
+    /// Discount factor for future savings (default: 0.9).
+    pub gamma: f64,
+    /// KV cache reuse probability model.
+    cache_model: CacheReuseModel,
+}
+
+pub struct CacheReuseModel {
+    /// Per-(model, role) estimated cache hit rate when reusing same model.
+    cache_hit_rates: HashMap<(String, String), f64>,
+    /// Average input tokens saved per cache hit.
+    avg_tokens_saved_per_hit: u64,
+    /// Cost per 1M tokens for cache reads vs fresh input.
+    cache_read_discount: f64,
+}
+```
+
+### Lookahead Algorithm
+
+```
+fn select_with_lookahead(current_task, upcoming_tasks, horizon):
+    // Get upcoming tasks from DAG (respecting dependencies)
+    window = [current_task] + upcoming_tasks[..horizon]
+
+    best_total_cost = infinity
+    best_assignment = None
+
+    for each candidate_model for current_task:
+        // Compute immediate cost
+        immediate_cost = estimated_cost(candidate_model, current_task)
+
+        // Compute expected future savings from cache reuse
+        future_savings = 0.0
+        for i in 1..window.len():
+            // If future task uses same model, cache reuse saves tokens
+            p_cache = cache_model.hit_rate(candidate_model, window[i].role)
+            tokens_saved = p_cache × cache_model.avg_tokens_saved_per_hit
+            cost_saved = tokens_saved × cache_model.cache_read_discount / 1_000_000
+            future_savings += gamma^i × cost_saved
+
+        total_cost = immediate_cost - future_savings
+
+        if total_cost < best_total_cost:
+            best_total_cost = total_cost
+            best_assignment = candidate_model
+
+    return best_assignment
+```
+
+### When Lookahead Matters
+
+Lookahead routing provides significant savings when:
+
+| Condition | Savings | Mechanism |
+|-----------|---------|-----------|
+| Sequential tasks on same crate | 15-30% | KV cache reuse for crate context |
+| Same role across consecutive tasks | 10-20% | System prompt caching |
+| Plan with >10 tasks | 5-15% compound | Amortized model selection overhead |
+| Mixed complexity plan | 10-25% | Route easy tasks cheap, cache for hard |
+
+Lookahead provides minimal benefit when tasks are independent (no shared context), when the plan has very few tasks, or when all tasks require different models.
+
+### Connection to Speculative Decoding
+
+Lookahead routing is analogous to speculative decoding (Leviathan et al. 2023) applied at the task level rather than the token level. Where speculative decoding predicts future tokens to reduce latency, lookahead routing predicts future tasks to reduce cost. The SpecRouter framework (2025) demonstrates that treating LLM inference as an adaptive routing problem — dynamically constructing inference "paths" — can significantly reduce end-to-end cost. Roko's lookahead extends this insight from intra-request to inter-request optimization.
+
+---
+
+## Router Calibration
+
+The cascade router's decisions are only as good as its internal estimates of model performance. Router calibration ensures that the router's confidence maps to actual performance — when the router estimates 80% pass probability for a model, that model should actually succeed approximately 80% of the time.
+
+### Calibration Framework
+
+```rust
+pub struct RouterCalibration {
+    /// Per-model calibration data.
+    calibrations: HashMap<String, ModelCalibration>,
+    /// Overall calibration score (lower is better, 0 = perfect).
+    pub brier_score: f64,
+    /// Recalibration interval (default: every 100 routing decisions).
+    pub recalibrate_interval: u32,
+}
+
+pub struct ModelCalibration {
+    /// Model slug.
+    pub model: String,
+    /// Predicted pass probabilities and actual outcomes.
+    predictions: Vec<(f64, bool)>,
+    /// Calibration bins (10 bins, 0-10%, 10-20%, ..., 90-100%).
+    pub bins: [CalibrationBin; 10],
+    /// Platt scaling parameters: a, b for sigmoid(a × raw_score + b).
+    pub platt_a: f64,
+    pub platt_b: f64,
+    /// Isotonic regression mapping (non-parametric calibration).
+    pub isotonic_map: Vec<(f64, f64)>,
+}
+
+pub struct CalibrationBin {
+    /// Bin range (e.g., 0.7 to 0.8).
+    pub lower: f64,
+    pub upper: f64,
+    /// Number of predictions in this bin.
+    pub count: u32,
+    /// Actual success rate within this bin.
+    pub actual_rate: f64,
+    /// Expected Calibration Error for this bin.
+    pub ece_contribution: f64,
+}
+```
+
+### Calibration Methods
+
+**1. Platt Scaling (parametric)**
+
+Fits a logistic regression on top of the router's raw confidence scores:
+
+```
+calibrated_probability = sigmoid(a × raw_score + b)
+```
+
+Parameters `a` and `b` are fit by minimizing log-loss on a held-out validation set of recent routing decisions. Platt scaling is fast (O(n) fitting), requires few samples (~50), and handles monotonic miscalibration well.
+
+**2. Isotonic Regression (non-parametric)**
+
+Fits a non-decreasing step function mapping raw scores to calibrated probabilities. More flexible than Platt scaling — handles non-monotonic miscalibration — but requires more data (~200 samples) and can overfit with small datasets.
+
+**3. Temperature Scaling**
+
+The simplest calibration: divide raw logits by a learned temperature T before applying softmax.
+
+```
+calibrated_score = raw_score / T
+```
+
+T > 1 reduces overconfidence. T < 1 reduces underconfidence. T is fit to minimize negative log-likelihood on validation data.
+
+### Expected Calibration Error (ECE)
+
+The primary calibration metric, computed over B bins:
+
+```
+ECE = Σ_{b=1}^{B} (n_b / N) × |accuracy_b - confidence_b|
+```
+
+where `n_b` is the number of predictions in bin b, `accuracy_b` is the actual success rate, and `confidence_b` is the average predicted probability. ECE = 0 means perfect calibration.
+
+| ECE Range | Interpretation | Action |
+|-----------|---------------|--------|
+| < 0.05 | Well calibrated | No action needed |
+| 0.05 - 0.10 | Slightly miscalibrated | Monitor |
+| 0.10 - 0.20 | Miscalibrated | Apply Platt scaling |
+| > 0.20 | Severely miscalibrated | Investigate data distribution shift |
+
+### Auto-Recalibration
+
+The router recalibrates automatically every `recalibrate_interval` decisions:
+
+```
+Every 100 routing decisions:
+    1. Collect last 200 (predicted_probability, actual_outcome) pairs
+    2. Compute ECE
+    3. If ECE > 0.10:
+       a. Fit Platt scaling parameters (a, b) via gradient descent
+       b. Validate on held-out 20% of data
+       c. If Platt-calibrated ECE < original ECE:
+          → Apply Platt scaling to all future predictions
+       d. Else: fit isotonic regression as fallback
+    4. Log calibration metrics to .roko/learn/calibration.jsonl
+```
+
+### Connection to Mixture-of-Experts Routing
+
+The cascade router's calibration challenge is analogous to the load-balancing problem in Mixture-of-Experts (MoE) models. In MoE architectures like Switch Transformer (Fedus et al. 2022) and GShard (Lepikhin et al. 2021), a gating network routes tokens to specialized expert sub-networks. Key parallels:
+
+| MoE Concept | Cascade Router Equivalent |
+|-------------|--------------------------|
+| Gating network | Stage-2/3 scoring function |
+| Expert capacity factor | Budget guardrail per model |
+| Auxiliary load balance loss | Pareto frontier pruning |
+| Expert choice routing (EC) | Inverse routing: model "claims" tasks it's best at |
+| Top-k routing | CascadeModel with primary + fallback |
+
+The Expert Choice (EC) routing innovation (Zhou et al. 2022) — where experts select their top-k tokens rather than tokens selecting experts — suggests an interesting inversion for Roko: instead of tasks being routed to models, models could "claim" tasks from a queue based on their learned specialization. This would naturally load-balance across models while allowing each model to self-select tasks where it excels.
+
+---
+
+## Cost-Spectrum Routing
+
+Recent research on cost-aware routing (CSCR, 2025) demonstrates that the router should consider a continuous spectrum of cost-quality tradeoffs rather than discrete tiers. The Cost-Spectrum Contrastive Router achieves up to 25% improvement in accuracy-cost tradeoff by adaptively selecting cost bands.
+
+### Continuous Cost-Quality Frontier
+
+```rust
+pub struct CostSpectrumRouter {
+    /// Contrastive encoder mapping (task_context, model_descriptor) → similarity.
+    encoder: ContrastiveEncoder,
+    /// Per-model cost descriptors (lightweight feature vectors).
+    model_descriptors: HashMap<String, ModelDescriptor>,
+    /// Adaptive cost band for current system state.
+    pub cost_band: CostBand,
+    /// Cost band adaptation parameters.
+    pub band_adaptation: BandAdaptation,
+}
+
+pub struct CostBand {
+    /// Lower bound of acceptable cost per task (USD).
+    pub min_cost: f64,
+    /// Upper bound of acceptable cost per task (USD).
+    pub max_cost: f64,
+    /// Current operating point within the band.
+    pub target_cost: f64,
+}
+
+pub struct BandAdaptation {
+    /// Widen band when pass rate is high (can afford cheaper experiments).
+    pub widen_threshold: f64,    // default: 0.85 pass rate
+    /// Narrow band when budget pressure is high.
+    pub narrow_threshold: f64,   // default: 0.80 budget utilization
+    /// Band width change per adaptation step.
+    pub step_size: f64,          // default: 0.05 (5% of current band width)
+}
+
+pub struct ModelDescriptor {
+    /// Lightweight feature vector encoding model characteristics.
+    /// [quality_score, cost_per_m_tokens, avg_latency_ms, context_window_size]
+    pub features: [f64; 4],
+    /// Provider identifier.
+    pub provider: String,
+    /// Whether this model supports extended thinking/reasoning.
+    pub supports_reasoning: bool,
+}
+```
+
+### Selection with Cost Bands
+
+```
+fn select_cost_spectrum(task_context, models, cost_band):
+    // Filter models to cost band
+    candidates = models.filter(|m| cost_band.min_cost <= m.cost <= cost_band.max_cost)
+
+    // Score each candidate by contrastive similarity to task
+    for candidate in candidates:
+        score = encoder.similarity(task_context, candidate.descriptor)
+
+    // Select cheapest model above quality threshold
+    quality_threshold = 0.7  // minimum acceptable similarity
+    qualified = candidates.filter(|c| c.score >= quality_threshold)
+    return qualified.min_by(|c| c.cost)
+
+    // Fallback: if no qualified model in band, expand band
+    if qualified.is_empty():
+        cost_band.max_cost *= 1.5
+        return select_cost_spectrum(task_context, models, expanded_band)
+```
+
+### Adaptive Band Management
+
+The cost band adapts to system performance:
+
+```
+After each routing decision:
+    if recent_pass_rate(last 20) > widen_threshold:
+        // System performing well → can try cheaper models
+        cost_band.min_cost -= step_size × cost_band.target_cost
+    if budget_utilization > narrow_threshold:
+        // Budget pressure → restrict to cheaper models
+        cost_band.max_cost -= step_size × cost_band.target_cost
+    if recent_pass_rate(last 20) < 0.50:
+        // System struggling → widen band to allow expensive models
+        cost_band.max_cost += 2 × step_size × cost_band.target_cost
+```
+
+This creates a self-regulating cost control mechanism that complements the budget guardrails in [08-cost-normalization](08-cost-normalization.md) — the guardrails provide hard limits while cost-spectrum routing provides soft optimization within those limits.
+
+---
+
 ## Relationship to Other Documents
 
 - **[03-bandits-ucb-thompson-linucb](03-bandits-ucb-thompson-linucb.md)** — The LinUCB algorithm used in stage 3.

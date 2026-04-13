@@ -330,14 +330,177 @@ gate thresholds to adjust pass criteria.
 
 ---
 
+## Self-Evolving Agent Architecture
+
+Beyond static extensibility, Roko's architecture supports **self-evolution** —
+the system improving its own agent configurations over time.
+
+### Darwin Gödel Machine Pattern
+
+The Darwin Gödel Machine (Sakana AI, arXiv:2505.22954, 2025) iteratively
+modifies its own code and empirically validates each change using benchmarks.
+It grows an archive of generated coding agents, samples from the archive,
+and agents self-modify to create new versions.
+
+**Results:** SWE-bench improved from 20.0% to 50.0% (2.5× improvement).
+Self-discovered improvements included: patch validation steps, better file
+viewing, enhanced editing tools, ranking multiple solutions, adding history
+of failed attempts.
+
+**Mapping to Roko:** Roko already has the infrastructure for self-modification
+(PRD → plan → execute → gate → persist). The DGM pattern adds an
+**evolutionary archive** — maintaining a population of agent configurations
+and selecting for fitness:
+
+```rust
+/// Evolutionary archive for agent configurations.
+/// Each entry is a configuration that produced good results,
+/// along with its fitness score on recent tasks.
+pub struct AgentArchive {
+    /// Archive of agent configurations with fitness scores.
+    entries: Vec<ArchiveEntry>,
+    /// Maximum archive size (default: 50).
+    max_entries: usize,
+    /// Minimum fitness to remain in archive (default: 0.5).
+    min_fitness: f64,
+}
+
+pub struct ArchiveEntry {
+    /// The agent configuration (role, model, system prompt, tools, parameters).
+    pub config: AgentConfiguration,
+    /// Fitness score: weighted combination of gate pass rate, cost efficiency,
+    /// and token efficiency (0.0–1.0).
+    pub fitness: f64,
+    /// Task types this configuration excels at.
+    pub specializations: Vec<String>,
+    /// Generation number (how many mutation steps from the seed config).
+    pub generation: u32,
+    /// Lineage: parent configuration IDs.
+    pub parents: Vec<String>,
+}
+
+pub struct AgentConfiguration {
+    pub role: AgentRole,
+    pub model_key: String,
+    pub system_prompt_overrides: HashMap<String, String>,
+    pub tool_allowlist: Option<Vec<String>>,
+    pub temperament: Temperament,
+    pub reasoning_strategy: ReasoningStrategy,
+    pub max_iterations: usize,
+}
+
+impl AgentArchive {
+    /// Select a configuration for a new task, with tournament selection.
+    pub fn select(&self, task_type: &str) -> &ArchiveEntry {
+        // 1. Filter entries specialized for this task type
+        // 2. Tournament selection: pick k random, return highest fitness
+        // 3. With probability ε, return a random entry (exploration)
+        todo!()
+    }
+
+    /// Mutate a configuration to create a variant for testing.
+    pub fn mutate(&self, parent: &AgentConfiguration) -> AgentConfiguration {
+        // Possible mutations:
+        // - Change model_key (try a different model)
+        // - Adjust system_prompt_overrides (add/remove instructions)
+        // - Modify tool_allowlist (add/remove tools)
+        // - Change reasoning_strategy (ReAct → Reflexion)
+        // - Adjust max_iterations
+        todo!()
+    }
+
+    /// After a task completes, update the archive.
+    pub fn update(&mut self, config: &AgentConfiguration, result: &AgentResult) {
+        // 1. Compute fitness from gate results, cost, tokens
+        // 2. If fitness > min_fitness, add to archive
+        // 3. If archive full, evict lowest-fitness entry
+        // 4. Record specializations based on task type
+    }
+}
+```
+
+### Voyager-Style Skill Library
+
+Voyager (Wang et al., 2023, arXiv:2305.16291) demonstrated that an
+ever-growing library of executable skills enables lifelong learning with
+three components: automatic curriculum, skill library, and iterative
+prompting. Skills compound the agent's abilities and transfer to new tasks.
+
+**Mapping to Roko:** The EpisodeLogger + playbook system in `roko-learn`
+already captures execution traces. The missing piece is **skill extraction**:
+identifying reusable patterns from successful episodes and storing them as
+composable skills with semantic descriptions for retrieval.
+
+### Agent Memory Sharing
+
+How do agents in a multi-agent team transfer learned strategies?
+
+```rust
+/// Shared memory for multi-agent teams.
+/// Agents can read from and contribute to a shared knowledge base
+/// that persists across plan executions.
+pub struct SharedAgentMemory {
+    /// Successful strategies indexed by task type.
+    strategies: HashMap<String, Vec<LearnedStrategy>>,
+    /// Tool usage patterns (what works, what fails).
+    tool_patterns: ToolTransitionGraph,
+    /// Model routing preferences learned from team experience.
+    routing_preferences: HashMap<String, ModelPreference>,
+}
+
+pub struct LearnedStrategy {
+    pub description: String,
+    /// The approach that worked (compressed as prompt fragment).
+    pub approach: String,
+    /// Task types this strategy applies to.
+    pub applicable_to: Vec<String>,
+    /// Confidence in this strategy (EMA of success rate).
+    pub confidence: f64,
+    /// Which agent discovered this strategy.
+    pub discovered_by: AgentRole,
+    /// Number of times this strategy has been successfully applied.
+    pub success_count: u32,
+}
+```
+
+### Intrinsic vs. Extrinsic Metacognition
+
+Liu & van der Schaar (2025, ICML 2025 Position Paper, arXiv:2506.05109)
+argue that existing "self-improving" agents rely on **extrinsic
+metacognitive mechanisms** — fixed, human-designed loops (like ReAct or
+reflection prompts). True self-improvement requires **intrinsic
+metacognitive learning**: the agent's ability to evaluate, reflect on, and
+adapt its own learning processes.
+
+Three required components:
+1. **Metacognitive knowledge** — Self-assessment of capabilities, tasks, and
+   learning strategies.
+2. **Metacognitive planning** — Deciding what and how to learn.
+3. **Metacognitive evaluation** — Reflecting on learning experiences to
+   improve future learning.
+
+Roko's learning layer (efficiency events, cascade router, experiments,
+adaptive thresholds) is extrinsic metacognition. The path to intrinsic
+metacognition would require roko to modify its own learning mechanisms —
+e.g., adjusting the EMA smoothing factor based on observed convergence rate,
+or switching from LinUCB to Thompson Sampling when the arm set changes.
+
+---
+
 ## Citations
 
 1. Refactoring PRD §05-agent-types — 8-step domain plugin process,
    LlmBackend addition process.
 2. Refactoring PRD §10-developer-guide — EventSource, FeedbackCollector,
    plugin system.
-3. `crates/roko-agent/src/provider/mod.rs` — ProviderAdapter trait,
-   adapter_for_kind dispatch.
-4. `crates/roko-agent/src/tool_loop/mod.rs` — LlmBackend trait.
-5. `crates/roko-agent/src/translate/mod.rs` — Translator trait.
-6. `crates/roko-agent/src/ollama_backend.rs` — Reference LlmBackend impl.
+3. Sakana AI et al. (2025). "Darwin Gödel Machine: Open-Ended Evolution of
+   Self-Improving Agents." arXiv:2505.22954. — SWE-bench 20% → 50%.
+4. Wang, G. et al. (2023). "Voyager: An Open-Ended Embodied Agent with LLMs."
+   arXiv:2305.16291. — Lifelong skill learning.
+5. Liu, T. & van der Schaar, M. (2025). "Truly Self-Improving Agents Require
+   Intrinsic Metacognitive Learning." ICML 2025. arXiv:2506.05109. —
+   Extrinsic vs. intrinsic metacognition.
+6. `crates/roko-agent/src/provider/mod.rs` — ProviderAdapter trait.
+7. `crates/roko-agent/src/tool_loop/mod.rs` — LlmBackend trait.
+8. `crates/roko-agent/src/translate/mod.rs` — Translator trait.
+9. `crates/roko-agent/src/ollama_backend.rs` — Reference LlmBackend impl.

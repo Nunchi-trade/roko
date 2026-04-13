@@ -317,15 +317,236 @@ garbage-collected without explicit cleanup logic.
 
 ---
 
+## 10. Modern Forgetting Curve Research
+
+### 10.1 The Power-Law vs. Exponential Debate
+
+Averell & Heathcote (2011, Journal of Mathematical Psychology 55(1)) provide the definitive
+resolution: **individual traces decay exponentially, but aggregate population data follows a
+power law**. The power law emerges as a mathematical artifact of mixing exponentials with
+different decay constants across individuals.
+
+This means Roko's `Decay::Ebbinghaus` (which is exponential) is correct at the individual
+Engram level. Population-level statistics over many Engrams will show power-law patterns,
+which is expected — not a modeling error.
+
+### 10.2 The Permanent Asymptote
+
+Averell & Heathcote also found above-chance asymptotic retention — some memories never fully
+decay. This supports `Decay::None` for Persistent-tier knowledge and suggests that very
+long-lived Ebbinghaus entries should have a configurable floor:
+
+```rust
+/// Ebbinghaus with permanent floor: weight never drops below `floor`.
+/// Models the finding that some fraction of encoding is permanent.
+pub fn apply_with_floor(&self, age_ms: i64, floor: f32) -> f32 {
+    let raw = self.apply(age_ms);
+    raw.max(floor)
+}
+```
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| `persistent_floor` | 0.05 | 0.0 - 0.2 | Minimum weight for Persistent-tier Ebbinghaus entries |
+
+### 10.3 Sleep Discontinuity
+
+Murre & Dros (2015, PLOS ONE) replicated Ebbinghaus and found a **discontinuity at 24 hours**
+— a memory boost after sleep consistent with consolidation research. This validates Roko's
+Dreams consolidation cycle (Delta frequency) as a biologically grounded mechanism.
+
+### 10.4 The Summed Exponential Model
+
+Murre's Memory Chain Model (MCM) sums two exponential processes — a fast-decaying short-term
+component and a slower long-term component — achieving better fit than any single function:
+
+```
+R(t) = a₁ × exp(-t/τ₁) + a₂ × exp(-t/τ₂)
+```
+
+A potential `Decay::SummedExponential` variant for Roko:
+
+```rust
+/// Summed exponential: models dual-process consolidation.
+/// Fast component (working memory) + slow component (consolidated).
+SummedExponential {
+    fast_weight: f32,   // a₁ — proportion in fast store
+    fast_tau_ms: u64,   // τ₁ — fast decay time constant
+    slow_tau_ms: u64,   // τ₂ — slow decay time constant
+},
+```
+
+---
+
+## 11. Adaptive Decay: Learning Optimal Rates from Usage
+
+### 11.1 The FSRS Model (Ye 2022)
+
+The Free Spaced Repetition Scheduler (FSRS) models memory with three variables:
+
+| Variable | Definition | Roko Analog |
+|---|---|---|
+| **Stability (S)** | How deeply encoded the memory is | Ebbinghaus `strength` parameter |
+| **Retrievability (R)** | Probability of recall right now: `R = exp(ln(0.9) × t/S)` | `Decay::apply(age_ms)` output |
+| **Difficulty (D)** | Intrinsic difficulty of the item | Knowledge type + content complexity |
+
+FSRS learns S and D per item from retrieval history, producing 20-30% fewer reviews than SM-2
+for the same retention level. The key mechanism: **stability increases after each successful
+retrieval**, with larger increases for harder retrievals.
+
+### 11.2 Desirable Difficulties (Bjork & Bjork 1992/2011)
+
+The New Theory of Disuse defines two independent strength dimensions:
+
+| Dimension | NTD Concept | Roko Analog |
+|---|---|---|
+| **Storage Strength (SS)** | How deeply embedded; only increases | Knowledge tier (Transient → Persistent) |
+| **Retrieval Strength (RS)** | How accessible right now; decays | `Decay::apply()` output |
+
+The critical interaction: **gains in SS are a decreasing function of RS**. The harder it is
+to retrieve something (low RS), the bigger the boost to SS from a successful retrieval.
+
+This directly justifies Roko's tier promotion rules: knowledge that is about to decay
+(low RS) but is successfully retrieved (gate pass after knowledge retrieval) deserves a
+larger promotion boost than knowledge that was easily accessible.
+
+### 11.3 Adaptive Strength Algorithm
+
+```rust
+/// Adaptive decay: updates Ebbinghaus strength based on retrieval success.
+/// Implements Bjork's desirable difficulty principle.
+pub fn update_strength_on_retrieval(
+    current_strength: f32,
+    age_at_retrieval_ms: i64,
+    scale_ms: u64,
+    retrieval_success: bool,
+) -> f32 {
+    // Compute current retrievability at retrieval time
+    let retrievability = Decay::Ebbinghaus { strength: current_strength, scale_ms }
+        .apply(age_at_retrieval_ms);
+
+    if retrieval_success {
+        // Desirable difficulty: lower retrievability → bigger strength boost
+        let difficulty_bonus = 1.0 - retrievability; // [0, 1]
+        let boost = 0.1 + 0.3 * difficulty_bonus;    // [0.1, 0.4]
+        (current_strength + boost).min(10.0)
+    } else {
+        // Failed retrieval: reduce strength (but not below minimum)
+        (current_strength * 0.8).max(0.05)
+    }
+}
+```
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| `strength_boost_min` | 0.1 | 0.01 - 0.5 | Minimum strength increase on successful retrieval |
+| `strength_boost_max` | 0.4 | 0.1 - 1.0 | Maximum strength increase (at lowest retrievability) |
+| `strength_decay_factor` | 0.8 | 0.5 - 0.95 | Multiplicative strength reduction on failed retrieval |
+| `strength_floor` | 0.05 | 0.01 - 0.5 | Minimum strength (prevents instant pruning) |
+
+---
+
+## 12. Decay Interaction Effects
+
+### 12.1 Spreading Activation (Collins & Loftus 1975)
+
+In associative memory networks, accessing one memory temporarily boosts activation of
+associated memories. Accessing an Engram should slow the effective "forgetting" of its
+associates — their activation stays elevated via lateral activation from the lineage DAG.
+
+### 12.2 Retrieval-Induced Forgetting (Anderson et al. 1994)
+
+Accessing one memory can **suppress** competing memories. When a knowledge entry is
+retrieved via a query that also activated competitors, the competitors' retrieval strength
+is temporarily inhibited. This means:
+
+- Accessing a specific heuristic may make competing heuristics harder to find
+- The effect is strongest for high-strength competitors (strong associations)
+- The inhibition is temporary (~seconds in biological memory; configurable in Roko)
+
+### 12.3 Implementation: Lineage-Based Decay Interaction
+
+```rust
+/// Adjust effective weight of related Engrams after a retrieval event.
+/// Implements spreading activation (boost) + retrieval-induced forgetting (inhibit).
+pub fn apply_retrieval_interaction(
+    retrieved: &Signal,
+    substrate: &dyn Substrate,
+    ctx: &Context,
+) -> Vec<(ContentHash, f32)> {
+    let mut adjustments = Vec::new();
+
+    // Boost: lineage parents get activation boost (spreading activation)
+    for parent_id in &retrieved.lineage {
+        adjustments.push((*parent_id, 0.05)); // +5% temporary boost
+    }
+
+    // Inhibit: same-Kind siblings get temporary suppression (RIF)
+    // Only applies to siblings that share a parent with the retrieved Engram
+    // and were activated (returned in the same query) but not selected.
+    // Implementation: tag recently-activated non-selected Engrams for
+    // temporary weight reduction in the next query cycle.
+
+    adjustments
+}
+```
+
+### 12.4 The Rational Analysis of Decay (Anderson & Schooler 1991)
+
+The base-level activation equation from ACT-R:
+
+```
+B_i = ln( Σⱼ tⱼ^{-d} )
+```
+
+where t_j is the time since the j-th past use, d ≈ 0.5 is the decay parameter. This formula
+treats decay as **rational discounting of evidence**: older evidence for future need is worth
+less. Environmental statistics (word frequencies in NY Times, email reappearance rates) follow
+the same power-law structure, meaning the memory system is adapted to its environment.
+
+Roko's Ebbinghaus decay is a single-encounter approximation of this formula. The adaptive
+strength algorithm (Section 11.3) makes it multi-encounter by boosting strength on each
+successful retrieval.
+
+---
+
+## 13. Multi-Store Memory Models and the 4-Tier System
+
+Roko's knowledge tiers (Transient → Working → Consolidated → Persistent) map onto
+established multi-store memory models:
+
+| Tier | Atkinson-Shiffrin (1968) | Baddeley (2000) | Cowan (1999) |
+|---|---|---|---|
+| **Transient** | Sensory registers | — | Activated LTM (outer layer) |
+| **Working** | Short-term store | Phonological loop + visuospatial sketchpad | Focus of attention (~4 chunks) |
+| **Consolidated** | Transfer to LTS | Episodic buffer | — |
+| **Persistent** | Long-term store | — | Baseline LTM |
+
+Cowan's embedded-processes model is most relevant: tiers are **not separate stores** but
+**activation states within a single Substrate**. An Engram at the Transient tier has high
+activation that decays rapidly. Promotion to Working means the Engram's strength has been
+reinforced. This is a graduated activation model, not a transfer between containers.
+
+---
+
 ## Academic Foundations
 
 | Citation | Contribution |
 |---|---|
-| Ebbinghaus 1885, Über das Gedächtnis | Discovered the forgetting curve: memory decays exponentially with rehearsal-dependent strength. |
-| Grassé 1959 | Stigmergy: indirect coordination via environmental signals that decay. Foundation for pheromone half-lives. |
-| Parunak et al. 2007, Mechanisms and Methods in Multi-Agent Systems | Digital pheromones with configurable evaporation rates for multi-agent coordination. |
-| Wixted & Ebbesen 1991, Journal of Experimental Psychology | Empirical validation of the exponential forgetting curve across multiple memory tasks. |
-| Murre & Dros 2015, PLOS ONE 10(7) | Replicated Ebbinghaus' original experiments, confirming the exponential decay model. |
+| Ebbinghaus 1885, Über das Gedächtnis | Discovered the forgetting curve. |
+| Grassé 1959 | Stigmergy: environmental signals that decay. |
+| Parunak et al. 2007 | Digital pheromones with configurable evaporation rates. |
+| Wixted 2004, Annual Review of Psychology 55 | Modern synthesis: power-law as consolidation-based interference. |
+| Averell & Heathcote 2011, J. Math. Psych. 55(1) | Individual exponential, population power-law; permanent asymptote. |
+| Murre & Dros 2015, PLOS ONE 10(7) | Ebbinghaus replication confirming 24-hour sleep discontinuity. |
+| Anderson & Schooler 1991, Psych. Science 2(6) | Rational analysis of memory: environmental statistics match decay. |
+| Collins & Loftus 1975, Psych. Review 82(6) | Spreading activation theory of semantic processing. |
+| Anderson et al. 1994, J. Exp. Psych. LMC 20(5) | Retrieval-induced forgetting: accessing one memory suppresses competitors. |
+| Bjork & Bjork 1992/2011 | New Theory of Disuse: storage strength vs. retrieval strength. |
+| Ye 2022, KDD | FSRS: adaptive spaced repetition with stability/retrievability/difficulty. |
+| Atkinson & Shiffrin 1968 | Modal model: sensory registers → STS → LTS. |
+| Baddeley 2000, Trends in Cognitive Sciences 4(11) | Working memory: episodic buffer as integration zone. |
+| Cowan 1999, in *Models of Working Memory*, CUP | Embedded-processes: tiers as activation states, not separate stores. |
 
 ---
 

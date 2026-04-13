@@ -134,6 +134,180 @@ Memory overhead per chain instance: MIDAS-R ~128KB, DDSketch ~2KB, Count-Min Ske
 
 ---
 
+## L2/L3 Deployment Architecture
+
+### Preferred Deployment: Arbitrum Orbit L3
+
+Rather than running as a sovereign L1, Korai's preferred deployment model is as an **Arbitrum Orbit L3 chain** settling to Arbitrum One (L2), which itself settles to Ethereum L1. This provides three layers of security inheritance:
+
+```
+┌─────────────────────────┐
+│     Ethereum L1          │  Security: ~$60B staked ETH
+│     (Settlement)         │  Finality: ~15 min (6 blocks)
+├─────────────────────────┤
+│     Arbitrum One (L2)    │  Security: Nitro fraud proofs + BoLD
+│     (DA + Settlement)    │  Finality: 7 days (optimistic), minutes (ZK)
+├─────────────────────────┤
+│     Korai Chain (L3)     │  Custom: HDC precompile, agent registries
+│     (Execution)          │  Block time: 400ms, KORAI gas token
+└─────────────────────────┘
+```
+
+#### Orbit Configuration for Korai
+
+```rust
+/// Orbit chain configuration for Korai
+pub struct KoraiOrbitConfig {
+    /// Chain name
+    pub chain_name: String,  // "Korai"
+
+    /// Gas token: KORAI (not ETH)
+    pub gas_token: Address,  // KORAI ERC-20 address on parent chain
+
+    /// Block time target
+    pub block_time_ms: u64,  // 400
+
+    /// Data availability mode
+    pub da_mode: DaMode,  // AnyTrust for lower cost, Rollup for max security
+
+    /// Stylus enabled for HDC precompiles
+    pub stylus_enabled: bool,  // true
+
+    /// Custom precompile addresses
+    pub precompiles: Vec<PrecompileConfig>,
+
+    /// Sequencer mode
+    pub sequencer: SequencerMode,
+}
+
+pub enum DaMode {
+    /// Full rollup: all data on Arbitrum One (L2) → Ethereum L1
+    /// Maximum security, higher cost
+    Rollup,
+    /// AnyTrust: data availability committee (DAC) + L1 fallback
+    /// Lower cost, trust the DAC (N-of-M honest assumption)
+    AnyTrust { committee_size: usize, threshold: usize },
+    /// Celestia: post data to Celestia DA layer via Blobstream
+    /// Modular DA, separate security assumption
+    Celestia { namespace: [u8; 32] },
+}
+
+pub enum SequencerMode {
+    /// Single sequencer (development, early production)
+    Centralized { sequencer_address: Address },
+    /// Shared sequencer (Espresso, Astria) for cross-chain atomic inclusion
+    Shared { sequencer_url: String },
+    /// Decentralized sequencer set (full decentralization)
+    Decentralized { validator_set: Vec<Address>, consensus: ConsensusType },
+}
+```
+
+#### Why Orbit Over OP Stack?
+
+| Property | Arbitrum Orbit | OP Stack |
+|---|---|---|
+| **Stylus (WASM contracts)** | Native support | Not available |
+| **Custom gas token** | Supported | Supported |
+| **Fraud proofs** | WASM-based (Nitro), permissionless (BoLD) | MIPS-based (Cannon), permissionless |
+| **ZK path** | In development | OP Succinct (Succinct Labs) |
+| **Custom precompiles** | Via Stylus (Rust → WASM) | Requires op-geth fork |
+| **DA flexibility** | Rollup, AnyTrust, Celestia | Rollup, Celestia, EigenDA |
+
+The decisive factor is **Stylus**: Korai's HDC precompile requires high-performance bitwise operations that are 10-100x cheaper in WASM than in EVM bytecode. Stylus provides this natively on Orbit chains. The OP Stack would require forking op-geth to add custom precompiles — a higher maintenance burden.
+
+### Consensus Evolution Roadmap
+
+Korai's consensus evolves through three phases:
+
+**Phase 1 — Centralized Sequencer (Launch)**:
+A single Korai-operated sequencer produces blocks. This is the standard model for new Orbit chains and all major L2s at launch. The sequencer cannot steal funds (fraud proofs protect users) but can censor transactions and extract MEV.
+
+**Phase 2 — Shared Sequencer (12-18 months post-launch)**:
+Integrate with a shared sequencing layer (Espresso Sequencer or Astria). Shared sequencing provides:
+- Cross-chain atomic inclusion (agents on Korai and Base can have transactions included atomically)
+- Censorship resistance (no single party controls ordering)
+- MEV redistribution (MEV extracted from Korai flows back to validators/stakers)
+
+**Phase 3 — Decentralized Sequencer Set (24+ months)**:
+Korai-specific validator set using CometBFT-style consensus adapted for the Orbit framework. Validators are high-tier Korai Passport holders (Protocol and Sovereign) who stake KORAI as collateral. This provides full decentralization while maintaining 400ms block times.
+
+### EigenLayer AVS Integration
+
+Korai can optionally leverage EigenLayer's Actively Validated Services (AVS) framework for specific validation tasks that benefit from Ethereum's restaked security:
+
+```rust
+/// EigenLayer AVS configuration for Korai validation tasks
+pub struct KoraiAvsConfig {
+    /// AVS tasks that Korai delegates to EigenLayer operators
+    pub tasks: Vec<AvsTask>,
+
+    /// Minimum restaked ETH required per operator
+    pub min_operator_stake: U256,  // default: 32 ETH
+
+    /// Slashing conditions
+    pub slashing: SlashingConfig,
+}
+
+pub enum AvsTask {
+    /// Validate HDC similarity search results
+    /// Operators re-compute top-K and verify against submitted results
+    HdcSearchValidation {
+        challenge_window_blocks: u64,  // 100 blocks (~40s)
+        slash_amount_bps: u16,         // 1000 (10% of operator stake)
+    },
+
+    /// Validate knowledge entry quality scores
+    /// Operators independently score entries and compare
+    KnowledgeQualityValidation {
+        min_validators: u8,  // 3
+        consensus_threshold: f64,  // 0.67 (2/3 agreement)
+    },
+
+    /// Validate clearing certificate KKT conditions
+    /// Operators verify the QP solution is optimal
+    ClearingCertificateValidation {
+        verification_timeout_blocks: u64,  // 50 blocks (~20s)
+    },
+}
+```
+
+EigenLayer AVS is particularly relevant for Korai because it allows Korai to borrow Ethereum's >$7B restaked security for critical validation tasks without requiring Korai-native staking to reach the same security level. As of April 2025, EigenLayer supports 39 live AVSs and has rebranded AVS from "Actively Validated Services" to "Autonomous Verifiable Services" — explicitly embracing agentic systems.
+
+### Alternative: Cosmos SDK Appchain with IBC
+
+If the Korai community decides that full sovereignty (own validator set, own consensus, no L1 dependency) outweighs Ethereum security inheritance, a Cosmos SDK appchain is the secondary option:
+
+**Advantages over Orbit**:
+- Full sovereignty: no dependency on Arbitrum or Ethereum
+- IBC native: instant interop with 200+ Cosmos chains
+- Custom modules in Go (vs. Solidity/Rust smart contracts)
+- CometBFT deterministic finality (~6s, tunable)
+
+**Disadvantages**:
+- Must bootstrap own validator set (or use Interchain Security from Cosmos Hub)
+- No Stylus — HDC precompile would be a native Go module (fast, but Go vs. Rust)
+- Less DeFi composability with Ethereum ecosystem
+- Smaller auditing/tooling ecosystem
+
+```rust
+/// Cosmos SDK module interface for HDC operations (Go)
+/// Would be implemented as a native Cosmos SDK keeper
+pub struct HdcModuleConfig {
+    /// Module name in the Cosmos SDK app
+    pub module_name: String,  // "korai_hdc"
+
+    /// Maximum vectors in on-chain index
+    pub max_index_size: u64,  // 1_000_000
+
+    /// Query gas cost per vector comparison
+    pub gas_per_comparison: u64,  // 10 (Cosmos gas, not EVM gas)
+}
+```
+
+The Orbit L3 approach is preferred for Korai's initial deployment due to Ethereum security inheritance and Stylus support. The Cosmos path remains viable for a future where agent coordination spans beyond the EVM ecosystem.
+
+---
+
 ## Storage Budget (Per Chain)
 
 | Component | Per Day | 7-Day Default | 30-Day |

@@ -195,3 +195,352 @@ Based on the gaps and their dependencies:
 - See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for the current API surface
 - See [12-4-tier-distillation-pipeline.md](./12-4-tier-distillation-pipeline.md) for the pipeline that is already implemented
 - See `tmp/implementation-plans/12a-cognitive-layer.md` for the full 72-item implementation plan
+
+---
+
+## Frontier Concepts: Knowledge Crystals and Knowledge Metabolism
+
+### Knowledge Crystals: Ultra-Compressed Knowledge Units
+
+A **knowledge crystal** is an ultra-compressed, high-value knowledge unit that has been distilled, validated, and optimized to the point where it carries maximum information in minimum space. Crystals are the final stage of knowledge evolution — beyond Playbooks.
+
+**Biological analogy**: In neuroscience, highly practiced skills become "crystallized intelligence" (Cattell 1963) — they are fast, automatic, and resistant to decay. Knowledge crystals are the computational equivalent.
+
+**Properties**:
+- **Atomic**: Each crystal encodes exactly one actionable principle
+- **Self-contained**: No external context needed to apply the crystal
+- **Maximally compressed**: HDC vector + one-line natural language + metadata, total < 2 KB
+- **Near-permanent**: Effective half-life > 10 years (requires explicit revocation to remove)
+- **Cross-domain**: Crystals are abstract enough to transfer across domains
+
+```rust
+/// A knowledge crystal: the most compressed, highest-value unit of knowledge.
+///
+/// Crystals emerge from the tier progression pipeline when:
+///   1. A Persistent-tier Heuristic has been confirmed 50+ times
+///   2. It has never been contradicted by AntiKnowledge
+///   3. It has been independently confirmed by 3+ agents
+///   4. Its content has been compressed to a single actionable principle
+///
+/// Crystals are stored separately from regular knowledge entries for
+/// fast lookup — they are always in memory, never paged out.
+pub struct KnowledgeCrystal {
+    /// Unique identifier.
+    pub id: String,
+    /// The principle, in one sentence. Max 200 characters.
+    pub principle: String,
+    /// HDC vector encoding the crystal's semantic structure.
+    pub hdc_vector: HdcVector,
+    /// Confidence: always >= 0.95 for crystals.
+    pub confidence: f64,
+    /// Number of independent confirmations.
+    pub confirmation_count: usize,
+    /// Domains where this crystal has been validated.
+    pub validated_domains: Vec<String>,
+    /// Source heuristic IDs that were crystallized.
+    pub source_heuristics: Vec<String>,
+    /// Creation timestamp.
+    pub crystallized_at: DateTime<Utc>,
+    /// Provenance chain.
+    pub provenance: ProvenanceChain,
+}
+
+/// Crystal store: always-in-memory, fast-lookup knowledge.
+///
+/// Maximum size: 1,000 crystals (beyond this, the least-used crystals
+/// are de-crystallized back to Persistent Heuristics).
+///
+/// Memory footprint: 1,000 × ~2 KB = ~2 MB — small enough to stay
+/// resident in L3 cache on modern processors.
+pub struct CrystalStore {
+    crystals: Vec<KnowledgeCrystal>,
+    /// Maximum crystals to retain. Default: 1000.
+    pub max_crystals: usize,
+    /// Minimum confirmations for crystallization. Default: 50.
+    pub min_confirmations: usize,
+    /// Minimum confidence for crystallization. Default: 0.95.
+    pub min_confidence: f64,
+}
+
+impl CrystalStore {
+    /// Attempt to crystallize a Persistent-tier Heuristic.
+    ///
+    /// Criteria:
+    ///   1. Tier == Persistent
+    ///   2. Confirmation count >= min_confirmations (50)
+    ///   3. Confidence >= min_confidence (0.95)
+    ///   4. No AntiKnowledge contradictions
+    ///   5. Confirmed by >= 3 independent agents (or >= 3 distinct contexts)
+    pub fn try_crystallize(
+        &mut self,
+        entry: &KnowledgeEntry,
+        stats: &EntryStats,
+        anti_entries: &[KnowledgeEntry],
+    ) -> Option<KnowledgeCrystal> {
+        if stats.confirmation_count < self.min_confirmations {
+            return None;
+        }
+        if entry.confidence < self.min_confidence {
+            return None;
+        }
+        // Check no AntiKnowledge contradictions
+        if let Some(hv) = entry.hdc_vector.as_ref()
+            .and_then(|b| HdcVector::from_bytes(b)) {
+            for anti in anti_entries {
+                if let Some(anti_hv) = anti.hdc_vector.as_ref()
+                    .and_then(|b| HdcVector::from_bytes(b)) {
+                    if hv.similarity(&anti_hv) > 0.526 {
+                        return None; // Contradicted
+                    }
+                }
+            }
+        }
+
+        Some(KnowledgeCrystal {
+            id: format!("crystal_{}", uuid::Uuid::new_v4()),
+            principle: entry.content.chars().take(200).collect(),
+            hdc_vector: entry.hdc_vector.as_ref()
+                .and_then(|b| HdcVector::from_bytes(b))
+                .unwrap_or_else(HdcVector::zeros),
+            confidence: entry.confidence,
+            confirmation_count: stats.confirmation_count,
+            validated_domains: vec![], // populated from source episodes
+            source_heuristics: vec![entry.id.clone()],
+            crystallized_at: Utc::now(),
+            provenance: ProvenanceChain::new_crystallized(&entry.id),
+        })
+    }
+}
+```
+
+**References**: Cattell, R.B. (1963). "Theory of fluid and crystallized intelligence." *Journal of Educational Psychology*, 54(1), 1-22.
+
+---
+
+### Knowledge Metabolism: Knowledge as a Living Substrate
+
+Knowledge is not static data — it is a **metabolizing substrate** that consumes resources (attention, storage, compute), produces outputs (better decisions), and generates waste (stale entries, false beliefs). The metabolic model provides a unified framework for understanding knowledge base health.
+
+**Biological analogy**: Living cells maintain homeostasis through metabolic processes — anabolism (building complex molecules from simple ones) and catabolism (breaking down complex molecules for energy). Knowledge metabolism operates similarly:
+
+| Metabolic Process | Biological | Knowledge |
+|---|---|---|
+| **Anabolism** (building up) | Protein synthesis | Distillation: episodes → insights → heuristics → crystals |
+| **Catabolism** (breaking down) | Digestion, waste removal | Decay + GC: stale entries → garbage collected |
+| **Homeostasis** | Temperature regulation | Tier system: balance between acquisition and pruning |
+| **Energy** | ATP | Agent compute budget (LLM tokens, CPU cycles) |
+| **Nutrients** | Food | New episodes, external knowledge imports |
+| **Waste** | CO2, urea | Decayed entries below GC threshold |
+| **Immune system** | White blood cells | AntiKnowledge, reactive checking |
+| **Growth** | Cell division | Knowledge base expansion through distillation |
+| **Aging** | Cellular senescence | Ebbinghaus decay |
+
+```rust
+/// Knowledge metabolism metrics.
+///
+/// Tracks the metabolic health of the knowledge base.
+/// Computed periodically and logged for trend analysis.
+pub struct MetabolismMetrics {
+    /// Anabolic rate: new knowledge entries per day.
+    pub anabolic_rate: f64,
+    /// Catabolic rate: entries garbage-collected per day.
+    pub catabolic_rate: f64,
+    /// Metabolic balance: anabolic - catabolic.
+    /// Positive = growing. Negative = shrinking. Near zero = homeostasis.
+    pub metabolic_balance: f64,
+    /// Metabolic efficiency: fraction of new entries that survive to Working tier.
+    /// Target: 0.3-0.5. Below 0.2 = wasteful (too many false extractions).
+    /// Above 0.7 = too conservative (missing patterns).
+    pub metabolic_efficiency: f64,
+    /// Energy expenditure: LLM tokens consumed for distillation per day.
+    pub daily_token_expenditure: usize,
+    /// Knowledge density: mean confidence × mean tier_multiplier.
+    /// Higher density = more concentrated, validated knowledge.
+    pub knowledge_density: f64,
+    /// Waste ratio: fraction of entries below 0.2 confidence.
+    /// High waste ratio = GC is not running frequently enough.
+    pub waste_ratio: f64,
+    /// Immune load: fraction of entries that are AntiKnowledge.
+    /// Target: 0.05-0.15. Below 0.05 = under-defended. Above 0.20 = too many
+    /// false beliefs being tracked (possible overactive immune system).
+    pub immune_load: f64,
+}
+
+/// Metabolic state classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetabolicState {
+    /// Healthy: balanced anabolism/catabolism, good efficiency.
+    Homeostasis,
+    /// Growing: anabolic rate exceeds catabolic rate. Normal during active work.
+    Growth,
+    /// Consolidating: catabolic rate exceeds anabolic rate. Normal during idle/Dreams.
+    Consolidation,
+    /// Starving: no new knowledge being created. Agent needs more episodes.
+    Starvation,
+    /// Bloated: too many low-confidence entries accumulating. Needs GC.
+    Bloat,
+    /// Inflamed: high immune load (too much AntiKnowledge). May indicate
+    /// systematic distillation errors or adversarial injection.
+    Inflammation,
+}
+
+impl MetabolismMetrics {
+    /// Classify the current metabolic state.
+    pub fn state(&self) -> MetabolicState {
+        if self.anabolic_rate < 0.1 {
+            return MetabolicState::Starvation;
+        }
+        if self.waste_ratio > 0.3 {
+            return MetabolicState::Bloat;
+        }
+        if self.immune_load > 0.20 {
+            return MetabolicState::Inflammation;
+        }
+        if self.metabolic_balance > 5.0 {
+            return MetabolicState::Growth;
+        }
+        if self.metabolic_balance < -5.0 {
+            return MetabolicState::Consolidation;
+        }
+        MetabolicState::Homeostasis
+    }
+
+    /// Recommend actions based on metabolic state.
+    pub fn recommendations(&self) -> Vec<String> {
+        let mut recs = Vec::new();
+        match self.state() {
+            MetabolicState::Starvation => {
+                recs.push("Knowledge base is starving. Run more tasks to generate episodes.".into());
+            }
+            MetabolicState::Bloat => {
+                recs.push(format!(
+                    "Knowledge base is bloated ({:.0}% waste). Run GC immediately.",
+                    self.waste_ratio * 100.0
+                ));
+            }
+            MetabolicState::Inflammation => {
+                recs.push(format!(
+                    "High immune load ({:.0}% AntiKnowledge). Check for distillation errors or poisoning.",
+                    self.immune_load * 100.0
+                ));
+            }
+            _ => {}
+        }
+        if self.metabolic_efficiency < 0.2 {
+            recs.push("Low metabolic efficiency. Distillation is producing too many false patterns.".into());
+        }
+        if self.daily_token_expenditure > 100_000 {
+            recs.push("High token expenditure on distillation. Consider batching or reducing D1 frequency.".into());
+        }
+        recs
+    }
+}
+```
+
+---
+
+### Neurosymbolic Integration: Bridging HDC and Knowledge Graphs
+
+Neuro's HDC encoding captures structural relationships algebraically. Knowledge graphs (Neo4j, TypeDB, RDF/OWL) capture relationships symbolically. The neurosymbolic integration layer bridges both, using each for its strength.
+
+**Research context**: The neurosymbolic AI field has matured rapidly (Shams et al. 2024 surveyed 158 papers from 2020-2024). AlphaGeometry (DeepMind 2024) demonstrated that combining neural pattern recognition (System 1) with symbolic deduction (System 2) can achieve IMO silver-medal-equivalent performance. GraphRAG (Microsoft 2024) showed that knowledge graphs + vector search improves LLM accuracy by 20%+ over vector-only RAG.
+
+```rust
+/// Neurosymbolic knowledge layer: HDC vectors + symbolic graph.
+///
+/// Each knowledge entry exists in two representations:
+///   1. HDC vector (10,240-bit BSC): fast similarity, cross-domain transfer
+///   2. Symbolic triple (subject, predicate, object): precise queries, inference
+///
+/// The symbolic layer enables:
+///   - Multi-hop queries: "what causes X which causes Y?"
+///   - Logical inference: "if A implies B and B implies C, then A implies C"
+///   - Constraint checking: "this new entry contradicts rule R"
+///
+/// The HDC layer enables:
+///   - Fast approximate similarity: "what entries are related to this query?"
+///   - Cross-domain transfer: "what structural analogy exists between domains?"
+///   - Memory compression: "summarize these 100 entries in one vector"
+pub struct NeurosymbolicStore {
+    /// HDC vector index (the existing NeuroStore).
+    pub vector_store: NeuroStore,
+    /// Symbolic triple store (knowledge graph).
+    pub graph_store: SymbolicGraph,
+    /// Mapping between entry IDs and graph node IDs.
+    pub id_mapping: HashMap<String, GraphNodeId>,
+}
+
+/// A symbolic triple in the knowledge graph.
+pub struct SymbolicTriple {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    /// Source knowledge entry ID.
+    pub source_entry_id: String,
+    /// Confidence inherited from the knowledge entry.
+    pub confidence: f64,
+}
+
+/// Symbolic graph interface (abstraction over graph backends).
+pub trait SymbolicGraph: Send + Sync {
+    /// Add a triple to the graph.
+    fn add_triple(&mut self, triple: SymbolicTriple) -> Result<GraphNodeId>;
+    /// Query triples matching a pattern (None = wildcard).
+    fn query(&self, subject: Option<&str>, predicate: Option<&str>, object: Option<&str>)
+        -> Result<Vec<SymbolicTriple>>;
+    /// Multi-hop query: follow predicate chains up to max_hops.
+    fn multi_hop(&self, start: &str, predicate: &str, max_hops: usize)
+        -> Result<Vec<Vec<SymbolicTriple>>>;
+    /// Inference: apply transitive closure over a predicate.
+    fn transitive_closure(&self, predicate: &str) -> Result<Vec<SymbolicTriple>>;
+}
+
+impl NeurosymbolicStore {
+    /// Hybrid query: HDC similarity + graph traversal.
+    ///
+    /// Pipeline:
+    ///   1. HDC similarity search → top-K candidates by structure
+    ///   2. Graph expansion → follow relationships from candidates
+    ///   3. Re-rank by combined score (HDC sim × graph relevance)
+    pub fn hybrid_query(
+        &self,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<HybridResult>> {
+        // 1. HDC similarity search
+        let hdc_candidates = self.vector_store.query(query_text, limit * 2)?;
+
+        // 2. Graph expansion: for each candidate, find related triples
+        let mut expanded = Vec::new();
+        for candidate in &hdc_candidates {
+            if let Some(node_id) = self.id_mapping.get(&candidate.id) {
+                let related = self.graph_store.multi_hop(
+                    &candidate.id, "relates_to", 2
+                )?;
+                expanded.extend(related.into_iter().flatten());
+            }
+        }
+
+        // 3. Re-rank and deduplicate
+        // ... scoring logic combining HDC similarity and graph distance
+
+        Ok(vec![]) // placeholder
+    }
+}
+```
+
+**When to use HDC vs Graph vs Both**:
+
+| Query Type | Best Approach | Example |
+|---|---|---|
+| Semantic similarity | HDC | "find entries about async performance" |
+| Exact relationship | Graph | "what causes borrow checker errors?" |
+| Cross-domain analogy | HDC | "what in DeFi is like borrow checker in Rust?" |
+| Multi-hop reasoning | Graph | "what causes X which leads to Y which affects Z?" |
+| Approximate + precise | Both (hybrid) | "find performance-related entries and their causal chains" |
+
+**References**:
+- Shams, Z. et al. (2024). "Neuro-Symbolic AI in 2024: A Systematic Review." arXiv:2501.05435.
+- Trinh, T.H. et al. (2024). "Solving olympiad geometry without human demonstrations." *Nature*, 625, 476-482. (AlphaGeometry)
+- Edge, D. et al. (2024). "From Local to Global: A Graph RAG Approach." arXiv:2404.16130. (GraphRAG)
+- Zhang, X. et al. (2024). "Neural-Symbolic Methods for Knowledge Graph Reasoning." *ACM TKDD*. DOI:10.1145/3686806.

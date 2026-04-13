@@ -244,6 +244,187 @@ An agent's Gamma tick processes T0 messages (heartbeats, alerts). Its Theta tick
 
 ---
 
+## Message Ordering Guarantees
+
+Different agent coordination patterns require different ordering guarantees. The 4-tier architecture provides three ordering levels:
+
+### Causal Ordering (T0, T1)
+
+At T0 and T1, messages carry **vector clocks** that enable causal ordering — if message A causally precedes message B (A happened before B and B depends on A), any node that receives both will process A before B.
+
+```rust
+pub struct VectorClock {
+    /// Map from passport_id to logical timestamp
+    /// Only tracks agents in the local mesh neighborhood (typically 8-12 peers)
+    pub clocks: BTreeMap<u256, u64>,
+}
+
+impl VectorClock {
+    /// Merge two vector clocks (take element-wise maximum)
+    pub fn merge(&mut self, other: &VectorClock) {
+        for (id, &ts) in &other.clocks {
+            let entry = self.clocks.entry(*id).or_insert(0);
+            *entry = (*entry).max(ts);
+        }
+    }
+
+    /// Check if self causally precedes other
+    pub fn precedes(&self, other: &VectorClock) -> bool {
+        self.clocks.iter().all(|(id, ts)| {
+            other.clocks.get(id).map_or(false, |other_ts| ts <= other_ts)
+        }) && self.clocks != other.clocks
+    }
+}
+```
+
+**What breaks without causal ordering**: An agent posts a knowledge entry (message A), then another agent confirms it (message B referencing A). Without causal ordering, a third agent might receive B before A and attempt to confirm a knowledge entry it hasn't seen yet. Causal ordering prevents this by ensuring A is always delivered before B.
+
+**Implementation**: Each gossip envelope includes the sender's vector clock. Receiving nodes buffer messages whose causal dependencies haven't arrived yet and deliver them in causal order. The buffer is bounded (max 1000 messages) with a timeout (5 heartbeats) — messages exceeding the buffer or timeout are delivered out-of-order with a flag.
+
+### Total Ordering (T3)
+
+T3 messages are included in Korai blocks, which provide **total ordering** by definition — all nodes process block N before block N+1, and all transactions within a block are ordered by their position. This is the strongest ordering guarantee.
+
+### Conflict-Free Replicated Data Types (CRDTs)
+
+For gossip state that multiple agents update concurrently (e.g., shared counters, observed-remove sets), the gossip layer supports CRDTs — data structures that converge to the same state regardless of message ordering:
+
+```rust
+/// G-Counter CRDT for distributed counting (e.g., confirmation counts)
+pub struct GCounter {
+    /// Each agent maintains its own counter; total = sum of all
+    pub counts: BTreeMap<u256, u64>,
+}
+
+impl GCounter {
+    pub fn increment(&mut self, agent_id: u256) {
+        *self.counts.entry(agent_id).or_insert(0) += 1;
+    }
+
+    pub fn merge(&mut self, other: &GCounter) {
+        for (id, &count) in &other.counts {
+            let entry = self.counts.entry(*id).or_insert(0);
+            *entry = (*entry).max(count);
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.counts.values().sum()
+    }
+}
+
+/// LWW-Register CRDT for last-writer-wins values (e.g., agent status)
+pub struct LwwRegister<T> {
+    pub value: T,
+    pub timestamp: u64,
+    pub writer: u256,
+}
+
+impl<T: Clone> LwwRegister<T> {
+    pub fn merge(&mut self, other: &LwwRegister<T>) {
+        if other.timestamp > self.timestamp
+           || (other.timestamp == self.timestamp && other.writer > self.writer) {
+            self.value = other.value.clone();
+            self.timestamp = other.timestamp;
+            self.writer = other.writer;
+        }
+    }
+}
+```
+
+CRDTs are used for:
+- **Confirmation counts** (GCounter): How many agents have confirmed a knowledge entry
+- **Agent status** (LWW-Register): Current online/offline/busy status
+- **Observed anomalies** (OR-Set): Set of anomaly IDs observed by the mesh, with add/remove semantics
+
+---
+
+## Privacy-Preserving Gossip
+
+Gossip participation leaks metadata. An adversary observing gossip patterns can infer:
+
+1. **Which topics an agent subscribes to** → reveals its domain and capabilities
+2. **Message timing** → correlates agent activity with on-chain events
+3. **Gossip mesh topology** → identifies high-connectivity hub agents
+4. **Message content even if encrypted** → traffic analysis reveals communication patterns
+
+### Dandelion++ Protocol Integration
+
+For sensitive T0 messages (anomaly alerts that might reveal detection methodology, job bids that reveal strategy), Korai integrates the **Dandelion++** protocol (Fanti et al., 2018):
+
+```
+Standard gossip:  Agent broadcasts to all mesh peers immediately
+                  → Easy to identify the originator
+
+Dandelion++:      STEM phase: message forwarded along a random path
+                  (1 hop → 1 hop → 1 hop) for 3-10 hops
+                  FLUFF phase: message enters normal gossip broadcast
+                  → Originator hidden behind 3-10 relay hops
+```
+
+```rust
+pub struct DandelionConfig {
+    /// Probability of transitioning from stem to fluff at each hop
+    pub stem_to_fluff_probability: f64,  // default: 0.1 (avg 10 stem hops)
+
+    /// Maximum stem hops before forced fluff
+    pub max_stem_hops: u32,  // default: 10
+
+    /// Stem relay selection: random peer from mesh
+    pub stem_relay_mode: StemRelayMode,
+
+    /// Topics that use Dandelion++ (not all topics need it)
+    pub dandelion_topics: Vec<GossipTopic>,  // default: [anomaly, simulation]
+}
+
+pub enum StemRelayMode {
+    /// Random peer from mesh (standard Dandelion++)
+    Random,
+    /// Peer with highest economic score (harder to compromise the stem path)
+    HighestEconomicScore,
+    /// Rotating peer (changes each heartbeat to prevent path analysis)
+    Rotating { rotation_interval_heartbeats: u32 },
+}
+```
+
+**Which topics use Dandelion++**:
+- `korai/anomaly/v1`: Anomaly alerts reveal detection capabilities — valuable competitive intelligence
+- `korai/simulation/v1`: Simulation results reveal trading strategies
+- `korai/job/v1` (bid messages only): Bid amounts are strategically sensitive before auction close
+- Other topics (heartbeat, knowledge, reputation, governance, peer-discovery) use standard gossip
+
+### Subscription Privacy
+
+An agent's topic subscriptions reveal its domain focus. Mitigation strategies:
+
+1. **Padding subscriptions**: Subscribe to K random additional topics beyond the needed set. Cost: ~K × heartbeat bandwidth overhead.
+2. **Cover traffic**: Generate dummy messages on subscribed topics at low rates. These are indistinguishable from real traffic to observers.
+3. **Epoch-based subscription changes**: Change subscription sets only at epoch boundaries (not in response to specific events, which would leak timing information).
+
+```rust
+pub struct SubscriptionPrivacyConfig {
+    /// Number of additional cover topics to subscribe to
+    pub cover_topics: usize,  // default: 2
+
+    /// Cover traffic rate (dummy messages per heartbeat interval)
+    pub cover_traffic_rate: f64,  // default: 0.1
+
+    /// Only change subscriptions at epoch boundaries
+    pub epoch_locked_subscriptions: bool,  // default: true
+}
+```
+
+### Academic Foundations (Gossip Extensions)
+
+- Fanti, G. et al. (2018). "Dandelion++: Lightweight Cryptocurrency Networking with Formal Anonymity Guarantees." *ACM SIGMETRICS*. — The Dandelion++ stem-and-fluff protocol for anonymous message origination.
+- Shapiro, M. et al. (2011). "Conflict-Free Replicated Data Types." *SSS*. — CRDT theory for eventually-consistent distributed state.
+- Lamport, L. (1978). "Time, Clocks, and the Ordering of Events in a Distributed System." *CACM*. — Vector clock theory for causal ordering.
+- Mattern, F. (1989). "Virtual Time and Global States of Distributed Systems." — Vector clock implementation for causal message delivery.
+- Correia, A. et al. (2007). "HyParView: A Membership Protocol for Reliable Gossip-Based Broadcast." *DSN*. — HyParView membership protocol for reliable gossip mesh management, complementary to GossipSub.
+- Leitão, J. et al. (2007). "Epidemic Broadcast Trees." *SRDS*. — Plumtree (push-lazy push) protocol for bandwidth-efficient gossip with tree-based message dissemination.
+
+---
+
 ## Academic Foundations
 
 - Vyzovitis, D. et al. (2020). "GossipSub: Attack-Resilient Message Propagation in the Filecoin and ETH2.0 Networks." — The GossipSub v1.1 protocol used for T0, with mesh management and peer scoring.

@@ -35,18 +35,18 @@ optimal performance.
 |---|------|-------|-------|
 | 00 | [00-layer-overview.md](./00-layer-overview.md) | L4 layer position, five-layer architecture, key concepts, sub-doc map | ~220 |
 | 01 | [01-plan-discovery.md](./01-plan-discovery.md) | Plan scanning, frontmatter parsing, validation, ranking | ~210 |
-| 02 | [02-unified-task-dag.md](./02-unified-task-dag.md) | Cross-plan DAG, file-conflict inference, topological sort, wave scheduling, critical path | ~230 |
-| 03 | [03-parallel-executor.md](./03-parallel-executor.md) | Pure state machine, tick/event loop, concurrency management, design rationale | ~200 |
+| 02 | [02-unified-task-dag.md](./02-unified-task-dag.md) | Cross-plan DAG, file-conflict inference, topological sort, wave scheduling, critical path, **DAG optimization passes** (CPM/PERT, task fusion, speculative execution, graph partitioning), **incremental computation** (Adapton/Salsa dirty-clean propagation, build-systems-à-la-carte classification), **dynamic DAG modification** (mutations, triggers, consistency invariants) | ~550 |
+| 03 | [03-parallel-executor.md](./03-parallel-executor.md) | Pure state machine, tick/event loop, concurrency management, design rationale, **resource-aware scheduling** (token bucgets, API rate limits, cost budgets), **priority inversion prevention** (ICPP, Mars Pathfinder), **Petri net formal model** (WF-net soundness, colored Petri nets, structural analysis) | ~470 |
 | 04 | [04-plan-phases.md](./04-plan-phases.md) | Phase lifecycle, state transition diagram, transition rules, retry bounds, failure types | ~250 |
 | 05 | [05-executor-actions.md](./05-executor-actions.md) | Action vocabulary, dispatch semantics, serialization, action flow | ~220 |
 | 06 | [06-runtime-harness.md](./06-runtime-harness.md) | PlanRunner structure, dispatch loop, agent dispatch, task tracking, learning integration | ~260 |
 | 07 | [07-worktree-isolation.md](./07-worktree-isolation.md) | Per-plan worktrees, branch naming, health checks, idle reclamation, budget enforcement | ~230 |
 | 08 | [08-merge-queue.md](./08-merge-queue.md) | File-conflict-aware merge serialization, priority ordering, retry with backoff | ~220 |
-| 09 | [09-snapshot-recovery.md](./09-snapshot-recovery.md) | Executor snapshots, event-log replay, merged recovery, validation warnings | ~250 |
+| 09 | [09-snapshot-recovery.md](./09-snapshot-recovery.md) | Executor snapshots, event-log replay, merged recovery, validation warnings, **incremental snapshots** (delta encoding, rotation strategy), **snapshot verification** (Merkle tree, BLAKE3 checksums, torn-write detection), **CRDTs for distributed state** (HLC, join-semilattice phases, delta-state CRDTs) | ~570 |
 | 10 | [10-event-log.md](./10-event-log.md) | Hash-chained event sourcing, BLAKE3 integrity, tamper detection, forensic replay | ~240 |
 | 11 | [11-conductor-integration.md](./11-conductor-integration.md) | 10 watchers, Yerkes-Dodson dynamics, cost monitoring, diagnosis engine | ~220 |
 | 12 | [12-stigmergy-niche.md](./12-stigmergy-niche.md) | Stigmergic coordination, niche construction, C-Factor, pheromone typology | ~260 |
-| 13 | [13-cross-domain-orchestration.md](./13-cross-domain-orchestration.md) | Multi-domain DAGs, domain-specific gates, HEFT scheduling, Spore/Sparrow | ~250 |
+| 13 | [13-cross-domain-orchestration.md](./13-cross-domain-orchestration.md) | Multi-domain DAGs, domain-specific gates, HEFT scheduling, Spore/Sparrow, **choreography vs orchestration** (saga pattern, hybrid approach), **domain-specific plan templates** (composable templates, built-ins), **cross-domain conflict resolution** (semantic merge, artifact protocols), **plan repair** (repair engine, abstraction levels, meta-reasoning) | ~650 |
 
 ---
 
@@ -175,7 +175,27 @@ optimal performance.
 | Wooldridge, M. | 2009 | *Introduction to MultiAgent Systems* (Wiley) | 05 |
 | Kahn, A. B. | 1962 | Topological sorting | 02 |
 | Nakamoto, S. | 2008 | Bitcoin whitepaper | 10 |
-| van der Aalst, W. M. P. | 1998 | Petri nets for workflow (*JCSC*) | 04 |
+| van der Aalst, W. M. P. | 1998 | Petri nets for workflow (*JCSC*) | 03, 04 |
+| Hammer, M. A. et al. | 2014 | Adapton: demand-driven incremental computation (*PLDI*) | 02 |
+| Mokhov, A. et al. | 2018 | Build systems à la carte (*ICFP*) | 02 |
+| Karypis, G. & Kumar, V. | 1998 | METIS graph partitioning (*SIAM J. Sci. Comput.*) | 02 |
+| Dean, J. & Ghemawat, S. | 2008 | MapReduce / speculative execution (*Comm. ACM*) | 02 |
+| Rocklin, M. | 2015 | Dask task graph optimization (*SciPy*) | 02 |
+| Sha, L. et al. | 1990 | Priority inheritance protocols (*IEEE Trans. Comp.*) | 03 |
+| Blumofe, R. D. & Leiserson, C. E. | 1999 | Work-stealing scheduling (*JACM*) | 03 |
+| Chase, D. & Lev, Y. | 2005 | Dynamic circular work-stealing deque (*SPAA*) | 03 |
+| Wei, C. et al. | 2025 | Agent.xpu LLM agent scheduling (*arXiv:2506.24045*) | 03 |
+| Patel, S. et al. | 2024 | BudgetMLAgent cost-efficient cascade (*AIMLSystems*) | 03 |
+| Shapiro, M. et al. | 2011 | Conflict-free replicated data types (*SSS*) | 09 |
+| Kleppmann, M. & Beresford, A. R. | 2017 | Conflict-free replicated JSON (*IEEE TPDS*) | 09 |
+| Kulkarni, S. S. et al. | 2014 | Hybrid Logical Clocks (*OPODIS*) | 09 |
+| O'Connor, J. et al. | 2020 | BLAKE3 hash function (*blake3.io*) | 09, 10 |
+| Garcia-Molina, H. & Salem, K. | 1987 | Sagas (*ACM SIGMOD*) | 13 |
+| Gerevini, A. et al. | 2004 | LPG-adapt plan repair (*JAIR*) | 13 |
+| Sacerdoti, E. D. | 1974 | ABSTRIPS abstraction hierarchies (*AI*) | 13 |
+| Erol, K. et al. | 1994 | HTN planning (*AAAI*) | 13 |
+| Fox, M. et al. | 2006 | Plan stability: replanning vs repair (*ICAPS*) | 13 |
+| desJardins, M. E. et al. | 1999 | Distributed continual planning (*AI Magazine*) | 13 |
 
 ---
 

@@ -436,6 +436,45 @@ compose the strategy that fits their specific problem domain.
 
 ---
 
+## 8. Connection to SOFAI and Modern Dual-Process Systems
+
+The autocatalytic architecture can be compared to **SOFAI (Slow and Fast AI)** (Fabiano et al.
+2025, npj Artificial Intelligence), which implements dual-process theory in software with a
+metacognitive module governing fast/slow deployment.
+
+### 8.1 Roko Extends SOFAI's Two Speeds to Three
+
+| SOFAI | Roko | Extension |
+|---|---|---|
+| **Fast** (System 1): data-driven, experience-based | **Gamma** (~5s): T0 probes, cached responses | Equivalent |
+| **Slow** (System 2): symbolic, rule-based | **Theta** (~75s): T1/T2, LLM reasoning | Equivalent |
+| — | **Delta** (~hours): Dreams, consolidation | **Novel**: no SOFAI equivalent |
+
+The Delta speed is Roko's unique contribution: offline consolidation that transforms
+experience into reusable knowledge. Neither SOFAI nor classical cognitive architectures
+(ACT-R, Soar) have an explicit offline learning mode analogous to biological sleep.
+
+### 8.2 Metacognitive Learning
+
+SOFAI's metacognitive module learns to deploy fast vs. slow solvers. In Roko, this maps to
+the CascadeRouter + adaptive gate thresholds. The key autocatalytic property: **the
+metacognitive decision of which speed to use is itself learnable**, creating a second-order
+improvement loop.
+
+```
+First-order:  Better context → better outputs → higher gate pass rate
+Second-order: Better tier routing → less wasted compute → more tasks → more learning signal
+Third-order:  Better metacognitive model → better tier routing → (compounds further)
+```
+
+Each order of improvement bootstraps the next, which is the defining property of an
+autocatalytic system.
+
+**Reference**: Fabiano, F. et al. (2025). "SOFAI: A multi-component cognitive architecture for
+intelligent systems." npj Artificial Intelligence.
+
+---
+
 ## Current Status and Gaps
 
 - **Autocatalytic structure**: The five-layer stack and three cross-cuts are built and
@@ -454,6 +493,8 @@ compose the strategy that fits their specific problem domain.
 - **Empirical validation**: The compound improvement claim requires measurement. An A/B
   comparison of agents with/without autocatalytic features would validate whether the
   theoretical improvement materializes.
+- **Opportunity**: Third-order metacognitive improvement loops (Section 8.2) are theoretically
+  possible but not yet instrumented or measured.
 
 ---
 

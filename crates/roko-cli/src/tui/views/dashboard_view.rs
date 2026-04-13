@@ -361,7 +361,7 @@ fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, th
 }
 
 // ---------------------------------------------------------------------------
-// Sub-tab: Git (placeholder)
+// Sub-tab: Git — inline summary from git commands
 // ---------------------------------------------------------------------------
 
 fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -371,10 +371,88 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         .border_style(theme.muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // Current branch
+    let branch = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let commit = git_cmd(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let age = git_cmd(&["log", "-1", "--format=%cr"]).unwrap_or_default();
+
+    if !branch.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" branch: ", theme.muted()),
+            Span::styled(branch.clone(), theme.accent()),
+            Span::styled(format!("  {commit}"), theme.muted()),
+            Span::styled(format!("  {age}"), theme.muted()),
+        ]));
+    }
+
+    // Status summary
+    if let Some(status) = git_cmd(&["status", "--short"]) {
+        let modified = status.lines().filter(|l| l.starts_with(" M") || l.starts_with("M ")).count();
+        let added = status.lines().filter(|l| l.starts_with("A ") || l.starts_with("??")).count();
+        let deleted = status.lines().filter(|l| l.starts_with(" D") || l.starts_with("D ")).count();
+        let total = status.lines().filter(|l| !l.is_empty()).count();
+        if total > 0 {
+            lines.push(Line::from(vec![
+                Span::styled(" status: ", theme.muted()),
+                Span::styled(format!("{total} changed"), theme.warning()),
+                Span::raw("  "),
+                Span::styled(format!("M:{modified}"), theme.warning()),
+                Span::raw(" "),
+                Span::styled(format!("A:{added}"), theme.success()),
+                Span::raw(" "),
+                Span::styled(format!("D:{deleted}"), theme.danger()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(" status: clean", theme.success())));
+        }
+    }
+
+    // Recent commits (last 8)
+    if let Some(log) = git_cmd(&["log", "--oneline", "--graph", "-8"]) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(" recent commits:", theme.accent())));
+        for line in log.lines().take(8) {
+            let style = if line.contains('*') {
+                theme.text()
+            } else {
+                theme.muted()
+            };
+            lines.push(Line::from(Span::styled(format!("  {line}"), style)));
+        }
+    }
+
+    // Worktrees
+    if let Some(wt) = git_cmd(&["worktree", "list", "--porcelain"]) {
+        let count = wt.lines().filter(|l| l.starts_with("worktree ")).count();
+        if count > 1 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" worktrees: ", theme.muted()),
+                Span::styled(format!("{count}"), theme.accent()),
+            ]));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(" not a git repository", theme.muted())));
+    }
+
     frame.render_widget(
-        Paragraph::new("git summary: use F4 for full git view").style(theme.muted()),
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn git_cmd(args: &[&str]) -> Option<String> {
+    std::process::Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 // ---------------------------------------------------------------------------

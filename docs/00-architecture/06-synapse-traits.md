@@ -499,6 +499,132 @@ combinations.
 
 ---
 
+## 10. Categorical Analysis: Traits as Morphisms
+
+The six Synapse traits can be analyzed through the lens of category theory, revealing deep
+structural properties that explain why the architecture composes so cleanly.
+
+### 10.1 The Engram Category
+
+Define a category **Eng** where:
+- **Objects** are types that appear in the pipeline: `Vec<Signal>`, `Signal`, `Score`, `Selection`, `Verdict`, `Vec<Signal>` (reactions)
+- **Morphisms** are the trait operations:
+  - `query : () → Vec<Signal>` (Substrate)
+  - `score : Signal → Score` (Scorer)
+  - `select : Vec<Signal> → Selection` (Router)
+  - `compose : Vec<Signal> → Signal` (Composer)
+  - `verify : Signal → Verdict` (Gate)
+  - `decide : Vec<Signal> → Vec<Signal>` (Policy)
+
+The pipeline `query >> select >> compose >> verify >> persist >> decide` is a composition of
+morphisms in **Eng**. Category theory guarantees that this composition is:
+- **Associative**: `(f >> g) >> h = f >> (g >> h)` — the pipeline can be chunked arbitrarily
+- **Has identity**: the NoOp implementations form identity morphisms at each type
+
+### 10.2 Score as a Monoid
+
+`Score` forms a monoid under both addition and multiplication:
+
+```
+(Score, +, Score::ZERO)     — additive monoid (evidence aggregation)
+(Score, ×, Score::NEUTRAL)  — multiplicative monoid (modifier application)
+```
+
+Monoid structure guarantees that `fold` over any collection of Scores is well-defined and
+associative, enabling parallel reduction. CompositeScorer is precisely `fold` over a weighted
+collection of Scorer outputs.
+
+### 10.3 Cross-Cuts as Functors
+
+The three cognitive cross-cuts (Neuro, Daimon, Dreams) can be understood as **endofunctors**
+on the Engram category — structure-preserving transformations that enrich the pipeline:
+
+| Cross-Cut | Functorial Action | Preservation |
+|---|---|---|
+| **Neuro** | Enriches query results with knowledge | Preserves trait interfaces; any Substrate ↦ knowledge-enriched Substrate |
+| **Daimon** | Biases routing decisions with affect | Preserves Router interface; any Router ↦ affect-weighted Router |
+| **Dreams** | Transforms online pipeline to offline consolidation | Preserves loop structure; same 9 steps at Delta timescale |
+
+A **natural transformation** between functors would be a uniform way to convert between
+cross-cut perspectives — for instance, converting Daimon's PAD assessment into a Score
+modification that Neuro can store. The cross-cut interaction model (Section 5 of
+13-cognitive-cross-cuts.md) implicitly defines these natural transformations.
+
+### 10.4 Pipeline Composition as Monoid Homomorphism
+
+If the output of each trait implementation forms a monoid, then composing trait pipelines
+is itself monoidal. This gives **hierarchical composition for free**:
+
+```
+Gamma pipeline = query >> score >> route >> compose >> verify >> persist >> react
+Theta pipeline = fold(recent Gamma outcomes) >> route >> compose >> verify >> persist
+Delta pipeline = fold(recent Theta outcomes) >> route >> compose >> verify >> persist
+```
+
+Each higher-frequency pipeline's outputs are `fold`ed into inputs for the next level. The
+monoid structure guarantees this fold is well-defined regardless of how many Gamma ticks
+feed into a Theta tick.
+
+### 10.5 Implications for a 7th Trait
+
+Category theory suggests that the six traits are sufficient if and only if every morphism
+in **Eng** factors through them. The analysis in Section 23 (architectural-analysis-improvements)
+identifies two candidate operations — **Transform** (Signal → Signal mapping without budget)
+and **Observe** (read-only projection for telemetry) — that currently piggyback on existing
+traits. Both can be expressed as degenerate cases of Composer and Policy respectively, so the
+six traits remain sufficient. However, if the system grows a class of Signal-to-Signal
+transformations that are neither budget-constrained (Composer) nor stream-reactive (Policy),
+a dedicated `Transform` trait may become warranted.
+
+**References**:
+- Milewski, B. (2014). "Category Theory for Programmers." [bartoszmilewski.com](https://bartoszmilewski.com/2014/10/28/category-theory-for-programmers-the-preface/)
+- Seemann, M. (2017). "From Design Patterns to Category Theory." [blog.ploeh.dk](https://blog.ploeh.dk/2017/10/04/from-design-patterns-to-category-theory/)
+- Clarke et al. (2020). "Profunctor Optics: A Categorical Update." arXiv:2001.07488
+
+---
+
+## 11. Sufficiency Analysis: Is Six Enough?
+
+The six traits emerged from analyzing 400+ capabilities. But does the architecture handle
+edge cases cleanly? Analysis reveals three boundary areas:
+
+### 11.1 Operations That Fit But Are Awkward
+
+| Operation | Current Trait | Awkwardness |
+|---|---|---|
+| Signal transformation (e.g., summarize) | Composer with budget=∞ | Budget parameter is meaningless for 1:1 transforms |
+| Telemetry/observability emission | Policy with empty input | Policy signature expects a stream; observability just emits |
+| Batch verification (multiple signals) | Gate called in loop | Gate verifies one signal; batch verification requires external loop |
+
+### 11.2 Why Not a 7th Trait?
+
+A `Transform` trait (`Signal → Signal`, no budget, no stream) would capture 1:1 signal
+transformations cleanly. However:
+
+1. **Parsimony**: Every additional trait multiplies the composition surface. Six traits
+   produce 6! = 720 ordering permutations; seven produce 5,040.
+2. **Degenerate Composer**: `Composer::compose(&[single_signal], &Budget::UNLIMITED, ...)` is
+   functionally identical to a Transform. The budget parameter is unused but causes no harm.
+3. **Cognitive simplicity**: "One noun, six verbs" is a powerful mnemonic. Adding a seventh
+   verb dilutes the conceptual model.
+
+**Decision**: Keep six. The awkward cases are minor and the parsimony benefit is substantial.
+If a future domain produces a large class of budget-free, stream-free Signal transformations,
+revisit this decision.
+
+### 11.3 Could Traits Be Merged?
+
+| Candidate Merge | Argument For | Argument Against |
+|---|---|---|
+| Scorer + Router | Both evaluate signals | Router has feedback(); Scorer is stateless |
+| Gate + Scorer | Both produce quality assessments | Gate is async, external, produces Verdict; Scorer is sync, internal, produces Score |
+| Policy + Gate | Both watch outputs | Policy is reactive (many→many); Gate is verificatory (one→Verdict) |
+
+No merge candidates are compelling. The sync/async, stateful/stateless, and one/many
+distinctions justify keeping each trait separate.
+
+---
+
 ## Academic Foundations
 
 | Citation | Contribution |
@@ -507,18 +633,24 @@ combinations.
 | Gamma et al. 1994, Design Patterns | Strategy pattern: traits as interchangeable algorithms. |
 | Ousterhout 2018, A Philosophy of Software Design | Deep modules: simple interfaces with powerful implementations. Each trait is a deep module. |
 | Chen et al. 2023 (arXiv:2305.05176) | FrugalGPT: cascade routing as Router + feedback. |
+| Milewski 2014, Category Theory for Programmers | Categorical composition: pipeline as morphism composition in a category. |
+| Seemann 2017, Design Patterns to Category Theory | Monoid structure: Score composition and pipeline folding. |
+| Koopmans et al. 2024 (arXiv:2405.10467) | Agent Design Pattern Catalogue: 18 patterns for foundation-model agents validate trait decomposition. |
+| Franklin et al. 2016, LIDA Tutorial | LIDA codelets as independent trait implementations running concurrently. |
 
 ---
 
 ## Current Status and Gaps
 
-- **Implemented**: All six traits defined in `roko-core/src/traits.rs`. Concrete
-  implementations in `roko-std` (96 tests). Universal loop in `roko-core/src/loop_tick.rs`.
-- **Implemented**: CascadeRouter, LinUCBRouter, StaticRouter in `roko-learn`.
-- **Implemented**: 11 gates in `roko-gate` with adaptive thresholds.
+- **Implemented**: All six traits defined in `roko-core/src/traits.rs` (131 total implementations).
+  Concrete implementations in `roko-std` (96 tests). Universal loop in `roko-core/src/loop_tick.rs`.
+- **Implemented**: CascadeRouter, LinUCBRouter, StaticRouter, WeightedRouter in `roko-learn`.
+- **Implemented**: 33 gate implementations in `roko-gate` with adaptive thresholds.
 - **Implemented**: SystemPromptBuilder as a Composer in `roko-compose`.
 - **Gap**: CompositeScorer for combining multiple Scorers (specified, partially implemented).
 - **Gap**: ChainSubstrate for on-chain Engram storage (specified, not built).
+- **Analysis**: Six traits are sufficient for all current and foreseeable operations.
+  See [23-architectural-analysis-improvements.md](23-architectural-analysis-improvements.md).
 
 ---
 
@@ -529,3 +661,4 @@ combinations.
 - [08-scorer-gate-router-composer-policy.md](08-scorer-gate-router-composer-policy.md) — Other five traits in depth
 - [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md) — How traits compose in the loop
 - [12-five-layer-taxonomy.md](12-five-layer-taxonomy.md) — Which layer each trait lives at
+- [23-architectural-analysis-improvements.md](23-architectural-analysis-improvements.md) — Full architectural analysis

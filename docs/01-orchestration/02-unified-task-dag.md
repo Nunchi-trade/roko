@@ -288,6 +288,383 @@ the executor to deadlock, with tasks waiting for each other indefinitely.
 
 ---
 
+---
+
+## DAG Optimization Passes
+
+Beyond basic topological sort and wave computation, the DAG supports several
+optimization passes inspired by dataflow system optimizers (Dask, Flink, Spark)
+and classical project scheduling algorithms (CPM, PERT).
+
+### Critical Path Analysis (CPM/PERT)
+
+The current `stats()` method computes a simple critical path length. A more
+sophisticated analysis uses the **Critical Path Method** with the
+forward/backward pass algorithm:
+
+```rust
+/// Extended critical path analysis with earliest/latest start times.
+pub struct CpmAnalysis {
+    /// For each task: earliest it can start.
+    pub earliest_start: HashMap<String, Duration>,
+    /// For each task: latest it can start without delaying the project.
+    pub latest_start: HashMap<String, Duration>,
+    /// For each task: total float (slack).
+    /// Float = latest_start - earliest_start.
+    /// Tasks with zero float are on the critical path.
+    pub total_float: HashMap<String, Duration>,
+    /// For each task: free float (slack before delaying successors).
+    /// Free_float = min(ES(successors)) - EF(self).
+    pub free_float: HashMap<String, Duration>,
+    /// The critical path (ordered list of zero-float tasks).
+    pub critical_path: Vec<String>,
+    /// Minimum project duration.
+    pub min_duration: Duration,
+}
+
+impl UnifiedTaskDag {
+    /// CPM forward and backward pass. O(V + E) — two passes over the DAG.
+    ///
+    /// Forward pass computes earliest start/finish:
+    ///   ES(v) = max(EF(u) for all predecessors u)  // 0 for root
+    ///   EF(v) = ES(v) + duration(v)
+    ///
+    /// Backward pass computes latest start/finish:
+    ///   LF(v) = min(LS(u) for all successors u)    // EF for sink
+    ///   LS(v) = LF(v) - duration(v)
+    ///
+    /// Float: TF(v) = LS(v) - ES(v).
+    /// Critical path: all tasks where TF = 0.
+    pub fn cpm_analysis(
+        &self,
+        durations: &HashMap<String, Duration>,
+    ) -> CpmAnalysis { /* ... */ }
+}
+```
+
+For agent tasks where durations are uncertain, the **PERT** extension uses a
+Beta distribution with three estimates:
+
+```
+Expected_time = (optimistic + 4 × most_likely + pessimistic) / 6
+Std_dev       = (pessimistic - optimistic) / 6
+Variance      = ((pessimistic - optimistic) / 6)²
+```
+
+The project completion probability is estimated by summing along the critical
+path and applying the Central Limit Theorem: `P(finish < T) = Φ((T - E) / σ)`.
+
+For Roko, PERT estimates can be derived from historical efficiency events in
+`.roko/learn/efficiency.jsonl` — past task durations grouped by complexity tier
+provide the three-point estimates.
+
+### Task Fusion
+
+Inspired by Dask's `fuse()` pass and Flink's operator chaining, task fusion
+merges sequential single-dependency tasks into a single compound task to reduce
+scheduling overhead:
+
+```rust
+/// Configuration for the task fusion optimization pass.
+pub struct FusionConfig {
+    /// Maximum chain length to fuse (avoids mega-tasks).
+    /// Default: 5. Range: 2..=20.
+    pub max_chain_length: usize,
+    /// Average width threshold — don't fuse if it reduces parallelism
+    /// below this. Mirrors Dask's ave_width parameter.
+    /// Default: 1.0.
+    /// Derived max_height = 1.5 + ave_width × ln(ave_width + 1).
+    pub ave_width: f64,
+    /// Only fuse tasks of the same complexity tier.
+    /// Default: true.
+    pub same_tier_only: bool,
+}
+
+/// A fused task group that executes as a single agent dispatch.
+pub struct FusedTaskGroup {
+    /// The synthetic task ID for the fused group.
+    pub fused_id: String,
+    /// Original task IDs in execution order.
+    pub tasks: Vec<String>,
+    /// Combined estimated duration.
+    pub combined_duration: Duration,
+    /// Files touched by all tasks in the group.
+    pub combined_files: HashSet<String>,
+}
+
+impl UnifiedTaskDag {
+    /// Identify linear chains (single-input, single-output) and fuse them.
+    ///
+    /// Algorithm:
+    /// 1. Find all tasks with exactly one successor and whose successor
+    ///    has exactly one predecessor (linear chain candidates).
+    /// 2. Walk forward to build chains up to max_chain_length.
+    /// 3. Check that fusion doesn't reduce parallelism below ave_width.
+    /// 4. Replace chain nodes with a single FusedTaskGroup node.
+    ///
+    /// Complexity: O(V + E).
+    pub fn fuse_linear_chains(
+        &mut self,
+        config: &FusionConfig,
+    ) -> Vec<FusedTaskGroup> { /* ... */ }
+}
+```
+
+**When fusion helps**: Chains of small, sequential tasks where scheduling
+overhead (agent spawn, prompt assembly, model routing) dominates actual work.
+
+**When to avoid**: If tasks in the chain require different agent roles, touch
+different codebases, or have different complexity tiers.
+
+### Speculative Execution
+
+Inspired by Spark's speculative execution for straggler mitigation, the DAG can
+support **backup task** scheduling when a task exceeds expected duration:
+
+```rust
+/// Configuration for speculative execution of straggler tasks.
+pub struct SpeculationConfig {
+    /// Enable speculative execution. Default: false.
+    pub enabled: bool,
+    /// Fraction of tasks that must complete before speculation starts.
+    /// Default: 0.75 (75%). Range: 0.5..=1.0.
+    pub quantile: f64,
+    /// Multiplier over median duration to be considered a straggler.
+    /// Default: 1.5 (50% slower than median). Range: 1.1..=5.0.
+    pub multiplier: f64,
+    /// Minimum elapsed time before a task is eligible.
+    /// Default: 120s. Range: 30s..=600s.
+    pub min_runtime: Duration,
+    /// Maximum concurrent speculative tasks.
+    /// Default: 2. Range: 1..=4.
+    pub max_speculative: usize,
+}
+
+impl UnifiedTaskDag {
+    /// Identify straggler tasks eligible for speculative re-execution.
+    ///
+    /// Algorithm (adapted from Spark's TaskSetManager):
+    /// 1. Wait until quantile fraction of wave tasks complete.
+    /// 2. Compute median duration of completed tasks.
+    /// 3. For each running task:
+    ///    if runtime > multiplier × median AND runtime > min_runtime
+    ///    AND only one copy running AND max_speculative not exceeded:
+    ///    → mark as speculative, schedule backup on DIFFERENT worktree.
+    /// 4. First copy to complete wins; other is cancelled via CancelToken.
+    pub fn find_speculative_candidates(
+        &self,
+        completed_durations: &HashMap<String, Duration>,
+        running_since: &HashMap<String, Instant>,
+        config: &SpeculationConfig,
+    ) -> Vec<String> { /* ... */ }
+}
+```
+
+Speculative execution trades budget for latency — most valuable for tasks on
+the critical path where a straggler delays the entire plan.
+
+### DAG Culling
+
+Adapted from Dask's `cull()` pass, DAG culling removes tasks not required to
+produce the target outputs. This is useful when a plan is partially completed
+and only a subset of remaining tasks matter:
+
+```rust
+impl UnifiedTaskDag {
+    /// Remove tasks not required to produce the given target task IDs.
+    /// Returns the number of tasks culled.
+    ///
+    /// Algorithm: BFS backward from targets, collecting reachable nodes.
+    /// Remove everything else. O(V + E).
+    pub fn cull(&mut self, targets: &[String]) -> usize { /* ... */ }
+}
+```
+
+### Graph Partitioning (METIS-Inspired)
+
+For very large DAGs (100+ tasks across 10+ plans), partitioning groups tasks
+into balanced clusters that minimize cross-cluster dependencies:
+
+```rust
+/// Partition the DAG into k balanced groups.
+///
+/// Algorithm (simplified METIS multilevel scheme):
+/// Phase 1 — Coarsening: Repeatedly contract graph via Heavy-Edge
+///   Matching (preferentially match nodes sharing files). O(E)/level.
+/// Phase 2 — Initial Partition: Bisect coarsened graph via
+///   Kernighan-Lin. O(V² log V) on the tiny coarsened graph.
+/// Phase 3 — Uncoarsening: Project back, refine with
+///   Fiduccia-Mattheyses boundary moves. O(E)/level.
+///
+/// Overall complexity: O(V + E).
+pub fn partition(&self, k: usize) -> Vec<DagPartition> { /* ... */ }
+
+pub struct DagPartition {
+    pub partition_id: usize,
+    pub tasks: Vec<String>,
+    /// Cross-partition dependencies requiring coordination.
+    pub cut_edges: usize,
+    /// Estimated total work in this partition.
+    pub total_work: Duration,
+}
+```
+
+---
+
+## Incremental Computation: Re-Executing Only Changed Subgraphs
+
+When a plan is modified during execution (tasks added, removed, or
+re-prioritized), the entire DAG need not be rebuilt. Drawing on Adapton
+(Hammer et al., PLDI 2014) and Salsa (used in rust-analyzer), the DAG supports
+selective invalidation and reconstruction.
+
+### The Dirty/Clean Propagation Model
+
+```rust
+/// Tracks which DAG nodes need recomputation after a change.
+pub struct IncrementalDag {
+    dag: UnifiedTaskDag,
+    /// Dirty nodes whose scheduling metadata is stale.
+    dirty: HashSet<String>,
+    /// Per-node input hash (dependencies + files). Detects whether a
+    /// "dirty" node actually changed or can be cleaned without recomputation.
+    input_hashes: HashMap<String, [u8; 32]>,
+    /// Global revision counter — increments on every input change.
+    revision: u64,
+    /// Per-node "verified at" revision. If verified_at == revision,
+    /// the node's metadata is current.
+    verified_at: HashMap<String, u64>,
+}
+
+impl IncrementalDag {
+    /// Phase 1: Dirtying. Mark the changed task and all transitively
+    /// reachable downstream tasks as dirty.
+    /// Stops at already-dirty nodes (amortized cost).
+    /// Complexity: O(affected edges), NOT O(total graph).
+    pub fn mark_dirty(&mut self, task_id: &str) { /* ... */ }
+
+    /// Phase 2: Cleaning (demand-driven). When scheduling metadata is
+    /// requested for a node:
+    /// 1. If verified_at == revision → return cached (memoization hit).
+    /// 2. If dirty, recompute input hash and compare to stored hash.
+    ///    - Unchanged → clean without recomputation (Salsa's "backdate").
+    ///    - Changed → recompute wave assignment, critical path, etc.
+    /// 3. Update verified_at to current revision.
+    pub fn ensure_clean(&mut self, task_id: &str) { /* ... */ }
+
+    /// Durability optimization (from Salsa): Skip verification for nodes
+    /// whose inputs are all at a higher durability level than the change.
+    pub fn set_durability(&mut self, task_id: &str, level: Durability) { /* ... */ }
+}
+
+pub enum Durability {
+    /// Task metadata (estimated duration, priority). Changes frequently.
+    Low,
+    /// File lists, crate associations. Changes occasionally.
+    Medium,
+    /// Structural dependencies (depends_on). Changes rarely.
+    High,
+}
+```
+
+### Build Systems à la Carte Classification
+
+Following Mokhov, Mitchell & Peyton Jones (ICFP 2018), Roko's DAG sits at a
+specific point in the build system design space:
+
+| Dimension | Roko's Choice | Alternative |
+|-----------|--------------|-------------|
+| **Scheduler** | Topological (static deps known at plan parse time) | Suspending (deps discovered at runtime) |
+| **Rebuilder** | Verifying traces (compare input hashes) | Dirty bit (conservative) or Constructive traces (cloud cache) |
+| **Dependency type** | Applicative (static — all deps in `tasks.toml`) | Monadic (dynamic — deps discovered during execution) |
+
+This maps Roko closest to **Ninja** (topological + verifying traces). If
+dynamic DAG modification is added, the scheduler shifts to **restarting** or
+**suspending**, moving closer to **Shake** or **Bazel**.
+
+---
+
+## Dynamic DAG Modification
+
+Plans can grow or shrink during execution based on gate feedback, agent
+discoveries, or operator intervention. Inspired by Flyte's `@dynamic`
+workflows, Prefect's code-as-workflow model, and Airflow's Dynamic Task Mapping.
+
+### DAG Mutation Operations
+
+```rust
+/// Operations that modify the DAG during execution.
+pub enum DagMutation {
+    /// Add a new task to an existing plan. Must not create a cycle.
+    AddTask { plan_id: String, task: TaskDef },
+    /// Remove a pending task. Dependencies re-linked: predecessors
+    /// connect directly to successors.
+    RemoveTask { task_id: String },
+    /// Split a task into subtasks. Original replaced; deps transferred.
+    SplitTask { task_id: String, subtasks: Vec<TaskDef> },
+    /// Add a dependency edge. Must not create a cycle.
+    AddDependency { from: String, to: String },
+    /// Update estimated duration or file list. Triggers incremental
+    /// recomputation of waves and critical path.
+    UpdateTaskMetadata {
+        task_id: String,
+        estimated_duration: Option<Duration>,
+        files: Option<Vec<String>>,
+    },
+}
+
+/// Result of applying a mutation.
+pub struct MutationResult {
+    pub success: bool,
+    /// Tasks whose scheduling metadata was invalidated.
+    pub invalidated: Vec<String>,
+    /// Recomputed wave assignments (only for invalidated tasks).
+    pub recomputed_waves: Vec<ExecutionWave>,
+    /// Updated critical path (if it changed).
+    pub new_critical_path: Option<Vec<String>>,
+}
+
+impl UnifiedTaskDag {
+    /// Apply a mutation during execution.
+    ///
+    /// Consistency rules:
+    /// 1. Completed tasks are immutable — their nodes and edges cannot change.
+    /// 2. Running tasks cannot be removed (only cancelled then mutated).
+    /// 3. Cycle check on every AddTask/AddDependency (local DFS from new
+    ///    edge target to source). Worst case O(V + E), typically O(subgraph).
+    /// 4. File-conflict edges are recomputed for affected task pairs.
+    /// 5. Incremental recomputation via dirty/clean model.
+    pub fn apply_mutation(
+        &mut self,
+        mutation: DagMutation,
+    ) -> Result<MutationResult, DagError> { /* ... */ }
+}
+```
+
+### Triggers for Dynamic Modification
+
+| Trigger | Mutation | Source |
+|---------|----------|--------|
+| Gate failure reveals missing subtask | `AddTask` | AutoFixer agent |
+| Task proves too large for single agent | `SplitTask` | Conductor complexity detection |
+| Research reveals new dependency | `AddDependency` | Strategist agent |
+| Task already done (discovered during review) | `RemoveTask` | Auditor |
+| Operator adds urgent task | `AddTask` with high priority | Manual intervention |
+| Plan repair from PDDL solver | Batch of `AddTask` + `RemoveTask` | Plan repair engine |
+
+### Consistency Invariants
+
+Following patterns from Flyte (append-only expansion), Temporal (deterministic
+replay), and Prefect (state transition rules):
+
+1. **Completed tasks are immutable** — preserves event log and snapshot integrity
+2. **Running tasks are observable but not mutable** — can only be cancelled then mutated
+3. **Pending tasks are fully mutable** — add, remove, split, reparent
+4. **File-conflict edges recomputed** — after any file list change
+5. **Cycle detection mandatory** — on every AddTask/AddDependency
+
+---
+
 ## References
 
 - The wave scheduling approach draws on topological sort algorithms (Kahn 1962)
@@ -300,5 +677,18 @@ the executor to deadlock, with tasks waiting for each other indefinitely.
   to prevent anomalies.
 - Grassé, P.-P. (1959). La reconstruction du nid et les coordinations
   interindividuelles. *Insectes Sociaux*, 6(1), 41–80. (Stigmergic
-  coordination — agents coordinate through shared artifacts, here the codebase
-  files they modify.)
+  coordination — agents coordinate through shared artifacts.)
+- Hammer, M. A. et al. (2014). Adapton: Composable, demand-driven incremental
+  computation. *PLDI 2014*. (Demand-driven dirtying/cleaning for incremental
+  DAG recomputation.)
+- Mokhov, A., Mitchell, N. & Peyton Jones, S. (2018). Build systems à la carte.
+  *ICFP 2018*. (Taxonomy: schedulers × rebuilders × dependency types.)
+- Salsa. Incremental computation for rust-analyzer. Red-green validation,
+  durability levels, backdate optimization. *github.com/salsa-rs/salsa*
+- Karypis, G. & Kumar, V. (1998). A fast and high quality multilevel scheme
+  for partitioning irregular graphs. *SIAM J. Sci. Comput.*, 20(1), 359–392.
+  (METIS graph partitioning.)
+- Dean, J. & Ghemawat, S. (2008). MapReduce: Simplified data processing on
+  large clusters. *Comm. ACM*, 51(1), 107–113. (Speculative execution.)
+- Rocklin, M. (2015). Dask: Parallel computation with blocked algorithms and
+  task scheduling. *SciPy 2015*. (Task graph optimization: cull, inline, fuse.)

@@ -228,6 +228,174 @@ mirage-rs includes 141 tests covering:
 
 ---
 
+## Simulation Fidelity Guarantees
+
+mirage-rs uses revm (the same EVM used by Reth, Foundry/Anvil, and major L2 chains), providing bytecode-level execution equivalence with production EVM. However, simulation inherently diverges from mainnet in several dimensions. This section documents what mirage-rs CAN and CANNOT faithfully simulate.
+
+### What mirage-rs Faithfully Simulates
+
+| Aspect | Fidelity | Notes |
+|---|---|---|
+| **EVM bytecode execution** | Exact | revm passes all official Ethereum execution test suites |
+| **Storage reads/writes** | Exact | Copy-on-write state from fork or local |
+| **Contract-to-contract calls** | Exact | Full call stack with proper gas forwarding |
+| **Gas metering (EVM opcodes)** | Exact | revm implements the official gas schedule |
+| **Precompile behavior** | Exact (standard) | SHA-256, ECRECOVER, BN256, etc. |
+| **Event emission** | Exact | Logs are captured and queryable |
+| **Revert handling** | Exact | Revert reasons propagated correctly |
+| **EIP-1559 basefee** | Configurable | Can be set to match mainnet or fixed |
+
+### What mirage-rs CANNOT Simulate
+
+| Aspect | Divergence | Impact | Mitigation |
+|---|---|---|---|
+| **MEV and transaction ordering** | No mempool competition | Simulation assumes isolated execution; mainnet places your tx among competing transactions. Sandwich attacks, frontrunning, and backrunning are invisible in simulation. | Use Flashbots MEV-Share or private mempool for production transactions. Compare simulation vs. actual execution post-facto. |
+| **Block builder behavior** | No builder auction | Different validators/builders may reorder transactions. Priority fee ordering, private order flow, and MEV-Boost auctions are not modeled. | For MEV-sensitive operations, use bundle simulation (multiple txs in sequence) rather than single-tx simulation. |
+| **Cross-block state changes** | Static snapshot | Oracle prices (Chainlink, TWAP), governance timelocks, and other time-dependent state change between simulation and execution. | Use short validity windows. Re-simulate immediately before execution. |
+| **Gas price dynamics** | Fixed basefee | EIP-1559 basefee fluctuates per block. Simulations at a fixed basefee will diverge if blocks fill unexpectedly. | Set `basefee` to 110% of current mainnet basefee as safety margin. |
+| **Private mempool (~40-60% of Ethereum block space)** | Invisible | Transactions routed through Flashbots, MEV-Boost, and private builders are invisible to simulation. | Accept that simulation is a lower bound on state competition. |
+| **EVM implementation divergences** | Minor | OpDiffer (arXiv:2504.12034, 2025) found 26 bugs across 9 EVM implementations affecting ~7.21% of deployed contracts. revm may produce different results than go-ethereum for edge-case bytecodes. | Run differential tests against go-ethereum for critical contracts. |
+| **Korai HDC precompile (in Stylus mode)** | Emulated locally | mirage-rs emulates HDC operations using `roko-primitives`; production uses Stylus WASM. Results are numerically identical but gas costs may differ slightly. | Calibrate gas estimates against Stylus benchmarks on testnet. |
+
+### Simulation Confidence Score
+
+mirage-rs computes a **simulation confidence score** for each simulated transaction, indicating how likely the simulation matches mainnet execution:
+
+```rust
+pub struct SimulationConfidence {
+    /// Overall confidence [0.0, 1.0]
+    pub score: f64,
+
+    /// Individual confidence factors
+    pub factors: ConfidenceFactors,
+}
+
+pub struct ConfidenceFactors {
+    /// How recent is the forked state? (seconds since fork block)
+    /// Fresh fork = high confidence; stale fork = low
+    pub state_freshness: f64,
+
+    /// Does the transaction interact with oracles or time-dependent state?
+    /// No oracle interaction = 1.0; oracle-heavy = 0.5
+    pub oracle_independence: f64,
+
+    /// Is the transaction sensitive to ordering (e.g., AMM swap)?
+    /// Ordering-independent = 1.0; MEV-exposed = 0.3
+    pub ordering_independence: f64,
+
+    /// Does the transaction involve cross-contract calls to unverified contracts?
+    /// All known contracts = 1.0; unknown contracts = 0.5
+    pub contract_verification: f64,
+
+    /// Gas estimation confidence
+    /// Simple transfer = 1.0; complex DeFi = 0.7
+    pub gas_confidence: f64,
+}
+
+impl SimulationConfidence {
+    pub fn compute(factors: &ConfidenceFactors) -> f64 {
+        factors.state_freshness * 0.25
+            + factors.oracle_independence * 0.25
+            + factors.ordering_independence * 0.25
+            + factors.contract_verification * 0.15
+            + factors.gas_confidence * 0.10
+    }
+}
+```
+
+The confidence score is included in the `TxSimGate` output. If confidence falls below 0.5, the gate recommends re-simulation with a fresher fork state before execution.
+
+---
+
+## Simulation-to-Mainnet Migration Testing
+
+### Differential Testing Framework
+
+mirage-rs includes a differential testing framework that compares simulation results against actual mainnet execution:
+
+```rust
+/// Differential test: compare simulation vs. mainnet for the same transaction
+pub struct DifferentialTest {
+    /// Transaction hash on mainnet
+    pub mainnet_tx_hash: TxHash,
+
+    /// Fork block: simulate at the block BEFORE the mainnet tx
+    pub fork_block: BlockNumber,
+
+    /// Expected vs. actual comparison
+    pub comparison: DiffComparison,
+}
+
+pub struct DiffComparison {
+    /// Gas used: simulation vs. mainnet
+    pub gas_diff: i64,
+    pub gas_diff_pct: f64,
+
+    /// Return data match
+    pub return_data_matches: bool,
+
+    /// State diff match (storage changes)
+    pub state_diffs_match: bool,
+    pub divergent_slots: Vec<(Address, U256)>,
+
+    /// Event logs match
+    pub logs_match: bool,
+
+    /// Success/failure match
+    pub status_matches: bool,
+}
+```
+
+**Usage pattern**: After executing a real transaction on mainnet, replay it through mirage-rs at the pre-execution fork point. Compare results. If they diverge, investigate:
+- Gas difference > 5%: likely an ordering/MEV issue
+- State diff mismatch: likely a cross-block state change between simulation and execution
+- Status mismatch (simulated success, mainnet revert): critical — indicates a simulation blindspot
+
+### Invariant Testing Integration
+
+mirage-rs supports Foundry-style invariant testing against Korai contracts:
+
+```rust
+/// Run invariant tests against Korai registry contracts
+pub struct KoraiInvariantTest {
+    pub mirage: MirageInstance,
+
+    /// Invariants that must hold after every random transaction sequence
+    pub invariants: Vec<KoraiInvariant>,
+}
+
+pub enum KoraiInvariant {
+    /// Total passport count equals registry length
+    PassportCountConsistency,
+    /// Sum of all domain stakes <= total KORAI supply
+    StakeSupplyBound,
+    /// No passport has tier < required stake for that tier
+    TierStakeConsistency,
+    /// All reputation scores in [0.0, 1.0]
+    ReputationBounds,
+    /// Escrow balance >= sum of all active job budgets
+    EscrowSolvency,
+    /// Custom invariant (Solidity expression evaluated on-chain)
+    Custom { expression: String },
+}
+```
+
+### Formal Verification Pipeline
+
+For critical Korai contracts (KORAI token, escrow, reputation registry), mirage-rs integrates with formal verification tools:
+
+1. **Certora Prover**: Write CVL (Certora Verification Language) specifications for Korai contracts. Certora proves properties like "KORAI total supply equals sum of all balances after demurrage" across all possible execution paths.
+2. **Halmos** (a16z): Symbolic execution for Foundry tests. Replace concrete fuzz values with symbolic variables — Halmos explores ALL possible inputs, not random samples.
+3. **Kontrol** (Runtime Verification): Formal semantics via KEVM (K framework). Most rigorous option for verifying the EVM bytecode of Korai precompile contracts.
+
+### Academic Foundations (Simulation)
+
+- Rakita, D. (2022). revm: Rust Ethereum Virtual Machine. — The EVM implementation underlying mirage-rs.
+- Yang, S. et al. (2025). "OpDiffer: Detecting Cross-Implementation Bugs in EVM via LLM-Guided Differential Testing." *arXiv:2504.12034*. — Differential EVM testing methodology; found 26 bugs across 9 implementations.
+- Grieco, G. et al. (2020). "Echidna: Effective, Usable, and Fast Fuzzing for Smart Contracts." *ISSTA*. — Property-based testing for smart contracts; foundation for mirage-rs invariant testing.
+
+---
+
 ## Current Status and Gaps
 
 **Built:**

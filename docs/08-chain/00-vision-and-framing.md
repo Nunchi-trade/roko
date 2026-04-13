@@ -133,6 +133,142 @@ KORAI token economics are designed around knowledge quality incentives, not spec
 
 ---
 
+## Chain Selection Rationale: Why EVM?
+
+The choice of EVM as the execution environment for Korai was deliberate, with four alternative VM architectures evaluated and rejected. This section documents the decision and its trade-offs.
+
+### Alternatives Evaluated
+
+#### Move VM (Aptos/Sui)
+
+Move's linear type system (resources cannot be copied or dropped — enforced at the bytecode verifier level) is theoretically superior for representing agent state. An agent's capabilities, credentials, and memory map naturally to resources that cannot be accidentally duplicated. Sui's object-centric model with DAG-based execution achieves sub-second finality for owned-object transactions without full consensus, and its explicit parallelism model is ideal for non-conflicting agent actions.
+
+**Why rejected**: The Move ecosystem is 1/100th the size of EVM by developer tooling, auditor availability, and DeFi liquidity. Cross-chain bridge support is limited. The decision to build on EVM preserves access to the largest smart contract ecosystem — Foundry, OpenZeppelin, the entire Solidity auditing industry — while Arbitrum Stylus (see below) closes most of Move's safety advantages by enabling Rust contracts on EVM chains.
+
+#### CosmWasm (Cosmos SDK)
+
+Cosmos SDK appchains with CosmWasm offer full sovereignty (own validator set), IBC-native interoperability across 200+ chains, and Rust-based smart contracts with an actor model that eliminates re-entrancy by design. CometBFT consensus provides deterministic ~6s finality.
+
+**Why rejected**: Empirical evidence shows EVM consistently winning even within the Cosmos ecosystem — Sei's CosmWasm usage dropped below 20% after adding an EVM layer; Injective followed similar patterns. The Cosmos security model requires bootstrapping your own validator set (or using Interchain Security from the Cosmos Hub), while EVM L2/L3 rollups inherit Ethereum's $60B+ security budget. IBC interoperability is valuable but secondary to EVM composability for the Korai use case.
+
+#### Solana VM (SVM)
+
+SVM offers the highest throughput of any production L1 (50,000+ TPS, 400ms block time) and the lowest transaction fees. The explicit account ownership model forces data isolation that maps well to multi-agent systems.
+
+**Why rejected**: SVM's account model is extremely unintuitive for EVM developers. Programs store no state; all state resides in separate accounts. The developer experience gap is large, and the network has experienced multiple outages. SVM outside Solana L1 (Eclipse, etc.) is still early-stage.
+
+#### Custom VM (from scratch)
+
+A purpose-built VM optimized for HDC operations and agent coordination could achieve maximum efficiency but would require building an entire compiler toolchain, debugger, and developer ecosystem from scratch.
+
+**Why rejected**: The cold-start problem. Building a VM ecosystem takes years and millions of dollars. EVM provides a ready-made foundation that can be extended with custom precompiles. The 80/20 analysis: EVM handles 80% of the workload well; custom precompiles (via Stylus or native) handle the 20% that needs specialization.
+
+### The Winning Approach: EVM + Stylus Precompiles
+
+The Korai chain uses EVM as its base execution layer, extended with custom precompiles for HDC operations. Two implementation paths are viable:
+
+**Path A — Arbitrum Orbit + Stylus (preferred)**:
+Deploy Korai as an Arbitrum Orbit L3 chain with the Stylus WASM VM enabled. HDC operations are implemented as Stylus contracts in Rust, achieving 10-100x gas reduction over equivalent Solidity. Stylus contracts share state with Solidity contracts and are called via standard ABI — no special integration needed. This path inherits Arbitrum's fraud proof system (BoLD, permissionless as of 2025) and Ethereum's security.
+
+```rust
+// Stylus HDC precompile — compiles to WASM, runs at near-native speed
+#[external]
+fn hdc_similarity(a: Bytes, b: Bytes) -> Result<U256, Vec<u8>> {
+    // 160 native 64-bit XOR + POPCNT operations
+    // ~5-6 gas via Stylus (vs. ~2,220 gas in Solidity)
+    let a_words: &[u64; 160] = bytemuck::cast_ref(&a[..1280]);
+    let b_words: &[u64; 160] = bytemuck::cast_ref(&b[..1280]);
+    let matching = a_words.iter().zip(b_words.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum::<u32>();
+    let similarity = U256::from(10240 - matching) * U256::from(10).pow(U256::from(18))
+        / U256::from(10240);
+    Ok(similarity)
+}
+```
+
+**Path B — Native Reth fork (maximum performance)**:
+Fork Reth and add HDC as a native precompile (like SHA-256 at 0x02), deployed at genesis address 0xA01. This provides the absolute lowest gas costs (~16 gas for Hamming distance) but requires maintaining a custom execution client fork. Suitable if Korai runs its own validator set.
+
+**Performance comparison**:
+
+| Operation | Solidity | Stylus (Rust/WASM) | Native Precompile |
+|---|---|---|---|
+| HDC XOR (1280 bytes) | ~120 gas | ~5-6 gas | ~5 gas |
+| Hamming distance | ~2,220 gas | ~16-20 gas | ~16 gas |
+| Top-K (N=1000, K=20) | Infeasible | ~16,000 gas | ~400 gas* |
+
+*Native precompile with index access; Stylus would need to iterate over on-chain storage.
+
+### Cross-Chain Interoperability Architecture
+
+Korai must interoperate with Ethereum mainnet (where DeFi liquidity lives), other L2s (where agents may operate), and potentially non-EVM chains. The interoperability stack uses a layered approach:
+
+#### Layer 1: Native Bridge (Orbit)
+
+If Korai is deployed as an Orbit L3, it inherits Arbitrum's canonical bridge to Ethereum L1. This bridge is secured by the Nitro fraud proof system with 7-day withdrawal windows (or faster via ZK validity proofs via OP Succinct-style replacements). Token transfers between Korai and Ethereum L1 are trustless — no external validator set required.
+
+#### Layer 2: Hyperlane ISM (Permissionless Cross-Chain)
+
+For cross-chain messaging beyond the native bridge, Korai deploys Hyperlane's `Mailbox` contract. Hyperlane is fully permissionless to deploy — no approval from the Hyperlane team required. The Interchain Security Module (ISM) is configured per-application:
+
+```rust
+/// Korai Hyperlane ISM configuration
+pub struct KoraiIsmConfig {
+    /// Multisig ISM: require 3-of-5 validator signatures for cross-chain messages
+    pub multisig_threshold: u8,  // default: 3
+    pub multisig_validators: Vec<Address>,  // 5 trusted validators
+
+    /// Aggregation ISM: require BOTH multisig AND optimistic
+    pub require_optimistic: bool, // default: true
+    pub optimistic_window_blocks: u64, // default: 100 (~40s on Korai)
+
+    /// ZK ISM (future): require ZK light client proof of source chain state
+    pub zk_enabled: bool, // default: false (enable when ZK ISMs mature)
+}
+```
+
+#### Layer 3: IBC (Cosmos Ecosystem)
+
+If Korai needs to interoperate with Cosmos SDK chains (e.g., for cross-ecosystem agent coordination), IBC-Solidity implementations exist for EVM chains. The IBC light client model — each chain maintains a light client of the counterparty and verifies Merkle proofs — provides trust-minimized cross-chain messaging without relying on external validator sets.
+
+#### Layer 4: Intent-Based Bridge (Fast Path)
+
+For time-sensitive cross-chain operations (agent needs to move KORAI to Base to pay for an MCP service), an intent-based bridge model (Across Protocol pattern) provides near-instant transfers:
+
+1. Agent signals intent: "Move 500 KORAI from Korai to Base"
+2. Solver on Base immediately delivers 500 KORAI-equivalent from their own capital
+3. Solver claims reimbursement from Korai chain after the canonical bridge settles
+4. Agent experiences sub-second transfer; solver bears the settlement delay risk
+
+```rust
+/// Cross-chain intent for agent transfers
+pub struct CrossChainIntent {
+    /// Source chain (Korai)
+    pub source_chain_id: u64,
+    /// Destination chain
+    pub dest_chain_id: u64,
+    /// Token to transfer
+    pub token: Address,
+    /// Amount in smallest unit
+    pub amount: U256,
+    /// Maximum fee the agent will pay (basis points)
+    pub max_fee_bps: u16,  // default: 50 (0.5%)
+    /// Deadline block on source chain
+    pub deadline_block: u64,
+    /// Agent's passport ID for identity verification
+    pub passport_id: u256,
+}
+```
+
+### Academic Foundations (Chain Selection)
+
+- Azar, Y., Broder, A.Z., Karlin, A.R., and Upfal, E. (1999). "Balanced Allocations." *SIAM Journal on Computing*. — Theoretical foundations for load-balanced dispatch applicable to cross-chain routing.
+- Buterin, V. (2021). "Endgame." *vitalik.ca*. — The modular blockchain thesis: separate execution, DA, and settlement. Korai as an Orbit L3 follows this architecture.
+- Zamyatin, A. et al. (2021). "SoK: Communication Across Distributed Ledgers." *Financial Cryptography*. — Taxonomy of cross-chain protocols (relay chains, hash time-locks, notary schemes). Korai's layered approach combines native bridge (relay) with ISM (notary) and intent (hash time-lock variant).
+
+---
+
 ## The Domain Plugin Pattern
 
 Chain capabilities are implemented as domain-specific trait implementations, just like any other domain in Roko:

@@ -509,6 +509,410 @@ pub fn generate_anti_from_gate_failure(
 
 ---
 
+## Anti-Knowledge Epidemiology
+
+### How Bad Knowledge Spreads
+
+Bad knowledge behaves like a pathogen in an information system. Understanding its epidemiology is essential for building effective defenses. Drawing from both epistemology (Kuhn 1962, Proctor 2008) and data poisoning research (Zou et al. 2025, Koh & Liang 2017), we model knowledge corruption as an epidemic process.
+
+### Infection Vectors
+
+Knowledge corruption enters the system through five vectors, ordered by danger:
+
+```rust
+/// Classification of how bad knowledge enters the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfectionVector {
+    /// Distillation error: LLM extracts incorrect insight from valid episodes.
+    /// Most common. The episode data is correct but the pattern extraction is wrong.
+    /// Example: "async always improves throughput" extracted from 3 episodes where
+    /// async happened to correlate with (but not cause) better performance.
+    DistillationError,
+
+    /// Confirmation cascade: a wrong insight gets confirmed by coincidence,
+    /// promoting it to Heuristic tier where it resists correction.
+    /// Most dangerous. Self-reinforcing — each false confirmation makes
+    /// the entry harder to dislodge.
+    ConfirmationCascade,
+
+    /// External injection: bad knowledge imported from mesh sync, backup restore,
+    /// or Korai chain marketplace.
+    /// Controlled by confidence discounting (0.50×-0.85×) and quarantine pipeline.
+    ExternalInjection,
+
+    /// Concept drift: knowledge that was correct when created becomes incorrect
+    /// as the environment changes (API updates, library version changes, etc.).
+    /// Not a bug — it's the natural staleness that Ebbinghaus decay is designed
+    /// to handle. Dangerous only when tier is Persistent (5× half-life resists decay).
+    ConceptDrift,
+
+    /// Adversarial poisoning: deliberately crafted entries designed to mislead.
+    /// Rare in single-agent mode. Relevant for mesh/chain scenarios.
+    /// Requires active defense (see Knowledge Immune System below).
+    AdversarialPoisoning,
+}
+```
+
+### Epidemiological Model: SIR for Knowledge
+
+Borrowing from epidemiology's SIR (Susceptible-Infected-Recovered) model, we model the knowledge base as a population of entries:
+
+```
+S(t) = entries that could become corrupted (Susceptible)
+I(t) = entries that are currently incorrect (Infected)
+R(t) = entries protected by AntiKnowledge challenges (Recovered/immune)
+
+dS/dt = -β × S × I / N + ν × R     (new susceptibles from entry ingestion, waning immunity)
+dI/dt = β × S × I / N - γ × I       (infection from confirmation cascade, recovery from gate failures)
+dR/dt = γ × I - ν × R               (recovery via AntiKnowledge creation, immunity waning)
+
+where:
+  β = confirmation cascade rate (how quickly bad entries get confirmed)
+  γ = detection rate (how quickly gate failures expose bad entries)
+  N = total knowledge base size
+  ν = immunity waning rate (how quickly AntiKnowledge loses effectiveness)
+```
+
+**Basic reproduction number R₀**:
+```
+R₀ = β / γ
+```
+
+If R₀ > 1, bad knowledge spreads faster than it's detected. If R₀ < 1, the knowledge immune system contains the infection. Neuro's design targets R₀ < 0.5 through aggressive gate checking (high γ) and confirmation cascade prevention (low β).
+
+### Confirmation Cascade: The Most Dangerous Failure Mode
+
+A confirmation cascade occurs when a bad entry happens to be in the context when a task succeeds for unrelated reasons:
+
+```
+1. Bad entry B is created with confidence 0.4 (Transient tier)
+2. Agent retrieves B alongside 20 other entries for task T₁
+3. Task T₁ succeeds (for reasons unrelated to B)
+4. B gets confirmation boost: 0.4 × 1.5 = 0.6, promoted to Working tier
+5. Agent retrieves B for task T₂ (B now has higher retrieval priority)
+6. Task T₂ succeeds (again, unrelated to B)
+7. B gets boost: 0.6 × 1.5 = 0.9, approaching Consolidated promotion
+8. After 3+ successful tasks, B is Consolidated with confidence 0.9
+9. B is now extremely difficult to demote (requires explicit contradiction)
+```
+
+**Mitigation**: Attribution analysis — track not just whether B was in the context, but whether B was *causally relevant* to the outcome.
+
+```rust
+/// Attribution analysis for knowledge confirmation.
+///
+/// Instead of blindly boosting all retrieved entries when a task succeeds,
+/// estimate each entry's causal contribution to the outcome.
+pub struct AttributionAnalysis {
+    /// Influence score: estimated causal contribution of each retrieved entry.
+    /// Range: 0.0 (no influence) to 1.0 (primary driver).
+    pub influence_scores: HashMap<String, f64>,
+    /// Method used for attribution.
+    pub method: AttributionMethod,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AttributionMethod {
+    /// All retrieved entries get equal credit (current naive approach).
+    EqualCredit,
+    /// Entries matching the task domain/tags get more credit.
+    TagRelevance,
+    /// Influence function estimation: how would the outcome change
+    /// if this entry were removed from context?
+    /// Based on Koh & Liang (2017) influence functions.
+    InfluenceEstimation,
+    /// Data Shapley: each entry's marginal contribution to the outcome.
+    /// Most accurate but computationally expensive (O(2^N) exact, O(N log N) approximate).
+    /// Based on Ghorbani & Zou (2019).
+    DataShapley,
+}
+
+/// Compute influence-weighted confirmation boost.
+///
+/// Instead of CONFIRMATION_BOOST = 1.5 for all entries,
+/// apply boost proportional to estimated causal influence.
+pub fn influence_weighted_boost(
+    entry: &KnowledgeEntry,
+    influence: f64,
+    base_boost: f64, // CONFIRMATION_BOOST = 1.5
+) -> f64 {
+    let weighted_boost = 1.0 + (base_boost - 1.0) * influence;
+    // influence = 0.0 → boost = 1.0 (no change)
+    // influence = 0.5 → boost = 1.25
+    // influence = 1.0 → boost = 1.5 (full boost)
+    (entry.confidence * weighted_boost).min(1.0)
+}
+```
+
+**References**: Koh, P.W. & Liang, P. (2017). "Understanding Black-box Predictions via Influence Functions." *ICML 2017*. Ghorbani, A. & Zou, J. (2019). "Data Shapley: Equitable Valuation of Data for Machine Learning." *ICML 2019*.
+
+---
+
+## Knowledge Immune System
+
+### Proactive Defense Against Knowledge Corruption
+
+The knowledge immune system operates at three levels, analogous to biological immunity:
+
+### Level 1: Innate Immunity (Always Active)
+
+Fast, non-specific defenses that run on every knowledge operation:
+
+```rust
+/// Innate immune checks applied to every entry during ingestion.
+pub struct InnateImmunity {
+    /// Bloom filter of known-bad entry fingerprints (HDC LSH).
+    /// Entries matching this filter are flagged for quarantine.
+    pub bad_entry_bloom: BloomFilter,
+    /// Maximum confidence for new external entries. Default: 0.7.
+    /// Prevents external entries from immediately reaching high tiers.
+    pub max_external_confidence: f64,
+    /// Minimum source diversity for tier promotion.
+    /// Entry must be confirmed by episodes from N distinct sources. Default: 2.
+    pub min_source_diversity: usize,
+    /// Anomaly detector: flags entries whose HDC vector is statistically
+    /// unusual compared to the existing knowledge base.
+    pub anomaly_threshold: f64, // Default: 3.0 (standard deviations)
+}
+
+impl InnateImmunity {
+    /// Screen an incoming entry. Returns quarantine disposition.
+    pub fn screen(&self, entry: &KnowledgeEntry, store: &NeuroStore) -> ScreenResult {
+        // 1. Check against known-bad bloom filter
+        if let Some(hv) = entry.hdc_vector.as_ref()
+            .and_then(|b| HdcVector::from_bytes(b)) {
+            if self.bad_entry_bloom.might_contain(&hv) {
+                return ScreenResult::Quarantine("Matches known-bad signature".into());
+            }
+        }
+
+        // 2. Cap confidence for external sources
+        if entry.source.is_some() && entry.confidence > self.max_external_confidence {
+            return ScreenResult::ReduceConfidence(self.max_external_confidence);
+        }
+
+        // 3. Anomaly detection: is this entry statistically unusual?
+        if let Some(hv) = entry.hdc_vector.as_ref()
+            .and_then(|b| HdcVector::from_bytes(b)) {
+            let mean_sim = store.mean_similarity_to_existing(&hv);
+            if mean_sim < 0.48 { // well below random 0.5 = anti-correlated
+                return ScreenResult::Quarantine(
+                    format!("Anomalous HDC vector (mean sim {mean_sim:.3})")
+                );
+            }
+        }
+
+        ScreenResult::Admit
+    }
+}
+
+pub enum ScreenResult {
+    Admit,
+    ReduceConfidence(f64),
+    Quarantine(String),
+}
+```
+
+### Level 2: Adaptive Immunity (Learned Defenses)
+
+Defenses that improve over time based on past corruption events:
+
+```rust
+/// Adaptive immunity: learned patterns of knowledge corruption.
+///
+/// Built from past AntiKnowledge entries and gate failures.
+/// Updated during Dreams consolidation cycle.
+pub struct AdaptiveImmunity {
+    /// Corruption pattern prototypes: HDC vectors of entries that were
+    /// identified as harmful. Bundled by category.
+    pub corruption_prototypes: HashMap<InfectionVector, HdcVector>,
+    /// Per-domain vulnerability scores: how susceptible is each domain
+    /// to specific types of corruption?
+    pub domain_vulnerabilities: HashMap<String, Vec<(InfectionVector, f64)>>,
+    /// Historical false positive rate per detection method.
+    pub false_positive_rates: HashMap<AttributionMethod, f64>,
+}
+
+impl AdaptiveImmunity {
+    /// Check an entry against learned corruption patterns.
+    /// Returns a threat score (0.0 = safe, 1.0 = high threat).
+    pub fn threat_score(&self, entry: &KnowledgeEntry) -> f64 {
+        let entry_hv = match entry.hdc_vector.as_ref()
+            .and_then(|b| HdcVector::from_bytes(b)) {
+            Some(hv) => hv,
+            None => return 0.0,
+        };
+
+        self.corruption_prototypes.values()
+            .map(|proto| entry_hv.similarity(proto) as f64)
+            .filter(|sim| *sim > 0.526) // above noise floor
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    }
+
+    /// Update corruption prototypes from new AntiKnowledge entries.
+    /// Called during Dreams consolidation.
+    pub fn learn_from_antiknowledge(
+        &mut self,
+        anti_entries: &[KnowledgeEntry],
+    ) {
+        for entry in anti_entries {
+            if let Some(hv) = entry.hdc_vector.as_ref()
+                .and_then(|b| HdcVector::from_bytes(b)) {
+                let vector = InfectionVector::DistillationError; // classify from metadata
+                self.corruption_prototypes.entry(vector)
+                    .and_modify(|proto| {
+                        // Bundle new anti-entry into existing prototype
+                        *proto = HdcVector::bundle(&[proto, &hv]);
+                    })
+                    .or_insert(hv);
+            }
+        }
+    }
+}
+```
+
+### Level 3: Active Immunity (Periodic Health Checks)
+
+Proactive audits that run during Dreams consolidation:
+
+```rust
+/// Active immunity: periodic knowledge base health audit.
+///
+/// Runs during Dreams consolidation. Produces a health report
+/// with actionable recommendations.
+pub struct KnowledgeHealthAudit {
+    /// Configuration for the audit.
+    pub config: AuditConfig,
+}
+
+pub struct AuditConfig {
+    /// Maximum acceptable parasite ratio (high-fitness, negative-quality entries).
+    /// Default: 0.05 (5% of knowledge base).
+    pub max_parasite_ratio: f64,
+    /// Minimum Price equation selection component for healthy knowledge base.
+    /// Default: 0.0 (non-negative = healthy).
+    pub min_selection_component: f64,
+    /// Maximum acceptable confirmation cascade probability.
+    /// Default: 0.10 (10% of entries should have multi-source confirmation).
+    pub max_single_source_ratio: f64,
+}
+
+pub struct AuditReport {
+    /// Overall health score: 0.0 (critical) to 1.0 (excellent).
+    pub health_score: f64,
+    /// Number of suspected parasites detected.
+    pub parasites_detected: usize,
+    /// Price equation diagnostics.
+    pub price_selection: f64,
+    pub price_transmission: f64,
+    /// Entries at risk of confirmation cascade (single-source, high confidence).
+    pub cascade_risk_entries: Vec<String>,
+    /// Recommended actions.
+    pub recommendations: Vec<String>,
+}
+
+impl KnowledgeHealthAudit {
+    /// Run a full health audit on the knowledge base.
+    pub fn audit(&self, store: &NeuroStore, outcomes: &[Outcome]) -> AuditReport {
+        // 1. Detect parasites
+        let parasites = detect_parasites(
+            &store.all_entries(),
+            &store.entry_stats(),
+            outcomes,
+        );
+
+        // 2. Price equation diagnostics
+        let price_data: Vec<(f64, f64, f64)> = store.all_entries().iter()
+            .filter_map(|e| {
+                let stats = store.entry_stats().get(&e.id)?;
+                Some((
+                    fitness(e, stats),
+                    stats.retrievals_per_day,
+                    stats.delta_fitness,
+                ))
+            })
+            .collect();
+        let (selection, transmission) = price_equation_diagnostics(&price_data);
+
+        // 3. Confirmation cascade risk
+        let cascade_risks: Vec<String> = store.all_entries().iter()
+            .filter(|e| {
+                e.confidence > 0.7
+                    && e.source_episodes.len() <= 1
+                    && e.kind != KnowledgeKind::AntiKnowledge
+            })
+            .map(|e| e.id.clone())
+            .collect();
+
+        // 4. Compute health score
+        let parasite_ratio = parasites.len() as f64 / store.all_entries().len().max(1) as f64;
+        let cascade_ratio = cascade_risks.len() as f64 / store.all_entries().len().max(1) as f64;
+        let health_score = (1.0 - parasite_ratio * 5.0)  // parasites heavily penalize health
+            .min(1.0 - cascade_ratio * 2.0)               // cascade risk moderately penalizes
+            .min(if selection < 0.0 { 0.3 } else { 1.0 }) // negative selection is critical
+            .max(0.0);
+
+        // 5. Generate recommendations
+        let mut recommendations = Vec::new();
+        if parasites.len() > 0 {
+            recommendations.push(format!(
+                "Found {} suspected parasites. Run anti-knowledge generation for: {:?}",
+                parasites.len(), &parasites[..parasites.len().min(3)]
+            ));
+        }
+        if selection < self.config.min_selection_component {
+            recommendations.push(
+                "Price equation selection is negative — bad entries are being preferentially selected. Review high-fitness entries.".into()
+            );
+        }
+        if cascade_ratio > self.config.max_single_source_ratio {
+            recommendations.push(format!(
+                "{} entries ({:.0}%) have high confidence but single-source confirmation. Risk of confirmation cascade.",
+                cascade_risks.len(), cascade_ratio * 100.0
+            ));
+        }
+
+        AuditReport {
+            health_score,
+            parasites_detected: parasites.len(),
+            price_selection: selection,
+            price_transmission: transmission,
+            cascade_risk_entries: cascade_risks,
+            recommendations,
+        }
+    }
+}
+```
+
+### Epistemological Foundations
+
+The knowledge immune system draws from three epistemological traditions:
+
+**Popper's Falsificationism** (1934): Knowledge grows by identifying what is wrong, not by confirming what is right. AntiKnowledge entries implement this directly — they are falsification records that prevent regression to disproven beliefs.
+
+**Kuhn's Paradigm Shifts** (1962): Knowledge is not cumulative; it undergoes revolutionary changes when anomalies accumulate. The Price equation diagnostics detect this: when the selection component goes negative (bad entries being selected), the knowledge base is in crisis and needs restructuring.
+
+**Proctor's Agnotology** (2008): Ignorance is not just absence of knowledge but can be actively produced. Adversarial poisoning in the mesh/chain context implements culturally induced ignorance. The immune system's bloom filter and anomaly detection are defenses against manufactured ignorance.
+
+**References**:
+- Popper, K.R. (1934/1959). *The Logic of Scientific Discovery*. Hutchinson.
+- Kuhn, T.S. (1962). *The Structure of Scientific Revolutions*. University of Chicago Press.
+- Proctor, R.N. & Schiebinger, L. (2008). *Agnotology: The Making and Unmaking of Ignorance*. Stanford.
+- Zou, W. et al. (2025). "PoisonedRAG: Knowledge Corruption Attacks to RAG." *USENIX Security 2025*.
+
+**Test criteria**:
+- InnateImmunity screens entries matching known-bad bloom filter → Quarantine
+- InnateImmunity caps external entry confidence at max_external_confidence
+- AdaptiveImmunity threat_score > 0.526 for entries similar to corruption prototypes
+- KnowledgeHealthAudit detects parasites (high fitness, negative quality)
+- KnowledgeHealthAudit flags single-source high-confidence entries as cascade risks
+- Price equation (0.0, 0.0) for empty input
+- Health score decreases when parasites detected
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**: `KnowledgeKind::AntiKnowledge` variant. `refuted_insight_id` and `refutation_evidence` fields on `KnowledgeEntry`. `refutation_warning()` method.

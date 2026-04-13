@@ -513,6 +513,272 @@ impl NeuroStore {
 
 ---
 
+## Transfer Risk Assessment
+
+### When Cross-Domain Transfer is Dangerous
+
+Not all structural analogies are beneficial. Transfer can be actively harmful in several scenarios:
+
+**1. Surface structure match, deep structure mismatch**: Two entries may share abstract role structure (BIND(risk_factor, X) ⊕ BIND(response, Y)) while the underlying causal mechanisms differ fundamentally. "High code complexity → more review" transfers safely to "high market volatility → more caution" because both reflect the general principle "uncertainty demands verification." But "high gas price → use L2" does NOT transfer to "high compile time → use a faster language" — the causal mechanisms are unrelated despite superficial structural similarity.
+
+**2. Negative transfer**: From transfer learning theory (Ben-David et al., 2010), transfer hurts when the domain divergence exceeds a critical threshold. Formally:
+
+```
+err_target(h) ≤ err_source(h) + d_H(S, T) + λ
+```
+
+Where d_H is the H-divergence between domains and λ is the ideal joint error. When d_H + λ > err_target_baseline, transfer is negative — the agent would be better off ignoring the cross-domain knowledge entirely.
+
+**3. Adversarial resonance**: In a multi-agent mesh, a malicious agent could craft knowledge entries with artificially high structural similarity to target domains, injecting misleading cross-domain "insights." The confirmation protocol (2+ agents) mitigates this, but the risk remains for domains with few agents.
+
+### Transfer Risk Scoring
+
+```rust
+/// Risk assessment for a detected cross-domain resonance.
+pub struct TransferRisk {
+    /// Base HDC similarity (raw structural match).
+    pub structural_similarity: f32,
+    /// Estimated domain distance (higher = riskier transfer).
+    pub domain_distance: f64,
+    /// Causal mechanism alignment score (0 = unrelated, 1 = identical mechanism).
+    pub causal_alignment: f64,
+    /// Historical transfer success rate for this domain pair.
+    pub historical_success_rate: f64,
+    /// Overall risk score (0 = safe, 1 = dangerous).
+    pub risk_score: f64,
+    /// Recommended action.
+    pub recommendation: TransferRecommendation,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TransferRecommendation {
+    /// Transfer is likely beneficial. Apply with standard confidence discount.
+    Accept,
+    /// Transfer is uncertain. Apply with heavy discount (0.3×) and monitor outcomes.
+    AcceptWithCaution,
+    /// Transfer is likely harmful. Block and log for diagnostic review.
+    Reject,
+    /// Insufficient data to assess. Queue for human review.
+    NeedsReview,
+}
+
+/// Compute transfer risk for a detected resonance.
+///
+/// Risk factors:
+///   1. Domain distance (high distance = high risk)
+///   2. Historical success rate (low = high risk)
+///   3. Structural similarity (paradoxically, VERY high similarity
+///      can indicate surface-level match rather than deep analogy)
+///   4. Causal alignment (low = high risk)
+pub fn assess_transfer_risk(
+    resonance: &Resonance,
+    domain_stats: &DomainPairStats,
+) -> TransferRisk {
+    let domain_distance = domain_stats.estimated_distance;
+    let historical_success = domain_stats.transfer_success_rate;
+
+    // Very high similarity (>0.58) is paradoxically risky: it may indicate
+    // the entries share surface features rather than deep structure
+    let similarity_risk = if resonance.similarity > 0.58 {
+        0.3 // elevated risk for suspiciously high matches
+    } else {
+        0.0
+    };
+
+    let risk_score = (domain_distance * 0.4
+        + (1.0 - historical_success) * 0.3
+        + similarity_risk * 0.2
+        + (1.0 - domain_stats.causal_alignment) * 0.1)
+        .clamp(0.0, 1.0);
+
+    let recommendation = match risk_score {
+        r if r < 0.3 => TransferRecommendation::Accept,
+        r if r < 0.6 => TransferRecommendation::AcceptWithCaution,
+        r if r < 0.8 => TransferRecommendation::NeedsReview,
+        _ => TransferRecommendation::Reject,
+    };
+
+    TransferRisk {
+        structural_similarity: resonance.similarity,
+        domain_distance,
+        causal_alignment: domain_stats.causal_alignment,
+        historical_success_rate: historical_success,
+        risk_score,
+        recommendation,
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| Domain distance weight | 0.4 | 0.1 - 0.6 | How much domain distance affects risk |
+| Historical success weight | 0.3 | 0.1 - 0.5 | How much past transfer outcomes matter |
+| Suspiciously high threshold | 0.58 | 0.55 - 0.65 | Above this, similarity itself becomes a risk signal |
+| Accept threshold | 0.3 | 0.1 - 0.4 | Risk below this → accept |
+| Reject threshold | 0.8 | 0.7 - 0.9 | Risk above this → reject |
+
+**References**: Ben-David, S. et al. (2010). "A theory of learning from different domains." *Machine Learning*, 79(1-2), 151-175. Wang, Z. et al. (2019). "Characterizing and Avoiding Negative Transfer." *CVPR 2019*.
+
+---
+
+## Domain Distance Metric
+
+### Quantifying Domain Divergence
+
+How different are "coding" and "chain"? "research" and "operations"? A domain distance metric enables principled decisions about whether cross-domain transfer is plausible.
+
+### Three-Component Distance
+
+Domain distance combines three orthogonal measurements:
+
+```rust
+/// Quantifies the distance between two knowledge domains.
+pub struct DomainDistance {
+    /// Vocabulary divergence: fraction of domain-specific concepts that don't overlap.
+    /// Computed from the domain codebooks in the HDC encoder.
+    /// Range: 0.0 (identical vocabulary) to 1.0 (no overlap).
+    pub vocabulary_divergence: f64,
+    /// Structural divergence: how different the role-filler patterns are.
+    /// Computed by comparing aggregate HDC vectors of domain entries.
+    /// Based on H-divergence (Ben-David et al., 2010).
+    pub structural_divergence: f64,
+    /// Outcome correlation: how correlated are success/failure patterns.
+    /// Computed from gate outcomes on cross-domain transferred knowledge.
+    /// Range: -1.0 (anti-correlated) to 1.0 (perfectly correlated).
+    pub outcome_correlation: f64,
+    /// Combined distance (weighted geometric mean).
+    pub combined: f64,
+}
+
+/// Compute domain distance from domain statistics.
+///
+/// Algorithm:
+///   1. Vocabulary: count concepts in domain A's codebook absent from B's, and vice versa
+///   2. Structure: compute mean HDC similarity between A's entries and B's entries,
+///      then convert to divergence (1.0 - mean_similarity)
+///   3. Outcomes: Pearson correlation of gate pass rates on shared knowledge types
+///   4. Combined = weighted geometric mean
+pub fn compute_domain_distance(
+    domain_a: &DomainProfile,
+    domain_b: &DomainProfile,
+) -> DomainDistance {
+    // 1. Vocabulary divergence
+    let a_concepts: HashSet<&str> = domain_a.codebook.keys().collect();
+    let b_concepts: HashSet<&str> = domain_b.codebook.keys().collect();
+    let intersection = a_concepts.intersection(&b_concepts).count();
+    let union = a_concepts.union(&b_concepts).count();
+    let vocabulary_divergence = 1.0 - (intersection as f64 / union.max(1) as f64);
+
+    // 2. Structural divergence (empirical H-divergence approximation)
+    let structural_divergence = 1.0 - cross_domain_mean_similarity(
+        &domain_a.entry_vectors, &domain_b.entry_vectors
+    );
+
+    // 3. Outcome correlation
+    let outcome_correlation = pearson_correlation(
+        &domain_a.gate_pass_rates,
+        &domain_b.gate_pass_rates,
+    );
+
+    // 4. Combined (weighted geometric mean, outcome inverted to distance)
+    let outcome_distance = (1.0 - outcome_correlation) / 2.0; // map [-1,1] → [0,1]
+    let combined = (vocabulary_divergence.powf(0.3)
+        * structural_divergence.powf(0.5)
+        * outcome_distance.powf(0.2))
+        .powf(1.0); // weights sum to 1.0
+
+    DomainDistance {
+        vocabulary_divergence,
+        structural_divergence,
+        outcome_correlation,
+        combined,
+    }
+}
+```
+
+### Domain Profile
+
+```rust
+/// Aggregate statistics for a knowledge domain.
+///
+/// Built incrementally as entries are ingested. Updated during Dreams cycle.
+pub struct DomainProfile {
+    /// Domain name (e.g., "rust", "defi", "research").
+    pub name: String,
+    /// HDC concept codebook for this domain.
+    pub codebook: HashMap<String, HdcVector>,
+    /// Aggregate HDC vectors for entries in this domain (bundled prototypes).
+    pub entry_vectors: Vec<HdcVector>,
+    /// Gate pass rates per knowledge type (for outcome correlation).
+    pub gate_pass_rates: Vec<f64>,
+    /// Number of entries in this domain.
+    pub entry_count: usize,
+    /// Mean confidence of entries in this domain.
+    pub mean_confidence: f64,
+    /// Timestamp of last profile update.
+    pub last_updated: DateTime<Utc>,
+}
+```
+
+### Known Domain Distances (Initial Estimates)
+
+Based on structural analysis of Roko's target domains:
+
+| Domain A | Domain B | Vocabulary | Structural | Outcome | Combined | Transfer Safety |
+|---|---|---|---|---|---|---|
+| Rust coding | TypeScript coding | 0.3 | 0.2 | 0.8 | 0.24 | High |
+| Coding (any) | DeFi chain | 0.7 | 0.5 | 0.3 | 0.52 | Moderate |
+| Coding (any) | Research | 0.5 | 0.4 | 0.5 | 0.43 | Moderate |
+| DeFi chain | TradFi | 0.4 | 0.3 | 0.6 | 0.34 | Moderate-High |
+| Coding | Operations | 0.4 | 0.3 | 0.6 | 0.34 | Moderate-High |
+| DeFi chain | Research | 0.8 | 0.6 | 0.1 | 0.62 | Low |
+
+**Interpretation**: Cross-domain transfer between related coding languages (Rust <-> TypeScript) is safe (distance 0.24). Transfer between coding and DeFi (distance 0.52) is moderate — structural patterns may transfer but domain-specific details will not. Transfer between DeFi and academic research (distance 0.62) is risky and should require strong confirmation.
+
+---
+
+## Analogical Reasoning Foundations
+
+### Structure Mapping Theory (Gentner 1983)
+
+Neuro's cross-domain transfer implements a computational version of Dedre Gentner's Structure Mapping Theory (1983). The key principles map directly to HDC operations:
+
+| Gentner's Principle | HDC Implementation |
+|---|---|
+| **Systematicity**: Prefer mappings that preserve connected relational systems | Bundle of role-filler bindings captures connected structure; similarity reflects systematic alignment |
+| **Relational focus**: Analogy is about relations, not object attributes | Abstract role vectors (role:risk_factor, role:response) encode relations; domain-specific fillers are orthogonal |
+| **One-to-one correspondence**: Each base element maps to at most one target element | Binding is invertible — each role maps to exactly one filler via unbinding |
+
+**Reference**: Gentner, D. (1983). "Structure-mapping: A theoretical framework for analogy." *Cognitive Science*, 7(2), 155-170. Falkenhainer, B., Forbus, K.D., & Gentner, D. (1989). "The Structure-Mapping Engine: Algorithm and Examples." *Artificial Intelligence*, 41(1), 1-63.
+
+### Hofstadter's Fluid Concepts
+
+Douglas Hofstadter's Copycat model (1995) emphasizes that analogy-making is not a rigid structure-matching process but a **fluid**, probabilistic exploration of the space of possible mappings. Key concepts relevant to Neuro:
+
+- **Conceptual slippage**: The substitution of one concept for an analogous one. In HDC, this corresponds to two fillers having moderate similarity (above noise floor but below identity) — "high_complexity" and "high_volatility" are conceptual slips of each other when bound to the same abstract role.
+
+- **Pressure-driven search**: Copycat uses a temperature parameter that controls how freely concepts can slip. At high temperature, wild analogies are explored; at low temperature, only conservative matches are found. In Neuro, this maps to the configurable similarity threshold (lower threshold = wilder analogies).
+
+- **Emergent structure**: Analogies emerge from many small parallel processes, not from a top-down controller. Neuro's resonance detection loop mirrors this — it scans all cross-domain pairs and lets structure emerge from the HDC geometry.
+
+**Reference**: Hofstadter, D.R. and the Fluid Analogies Research Group. (1995). *Fluid Concepts and Creative Analogies*. Basic Books.
+
+### LLMs and Analogical Reasoning (2024-2025)
+
+Recent research (Webb et al., 2024; arXiv:2406.13803) shows that LLMs achieve human-level performance on **near analogies** (high surface similarity) but fall to below-random on **far analogies** (cross-domain, low surface similarity). This is precisely where HDC excels — structural similarity detection across distant domains.
+
+The emerging hybrid approach (arXiv:2603.29997, 2025) uses LLMs to generate structured representations and a classical mapping engine (like SME or HDC) to perform the structural alignment. Neuro's architecture naturally supports this: the LLM-based distillation pipeline (D1) generates structured entries, and the HDC resonance detector finds cross-domain alignments.
+
+**Test criteria for analogical reasoning**:
+- "rust" to "borrow_checker" as "java" to ? → "garbage_collector" (codebook contains it, similarity > 0.526)
+- "high_complexity" to "more_review" as "high_volatility" to ? → "more_caution" (cross-domain structural analogy)
+- Far analogy: "code_refactoring" to "debt_reduction" as "portfolio_rebalancing" to ? → "risk_reduction" (3-hop analogy)
+- Negative test: random concept pair produces similarity < 0.515 (below threshold)
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**: Basic HDC encoding via `from_seed()` and `text_fingerprint()`. Code symbol fingerprinting with role vectors in `roko-index`.

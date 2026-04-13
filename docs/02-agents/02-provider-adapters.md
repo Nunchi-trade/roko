@@ -344,14 +344,222 @@ and message format were sent.
 
 ---
 
+## Provider Capability Matrix
+
+Each provider backend supports a different subset of features. This matrix
+drives automatic provider selection and capability-aware prompt assembly:
+
+| Capability | Anthropic API | Claude CLI | OpenAI Compat | Cursor ACP |
+|---|---|---|---|---|
+| **Streaming** | SSE | Stream-JSON | SSE | JSON-RPC |
+| **Tool calling** | Content blocks | `--tools` flag | Function calling | JSON-RPC |
+| **Extended thinking** | `thinking` param, budget_tokens 1K–128K | `--effort` flag | o3/o4-mini reasoning | N/A |
+| **Structured output** | Tool use schemas | N/A | `json_schema` constrained decoding | N/A |
+| **Prompt caching** | Server-side, 90% cost reduction, 5min–1hr TTL | Built-in | Auto-caching, 50% discount | N/A |
+| **Vision / images** | Content blocks with `image` type | `--input` flag | `image_url` in messages | N/A |
+| **MCP support** | Native (creator of MCP) | `--mcp-config` passthrough | Not native | N/A |
+| **Token-efficient tools** | Beta header, up to 70% savings | N/A | N/A | N/A |
+| **Interleaved thinking** | Beta header, think between tool calls | N/A | N/A | N/A |
+| **Background/async** | Client-managed | N/A | Background mode (poll) | N/A |
+| **Batch API** | 50% discount | N/A | 50% discount | N/A |
+| **Max context** | 200K | 200K | 1M (GPT-4.1) | Model-dependent |
+| **Max output** | 128K (with thinking) | Model-dependent | 100K (o3) | Model-dependent |
+| **Web search** | Via MCP tools | Via MCP/tools | Native `web_search` tool | N/A |
+| **Code execution** | Via MCP tools | Via bash tool | Native `code_interpreter` | N/A |
+
+### Provider-Specific API Features (2025–2026)
+
+**Anthropic Extended Thinking:**
+- Enable via `thinking` parameter with `budget_tokens` value (minimum 1,024).
+- Interleaved thinking (beta header `interleaved-thinking-2025-05-14`) allows
+  Claude to think between tool calls, not just at the start.
+- Temperature fixed at 1 when thinking is enabled.
+- Tool use with thinking only supports `tool_choice: auto` or `none`.
+
+**OpenAI Structured Outputs:**
+- `response_format: { type: "json_schema", json_schema: {...} }` uses
+  constrained decoding at the token level — **guaranteed** valid JSON.
+- `strict: true` in function definitions ensures arguments always match schema.
+- The Responses API (replaces Chat Completions for agentic use) supports
+  built-in agentic loops with web_search, file_search, code_interpreter,
+  and remote MCP servers within a single API request.
+
+**Google Gemini:**
+- 1M token context window (2M for Gemini 1.5 Pro).
+- `thinkingConfig` with `includeThoughts: true` and `thinkingBudget` (0–32K).
+- Built-in Google Search grounding, Maps grounding, sandboxed Python execution.
+- OpenAI-compatible endpoint at `/v1beta/openai/` works with `OpenAiCompatAdapter`.
+- Pricing advantage: Gemini 2.5 Flash at $0.30/$2.50 per MTok.
+
+---
+
+## Automatic Provider Selection
+
+When a task requires specific capabilities (e.g., web search, code execution,
+extended thinking), the adapter layer should automatically select the best
+provider rather than relying on manual configuration.
+
+```rust
+/// Task requirements that inform automatic provider selection.
+#[derive(Clone, Debug, Default)]
+pub struct TaskRequirements {
+    /// Does the task need web search / grounded retrieval?
+    pub needs_web_search: bool,
+    /// Does the task need code execution?
+    pub needs_code_execution: bool,
+    /// Does the task need extended thinking / deep reasoning?
+    pub needs_thinking: bool,
+    /// Does the task need vision / image analysis?
+    pub needs_vision: bool,
+    /// Does the task need structured output (guaranteed JSON)?
+    pub needs_structured_output: bool,
+    /// Minimum context window required (tokens).
+    pub min_context_window: u64,
+    /// Maximum acceptable cost per million output tokens.
+    pub max_cost_output_per_m: Option<f64>,
+    /// Maximum acceptable latency (ms).
+    pub max_latency_ms: Option<u64>,
+}
+
+/// Score a model profile against task requirements.
+/// Returns None if the model cannot satisfy hard requirements.
+pub fn score_model_for_task(
+    profile: &ModelProfile,
+    requirements: &TaskRequirements,
+) -> Option<f64> {
+    // Hard requirements: if any fail, model is disqualified
+    if requirements.needs_web_search && !profile.supports_search { return None; }
+    if requirements.needs_thinking && !profile.supports_thinking { return None; }
+    if requirements.needs_vision && !profile.supports_vision { return None; }
+    if profile.context_window < requirements.min_context_window { return None; }
+
+    // Soft scoring: weighted combination of capability match + cost efficiency
+    let mut score = 1.0;
+
+    // Prefer models that natively support requested features
+    if requirements.needs_web_search && profile.supports_search { score += 0.2; }
+    if requirements.needs_code_execution { score += 0.1; }
+
+    // Cost efficiency bonus
+    if let (Some(max_cost), Some(model_cost)) = (
+        requirements.max_cost_output_per_m,
+        profile.cost_output_per_m,
+    ) {
+        if model_cost > max_cost { return None; }
+        score += (max_cost - model_cost) / max_cost; // Cheaper = higher score
+    }
+
+    Some(score)
+}
+
+/// Select the best model for a task from all configured models.
+/// Algorithm:
+///   1. Filter models by hard requirements
+///   2. Score remaining models
+///   3. Break ties by CascadeRouter's learned preferences
+///   4. Return highest-scoring model
+pub fn select_model_for_task(
+    config: &RokoConfig,
+    requirements: &TaskRequirements,
+    cascade_router: Option<&CascadeRouter>,
+) -> Option<String> {
+    let mut candidates: Vec<(String, f64)> = config
+        .effective_models()
+        .iter()
+        .filter_map(|(key, profile)| {
+            let score = score_model_for_task(profile, requirements)?;
+            Some((key.clone(), score))
+        })
+        .collect();
+
+    // Boost by learned performance if CascadeRouter is available
+    if let Some(router) = cascade_router {
+        for (key, score) in &mut candidates {
+            *score += router.model_bonus(key) * 0.5;
+        }
+    }
+
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.first().map(|(key, _)| key.clone())
+}
+```
+
+---
+
+## Provider-Specific Optimizations
+
+### Batching Strategies
+
+Different providers benefit from different batching approaches:
+
+| Strategy | Provider | Mechanism | Savings |
+|---|---|---|---|
+| **Request batching** | Anthropic, OpenAI | Batch API (async job queue) | 50% cost reduction |
+| **Prompt caching** | Anthropic | Server-side cache of system prompt + tools | 90% cost reduction on cached tokens |
+| **Automatic caching** | OpenAI | Server-side, automatic | 50% cost reduction on cached tokens |
+| **Context caching** | Google Gemini | Explicit context caching API | Varies |
+| **Token-efficient tools** | Anthropic | Beta header reduces tool call output | Up to 70% savings |
+
+```rust
+/// Provider-specific optimization hints applied at the adapter level.
+pub struct ProviderOptimizations {
+    /// Use batch API for non-time-sensitive tasks (50% cost savings).
+    pub use_batch_api: bool,
+    /// Enable prompt caching for this provider.
+    pub enable_prompt_caching: bool,
+    /// Enable token-efficient tool use (Anthropic beta header).
+    pub enable_efficient_tools: bool,
+    /// Maximum concurrent requests for this provider's rate limits.
+    pub max_concurrent: u32,
+    /// Preferred streaming mode.
+    pub streaming_mode: StreamingMode,
+}
+
+pub enum StreamingMode {
+    /// Server-Sent Events (Anthropic, OpenAI).
+    Sse,
+    /// Stream-JSON over subprocess pipes (Claude CLI).
+    StreamJson,
+    /// JSON-RPC (Cursor ACP).
+    JsonRpc,
+    /// No streaming — single response.
+    None,
+}
+```
+
+### Caching Strategies
+
+Prompt caching is the single largest cost optimization available. The adapter
+layer should automatically enable it when the provider supports it:
+
+- **Anthropic:** Cache read tokens cost 10% of normal input rate. Cache-aware
+  rate limits: cache reads no longer count against ITPM limit. TTL: 5 minutes
+  (Sonnet), 1 hour (Haiku). System prompts and tool definitions are ideal
+  cache candidates.
+- **OpenAI:** Automatic caching with 50% discount. No explicit opt-in needed.
+- **Gemini:** Context caching API for explicitly cached content.
+
+The `SystemPromptBuilder` should structure prompts to maximize cache hit rates
+by placing stable content (project context, role definition, tool schemas)
+at the beginning of the system prompt, and variable content (task-specific
+instructions, recent history) at the end.
+
+---
+
 ## Citations
 
 1. Implementation plan `modelrouting/03-provider-adapters.md` — ProviderAdapter
    trait design, 4 implementations, factory function. 19 tasks.
 2. Implementation plan `modelrouting/01-architecture.md` — Three-layer provider
    system, why static dispatch.
-3. `crates/roko-agent/src/provider/mod.rs` — Full 407-line source.
-4. `crates/roko-agent/src/provider/openai_compat.rs` — OpenAiCompatAdapter.
-5. `crates/roko-agent/src/provider/anthropic_api.rs` — AnthropicApiAdapter.
-6. `crates/roko-agent/src/provider/claude_cli.rs` — ClaudeCliAdapter.
-7. `crates/roko-agent/src/provider/cursor_acp.rs` — CursorAcpAdapter.
+3. Anthropic (2025). Extended Thinking API documentation. — `budget_tokens`,
+   interleaved thinking, token-efficient tools.
+4. OpenAI (2025). Structured Outputs documentation. — Constrained decoding,
+   `json_schema` response format, strict mode.
+5. Google (2025). Gemini API documentation. — `thinkingConfig`, grounding,
+   code execution, 1M context.
+6. `crates/roko-agent/src/provider/mod.rs` — Full 407-line source.
+7. `crates/roko-agent/src/provider/openai_compat.rs` — OpenAiCompatAdapter.
+8. `crates/roko-agent/src/provider/anthropic_api.rs` — AnthropicApiAdapter.
+9. `crates/roko-agent/src/provider/claude_cli.rs` — ClaudeCliAdapter.
+10. `crates/roko-agent/src/provider/cursor_acp.rs` — CursorAcpAdapter.

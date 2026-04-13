@@ -39,6 +39,21 @@ impl Notification {
         }
     }
 
+    /// Create an info notification with default TTL (5 seconds).
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(message, NotificationLevel::Info, 5)
+    }
+
+    /// Create a warning notification with default TTL (8 seconds).
+    pub fn warn(message: impl Into<String>) -> Self {
+        Self::new(message, NotificationLevel::Warn, 8)
+    }
+
+    /// Create an error notification with default TTL (10 seconds).
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(message, NotificationLevel::Error, 10)
+    }
+
     /// Whether this notification has expired.
     pub fn is_expired(&self) -> bool {
         self.created.elapsed().as_secs() >= self.ttl_secs

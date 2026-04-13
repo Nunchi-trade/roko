@@ -342,6 +342,463 @@ must bid lower to compete, while high-reputation agents can charge a premium.
 
 ---
 
+---
+
+## Choreography vs Orchestration Patterns
+
+The Roko executor is a **centralized orchestrator** — the `ParallelExecutor`
+state machine controls the sequence of operations. However, some cross-domain
+workflows may benefit from choreographic elements where domains react to events
+autonomously.
+
+### Pattern Comparison
+
+| Aspect | Orchestration (current) | Choreography (future) |
+|--------|------------------------|----------------------|
+| **Control** | Central coordinator (`PlanRunner`) | Each domain reacts to events |
+| **Coupling** | Domains coupled to executor | Domains coupled only to events |
+| **Observability** | Full visibility in one place | Distributed traces needed |
+| **Error handling** | Centralized retry/compensation | Per-domain saga compensations |
+| **Scalability** | Bottleneck at coordinator | Scales with domains |
+| **Complexity** | Simple flow, complex coordinator | Simple coordinators, complex flow |
+
+### Saga Pattern for Cross-Domain Transactions
+
+When a cross-domain plan involves irreversible steps (e.g., deploy a contract
+AND wire it into code), failures require **compensation** rather than rollback:
+
+```rust
+/// A saga step with forward action and compensating action.
+pub struct SagaStep {
+    /// The forward transaction.
+    pub action: TaskDef,
+    /// The compensating transaction (semantic undo).
+    /// None if the step is inherently reversible (e.g., code change in
+    /// a worktree — just git reset).
+    pub compensation: Option<TaskDef>,
+    /// Status tracking.
+    pub status: SagaStepStatus,
+}
+
+pub enum SagaStepStatus {
+    Pending,
+    Succeeded,
+    CompensationNeeded,
+    Compensated,
+    CompensationFailed,
+}
+
+/// Saga Execution Coordinator — manages the forward/compensate flow.
+pub struct SagaCoordinator {
+    pub saga_id: String,
+    pub state: SagaState,
+    pub steps: Vec<SagaStep>,
+    pub current_step: usize,
+    /// Durable event log for saga recovery.
+    pub log: Vec<SagaEvent>,
+}
+
+pub enum SagaState {
+    Running,
+    Compensating,
+    Completed,
+    Failed,
+}
+
+/// Saga events for durable logging (enables recovery after crash
+/// during compensation).
+pub enum SagaEvent {
+    BeginSaga,
+    BeginStep(usize),
+    EndStep(usize),
+    BeginCompensation(usize),
+    EndCompensation(usize),
+    EndSaga,
+}
+```
+
+The saga coordinator integrates with the existing `EventLog` — saga events are
+recorded alongside orchestration events in the hash chain, enabling recovery
+of in-progress compensations after a crash.
+
+### Hybrid Approach: Orchestrated Choreography
+
+Roko can combine both patterns using Temporal's approach: the executor
+orchestrates the high-level plan flow, while individual domains use
+event-driven choreography for intra-domain coordination:
+
+```
+Executor (orchestration)
+  ├── Code domain (orchestrated: specific task order)
+  ├── Chain domain (choreography: react to on-chain events)
+  └── Research domain (choreography: react to citation discoveries)
+```
+
+---
+
+## Domain-Specific Plan Templates
+
+Plan templates are reusable workflow fragments that encode domain-specific
+best practices. They compose into complete cross-domain plans.
+
+### Template System
+
+```rust
+/// A reusable plan template for a specific domain.
+pub struct PlanTemplate {
+    /// Unique template identifier.
+    pub id: String,
+    /// Domain this template applies to.
+    pub domain: TaskDomain,
+    /// Semantic version for backwards compatibility.
+    pub version: semver::Version,
+    /// Template parameters (filled in at instantiation).
+    pub parameters: Vec<TemplateParameter>,
+    /// Task definitions with parameter placeholders.
+    pub tasks: Vec<TemplateTask>,
+    /// Gate configuration for this domain.
+    pub gates: Vec<GateConfig>,
+    /// Dependencies on other templates (composable).
+    pub requires: Vec<TemplateDependency>,
+}
+
+pub struct TemplateParameter {
+    pub name: String,
+    pub param_type: ParameterType,
+    pub default: Option<String>,
+    pub required: bool,
+    pub description: String,
+}
+
+pub enum ParameterType {
+    String,
+    Path,
+    CrateName,
+    ContractAddress,
+    Url,
+}
+
+/// A task within a template, with parameter placeholders.
+pub struct TemplateTask {
+    pub id_pattern: String,      // e.g., "impl-{{crate_name}}"
+    pub title_pattern: String,   // e.g., "Implement {{feature}} in {{crate_name}}"
+    pub domain: TaskDomain,
+    pub tier: String,
+    pub depends_on: Vec<String>, // can reference other template tasks
+    pub files_pattern: Vec<String>, // e.g., "crates/{{crate_name}}/src/**"
+}
+
+impl PlanTemplate {
+    /// Instantiate a template with concrete parameter values.
+    /// Returns a list of concrete TaskDef entries.
+    pub fn instantiate(
+        &self,
+        params: &HashMap<String, String>,
+    ) -> Result<Vec<TaskDef>, TemplateError> { /* ... */ }
+
+    /// Compose two templates: merge their tasks, resolve cross-template
+    /// dependencies, and validate the combined DAG.
+    pub fn compose(
+        &self,
+        other: &PlanTemplate,
+        binding: &CompositionBinding,
+    ) -> Result<PlanTemplate, TemplateError> { /* ... */ }
+}
+```
+
+### Built-in Templates
+
+| Template | Domain | Tasks | Description |
+|----------|--------|-------|-------------|
+| `rust-feature` | Code | 5 | Add feature: implement, test, document, gate, review |
+| `rust-refactor` | Code | 4 | Refactor: analyze, implement, verify, review |
+| `research-topic` | Research | 3 | Research: survey, synthesize, cite-check |
+| `chain-deploy` | Chain | 4 | Deploy: compile, simulate, deploy-testnet, verify |
+| `full-feature` | Cross-domain | 8+ | Research → implement → test → deploy → document |
+
+Templates are stored in `.roko/templates/` and versioned. The `roko prd plan`
+command can select appropriate templates based on PRD content analysis.
+
+---
+
+## Cross-Domain Conflict Resolution
+
+When two domains modify the same artifact (e.g., both code and chain tasks
+update `roko.toml`), conflicts must be detected and resolved.
+
+### Conflict Prevention (Preferred)
+
+Prevention is cheaper than resolution for agent systems. The existing
+`UnifiedTaskDag` file-conflict inference already serializes tasks that touch
+the same files, regardless of domain. This prevents most conflicts.
+
+### Semantic Merge (When Prevention Fails)
+
+For artifacts with domain-specific structure (TOML, Cargo.lock, Solidity ABIs),
+textual merge often fails where semantic merge would succeed:
+
+```rust
+/// Domain-specific merge strategies.
+pub enum MergeStrategy {
+    /// Standard git textual merge (default).
+    Textual,
+    /// TOML-aware merge: merge at the key-value level rather than
+    /// line level. Handles concurrent additions to different sections.
+    TomlSemantic,
+    /// Cargo.lock merge: re-resolve dependencies rather than
+    /// merging the lock file textually.
+    CargoLockResolve,
+    /// JSON merge: deep merge at the object/array level.
+    JsonDeep,
+    /// Domain-specific custom merge function.
+    Custom(Box<dyn Fn(&str, &str, &str) -> Result<String, MergeError>>),
+}
+
+/// Resolution strategies when semantic merge fails.
+pub enum ConflictResolution {
+    /// Favor the higher-priority plan's version.
+    PriorityWins,
+    /// Favor the more recent change (LWW).
+    LastWriterWins,
+    /// Delegate to an agent to manually resolve.
+    AgentResolve { role: AgentRole },
+    /// Fail and require operator intervention.
+    ManualResolve,
+}
+
+/// Configuration per file pattern.
+pub struct MergeConfig {
+    /// Glob pattern matching files (e.g., "*.toml", "Cargo.lock").
+    pub pattern: String,
+    /// Merge strategy for matching files.
+    pub strategy: MergeStrategy,
+    /// Fallback resolution when strategy fails.
+    pub fallback: ConflictResolution,
+}
+
+/// Default merge configurations.
+pub fn default_merge_configs() -> Vec<MergeConfig> {
+    vec![
+        MergeConfig {
+            pattern: "Cargo.lock".into(),
+            strategy: MergeStrategy::CargoLockResolve,
+            fallback: ConflictResolution::AgentResolve {
+                role: AgentRole::AutoFixer,
+            },
+        },
+        MergeConfig {
+            pattern: "*.toml".into(),
+            strategy: MergeStrategy::TomlSemantic,
+            fallback: ConflictResolution::PriorityWins,
+        },
+        MergeConfig {
+            pattern: "*.json".into(),
+            strategy: MergeStrategy::JsonDeep,
+            fallback: ConflictResolution::LastWriterWins,
+        },
+    ]
+}
+```
+
+### Cross-Domain Dependency Protocols
+
+When domains have implicit dependencies (e.g., code depends on a deployed
+contract address, but the address is only known after deployment):
+
+```rust
+/// A cross-domain artifact that one domain produces and another consumes.
+pub struct DomainArtifact {
+    /// Unique artifact identifier.
+    pub id: String,
+    /// The domain that produces this artifact.
+    pub producer_domain: TaskDomain,
+    /// The task that produces it.
+    pub producer_task: String,
+    /// The value (filled in after production).
+    pub value: Option<serde_json::Value>,
+    /// Consumers waiting for this artifact.
+    pub consumers: Vec<ArtifactConsumer>,
+}
+
+pub struct ArtifactConsumer {
+    pub domain: TaskDomain,
+    pub task_id: String,
+    /// How the artifact is injected into the consumer's context.
+    pub injection: ArtifactInjection,
+}
+
+pub enum ArtifactInjection {
+    /// Set as an environment variable.
+    EnvVar(String),
+    /// Write to a file path.
+    FilePath(PathBuf),
+    /// Include in the agent's system prompt.
+    PromptContext,
+}
+```
+
+This enables late-binding dependencies: a code task can declare it needs a
+`contract_address` artifact from a chain task, and the executor will wait
+for the chain task to produce it before dispatching the code task.
+
+---
+
+## Plan Repair: Self-Modifying Plans
+
+When gate feedback reveals that a plan is fundamentally flawed (not just a
+fixable compilation error), the orchestrator can invoke **plan repair** — a
+structured modification of the plan based on automated planning techniques.
+
+### Plan Repair Engine
+
+Drawing on AI planning research (STRIPS, PDDL, LPG-adapt) and HTN
+(Hierarchical Task Network) decomposition:
+
+```rust
+/// The plan repair engine modifies a failing plan based on gate feedback.
+pub struct PlanRepairEngine {
+    /// Maximum repair attempts before declaring failure.
+    /// Default: 3. Range: 1..=5.
+    pub max_repairs: u32,
+    /// Repair strategy selection.
+    pub strategy: RepairStrategy,
+}
+
+pub enum RepairStrategy {
+    /// Patch: modify only the failing tasks and their immediate neighbors.
+    /// Fastest, but may miss structural issues.
+    /// Inspired by LPG-adapt (Gerevini et al., 2004).
+    Patch,
+    /// Replan: regenerate the entire remaining plan from the current state.
+    /// Most thorough, but discards work on pending tasks.
+    Replan,
+    /// Hierarchical: decompose failing tasks into subtasks at a finer grain.
+    /// Inspired by HTN planning (Erol et al., 1994).
+    Hierarchical,
+    /// Adaptive: choose strategy based on failure type.
+    Adaptive,
+}
+
+/// A repair action produced by the repair engine.
+pub enum RepairAction {
+    /// Replace a failing task with a revised version.
+    ReviseTask { task_id: String, new_def: TaskDef },
+    /// Decompose a task into subtasks.
+    DecomposeTask { task_id: String, subtasks: Vec<TaskDef> },
+    /// Add a prerequisite task (missing dependency discovered).
+    AddPrerequisite { before: String, new_task: TaskDef },
+    /// Remove an infeasible task and adjust dependencies.
+    RemoveInfeasible { task_id: String },
+    /// Escalate: the plan needs fundamental restructuring.
+    /// Triggers `roko prd plan <slug>` to regenerate from the PRD.
+    Escalate { reason: String },
+}
+
+impl PlanRepairEngine {
+    /// Analyze gate failures and produce repair actions.
+    ///
+    /// Algorithm:
+    /// 1. Classify failure type:
+    ///    - Compilation error → Patch (fix the specific code)
+    ///    - Test failure → Patch or Hierarchical (may need more steps)
+    ///    - Multiple related failures → Hierarchical (structural issue)
+    ///    - 3+ consecutive failures → Escalate (fundamental problem)
+    ///
+    /// 2. Generate repair actions based on strategy:
+    ///    - Patch: use AutoFixer agent to propose task revision.
+    ///    - Hierarchical: use Strategist agent to decompose.
+    ///    - Replan: invoke `roko prd plan` with current-state context.
+    ///    - Adaptive: classify failure, pick best strategy.
+    ///
+    /// 3. Apply repairs via DagMutation operations.
+    /// 4. Re-validate the modified DAG.
+    pub fn repair(
+        &self,
+        plan_id: &str,
+        failures: &[GateResult],
+        dag: &mut UnifiedTaskDag,
+    ) -> Result<Vec<RepairAction>, RepairError> { /* ... */ }
+}
+```
+
+### Plan Abstraction Levels
+
+Plans operate at three abstraction levels, inspired by military/business
+planning hierarchies and ABSTRIPS (Sacerdoti, 1974):
+
+| Level | Scope | Granularity | Example |
+|-------|-------|-------------|---------|
+| **Strategic** | Project-wide goals | PRDs, milestones | "Achieve full self-hosting" |
+| **Tactical** | Feature-level plans | Plans with task lists | "Wire SystemPromptBuilder" |
+| **Operational** | Individual tasks | Agent dispatches | "Edit orchestrate.rs line 340" |
+
+```rust
+/// A hierarchical plan with multiple abstraction levels.
+pub struct HierarchicalPlan {
+    /// Strategic goal (from PRD).
+    pub goal: String,
+    /// Tactical plans (decomposition of goal).
+    pub plans: Vec<PlanInfo>,
+    /// Refinement mapping: strategic → tactical → operational.
+    pub refinements: HashMap<String, Vec<String>>,
+}
+
+impl HierarchicalPlan {
+    /// Refine a strategic goal into tactical plans.
+    /// Uses the Strategist agent to decompose.
+    pub fn refine_strategic(&self, goal: &str) -> Vec<PlanInfo> { /* ... */ }
+
+    /// Refine a tactical plan into operational tasks.
+    /// Uses the TasksFile format with dependency resolution.
+    pub fn refine_tactical(&self, plan_id: &str) -> Vec<TaskDef> { /* ... */ }
+
+    /// When a tactical plan fails repair, escalate to strategic level:
+    /// re-evaluate whether the goal decomposition is correct.
+    pub fn escalate_to_strategic(
+        &self,
+        plan_id: &str,
+        reason: &str,
+    ) -> StrategicReplanAction { /* ... */ }
+}
+```
+
+### Meta-Reasoning: When to Repair vs Replan
+
+Drawing on continual planning literature (desJardins et al., 1999) and the
+PRS (Procedural Reasoning System):
+
+```rust
+/// Decision function: should we repair the current plan or replan from scratch?
+///
+/// Heuristic:
+///   repair_cost = estimated_agent_calls × avg_cost_per_call
+///   replan_cost = strategist_cost + new_plan_tasks × avg_cost_per_call
+///   completed_work_value = completed_tasks × avg_task_value
+///
+///   if repair_cost < replan_cost - completed_work_value:
+///       → repair (preserves completed work)
+///   else:
+///       → replan (fresh start cheaper than patching)
+///
+/// Additional signals:
+/// - If 3+ consecutive repairs failed → always replan
+/// - If completion_ratio > 0.7 → prefer repair (most work done)
+/// - If failure is structural (missing crate, wrong architecture) → replan
+pub fn should_repair_or_replan(
+    plan_state: &PlanState,
+    failures: &[GateResult],
+    efficiency_history: &[AgentEfficiencyEvent],
+) -> PlanRecoveryDecision { /* ... */ }
+
+pub enum PlanRecoveryDecision {
+    Repair(RepairStrategy),
+    Replan,
+    Abort { reason: String },
+}
+```
+
+---
+
 ## References
 
 - Topcuoglu, H., Hariri, S. & Wu, M.-Y. (2002). Performance-effective and
@@ -357,3 +814,17 @@ must bid lower to compete, while high-reputation agents can charge a premium.
 - Lee, J. et al. (2026). FrugalGPT: How to use large language models while
   reducing cost and improving performance. *arXiv:2603.28052*. (Cost-efficient
   model routing, underpins the CascadeRouter)
+- Garcia-Molina, H. & Salem, K. (1987). Sagas. *ACM SIGMOD 1987*. (Saga
+  pattern for long-lived transactions with compensation.)
+- Gerevini, A. et al. (2004). Planning through stochastic local search and
+  temporal action graphs in LPG. *JAIR*, 20, 239–290. (LPG-adapt plan repair.)
+- Sacerdoti, E. D. (1974). Planning in a hierarchy of abstraction spaces.
+  *Artificial Intelligence*, 5(2), 115–135. (ABSTRIPS — abstraction
+  hierarchies in automated planning.)
+- Erol, K., Hendler, J. & Nau, D. S. (1994). HTN planning: Complexity and
+  expressivity. *AAAI 1994*. (Hierarchical Task Network decomposition.)
+- Fox, M. et al. (2006). Plan stability: Replanning versus plan repair.
+  *ICAPS 2006*. (When repair beats replanning.)
+- desJardins, M. E. et al. (1999). A survey of research in distributed,
+  continual planning. *AI Magazine*, 20(4), 13–22. (Interleaving planning
+  and execution, meta-reasoning about when to replan.)

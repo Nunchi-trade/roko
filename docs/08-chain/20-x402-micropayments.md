@@ -197,6 +197,231 @@ ERC-3009 authorizations include `validAfter` and `validBefore` timestamps. An au
 
 ---
 
+## Agent-to-Agent Payment Channels
+
+For agents that transact at very high frequency (>100 transactions/hour with the same counterparty), individual x402 payments create unnecessary settlement overhead. Payment channels provide a more efficient mechanism:
+
+### State Channel Architecture
+
+```rust
+/// Payment channel between two agents
+pub struct AgentPaymentChannel {
+    /// Channel identifier (hash of creation params)
+    pub channel_id: [u8; 32],
+
+    /// Agent A (payer) passport ID and address
+    pub agent_a: ChannelParty,
+    /// Agent B (payee) passport ID and address
+    pub agent_b: ChannelParty,
+
+    /// Total KORAI deposited by each party
+    pub deposit_a: U256,
+    pub deposit_b: U256,
+
+    /// Current state (updated off-chain)
+    pub state: ChannelState,
+
+    /// Challenge window for dispute resolution (blocks)
+    pub challenge_window: u64,  // default: 100 (~40s on Korai)
+}
+
+pub struct ChannelParty {
+    pub passport_id: u256,
+    pub address: Address,
+}
+
+pub struct ChannelState {
+    /// Monotonically increasing sequence number
+    pub nonce: u64,
+    /// Current balance allocation
+    pub balance_a: U256,
+    pub balance_b: U256,
+    /// Both parties' signatures over (channel_id, nonce, balance_a, balance_b)
+    pub sig_a: [u8; 64],
+    pub sig_b: [u8; 64],
+}
+```
+
+### Channel Lifecycle
+
+```
+1. OPEN: Both agents deposit KORAI into the channel contract
+   Agent A deposits 500 KORAI, Agent B deposits 0 KORAI
+   On-chain cost: 1 transaction per party
+
+2. TRANSACT (off-chain): Agents exchange signed state updates
+   Payment 1: A→B 5 KORAI → state: (495, 5, nonce=1)
+   Payment 2: A→B 3 KORAI → state: (492, 8, nonce=2)
+   ...
+   Payment 1000: A→B 2 KORAI → state: (100, 400, nonce=1000)
+   Off-chain cost: 0 gas per transaction (just signatures)
+
+3. CLOSE (cooperative): Both sign final state, submit to contract
+   On-chain cost: 1 transaction
+
+4. CLOSE (dispute): One party submits their latest state
+   Challenge window opens (100 blocks / ~40s on Korai)
+   Counterparty can submit higher-nonce state to override
+   After window: contract distributes per the highest-nonce state
+```
+
+### Streaming Payments (Superfluid Integration)
+
+For continuous services (agent A pays agent B for ongoing monitoring), Korai supports Superfluid-style streaming payments:
+
+```rust
+/// Continuous payment stream between two agents
+pub struct PaymentStream {
+    /// Stream identifier
+    pub stream_id: [u8; 32],
+
+    /// Sender and receiver
+    pub sender: u256,  // passport_id
+    pub receiver: u256,
+
+    /// Flow rate in KORAI wei per second
+    pub flow_rate: U256,
+
+    /// Start time (block timestamp)
+    pub started_at: u64,
+
+    /// Deposit buffer (sender must maintain enough to cover N seconds)
+    pub buffer_seconds: u64,  // default: 3600 (1 hour buffer)
+}
+
+impl PaymentStream {
+    /// Current receiver balance (computed, not stored)
+    pub fn receiver_balance(&self, current_timestamp: u64) -> U256 {
+        let elapsed = current_timestamp.saturating_sub(self.started_at);
+        self.flow_rate * U256::from(elapsed)
+    }
+}
+```
+
+Streaming payments have zero per-second on-chain cost — the `balanceOf()` function computes the real-time balance from the flow rate and elapsed time. A single transaction starts the stream; a single transaction stops it.
+
+### Payment Architecture Selection Guide
+
+| Agent Interaction Pattern | Recommended Payment Method | Cost per Payment |
+|---|---|---|
+| **Ad-hoc, different services** | x402 (ERC-3009) per-request | ~0.01-0.1 KORAI + L2 gas |
+| **Repeated, same counterparty (>100/hr)** | State channel | 0 gas (off-chain), amortized open/close |
+| **Continuous service** | Streaming payment | 0 gas per second, 1 tx to start/stop |
+| **Batch settlement (many small payments)** | Batched x402 (epoch settlement) | ~1/50th of individual gas per payment |
+| **Cross-chain payment** | Intent-based bridge + x402 | Bridge fee + x402 cost |
+
+### On-Chain Knowledge Attestation
+
+Beyond payments, x402-style signed authorizations can attest to knowledge claims:
+
+```rust
+/// Knowledge attestation: agent signs a claim about a fact
+pub struct KnowledgeAttestation {
+    /// The knowledge entry being attested
+    pub entry_hash: [u8; 32],
+
+    /// The attesting agent
+    pub attester_passport_id: u256,
+
+    /// Attestation type
+    pub attestation_type: AttestationType,
+
+    /// Confidence score [0.0, 1.0]
+    pub confidence: f64,
+
+    /// Ed25519 signature over (entry_hash, attestation_type, confidence, timestamp)
+    pub signature: [u8; 64],
+
+    /// Timestamp
+    pub timestamp: u64,
+
+    /// Optional: stake KORAI as bond (slashed if attestation proven wrong)
+    pub bond: Option<U256>,
+}
+
+pub enum AttestationType {
+    /// "I confirm this knowledge entry is accurate"
+    Confirmation,
+    /// "I independently arrived at the same conclusion"
+    IndependentVerification,
+    /// "I used this entry and it produced correct results"
+    UsageValidation,
+    /// "I challenge this entry as incorrect"
+    Challenge { reason: String },
+}
+```
+
+### Dispute Resolution for Knowledge Claims
+
+When a knowledge entry is challenged, the dispute follows an escalating resolution mechanism inspired by UMA's Optimistic Oracle and Reality.eth's escalating bond model:
+
+```
+Level 1 — Optimistic acceptance (default)
+  Knowledge entry accepted unless challenged within 24 hours
+  Cost: 0 (no on-chain action needed)
+
+Level 2 — Bond-escalating challenge
+  Challenger posts 1 KORAI bond
+  Original poster must respond with 2 KORAI bond (or lose)
+  Challenger responds with 4 KORAI bond (or lose)
+  Each round doubles the bond until one party concedes
+  Cost: logarithmic in dispute intensity
+
+Level 3 — Peer jury resolution
+  If bonds exceed 100 KORAI, escalate to peer jury
+  5 random agents with reputation > 0.7 in the relevant domain
+  Majority vote determines outcome
+  Jurors earn a share of the losing party's bond
+  Cost: ~50 KORAI from the losing party's bond
+
+Level 4 — Governance resolution
+  If peer jury decision is appealed (requires 500 KORAI bond)
+  Full governance vote by Protocol and Sovereign tier agents
+  Final and binding
+```
+
+```rust
+pub struct DisputeResolution {
+    pub entry_hash: [u8; 32],
+    pub challenger: u256,
+    pub defender: u256,
+    pub current_level: DisputeLevel,
+    pub challenger_bond: U256,
+    pub defender_bond: U256,
+    pub jury: Option<Vec<u256>>,
+    pub deadline_block: u64,
+}
+
+pub enum DisputeLevel {
+    BondEscalation { round: u8 },
+    PeerJury { votes_for: u32, votes_against: u32 },
+    GovernanceVote { proposal_id: [u8; 32] },
+    Resolved { winner: u256, outcome: DisputeOutcome },
+}
+
+pub enum DisputeOutcome {
+    /// Entry confirmed as correct
+    EntryUpheld,
+    /// Entry removed, poster penalized
+    EntryRemoved,
+    /// Entry modified (metadata corrected)
+    EntryAmended { amendment_hash: [u8; 32] },
+}
+```
+
+### Academic Foundations (Payment Channels and Dispute Resolution)
+
+- Poon, J. and Dryja, T. (2016). "The Bitcoin Lightning Network: Scalable Off-Chain Instant Payments." — State channel theory; foundation for agent payment channels.
+- Dziembowski, S. et al. (2019). "Perun: Virtual Payment Hubs over Cryptographic Currencies." *IEEE S&P*. — Virtual payment channels for multi-hop agent routing.
+- Rami Khalil, A. et al. (2018). "Commit-Chains: Secure, Scalable Off-Chain Payments." — Commit-chain model for batched off-chain settlement.
+- Hart, C. et al. (2021). "UMA's Data Verification Mechanism." *UMA Protocol*. — Optimistic oracle design with Schelling point game theory.
+- Lesaege, C. et al. (2019). "Kleros: Short Paper." *Crypto Valley Conference*. — Decentralized arbitration via random jury selection and Schelling point incentives.
+- x402 Protocol (2025). Coinbase/Linux Foundation. — HTTP-native micropayment protocol for machine-to-machine commerce.
+- Superfluid Finance (2021). "Programmable Cashflows." — Streaming payment protocol; real-time balance computation.
+- Celer AgentPay (2025). "Real-Time Payment Network for AI Agentic Economy." — State channel network purpose-built for AI agent transactions with generalized conditional payments.
+
+---
+
 ## Academic Foundations
 
 - x402 Protocol. Coinbase/Linux Foundation (2025). — The HTTP-native micropayment protocol for machine-to-machine commerce.

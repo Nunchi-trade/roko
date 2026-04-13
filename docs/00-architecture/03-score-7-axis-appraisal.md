@@ -371,14 +371,241 @@ result to a scalar for routing and composition decisions.
 
 ---
 
+## 9. Multi-Criteria Decision Analysis: Alternative Ranking Methods
+
+The current `effective()` formula produces a single scalar for total ordering. Three classical
+MCDA methods offer alternatives for contexts where the simple formula is insufficient.
+
+### 9.1 TOPSIS (Hwang & Yoon 1981)
+
+Technique for Order of Preference by Similarity to Ideal Solution. Measures each Engram's
+geometric distance from a Positive Ideal Solution (best possible on all axes) and a Negative
+Ideal Solution (worst possible). The relative closeness coefficient:
+
+```
+C_i* = S_i⁻ / (S_i⁺ + S_i⁻)     ∈ [0, 1]
+
+where:
+  S_i⁺ = sqrt( Σⱼ (v_ij - v_j⁺)² )  // distance to ideal
+  S_i⁻ = sqrt( Σⱼ (v_ij - v_j⁻)² )  // distance to anti-ideal
+  v_ij = w_j × r_ij                   // weighted normalized score
+```
+
+TOPSIS is fully compensatory (a large advantage on one axis offsets a deficit on another)
+and always produces a total ordering. Suitable for Engram ranking when all axes are
+commensurable.
+
+### 9.2 ELECTRE III (Roy 1968; Figueira et al. 2005)
+
+The outranking approach: "Engram A outranks B" means there is sufficient evidence in favor
+of A and no strong evidence against it. Three thresholds per axis:
+
+| Threshold | Symbol | Meaning |
+|---|---|---|
+| Indifference | q_j | Differences below q_j are ignored |
+| Preference | p_j | Differences above p_j establish strict preference |
+| **Veto** | v_j | Differences above v_j block outranking entirely |
+
+The veto threshold makes ELECTRE **non-compensatory**: zero confidence vetoes the Engram
+regardless of other axes. This is structurally equivalent to Roko's current design where
+`confidence = 0 → effective = 0`, but ELECTRE generalizes it to any axis.
+
+### 9.3 PROMETHEE (Brans & Vincke 1985)
+
+Pairwise preference functions map axis differences onto [0, 1]:
+
+```
+pi(a, b) = Σⱼ wⱼ × Pⱼ(a, b)    // multicriteria preference index
+
+phi⁺(a) = (1/(n-1)) Σ_{x≠a} pi(a, x)   // positive flow (dominance)
+phi⁻(a) = (1/(n-1)) Σ_{x≠a} pi(x, a)   // negative flow (dominated-ness)
+phi(a)  = phi⁺(a) - phi⁻(a)              // net flow → ranking
+```
+
+PROMETHEE I preserves **incomparability** — two Engrams that are strong on different axes
+remain unranked rather than forced into a total order. This is useful when the Router should
+consider multiple candidates rather than a single winner.
+
+### 9.4 When to Use Each
+
+| Situation | Method | Rationale |
+|---|---|---|
+| Standard Engram ranking (most cases) | `effective()` formula | Simple, fast, well-understood |
+| Context budget allocation (VCG auction) | TOPSIS | Produces normalized [0,1] scores for bidding |
+| Safety-critical verification | ELECTRE III | Veto thresholds prevent unsafe Engrams from passing |
+| Exploratory routing (multiple candidates) | PROMETHEE I | Preserves incomparability for diverse selection |
+
+---
+
+## 10. Optimal Dimensionality: Is 7 the Right Number?
+
+### 10.1 Miller (1956): The Magical Number Seven
+
+George Miller demonstrated that humans can reliably distinguish approximately 7 ± 2 levels
+on a single stimulus dimension (approximately 2-3 bits of information per channel). When
+information is distributed across multiple dimensions, total capacity increases but per-axis
+resolution decreases. Miller speculated that the limit on independent trackable dimensions
+is "somewhere in the neighborhood of ten."
+
+**Implication**: 7 axes is near the upper limit of human comprehension. For machine processing
+there is no constraint, but for human operators reviewing scores, 5 axes may be more practical.
+
+### 10.2 Factor Analysis (Thurstone 1947)
+
+Thurstone's Multiple Factor Analysis identified approximately 7 primary mental ability factors
+through empirical factor extraction. Across psychological datasets, factor analysis typically
+finds 3-8 meaningful factors before dimensionality becomes redundant.
+
+### 10.3 Appraisal Theory Consensus
+
+Across major appraisal theorists (Scherer 2001, Lazarus 1991, Smith & Ellsworth 1985), the
+consensus is **5 core dimensions** all theories agree on:
+
+1. Goal/need relevance → maps to **utility**
+2. Goal congruence → maps to **confidence** (was the outcome favorable?)
+3. Causal agency → maps to **reputation** (who caused this?)
+4. Coping potential → maps to **salience** (can we act on this?)
+5. Normative significance → maps to **coherence** (does it fit standards?)
+
+Plus 2 additional dimensions that are theory-specific:
+
+6. Novelty/unexpectedness → maps to **novelty**
+7. Certainty/predictability → maps to **precision**
+
+This gives 7 appraisal dimensions — converging independently with Miller's cognitive limit,
+Thurstone's factor analyses, and Roko's 7-axis design.
+
+**Validation criterion**: The 7 axes should be verified as genuinely independent via
+inter-correlation analysis on production score data. If any pair of axes correlates above
+r > 0.8, they should be merged.
+
+---
+
+## 11. Score Calibration
+
+### 11.1 The Calibration Problem
+
+Scores from different Scorers, domains, and time periods may not be directly comparable.
+A confidence of 0.8 from a `CompileGate` (deterministic, well-calibrated) is not the same
+as 0.8 from an `LlmJudgeGate` (probabilistic, potentially overconfident).
+
+### 11.2 Temperature Scaling (Guo et al. 2017)
+
+The simplest calibration method: a single parameter T > 0 applied to the score:
+
+```
+calibrated_score = score / T
+```
+
+T > 1 reduces overconfidence; T < 1 sharpens. T is tuned on a held-out set by minimizing
+Expected Calibration Error (ECE). Guo et al. showed temperature scaling matches or beats
+more complex methods for neural network calibration.
+
+### 11.3 Conformal Prediction (Vovk et al. 2005)
+
+Provides finite-sample coverage guarantees: the prediction set at level 1-α satisfies
+`P(Y ∈ C(X)) ≥ 1 - α` regardless of the score distribution. For Roko, this means bounded
+confidence intervals on any score axis without distributional assumptions.
+
+### 11.4 Domain-Specific Bias Correction
+
+For cross-domain score comparability, model domain-specific biases:
+
+```
+observed_score_ij = true_quality_i + domain_bias_j + noise_ij
+domain_bias_j ~ Normal(0, σ²_domain)
+```
+
+This hierarchical model (Gelman et al. 2013) shrinks domain biases toward zero, enabling
+meaningful cross-domain comparison of scores.
+
+---
+
+## 12. Bayesian Score Updating
+
+### 12.1 Beta-Binomial for Confidence
+
+Gate verdicts provide binary pass/fail evidence. The Beta-Binomial conjugate model updates
+confidence optimally:
+
+```rust
+/// Bayesian confidence updater using Beta-Binomial conjugacy.
+pub struct BayesianConfidenceUpdater {
+    /// Prior pseudo-counts: (alpha = prior passes, beta = prior fails).
+    /// Beta(2, 2) = weakly informative, centered at 0.5.
+    alpha: f64,
+    beta: f64,
+}
+
+impl BayesianConfidenceUpdater {
+    pub fn new() -> Self { Self { alpha: 2.0, beta: 2.0 } }
+
+    /// Update after a gate verdict.
+    pub fn update(&mut self, passed: bool) {
+        if passed { self.alpha += 1.0; } else { self.beta += 1.0; }
+    }
+
+    /// Posterior mean = calibrated confidence estimate.
+    pub fn confidence(&self) -> f32 {
+        (self.alpha / (self.alpha + self.beta)) as f32
+    }
+
+    /// Posterior variance = remaining uncertainty about quality.
+    pub fn uncertainty(&self) -> f32 {
+        let n = self.alpha + self.beta;
+        ((self.alpha * self.beta) / (n * n * (n + 1.0))) as f32
+    }
+
+    /// Effective sample size of the prior (how many observations to override).
+    pub fn prior_strength(&self) -> f64 { self.alpha + self.beta }
+}
+```
+
+### 12.2 Updating Parameters
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| `prior_alpha` | 2.0 | 0.5 - 10.0 | Prior pseudo-passes. Higher = more initial optimism. |
+| `prior_beta` | 2.0 | 0.5 - 10.0 | Prior pseudo-fails. Higher = more initial pessimism. |
+| `prior_strength` | 4.0 | 1.0 - 20.0 | Total prior weight. Higher = more observations needed to override. |
+| `ema_alpha` | 0.1 | 0.01 - 0.5 | EMA smoothing for rolling calibration. |
+
+### 12.3 Multi-Axis Updating
+
+For independent per-axis updating (the natural choice when axes represent orthogonal quality
+dimensions), maintain 7 independent Beta-Binomial models — one per axis. Each axis receives
+evidence from different sources:
+
+| Axis | Evidence Source | Update Trigger |
+|---|---|---|
+| confidence | Gate verdicts | Each gate pass/fail |
+| novelty | Complexity ratio (Section 14 of 02-engram-data-type.md) | On Engram creation |
+| utility | Downstream usage count | Each time the Engram is referenced |
+| reputation | Author's historical pass rate | Periodic reputation recalculation |
+| precision | Error specificity (vague vs. specific) | LLM evaluation |
+| salience | Context match score | Per-query relevance check |
+| coherence | MDL model fit | Against same-Kind corpus |
+
+---
+
 ## Academic Foundations
 
 | Citation | Contribution |
 |---|---|
-| Friston 2010, Nature Reviews Neuroscience 11(2) | Precision weighting in active inference — prediction errors weighted by their precision. Foundation for the precision axis. |
-| Scherer 2001, Applied AI 15 | Appraisal theory of emotion: multi-dimensional evaluation of stimuli. Theoretical basis for multi-axis scoring. |
-| Damasio 1994, Descartes' Error | Somatic markers: emotional signals bias decision-making. Score as a computational somatic marker. |
-| Kahneman & Tversky 1979, Econometrica 47(2) | Prospect theory: non-linear weighting of probabilities. Informs the multiplicative (not additive) combination formula. |
+| Friston 2010, Nature Reviews Neuroscience 11(2) | Precision weighting in active inference. Foundation for the precision axis. |
+| Scherer 2001, Applied AI 15 | Component Process Model: 14 Stimulus Evaluation Checks in 4 stages. Maps to 7-axis scoring. |
+| Lazarus 1991, *Emotion and Adaptation*, OUP | Cognitive-mediational theory: 5-7 appraisal dimensions. |
+| Smith & Ellsworth 1985, JPSP 48(4) | Empirical patterns of cognitive appraisal: 6 dimensions. |
+| Damasio 1994, Descartes' Error | Somatic markers: emotional signals bias decision-making. Score as computational somatic marker. |
+| Kahneman & Tversky 1979, Econometrica 47(2) | Prospect theory: non-linear weighting. Informs multiplicative combination formula. |
+| Miller 1956, Psychological Review 63(2) | The magical number seven: channel capacity limits on unidimensional judgment. |
+| Thurstone 1947, Univ. Chicago Press | Multiple Factor Analysis: empirical 7-factor structure in abilities. |
+| Hwang & Yoon 1981, Springer | TOPSIS: distance to ideal/anti-ideal solution for multi-criteria ranking. |
+| Roy 1968, RIRO | ELECTRE: outranking with indifference, preference, and veto thresholds. |
+| Brans & Vincke 1985, Management Science 31(6) | PROMETHEE: pairwise preference with net flow ranking. |
+| Guo et al. 2017, ICML | Temperature scaling for neural network calibration. |
+| Vovk et al. 2005, Springer | Conformal prediction: distribution-free finite-sample coverage guarantees. |
+| Gelman et al. 2013, CRC Press | Bayesian Data Analysis, 3rd ed. Hierarchical models for cross-domain calibration. |
 
 ---
 

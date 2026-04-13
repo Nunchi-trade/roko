@@ -276,3 +276,333 @@ new failure modes are cataloged.
 | `crates/roko-conductor/src/stuck_detection.rs` | MetaCognitionHook (Theta-frequency assessment) |
 | `crates/roko-conductor/src/health.rs` | Health monitor (periodic infrastructure check) |
 | `crates/roko-conductor/src/interventions.rs` | Decision resolution (Orient → Decide) |
+
+---
+
+## OODA Loop Speed Optimization
+
+### Boyd's key insight: tempo, not speed
+
+Boyd's central argument was not "cycle faster." It was "get inside the
+adversary's decision loop." For the Conductor, the adversary is drift —
+the gap between what agents are doing and what they should be doing. The
+goal is to update the world model faster than agent behavior can diverge
+from the plan.
+
+"Operating inside the loop" means the Conductor detects and corrects a
+deviation before the agent's next action compounds it. If an agent
+produces a ghost turn and the Conductor restarts it before the next turn
+fires, the loop stays tight. If three ghost turns accumulate before
+detection, the Conductor is operating outside the loop — reacting to
+damage rather than preventing it.
+
+Tempo is relational. A Conductor that evaluates every 500 ms is
+overbuilt if agents produce turns every 30 seconds. A Conductor that
+evaluates every 10 seconds is underbuilt if agents produce turns every
+2 seconds. The right tempo is one evaluation per event, with periodic
+health checks to cover silent failures.
+
+### What determines conductor cycle time
+
+The Conductor's per-evaluation latency breaks down as follows:
+
+| Component | Typical Latency | Optimization |
+|-----------|----------------|--------------|
+| Signal stream scan (10 watchers) | < 1 ms | Already optimal — pure in-memory scan |
+| Circuit breaker lookup (DashMap) | < 1 us | Already optimal — lock-free concurrent map |
+| Intervention policy resolution | < 1 us | Already optimal — max comparison |
+| Anomaly detector check | < 0.1 ms | EWMA update is O(1) |
+| Health monitor snapshot | ~10 ms | Periodic, not on critical path |
+| MetaCognition assessment | ~1 ms | Theta frequency, not every turn |
+| **Total per-evaluation** | **< 2 ms** | **Negligible vs agent turn times** |
+
+At < 2 ms per evaluation, the Conductor adds negligible overhead to any
+agent turn. The evaluation itself is never the bottleneck. The bottleneck
+is upstream: when do observations arrive?
+
+### The real bottleneck: observation latency
+
+The Conductor evaluates fast, but it can only evaluate what it can see.
+Observations arrive when events are produced — and an agent stuck in a
+long reasoning chain produces no events. Between the start of an agent
+turn and the completion of that turn, the Conductor is blind.
+
+The per-10s health monitor is the only mechanism that detects this gap.
+It checks infrastructure status independent of the event stream. But
+10 seconds is a coarse interval. An agent that hangs for 9 seconds
+gets no detection until the next health tick.
+
+A dedicated liveness monitor would close this gap:
+
+```rust
+/// Heartbeat-based liveness detection for agents between events.
+/// Detects stuck agents that produce no observable signals.
+pub struct LivenessMonitor {
+    /// Expected heartbeat interval per agent (default: 30s).
+    expected_interval: Duration,
+    /// Last heartbeat timestamp per agent.
+    last_heartbeat: DashMap<String, Instant>,
+    /// Warning threshold: fire warning at this multiple of expected_interval.
+    warning_multiplier: f64,  // default: 2.0 (60s for 30s interval)
+    /// Critical threshold: fire critical at this multiple.
+    critical_multiplier: f64, // default: 5.0 (150s for 30s interval)
+}
+```
+
+The liveness monitor runs on its own timer. If an agent's last heartbeat
+exceeds `expected_interval * warning_multiplier`, it emits a warning
+signal into the stream. If it exceeds `critical_multiplier`, it emits
+a critical signal. This gives the Conductor visibility into the gap
+between events without requiring agents to change their behavior —
+heartbeats are emitted by the process supervisor, not by agents
+themselves.
+
+### Implicit Guidance and Control (IG&C)
+
+Boyd described a shortcut in the OODA loop: when the Orient phase
+recognizes a well-known pattern, it can bypass the full Decide phase
+and jump straight to Act. He called this Implicit Guidance and Control.
+Klein's Recognition-Primed Decision model (1998) documents the same
+phenomenon in human experts — experienced firefighters do not deliberate
+over options; they recognize the situation and act.
+
+For the Conductor, IG&C means pre-compiled rules for common failure
+patterns:
+
+```rust
+/// Pre-compiled action rules for known patterns (Boyd's IG&C shortcut).
+/// Bypasses full watcher evaluation for well-understood failure modes.
+pub struct ImplicitGuidance {
+    /// Map from recognized pattern fingerprint to pre-computed action.
+    rules: Vec<ImplicitRule>,
+}
+
+pub struct ImplicitRule {
+    /// Pattern name for logging/observability.
+    pub name: &'static str,
+    /// Fast check: does this pattern match the current signal stream?
+    pub matcher: Box<dyn Fn(&[Signal]) -> bool + Send + Sync>,
+    /// Pre-computed action to take when the pattern matches.
+    pub action: ConductorDecision,
+    /// Minimum confidence from bandit training before this rule activates.
+    pub min_confidence: f64,
+}
+```
+
+When `ImplicitGuidance` matches the current signal stream, the Conductor
+skips full watcher evaluation and returns the pre-computed decision.
+This is faster (sub-microsecond), but more importantly it encodes
+institutional knowledge: patterns the system has seen before and knows
+how to handle.
+
+IG&C rules should not be hand-written. They should be extracted from the
+ConductorBandit's converged actions. When a bandit arm converges to >95%
+selection rate for a given failure pattern, that pattern graduates to an
+IG&C rule. The bandit continues to explore; the IG&C rule handles the
+common case.
+
+---
+
+## Nested OODA loops — multi-timescale control
+
+A single OODA loop is insufficient for a system that operates across
+multiple timescales. Agent turns happen in seconds, tasks take minutes,
+plans run for hours. A single loop tuned for seconds would generate
+excessive churn at the plan level. A single loop tuned for hours would
+miss per-turn anomalies.
+
+The solution is nested loops, each operating at its own frequency.
+
+### Three-level nesting
+
+Roko's cognitive frequencies map to three nested OODA loops:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Delta Loop (Strategic)                              │
+│  Period: per-batch (hours)                           │
+│  Orient: cross-plan patterns, model effectiveness    │
+│  Decide: cascade router updates, threshold tuning    │
+│  Act:    policy changes for next batch               │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐    │
+│  │  Theta Loop (Operational)                    │    │
+│  │  Period: per-task (minutes)                   │    │
+│  │  Orient: MetaCognitionHook assessment         │    │
+│  │  Decide: strategy adjustment, escalation      │    │
+│  │  Act:    restart agent, switch model           │    │
+│  │                                                │    │
+│  │  ┌───────────────────────────────────────┐   │    │
+│  │  │  Gamma Loop (Tactical)                 │   │    │
+│  │  │  Period: per-turn (seconds)             │   │    │
+│  │  │  Orient: all 10 watchers                │   │    │
+│  │  │  Decide: intervention policy            │   │    │
+│  │  │  Act:    continue/restart/fail           │   │    │
+│  │  └───────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────┘
+```
+
+The innermost loop (Gamma) handles per-turn tactical decisions: is this
+agent turn healthy? The middle loop (Theta) handles per-task operational
+decisions: is this task making progress? The outer loop (Delta) handles
+per-batch strategic decisions: is the system learning and improving?
+
+### Separation of concerns
+
+Each loop has its own orientation model — different data sources,
+different scopes, different update frequencies:
+
+| Loop | Orientation Source | Model Scope | Update Frequency |
+|------|-------------------|-------------|-----------------|
+| Gamma | Watcher thresholds (static constants) | Single agent turn | Every turn |
+| Theta | MetaCognition assessment + stuck heuristics | Task trajectory | Every 3-5 turns |
+| Delta | Efficiency events + cascade router observations | Cross-plan patterns | Per batch |
+
+The Gamma loop does not know about cross-plan patterns. The Delta loop
+does not know about individual agent turns. This is not a limitation —
+it is the design. Each loop sees only what it needs at its timescale.
+
+### Parameter cascade
+
+Slower loops set the parameters for faster loops. This is the
+foundational principle from hierarchical control theory (Mesarovic
+et al. 1970): the slower controller sets the frame within which the
+faster controller operates.
+
+In Roko:
+- **Delta sets Theta parameters**: adaptive gate thresholds, default
+  model tier, cost budgets per task
+- **Theta sets Gamma parameters**: adjusted watcher thresholds based
+  on meta-cognition assessment, intervention cooldown periods
+
+```rust
+/// Hierarchical parameter cascade: slower loops configure faster loops.
+pub struct ParameterCascade {
+    /// Delta-level parameters (updated per batch).
+    pub delta: DeltaParameters,
+    /// Theta-level parameters (updated per task).
+    pub theta: ThetaParameters,
+    /// Gamma-level parameters (used per turn, set by Theta).
+    pub gamma: GammaParameters,
+}
+
+pub struct DeltaParameters {
+    pub default_model_tier: ModelTier,
+    pub base_cost_budget_usd: f64,
+    pub gate_threshold_adjustments: HashMap<String, f64>,
+}
+
+pub struct ThetaParameters {
+    pub adjusted_stuck_threshold: usize,
+    pub adjusted_ghost_turn_max: usize,
+    pub current_pressure_level: f64,  // 0.0 to 1.0
+}
+
+pub struct GammaParameters {
+    pub watcher_thresholds: WatcherThresholds,
+    pub intervention_cooldown: Duration,
+}
+```
+
+The cascade flows one direction: slow to fast. The Gamma loop never
+modifies Delta parameters. If the Gamma loop detects something that
+requires a strategic response, it emits a signal into the stream. The
+Delta loop picks it up on its next evaluation — at its own pace.
+
+### Singular perturbation principle
+
+When timescales are well-separated, each loop can be analyzed
+independently. This is the singular perturbation result from control
+theory: if the fast loop reaches steady state before the slow loop
+takes its next step, the two loops decouple mathematically.
+
+In Roko:
+- Gamma runs every ~5 seconds (per agent turn)
+- Theta runs every ~75 seconds (per task, roughly every 15 Gamma cycles)
+- Delta runs every ~hours (per batch, roughly 50-100 Theta cycles)
+
+The ~15x separation between adjacent levels is sufficient for
+quasi-static decoupling. The Gamma loop treats Theta parameters as
+constants — they change slowly relative to per-turn evaluation. The
+Theta loop assumes the Gamma loop has reached its steady-state
+decision for the current watcher outputs.
+
+This separation is what makes the hierarchical architecture tractable.
+Without it, every parameter change at every level would interact with
+every other level, producing a combinatorial analysis problem. With it,
+each level can be understood, tuned, and debugged in isolation.
+
+---
+
+## Algedonic signals — priority interrupts
+
+### Definition
+
+Algedonic signals are pain/pleasure signals that bypass the normal
+management hierarchy, going directly from operations to policy. The
+term comes from Greek: algos (pain) + hedone (pleasure). Beer
+introduced the concept in the Viable System Model as the mechanism
+by which System 1 (operations) alerts System 5 (policy) without
+waiting for the signal to propagate through Systems 2, 3, and 4.
+
+In the Conductor, algedonic signals represent conditions severe enough
+that the normal evaluation pipeline is too slow. The Gamma loop should
+not deliberate over whether a safety violation warrants intervention.
+
+### When algedonic signals fire
+
+Four conditions trigger algedonic escalation:
+
+1. **Runaway cost**: total session cost exceeds 2x budget before 50%
+   of wall time has elapsed. The cost trajectory predicts catastrophic
+   overrun, not a gradual approach to the budget ceiling.
+
+2. **Safety violation**: an agent attempts to modify files outside the
+   declared workspace scope, execute disallowed commands, or access
+   restricted resources. Any safety violation is an immediate interrupt
+   regardless of severity assessment.
+
+3. **Total infrastructure failure**: all agents are down simultaneously.
+   Not one agent failing (which the Gamma loop handles), but every
+   agent in the current execution losing connectivity or crashing at
+   once.
+
+4. **Operator interrupt**: explicit Ctrl+C or shutdown command. The
+   human operator is the ultimate algedonic channel — their interrupt
+   overrides everything.
+
+### Escalation with time windows
+
+Each layer in the hierarchy gets a bounded window to respond before the
+signal escalates upward:
+
+```
+Agent detects anomaly → Conductor has 5s to respond
+    | (no response within 5s)
+Orchestrator has 30s to respond
+    | (no response within 30s)
+Policy layer triggers emergency shutdown
+```
+
+The time windows enforce liveness. A Conductor that hangs (perhaps
+because the anomaly also affects its evaluation path) cannot silently
+block the escalation. If the Conductor does not respond within 5
+seconds, the orchestrator takes over. If the orchestrator does not
+respond within 30 seconds, the policy layer performs an emergency
+shutdown — kill all agents, persist state, exit with a non-zero status.
+
+Algedonic signals are rare by design. If they fire frequently, the
+normal feedback loops are miscalibrated. A well-tuned system routes
+almost everything through the Gamma/Theta/Delta hierarchy and reserves
+algedonic escalation for genuine emergencies.
+
+---
+
+## References
+
+- Boyd, J. (1995). "The Essence of Winning and Losing" (OODA loop diagram).
+- Boyd, J. (1976). "Destruction and Creation" (theoretical underpinning of OODA).
+- Beer, S. (1972). *Brain of the Firm* (Viable System Model, algedonic signals).
+- Mesarovic, M., Macko, D., and Takahara, Y. (1970). *Theory of Hierarchical, Multilevel Systems* (hierarchical control, parameter cascade).
+- Klein, G. (1998). *Sources of Power: How People Make Decisions* (Recognition-Primed Decision model, parallel to IG&C).

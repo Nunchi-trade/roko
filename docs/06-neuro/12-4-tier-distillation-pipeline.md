@@ -566,6 +566,203 @@ impl DreamsDistillationTrigger {
 
 ---
 
+## Distillation Quality Metrics
+
+### Measuring Distillation Effectiveness
+
+How do you know if the distillation pipeline is producing good knowledge? Five metrics, tracked over time:
+
+```rust
+/// Quality metrics for the distillation pipeline.
+///
+/// Computed per Dreams cycle and logged to `.roko/learn/distillation-quality.jsonl`.
+pub struct DistillationQualityReport {
+    /// Timestamp of this report.
+    pub timestamp: DateTime<Utc>,
+    /// D1 metrics: episode → insight extraction.
+    pub d1: D1Metrics,
+    /// D2 metrics: insight → heuristic promotion.
+    pub d2: D2Metrics,
+    /// D3 metrics: heuristic → playbook compilation.
+    pub d3: D3Metrics,
+    /// Overall pipeline health score (0.0 - 1.0).
+    pub pipeline_health: f64,
+}
+
+pub struct D1Metrics {
+    /// Extraction yield: insights extracted per episode. Target: 1.5-3.0.
+    pub extraction_yield: f64,
+    /// Survival rate: fraction of D1 outputs that survive to Working tier.
+    /// Target: 0.3-0.5. Below 0.2 = too many false patterns. Above 0.7 = too conservative.
+    pub survival_rate: f64,
+    /// Novelty rate: fraction of D1 outputs that are genuinely new
+    /// (not duplicates of existing entries). Target: > 0.5.
+    pub novelty_rate: f64,
+    /// Contradiction rate: fraction of D1 outputs that match existing AntiKnowledge.
+    /// Should be < 0.05 (distillation should not re-extract known-false patterns).
+    pub contradiction_rate: f64,
+}
+
+pub struct D2Metrics {
+    /// Cluster quality: mean intra-cluster HDC similarity. Target: > 0.54.
+    pub cluster_cohesion: f32,
+    /// Promotion rate: fraction of clusters that meet promotion criteria.
+    /// Target: 0.1-0.3. Below 0.05 = criteria too strict. Above 0.5 = too permissive.
+    pub promotion_rate: f64,
+    /// Cross-validation score: fraction of promoted heuristics from 2+ contexts.
+    /// Must be 1.0 (all promoted heuristics pass cross-validation by design).
+    pub cross_validation_score: f64,
+    /// Heuristic longevity: mean age (days) of heuristics before demotion.
+    /// Target: > 30 days. Short-lived heuristics indicate false promotions.
+    pub heuristic_mean_age_days: f64,
+}
+
+pub struct D3Metrics {
+    /// Playbook coverage: fraction of active heuristics included in PLAYBOOK.md.
+    /// Target: > 0.8.
+    pub playbook_coverage: f64,
+    /// Playbook actionability: fraction of playbook rules that have been
+    /// successfully applied in tasks since last compilation. Target: > 0.5.
+    pub playbook_actionability: f64,
+    /// Staleness: days since last PLAYBOOK.md update. Target: < 7 days.
+    pub days_since_update: f64,
+}
+```
+
+### Distillation Quality Thresholds
+
+| Metric | Healthy | Warning | Critical |
+|---|---|---|---|
+| D1 extraction yield | 1.5 - 3.0 | < 1.0 or > 5.0 | < 0.5 or > 10.0 |
+| D1 survival rate | 0.3 - 0.5 | < 0.2 or > 0.7 | < 0.1 or > 0.9 |
+| D1 contradiction rate | < 0.05 | 0.05 - 0.10 | > 0.10 |
+| D2 cluster cohesion | > 0.54 | 0.52 - 0.54 | < 0.52 |
+| D2 promotion rate | 0.1 - 0.3 | < 0.05 or > 0.5 | < 0.01 or > 0.8 |
+| D2 heuristic longevity | > 30 days | 14 - 30 days | < 14 days |
+| D3 playbook coverage | > 0.8 | 0.5 - 0.8 | < 0.5 |
+| D3 playbook actionability | > 0.5 | 0.3 - 0.5 | < 0.3 |
+
+**References**: Hinton, G. et al. (2015). "Distilling the Knowledge in a Neural Network." *NIPS Workshop*. Salimans, T. & Ho, J. (2022). "Progressive Distillation for Fast Sampling." *ICLR 2022*.
+
+---
+
+## Distillation Scheduling
+
+### When and How Often to Distill
+
+Distillation is not free — LLM-based D1 extraction costs tokens, and D2/D3 consume CPU time for clustering and compilation. The scheduler balances freshness against cost.
+
+```rust
+/// Distillation scheduling policy.
+///
+/// Determines when each stage runs and how much budget to allocate.
+pub struct DistillationScheduler {
+    /// D1 scheduling: episode → insight extraction.
+    pub d1_policy: D1Policy,
+    /// D2 scheduling: insight → heuristic promotion.
+    pub d2_policy: D2Policy,
+    /// D3 scheduling: heuristic → playbook compilation.
+    pub d3_policy: D3Policy,
+    /// Global budget: maximum LLM tokens per hour for distillation.
+    pub hourly_token_budget: usize,
+    /// Current token usage in the current hour window.
+    pub tokens_used_this_hour: usize,
+}
+
+pub struct D1Policy {
+    /// Trigger: run D1 after each completed episode. Default: true.
+    /// When false, D1 runs only during Dreams cycles.
+    pub run_after_episode: bool,
+    /// Maximum episodes to batch before running D1. Default: 1.
+    /// Higher values amortize LLM cost but delay insight extraction.
+    pub batch_size: usize,
+    /// Minimum episode quality for D1. Default: 0.3.
+    /// Skip D1 for episodes that were trivial or failed completely.
+    pub min_episode_quality: f64,
+    /// Curriculum ordering: process easier episodes first. Default: true.
+    /// Based on Bengio et al. (2009) curriculum learning.
+    pub curriculum_ordering: bool,
+}
+
+pub struct D2Policy {
+    /// Minimum interval between D2 runs. Default: 6 hours.
+    pub min_interval: Duration,
+    /// Minimum new insights since last D2 run. Default: 10.
+    /// Don't run D2 if there aren't enough new insights to form clusters.
+    pub min_new_insights: usize,
+    /// Run during Dreams only. Default: true.
+    pub dreams_only: bool,
+}
+
+pub struct D3Policy {
+    /// Minimum interval between PLAYBOOK.md recompilation. Default: 24 hours.
+    pub min_interval: Duration,
+    /// Minimum new heuristics since last D3 run. Default: 3.
+    pub min_new_heuristics: usize,
+    /// Run during Dreams only. Default: true.
+    pub dreams_only: bool,
+}
+
+impl DistillationScheduler {
+    /// Check if D1 should run for a completed episode.
+    pub fn should_run_d1(&self, episode_quality: f64) -> bool {
+        self.d1_policy.run_after_episode
+            && episode_quality >= self.d1_policy.min_episode_quality
+            && self.tokens_used_this_hour < self.hourly_token_budget
+    }
+
+    /// Check if D2 should run (typically called from Dreams cycle).
+    pub fn should_run_d2(
+        &self,
+        last_d2: Option<DateTime<Utc>>,
+        new_insights_since_d2: usize,
+    ) -> bool {
+        let interval_ok = last_d2.map_or(true, |t| {
+            Utc::now() - t > chrono::Duration::from_std(self.d2_policy.min_interval)
+                .unwrap_or(chrono::Duration::hours(6))
+        });
+        interval_ok && new_insights_since_d2 >= self.d2_policy.min_new_insights
+    }
+}
+```
+
+### Curriculum-Ordered Distillation
+
+Inspired by Bengio et al. (2009) curriculum learning, D1 processes episodes in order of estimated difficulty:
+
+```
+Episode difficulty ≈ 1.0 - (gate_pass_count / total_gates)
+
+1. Easy episodes (high pass rate) are processed first → cleaner insights
+2. Hard episodes (many failures) are processed later → more nuanced insights
+3. Failed episodes (all gates failed) are processed last → primarily produce Warnings
+```
+
+This ordering improves D1 extraction quality because the distillation LLM builds up a context of established patterns from easy episodes before tackling ambiguous or failure-heavy ones.
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| D1 batch size | 1 | 1 - 10 | Higher = fewer LLM calls, delayed extraction |
+| D1 min episode quality | 0.3 | 0.0 - 0.5 | Below 0.3 = trivial/failed episodes |
+| D2 min interval | 6 hours | 1 - 24 hours | Lower = more frequent but more CPU cost |
+| D2 min new insights | 10 | 3 - 50 | Lower = smaller clusters, less confident |
+| D3 min interval | 24 hours | 6 - 72 hours | Playbook recompiles are relatively cheap |
+| Hourly token budget | 50,000 | 10K - 500K | Controls distillation LLM cost |
+
+**References**: Bengio, Y. et al. (2009). "Curriculum Learning." *ICML 2009*. Furlanello, T. et al. (2018). "Born Again Neural Networks." *ICML 2018*.
+
+**Test criteria**:
+- D1 extraction yield in healthy range (1.5-3.0) for a test corpus of 10 episodes
+- D2 does not run before min_interval elapses
+- D2 does not run when new_insights < min_new_insights
+- D3 generates valid Markdown from promoted heuristics
+- Curriculum ordering: easy episodes processed before hard ones
+- Token budget respected: scheduler returns false when budget exceeded
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**:

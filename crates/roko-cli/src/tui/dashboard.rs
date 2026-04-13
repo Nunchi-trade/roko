@@ -535,18 +535,19 @@ impl DashboardData {
             .collect();
         let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         let cfactor_stamp = file_stamp(&cfactor_path);
+
+        // Load task outputs before plan execution so backfill can use them
+        let task_outputs_dir = roko_dir.join("task-outputs");
+        let task_outputs = load_task_outputs(&task_outputs_dir);
+        let task_outputs_stamp = file_stamp(&task_outputs_dir);
+
         let current_plan_execution = load_current_plan_execution(
             &root,
             &state,
             &episodes,
-            &HashMap::new(), // task_outputs not yet loaded
+            &task_outputs,
         );
         let efficiency_stamp = file_stamp(&efficiency_path);
-
-        // Load task outputs from .roko/task-outputs/
-        let task_outputs_dir = roko_dir.join("task-outputs");
-        let task_outputs = load_task_outputs(&task_outputs_dir);
-        let task_outputs_stamp = file_stamp(&task_outputs_dir);
 
         // Backfill agent_output_tail from task-outputs if episode didn't provide it
         let current_plan_execution = backfill_agent_output_tail(

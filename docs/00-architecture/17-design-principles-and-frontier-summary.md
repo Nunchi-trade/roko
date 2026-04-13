@@ -459,27 +459,174 @@ Each innovation has different validation requirements:
 
 ---
 
+## 5. Theoretical Foundations of the Design Principles
+
+### 5.1 Information Hiding (Parnas 1972)
+
+Parnas's paper "On the Criteria to Be Used in Decomposing Systems into Modules" (CACM 15(12))
+established the foundational criterion: **"Begin with a list of difficult design decisions or
+design decisions which are likely to change."** Each decision becomes the secret of exactly
+one module. The interface reveals as little as possible.
+
+Each Synapse trait passes the Parnas test:
+- `Scorer` hides the scoring algorithm (neural model, heuristic, or lookup table)
+- `Gate` hides the verification mechanism (subprocess, API call, simulation)
+- `Router` hides the selection algorithm (static, bandit, cascade)
+- `Composer` hides the assembly strategy (template, VCG auction, priority queue)
+
+The danger is "interface leakage" — when the `Signal` type exposes internal representation
+details through the trait interface, coupling all traits through the shared type.
+
+### 5.2 Module Depth (Ousterhout 2018)
+
+Ousterhout defines module depth = benefit / interface cost. Deep modules have large
+implementations behind small interfaces. Each Synapse trait has a 1-3 method interface hiding
+arbitrarily complex implementations — this is maximally deep design.
+
+**Information leakage** occurs when a design decision appears in multiple trait interfaces.
+If two traits both need to know the prompt template format, the template format has leaked.
+Fix: introduce a new module whose secret is the template format.
+
+### 5.3 Clean Architecture / Hexagonal Architecture
+
+Martin's Clean Architecture (2017) and Cockburn's Hexagonal Architecture (2005) converge on
+the same principle: **dependencies point inward**. Domain types (Engram, Score, Kind) are in
+the center. Infrastructure (Substrate backends, LLM APIs) is on the outside. The Substrate
+does not define what an Engram is; the Engram defines what the Substrate must store.
+
+Hexagonal Architecture adds the **port/adapter** distinction that Roko implements exactly:
+- **Ports** = Synapse traits (Substrate, Scorer, Gate, Router, Composer, Policy)
+- **Adapters** = Concrete implementations (FileSubstrate, CompileGate, CascadeRouter)
+
+Multiple adapters per port is the norm: MemorySubstrate for testing, FileSubstrate for
+production, ChainSubstrate for on-chain state.
+
+### 5.4 Algebraic Effects as Theoretical Ideal
+
+Algebraic effects (Plotkin & Power 2001; Bauer & Pretnar 2015; Leijen 2017) represent the
+theoretical ideal that Rust's trait system approximates. In an effect system, each capability
+is an **effect declaration** (not a trait). Handlers provide interpretations (not impl blocks).
+Effect rows replace generic bounds.
+
+The 6-trait system is an approximation of a 6-effect system constrained by Rust's lack of
+native effect polymorphism. The key insight: handlers can be stacked (a caching handler wraps
+a neural-model handler), enabling compositional interpretation without trait inheritance.
+
+Rust's `async`/`await` is already a special-cased algebraic effect. The Koka language (Leijen
+2014) implements general algebraic effects with row-typed effect polymorphism. If Rust gains
+higher-kinded types or effect polymorphism, the Synapse traits could be reframed as effects.
+
+### 5.5 Functional Core / Imperative Shell (Bernhardt 2012)
+
+The Synapse Architecture naturally implements this pattern:
+- **Functional core** (pure, immutable): Scorer, Router, Composer, Policy — all operate on
+  immutable `Signal` values and return new values. No I/O, no state mutation.
+- **Imperative shell** (effectful): Substrate (persistence), Agent dispatch (LLM calls) —
+  the only impure operations.
+
+This creates a clean testing boundary: functional core traits can be tested with pure
+inputs/outputs and no mocking. Imperative shell traits require integration testing.
+
+---
+
+## 6. Anti-Patterns Catalog: Designs Explicitly Rejected
+
+Based on the MAST taxonomy of multi-agent system failures (Cemri et al. 2025, arXiv:2503.13657)
+and empirical agent failure analysis.
+
+### 6.1 The God Agent Anti-Pattern
+
+**Rejected**: A single agent instructed to perform all roles simultaneously (coder, reviewer,
+tester, architect). MAST finding: 41.8% of multi-agent failures stem from specification and
+system design issues; role ambiguity is the leading cause.
+
+**Roko's design**: Agent roles are explicit (`RoleSystemPromptSpec` in `roko-compose`). Each
+role has defined responsibilities AND exclusions. Nine role templates provide clear behavioral
+boundaries.
+
+### 6.2 Hallucination Amplification Loop
+
+**Rejected**: Pipeline where Agent B takes Agent A's unverified output as trusted input. Error
+amplifies at each step through conformity bias and chain-of-thought amplification (OWASP ASI08:
+"Cascading Failures in Agentic AI").
+
+**Roko's design**: P2 (Verify Everything) structurally prevents this. Every output passes
+through the Gate pipeline before being persisted or used as input. The lineage DAG traces
+every Engram to its verified sources.
+
+### 6.3 Unbounded Context Sharing
+
+**Rejected**: Agents sharing a single growing context window that amplifies both errors and
+distraction. MAST FM-1.4: loss of conversation history occurs when context exceeds the window.
+
+**Roko's design**: P3 (Budget-Aware) limits context via `Budget { max_tokens, max_signals,
+max_bytes, max_wall_ms }`. The VCG Attention Auction allocates context optimally rather than
+growing it unboundedly.
+
+### 6.4 Implicit Termination
+
+**Rejected**: Termination condition is "when the task is done" without an operationalized check.
+MAST FM-1.5: 8.2% of failures are premature termination or failure to terminate.
+
+**Roko's design**: Every task has a machine-readable completion criterion checked by the Gate
+pipeline. Budget thresholds (`warn_threshold`, `block_threshold`) provide hard stops.
+`max_turns` bounds every agent invocation.
+
+### 6.5 Self-Verification
+
+**Rejected**: An agent verifying its own output. MAST FM-3.3: 9.1% of failures involve
+incorrect verification — agents rationalizing their own output as correct.
+
+**Roko's design**: Gates are structurally separate from the producing agent. `CompileGate`
+runs an external subprocess. `TestGate` runs the test suite. `JudgeGate` uses a separate
+LLM invocation. No agent evaluates its own work.
+
+### 6.6 Configuration Over Composition
+
+**Rejected**: `if config.mode == "chain" { ... } else if config.mode == "coding" { ... }`.
+Domain behavior controlled by config flags rather than trait implementations.
+
+**Roko's design**: P1 (Composition Over Configuration). Domain behavior is a trait
+implementation plugged into the universal loop. New domains add trait implementations;
+no core changes needed.
+
+### 6.7 Verification as Afterthought
+
+**Rejected**: Adding verification at the end of a pipeline as an optional step that can be
+skipped for speed.
+
+**Roko's design**: P2 places verification at Step 6 of the 9-step loop — structurally central,
+not appendable. Gate verdicts are Engrams in the lineage DAG; skipping them leaves an audit
+gap that is visible to any DAG traversal.
+
+---
+
 ## Academic Foundations
 
 | Citation | Contribution |
 |---|---|
-| Chen et al. 2023, arXiv:2305.05176 | FrugalGPT: cascade cost optimization, up to 98% reduction |
-| Vickrey 1961; Clarke 1971; Groves 1973 | VCG mechanism: truthful bidding for resource allocation |
-| Damasio 1994, "Descartes' Error" | Somatic marker hypothesis: emotion biases decisions |
-| Bower 1981 | Mood-congruent memory: emotional state biases recall |
-| Lacaux et al. 2021, Science Advances 7(50) | Hypnagogia: 83% hidden rule discovery in N1 |
-| Haar Horowitz 2020/2023 (MIT Dormio) | Targeted dream incubation: 43% creativity boost |
-| Derrida 1993 | Hauntology: "differently haunted" experiential traces |
-| Boden 2004, "The Creative Mind" | Three creativity modes: combinational, exploratory, transformational |
-| Hu et al. 2025, ICLR | ADAS: meta-agent architecture search, +14% ARC Challenge |
-| Kanerva 2009, Cognitive Computation 1(2) | HDC: hyperdimensional computing for similarity search |
-| Plate 2003 | Holographic Reduced Representations: HDC for knowledge |
-| Kleyko et al. 2022, Artificial Intelligence Review | Survey of HDC applications |
-| Charnov 1976 | Marginal Value Theorem: optimal foraging stopping rule |
-| Pirolli & Card 1999 | Information Foraging Theory |
-| Conant & Ashby 1970, IJSS 1(2) | Good Regulator Theorem |
-| Lee et al. 2026, arXiv:2603.28052 | Meta-Harness: +7.7 pts text classification, +4.7 pts IMO math from harness optimization |
-| Karpathy 2025 | Context engineering: "the delicate art of filling the context window" |
+| Parnas 1972, CACM 15(12) | Information hiding: modules hide design decisions likely to change. |
+| Ousterhout 2018, Yaknyam Press | Module depth: simple interfaces, powerful implementations. |
+| Martin 2017, Prentice Hall | Clean Architecture: dependencies point inward. |
+| Cockburn 2005, Technical Report | Hexagonal Architecture: ports (traits) and adapters (impls). |
+| Plotkin & Power 2001, FoSSaCS, LNCS 2030 | Algebraic effects: adequacy for effect algebras. |
+| Bauer & Pretnar 2015, JLAMP 84(1) | Programming with algebraic effects and handlers. |
+| Leijen 2017, POPL | Row-typed algebraic effects: efficient compilation of effect systems. |
+| Bernhardt 2012, SCNA | Functional Core / Imperative Shell pattern. |
+| Cemri et al. 2025, arXiv:2503.13657 | MAST: 14 failure modes across 150 multi-agent system traces. |
+| OWASP ASI08 2026 | Cascading Failures in Agentic AI: error amplification taxonomy. |
+| Evans 2003, Addison-Wesley | Domain-Driven Design: ubiquitous language, bounded contexts. |
+| Hewitt et al. 1973, IJCAI | Actor Model: concurrent computation via message passing. |
+| Chen et al. 2023, arXiv:2305.05176 | FrugalGPT: cascade cost optimization, up to 98% reduction. |
+| Vickrey 1961; Clarke 1971; Groves 1973 | VCG mechanism: truthful bidding for resource allocation. |
+| Damasio 1994, Descartes' Error | Somatic marker hypothesis: emotion biases decisions. |
+| Lacaux et al. 2021, Science Advances 7(50) | Hypnagogia: 83% hidden rule discovery in N1. |
+| Hu et al. 2025, ICLR | ADAS: meta-agent architecture search, +14% ARC Challenge. |
+| Kanerva 2009, Cognitive Computation 1(2) | HDC: hyperdimensional computing for similarity search. |
+| Kleyko et al. 2022, Artificial Intelligence Review | Survey of HDC applications. |
+| Charnov 1976 | Marginal Value Theorem: optimal foraging stopping rule. |
+| Conant & Ashby 1970, IJSS 1(2) | Good Regulator Theorem. |
+| Lee et al. 2026, arXiv:2603.28052 | Meta-Harness: harness optimization alone produces outsized gains. |
 
 ---
 

@@ -352,7 +352,290 @@ fn resolve_budget_conflicts(sections: &mut [AvailableSection], total_budget: usi
 
 ---
 
-## 11. Current Status and Gaps
+## 11. Budget Prediction: Estimate Before Assembly
+
+Before assembling context, predict how much budget a task will need. This avoids two failure modes: (a) over-fetching context for trivial tasks (wastes tokens, risks context rot), and (b) under-fetching for complex tasks (insufficient context, gate failure).
+
+### 11.1 The TALE Approach
+
+The TALE framework [Hu et al., ACL Findings 2025, arXiv:2412.18547] demonstrated that models can predict the token budget needed for a problem **before** generating the solution. TALE reduces token usage by 68.9% with <5% accuracy loss. The key insight: there is a consistent positive correlation between problem complexity and allocated budget — the model learns to quantify difficulty.
+
+Applied to Roko: before running the 5-stage assembly pipeline, a lightweight predictor estimates the context budget needed for this specific task.
+
+### 11.2 Budget Predictor
+
+```rust
+/// Predicts the token budget a task will need before assembly begins.
+pub struct BudgetPredictor {
+    /// Historical task outcomes: (features, budget_used, gate_passed).
+    history: Vec<BudgetObservation>,
+    /// Feature extractor for task descriptions.
+    feature_extractor: TaskFeatureExtractor,
+    /// Regression model: features → predicted optimal budget.
+    model: BudgetRegressionModel,
+}
+
+pub struct BudgetObservation {
+    pub task_category: String,
+    pub complexity: Complexity,
+    pub role: AgentRole,
+    pub files_touched: usize,
+    pub crates_involved: usize,
+    pub has_prior_failures: bool,
+    pub budget_allocated: usize,
+    pub budget_used: usize,         // how much the agent actually consumed
+    pub gate_passed: bool,
+    pub iterations_needed: usize,
+}
+
+pub struct TaskFeatureExtractor;
+
+impl TaskFeatureExtractor {
+    /// Extract features from a task for budget prediction.
+    pub fn extract(&self, task: &TaskInput) -> TaskFeatures {
+        TaskFeatures {
+            description_tokens: estimate_tokens(&task.description),
+            file_count: task.read_files.len(),
+            crate_count: task.target_crates.len(),
+            has_gate_errors: !task.prior_gate_errors.is_empty(),
+            iteration_number: task.iteration,
+            complexity_band: task.complexity,
+            role: task.role,
+        }
+    }
+}
+
+pub struct BudgetRegressionModel {
+    /// Per-category linear regression coefficients.
+    /// Predicts: optimal_budget = bias + Σ(w_i × feature_i)
+    coefficients: HashMap<String, Vec<f64>>,
+    /// Minimum observations before trusting predictions.
+    min_observations: usize,  // default: 15
+}
+
+impl BudgetRegressionModel {
+    /// Predict optimal budget for a task.
+    pub fn predict(&self, category: &str, features: &TaskFeatures) -> Option<usize> {
+        let coeffs = self.coefficients.get(category)?;
+        if self.observation_count(category) < self.min_observations {
+            return None;  // Not enough data — use static budget
+        }
+        let prediction = coeffs[0]  // bias
+            + coeffs[1] * features.description_tokens as f64
+            + coeffs[2] * features.file_count as f64
+            + coeffs[3] * features.crate_count as f64
+            + coeffs[4] * features.has_gate_errors as i32 as f64
+            + coeffs[5] * features.iteration_number as f64;
+        Some(prediction.max(2000.0) as usize)  // floor at 2000 tokens
+    }
+}
+```
+
+### 11.3 Prediction → Static Fallback Cascade
+
+```
+fn resolve_budget(task: &TaskInput, predictor: &BudgetPredictor) -> usize {
+    // 1. Try learned prediction
+    if let Some(predicted) = predictor.predict(task) {
+        return predicted;
+    }
+    // 2. Fall back to complexity-adaptive static budget
+    let adjusted = adjusted_budget_for(task.role, task.complexity);
+    adjusted.total_tokens()
+}
+```
+
+### 11.4 SelfBudgeter Pattern
+
+The SelfBudgeter approach [Li et al., arXiv:2505.11274, May 2025] trains the model itself to predict its needed budget before reasoning. Applied to Roko: instead of an external predictor, the system prompt can include a preamble asking the agent to estimate its context needs:
+
+```
+Before starting, briefly assess: on a scale of 1-5, how much context
+do you need for this task? (1 = trivial rename, 5 = cross-crate architectural change)
+```
+
+The agent's self-assessment is parsed and used to dynamically adjust which enrichment artifacts are loaded. This is lower accuracy than the statistical predictor but requires zero training data.
+
+---
+
+## 12. Budget Learning: Track and Optimize Allocations
+
+### 12.1 Per-Section Value Tracking
+
+Every task execution records which sections were included, their token counts, and the outcome:
+
+```rust
+/// Recorded after each task execution for budget optimization.
+pub struct BudgetOutcome {
+    pub task_id: String,
+    pub task_category: String,
+    pub role: AgentRole,
+    pub complexity: Complexity,
+    /// Per-section: (name, tokens_allocated, was_included, was_truncated).
+    pub section_allocations: Vec<SectionAllocationRecord>,
+    /// Task outcome.
+    pub gate_passed: bool,
+    pub iterations_needed: usize,
+    pub total_input_tokens: usize,
+    pub total_output_tokens: usize,
+    pub total_cost_usd: f64,
+    pub timestamp: Timestamp,
+}
+
+pub struct SectionAllocationRecord {
+    pub section_name: String,
+    pub tokens_allocated: usize,
+    pub tokens_actual: usize,
+    pub was_included: bool,
+    pub was_truncated: bool,
+    pub priority: SectionPriority,
+}
+```
+
+### 12.2 Leave-One-Out Section Value
+
+The Contextual Influence Value framework [Shanghai Jiao Tong University 2025] measures per-section impact through leave-one-out analysis. Applied to Roko's budget system:
+
+```
+For each section S in the context pack:
+    influence(S) = pass_rate_with_S - pass_rate_without_S
+
+If influence(S) > 0: S is valuable — increase its budget allocation.
+If influence(S) ≈ 0: S is neutral — candidate for compression or dropping.
+If influence(S) < 0: S is harmful — drop it (it's introducing context rot).
+```
+
+This doesn't require controlled experiments (which are expensive). Instead, it's computed from natural variation: tasks where a section was dropped due to budget constraints (the "without S" condition) versus tasks where it was included (the "with S" condition).
+
+```rust
+/// Compute per-section influence from historical outcomes.
+pub fn compute_section_influence(
+    outcomes: &[BudgetOutcome],
+    section_name: &str,
+    task_category: &str,
+) -> SectionInfluence {
+    let with_section: Vec<_> = outcomes.iter()
+        .filter(|o| o.task_category == task_category)
+        .filter(|o| o.section_allocations.iter().any(|s|
+            s.section_name == section_name && s.was_included))
+        .collect();
+
+    let without_section: Vec<_> = outcomes.iter()
+        .filter(|o| o.task_category == task_category)
+        .filter(|o| o.section_allocations.iter().any(|s|
+            s.section_name == section_name && !s.was_included))
+        .collect();
+
+    let pass_rate_with = with_section.iter()
+        .filter(|o| o.gate_passed).count() as f64 / with_section.len().max(1) as f64;
+    let pass_rate_without = without_section.iter()
+        .filter(|o| o.gate_passed).count() as f64 / without_section.len().max(1) as f64;
+
+    SectionInfluence {
+        section_name: section_name.to_string(),
+        influence: pass_rate_with - pass_rate_without,
+        observations_with: with_section.len(),
+        observations_without: without_section.len(),
+        confidence: wilson_confidence_interval(
+            with_section.len(), without_section.len(),
+            pass_rate_with, pass_rate_without,
+        ),
+    }
+}
+
+pub struct SectionInfluence {
+    pub section_name: String,
+    /// Positive = section helps, negative = section hurts.
+    pub influence: f64,
+    pub observations_with: usize,
+    pub observations_without: usize,
+    /// 95% confidence interval width. Narrow = confident estimate.
+    pub confidence: f64,
+}
+```
+
+### 12.3 Adaptive Budget Reallocation
+
+Once section influence values are computed, the budget allocations are updated:
+
+```
+Algorithm: Budget reallocation from influence values
+
+1. Compute influence(S) for all sections S with sufficient observations (>= 20 each)
+2. Classify sections:
+   - Valuable (influence > 0.05): increase allocation by 20%
+   - Neutral (-0.05 ≤ influence ≤ 0.05): no change
+   - Harmful (influence < -0.05): reduce allocation by 50% or drop entirely
+3. Redistribute freed tokens to valuable sections
+4. Apply min_tokens floor (never allocate below minimum useful threshold)
+5. Persist updated allocations to .roko/learn/budget-allocations.json
+6. Log changes for audit trail
+
+Constraints:
+- Never modify Critical section allocations (role, safety, task)
+- Reallocation bounded by ±50% of baseline per cycle
+- Require >= 50 observations per category before any reallocation
+- Run reallocation at most once per day (avoid over-fitting to recent data)
+```
+
+### 12.4 Information-Theoretic Budget Allocation
+
+The Selective Context approach [Li et al., EMNLP 2023] uses self-information (surprisal) to identify valuable tokens. Applied to budget allocation: allocate more budget to sections with high average surprisal (they carry more information per token) and less to sections with low surprisal (they're predictable given other context).
+
+```rust
+/// Score a section's information density using token-level surprisal.
+/// Higher surprisal = more informative content = deserves more budget.
+pub fn section_information_density(
+    section_content: &str,
+    other_sections: &[&str],
+) -> f64 {
+    // Approximate: measure how much of section's content is predictable
+    // given the other sections (cross-entropy proxy).
+    //
+    // Use n-gram overlap as a cheap proxy for mutual information:
+    // - High overlap with other sections → low marginal information → low density
+    // - Low overlap → high marginal information → high density
+    let section_ngrams = extract_ngrams(section_content, 3);
+    let other_ngrams: HashSet<_> = other_sections.iter()
+        .flat_map(|s| extract_ngrams(s, 3))
+        .collect();
+
+    let novel_fraction = section_ngrams.iter()
+        .filter(|ng| !other_ngrams.contains(*ng))
+        .count() as f64 / section_ngrams.len().max(1) as f64;
+
+    novel_fraction  // Range [0, 1]. Higher = more novel content.
+}
+```
+
+### 12.5 Persistence
+
+Budget learning state persists to `.roko/learn/budget-allocations.json`:
+
+```json
+{
+  "version": 1,
+  "updated_at": "2026-04-12T10:00:00Z",
+  "section_influences": {
+    "implement": {
+      "workspace_map": { "influence": 0.08, "observations": 142, "confidence": 0.04 },
+      "cross_plan_context": { "influence": -0.03, "observations": 89, "confidence": 0.06 },
+      "learning_pack": { "influence": -0.07, "observations": 201, "confidence": 0.03 }
+    }
+  },
+  "adjusted_allocations": {
+    "implement": {
+      "workspace_map": 24000,
+      "cross_plan_context": 2000,
+      "learning_pack": 0
+    }
+  }
+}
+```
+
+---
+
+## 13. Current Status and Gaps
 
 | Aspect | Status |
 |--------|--------|
@@ -363,8 +646,10 @@ fn resolve_budget_conflicts(sections: &mut [AvailableSection], total_budget: usi
 | Cache-aware allocation ordering | **Implemented** |
 | History compaction | **Implemented** |
 | A/B testing framework | **Scaffold** (ExperimentStore exists) |
-| Learned budget optimization | **Not yet** |
-| Per-section value tracking | **Partially** (efficiency events) |
+| Budget prediction (§11) | **Designed** — BudgetPredictor + regression model specified |
+| Budget learning / section influence (§12) | **Designed** — leave-one-out influence + adaptive reallocation specified |
+| Information-theoretic density scoring (§12.4) | **Designed** — n-gram novelty proxy specified |
+| Per-section value tracking | **Partially** (efficiency events exist, BudgetOutcome not yet) |
 
 ---
 
@@ -372,8 +657,12 @@ fn resolve_budget_conflicts(sections: &mut [AvailableSection], total_budget: usi
 
 - [00-composer-trait.md](00-composer-trait.md) — Budget struct in Composer trait
 - [01-prompt-composer.md](01-prompt-composer.md) — Budget enforcement in assembly
+- [02-system-prompt-builder-7-layer.md](02-system-prompt-builder-7-layer.md) — Compression integration (§9)
 - [03-role-templates.md](03-role-templates.md) — Per-role allocation table
 - [06-lost-in-the-middle-u-shape.md](06-lost-in-the-middle-u-shape.md) — Attention-aware placement
+- [07-active-inference-context-selection.md](07-active-inference-context-selection.md) — Scoring that feeds budget decisions
+- [09-predictive-foraging-mvt.md](09-predictive-foraging-mvt.md) — MVT stopping rule as budget control
+- [11-distributed-context-engineering.md](11-distributed-context-engineering.md) — Contextual Influence Value framework
 - `crates/roko-compose/src/budget.rs` — Complexity-adaptive budgets
 - `crates/roko-compose/src/templates/common.rs` — budget_for() table
 - `crates/roko-compose/src/context_provider.rs` — Context tier definitions

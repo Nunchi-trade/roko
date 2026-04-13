@@ -386,7 +386,170 @@ The Implementer gets the largest Task Context share because it needs detailed co
 
 ---
 
-## 8. Academic Foundations
+## 8. Dynamic Layer Ordering
+
+The 7 layers are assembled in a fixed canonical order by default. But the optimal ordering may vary by task type. Research from 2025 strongly supports this hypothesis.
+
+### 8.1 The Layer Ordering Hypothesis
+
+**Directive-last principle.** Anthropic's context engineering guidance [2025] and systematic prompt surveys [arXiv:2402.07927] both confirm: placing the core task directive at the END of the prompt outperforms placing it first. When instructions come first, the LLM tends to generate additional context before following the task. When instructions come last, the model integrates all preceding grounding before acting.
+
+This suggests the canonical order (role → conventions → knowledge → task → tools → anti-patterns → affect) is nearly optimal: grounding layers (1-3) precede the directive (4), which precedes constraints and modulation (5-7). The model reads grounding, receives the task, then sees tool availability and warnings before generating.
+
+**But the optimal ordering is task-dependent.** For a simple rename task, the task directive should appear early (the agent needs minimal grounding). For a cross-crate integration, extensive grounding should precede the directive. This suggests a learned ordering policy.
+
+### 8.2 Learned Layer Ordering
+
+```rust
+/// Represents a learned optimal layer ordering for a task category.
+pub struct LayerOrderPolicy {
+    /// Task category → ordered list of layer indices.
+    /// Layer indices correspond to the 7 layers (0..7).
+    pub orderings: HashMap<String, Vec<usize>>,
+    /// Observation counts per category for confidence estimation.
+    pub observation_counts: HashMap<String, usize>,
+    /// Default ordering used when category has < min_observations.
+    pub default_order: Vec<usize>,
+    /// Minimum observations before using learned ordering.
+    pub min_observations: usize,  // default: 20
+}
+
+impl LayerOrderPolicy {
+    /// Select the layer ordering for a task.
+    pub fn order_for(&self, task_category: &str) -> &[usize] {
+        match self.orderings.get(task_category) {
+            Some(order) if self.observation_counts[task_category] >= self.min_observations => order,
+            _ => &self.default_order,
+        }
+    }
+
+    /// Update the policy after observing a task outcome.
+    /// Uses Thompson sampling: maintain Beta distributions per ordering variant.
+    pub fn update(&mut self, task_category: &str, ordering_used: &[usize], gate_passed: bool) {
+        // Increment observation count
+        // Update success/failure counts for this ordering variant
+        // Periodically re-solve for the best ordering using accumulated statistics
+    }
+}
+```
+
+### 8.3 Layer Interaction Effects
+
+Do layers interact? Does putting knowledge before task context produce different outcomes than the reverse? Empirical evidence suggests yes:
+
+**Grounding-before-directive.** Knowledge context (Layer 3a/3b) placed before the task directive (Layer 4) allows the model to integrate domain knowledge into its task understanding. The reverse — task first, then knowledge — risks the model forming a plan before seeing the relevant context, leading to plans that ignore available information.
+
+**Anti-patterns-near-output.** Anti-patterns (Layer 6) placed at the end (near the generation boundary) exploit the recency attention effect [Liu et al. 2023]. The model's last impression before generating is "don't make these mistakes." Moving anti-patterns to Layer 3 position would bury them in the middle, reducing their effectiveness by ~30% (the attention degradation factor).
+
+**Interaction matrix** (hypothesized, to be validated empirically):
+
+| Layer A before B | Effect | Confidence |
+|---|---|---|
+| Knowledge → Task | Model grounds before planning | High (Anthropic 2025) |
+| Task → Anti-patterns | Avoidance instructions near output | High (Liu et al. 2023) |
+| Role → Conventions | Identity before rules | High (standard practice) |
+| Tools → Task | Model plans with tool awareness | Medium (untested) |
+| Affect → Anti-patterns | Mood context before warnings | Low (interaction unclear) |
+
+### 8.4 Empirical Validation Plan
+
+```
+Protocol for measuring layer ordering effects:
+
+1. Define 4 candidate orderings:
+   a. Canonical: [1,2,3a,3b,4,5,6,7]
+   b. Task-first: [1,4,2,3a,3b,5,6,7]
+   c. Knowledge-heavy: [1,2,3a,3b,5,4,6,7] (tools before task)
+   d. Safety-sandwiched: [6,1,2,3a,3b,4,5,7,6] (anti-patterns at start AND end)
+
+2. Run each ordering on 50+ tasks per category (rename, implement, integrate)
+3. Measure: gate pass rate, token usage, iteration count
+4. Statistical test: paired t-test with Bonferroni correction for multiple comparisons
+
+Expected result: ordering (a) or (d) dominates for complex tasks;
+ordering (b) dominates for trivial tasks.
+```
+
+---
+
+## 9. Prompt Compression Integration
+
+The SystemPromptBuilder can optionally compress layers before assembly, enabling larger effective context in smaller windows.
+
+### 9.1 Compression Strategies by Layer
+
+Research from the LLMLingua family [Jiang et al., EMNLP 2023; LLMLingua-2, ACL Findings 2024] and RECOMP [Xu et al., ICLR 2024] demonstrates that different content types tolerate different compression methods:
+
+| Layer | Compression Method | Compression Ratio | Rationale |
+|---|---|---|---|
+| 1. Role Identity | **None** | 1:1 | Identity is hand-crafted; compression risks altering persona |
+| 2. Conventions | **None** | 1:1 | Safety rules must be verbatim |
+| 3a. Domain Context | **RECOMP extractive** | 3:1 - 6:1 | Select most relevant sentences from PRD/workspace |
+| 3b. Relevant Context | **LLMLingua-2 token pruning** | 2:1 - 5:1 | Remove low-information tokens while preserving semantics |
+| 4. Task Context | **Light pruning only** | 1.5:1 | Task description needs high fidelity |
+| 5. Tool Instructions | **Deduplication** | 1.2:1 | Remove redundant tool descriptions |
+| 6. Anti-Patterns | **None** | 1:1 | Warnings must be exact |
+| 7. Affect Guidance | **None** | 1:1 | Already minimal (~50 tokens) |
+
+### 9.2 The Size-Fidelity Paradox
+
+A critical finding from the NAACL 2025 prompt compression survey [Li et al., arXiv:2410.12388]: **larger compressor models produce less faithful compressions.** This occurs because larger models substitute their own parametric knowledge for source facts ("knowledge overwriting"). For Roko's composition layer, this means:
+
+- Use **small** models (BERT-class, Haiku) for compression, not Opus
+- Validate compressed output against source with exact-match checks on critical terms
+- Never compress safety constraints or role identity (Layers 1, 2, 6)
+
+### 9.3 Compression Budget Controller
+
+```rust
+/// Controls per-layer compression to fit an aggressive token budget.
+pub struct CompressionBudgetController {
+    /// Target total tokens after compression.
+    pub target_tokens: usize,
+    /// Per-layer compression configs.
+    pub layer_configs: [LayerCompressionConfig; 8],
+}
+
+pub struct LayerCompressionConfig {
+    /// Whether this layer can be compressed at all.
+    pub compressible: bool,
+    /// Maximum compression ratio (e.g., 5.0 means 5:1 max).
+    pub max_ratio: f64,
+    /// Compression method to use.
+    pub method: CompressionMethod,
+    /// Minimum tokens to retain (never compress below this).
+    pub floor_tokens: usize,
+}
+
+pub enum CompressionMethod {
+    /// No compression. Used for identity, safety, affect.
+    None,
+    /// Extractive: select most relevant sentences. For domain context.
+    Extractive,
+    /// Token pruning: remove low-surprisal tokens. For retrieved context.
+    TokenPruning,
+    /// Deduplication: remove redundant segments. For tool instructions.
+    Dedup,
+    /// Abstractive summarization: generate summary. For episode history.
+    Abstractive,
+}
+```
+
+### 9.4 Chain of Draft Integration
+
+Chain of Draft [Zoom Research, arXiv:2502.18600] demonstrated that instructing models to produce 5-word-maximum intermediate reasoning steps matches CoT accuracy while using only **7.6% of tokens**. This is directly applicable to Layer 1 (Role Identity) instructions:
+
+```rust
+// Instead of verbose CoT instructions in role identity:
+// OLD: "Think step by step. For each step, explain your reasoning in detail."
+// NEW: "Think step by step, but write each reasoning step as a brief 5-word note."
+```
+
+This reduces token overhead in the agent's response without sacrificing reasoning quality.
+
+---
+
+## 10. Academic Foundations
 
 **Plan-and-Solve Prompting** [Wang et al. 2023]. Improved zero-shot reasoning by splitting into two phases: devise a plan, then execute subtasks sequentially. The Strategist role's Layer 4 content embodies this: the task context includes the decomposition step that breaks down complex tasks before implementation.
 
@@ -395,6 +558,20 @@ The Implementer gets the largest Task Context share because it needs detailed co
 **Reflexion** [Shinn et al. 2023]. Verbal reinforcement learning: agents reflect on failures and use reflections to improve. Gate errors and iteration memory in Layer 4 are the Reflexion mechanism — they inject structured reflections from prior attempts into the next attempt's context.
 
 **Step-Back Prompting** [Zheng et al. 2023]. Asking the model to abstract before solving improves reasoning by 7-27%. The Strategist's Layer 1 identity explicitly instructs abstraction before decomposition: "step back from the implementation details, reason about the architectural intent, then decompose."
+
+**Chain of Draft** [Zoom Research, arXiv:2502.18600, February 2025]. Concise 5-word intermediate reasoning steps match CoT accuracy at 7.6% of the token cost. No model fine-tuning required — purely a prompt modification. Directly applicable to role identity instructions for token-constrained contexts.
+
+**The Decreasing Value of CoT** [Meincke et al., Wharton GAIL 2025]. For reasoning models (o3-mini, o4-mini), explicit CoT prompts add only 2.9-3.1% improvement at 20-80% higher latency. For non-reasoning models, CoT increases variance. Implication: CoT instructions in Layer 1 should be conditional on the model class — skip for reasoning models, include for standard models.
+
+**Anthropic Context Engineering** [Anthropic 2025]. Reframed "prompt engineering" as "context engineering." Key guidance: write instructions at the right altitude (not too high-level, not too low-level). Place grounding knowledge before task directives. The SystemPromptBuilder's layered architecture implements this principle directly.
+
+**LLMLingua-2** [Pan et al., ACL Findings 2024, arXiv:2403.12968]. Token classification-based prompt compression. 3-6× faster than LLMLingua-1 with superior out-of-domain generalization. The BERT-level classifier makes it cheap enough for per-request compression of retrieved context layers.
+
+**RECOMP** [Xu et al., ICLR 2024, arXiv:2310.04408]. Two-compressor architecture (extractive + abstractive) achieves 94% token reduction with minimal performance loss. Selective augmentation: returns empty string when retrieved content is irrelevant. Directly applicable to Layer 3b compression.
+
+**Promptomatix** [arXiv:2507.14241, July 2025]. Automated prompt optimization framework that transforms natural language task descriptions into optimized prompts. Supports DSPy-powered compilation. Validates the concept of learning optimal prompt structure automatically — the same goal as Roko's learned layer ordering policy.
+
+**IPEM: Inclusive Prompt Engineering Model** [Springer AI Review 2025]. Modular layered framework integrating Memory-of-Thought, Enhanced Chain-of-Thought, and feedback loops. Validates multi-layer prompt construction as superior to monolithic prompts.
 
 ---
 
@@ -412,7 +589,56 @@ The Implementer gets the largest Task Context share because it needs detailed co
 
 ---
 
-## 10. Current Status and Gaps
+## 11. Test Criteria for New Features
+
+### Dynamic Layer Ordering Tests
+
+```
+test_canonical_ordering_is_default:
+    Given no learned policy
+    When building for any task category
+    Then layers appear in order [1,2,3a,3b,4,5,6,7]
+
+test_learned_ordering_applied:
+    Given a policy with category "rename" → [1,4,2,5,6,7]
+    When building for a "rename" task
+    Then layers appear in learned order
+
+test_cold_start_fallback:
+    Given a policy with < min_observations for category "integrate"
+    When building for "integrate"
+    Then canonical ordering is used
+
+test_ordering_preserves_cache_tiers:
+    Given any layer ordering
+    When building
+    Then all System-tier layers appear before the first Session-tier layer
+    (Cache alignment overrides learned ordering within tiers)
+```
+
+### Compression Integration Tests
+
+```
+test_identity_never_compressed:
+    Given CompressionBudgetController with any settings
+    When compressing Layer 1 (Role Identity)
+    Then content is unchanged
+
+test_domain_context_extractive_compression:
+    Given a 2000-token domain context and 500-token budget
+    When applying extractive compression
+    Then output is <= 500 tokens
+    And output contains the highest-relevance sentences from input
+
+test_compression_floor_respected:
+    Given floor_tokens = 100 for a layer
+    When compressing that layer
+    Then output is >= 100 tokens (or original if already under)
+```
+
+---
+
+## 12. Current Status and Gaps
 
 | Aspect | Status |
 |--------|--------|
@@ -425,6 +651,11 @@ The Implementer gets the largest Task Context share because it needs detailed co
 | Dominance affect guidance | **Not yet** |
 | Dynamic anti-patterns from knowledge store | **Scaffold** |
 | Learned budget allocation (DSPy-style) | **Not yet** |
+| Dynamic layer ordering (§8) | **Designed** — LayerOrderPolicy specified |
+| Layer interaction measurement (§8.4) | **Not yet** — validation protocol specified |
+| Prompt compression integration (§9) | **Designed** — CompressionBudgetController specified |
+| Chain of Draft integration (§9.4) | **Not yet** — applicable to role identity |
+| Conditional CoT by model class | **Not yet** — skip CoT for reasoning models |
 
 ---
 
@@ -433,6 +664,7 @@ The Implementer gets the largest Task Context share because it needs detailed co
 - [00-composer-trait.md](00-composer-trait.md) — Composer trait definition
 - [03-role-templates.md](03-role-templates.md) — Role template details
 - [05-token-budget-management.md](05-token-budget-management.md) — Budget allocation
+- [06-lost-in-the-middle-u-shape.md](06-lost-in-the-middle-u-shape.md) — Attention curve that motivates layer positioning
 - [12-affect-modulated-retrieval.md](12-affect-modulated-retrieval.md) — PAD-based modulation
 - `crates/roko-compose/src/system_prompt_builder.rs` — Implementation source
 - `crates/roko-compose/src/role_prompts.rs` — Role-specific wiring

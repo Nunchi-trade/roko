@@ -218,21 +218,317 @@ VCG has known limitations:
 
 ---
 
-## 8. Academic Foundations
+## 8. Strategic Bidding: Can Subsystems Learn to Bid Optimally?
 
-**Vickrey, W. (1961), "Counterspeculation, Auctions, and Competitive Sealed Tenders."** Journal of Finance, 16(1), 8-37. The foundational paper on second-price auctions. Proved that truthful bidding is a dominant strategy in sealed-bid second-price auctions.
+In a repeated auction (context assembly runs for every task), subsystems can learn from past outcomes to improve their bids. This is desirable — learned bids reflect actual section value — but requires careful design to maintain truthfulness.
 
-**Clarke, E. H. (1971), "Multipart Pricing of Public Goods."** Public Choice, 11(1), 17-33. Extended Vickrey's result to multi-item allocations.
+### 8.1 The Learning-Truthfulness Tension
 
-**Groves, T. (1973), "Incentives in Teams."** Econometrica, 41(4), 617-631. Proved the uniqueness of the VCG payment rule for achieving truthfulness and efficiency simultaneously.
+VCG guarantees truthful bidding is a dominant strategy in a **single-shot** auction. In **repeated** auctions, strategic behavior can emerge even under VCG:
 
-**Simon, H. A. (1971), "Designing Organizations for an Information-Rich World."** The observation that information abundance creates attention scarcity — the foundational framing for attention allocation.
+- A subsystem might learn that inflating bids for "safety" sections guarantees inclusion, even when those sections are marginally useful for the current task.
+- A subsystem might learn that other subsystems always bid high, so it should bid even higher to capture budget.
 
-**Friston, K. (2022), The Free Energy Principle.** Active inference as an alternative to mechanism design for attention allocation. Both approaches converge on efficient allocation under different assumptions.
+Research on learning in repeated auctions [MIT CEEPR Working Paper 2023-18] shows that no-regret learning algorithms tend to converge to welfare-maximizing equilibria. Strategic bidding in first-price auctions is harder to stabilize [arXiv:2402.07363], but VCG's second-price rule dampens strategic incentives.
+
+### 8.2 Bid Learning via Thompson Sampling
+
+Each subsystem maintains a posterior distribution over its bid value, updated by task outcomes:
+
+```rust
+/// A subsystem that learns its bid value from historical outcomes.
+pub struct LearningBidder {
+    pub subsystem_id: SubsystemId,
+    /// Per-section Beta distributions for Thompson sampling.
+    /// Beta(alpha, beta) where alpha = successes when included, beta = failures.
+    pub section_betas: HashMap<String, (f64, f64)>,
+    /// Prior bid value (before learning).
+    pub prior_bid: f64,
+}
+
+impl LearningBidder {
+    /// Compute bid for a section using Thompson sampling.
+    pub fn bid(&self, section_name: &str, relevance: f64) -> f64 {
+        let (alpha, beta) = self.section_betas
+            .get(section_name)
+            .copied()
+            .unwrap_or((1.0, 1.0));  // Uniform prior
+
+        // Sample from Beta(alpha, beta) for exploration
+        let sampled_track_record = beta_sample(alpha, beta);
+
+        // Bid = sampled track record × relevance to current task
+        sampled_track_record * relevance
+    }
+
+    /// Update after observing a task outcome.
+    pub fn update(&mut self, section_name: &str, was_included: bool, gate_passed: bool) {
+        if was_included {
+            let entry = self.section_betas
+                .entry(section_name.to_string())
+                .or_insert((1.0, 1.0));
+            if gate_passed {
+                entry.0 += 1.0;  // alpha: success count
+            } else {
+                entry.1 += 1.0;  // beta: failure count
+            }
+        }
+    }
+}
+```
+
+Thompson sampling provides natural exploration: sections with uncertain value are occasionally bid higher (sampled from a wide Beta distribution), ensuring the system discovers their true value. As observations accumulate, the Beta distribution narrows and bids converge to the true expected value.
+
+### 8.3 Convergence Properties
+
+From the MARL auction literature [arXiv:2402.19420, 2024]:
+
+| Property | Expected Behavior |
+|---|---|
+| Convergence time | ~50-100 tasks per subsystem to stabilize bids |
+| Equilibrium type | Welfare-maximizing (under VCG payment rule) |
+| Exploration rate | Decreasing: Beta distributions narrow over time |
+| Sensitivity to environment change | Moderate: sudden shifts in task distribution require re-exploration |
+
+### 8.4 Collusion Detection
+
+Although subsystems under the same operator's control have no incentive to collude, structural coupling can create emergent collusion-like behavior (e.g., two subsystems always bidding high because they share a relevance signal). Detection:
+
+```rust
+/// Detect bid correlation that might indicate structural coupling.
+pub fn detect_bid_correlation(
+    bid_history: &[(SubsystemId, SubsystemId, Vec<(f64, f64)>)],
+    threshold: f64,  // default: 0.85
+) -> Vec<(SubsystemId, SubsystemId, f64)> {
+    bid_history.iter()
+        .filter_map(|(s1, s2, pairs)| {
+            let correlation = pearson_correlation(pairs);
+            if correlation > threshold {
+                Some((*s1, *s2, correlation))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+```
 
 ---
 
-## 9. Implementation Plan
+## 9. Auction Efficiency Metrics
+
+### 9.1 Welfare Loss
+
+The **welfare loss** (or **deadweight loss**) measures how much total value is lost compared to the optimal allocation:
+
+```
+welfare_loss = optimal_total_value - actual_total_value
+
+Where:
+  optimal_total_value = value of the allocation that maximizes Σ v_i × x_i
+                        subject to Σ tokens_i × x_i ≤ budget
+  actual_total_value  = value of the allocation produced by the auction
+```
+
+For the greedy knapsack used in Roko, the welfare loss is bounded:
+
+```
+greedy_welfare >= 0.5 × optimal_welfare  (Dantzig 1957)
+```
+
+In practice, with section values correlated to their token size, the greedy approximation is much tighter — typically >90% of optimal.
+
+### 9.2 Pareto Optimality
+
+An allocation is **Pareto optimal** if no section can be added without removing another section of equal or greater value. The VCG mechanism produces Pareto-optimal allocations when the welfare maximization is exact.
+
+```rust
+/// Check if a VCG allocation is Pareto optimal.
+pub fn is_pareto_optimal(
+    included: &[SectionAllocation],
+    excluded: &[SectionAllocation],
+    budget_remaining: usize,
+) -> bool {
+    // For each excluded section that fits in remaining budget:
+    for exc in excluded {
+        if exc.tokens <= budget_remaining {
+            // Can we add it without removing anything?
+            // If yes, the current allocation is NOT Pareto optimal.
+            return false;
+        }
+    }
+    // For each excluded section that doesn't fit:
+    for exc in excluded {
+        if exc.tokens > budget_remaining {
+            // Can we swap it for any included section with lower value?
+            for inc in included {
+                if inc.value < exc.value && inc.tokens >= exc.tokens {
+                    // Swap improves welfare → not Pareto optimal
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+```
+
+### 9.3 Price of Anarchy
+
+The **Price of Anarchy** (PoA) measures welfare loss from strategic behavior:
+
+```
+PoA = welfare(socially optimal) / welfare(worst Nash equilibrium)
+```
+
+Under VCG with truthful bidding, PoA = 1 (no loss from strategic behavior). The concern is the greedy approximation: when welfare maximization is approximate (greedy knapsack), VCG payments no longer guarantee exact truthfulness [Nisan & Ronen]. The practical PoA for Roko's context allocation is estimated at <1.1 (less than 10% welfare loss) based on the small candidate set size (N < 50).
+
+Research on strong and Pareto equilibria [Chien & Sinclair, UC Berkeley] shows that the PoA for Pareto-optimal Nash equilibria is significantly smaller than for arbitrary Nash equilibria in congestion games — a related allocation setting.
+
+### 9.4 Diagnostic Dashboard Metrics
+
+```rust
+/// Auction diagnostics computed after each context assembly.
+pub struct AuctionDiagnostics {
+    /// Total bid value of winning sections.
+    pub total_welfare: f64,
+    /// Total VCG payments across all winners.
+    pub total_payments: f64,
+    /// Welfare loss vs. optimal (estimated by trying exhaustive search for N < 20).
+    pub welfare_loss: f64,
+    /// Is the allocation Pareto optimal?
+    pub pareto_optimal: bool,
+    /// Sections with highest payment (most budget pressure).
+    pub highest_payment_sections: Vec<(String, f64)>,
+    /// Sections that were displaced (excluded due to budget).
+    pub displaced_sections: Vec<(String, f64)>,
+    /// Budget utilization: tokens_used / tokens_available.
+    pub budget_utilization: f64,
+}
+```
+
+---
+
+## 10. Alternative Fairness Criteria
+
+VCG maximizes aggregate welfare, but there are scenarios where other fairness criteria are more appropriate.
+
+### 10.1 Proportional Fairness
+
+Each subsystem receives allocation proportional to its bid:
+
+```
+allocation_i = (bid_i / Σ bid_j) × total_budget
+```
+
+**Advantage:** Every subsystem gets some representation. No subsystem is completely starved.
+
+**Disadvantage:** Low-value subsystems consume budget that higher-value subsystems need. Can produce worse outcomes than aggressive priority-based dropping.
+
+**When to use:** When the system has no confidence in bid accuracy (early cold-start phase, or when all subsystems are poorly calibrated). Proportional fairness is the safe default.
+
+Research: Regularized Proportional Fairness (RPF) [Zhu et al., ICLR 2025, arXiv:2501.01111] adds neural-network-learned regularization to standard PF, increasing robustness to misreported bids.
+
+### 10.2 Max-Min Fairness
+
+Maximize the minimum allocation across all subsystems:
+
+```
+max min_i allocation_i
+subject to Σ allocation_i ≤ total_budget
+```
+
+**Advantage:** The worst-served subsystem is as well-served as possible. Prevents catastrophic context gaps.
+
+**Disadvantage:** Very inefficient — gives equal weight to low-value and high-value subsystems. The safety system's 200-token constraint gets the same allocation as the file context module's 8000-token need.
+
+**When to use:** Only for safety-critical subsystems. A max-min guarantee on the safety subsystem ensures that safety constraints always get minimum viable representation, regardless of how other subsystems bid.
+
+### 10.3 Alpha-Fairness Spectrum
+
+The three criteria are special cases of the alpha-fairness family [Bertsimas et al.]:
+
+```
+maximize Σ_i (allocation_i^(1-α)) / (1-α)
+
+α = 0: Utilitarian (VCG) — maximize total welfare
+α = 1: Proportional fairness — maximize geometric mean
+α → ∞: Max-min fairness — maximize the minimum
+```
+
+Roko can implement a configurable α parameter:
+
+```rust
+/// Configurable fairness parameter for the attention auction.
+pub struct FairnessConfig {
+    /// Alpha parameter for the alpha-fairness family.
+    /// 0.0 = pure efficiency (VCG-like)
+    /// 1.0 = proportional fairness
+    /// 10.0 = approximately max-min
+    pub alpha: f64,  // default: 0.0 (pure efficiency)
+    /// Minimum guaranteed allocation for safety subsystem (max-min floor).
+    pub safety_floor_tokens: usize,  // default: 200
+}
+```
+
+### 10.4 Hybrid Policy: VCG + Safety Floor
+
+The recommended policy combines VCG efficiency with a max-min floor for safety:
+
+```
+1. Reserve safety_floor_tokens for the Safety subsystem (guaranteed minimum)
+2. Run VCG auction on the remaining budget across all subsystems
+3. Safety subsystem can bid for ADDITIONAL tokens beyond its floor
+4. All other subsystems compete in the standard VCG auction
+```
+
+This ensures safety constraints always appear (max-min floor) while maximizing total value for the remaining budget (VCG efficiency).
+
+---
+
+## 11. Mechanism Design for LLMs: The Token Auction
+
+A landmark paper directly connecting mechanism design to LLM systems:
+
+**"Mechanism Design for Large Language Models"** [Duetting et al., WWW 2024 Best Paper, arXiv:2310.10826]. Proposes a **token auction** model where competing LLM agents bid for influence over the output, operating token-by-token. Key results:
+
+- Desirable incentive properties (truthful bidding) are equivalent to a **monotonicity condition** on output aggregation.
+- When valuations are KL-divergence-based, the welfare-maximizing rule is a **weighted log-space convex combination** of target distributions.
+- This is the first clean extension of VCG to LLM content generation.
+
+The connection to Roko's VCG attention auction: Duetting et al.'s token auction operates at the generation level (which tokens to produce), while Roko's operates at the context level (which tokens to include). Both use the same incentive-compatibility framework. The token auction validates that mechanism design is applicable to LLM systems in practice, not just in theory.
+
+---
+
+## 12. Academic Foundations
+
+**Vickrey, W. (1961), "Counterspeculation, Auctions, and Competitive Sealed Tenders."** Journal of Finance, 16(1), 8-37. The foundational paper on second-price auctions.
+
+**Clarke, E. H. (1971), "Multipart Pricing of Public Goods."** Public Choice, 11(1), 17-33.
+
+**Groves, T. (1973), "Incentives in Teams."** Econometrica, 41(4), 617-631.
+
+**Simon, H. A. (1971), "Designing Organizations for an Information-Rich World."**
+
+**Friston, K. (2022), The Free Energy Principle.** Active inference as an alternative to mechanism design.
+
+**Duetting, Mirrokni, Paes Leme, Xu, Zuo (2024), "Mechanism Design for Large Language Models."** WWW 2024 Best Paper, arXiv:2310.10826. Token auction model for aggregating competing LLM agents. First clean extension of VCG to LLM systems.
+
+**Zhu et al. (2025), "Regularized Proportional Fairness Mechanism for Resource Allocation Without Money."** ICLR 2025, arXiv:2501.01111. RPF-Net adds neural regularization to proportional fairness for robustness against misreports.
+
+**MIT CEEPR (2023), "Learning in Repeated Multi-Unit Auctions."** Working Paper 2023-18. No-regret learning converges to welfare-maximizing equilibria in repeated auctions.
+
+**arXiv:2402.19420 (2024), "Understanding Iterative Combinatorial Auction Designs via Multi-Agent Reinforcement Learning."** Deep MARL computes equilibria in combinatorial auctions.
+
+**arXiv:2402.07363 (2024), "Strategically-Robust Learning Algorithms for Bidding in First-Price Auctions."** Robustness guarantees against adversarial strategic behavior in learning-based bidding.
+
+**Chien & Sinclair (UC Berkeley), "Strong and Pareto Price of Anarchy in Congestion Games."** The PoA for Pareto-optimal Nash equilibria is significantly smaller than for arbitrary Nash equilibria.
+
+**Nisan & Ronen, "Computationally Feasible VCG Mechanisms."** When welfare maximization is approximate, VCG-based mechanisms lose truthfulness guarantees.
+
+---
+
+## 13. Implementation Plan
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
@@ -241,10 +537,14 @@ VCG has known limitations:
 | 3 | Implement VCG payment computation | **Not yet** | For diagnostic purposes |
 | 4 | Wire bidding into context assembly | **Not yet** | Replace static priorities with bids |
 | 5 | Payment-based budget pressure monitoring | **Not yet** | Dashboard for budget allocation analysis |
+| 6 | Implement LearningBidder (Thompson sampling) | **Not yet** | Per-subsystem bid learning (§8.2) |
+| 7 | Implement auction diagnostics (§9.4) | **Not yet** | Welfare loss, Pareto check, budget utilization |
+| 8 | Implement alpha-fairness config (§10.3) | **Not yet** | Configurable VCG vs proportional vs max-min |
+| 9 | Implement VCG + safety floor hybrid (§10.4) | **Not yet** | Guaranteed safety allocation + VCG for rest |
 
 ---
 
-## 10. Current Status and Gaps
+## 14. Current Status and Gaps
 
 | Aspect | Status |
 |--------|--------|
@@ -256,12 +556,19 @@ VCG has known limitations:
 | VCG payments | **Not yet** |
 | Truthfulness verification | **Not yet** |
 | Budget pressure monitoring | **Not yet** |
+| Strategic bidding via Thompson sampling (§8) | **Designed** — LearningBidder specified |
+| Auction efficiency metrics (§9) | **Designed** — welfare loss, Pareto, PoA specified |
+| Alternative fairness criteria (§10) | **Designed** — proportional, max-min, alpha-fair specified |
+| VCG + safety floor hybrid (§10.4) | **Designed** — recommended policy specified |
+| Collusion detection (§8.4) | **Designed** — correlation-based detection specified |
 
 ---
 
 ## Cross-References
 
+- [05-token-budget-management.md](05-token-budget-management.md) — Budget learning that feeds bid calibration
 - [07-active-inference-context-selection.md](07-active-inference-context-selection.md) — Alternative scoring mechanism
 - [08-5-stage-assembly-pipeline.md](08-5-stage-assembly-pipeline.md) — Pipeline where allocation occurs
+- [09-predictive-foraging-mvt.md](09-predictive-foraging-mvt.md) — MVT as complementary stopping rule
 - [12-affect-modulated-retrieval.md](12-affect-modulated-retrieval.md) — Affect modulation of bids
 - `refactoring-prd/09-innovations.md` §II, §XIX.E — Canonical VCG specification

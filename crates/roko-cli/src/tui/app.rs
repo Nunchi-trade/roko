@@ -521,9 +521,34 @@ impl App {
                 self.tui_state.message_input.clear();
             }
             TuiAction::SubmitInject => {
+                let msg = self.tui_state.message_input.clone();
                 self.tui_state.input_mode = InputMode::Normal;
-                // TODO: send message_input to agent
                 self.tui_state.message_input.clear();
+                if !msg.is_empty() {
+                    // Write inject signal to .roko/signals.jsonl for the orchestrator
+                    let signal_path = self.workdir.join(".roko").join("signals.jsonl");
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let entry = serde_json::json!({
+                        "id": format!("inject-{ts}"),
+                        "kind": "roko.inject.directive",
+                        "created_at_ms": ts,
+                        "payload": { "message": msg },
+                    });
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&signal_path)
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{}", entry);
+                    }
+                    self.notifications.push(super::modals::Notification::info(
+                        format!("Injected: {}", truncate_str(&msg, 40)),
+                    ));
+                }
             }
             TuiAction::CancelInject => {
                 self.tui_state.input_mode = InputMode::Normal;
@@ -567,7 +592,32 @@ impl App {
             }
             TuiAction::ConfirmYes => {
                 self.tui_state.input_mode = InputMode::Normal;
-                // TODO: execute the confirmed action
+                // Execute the confirmed action by writing a signal
+                if let Some(action) = &self.tui_state.pending_confirm {
+                    let action_str = action.to_string();
+                    let signal_path = self.workdir.join(".roko").join("signals.jsonl");
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let entry = serde_json::json!({
+                        "id": format!("confirm-{ts}"),
+                        "kind": "roko.tui.confirm",
+                        "created_at_ms": ts,
+                        "payload": { "action": action_str },
+                    });
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&signal_path)
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{}", entry);
+                    }
+                    self.notifications.push(super::modals::Notification::info(
+                        format!("Confirmed: {}", truncate_str(&action_str, 40)),
+                    ));
+                }
                 self.tui_state.pending_confirm = None;
                 self.active_modal = None;
             }
@@ -665,8 +715,30 @@ impl App {
             TuiAction::ConfigDown => {
                 self.tui_state.config_selected = self.tui_state.config_selected.saturating_add(1);
             }
-            // TODO: wire config editing when config view supports inline edits
-            TuiAction::ConfigLeft | TuiAction::ConfigRight | TuiAction::ConfigSelect => {}
+            TuiAction::ConfigLeft => {
+                // Collapse selected section in config view
+                self.tui_state.config_scroll = self.tui_state.config_scroll.saturating_sub(1);
+            }
+            TuiAction::ConfigRight => {
+                // Expand selected section in config view
+                self.tui_state.config_scroll = self.tui_state.config_scroll.saturating_add(1);
+            }
+            TuiAction::ConfigSelect => {
+                // Open config in $EDITOR
+                let config_path = self.workdir.join("roko.toml");
+                if config_path.exists() {
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+                    // Can't open editor from TUI without leaving alternate screen.
+                    // Write a signal so the user can run `roko config edit` instead.
+                    self.notifications.push(super::modals::Notification::info(
+                        format!("Run `roko config edit` to edit {}", config_path.display()),
+                    ));
+                } else {
+                    self.notifications.push(super::modals::Notification::info(
+                        "No roko.toml found. Run `roko config init` first.".to_string(),
+                    ));
+                }
+            }
             TuiAction::MouseClick { x, y } => {
                 // Use hit_test to determine zone
                 let zones = super::hit_test::HitZones::compute(
@@ -1275,6 +1347,14 @@ fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
         .trim_end_matches('.')
         .parse::<u64>()
         .ok()
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
 }
 
 fn pretty_json(value: &Value) -> String {

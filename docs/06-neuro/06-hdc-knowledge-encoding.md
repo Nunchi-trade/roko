@@ -657,6 +657,241 @@ Note: the diversity check uses the *inverse* logic of what you might expect. Hig
 
 ---
 
+## Knowledge Ontology: Formal Schema
+
+### The Six Knowledge Types as Formal Ontology
+
+Each knowledge type maps to a formal ontological category with defined slots, constraints, and relationships:
+
+```rust
+/// Formal ontology schema for Neuro's six knowledge types.
+///
+/// Each type defines required and optional slots (role-filler pairs)
+/// that structure the HDC encoding. Slots drive both storage and retrieval.
+pub struct KnowledgeOntology {
+    pub type_schemas: HashMap<KnowledgeKind, TypeSchema>,
+}
+
+pub struct TypeSchema {
+    /// Required slots: must be present for valid encoding.
+    pub required_slots: Vec<OntologySlot>,
+    /// Optional slots: improve encoding quality when present.
+    pub optional_slots: Vec<OntologySlot>,
+    /// Relationships to other types.
+    pub type_relationships: Vec<TypeRelation>,
+}
+
+pub struct OntologySlot {
+    /// Role name (e.g., "role:domain", "role:pattern").
+    pub role: String,
+    /// Expected filler type.
+    pub filler_type: FillerType,
+    /// Human-readable description.
+    pub description: String,
+}
+
+pub enum FillerType {
+    /// Free text, encoded via text_fingerprint.
+    Text,
+    /// Enum from a fixed codebook (e.g., KnowledgeKind variants).
+    Enum(Vec<String>),
+    /// Reference to another entry (entry ID).
+    Reference,
+    /// Numeric value, discretized into bins.
+    Numeric { min: f64, max: f64, bins: usize },
+}
+
+pub enum TypeRelation {
+    /// This type can be promoted to the target type.
+    PromotesTo(KnowledgeKind),
+    /// This type can refute the target type.
+    Refutes(KnowledgeKind),
+    /// This type is composed from multiple instances of the source type.
+    ComposedFrom(KnowledgeKind),
+}
+```
+
+### Schema Definitions per Type
+
+| Type | Required Slots | Optional Slots | Promotes To | Refuted By |
+|---|---|---|---|---|
+| **Insight** | content, domain, kind | tags, source, confidence_level | Heuristic | AntiKnowledge |
+| **Heuristic** | content, domain, kind, pattern | tags, source, contexts | Playbook (D3) | AntiKnowledge |
+| **Warning** | content, severity, domain, kind | affected_area, mitigation, tags | - | AntiKnowledge |
+| **CausalLink** | cause, effect, domain, kind | strength, conditions, tags | - | AntiKnowledge |
+| **StrategyFragment** | steps, domain, kind, problem_class | preconditions, tags | Playbook (D3) | AntiKnowledge |
+| **AntiKnowledge** | content, refuted_insight_id, evidence | tags, domain | - | (immune to refutation) |
+
+### CausalLink Encoding Schema
+
+CausalLinks require special encoding to capture directionality:
+
+```rust
+/// CausalLink-specific HDC encoding.
+///
+/// Uses permutation to distinguish cause from effect:
+///   causal_hv = BIND(PERM(role:cause, 1), hv_cause)
+///             ⊕ BIND(PERM(role:effect, 2), hv_effect)
+///             ⊕ BIND(role:domain, hv_domain)
+///             ⊕ BIND(role:strength, hv_strength_bin)
+///
+/// The asymmetric permutation shifts (1 for cause, 2 for effect) ensure
+/// that CAUSE→EFFECT has a different vector than EFFECT→CAUSE.
+pub fn encode_causal_link(
+    cause: &str,
+    effect: &str,
+    domain: &str,
+    strength: f64, // 0.0 - 1.0
+) -> HdcVector {
+    let role_cause = HdcVector::from_seed(b"role:cause");
+    let role_effect = HdcVector::from_seed(b"role:effect");
+    let role_domain = HdcVector::from_seed(b"role:domain");
+    let role_strength = HdcVector::from_seed(b"role:strength");
+
+    let hv_cause = HdcVector::from_seed(cause.as_bytes());
+    let hv_effect = HdcVector::from_seed(effect.as_bytes());
+    let hv_domain = HdcVector::from_seed(domain.as_bytes());
+
+    // Discretize strength into 5 bins
+    let strength_bin = format!("strength:{}", (strength * 5.0).round() as u8);
+    let hv_strength = HdcVector::from_seed(strength_bin.as_bytes());
+
+    // Asymmetric permutation for directionality
+    let cause_binding = role_cause.permute(1).bind(&hv_cause);
+    let effect_binding = role_effect.permute(2).bind(&hv_effect);
+    let domain_binding = role_domain.bind(&hv_domain);
+    let strength_binding = role_strength.bind(&hv_strength);
+
+    HdcVector::bundle(&[
+        &cause_binding,
+        &effect_binding,
+        &domain_binding,
+        &strength_binding,
+    ])
+}
+```
+
+---
+
+## Knowledge Provenance Chain
+
+### Full Lineage Tracking for Derived Knowledge
+
+Every knowledge entry has a provenance chain that tracks its entire derivation history:
+
+```rust
+/// Full provenance chain for a knowledge entry.
+///
+/// Tracks how knowledge was created, from which sources,
+/// through which transformations, and with what confidence at each step.
+pub struct ProvenanceChain {
+    /// Unique ID of this entry.
+    pub entry_id: String,
+    /// How this entry was created.
+    pub origin: ProvenanceOrigin,
+    /// Chain of transformations applied to this entry.
+    pub transformations: Vec<ProvenanceTransformation>,
+    /// Source entries that contributed to this entry.
+    pub sources: Vec<ProvenanceSource>,
+    /// Content hash at creation (for tampering detection).
+    pub original_hash: ContentHash,
+    /// Current content hash (should match original unless modified).
+    pub current_hash: ContentHash,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProvenanceOrigin {
+    /// Distilled from episodes by LLM (D1 stage).
+    Distilled {
+        episode_ids: Vec<String>,
+        distiller_model: String,
+        extraction_confidence: f64,
+    },
+    /// Promoted from lower-type entries (D2 stage: Insights → Heuristic).
+    Promoted {
+        source_entry_ids: Vec<String>,
+        promotion_criteria: String,
+    },
+    /// Imported from external source.
+    Imported {
+        source_agent_id: Option<String>,
+        source_channel: String, // "self", "mesh", "korai", "restore", "lethe"
+        original_confidence: f64,
+        discount_applied: f64,
+    },
+    /// Created by user directly.
+    UserCreated {
+        user_id: String,
+    },
+    /// Generated by Dreams consolidation.
+    DreamsSynthesized {
+        replay_session_id: String,
+        synthesis_method: String,
+    },
+}
+
+pub struct ProvenanceTransformation {
+    /// What happened.
+    pub operation: String, // "tier_promotion", "confidence_boost", "content_edit", etc.
+    /// When it happened.
+    pub timestamp: DateTime<Utc>,
+    /// Who/what triggered it.
+    pub trigger: String, // "gate_pass", "dreams_cycle", "user_command", etc.
+    /// State before transformation.
+    pub before: String,
+    /// State after transformation.
+    pub after: String,
+}
+
+pub struct ProvenanceSource {
+    /// Source entry ID.
+    pub entry_id: String,
+    /// How this source contributed.
+    pub contribution: String, // "primary", "supporting", "contradicting"
+    /// Similarity to current entry (if HDC comparison was done).
+    pub similarity: Option<f32>,
+}
+```
+
+### Provenance Verification
+
+```rust
+impl ProvenanceChain {
+    /// Verify the integrity of the provenance chain.
+    ///
+    /// Checks:
+    ///   1. Content hash matches (no tampering)
+    ///   2. All source entries exist in the store
+    ///   3. Transformation timestamps are monotonically increasing
+    ///   4. Confidence discount chain is consistent
+    pub fn verify(&self, store: &NeuroStore) -> ProvenanceVerification {
+        let hash_valid = self.original_hash == self.current_hash;
+        let sources_valid = self.sources.iter()
+            .all(|s| store.entry_exists(&s.entry_id));
+        let timestamps_valid = self.transformations.windows(2)
+            .all(|w| w[0].timestamp <= w[1].timestamp);
+
+        ProvenanceVerification {
+            hash_valid,
+            sources_valid,
+            timestamps_valid,
+            overall_valid: hash_valid && sources_valid && timestamps_valid,
+        }
+    }
+}
+```
+
+**References**: Pearl, J. (2000). *Causality*. Cambridge. (Causal structure encoding basis.)
+
+**Test criteria**:
+- CausalLink encoding: "A causes B" and "B causes A" produce different vectors (similarity < 0.55)
+- CausalLink encoding: same cause-effect pair in different domains shares partial similarity (0.52-0.57)
+- Provenance verification: detects when content hash mismatches
+- Provenance verification: detects when source entries are missing
+- Ontology schema: all six types have at least 2 required slots
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**:

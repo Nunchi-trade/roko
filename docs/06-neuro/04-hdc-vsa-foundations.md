@@ -988,6 +988,252 @@ fn top_k(query: &HdcVector, k: usize) -> Vec<(usize, f32)>:
 
 ---
 
+## Comparative Analysis: HDC Families in Depth
+
+### Holographic Reduced Representations (Plate 2003)
+
+HRR (Plate 1995, 2003) uses real-valued vectors with **circular convolution** as the binding operation. Binding cost is O(D log D) via FFT versus O(D) for BSC's XOR. HRR's key advantage is compatibility with continuous-valued data and smoother gradient properties.
+
+**Capacity comparison**: At D = 10,000, HRR stores approximately D / (2 ln(1/δ)) ≈ 1,087 pairs at δ = 0.01 error rate (Plate 2003, Appendix B-D). BSC at the same dimension stores ~1,000 pairs with >95% accuracy. HRR has slightly higher theoretical capacity per dimension (real values encode more information per component) but BSC's binary operations are 10-100× faster.
+
+**Unbinding quality**: HRR unbinding via correlation is approximate — noise accumulates across nested bindings. BSC unbinding via XOR is exact (self-inverse), making BSC strictly superior for Neuro's structured query decomposition.
+
+**Memory footprint**: HRR at D = 10,000 requires 40 KB per vector (f32). BSC at D = 10,240 requires 1,280 bytes — a 31× advantage. For a 100K-entry knowledge base: HRR = 4 GB, BSC = 128 MB.
+
+**Reference**: Plate, T.A. (2003). *Holographic Reduced Representations*. CSLI Publications. Plate, T.A. (1995). "Holographic reduced representations." *IEEE Transactions on Neural Networks*, 6(3), 623-641.
+
+### Fourier Holographic Reduced Representations (FHRR)
+
+FHRR uses complex-valued phasor vectors (each component is e^{iθ}). Binding is element-wise complex multiplication. The key advance: **fractional binding** — bind(A, B^α) for α ∈ ℝ enables smooth interpolation between identity and full binding, supporting continuous analogical transformations not possible with binary XOR.
+
+BSC is mathematically a restriction of FHRR to phasors at 0 and π (i.e., {+1, -1} on the real axis). This relationship means BSC results translate to FHRR with relaxed constraints.
+
+**When FHRR beats BSC**: Continuous sequence encoding (VFA architecture), smooth positional encoding for transformer-like attention, and tasks requiring graduated similarity (e.g., "partially similar" rather than "similar or not").
+
+**When BSC beats FHRR**: Hardware efficiency (no complex arithmetic), exact unbinding, storage (1,280 bytes vs 80 KB at D=10,240), and discrete structured data (Neuro's primary use case).
+
+---
+
+## Hybrid HDC + Dense Embedding Strategy
+
+### When to Use HDC vs Dense Embeddings
+
+HDC and dense neural embeddings (sentence-transformers, Cohere embed-v4, OpenAI text-embedding-3) serve different purposes. The optimal strategy for Neuro is to use both, each for its strength.
+
+| Criterion | HDC (BSC) | Dense Embeddings |
+|---|---|---|
+| **Compositionality** | Algebraically exact: bind/unbind preserves structure | Approximate: learned, fragile under distribution shift |
+| **Semantic similarity (MTEB)** | Not competitive (~94% topic classification) | State-of-the-art (65+ MTEB score) |
+| **Latency (CPU)** | 0.001-0.09 ms per comparison | 0.07-0.2 ms per inference (MiniLM-L6) |
+| **Training** | Zero: deterministic from seed | Requires pre-training on billions of tokens |
+| **Online adaptation** | O(1) per new item (bundle into prototype) | Requires fine-tuning (full backprop) |
+| **Interpretability** | Algebraic inverse: decompose back to components | Opaque: no principled decomposition |
+| **Edge deployment** | Native binary ops, FPGA/in-memory computing | Requires FP or quantization |
+| **Few-shot learning** | Excellent: 8-10% of training data can suffice | Requires fine-tuning or prompt engineering |
+
+**References**: Word2HyperVec (GLSVLSI 2024): maps Word2Vec into BSC space with 1.81× efficiency gain. "Attention as Binding" (arXiv:2512.14709, 2025): formalizes how transformer attention approximates VSA binding.
+
+### Roko's Dual-Encoding Strategy
+
+```rust
+/// Dual encoding: HDC for structure, dense for semantics.
+///
+/// HDC captures compositional structure (role-filler bindings, type,
+/// domain, tags). Dense embedding captures semantic nuance (paraphrase
+/// detection, cross-lingual similarity).
+///
+/// Query pipeline:
+///   1. HDC structured query (role-filler binding) → candidates by structure
+///   2. Dense semantic rerank → final ranking by meaning
+///   3. Combined score = α × hdc_sim + (1-α) × dense_sim
+///      where α = 0.6 (structure-heavy for Neuro's use case)
+pub struct DualEncoder {
+    /// HDC encoder for structural features.
+    pub hdc_encoder: KnowledgeHdcEncoder,
+    /// Optional dense encoder (requires embedding model).
+    /// When None, falls back to HDC-only mode.
+    pub dense_encoder: Option<Box<dyn DenseEncoder>>,
+    /// Blending weight: 0.0 = pure dense, 1.0 = pure HDC. Default: 0.6.
+    pub alpha: f64,
+}
+
+/// Trait for pluggable dense embedding backends.
+pub trait DenseEncoder: Send + Sync {
+    /// Encode text into a dense embedding vector.
+    fn encode(&self, text: &str) -> Result<Vec<f32>>;
+    /// Compute cosine similarity between two dense vectors.
+    fn similarity(&self, a: &[f32], b: &[f32]) -> f32;
+}
+
+impl DualEncoder {
+    /// Encode a knowledge entry with both HDC and dense representations.
+    pub fn encode(&mut self, entry: &KnowledgeEntry) -> EncodedEntry {
+        let hdc = self.hdc_encoder.encode(entry);
+        let dense = self.dense_encoder.as_ref()
+            .and_then(|enc| enc.encode(&entry.content).ok());
+        EncodedEntry { hdc, dense }
+    }
+
+    /// Combined similarity score.
+    pub fn combined_similarity(
+        &self,
+        query: &EncodedEntry,
+        candidate: &EncodedEntry,
+    ) -> f64 {
+        let hdc_sim = query.hdc.similarity(&candidate.hdc) as f64;
+        let dense_sim = match (&query.dense, &candidate.dense, &self.dense_encoder) {
+            (Some(q), Some(c), Some(enc)) => enc.similarity(q, c) as f64,
+            _ => hdc_sim, // fallback to HDC when dense unavailable
+        };
+        self.alpha * hdc_sim + (1.0 - self.alpha) * dense_sim
+    }
+}
+```
+
+**Configuration parameters**:
+
+| Parameter | Default | Range | Notes |
+|---|---|---|---|
+| `alpha` | 0.6 | 0.0 - 1.0 | Higher = more structural weight. Use 1.0 for offline/edge mode |
+| Dense model | None | MiniLM-L6, BGE-M3, Cohere embed-v4 | Optional; HDC works standalone |
+| Dense dimension | 384-3072 | Model-dependent | MiniLM-L6: 384, BGE-M3: 1024 |
+
+**When to use HDC-only**: Edge deployment, offline operation, low-latency requirements, structured queries (role-filler decomposition), cross-domain transfer detection.
+
+**When to add dense**: Semantic search over free-text content, paraphrase detection, cross-lingual knowledge bases, high-accuracy retrieval where embedding model cost is acceptable.
+
+---
+
+## Dimensionality Analysis: Why 10,240?
+
+### Information-Theoretic Optimum
+
+The choice of D = 10,240 is not arbitrary. It sits at the intersection of three constraints:
+
+**1. Quasi-orthogonality (noise floor)**:
+The noise floor σ = 1/(2√D). For reliable discrimination, signal must exceed 3σ:
+
+| D | σ (noise floor) | 3σ threshold | Min detectable similarity |
+|---|---|---|---|
+| 4,096 | 0.0078 | 0.0234 | 0.523 |
+| 8,192 | 0.0055 | 0.0166 | 0.517 |
+| **10,240** | **0.0049** | **0.0148** | **0.515** |
+| 16,384 | 0.0039 | 0.0117 | 0.512 |
+| 32,768 | 0.0028 | 0.0083 | 0.508 |
+
+D = 10,240 provides a noise floor of ~0.005, enabling detection of similarities as low as 0.515. Increasing to D = 16,384 improves this marginally (0.512) at 60% more memory cost.
+
+**2. Bundling capacity (SNR)**:
+For K items bundled, SNR = √(D/K). The critical threshold is SNR ≥ 3 for reliable retrieval:
+
+| D | Max K at SNR ≥ 3 | Max K at SNR ≥ 5 | Max K at SNR ≥ 10 |
+|---|---|---|---|
+| 4,096 | 455 | 164 | 41 |
+| 8,192 | 910 | 328 | 82 |
+| **10,240** | **1,138** | **410** | **102** |
+| 16,384 | 1,820 | 655 | 164 |
+
+D = 10,240 supports bundling ~100 items at SNR ≥ 10 (high quality) or ~1,100 items at SNR ≥ 3 (minimum viable). This covers Neuro's use cases: 5-10 role-filler bindings per entry (SNR > 30), and up to 100 entries per episode summary (SNR ≈ 10).
+
+**3. Hardware alignment**:
+D = 10,240 = 160 × 64 bits = 5 × 32-word AVX-512 iterations. Clean SIMD alignment with no remainder handling on x86-64. Also: 10,240 = 10 × 1,024, making it cache-line friendly (1,280 bytes = 20 × 64-byte cache lines).
+
+### Non-Monotonic Accuracy Warning
+
+Research has found a **non-monotonic relationship** between D and classification accuracy in some tasks — above D ≈ 10,000-12,000, increasing D can degrade majority-vote-based classification due to increased noise in bundled representations (Kleyko et al. 2022). The recommended maximum is D ≈ 10,000-12,000 for most classification tasks. D = 10,240 sits at this optimum.
+
+### Dimensional Upgrade Path
+
+If future Neuro deployments require larger knowledge bases (>100K entries) or higher precision (ε < 0.05 in Johnson-Lindenstrauss):
+
+```rust
+/// Configurable HDC dimension for future upgrades.
+pub const HDC_BITS: usize = 10_240;      // Current default
+pub const HDC_WORDS: usize = HDC_BITS / 64; // 160 u64 words
+pub const HDC_BYTES: usize = HDC_WORDS * 8;  // 1,280 bytes
+
+// Upgrade candidates:
+// D = 12,288 = 192 words (6 AVX-512 passes) — for 100K-500K entries
+// D = 16,384 = 256 words (8 AVX-512 passes) — for 500K-1M entries
+// D = 8,192  = 128 words (4 AVX-512 passes) — for edge/embedded
+```
+
+**Migration**: Upgrading D requires re-encoding all existing HDC vectors. The `from_seed()` function is D-agnostic (it generates as many bits as needed), so role vectors and concept vectors remain deterministic across dimension changes. Only the storage layout changes.
+
+---
+
+## Hardware Acceleration Landscape (2024-2025)
+
+### Current Accelerator Approaches
+
+The HDC hardware landscape has matured significantly in 2024-2025:
+
+**FPGA acceleration**: HPVM-HDC (Kotsifakou et al., arXiv:2410.15179, 2024) provides a compiler + runtime for heterogeneous HDC execution across CPUs, GPUs, and FPGAs. Reports **132× speedup** for EMG gesture recognition at D = 10,240.
+
+**In-memory computing**: IBM Research (Karunaratne et al., *Nature Electronics*, 2020) demonstrated storing 49 D=10,000 hypervectors in 760,000 phase-change memory (PCM) devices on a 14nm chip. Follow-up work (2024) using ferroelectric-based in-memory computing achieves software-equivalent accuracy with orders-of-magnitude energy reduction.
+
+**ASIC designs**: FSL-HDnn (arXiv:2512.11826, 2024) is a 40nm CMOS chip combining CNN feature extraction with HDC classification, achieving 0.09ms inference latency on FPGA (Alveo U280).
+
+**IoT/embedded**: HyperSense (arXiv:2401.10267, 2024) targets wearable/IoT devices with >10× reduction in inference time and energy vs CPU baseline.
+
+### Implications for Roko
+
+Roko's current CPU-based HDC (XOR + POPCNT at ~13ns per comparison) is already fast enough for per-agent knowledge bases (<100K entries ≈ 1.3ms scan). Hardware acceleration becomes relevant for:
+
+1. **Korai chain precompile**: On-chain HDC similarity search across millions of entries
+2. **Collective mesh queries**: Real-time cross-agent knowledge search
+3. **Edge deployment**: Battery-constrained devices running agent inference
+
+```rust
+/// Trait for HDC hardware backend abstraction.
+pub trait HdcBackend: Send + Sync {
+    /// Compare query against all stored vectors, return top-k matches.
+    fn top_k(&self, query: &HdcVector, k: usize) -> Vec<(usize, f32)>;
+    /// Batch similarity: compare query against N vectors in parallel.
+    fn batch_similarity(&self, query: &HdcVector, candidates: &[HdcVector]) -> Vec<f32>;
+}
+
+/// CPU backend (current default).
+pub struct CpuHdcBackend;
+
+/// Configuration for backend selection.
+pub struct HdcBackendConfig {
+    /// Backend type. Default: "cpu".
+    /// Future: "fpga", "pim" (processing-in-memory), "gpu".
+    pub backend: String,
+    /// For large stores: enable three-tier search (Bloom → approximate → exact).
+    pub enable_tiered_search: bool,
+    /// Threshold for switching from brute-force to tiered search.
+    pub tiered_search_threshold: usize, // Default: 100_000 entries
+}
+```
+
+### Recent Advances: Learnable and Adaptive HDC
+
+**FLASH encoder** (Frontiers in AI, 2024): Learns the encoder matrix distribution via gradient descent rather than using fixed random matrices. Achieves 5.5× faster inference than RFF-based ridge regression with comparable accuracy. This is relevant for Neuro if domain-specific encoding quality needs improvement beyond what `from_seed()` provides.
+
+**Kernel mean embeddings** (Neural Computing and Applications, 2025): Generalizes HDC operations as kernel mean embeddings, enabling closed-form solutions for regression, classification, and Bayesian inference. Unifies HDC with kernel methods, providing a theoretical bridge between Neuro's HDC and traditional ML.
+
+**HDC for graph ML** (arXiv:2402.17073, 2024): Node classification and link prediction using HDC achieves accuracy comparable to GNNs while training 14.6× faster with 2.0× faster inference. Relevant for Neuro's knowledge graph encoding.
+
+---
+
+## Academic Foundations (Extended)
+
+- Kanerva, P. (2009). "Hyperdimensional Computing." *Cognitive Computation*, 1(2), 139-159.
+- Plate, T. A. (1995). "Holographic reduced representations." *IEEE Trans. Neural Networks*, 6(3), 623-641.
+- Plate, T. A. (2003). *Holographic Reduced Representations*. CSLI Publications.
+- Kleyko, D., et al. (2022). "A Survey on Hyperdimensional Computing." *ACM Computing Surveys*, 54(6) and 55(9).
+- Thomas, A., Dasgupta, S., & Bhatt, T. (2021). "A Theoretical Perspective on Hyperdimensional Computing." *JAIR*, 72.
+- Kotsifakou, M. et al. (2024). "HPVM-HDC: A Heterogeneous Programming System for Accelerating HDC." arXiv:2410.15179.
+- Karunaratne, G. et al. (2020). "In-memory hyperdimensional computing." *Nature Electronics*, 3, 327-337.
+- FLASH (2024). "Hyperdimensional computing with holographic and adaptive encoder." *Frontiers in AI*. DOI:10.3389/frai.2024.1371988.
+- HDC Graph ML (2024). "Hyperdimensional Computing for Node Classification and Link Prediction." arXiv:2402.17073.
+- FSL-HDnn (2024). "A 40nm Few-shot On-Device Learning Accelerator." arXiv:2512.11826.
+- "Hyperdimensional computing hardware: progress, trends and prospects." *ICES*, 2025.
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**:

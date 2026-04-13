@@ -321,3 +321,678 @@ Estimated LOC: ~120 for transformation + Substrate writes, ~60 for Router query,
 - [../05-learning/00-episode-logger.md](../05-learning/00-episode-logger.md) -- Where verdicts are currently logged
 - `crates/roko-core/src/kind.rs` -- Kind::GateVerdict definition
 - `crates/roko-learn/src/episode_logger.rs` -- GateVerdict struct
+
+---
+
+## 11. Verdict Aggregation Across Time: Trend Detection
+
+Individual verdicts are snapshots. Trends across verdicts reveal systemic changes —
+a gate that was stable for weeks but now fails frequently, a model that suddenly
+produces worse code, a plan category that consistently underperforms. Trend detection
+transforms raw verdict streams into actionable intelligence.
+
+> **Citation**: "Contrasting Test Selection, Prioritization, and Batch Testing at Scale"
+> (Empirical Software Engineering, 2024) — ML-driven trend detection in CI pipelines.
+
+### 11.1 Verdict Time Series
+
+```rust
+/// A verdict time series for a specific gate, tracking outcomes over time.
+pub struct VerdictTimeSeries {
+    /// Gate identifier.
+    pub gate: String,
+    /// Ordered observations (newest last).
+    pub observations: VecDeque<VerdictObservation>,
+    /// Maximum observations retained (sliding window).
+    pub max_observations: usize,    // default: 500
+    /// EMA of pass rate (same as AdaptiveThresholds.ema_pass_rate).
+    pub ema_pass_rate: f64,
+    /// EMA of verdict score (continuous, not just binary).
+    pub ema_score: f64,
+    /// CUSUM accumulators for shift detection (see §06 SPC).
+    pub cusum_upper: f64,
+    pub cusum_lower: f64,
+    /// Computed trend classification.
+    pub trend: VerdictTrend,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerdictObservation {
+    pub timestamp_ms: u64,
+    pub passed: bool,
+    pub score: f32,
+    pub plan_id: String,
+    pub task_id: String,
+    pub signature: Option<String>,
+    pub model: Option<String>,
+}
+
+/// Trend classification for a verdict time series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictTrend {
+    /// No significant change in behavior.
+    Stable,
+    /// Consistent improvement over the observation window.
+    Improving,
+    /// Consistent degradation over the observation window.
+    Degrading,
+    /// High variance, no clear direction.
+    Volatile,
+    /// Fundamental change in statistical properties (detected by BOCPD).
+    RegimeShift,
+}
+```
+
+### 11.2 Trend Classification Algorithm
+
+```rust
+impl VerdictTimeSeries {
+    /// Classify the current trend from the observation window.
+    ///
+    /// Uses three signals:
+    /// 1. EMA derivative (slope of the smoothed pass rate)
+    /// 2. CUSUM shift detection (sustained drift)
+    /// 3. BOCPD regime change (fundamental change)
+    pub fn classify_trend(&self) -> VerdictTrend {
+        // 1. Compute EMA slope over the last N observations
+        let slope = self.ema_slope(20); // slope over last 20 observations
+
+        // 2. Check CUSUM for sustained shift
+        let cusum_signal = self.cusum_upper > CUSUM_H
+            || self.cusum_lower > CUSUM_H;
+
+        // 3. Check BOCPD for regime change
+        let regime_change = self.bocpd_changepoint_prob > BOCPD_THRESHOLD;
+
+        // Classification logic:
+        if regime_change {
+            return VerdictTrend::RegimeShift;
+        }
+        if cusum_signal && slope > SLOPE_IMPROVING {
+            return VerdictTrend::Improving;
+        }
+        if cusum_signal && slope < SLOPE_DEGRADING {
+            return VerdictTrend::Degrading;
+        }
+
+        // Volatility check: coefficient of variation
+        let cv = self.score_std_dev() / self.ema_score.max(0.01);
+        if cv > VOLATILITY_THRESHOLD {
+            return VerdictTrend::Volatile;
+        }
+
+        VerdictTrend::Stable
+    }
+}
+
+/// Trend detection constants.
+const SLOPE_IMPROVING: f64 = 0.005;   // ~0.5% improvement per observation
+const SLOPE_DEGRADING: f64 = -0.005;
+const CUSUM_H: f64 = 4.0;             // CUSUM decision interval
+const BOCPD_THRESHOLD: f64 = 0.5;     // P(changepoint) threshold
+const VOLATILITY_THRESHOLD: f64 = 0.3; // CV above this = volatile
+```
+
+### 11.3 Multi-Gate Trend Dashboard
+
+```
+Verdict Trends (last 200 observations):
+  Compile:        ███████████████ 97.2% STABLE        (slope: +0.001)
+  Lint:           █████████████░░ 86.5% DEGRADING ↓   (slope: -0.012, CUSUM alert)
+  Test:           ████████████░░░ 79.1% STABLE        (slope: +0.003)
+  Symbol:         ███████████████ 98.0% IMPROVING ↑   (slope: +0.008)
+  Generated:      ████████░░░░░░░ 54.2% VOLATILE ⚡    (CV: 0.42)
+  Property:       █████████████░░ 88.0% REGIME SHIFT  (BOCPD: new baseline 88%)
+```
+
+---
+
+## 12. Verdict Pattern Mining
+
+Beyond per-gate trends, cross-gate and cross-task patterns reveal deeper structural
+issues.
+
+### 12.1 Co-Failure Patterns
+
+```rust
+/// Detect gates that tend to fail together.
+///
+/// If compile and lint failures correlate > threshold, they likely
+/// share a root cause (e.g., syntax errors cause both).
+pub struct CoFailureDetector {
+    /// Co-occurrence matrix: entry (i,j) = count of times gate i and
+    /// gate j both failed on the same task.
+    pub co_failures: HashMap<(String, String), u64>,
+    /// Total observations per gate.
+    pub gate_counts: HashMap<String, u64>,
+    /// Minimum co-occurrence for significance.
+    pub min_co_occurrences: u64,     // default: 5
+    /// Phi coefficient threshold for declaring correlation.
+    pub correlation_threshold: f64,   // default: 0.3
+}
+
+impl CoFailureDetector {
+    /// Record a set of gate verdicts from one task execution.
+    pub fn observe(&mut self, verdicts: &[(&str, bool)]) {
+        let failed: Vec<&str> = verdicts.iter()
+            .filter(|(_, passed)| !passed)
+            .map(|(gate, _)| *gate)
+            .collect();
+
+        for i in 0..failed.len() {
+            for j in (i+1)..failed.len() {
+                let key = if failed[i] < failed[j] {
+                    (failed[i].to_string(), failed[j].to_string())
+                } else {
+                    (failed[j].to_string(), failed[i].to_string())
+                };
+                *self.co_failures.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (gate, _) in verdicts {
+            *self.gate_counts.entry(gate.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// Return significantly correlated gate pairs.
+    pub fn correlated_pairs(&self) -> Vec<CoFailurePair> {
+        self.co_failures.iter()
+            .filter(|(_, &count)| count >= self.min_co_occurrences)
+            .filter_map(|((a, b), &count)| {
+                let phi = self.phi_coefficient(a, b, count);
+                if phi.abs() > self.correlation_threshold {
+                    Some(CoFailurePair {
+                        gate_a: a.clone(),
+                        gate_b: b.clone(),
+                        co_failure_count: count,
+                        phi_coefficient: phi,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+pub struct CoFailurePair {
+    pub gate_a: String,
+    pub gate_b: String,
+    pub co_failure_count: u64,
+    pub phi_coefficient: f64,
+}
+```
+
+### 12.2 Failure Signature Clustering
+
+Group failures by their error signature to identify recurring issues:
+
+```rust
+/// Cluster verdict failures by error signature.
+///
+/// Repeated failures with the same signature suggest a systemic issue
+/// that needs structural attention, not just retries.
+pub struct SignatureCluster {
+    /// The error signature (hashed diagnostic).
+    pub signature: String,
+    /// Gate that produced these failures.
+    pub gate: String,
+    /// Number of occurrences.
+    pub count: u64,
+    /// First and last occurrence timestamps.
+    pub first_seen_ms: u64,
+    pub last_seen_ms: u64,
+    /// Task IDs that experienced this failure.
+    pub affected_tasks: Vec<String>,
+    /// Plan IDs that experienced this failure.
+    pub affected_plans: Vec<String>,
+    /// Models that produced this failure.
+    pub affected_models: Vec<String>,
+    /// Whether this cluster is growing (more frequent over time).
+    pub trend: VerdictTrend,
+}
+
+impl SignatureCluster {
+    /// Compute severity: a composite of frequency, recency, and breadth.
+    pub fn severity(&self) -> f64 {
+        let frequency = (self.count as f64).ln().max(0.0) / 5.0; // log-scaled
+        let recency = 1.0; // would use time decay in practice
+        let breadth = self.affected_plans.len() as f64
+            / 10.0_f64.max(self.affected_plans.len() as f64);
+        (frequency + recency + breadth) / 3.0
+    }
+}
+```
+
+---
+
+## 13. Verdict-Driven Replanning
+
+When verdict patterns indicate that a plan or task is fundamentally broken, automatic
+replanning modifies the execution strategy without human intervention.
+
+### 13.1 Replanning Triggers
+
+```rust
+/// Conditions that trigger automatic replanning.
+pub struct ReplanTriggers {
+    /// Same error signature fails N times across attempts → replan the task.
+    pub same_signature_threshold: u32,    // default: 3
+    /// Progress score negative for N consecutive turns → replan approach.
+    pub negative_progress_threshold: u32, // default: 3
+    /// Promise score below this for N turns → abort and replan.
+    pub low_promise_threshold: f64,       // default: 0.2
+    pub low_promise_turns: u32,           // default: 2
+    /// Plan-level: if > N tasks fail in a plan → re-plan remaining tasks.
+    pub plan_failure_threshold: u32,      // default: 3
+    /// Gate degradation trend detected → replan with additional gates.
+    pub trend_degradation_trigger: bool,  // default: true
+}
+
+/// Replanning action to take.
+#[derive(Debug, Clone)]
+pub enum ReplanAction {
+    /// Modify the task: add constraints, decompose into sub-tasks,
+    /// change the approach described in the task spec.
+    ModifyTask {
+        task_id: String,
+        reason: String,
+        /// Suggested modifications based on failure analysis.
+        modifications: Vec<TaskModification>,
+    },
+    /// Replace the task entirely with a new plan generated from
+    /// the failure context.
+    ReplaceTask {
+        task_id: String,
+        reason: String,
+        /// Context from failures to inform the new plan.
+        failure_context: FailureContext,
+    },
+    /// Decompose a single failing task into smaller sub-tasks that
+    /// are individually more likely to pass gates.
+    DecomposeTask {
+        task_id: String,
+        reason: String,
+        /// Suggested decomposition points.
+        split_points: Vec<String>,
+    },
+    /// Escalate: add stronger gates, use more capable model, or
+    /// flag for human review.
+    Escalate {
+        task_id: String,
+        reason: String,
+        escalation: EscalationType,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum TaskModification {
+    /// Add a constraint to the task spec (e.g., "do not modify file X").
+    AddConstraint(String),
+    /// Remove a requirement that is causing failures.
+    RelaxRequirement(String),
+    /// Change the approach (e.g., "use trait objects instead of generics").
+    ChangeApproach(String),
+    /// Add a prerequisite task that must complete first.
+    AddPrerequisite(String),
+}
+
+pub struct FailureContext {
+    /// Error signatures from failed attempts.
+    pub signatures: Vec<String>,
+    /// Gates that consistently fail.
+    pub failing_gates: Vec<String>,
+    /// Files that were modified in failed attempts.
+    pub modified_files: Vec<String>,
+    /// Successful approaches for similar tasks (from skill library).
+    pub similar_successes: Vec<String>,
+}
+
+pub enum EscalationType {
+    /// Add more verification gates.
+    AddGates(Vec<Box<dyn Gate>>),
+    /// Use a more capable model.
+    UpgradeModel(String),
+    /// Flag for human review.
+    HumanReview,
+}
+```
+
+### 13.2 Replanning Decision Engine
+
+```rust
+/// Engine that monitors verdict patterns and triggers replanning.
+pub struct ReplanEngine {
+    pub triggers: ReplanTriggers,
+    /// Per-task failure tracking.
+    pub task_failures: HashMap<String, TaskFailureState>,
+    /// Per-plan failure tracking.
+    pub plan_failures: HashMap<String, PlanFailureState>,
+}
+
+pub struct TaskFailureState {
+    /// Consecutive attempts with same error signature.
+    pub same_signature_streak: u32,
+    /// Last seen error signature.
+    pub last_signature: Option<String>,
+    /// Progress scores for recent turns.
+    pub recent_progress: VecDeque<f64>,
+    /// Promise scores for recent turns.
+    pub recent_promise: VecDeque<f64>,
+}
+
+impl ReplanEngine {
+    /// Process a new verdict and determine if replanning is needed.
+    pub fn process_verdict(&mut self, verdict: &GateVerdict,
+                           process_reward: &ProcessReward)
+        -> Option<ReplanAction>
+    {
+        let state = self.task_failures
+            .entry(verdict.task_id.clone())
+            .or_default();
+
+        // Track signature streaks
+        if !verdict.passed {
+            if verdict.signature.as_deref() == state.last_signature.as_deref() {
+                state.same_signature_streak += 1;
+            } else {
+                state.same_signature_streak = 1;
+                state.last_signature = verdict.signature.clone();
+            }
+        } else {
+            state.same_signature_streak = 0;
+        }
+
+        // Track process rewards
+        state.recent_progress.push_back(process_reward.progress);
+        state.recent_promise.push_back(process_reward.promise);
+        if state.recent_progress.len() > 10 {
+            state.recent_progress.pop_front();
+            state.recent_promise.pop_front();
+        }
+
+        // Check triggers
+        if state.same_signature_streak >= self.triggers.same_signature_threshold {
+            return Some(ReplanAction::ModifyTask {
+                task_id: verdict.task_id.clone(),
+                reason: format!(
+                    "Same error signature '{}' failed {} times consecutively",
+                    state.last_signature.as_deref().unwrap_or("unknown"),
+                    state.same_signature_streak
+                ),
+                modifications: self.suggest_modifications(verdict, state),
+            });
+        }
+
+        let negative_progress_count = state.recent_progress.iter()
+            .rev()
+            .take_while(|&&p| p < -0.1)
+            .count() as u32;
+        if negative_progress_count >= self.triggers.negative_progress_threshold {
+            return Some(ReplanAction::DecomposeTask {
+                task_id: verdict.task_id.clone(),
+                reason: format!(
+                    "Negative progress for {} consecutive turns",
+                    negative_progress_count
+                ),
+                split_points: self.suggest_decomposition(verdict),
+            });
+        }
+
+        let low_promise_count = state.recent_promise.iter()
+            .rev()
+            .take_while(|&&p| p < self.triggers.low_promise_threshold)
+            .count() as u32;
+        if low_promise_count >= self.triggers.low_promise_turns {
+            return Some(ReplanAction::ReplaceTask {
+                task_id: verdict.task_id.clone(),
+                reason: format!(
+                    "Promise below {:.1} for {} turns — approach is not viable",
+                    self.triggers.low_promise_threshold,
+                    low_promise_count
+                ),
+                failure_context: self.build_failure_context(verdict, state),
+            });
+        }
+
+        None // No replanning needed
+    }
+}
+```
+
+### 13.3 Replanning Feedback Loop
+
+```
+Verdict stream
+    │
+    ├── Trend detection ──────► VerdictTrend per gate
+    │                              │
+    ├── Co-failure analysis ──► Correlated gate pairs
+    │                              │
+    ├── Signature clustering ─► Recurring failure patterns
+    │                              │
+    └── ReplanEngine ◄────────── All signals combined
+         │
+         ├── ReplanAction::ModifyTask ──► Orchestrator adjusts task spec
+         │                                before next attempt
+         ├── ReplanAction::DecomposeTask ──► DAG executor creates sub-tasks
+         │                                   with dependency edges
+         ├── ReplanAction::ReplaceTask ──► Plan generator creates new task
+         │                                 from failure context
+         └── ReplanAction::Escalate ──► Stronger model / more gates / human
+```
+
+---
+
+## 14. Meta-Learning from Verdict Patterns
+
+Verdicts are the richest learning signal in the system. Meta-learning uses verdict
+history to improve future verification decisions.
+
+> **Citation**: Finn et al., "Model-Agnostic Meta-Learning for Fast Adaptation"
+> (MAML, arXiv:1703.03400, ICML 2017).
+
+> **Citation**: Machalica et al., "Predictive Test Selection" (ICSE-SEIP 2019) —
+> Facebook's ML-based test selection achieving 2x cost reduction.
+
+### 14.1 Predictive Gate Selection
+
+Instead of using static complexity bands to select gates, predict which gates will
+fail based on the task's features and select those gates for thorough verification:
+
+```rust
+/// Predictive gate selector using verdict history.
+///
+/// Features per (task, gate) pair, trained on historical verdicts:
+///   - task_category: categorical (compile fix, test fix, new feature, refactor)
+///   - files_modified: set of file paths
+///   - model_used: which LLM model
+///   - recent_gate_history: last 10 verdicts for this gate
+///   - task_complexity: token count of task description
+///   - gate_pass_rate: current EMA pass rate for this gate
+///   - co_failure_rate: correlation with other failing gates
+pub struct PredictiveGateSelector {
+    /// Per-gate failure prediction models.
+    /// Maps gate name → trained predictor.
+    pub predictors: HashMap<String, Box<dyn FailurePredictor>>,
+    /// Minimum predicted failure probability to include gate.
+    pub inclusion_threshold: f64,    // default: 0.1
+    /// Maximum gates to include (prevents over-verification).
+    pub max_gates: usize,            // default: 7
+}
+
+pub trait FailurePredictor: Send + Sync {
+    /// Predict the probability of failure for this gate given task features.
+    fn predict_failure(&self, features: &TaskFeatures) -> f64;
+}
+
+pub struct TaskFeatures {
+    pub category: String,
+    pub files_modified: Vec<String>,
+    pub model: String,
+    pub task_complexity: usize,
+    pub recent_gate_results: Vec<bool>,
+}
+
+impl PredictiveGateSelector {
+    /// Select gates to run based on predicted failure probabilities.
+    ///
+    /// Strategy: always include mandatory gates (compile, test).
+    /// Include optional gates only if P(failure) > threshold.
+    /// Rank by P(failure) descending and take top max_gates.
+    pub fn select_gates(&self, features: &TaskFeatures) -> Vec<String> {
+        let mut predictions: Vec<(String, f64)> = self.predictors.iter()
+            .map(|(gate, predictor)| {
+                (gate.clone(), predictor.predict_failure(features))
+            })
+            .collect();
+
+        // Always include mandatory gates
+        let mut selected = vec!["compile".to_string(), "test".to_string()];
+
+        // Sort optional gates by predicted failure probability (desc)
+        predictions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        for (gate, prob) in predictions {
+            if selected.contains(&gate) { continue; }
+            if prob >= self.inclusion_threshold && selected.len() < self.max_gates {
+                selected.push(gate);
+            }
+        }
+
+        selected
+    }
+}
+```
+
+### 14.2 Few-Shot Gate Calibration from Verdict History
+
+When a new task arrives, find similar past tasks and use their verdict patterns to
+pre-calibrate gate thresholds:
+
+```rust
+/// Few-shot gate calibration from historical verdict patterns.
+///
+/// For a new task, find the K nearest historical tasks and use their
+/// verdict patterns to set initial thresholds and retry budgets.
+pub struct VerdictPatternMemory {
+    /// Historical task → verdict pattern entries.
+    pub patterns: Vec<TaskVerdictPattern>,
+    /// Number of nearest neighbors to use for calibration.
+    pub k: usize,                    // default: 5
+    /// Similarity metric for task features.
+    pub similarity: Box<dyn TaskSimilarity>,
+}
+
+pub struct TaskVerdictPattern {
+    pub features: TaskFeatures,
+    pub gate_verdicts: Vec<(String, bool, f32)>,  // gate, passed, score
+    pub outcome: bool,                             // task succeeded?
+    pub steps_to_completion: u32,
+    pub retries_used: u32,
+    pub model: String,
+}
+
+impl VerdictPatternMemory {
+    /// Calibrate gate thresholds for a new task using K nearest neighbors.
+    pub fn calibrate(&self, new_task: &TaskFeatures) -> GateCalibration {
+        let similar = self.k_nearest(new_task, self.k);
+
+        // Predict which gates will likely fail
+        let mut gate_failure_rates: HashMap<String, (u64, u64)> = HashMap::new();
+        for pattern in &similar {
+            for (gate, passed, _) in &pattern.gate_verdicts {
+                let (fails, total) = gate_failure_rates
+                    .entry(gate.clone()).or_insert((0, 0));
+                if !passed { *fails += 1; }
+                *total += 1;
+            }
+        }
+
+        // Predict optimal retry count from similar tasks
+        let avg_retries = similar.iter()
+            .filter(|p| p.outcome) // only from successful tasks
+            .map(|p| p.retries_used as f64)
+            .sum::<f64>() / similar.len().max(1) as f64;
+
+        GateCalibration {
+            per_gate_failure_prediction: gate_failure_rates.into_iter()
+                .map(|(gate, (fails, total))| {
+                    (gate, fails as f64 / total as f64)
+                })
+                .collect(),
+            suggested_retries: avg_retries.ceil() as u32,
+            similar_task_success_rate: similar.iter()
+                .filter(|p| p.outcome).count() as f64 / similar.len() as f64,
+        }
+    }
+}
+
+pub struct GateCalibration {
+    /// Predicted failure rate per gate [0, 1].
+    pub per_gate_failure_prediction: HashMap<String, f64>,
+    /// Suggested retry budget from similar tasks.
+    pub suggested_retries: u32,
+    /// Success rate of similar historical tasks.
+    pub similar_task_success_rate: f64,
+}
+```
+
+---
+
+## 15. Verdict Signal Persistence
+
+### 15.1 Verdict Aggregation Store
+
+```
+.roko/learn/
+├── verdict-trends.json         # Per-gate trend data
+│   {"compile": {"trend": "Stable", "ema": 0.97, "slope": 0.001},
+│    "lint": {"trend": "Degrading", "ema": 0.86, "slope": -0.012}}
+├── co-failures.json            # Co-failure matrix
+│   {"compile+lint": {"count": 12, "phi": 0.45}}
+├── signature-clusters.json     # Recurring failure signatures
+│   [{"signature": "E0425", "gate": "compile", "count": 23,
+│     "trend": "Stable", "severity": 0.6}]
+├── replan-log.jsonl            # Replanning decisions and outcomes
+│   {"ts": ..., "task": "T5", "action": "DecomposeTask",
+│    "reason": "negative progress 3 turns", "outcome": "succeeded"}
+└── pattern-memory.json         # Historical verdict patterns for k-NN
+    [{"features": {...}, "verdicts": [...], "outcome": true}]
+```
+
+---
+
+## 16. Integration with Other Verification Components
+
+| Component | How Verdict Signals Feed It |
+|---|---|
+| **AdaptiveThresholds** (§06) | Verdict trends adjust SPC parameters; regime shifts trigger recalibration |
+| **ProcessRewardModels** (§07) | Verdict patterns → step-level labels; co-failures inform reward shaping |
+| **EvoSkills** (§11) | Verdict success patterns → skill extraction; failure patterns → skill retirement |
+| **GatePipeline** (§03) | Predictive gate selection uses verdict history to choose which gates to run |
+| **GateRatchet** (§05) | Verdict trends inform ratchet strictness — degrading trends tighten ratchet |
+| **CascadeRouter** | Verdict-model correlations drive routing; consistent failures with Model X → avoid X |
+| **SystemPromptBuilder** | Verdict patterns injected as "lessons learned" section in prompts |
+| **Dreams** | Verdict clusters feed Delta consolidation; recurring patterns become knowledge entries |
+
+---
+
+## 17. Extended Test Criteria
+
+| Test | Property |
+|---|---|
+| `trend_stable_on_constant_rate` | 100 obs at 85% pass rate → VerdictTrend::Stable |
+| `trend_degrading_on_declining_rate` | 50 obs at 90% then 50 at 70% → Degrading |
+| `trend_regime_shift_on_sudden_change` | 100 at 95% then 100 at 50% → RegimeShift |
+| `trend_volatile_on_oscillation` | Alternating pass/fail → Volatile |
+| `co_failure_detects_correlation` | Compile+lint fail together 10x → phi > threshold |
+| `co_failure_ignores_independent` | Compile and test fail independently → phi < threshold |
+| `signature_cluster_counts_correctly` | 5 failures with same signature → cluster.count == 5 |
+| `replan_on_same_signature_3x` | Same error 3 times → ReplanAction::ModifyTask |
+| `replan_on_negative_progress` | Progress < -0.1 for 3 turns → DecomposeTask |
+| `replan_on_low_promise` | Promise < 0.2 for 2 turns → ReplaceTask |
+| `predictive_selects_high_risk_gates` | Gate with 80% predicted failure → selected |
+| `predictive_skips_low_risk_gates` | Gate with 2% predicted failure → not selected |
+| `knn_calibration_from_similar_tasks` | 5 similar tasks with 3 avg retries → suggest 3 |
+| `verdict_signal_round_trips_through_substrate` | Write → query → correct tags and lineage |

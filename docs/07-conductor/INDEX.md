@@ -26,6 +26,7 @@
 | 12 | [yerkes-dodson-pressure.md](12-yerkes-dodson-pressure.md) | Inverted-U curve, pressure tuning, cooperation metrics | ~310 |
 | 13 | [process-supervision-wiring.md](13-process-supervision-wiring.md) | ProcessSupervisor integration, PID tracking, orphan cleanup | ~310 |
 | 14 | [production-failure-catalog.md](14-production-failure-catalog.md) | 21 production failures mapped to conductor responses | ~360 |
+| 15 | [conductor-learning-federation.md](15-conductor-learning-federation.md) | Learned policies, federated control, self-healing | ~400 |
 
 ---
 
@@ -63,6 +64,11 @@
 14. **13-process-supervision-wiring.md** — OS-level process management
 15. **14-production-failure-catalog.md** — Every known failure and
     its conductor response
+
+### Frontier (Adaptive and self-improving conductor)
+
+16. **15-conductor-learning-federation.md** — Learned intervention
+    policies, federated multi-level control, self-healing conductor
 
 ---
 
@@ -134,6 +140,16 @@ Every intervention is a data point for the learning system:
 - Efficiency events → cascade router training (doc 11)
 - Gate outcomes → adaptive threshold tuning (doc 11)
 - Cooperation metrics → pressure calibration (doc 12)
+- Intervention outcomes → conductor bandit training (doc 15)
+
+### Theme: Hierarchical Control
+
+The conductor operates at multiple timescales simultaneously:
+- **Gamma** (per-turn): 10 watchers + anomaly detector (docs 01, 11)
+- **Theta** (per-task): MetaCognitionHook + stuck detection (docs 05, 07)
+- **Delta** (per-batch): cascade router + threshold adaptation (docs 11, 15)
+- Slower loops set parameters for faster loops (doc 07, nested OODA)
+- Each level implements the Policy trait independently (doc 15)
 
 ### Theme: Multiple Levels of Protection
 
@@ -165,6 +181,14 @@ Every threshold and mechanism traces to a real failure:
 | Yerkes-Dodson Law | Yerkes & Dodson | 1908 | Pressure dynamics (doc 12) |
 | Stigmergy | Grassé | 1959 | Indirect coordination (doc 12) |
 | Self-Improvement Convergence | Song et al. | ICLR 2025 | Verifier exceeds generator (doc 08) |
+| Internal Model Principle | Francis & Wonham | 1976 | Forward prediction, self-model learning (doc 08) |
+| Cognitive Load Theory | Sweller | 1988 | Intrinsic/extraneous/germane load mapping (doc 12) |
+| Flow State | Csikszentmihalyi | 1975 | Challenge-skill balance, flow detection (doc 12) |
+| Complex Event Processing | Luckham | 2002 | Watcher composition patterns (doc 01) |
+| Isolation Forest | Liu et al. | 2008 | Streaming anomaly detection (doc 01) |
+| Dempster-Shafer Theory | Dempster/Shafer | 1967/76 | Watcher fusion under uncertainty (doc 01) |
+| Recovery-Oriented Computing | Patterson et al. | 2002 | Self-healing, micro-reboots (doc 15) |
+| Active Inference | Friston | 2010 | Precision-weighted model updates (doc 08) |
 
 ---
 
@@ -187,6 +211,7 @@ Every threshold and mechanism traces to a real failure:
 | `crates/roko-learn/src/provider_health.rs` | Provider health tracker |
 | `crates/roko-gate/src/adaptive_threshold.rs` | Adaptive gate thresholds |
 | `crates/bardo-runtime/` | ProcessSupervisor |
+| `crates/roko-learn/src/conductor.rs` | ConductorBandit (learned intervention policy) |
 
 ---
 

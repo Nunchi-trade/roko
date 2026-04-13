@@ -647,6 +647,226 @@ impl NeuroStore {
 
 ---
 
+## Advanced Operations: Beyond the Core Four (2024-2025)
+
+Recent research has extended the BSC algebra with new operations relevant to Neuro:
+
+### Fractional Binding (FHRR Extension)
+
+While BSC uses binary XOR (discrete binding), Fourier Holographic Reduced Representations (FHRR) enable **fractional binding**: `bind(A, B^α)` for α ∈ ℝ. This produces a smooth interpolation between identity (α=0) and full binding (α=1).
+
+**Relevance to Neuro**: Fractional binding enables graduated confidence in role-filler assignments. Instead of encoding "definitely Rust domain" vs "not Rust domain," an entry could encode "probably Rust domain with 70% confidence" using α = 0.7. This is not yet implemented but represents a natural extension.
+
+```rust
+/// Fractional binding via BSC approximation.
+///
+/// BSC does not natively support fractional binding. This approximation
+/// uses probabilistic bit flipping: for each bit position, keep the
+/// binding result with probability α, or keep the original with probability (1-α).
+///
+/// At α = 0.0: returns `self` (no binding)
+/// At α = 1.0: returns `self.bind(other)` (full binding)
+/// At α = 0.5: returns a vector halfway between self and bind(self, other)
+///
+/// This is a Monte Carlo approximation of FHRR's exact fractional binding.
+/// Deterministic via seeded PRNG for reproducibility.
+pub fn fractional_bind(&self, other: &Self, alpha: f64, seed: u64) -> Self {
+    if alpha <= 0.0 { return *self; }
+    if alpha >= 1.0 { return self.bind(other); }
+
+    let bound = self.bind(other);
+    let mut result = [0u64; 160];
+    let mut rng_state = seed;
+
+    for (i, slot) in result.iter_mut().enumerate() {
+        let mut word = 0u64;
+        for bit in 0..64 {
+            // Seeded random threshold per bit
+            rng_state = splitmix64(&mut rng_state);
+            let threshold = (rng_state as f64) / (u64::MAX as f64);
+
+            if threshold < alpha {
+                // Use bound bit
+                word |= (bound.bits[i] >> bit & 1) << bit;
+            } else {
+                // Keep original bit
+                word |= (self.bits[i] >> bit & 1) << bit;
+            }
+        }
+        *slot = word;
+    }
+    Self { bits: result }
+}
+```
+
+### Weighted Bundling via Vote Accumulator
+
+The `BundleAccumulator` (designed in this doc) supports weighted bundling, but a more efficient approach uses **stochastic rounding** for online bundling without maintaining vote counts:
+
+```rust
+/// Online weighted bundle without vote accumulator.
+///
+/// Instead of maintaining per-bit vote counts (40 KB memory),
+/// uses stochastic rounding to maintain a running binary bundle.
+///
+/// For each new vector added with weight w:
+///   For each bit position:
+///     acceptance_probability = w / (w + current_weight)
+///     if random() < acceptance_probability:
+///       output_bit = new_vector_bit
+///     else:
+///       output_bit = current_bundle_bit
+///
+/// Memory: O(D/8) = 1,280 bytes (just the running bundle + weight counter).
+/// The BundleAccumulator uses 40 KB. This saves 31× memory at the cost
+/// of some approximation noise.
+pub struct OnlineBundler {
+    /// Running bundle (binary vector).
+    pub bundle: HdcVector,
+    /// Accumulated weight.
+    pub total_weight: f64,
+}
+
+impl OnlineBundler {
+    pub fn new() -> Self {
+        Self {
+            bundle: HdcVector::zeros(),
+            total_weight: 0.0,
+        }
+    }
+
+    /// Add a vector with weight to the running bundle.
+    pub fn add(&mut self, vector: &HdcVector, weight: f64, seed: u64) {
+        if self.total_weight == 0.0 {
+            self.bundle = *vector;
+            self.total_weight = weight;
+            return;
+        }
+
+        let acceptance = weight / (weight + self.total_weight);
+        let mut rng_state = seed;
+        let mut bits = [0u64; 160];
+
+        for (i, slot) in bits.iter_mut().enumerate() {
+            let mut word = 0u64;
+            for bit in 0..64 {
+                rng_state = splitmix64(&mut rng_state);
+                let threshold = (rng_state as f64) / (u64::MAX as f64);
+                if threshold < acceptance {
+                    word |= (vector.bits[i] >> bit & 1) << bit;
+                } else {
+                    word |= (self.bundle.bits[i] >> bit & 1) << bit;
+                }
+            }
+            *slot = word;
+        }
+
+        self.bundle = HdcVector { bits };
+        self.total_weight += weight;
+    }
+}
+```
+
+### Sequence Encoding: N-gram Permutation Chains
+
+Beyond single-step permutation, **n-gram encoding** captures local context in sequences:
+
+```
+bigram(A, B) = bind(permute(A, 1), B)
+trigram(A, B, C) = bind(permute(permute(A, 1), 1), bind(permute(B, 1), C))
+                 = bind(permute(A, 2), bind(permute(B, 1), C))
+```
+
+For knowledge entries, trigram encoding of content captures local semantic context that single-word fingerprinting misses. The `roko-index` crate already uses character trigrams for symbol name encoding; extending this to word-level trigrams for knowledge content would improve semantic matching.
+
+```rust
+/// Word-level trigram encoding for knowledge entry content.
+///
+/// Splits content into words, encodes each word via from_seed,
+/// then composes word trigrams using permutation-binding chains.
+///
+/// Example: "borrow checker errors mean you need Arc"
+///   trigrams: [borrow,checker,errors], [checker,errors,mean], ...
+///   each trigram: bind(perm(w1, 2), bind(perm(w2, 1), w3))
+///   final: bundle(all trigrams)
+pub fn word_trigram_fingerprint(content: &str) -> HdcVector {
+    let words: Vec<&str> = content.split_whitespace().collect();
+    if words.len() < 3 {
+        return HdcVector::from_seed(content.as_bytes());
+    }
+
+    let word_hvs: Vec<HdcVector> = words.iter()
+        .map(|w| HdcVector::from_seed(w.to_lowercase().as_bytes()))
+        .collect();
+
+    let trigrams: Vec<HdcVector> = word_hvs.windows(3)
+        .map(|window| {
+            let w0 = window[0].permute(2);
+            let w1 = window[1].permute(1);
+            let w2 = window[2];
+            w0.bind(&w1.bind(&w2))
+        })
+        .collect();
+
+    let refs: Vec<&HdcVector> = trigrams.iter().collect();
+    HdcVector::bundle(&refs)
+}
+```
+
+**Comparison with character trigrams**:
+- Character trigrams (used in roko-index): capture sub-word morphology. "parse_config" and "parse_input" are similar because they share "par", "ars", "rse" trigrams.
+- Word trigrams (proposed above): capture semantic context. "borrow checker errors" and "ownership check failures" share the pattern [property_system, verification, failure].
+- Both can be bundled for richer encoding: `bundle(char_trigram_hv, word_trigram_hv)`.
+
+### Controlled Forgetting via Exponential Decay in Vector Space
+
+The `decay()` method on `BundleAccumulator` applies multiplicative decay to vote counts. An equivalent operation for binary vectors uses **stochastic bit flipping**:
+
+```rust
+/// Apply exponential decay to a binary HDC vector.
+///
+/// For each bit, flip it with probability (1 - factor) / 2.
+/// At factor = 1.0: no change.
+/// At factor = 0.0: complete randomization (vector → noise).
+/// At factor = 0.5: each bit has 25% chance of flipping.
+///
+/// This creates a "fading" effect: the vector gradually loses
+/// its signal and approaches the random noise floor (similarity ≈ 0.5
+/// to any specific vector).
+///
+/// Use case: implementing temporal decay in HDC space, complementing
+/// the Ebbinghaus decay on confidence scores.
+pub fn stochastic_decay(&self, factor: f64, seed: u64) -> Self {
+    if factor >= 1.0 { return *self; }
+    let flip_prob = (1.0 - factor) / 2.0;
+    let mut result = self.bits;
+    let mut rng_state = seed;
+
+    for word in result.iter_mut() {
+        for bit in 0..64 {
+            rng_state = splitmix64(&mut rng_state);
+            let threshold = (rng_state as f64) / (u64::MAX as f64);
+            if threshold < flip_prob {
+                *word ^= 1u64 << bit; // flip this bit
+            }
+        }
+    }
+    Self { bits: result }
+}
+```
+
+**Test criteria**:
+- `fractional_bind` at α=0.0 returns self (similarity 1.0 to original)
+- `fractional_bind` at α=1.0 returns `bind(self, other)` (similarity 1.0 to full bind)
+- `fractional_bind` at α=0.5 returns vector with similarity ~0.75 to both self and full bind
+- `OnlineBundler` with 10 vectors produces result similar (>0.95) to `BundleAccumulator.finish()`
+- `word_trigram_fingerprint` on similar sentences produces similarity > 0.55
+- `word_trigram_fingerprint` on unrelated sentences produces similarity ≈ 0.50
+- `stochastic_decay` at factor=1.0 returns unchanged vector
+- `stochastic_decay` at factor=0.0 produces random vector (similarity ≈ 0.50 to original)
+
+---
+
 ## Current Status and Gaps
 
 **Implemented**: `bind()`, `bundle()`, `permute()`, `similarity()`, `from_seed()`, `to_bytes()`/`from_bytes()`, serde, rkyv zero-copy, `fingerprint()`/`text_fingerprint()`.

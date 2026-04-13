@@ -143,6 +143,17 @@ CompletedRunInput
 | Pan et al. ICML 2024 | [12](12-self-improvement-frameworks.md) | Self-improvement limitations |
 | Garivier & Moulines 2011 | [11](11-thompson-sampling-drift.md) | Discounted Thompson Sampling |
 | Gneiting & Raftery 2007 | [16](16-predictive-foraging.md) | Calibration theory |
+| Schaul et al. 2016 | [00](00-episode-logger.md) | Prioritized experience replay |
+| Andrychowicz et al. 2017 | [00](00-episode-logger.md) | Hindsight experience replay |
+| Zhou et al. 2020 | [03](03-bandits-ucb-thompson-linucb.md) | NeuralUCB algorithm |
+| Zhu et al. 2023 | [03](03-bandits-ucb-thompson-linucb.md) | Non-stationary neural bandits (NP-ES) |
+| Fedus et al. 2022 | [04](04-cascade-router.md) | Switch Transformer MoE routing |
+| Zhou et al. 2022 | [04](04-cascade-router.md) | Expert Choice routing |
+| Leviathan et al. 2023 | [04](04-cascade-router.md) | Speculative decoding |
+| Bai et al. 2022 | [12](12-self-improvement-frameworks.md) | Constitutional AI |
+| Skalse et al. 2022 | [12](12-self-improvement-frameworks.md) | Reward hacking in RL |
+| Kirkpatrick et al. 2017 | [14](14-stability-mechanisms.md) | Elastic Weight Consolidation (EWC) |
+| Bengio et al. 2009 | [17](17-adas-and-autocatalytic.md) | Curriculum learning |
 
 ---
 
@@ -208,6 +219,133 @@ CompletedRunInput
 | ProviderHealth | CircuitState | CascadeRouter (filtering) |
 | LatencyRegistry | LatencyStats | CascadeRouter (SLA compliance) |
 | ExperimentStore | PromptVariant | SystemPromptBuilder (variant selection) |
+
+---
+
+## Cross-Cutting Concerns
+
+Three concerns span the entire learning subsystem and must be addressed holistically rather than within individual documents.
+
+### Catastrophic Forgetting Prevention
+
+As Roko learns new patterns and skills, it must not forget previously learned knowledge. Three mechanisms prevent catastrophic forgetting:
+
+1. **Append-only storage**: Episodes, costs, and metrics are never overwritten. New learning adds to the knowledge base without modifying historical records. This is the simplest and most robust anti-forgetting mechanism.
+
+2. **Elastic Weight Consolidation (EWC) for bandits**: When bandit parameters are updated, critical historical parameters (those that contributed most to past successes) receive higher regularization, resisting change. Inspired by Kirkpatrick et al. 2017.
+
+```rust
+pub struct EWCRegularizer {
+    /// Fisher information diagonal per bandit arm.
+    pub fisher_diag: HashMap<String, Vec<f64>>,
+    /// Reference parameters (from last consolidation).
+    pub reference_params: HashMap<String, Vec<f64>>,
+    /// Regularization strength (default: 100.0).
+    pub lambda: f64,
+    /// Consolidation interval (default: every 100 episodes).
+    pub consolidate_every: u32,
+}
+```
+
+3. **Confidence decay floor**: Playbook rules have a minimum confidence of 0.10 before pruning. This means a rule must be actively contradicted (not just unused) before removal. Unused rules persist indefinitely at their last confidence level.
+
+### Curriculum Learning for Task Ordering
+
+The plan executor currently runs tasks in dependency order. Curriculum learning (Bengio et al. 2009) suggests that ordering tasks by difficulty — easy first, hard later — accelerates learning because early successes build the skill library and playbook rules that help with harder tasks.
+
+```rust
+pub struct CurriculumScheduler {
+    /// Difficulty estimator for tasks.
+    pub difficulty_model: DifficultyModel,
+    /// Curriculum mode.
+    pub mode: CurriculumMode,
+    /// Current curriculum epoch (resets when a new plan starts).
+    pub epoch: u32,
+}
+
+pub enum CurriculumMode {
+    /// Tasks ordered easy→hard within each dependency level.
+    EasyFirst,
+    /// Tasks ordered hard→easy (anti-curriculum, for stress testing).
+    HardFirst,
+    /// Interleaved: alternate easy and hard tasks.
+    Interleaved,
+    /// Adaptive: start easy, increase difficulty as pass rate improves.
+    Adaptive { target_pass_rate: f64 },
+}
+
+pub struct DifficultyModel {
+    /// Per-(role, complexity, crate) historical pass rate.
+    pass_rates: HashMap<(String, String, String), f64>,
+    /// HDC similarity to historically difficult episodes.
+    difficulty_hdc: Option<HdcVector>,
+}
+```
+
+Difficulty estimation uses three signals:
+- **Historical pass rate** for the `(role, complexity, crate)` triple — lower pass rate = harder
+- **HDC similarity** to previously failed episodes — higher similarity = likely harder
+- **Dependency depth** — tasks with many dependencies tend to be harder (more constraints)
+
+### Learning Rate Scheduling
+
+Different learning subsystems should adapt at different rates depending on their maturity:
+
+| Subsystem | Cold Start Rate | Warm Rate | Mature Rate |
+|-----------|----------------|-----------|-------------|
+| Cascade router | High (explore aggressively) | Medium (balance) | Low (exploit) |
+| Pattern miner | High (discover patterns) | Medium (validate) | Low (maintain) |
+| Skill library | Medium (accumulate) | Medium (validate) | Low (curate) |
+| Playbook rules | Low (cautious promotion) | Medium (active validation) | High (aggressive pruning) |
+
+```rust
+pub struct LearningRateSchedule {
+    /// Episode count thresholds for phase transitions.
+    pub cold_threshold: u32,   // default: 50
+    pub warm_threshold: u32,   // default: 200
+    /// Per-subsystem rate multipliers.
+    pub rates: HashMap<String, PhaseRates>,
+}
+
+pub struct PhaseRates {
+    pub cold: f64,   // rate multiplier during cold start
+    pub warm: f64,   // rate multiplier during warm phase
+    pub mature: f64, // rate multiplier during mature phase
+}
+```
+
+This ensures that the system explores aggressively during cold start (building its initial knowledge base) and becomes increasingly conservative as it matures (preserving proven configurations while making incremental improvements).
+
+### Meta-Learning for Tool Use
+
+Roko agents use tools (Read, Write, Bash, etc.) with varying effectiveness. Meta-learning tracks which tool sequences lead to successful outcomes for different task types, then biases tool selection in agent prompts.
+
+```rust
+pub struct ToolUsageProfile {
+    /// Per-(role, task_category): tool sequence patterns that correlate with success.
+    pub success_patterns: HashMap<(String, String), Vec<ToolSequencePattern>>,
+    /// Tools that are frequently called but rarely contribute to success.
+    pub low_value_tools: Vec<ToolWarning>,
+}
+
+pub struct ToolSequencePattern {
+    /// Ordered tool sequence (e.g., ["Read", "Edit", "Bash:cargo test"]).
+    pub sequence: Vec<String>,
+    /// How often this sequence appears in successful episodes.
+    pub support: u32,
+    /// Pass rate when this sequence is used vs when it's not.
+    pub lift: f64,
+}
+
+pub struct ToolWarning {
+    pub tool_name: String,
+    pub calls_per_episode: f64,
+    pub contribution_to_success: f64,  // near 0.0 = tool isn't helping
+    pub tokens_consumed: u64,
+}
+```
+
+Tool usage profiles are injected into agent prompts as hints: "For this task type, successful approaches typically use Read→Edit→Bash(test) in that order. Avoid excessive use of [tool] which historically doesn't contribute to success."
 
 ---
 

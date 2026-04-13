@@ -57,6 +57,13 @@ loop, and the frontier innovations that emerge from the architecture.
 | 15 | [Crate Map](./15-crate-map.md) | 18+ crates by layer with status, test counts, dependency graph, roko-golem dissolution, legacy naming |
 | 16 | [Autocatalytic Improvement and Cybernetics](./16-autocatalytic-and-cybernetics.md) | Kauffman autocatalytic sets, compound improvement (0.9^4), Ashby's Law, Good Regulator Theorem, Beer VSM, Free Energy Principle, stigmergy |
 | 17 | [Design Principles and Frontier Summary](./17-design-principles-and-frontier-summary.md) | 7 design principles (P1-P7), 14 Blue Ocean innovations with details, interconnection map, empirical validation status |
+| 18 | [Decay-Tier Matrix](./18-decay-tier-matrix.md) | 4×4 matrix: four decay variants × four knowledge tiers, Ebbinghaus parameters, promotion/demotion rules |
+| 19 | [Compositional Kinds](./19-compositional-kinds.md) | Kind::Compound variant for cross-domain signals, filter matching, scoring, migration path |
+| 20 | [Configuration Schema](./20-configuration-schema.md) | RokoConfig struct, 60+ parameters, 3-level override hierarchy, validation rules |
+| 21 | [Performance and Numerical Stability](./21-performance-numerical-stability.md) | f32/f64 decision matrix, hot-path complexity targets, memory budgets, NaN/Inf handling |
+| 22 | [Error Handling and Recovery](./22-error-handling-recovery.md) | Four error classes, exponential backoff, circuit breaker, 7-level graceful degradation |
+| 23 | [Architectural Analysis and Improvements](./23-architectural-analysis-improvements.md) | Coherence analysis: trait sufficiency, layer violations, category theory, cognitive architecture comparison, novel proposals |
+| 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), event bus proposal, data flow diagrams, integration roadmap (~2,070 LOC) |
 
 ---
 
@@ -155,8 +162,8 @@ This topic connects to:
 
 - **Generated**: 2026-04-11
 - **Model**: Claude Opus 4.6
-- **Sub-docs produced**: 18
-- **Total lines**: ~6,500+
+- **Sub-docs produced**: 24
+- **Total lines**: ~8,500+
 - **Primary sources consulted**:
   - `/Users/will/dev/nunchi/roko/refactoring-prd/00-overview.md` through `09-innovations.md`
   - `/Users/will/dev/nunchi/roko/roko/crates/roko-core/src/` (signal.rs, traits.rs, score.rs, decay.rs, kind.rs, provenance.rs, loop_tick.rs, query.rs, verdict.rs, context.rs, body.rs, hash.rs, operating_frequency.rs, lib.rs)
