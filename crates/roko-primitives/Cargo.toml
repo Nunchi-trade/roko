@@ -1,0 +1,27 @@
+[package]
+name = "roko-primitives"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "10,240-bit hyperdimensional computing vectors, inference tier routing, and zero-dependency compute primitives."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+rkyv = ["dep:rkyv"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+rkyv = { version = "0.8", optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }

@@ -12,11 +12,11 @@ workspace = true
 
 [features]
 default = []
-hdc = ["dep:bardo-primitives", "dep:base64"]
+hdc = ["dep:roko-primitives", "dep:base64"]
 
 [dependencies]
 roko-core = { path = "../roko-core" }
-bardo-primitives = { path = "../bardo-primitives", optional = true }
+roko-primitives = { path = "../roko-primitives", optional = true }
 async-trait = "0.1"
 base64 = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "sync", "io-util", "rt", "macros"] }

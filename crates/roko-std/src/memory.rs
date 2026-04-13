@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{ContentHash, Context, Query, Signal, Substrate, error::Result};
+use roko_core::{ContentHash, Context, Engram, Query, Substrate, error::Result};
 use std::collections::HashMap;
 
 /// An in-memory, concurrent signal substrate.
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// semantics through the internal `parking_lot::RwLock`).
 #[derive(Default)]
 pub struct MemorySubstrate {
-    store: RwLock<HashMap<ContentHash, Signal>>,
+    store: RwLock<HashMap<ContentHash, Engram>>,
     #[allow(dead_code)]
     name: String,
 }
@@ -40,7 +40,7 @@ impl MemorySubstrate {
     }
 
     /// Synchronous put (bypass async — useful for test setup).
-    pub fn put_sync(&self, signal: Signal) -> ContentHash {
+    pub fn put_sync(&self, signal: Engram) -> ContentHash {
         let id = signal.id;
         self.store.write().insert(id, signal);
         id
@@ -48,7 +48,7 @@ impl MemorySubstrate {
 
     /// Synchronous get.
     #[must_use]
-    pub fn get_sync(&self, id: &ContentHash) -> Option<Signal> {
+    pub fn get_sync(&self, id: &ContentHash) -> Option<Engram> {
         self.store.read().get(id).cloned()
     }
 
@@ -61,20 +61,20 @@ impl MemorySubstrate {
 
 #[async_trait]
 impl Substrate for MemorySubstrate {
-    async fn put(&self, signal: Signal) -> Result<ContentHash> {
+    async fn put(&self, signal: Engram) -> Result<ContentHash> {
         let id = signal.id;
         self.store.write().insert(id, signal);
         Ok(id)
     }
 
-    async fn get(&self, id: &ContentHash) -> Result<Option<Signal>> {
+    async fn get(&self, id: &ContentHash) -> Result<Option<Engram>> {
         Ok(self.store.read().get(id).cloned())
     }
 
     #[allow(clippy::significant_drop_tightening)]
-    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Signal>> {
+    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Engram>> {
         let store = self.store.read();
-        let mut matching: Vec<Signal> = store
+        let mut matching: Vec<Engram> = store
             .values()
             .filter(|s| matches_query(s, q, ctx))
             .cloned()
@@ -112,7 +112,7 @@ impl Substrate for MemorySubstrate {
 }
 
 /// Pure function: does `signal` satisfy `query` at time `ctx.now_ms`?
-fn matches_query(signal: &Signal, q: &Query, ctx: &Context) -> bool {
+fn matches_query(signal: &Engram, q: &Query, ctx: &Context) -> bool {
     if let Some(kinds) = &q.kinds {
         if !kinds.contains(&signal.kind) {
             return false;
@@ -157,8 +157,8 @@ mod tests {
     use super::*;
     use roko_core::{Body, Decay, Kind, Provenance, Score};
 
-    fn sig(kind: Kind, body: &str, t: i64) -> Signal {
-        Signal::builder(kind)
+    fn sig(kind: Kind, body: &str, t: i64) -> Engram {
+        Engram::builder(kind)
             .body(Body::text(body))
             .created_at_ms(t)
             .build()
@@ -224,7 +224,7 @@ mod tests {
     async fn query_by_tag() {
         let sub = MemorySubstrate::new();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("a"))
                 .tag("env", "prod")
                 .created_at_ms(0)
@@ -233,7 +233,7 @@ mod tests {
         .await
         .unwrap();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("b"))
                 .tag("env", "dev")
                 .created_at_ms(0)
@@ -267,7 +267,7 @@ mod tests {
         let sub = MemorySubstrate::new();
         // High score, half-life 1000ms
         sub.put(
-            Signal::builder(Kind::Pheromone)
+            Engram::builder(Kind::Pheromone)
                 .body(Body::text("fresh"))
                 .created_at_ms(0)
                 .score(Score::new(1.0, 0.0, 0.0, 1.0))
@@ -298,7 +298,7 @@ mod tests {
     async fn prune_removes_decayed_signals() {
         let sub = MemorySubstrate::new();
         sub.put(
-            Signal::builder(Kind::Pheromone)
+            Engram::builder(Kind::Pheromone)
                 .body(Body::text("fresh"))
                 .created_at_ms(0)
                 .score(Score::new(1.0, 0.0, 0.0, 1.0))
@@ -308,7 +308,7 @@ mod tests {
         .await
         .unwrap();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("permanent"))
                 .created_at_ms(0)
                 .score(Score::new(1.0, 0.0, 0.0, 1.0))
@@ -329,7 +329,7 @@ mod tests {
     async fn query_sorts_by_weight_descending() {
         let sub = MemorySubstrate::new();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("low"))
                 .created_at_ms(0)
                 .score(Score::new(0.2, 0.0, 0.0, 1.0))
@@ -338,7 +338,7 @@ mod tests {
         .await
         .unwrap();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("high"))
                 .created_at_ms(0)
                 .score(Score::new(0.9, 0.0, 0.0, 1.0))
@@ -357,7 +357,7 @@ mod tests {
     async fn query_by_author() {
         let sub = MemorySubstrate::new();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .provenance(Provenance::agent("alice"))
                 .created_at_ms(0)
                 .body(Body::text("a"))
@@ -366,7 +366,7 @@ mod tests {
         .await
         .unwrap();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .provenance(Provenance::agent("bob"))
                 .created_at_ms(0)
                 .body(Body::text("b"))

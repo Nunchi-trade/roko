@@ -8,13 +8,13 @@
 //! See [crate docs](crate) for the universal loop that composes them.
 
 use crate::{
-    Budget, ContentHash, Context, Outcome, Query, Score, Selection, Signal, Verdict, error::Result,
+    Budget, ContentHash, Context, Engram, Outcome, Query, Score, Selection, Verdict, error::Result,
 };
 use async_trait::async_trait;
 
 // ─── Substrate ─────────────────────────────────────────────────────────────
 
-/// Stores and queries [`Signal`]s.
+/// Stores and queries [`Engram`]s.
 ///
 /// All storage backends implement this trait: `MemorySubstrate` (testing),
 /// `FileSubstrate` (.roko/ persistence), `HdcSubstrate` (semantic search),
@@ -33,14 +33,14 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Substrate: Send + Sync {
     /// Store a signal. Returns its content hash. Idempotent on content.
-    async fn put(&self, signal: Signal) -> Result<ContentHash>;
+    async fn put(&self, signal: Engram) -> Result<ContentHash>;
 
     /// Retrieve a signal by content hash. Does not apply decay.
-    async fn get(&self, id: &ContentHash) -> Result<Option<Signal>>;
+    async fn get(&self, id: &ContentHash) -> Result<Option<Engram>>;
 
     /// Query for signals matching the given filter. Impls may apply decay
     /// when evaluating `min_weight` and when ordering results.
-    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Signal>>;
+    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Engram>>;
 
     /// Remove signals whose effective weight (score × decay) has fallen
     /// below `threshold` at `ctx.now_ms`. Returns count of pruned signals.
@@ -77,7 +77,7 @@ pub trait Substrate: Send + Sync {
 /// - `CatalyticScorer`: how many downstream signals does this enable?
 pub trait Scorer: Send + Sync {
     /// Score a signal in the given context.
-    fn score(&self, signal: &Signal, ctx: &Context) -> Score;
+    fn score(&self, signal: &Engram, ctx: &Context) -> Score;
 
     /// Human-readable name.
     fn name(&self) -> &'static str {
@@ -101,7 +101,7 @@ pub trait Scorer: Send + Sync {
 #[async_trait]
 pub trait Gate: Send + Sync {
     /// Verify the signal and return a verdict.
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict;
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict;
 
     /// Human-readable name (appears in verdicts).
     fn name(&self) -> &str;
@@ -123,7 +123,7 @@ pub trait Gate: Send + Sync {
 /// - `WeightedRouter` — softmax over scorers
 pub trait Router: Send + Sync {
     /// Select one signal from the candidates. None = no selection made.
-    fn select(&self, candidates: &[Signal], ctx: &Context) -> Option<Selection>;
+    fn select(&self, candidates: &[Engram], ctx: &Context) -> Option<Selection>;
 
     /// Learn from a selection's actual outcome.
     fn feedback(&self, outcome: &Outcome);
@@ -145,11 +145,11 @@ pub trait Composer: Send + Sync {
     /// The composer may use the scorer to rank/select inputs under budget.
     fn compose(
         &self,
-        signals: &[Signal],
+        signals: &[Engram],
         budget: &Budget,
         scorer: &dyn Scorer,
         ctx: &Context,
-    ) -> Result<Signal>;
+    ) -> Result<Engram>;
 
     /// Human-readable name.
     fn name(&self) -> &str;
@@ -165,7 +165,7 @@ pub trait Composer: Send + Sync {
 /// signal stream and may produce zero, one, or many output signals per tick.
 pub trait Policy: Send + Sync {
     /// Examine the recent signal stream and produce new signals (interventions).
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal>;
+    fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram>;
 
     /// Human-readable name.
     fn name(&self) -> &str;

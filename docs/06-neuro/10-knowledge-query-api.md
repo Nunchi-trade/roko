@@ -161,13 +161,19 @@ pub struct ContextAssembler {
 }
 ```
 
-The ContextAssembler is currently a skeleton — the struct is defined but no methods are implemented. The designed behavior is:
+The current implementation already performs the base retrieval pipeline:
 
 1. **Query** the knowledge store for entries relevant to the current task
 2. **Query** the episode store for recent relevant episodes
 3. **Rank** all results by composite retrieval score
-4. **Budget** — select the top-ranked entries that fit within `max_context_tokens`
+4. **Budget** — run an auction-style allocator that weighs retrieval value against token cost, dampens repeated source families, and stops when marginal gain falls below the running average
 5. **Format** — render selected entries as structured text for the LLM prompt
+
+The canonical implementation now lives in `roko-neuro/src/context.rs`, and
+`roko-compose` re-exports those primitives rather than maintaining a parallel
+copy. PAD-based affect biasing is also wired into ranking via `PadState`, and
+the allocator now enforces a small contrarian slice for affect-heavy retrieval
+so one mood does not monopolize the recalled knowledge set.
 
 The context assembly pipeline is designed to integrate with the VCG attention auction (see `refactoring-prd/09-innovations.md` §II), where different subsystems (Neuro, Daimon, iteration memory, code intelligence, etc.) bid for token budget. Neuro's bid is based on the expected value of including knowledge context for the current task.
 
@@ -219,9 +225,9 @@ See [12-4-tier-distillation-pipeline.md](./12-4-tier-distillation-pipeline.md) f
 
 ## Current Status and Gaps
 
-**Implemented**: `NeuroStore` trait, `KnowledgeStore` JSONL backend, `KnowledgeConfirmationRecord`, `KnowledgeStats`, `MemoryIndex` (feature-gated), `ContextAssembler` struct (skeleton only).
+**Implemented**: `NeuroStore` trait, `KnowledgeStore` JSONL backend, `KnowledgeConfirmationRecord`, `KnowledgeStats`, `MemoryIndex` (feature-gated), and the canonical `ContextAssembler` retrieval/ranking/compression pipeline, including cost-aware auction-style chunk allocation inside Neuro.
 
-**Missing**: ContextAssembler methods (query, rank, budget, format). VCG attention auction integration. Combined retrieval score (confidence × decay × HDC similarity). Tier-aware query filtering. Within-domain vs. cross-domain threshold selection.
+**Missing**: Cross-subsystem VCG attention auction integration. Richer combined retrieval scoring. Tier-aware query filtering. Within-domain vs. cross-domain threshold selection. Full somatic-state retrieval and resonance-driven selection.
 
 ---
 

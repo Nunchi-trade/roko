@@ -26,7 +26,7 @@ use super::call::{ToolCall, ToolResult};
 use super::def::ToolPermission;
 use super::metrics::{MetricsSink, NoopMetricsSink};
 use super::trace::{NoopTraceSink, TraceSink};
-use crate::Signal;
+use crate::Engram;
 
 /// A mutating side effect performed by a tool during agent execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,11 +53,11 @@ pub struct ExternalAction {
 /// Sink for audit signals emitted during tool execution.
 ///
 /// Every executed [`ToolCall`] should produce at least one
-/// `Signal<Kind::ToolInvocation>` (§36.44) on this sink. Implementations
+/// `Engram<Kind::ToolInvocation>` (§36.44) on this sink. Implementations
 /// may fan out, buffer, or drop; they must not block the caller.
 pub trait AuditSink: Send + Sync {
     /// Publish a signal. Must not block; impls buffer if downstream is slow.
-    fn emit(&self, signal: Signal);
+    fn emit(&self, signal: Engram);
 }
 
 /// No-op [`AuditSink`] — drops every signal. Used in tests.
@@ -65,7 +65,7 @@ pub trait AuditSink: Send + Sync {
 pub struct NoopAuditSink;
 
 impl AuditSink for NoopAuditSink {
-    fn emit(&self, _signal: Signal) {}
+    fn emit(&self, _signal: Engram) {}
 }
 
 // ─── CancelToken ──────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ mod tests {
     fn noop_audit_sink_accepts_signals() {
         let sink = NoopAuditSink;
         // Construct a minimal signal via the builder (body can be empty).
-        let signal = Signal::builder(crate::Kind::Task).build();
+        let signal = Engram::builder(crate::Kind::Task).build();
         sink.emit(signal);
     }
 

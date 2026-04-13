@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    Body, Budget, Composer, Context, Decay, Gate, Kind, Policy, Provenance, Query, Result, Score,
-    Scorer, Signal, Substrate, Verdict, loop_tick,
+    Body, Budget, Composer, Context, Decay, Engram, Gate, Kind, Policy, Provenance, Query, Result,
+    Score, Scorer, Substrate, Verdict, loop_tick,
 };
 use roko_std::{FirstRouter, MemorySubstrate, NoOpPolicy};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// A custom scorer: favors signals tagged `priority=high`.
 struct PriorityScorer;
 impl Scorer for PriorityScorer {
-    fn score(&self, s: &Signal, _ctx: &Context) -> Score {
+    fn score(&self, s: &Engram, _ctx: &Context) -> Score {
         let confidence = if s.tag("priority") == Some("high") {
             0.9
         } else {
@@ -32,7 +32,7 @@ impl Scorer for PriorityScorer {
 struct NonEmptyGate;
 #[async_trait]
 impl Gate for NonEmptyGate {
-    async fn verify(&self, s: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, s: &Engram, _ctx: &Context) -> Verdict {
         if s.body.byte_size() > 0 {
             Verdict::pass(self.name())
         } else {
@@ -49,11 +49,11 @@ struct WrapComposer;
 impl Composer for WrapComposer {
     fn compose(
         &self,
-        signals: &[Signal],
+        signals: &[Engram],
         _budget: &Budget,
         _scorer: &dyn Scorer,
         _ctx: &Context,
-    ) -> Result<Signal> {
+    ) -> Result<Engram> {
         let input = signals.first().expect("at least one input");
         Ok(input
             .derive(
@@ -71,11 +71,11 @@ impl Composer for WrapComposer {
 /// A policy that emits a logging episode every time a signal passes through.
 struct EpisodeLoggerPolicy;
 impl Policy for EpisodeLoggerPolicy {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         stream
             .iter()
             .map(|s| {
-                Signal::builder(Kind::Episode)
+                Engram::builder(Kind::Episode)
                     .body(Body::text(format!("logged: {}", s.id.short())))
                     .provenance(Provenance::agent("episode_logger"))
                     .lineage([s.id])
@@ -101,12 +101,12 @@ async fn universal_loop_processes_a_signal_end_to_end() {
     let policy = EpisodeLoggerPolicy;
 
     // Seed the substrate with two tasks.
-    let task1 = Signal::builder(Kind::Task)
+    let task1 = Engram::builder(Kind::Task)
         .body(Body::text("task 1 content"))
         .tag("priority", "high")
         .created_at_ms(1000)
         .build();
-    let task2 = Signal::builder(Kind::Task)
+    let task2 = Engram::builder(Kind::Task)
         .body(Body::text("task 2 content"))
         .tag("priority", "low")
         .created_at_ms(1100)
@@ -203,12 +203,12 @@ async fn failing_gate_prevents_writeback() {
     impl Composer for EmptyComposer {
         fn compose(
             &self,
-            _s: &[Signal],
+            _s: &[Engram],
             _b: &Budget,
             _sc: &dyn Scorer,
             _c: &Context,
-        ) -> Result<Signal> {
-            Ok(Signal::builder(Kind::Custom("empty".into()))
+        ) -> Result<Engram> {
+            Ok(Engram::builder(Kind::Custom("empty".into()))
                 .body(Body::empty())
                 .build())
         }
@@ -223,7 +223,7 @@ async fn failing_gate_prevents_writeback() {
     // Seed with one task.
     substrate
         .put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("source"))
                 .created_at_ms(0)
                 .build(),
@@ -259,7 +259,7 @@ async fn decayed_signals_prune_away() {
     // Add a pheromone with 1s half-life.
     substrate
         .put(
-            Signal::builder(Kind::Pheromone)
+            Engram::builder(Kind::Pheromone)
                 .body(Body::text("transient"))
                 .score(Score::new(1.0, 0.0, 0.0, 1.0))
                 .decay(Decay::HalfLife { half_life_ms: 1000 })
@@ -284,7 +284,7 @@ async fn content_hash_deduplicates() {
     let substrate = MemorySubstrate::new();
     // Two identical signals should collapse to one.
     let make = || {
-        Signal::builder(Kind::Task)
+        Engram::builder(Kind::Task)
             .body(Body::text("identical"))
             .created_at_ms(12_345)
             .build()

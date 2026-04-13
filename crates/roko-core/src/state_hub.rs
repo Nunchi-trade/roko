@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use bardo_runtime::event_bus::{self, EventBus};
+use roko_runtime::event_bus::{self, EventBus};
 use tokio::sync::watch;
 
 use crate::dashboard_snapshot::{DashboardEvent, DashboardSnapshot};

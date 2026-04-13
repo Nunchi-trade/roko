@@ -17,9 +17,9 @@
 
 ## Abstract
 
-Neuro's codebase has a solid foundation: the core data types (`KnowledgeEntry`, `KnowledgeKind`, `NeuroStore` trait), the JSONL storage backend (`KnowledgeStore`), the episode distillation pipeline (`Distiller`, `DistillationBackend`), and the tier progression system (`TierProgression` with D1/D2/D3 stages) are all implemented. The HDC vector library (`HdcVector` in `bardo-primitives`) is fully functional with bind, bundle, permute, similarity, and deterministic seeding.
+Neuro's codebase has a solid foundation: the core data types (`KnowledgeEntry`, `KnowledgeKind`, `NeuroStore` trait), the JSONL storage backend (`KnowledgeStore`), the episode distillation pipeline (`Distiller`, `DistillationBackend`), and the tier progression system (`TierProgression` with D1/D2/D3 stages) are all implemented. The HDC vector library (`HdcVector` in `roko-primitives`) is fully functional with bind, bundle, permute, similarity, and deterministic seeding.
 
-However, significant gaps remain between the current implementation and the refactoring-prd design. The tier multiplier system is now implemented on `KnowledgeEntry`, and the canonical knowledge types now match the PRD (`Insight`, `Heuristic`, `Warning`, `CausalLink`, `StrategyFragment`, `AntiKnowledge`) with legacy names preserved only as serde aliases. The main remaining structural gap is that `roko-neuro::context::ContextAssembler` is still a skeleton while `roko-compose::ContextAssembler` carries the real retrieval/ranking logic. Frontier innovations such as the VCG attention auction, somatic landscape, and active-inference retrieval are still not implemented.
+However, significant gaps remain between the current implementation and the refactoring-prd design. The tier multiplier system is now implemented on `KnowledgeEntry`, the canonical knowledge types now match the PRD (`Insight`, `Heuristic`, `Warning`, `CausalLink`, `StrategyFragment`, `AntiKnowledge`) with legacy names preserved only as serde aliases, the canonical `ContextAssembler` now lives in `roko-neuro`, AntiKnowledge now enforces its 0.3 confidence floor during decay/GC, CausalLinks now use directional HDC role bindings during ingest and retrieval, and Neuro's local context allocator now performs auction-style budget selection plus a contrarian affect slice instead of naive truncation. Frontier innovations such as the full cross-subsystem VCG attention auction, somatic landscape, and fuller active-inference retrieval are still not implemented.
 
 ---
 
@@ -32,7 +32,7 @@ However, significant gaps remain between the current implementation and the refa
 | `KnowledgeKind` enum | `lib.rs` | **Implemented** — canonical variants are Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge; legacy names deserialize via aliases | ~50 |
 | `KnowledgeEntry` struct | `lib.rs` | **Implemented** — includes tier, refuted_insight_id, refutation_evidence, hdc_vector | ~60 |
 | `NeuroStore` trait | `lib.rs` | **Implemented** — init, query, ingest, decay, gc | ~20 |
-| Half-life constants | `lib.rs` | **Implemented** — INSIGHT=30d, HEURISTIC=90d, WARNING=7d, CAUSAL_LINK=30d, STRATEGY_FRAGMENT=60d | ~30 |
+| Half-life constants | `lib.rs` | **Implemented** — INSIGHT=30d, HEURISTIC=90d, WARNING=7d, CAUSAL_LINK=60d, STRATEGY_FRAGMENT=14d | ~30 |
 | `refutation_warning()` | `lib.rs` | **Implemented** — generates warning text for AntiKnowledge entries | ~25 |
 | `KnowledgeStore` (JSONL) | `knowledge_store.rs` | **Implemented** — append-only, with stats, optional HDC MemoryIndex | Large |
 | `KnowledgeConfirmationRecord` | `knowledge_store.rs` | **Implemented** — tracks positive/negative confirmations | ~10 |
@@ -45,7 +45,7 @@ However, significant gaps remain between the current implementation and the refa
 | `InsightRecord` | `tier_progression.rs` | **Implemented** — pattern, support, confidence, source_episodes | ~10 |
 | `HeuristicRule` | `tier_progression.rs` | **Implemented** — rule, support, confidence, source_insights | ~10 |
 | `PlaybookCompilation` | `tier_progression.rs` | **Implemented** — title, rules, markdown | ~10 |
-| `ContextAssembler` struct | `context.rs` | **Skeleton** — struct defined (KnowledgeStore + EpisodeStore + budget), no methods | ~10 |
+| `ContextAssembler` | `context.rs` | **Implemented** — canonical gather/rank/compress pipeline with PAD biasing, contrarian affect retention, and auction-style token allocation; re-exported by `roko-compose` | ~450 |
 
 ### roko-primitives (HDC Vectors)
 
@@ -89,8 +89,8 @@ However, significant gaps remain between the current implementation and the refa
 
 | Gap | Where It Belongs | Blocking? | Implementation Plan Reference |
 |---|---|---|---|
-| **AntiKnowledge confidence floor (0.3)** | `roko-neuro/src/knowledge_store.rs` | Moderate — currently decays to 0 | D4 |
-| **ContextAssembler methods** | `roko-neuro/src/context.rs` | Yes — context assembly is not functional | E1-E6 |
+| **AntiKnowledge confidence floor (0.3)** | `roko-neuro/src/knowledge_store.rs` | Implemented — decay clamps at 0.3 and GC preserves AntiKnowledge entries | D4 |
+| **ContextAssembler methods** | `roko-neuro/src/context.rs` | Implemented — canonicalized into `roko-neuro`; local chunk auctioning is now present, but cross-subsystem auctioning is still missing | E1-E6 |
 | **Combined retrieval scoring** | `roko-neuro/src/knowledge_store.rs` | Moderate — query uses simple matching, not confidence × decay × similarity | D7-D8 |
 
 ### Priority 2 — HDC Enhancement Gaps
@@ -102,16 +102,16 @@ However, significant gaps remain between the current implementation and the refa
 | **ResonatorNetwork** (factor decomposition) | `roko-primitives/src/hdc.rs` | No — advanced feature |
 | **DecayingBundleAccumulator** | `roko-primitives/src/hdc.rs` | No — controlled forgetting in bundles |
 | **Three-tier search** (Bloom → approximate → exact) | `roko-neuro/src/knowledge_store.rs` | No — brute force is fast enough for <100K entries |
-| **Automatic HDC encoding on ingest** | `roko-neuro/src/knowledge_store.rs` | Moderate — hdc_vector field is optional and often empty |
-| **Role vector registry** | New module | Moderate — needed for structured encoding |
+| **Automatic HDC encoding on ingest** | `roko-neuro/src/knowledge_store.rs` | Implemented — ingest populates `hdc_vector` when the `hdc` feature is enabled |
+| **Role vector registry / typed HDC encoder** | `roko-neuro/src/hdc.rs` | Implemented at a lightweight level — directional CausalLink encoding and query probing now live behind a dedicated encoder module |
 
 ### Priority 3 — Frontier Innovation Gaps
 
 | Gap | Design Source | Status |
 |---|---|---|
-| **VCG attention auction** | `09-innovations.md` §II | Designed, not implemented (Tier 2, P2) |
+| **VCG attention auction** | `09-innovations.md` §II | Partially implemented — Neuro now does auction-style chunk allocation internally; the full multi-subsystem VCG market is still not implemented (Tier 2, P2) |
 | **SomaticLandscape** (k-d tree, 8D) | `09-innovations.md` §III | Designed, not implemented |
-| **Active inference context selection** | `09-innovations.md` §XIX.A-C | Designed, not implemented |
+| **Active inference context selection** | `09-innovations.md` §XIX.A-C | Partially implemented — track-record/uncertainty scoring, auction-style budgeting, and contrarian affect retention are present; full EFE-style subsystem integration is not |
 | **Cross-domain resonance detection** | `09-innovations.md` §XIII | Designed, not implemented |
 | **Pheromone system** | `04-knowledge-and-mesh.md` §4 | Types designed, not implemented (Tier 5E, P2) |
 | **Dream engine integration** | `03-cognitive-subsystems.md` §3 | Distillation is wired; Dreams cycle is not |
@@ -136,9 +136,9 @@ However, significant gaps remain between the current implementation and the refa
 
 | Current Name | Target Name | Status |
 |---|---|---|
-| `bardo-primitives` | `roko-primitives` | **Pending** — crate still uses old name |
-| `bardo-runtime` | `roko-runtime` | **Pending** — crate still uses old name |
-| `roko-golem` | **Dissolved** | **In progress** — subsystems redistributed |
+| `bardo-primitives` | `roko-primitives` | **Completed** |
+| `bardo-runtime` | `roko-runtime` | **Completed** |
+| `roko-golem` | **Dissolved** | **Completed** — subsystems redistributed |
 
 ---
 
@@ -149,7 +149,7 @@ The implementation plan (`12a-cognitive-layer.md`) specifies 72 items across fou
 | Category | Items | Status |
 |---|---|---|
 | **D: Knowledge (D1-D18)** | KnowledgeEntry fields, tier system, decay, query, HDC encoding | ~40% implemented (core types and storage exist; tiers, advanced types, and encoding missing) |
-| **E: Context (E1-E6)** | ContextAssembler methods, VCG auction, token budgeting | ~5% implemented (struct exists, no methods) |
+| **E: Context (E1-E6)** | ContextAssembler methods, VCG auction, token budgeting | ~45% implemented (base retrieval pipeline exists; auctioning/frontier selection missing) |
 | **F: Daimon (F1-F9)** | PAD vector, behavioral states, somatic markers | Separate crate (`roko-daimon`); not tracked here |
 | **G: Dreams (G1-G8)** | Dream cycle, replay, consolidation | Separate crate (`roko-dreams`); not tracked here |
 | **R: Crate Architecture (R1-R3)** | Crate restructuring, golem dissolution | ~50% implemented (neuro exists; primitives not yet renamed) |
@@ -163,8 +163,8 @@ Based on the gaps and their dependencies:
 1. **Add tier field to KnowledgeEntry** — unblocks all tier-related features
 2. **Add Warning, CausalLink, StrategyFragment types** — completes the type system
 3. **Implement effective_half_life = tier × base** — activates the two-dimensional decay model
-4. **Implement AntiKnowledge confidence floor** — prevents GC of negative knowledge
-5. **Implement ContextAssembler methods** — enables knowledge-augmented prompts
+4. **Deepen structured HDC semantics** — directional causal encoding is in place; richer codebooks, multi-stage search, and resonance are still open
+5. **Complete cross-subsystem VCG / higher-order context allocation** — base ContextAssembler is now present and local chunk auctioning has landed
 6. **Add automatic HDC encoding on ingest** — enables similarity search
 7. **Implement combined retrieval scoring** — confidence × decay × similarity
 8. **Add SomaticLandscape** — enables emotional fast-path routing

@@ -99,9 +99,9 @@ This topic connects to:
 
 **HDC subsystem**: The `HdcVector` (10,240-bit BSC) is fully implemented with all four operations, deterministic seeding, serde, and rkyv zero-copy support. Code symbol fingerprinting is implemented in `roko-index`.
 
-**Key gaps**: The tier field (Transient/Working/Consolidated/Persistent) is not yet on `KnowledgeEntry`. Several knowledge types from the design (Warning, CausalLink, StrategyFragment) are missing. The `ContextAssembler` has no methods. None of the frontier innovations (VCG auction, SomaticLandscape, active inference, cross-domain resonance) are implemented.
+**Key gaps**: The foundational refactor items are now in place: `KnowledgeEntry` has tiers, the PRD-native knowledge kinds are present, `ContextAssembler` is implemented in `roko-neuro`, ingest persists HDC vectors, CausalLinks now carry directional HDC encodings, and Neuro's local context allocator now uses auction-style budget selection plus a contrarian affect slice. The remaining gaps are the higher-order features: the full cross-subsystem VCG market, SomaticLandscape, fuller active inference, and cross-domain resonance.
 
-**Recommended priority**: (1) Add tier field, (2) Add missing types, (3) Implement effective_half_life = tier × base, (4) Implement ContextAssembler methods, (5) Add automatic HDC encoding on ingest.
+**Recommended priority**: (1) complete the cross-subsystem VCG market, (2) wire SomaticLandscape into retrieval/routing, (3) expand active-inference scoring, (4) add cross-domain resonance, (5) deepen the HDC stack with codebooks and multi-stage search.
 
 See [16-current-status-and-gaps.md](./16-current-status-and-gaps.md) for the complete assessment.
 

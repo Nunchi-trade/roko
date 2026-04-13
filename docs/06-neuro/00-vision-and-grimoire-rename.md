@@ -315,21 +315,21 @@ Mattar and Daw (2018) showed that the hippocampus preferentially replays memorie
 | Component | Crate | Status |
 |---|---|---|
 | `KnowledgeEntry` struct | `roko-neuro/src/lib.rs` | Implemented with id, kind, source, content, confidence, confidence_weight, refuted_insight_id, refutation_evidence, source_episodes, tags, created_at, half_life_days, hdc_vector |
-| `KnowledgeKind` enum | `roko-neuro/src/lib.rs` | 7 variants: Fact, Insight, Procedure, Heuristic, Playbook, Constraint, AntiKnowledge |
+| `KnowledgeKind` enum | `roko-neuro/src/lib.rs` | PRD-native variants: Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge (legacy names deserialize via aliases) |
 | `NeuroStore` trait | `roko-neuro/src/lib.rs` | init, query, ingest, decay, gc |
 | `KnowledgeStore` (JSONL impl) | `roko-neuro/src/knowledge_store.rs` | Append-only, with confirmation records, stats, optional HDC index |
 | `Distiller` | `roko-neuro/src/distiller.rs` | Episode → knowledge via LLM (Claude Haiku default) |
 | `TierProgression` | `roko-neuro/src/tier_progression.rs` | 3-stage: episodes→insights, insights→heuristics, heuristics→PLAYBOOK.md |
-| `ContextAssembler` | `roko-neuro/src/context.rs` | Skeleton (struct defined, no methods) |
+| `ContextAssembler` | `roko-neuro/src/context.rs` | Canonical gather/rank/compress pipeline; re-exported by `roko-compose` |
 | `HdcVector` (10,240-bit BSC) | `roko-primitives/src/hdc.rs` | Full: bind, bundle, permute, similarity, from_seed |
 | `HdcFingerprint` (code symbols) | `roko-index/src/hdc.rs` | Trigram encoding, role vectors per SymbolKind |
 | `KMedoids` clustering | `roko-learn/src/hdc_clustering.rs` | PAM algorithm over HdcVector |
 
 ### What's Missing
 
-- **Warning, CausalLink, StrategyFragment knowledge types**: The `KnowledgeKind` enum in the current codebase has Fact/Insight/Procedure/Heuristic/Playbook/Constraint/AntiKnowledge — but not Warning, CausalLink, or StrategyFragment from the refactoring-prd design. The refactoring-prd's six types do not exactly match the current code's seven variants. Reconciliation is needed (see `12a-cognitive-layer.md` tasks D1-D4).
-- **Four validation tiers (Transient/Working/Consolidated/Persistent)**: Not implemented. The current code has half-life constants but no tier multiplier system.
-- **ContextAssembler methods**: Only the struct is defined; no context assembly logic exists.
+- **Warning, CausalLink, StrategyFragment knowledge types**: Implemented; legacy names remain only as serde aliases for backward compatibility.
+- **Four validation tiers (Transient/Working/Consolidated/Persistent)**: Implemented on `KnowledgeEntry`.
+- **ContextAssembler methods**: Implemented; the remaining gap is higher-order context arbitration and richer somatic / active-inference behavior.
 - **VCG attention auction**: Designed but not implemented (Tier 2, P2).
 - **Active inference context selection**: Designed but not implemented (Tier 2, P2).
 - **Somatic landscape integration**: Designed in `09-innovations.md` §III; not yet wired into Neuro retrieval.

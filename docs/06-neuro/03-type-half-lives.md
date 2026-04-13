@@ -235,8 +235,8 @@ const fn default_half_life_days() -> f64 {
 pub const INSIGHT_HALF_LIFE_DAYS: f64 = 30.0;
 pub const HEURISTIC_HALF_LIFE_DAYS: f64 = 90.0;
 pub const WARNING_HALF_LIFE_DAYS: f64 = 7.0;
-pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 30.0;
-pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 60.0;
+pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 60.0;
+pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 14.0;
 
 impl KnowledgeKind {
     pub const fn default_half_life_days(self) -> f64 {
@@ -252,11 +252,12 @@ impl KnowledgeKind {
 }
 ```
 
-This section is now partly historical. Current code has PRD-native variants for
-`Warning`, `CausalLink`, and `StrategyFragment`, plus tier-scaled effective
-half-life computation. The remaining notable mismatch is `AntiKnowledge`, which
-still uses the generic default decay path rather than a true never-decay / floor
-model.
+This section is now mostly descriptive of the current code. The PRD-native
+variants are present, the base half-lives now match the docs, tier-scaled
+effective half-life computation is implemented, and `AntiKnowledge` enforces
+its 0.3 confidence floor during decay and GC. The remaining notable mismatch is
+the richer half-speed / structured demurrage model described for chain
+publication.
 
 ---
 
@@ -275,14 +276,15 @@ model.
 - `INSIGHT_HALF_LIFE_DAYS = 30.0`
 - `HEURISTIC_HALF_LIFE_DAYS = 90.0`
 - `WARNING_HALF_LIFE_DAYS = 7.0`
-- `CAUSAL_LINK_HALF_LIFE_DAYS = 30.0`
-- `STRATEGY_FRAGMENT_HALF_LIFE_DAYS = 60.0`
+- `CAUSAL_LINK_HALF_LIFE_DAYS = 60.0`
+- `STRATEGY_FRAGMENT_HALF_LIFE_DAYS = 14.0`
 - `KnowledgeKind::default_half_life_days()` for the PRD-native enum
 - Tier multiplier application via `KnowledgeEntry::effective_half_life_days()`
+- AntiKnowledge confidence floor enforcement at `0.3` during decay and GC
 
 **Missing**:
-- AntiKnowledge special decay (never, floor 0.3) — still uses the generic default path
 - Configurable half-lives in `roko.toml` (for domain-specific tuning)
+- Chain-level half-speed demurrage / richer AntiKnowledge longevity semantics
 
 ---
 

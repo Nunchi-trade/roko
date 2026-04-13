@@ -1,9 +1,10 @@
 //! Multi-dimensional scoring for signals.
 //!
-//! A [`Score`] is four orthogonal axes combined into a single scalar via
-//! [`Score::effective`]. This is what scorers produce and routers consume.
+//! A [`Score`] carries four primary axes plus three extended routing axes and
+//! combines them into a single scalar via [`Score::effective`]. This is what
+//! scorers produce and routers consume.
 //!
-//! The four axes were chosen because every scoring mechanism in the Roko
+//! The primary axes were chosen because every scoring mechanism in the Roko
 //! design corpus (confidence, novelty, utility, reputation, fitness,
 //! pfUtility, catalytic score, …) collapses into one of these:
 //!
@@ -11,6 +12,13 @@
 //! - **novelty**: how new/surprising is this signal? \[0..1\]
 //! - **utility**: how useful was this signal historically? \[0..∞)
 //! - **reputation**: author's trustworthiness at time of emission \[0..∞)
+//!
+//! The extended axes provide extra shaping for downstream consumers without
+//! forcing every scorer to populate them:
+//!
+//! - **precision**: how exact or narrowly applicable is this score? \[0..1\]
+//! - **salience**: how much should this stand out during ranking? \[0..1\]
+//! - **coherence**: how internally consistent is the supporting evidence? \[0..1\]
 //!
 //! Scorers compose via arithmetic: `score_a * score_b` scales each axis
 //! independently. `score_a + score_b` aggregates evidence.
@@ -33,6 +41,15 @@ pub struct Score {
     pub utility: f32,
     /// \[0..∞) — reputation of the signal's author at emission time.
     pub reputation: f32,
+    /// \[0..1\] — how exact or narrowly applicable is this signal?
+    #[serde(default)]
+    pub precision: f32,
+    /// \[0..1\] — how much extra ranking weight should this signal receive?
+    #[serde(default)]
+    pub salience: f32,
+    /// \[0..1\] — how internally consistent is the evidence?
+    #[serde(default)]
+    pub coherence: f32,
 }
 
 impl Score {
@@ -42,6 +59,9 @@ impl Score {
         novelty: 0.0,
         utility: 0.0,
         reputation: 0.0,
+        precision: 0.0,
+        salience: 0.0,
+        coherence: 0.0,
     };
 
     /// A neutral score (confidence=0.5, others=0). Default when no scorer is applied.
@@ -50,6 +70,9 @@ impl Score {
         novelty: 0.0,
         utility: 0.0,
         reputation: 1.0,
+        precision: 0.0,
+        salience: 0.0,
+        coherence: 0.0,
     };
 
     /// Construct a `Score`; values are clamped to their respective valid ranges.
@@ -60,19 +83,61 @@ impl Score {
             novelty: novelty.clamp(0.0, 1.0),
             utility: if utility > 0.0 { utility } else { 0.0 },
             reputation: if reputation > 0.0 { reputation } else { 0.0 },
+            precision: 0.0,
+            salience: 0.0,
+            coherence: 0.0,
         }
     }
 
-    /// Scalar effective score combining all four axes.
+    /// Construct a `Score` with the extended axes populated explicitly.
+    #[must_use]
+    pub const fn new_extended(
+        confidence: f32,
+        novelty: f32,
+        utility: f32,
+        reputation: f32,
+        precision: f32,
+        salience: f32,
+        coherence: f32,
+    ) -> Self {
+        Self {
+            confidence: confidence.clamp(0.0, 1.0),
+            novelty: novelty.clamp(0.0, 1.0),
+            utility: if utility > 0.0 { utility } else { 0.0 },
+            reputation: if reputation > 0.0 { reputation } else { 0.0 },
+            precision: precision.clamp(0.0, 1.0),
+            salience: salience.clamp(0.0, 1.0),
+            coherence: coherence.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Scalar effective score combining the primary axes plus salience and coherence.
     ///
-    /// The formula `confidence × (1 + novelty) × (1 + utility) × reputation`
+    /// The formula
+    /// `confidence × (1 + novelty) × (1 + utility) × reputation × (0.5 + 0.5 × salience) × (0.5 + 0.5 × coherence)`
     /// was chosen so that:
     /// - zero confidence → zero effective score (false positives are worthless)
     /// - novelty and utility act as multipliers (additive bonuses to 1.0)
     /// - reputation directly scales the result
+    /// - salience and coherence softly damp or boost the final ranking
     #[must_use]
     pub fn effective(&self) -> f32 {
-        self.confidence * (1.0 + self.novelty) * (1.0 + self.utility) * self.reputation
+        let salience_factor = if self.salience == 0.0 {
+            1.0
+        } else {
+            0.5 + 0.5 * self.salience
+        };
+        let coherence_factor = if self.coherence == 0.0 {
+            1.0
+        } else {
+            0.5 + 0.5 * self.coherence
+        };
+        self.confidence
+            * (1.0 + self.novelty)
+            * (1.0 + self.utility)
+            * self.reputation
+            * salience_factor
+            * coherence_factor
     }
 
     /// Is this score above the given threshold on the effective axis?
@@ -104,6 +169,9 @@ impl Mul for Score {
             novelty: (self.novelty * other.novelty).clamp(0.0, 1.0),
             utility: self.utility * other.utility,
             reputation: self.reputation * other.reputation,
+            precision: (self.precision * other.precision).clamp(0.0, 1.0),
+            salience: (self.salience * other.salience).clamp(0.0, 1.0),
+            coherence: (self.coherence * other.coherence).clamp(0.0, 1.0),
         }
     }
 }
@@ -118,6 +186,9 @@ impl Add for Score {
             novelty: (self.novelty + other.novelty).clamp(0.0, 1.0),
             utility: self.utility + other.utility,
             reputation: self.reputation + other.reputation,
+            precision: (self.precision + other.precision).clamp(0.0, 1.0),
+            salience: (self.salience + other.salience).clamp(0.0, 1.0),
+            coherence: (self.coherence + other.coherence).clamp(0.0, 1.0),
         }
     }
 }
@@ -128,11 +199,14 @@ mod tests {
 
     #[test]
     fn new_clamps_values() {
-        let s = Score::new(2.0, -1.0, -5.0, -1.0);
+        let s = Score::new_extended(2.0, -1.0, -5.0, -1.0, 2.0, -1.0, 3.0);
         assert_eq!(s.confidence, 1.0);
         assert_eq!(s.novelty, 0.0);
         assert_eq!(s.utility, 0.0);
         assert_eq!(s.reputation, 0.0);
+        assert_eq!(s.precision, 1.0);
+        assert_eq!(s.salience, 0.0);
+        assert_eq!(s.coherence, 1.0);
     }
 
     #[test]
@@ -143,34 +217,48 @@ mod tests {
 
     #[test]
     fn effective_scales_with_all_axes() {
-        // confidence=1, novelty=0, utility=0, reputation=1 → 1 × 1 × 1 × 1 = 1
+        // confidence=1, novelty=0, utility=0, reputation=1, salience=0, coherence=0
+        // → 1 × 1 × 1 × 1 × 1 × 1 = 1
         let s = Score::new(1.0, 0.0, 0.0, 1.0);
         assert!((s.effective() - 1.0).abs() < 1e-6);
 
-        // confidence=0.5, novelty=1, utility=1, reputation=2 → 0.5×2×2×2 = 4
-        let s = Score::new(0.5, 1.0, 1.0, 2.0);
+        // confidence=0.5, novelty=1, utility=1, reputation=2, salience=1, coherence=1
+        // → 0.5 × 2 × 2 × 2 × 1 × 1 = 4
+        let s = Score::new_extended(0.5, 1.0, 1.0, 2.0, 0.0, 1.0, 1.0);
+        assert!((s.effective() - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zero_extended_axes_preserve_legacy_effective_score() {
+        let s = Score::new_extended(0.5, 1.0, 1.0, 2.0, 0.0, 0.0, 0.0);
         assert!((s.effective() - 4.0).abs() < 1e-6);
     }
 
     #[test]
     fn multiplication_scales_independently() {
-        let a = Score::new(0.8, 0.5, 2.0, 1.5);
-        let modifier = Score::new(1.0, 1.0, 0.5, 2.0);
+        let a = Score::new_extended(0.8, 0.5, 2.0, 1.5, 0.8, 0.6, 0.5);
+        let modifier = Score::new_extended(1.0, 1.0, 0.5, 2.0, 0.5, 0.5, 0.25);
         let product = a * modifier;
         assert!((product.confidence - 0.8).abs() < 1e-6);
         assert!((product.utility - 1.0).abs() < 1e-6);
         assert!((product.reputation - 3.0).abs() < 1e-6);
+        assert!((product.precision - 0.4).abs() < 1e-6);
+        assert!((product.salience - 0.3).abs() < 1e-6);
+        assert!((product.coherence - 0.125).abs() < 1e-6);
     }
 
     #[test]
     fn addition_aggregates_evidence() {
-        let a = Score::new(0.3, 0.4, 1.0, 1.0);
-        let b = Score::new(0.4, 0.4, 2.0, 0.5);
+        let a = Score::new_extended(0.3, 0.4, 1.0, 1.0, 0.2, 0.3, 0.4);
+        let b = Score::new_extended(0.4, 0.4, 2.0, 0.5, 0.5, 0.6, 0.7);
         let sum = a + b;
         assert!((sum.confidence - 0.7).abs() < 1e-6);
         assert!((sum.novelty - 0.8).abs() < 1e-6);
         assert!((sum.utility - 3.0).abs() < 1e-6);
         assert!((sum.reputation - 1.5).abs() < 1e-6);
+        assert!((sum.precision - 0.7).abs() < 1e-6);
+        assert!((sum.salience - 0.9).abs() < 1e-6);
+        assert_eq!(sum.coherence, 1.0);
     }
 
     #[test]
@@ -185,7 +273,7 @@ mod tests {
     #[test]
     fn exceeds_uses_effective() {
         let low = Score::new(0.1, 0.0, 0.0, 1.0); // effective = 0.1
-        let high = Score::new(0.9, 0.0, 0.0, 1.0); // effective = 0.9
+        let high = Score::new_extended(0.9, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0); // effective = 0.9
         assert!(!low.exceeds(0.5));
         assert!(high.exceeds(0.5));
     }

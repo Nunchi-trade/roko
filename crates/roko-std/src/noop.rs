@@ -8,15 +8,15 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    Body, Budget, Composer, Context, Gate, Kind, Outcome, Policy, Router, Score, Scorer, Selection,
-    Signal, Verdict, error::Result,
+    Body, Budget, Composer, Context, Engram, Gate, Kind, Outcome, Policy, Router, Score, Scorer,
+    Selection, Verdict, error::Result,
 };
 
 /// A scorer that returns `Score::NEUTRAL` for every signal.
 #[derive(Debug, Clone, Default)]
 pub struct NoOpScorer;
 impl Scorer for NoOpScorer {
-    fn score(&self, _s: &Signal, _ctx: &Context) -> Score {
+    fn score(&self, _s: &Engram, _ctx: &Context) -> Score {
         Score::NEUTRAL
     }
     fn name(&self) -> &'static str {
@@ -30,7 +30,7 @@ pub struct NoOpGate;
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
 impl Gate for NoOpGate {
-    async fn verify(&self, _s: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, _s: &Engram, _ctx: &Context) -> Verdict {
         Verdict::pass("noop_gate")
     }
     fn name(&self) -> &str {
@@ -43,7 +43,7 @@ impl Gate for NoOpGate {
 pub struct NoOpRouter;
 #[allow(clippy::unnecessary_literal_bound)]
 impl Router for NoOpRouter {
-    fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<Selection> {
+    fn select(&self, candidates: &[Engram], _ctx: &Context) -> Option<Selection> {
         candidates
             .first()
             .map(|s| Selection::new(s.id, "noop_router"))
@@ -62,13 +62,13 @@ pub struct NoOpComposer;
 impl Composer for NoOpComposer {
     fn compose(
         &self,
-        signals: &[Signal],
+        signals: &[Engram],
         _budget: &Budget,
         _scorer: &dyn Scorer,
         _ctx: &Context,
-    ) -> Result<Signal> {
+    ) -> Result<Engram> {
         Ok(signals.first().cloned().unwrap_or_else(|| {
-            Signal::builder(Kind::Custom("empty".into()))
+            Engram::builder(Kind::Custom("empty".into()))
                 .body(Body::empty())
                 .build()
         }))
@@ -83,7 +83,7 @@ impl Composer for NoOpComposer {
 pub struct NoOpPolicy;
 #[allow(clippy::unnecessary_literal_bound)]
 impl Policy for NoOpPolicy {
-    fn decide(&self, _stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         Vec::new()
     }
     fn name(&self) -> &str {
@@ -95,8 +95,8 @@ impl Policy for NoOpPolicy {
 mod tests {
     use super::*;
 
-    fn mk_signal() -> Signal {
-        Signal::builder(Kind::Task).body(Body::text("x")).build()
+    fn mk_signal() -> Engram {
+        Engram::builder(Kind::Task).body(Body::text("x")).build()
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
     fn noop_router_picks_first() {
         let r = NoOpRouter;
         let s1 = mk_signal();
-        let s2 = Signal::builder(Kind::Task).body(Body::text("y")).build();
+        let s2 = Engram::builder(Kind::Task).body(Body::text("y")).build();
         let sel = r.select(&[s1.clone(), s2], &Context::at(0)).unwrap();
         assert_eq!(sel.chosen, s1.id);
     }

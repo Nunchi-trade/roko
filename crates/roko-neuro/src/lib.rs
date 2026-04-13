@@ -31,9 +31,9 @@ pub const HEURISTIC_HALF_LIFE_DAYS: f64 = 90.0;
 /// Default half-life for warnings, in days.
 pub const WARNING_HALF_LIFE_DAYS: f64 = 7.0;
 /// Default half-life for causal links, in days.
-pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 30.0;
+pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 60.0;
 /// Default half-life for strategy fragments, in days.
-pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 60.0;
+pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 14.0;
 
 /// Semantic category for a knowledge item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,11 +243,16 @@ pub mod context;
 pub mod distiller;
 /// Helpers for asynchronously processing completed episodes.
 pub mod episode_completion;
+#[cfg(feature = "hdc")]
+mod hdc;
 pub mod knowledge_store;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
-pub use context::{ContextAssembler, EpisodeStore};
+pub use context::{
+    ContextAssembler, ContextChunk, ContextSource, EpisodeStore, PadState, ReadFileSpec, TaskInput,
+    VerifySpec,
+};
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
 pub use knowledge_store::{
@@ -295,10 +300,10 @@ mod tests {
     #[test]
     fn new_knowledge_kinds_have_expected_defaults() {
         assert_eq!(KnowledgeKind::Warning.default_half_life_days(), 7.0);
-        assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 30.0);
+        assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 60.0);
         assert_eq!(
             KnowledgeKind::StrategyFragment.default_half_life_days(),
-            60.0
+            14.0
         );
         assert_eq!(KnowledgeKind::Warning.as_str(), "warning");
         assert_eq!(KnowledgeKind::CausalLink.as_str(), "causal_link");

@@ -915,9 +915,9 @@ The knowledge immune system draws from three epistemological traditions:
 
 ## Current Status and Gaps
 
-**Implemented**: `KnowledgeKind::AntiKnowledge` variant. `refuted_insight_id` and `refutation_evidence` fields on `KnowledgeEntry`. `refutation_warning()` method.
+**Implemented**: `KnowledgeKind::AntiKnowledge` variant. `refuted_insight_id` and `refutation_evidence` fields on `KnowledgeEntry`. `refutation_warning()` method. Confidence floor enforcement at `0.3` during decay and GC.
 
-**Missing**: Confidence floor enforcement (designed above). Half-speed demurrage (designed above; Korai precompile not implemented). Reactive checking (designed above). Epistemic parasite detection (designed above; needs outcome tracking). Price equation diagnostics (designed above). Automatic AntiKnowledge generation from gate failures (designed above; needs wiring into gate pipeline).
+**Missing**: Half-speed demurrage (designed above; Korai precompile not implemented). Reactive checking (designed above). Epistemic parasite detection (designed above; needs outcome tracking). Price equation diagnostics (designed above). Automatic AntiKnowledge generation from gate failures (designed above; needs wiring into gate pipeline).
 
 ---
 

@@ -11,8 +11,8 @@ description = "Roko kernel: Signal type and the six universal traits (Substrate,
 workspace = true
 
 [dependencies]
-bardo-primitives = { path = "../bardo-primitives" }
-bardo-runtime = { path = "../bardo-runtime" }
+roko-primitives = { path = "../roko-primitives" }
+roko-runtime = { path = "../roko-runtime" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

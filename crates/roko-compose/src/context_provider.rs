@@ -23,6 +23,7 @@ use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
 use roko_core::OperatingFrequency;
+pub use roko_neuro::{ContextSource, ReadFileSpec, TaskInput, VerifySpec};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -106,79 +107,6 @@ pub fn is_local_model(slug: &str) -> bool {
             && !lower.starts_with("gpt")
             && !lower.starts_with("composer")
             && !lower.starts_with("cursor")
-}
-
-// ─── Context source tracking ───────────────────────────────────────────────
-
-/// Where a context section came from — used for attribution and feedback learning.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ContextSource {
-    /// Knowledge entry retrieved from the durable knowledge store.
-    KnowledgeEntry {
-        /// Knowledge entry identifier.
-        entry_id: String,
-        /// Semantic kind of the entry.
-        kind: String,
-        /// Provenance label for the knowledge entry, if available.
-        source: Option<String>,
-    },
-    /// Recent episode retrieved from the episode store.
-    Episode {
-        /// Episode identifier.
-        episode_id: String,
-        /// Plan identifier associated with the episode.
-        plan_id: String,
-        /// Task identifier associated with the episode.
-        task_id: String,
-    },
-    /// Inlined file content (from `read_files` in tasks.toml).
-    InlineFile {
-        /// File path relative to workdir.
-        path: String,
-        /// Optional line range (e.g. "40-80").
-        lines: Option<String>,
-    },
-    /// Recent signal from the plan signal log.
-    RecentSignal {
-        /// Signal identifier.
-        signal_id: String,
-        /// Plan identifier.
-        plan_id: String,
-        /// Signal kind.
-        kind: String,
-    },
-    /// Resolved symbol signature (struct/fn/trait/enum definition).
-    SymbolSignature {
-        /// Symbol name that was searched for.
-        symbol: String,
-        /// File where it was found.
-        file: String,
-    },
-    /// Anti-pattern directive.
-    AntiPattern,
-    /// Verification command listing.
-    Verification,
-    /// Per-task brief (What/Why/How).
-    TaskBrief,
-    /// Output from a completed dependency task.
-    PriorTaskOutput {
-        /// Comma-separated list of dependency task IDs.
-        task_id: String,
-    },
-    /// Plan-level brief (from plan dir brief.md).
-    PlanBrief,
-    /// Research memo (from plan dir research.md).
-    ResearchMemo,
-    /// Invariants/rubric (from plan dir rubric.md).
-    Invariants,
-    /// Cross-plan context (from plan dir context.md or cross-plan references).
-    CrossPlanContext,
-    /// PRD extract (from plan dir prd-extract.md).
-    PrdExtract,
-    /// Decomposition (from plan dir decomposition.md).
-    Decomposition,
-    /// Sibling task titles (from tasks.toml, just IDs + titles of tasks in same plan).
-    SiblingTasks,
 }
 
 // ─── Rolling average context utility ───────────────────────────────────────
@@ -378,62 +306,6 @@ impl ContextBudgets {
             OperatingFrequency::Delta => usize::MAX,
         }
     }
-}
-
-// ─── Task input ────────────────────────────────────────────────────────────
-
-/// Everything the context provider needs to know about a task.
-/// This is a view into `TaskDef` — we don't depend on the CLI crate.
-#[derive(Clone, Debug)]
-pub struct TaskInput {
-    /// Task ID (e.g. "T1").
-    pub id: String,
-    /// Human-readable task title.
-    pub title: String,
-    /// Optional task description from the plan file.
-    pub description: Option<String>,
-    /// Complexity tier: mechanical, focused, integrative, architectural.
-    pub tier: String,
-    /// Files this task modifies.
-    pub files: Vec<String>,
-    /// Files to read as context, with optional line ranges and reasons.
-    pub read_files: Vec<ReadFileSpec>,
-    /// Symbol names to resolve to their signatures.
-    pub symbols: Vec<String>,
-    /// Anti-patterns — things the agent must NOT do.
-    pub anti_patterns: Vec<String>,
-    /// Context from prior failed attempts at this task.
-    pub prior_failures: Vec<String>,
-    /// Verification commands that must pass after changes.
-    pub verify_commands: Vec<VerifySpec>,
-    /// Acceptance criteria (legacy string format).
-    pub acceptance: Vec<String>,
-    /// IDs of tasks this task depends on.
-    pub depends_on: Vec<String>,
-    /// Maximum lines of change allowed.
-    pub max_loc: Option<u32>,
-}
-
-/// A file to read as context.
-#[derive(Clone, Debug)]
-pub struct ReadFileSpec {
-    /// File path relative to workdir.
-    pub path: String,
-    /// Optional line range (e.g. "40-80").
-    pub lines: Option<String>,
-    /// Why this file is relevant.
-    pub why: String,
-}
-
-/// A verification command.
-#[derive(Clone, Debug)]
-pub struct VerifySpec {
-    /// Phase: structural, compile, test, integration.
-    pub phase: String,
-    /// Shell command to run.
-    pub command: String,
-    /// Message to show on failure.
-    pub fail_msg: Option<String>,
 }
 
 // ─── Plan context (artifacts on disk) ──────────────────────────────────────

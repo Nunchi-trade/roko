@@ -6,7 +6,7 @@
 //! - `Delta`: consolidation, ~30min+
 
 use crate::{Task, TaskContextWeight, TaskQualityProfile, TaskReasoningLevel};
-use bardo_primitives::tier::InferenceTier;
+use roko_primitives::tier::InferenceTier;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -362,7 +362,7 @@ mod tests {
         OperatingFrequency, OperatingFrequencyScheduleContext, OperatingFrequencyScheduler,
     };
     use crate::{Task, TaskCategory, TaskContextWeight, TaskQualityProfile, TaskReasoningLevel};
-    use bardo_primitives::tier::InferenceTier;
+    use roko_primitives::tier::InferenceTier;
 
     struct TestAffect {
         confidence: f64,

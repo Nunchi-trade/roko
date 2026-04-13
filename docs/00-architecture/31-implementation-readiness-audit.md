@@ -223,11 +223,11 @@ benchmarked. False positive threshold derivation (Z-score 5.26, Bonferroni for 1
 0.526) is exceptional. Ebbinghaus decay with tier multiplier has 4 worked examples.
 
 **Critical gaps:**
-- Tier field absent from `KnowledgeEntry` — acknowledged in status doc
-- `ContextAssembler` is a skeleton (struct exists, key methods unimplemented)
-- Somatic integration (k-d tree, PAD vectors, mood-congruent retrieval) entirely unimplemented
+- Tier field / PRD-native types have landed, directional causal encoding is now implemented, and the remaining lag is mostly in higher-order retrieval/runtime features plus status docs
+- `ContextAssembler` base retrieval is implemented and now uses an internal auction-style allocator; cross-subsystem allocation and somatic retrieval remain open
+- Somatic integration is still largely unimplemented: there is no k-d tree or emotional tagging, but PAD-biased retrieval plus a contrarian slice now exist in `ContextAssembler`
 - Cross-domain HDC transfer entirely unimplemented
-- Half-life constants use incorrect 30d defaults in code
+- Half-life constants now match the PRD for CausalLink (60d) and StrategyFragment (14d)
 
 **Crate reality:** bardo-primitives has `HdcVector` (3 files, ~500 LOC, 18 tests). The knowledge store
 types are spread across roko-core and roko-golem without consolidation.

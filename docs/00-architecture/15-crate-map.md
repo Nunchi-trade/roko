@@ -382,8 +382,8 @@ their `roko-*` equivalents.
   the others are stubs.
 - **roko-serve**: Scaffolded. HTTP API not yet wired.
 - **roko-dreams**: Scaffolded. Three-phase cycle specified but not shipping.
-- **Signal → Engram rename**: The core Rust type is still named `Signal`. Rename to `Engram`
-  is Tier 0D in the implementation plan. All PRD documentation uses "Engram" but code samples
+- **Signal → Engram rename**: Completed in the core codebase; any remaining mentions are documentation drift,
+  not a live type mismatch. All PRD documentation uses "Engram" and the Rust type now does too.
   reference `Signal` with explanatory comments.
 
 ---

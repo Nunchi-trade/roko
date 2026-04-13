@@ -2090,7 +2090,7 @@ pub struct SchedulerCronConfig {
     pub name: String,
     /// Standard cron expression.
     pub expression: String,
-    /// Signal kind emitted when the schedule fires.
+    /// Engram kind emitted when the schedule fires.
     pub signal_kind: String,
     /// Extra structured metadata included in the emitted signal body.
     #[serde(default)]
@@ -2145,7 +2145,7 @@ impl Default for GithubWebhookConfig {
 pub struct SubscriptionConfig {
     /// Agent template name associated with this subscription.
     pub template: String,
-    /// Signal kind glob used to match webhook signals.
+    /// Engram kind glob used to match webhook signals.
     pub trigger: String,
     /// Optional repo / branch / path filters.
     #[serde(default, skip_serializing_if = "SubscriptionFilterConfig::is_empty")]

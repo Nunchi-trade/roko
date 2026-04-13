@@ -16,10 +16,14 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "hdc")]
+use crate::hdc::KnowledgeHdcEncoder;
 use crate::{KnowledgeEntry, KnowledgeKind, NeuroStore};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
+/// Minimum retained confidence for AntiKnowledge entries.
+const ANTI_KNOWLEDGE_CONFIDENCE_FLOOR: f64 = 0.3;
 /// Multiplier applied when a knowledge entry has multiple independent sources.
 const CONFIRMATION_BOOST: f64 = 1.5;
 /// Minimum number of shared tags for two entries to be considered similar.
@@ -381,7 +385,12 @@ impl KnowledgeStore {
 
         for entry in &mut entries {
             let factor = recency_factor(entry, now);
-            entry.confidence = (entry.confidence.max(0.0) * factor).clamp(0.0, 1.0);
+            let decayed_confidence = (entry.confidence.max(0.0) * factor).clamp(0.0, 1.0);
+            entry.confidence = if entry.kind == KnowledgeKind::AntiKnowledge {
+                decayed_confidence.max(ANTI_KNOWLEDGE_CONFIDENCE_FLOOR)
+            } else {
+                decayed_confidence
+            };
         }
 
         self.rewrite_all(&entries)?;
@@ -400,7 +409,10 @@ impl KnowledgeStore {
         let before_len = before.len();
         let entries = before
             .into_iter()
-            .filter(|entry| effective_confidence(entry) >= threshold)
+            .filter(|entry| {
+                entry.kind == KnowledgeKind::AntiKnowledge
+                    || effective_confidence(entry) >= threshold
+            })
             .collect::<Vec<_>>();
         let removed = before_len.saturating_sub(entries.len());
         self.rewrite_all(&entries)?;
@@ -642,7 +654,7 @@ impl MemoryIndex {
             return Vec::new();
         }
 
-        let query_fingerprint = HdcVector::from_seed(query.as_bytes());
+        let query_fingerprint = KnowledgeHdcEncoder.encode_query(query);
         let mut scored: Vec<MemoryHit> = self
             .entries
             .iter()
@@ -677,7 +689,7 @@ fn fingerprint_entry(entry: &KnowledgeEntry) -> HdcVector {
     {
         return HdcVector::from_bytes(&bytes);
     }
-    HdcVector::from_seed(entry.content.as_bytes())
+    KnowledgeHdcEncoder.encode_entry(entry)
 }
 
 #[cfg(feature = "hdc")]
@@ -782,7 +794,16 @@ fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
 }
 
 fn effective_confidence(entry: &KnowledgeEntry) -> f64 {
-    entry.confidence.clamp(0.0, 1.0) * confirmation_boost(entry)
+    bounded_confidence(entry) * confirmation_boost(entry)
+}
+
+fn bounded_confidence(entry: &KnowledgeEntry) -> f64 {
+    let confidence = entry.confidence.clamp(0.0, 1.0);
+    if entry.kind == KnowledgeKind::AntiKnowledge {
+        confidence.max(ANTI_KNOWLEDGE_CONFIDENCE_FLOOR)
+    } else {
+        confidence
+    }
 }
 
 fn confirmation_boost(entry: &KnowledgeEntry) -> f64 {
@@ -822,7 +843,7 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
         return 0.0;
     };
     let entry_vec = HdcVector::from_bytes(&bytes);
-    let topic_vec = HdcVector::from_seed(topic.as_bytes());
+    let topic_vec = KnowledgeHdcEncoder.encode_query(topic);
     topic_vec.similarity(&entry_vec) as f64
 }
 
@@ -1012,6 +1033,39 @@ mod tests {
     }
 
     #[test]
+    fn decay_preserves_antiknowledge_confidence_floor() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let created_at = Utc::now() - Duration::days(365);
+
+        store
+            .add(KnowledgeEntry {
+                id: "anti-floor".to_owned(),
+                kind: KnowledgeKind::AntiKnowledge,
+                source: None,
+                content: "This previously successful pattern regressed badly.".to_owned(),
+                confidence: 0.8,
+                confidence_weight: -0.8,
+                refuted_insight_id: Some("insight-1".to_owned()),
+                refutation_evidence: Some("repeated gate failures".to_owned()),
+                source_episodes: vec!["ep-a".to_owned()],
+                tags: vec!["anti_knowledge".to_owned(), "regression".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at,
+                half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                tier: KnowledgeTier::Working,
+                hdc_vector: None,
+            })
+            .expect("add anti knowledge");
+
+        store.decay().expect("decay");
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert!((all[0].confidence - ANTI_KNOWLEDGE_CONFIDENCE_FLOOR).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn decay_uses_kind_specific_half_lives() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
@@ -1135,6 +1189,42 @@ mod tests {
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, "validated");
+    }
+
+    #[test]
+    fn gc_preserves_antiknowledge_even_below_threshold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(KnowledgeEntry {
+                id: "anti-gc".to_owned(),
+                kind: KnowledgeKind::AntiKnowledge,
+                source: None,
+                content: "This optimization path is deceptively harmful.".to_owned(),
+                confidence: 0.01,
+                confidence_weight: -0.4,
+                refuted_insight_id: Some("insight-2".to_owned()),
+                refutation_evidence: Some("caused repeated failures".to_owned()),
+                source_episodes: vec!["ep-a".to_owned()],
+                tags: vec!["anti_knowledge".to_owned(), "optimization".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: now,
+                half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                tier: KnowledgeTier::Working,
+                hdc_vector: None,
+            })
+            .expect("add anti knowledge");
+
+        store.gc(0.95).expect("gc");
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "anti-gc");
+        assert!(
+            (effective_confidence(&all[0]) - ANTI_KNOWLEDGE_CONFIDENCE_FLOOR).abs() < f64::EPSILON
+        );
     }
 
     #[test]
@@ -1338,6 +1428,44 @@ mod tests {
         let hits = index.search("semantic retrieval over durable knowledge", 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.id, "k1");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn causal_links_match_queries_by_cause_and_effect() {
+        let now = Utc::now();
+        let index = MemoryIndex::from_entries(vec![
+            entry(
+                KnowledgeKind::CausalLink,
+                "k1",
+                "high complexity -> more review",
+                &[
+                    "cause:high complexity",
+                    "effect:more review",
+                    "domain:coding",
+                ],
+                0.9,
+                &["ep-a"],
+                now,
+            ),
+            entry(
+                KnowledgeKind::Insight,
+                "k2",
+                "postgres vacuum keeps tables healthy",
+                &["postgres"],
+                0.9,
+                &["ep-b"],
+                now,
+            ),
+        ]);
+
+        let cause_hits = index.search("high complexity", 1);
+        assert_eq!(cause_hits.len(), 1);
+        assert_eq!(cause_hits[0].entry.id, "k1");
+
+        let effect_hits = index.search("more review", 1);
+        assert_eq!(effect_hits.len(), 1);
+        assert_eq!(effect_hits[0].entry.id, "k1");
     }
 
     #[cfg(feature = "hdc")]

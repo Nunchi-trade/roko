@@ -256,29 +256,18 @@ pub enum KnowledgeKind {
 
 ### Reconciliation with the Six-Type Design
 
-The refactoring-prd specifies six types: Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge. The current code has seven variants: Fact, Insight, Procedure, Heuristic, Playbook, Constraint, AntiKnowledge. The mapping is:
+The refactoring-prd specifies six types: Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge. The current code now matches that canonical set directly, while still accepting historical names during deserialization for backward compatibility.
 
-| Refactoring-PRD Type | Current Code Variant | Notes |
+| PRD Type | Current Code Variant | Notes |
 |---|---|---|
-| **Insight** | `Insight` | Direct match |
-| **Heuristic** | `Heuristic` | Direct match |
-| **Warning** | `Constraint` | Partially overlaps; `Constraint` is "a hard restriction" which covers Warning semantics |
-| **CausalLink** | (not present) | Needs to be added |
-| **StrategyFragment** | `Procedure` | Partially overlaps; `Procedure` is "a step-by-step action pattern" |
-| **AntiKnowledge** | `AntiKnowledge` | Direct match |
-| (not in PRD) | `Fact` | Exists in code but not in the 6-type design; serves as a default type |
-| (not in PRD) | `Playbook` | Exists in code as the compiled output of tier progression |
+| **Insight** | `Insight` | Canonical variant |
+| **Heuristic** | `Heuristic` | Canonical variant |
+| **Warning** | `Warning` | Canonical variant; legacy `Constraint` deserializes here |
+| **CausalLink** | `CausalLink` | Canonical variant with directional HDC encoding |
+| **StrategyFragment** | `StrategyFragment` | Canonical variant; legacy `Procedure` / `Playbook` deserialize here where appropriate |
+| **AntiKnowledge** | `AntiKnowledge` | Canonical variant with confidence floor 0.3 |
 
-**Reconciliation decision** (per `12a-cognitive-layer.md` tasks D1-D4): The recommended approach is to expand the enum to include all types from both sources:
-- Keep `Fact` (established general-purpose type with 365-day half-life)
-- Keep `Insight` (30-day half-life)
-- Keep `Heuristic` (90-day half-life)
-- Add `Warning` (7-day half-life, distinct from `Constraint`)
-- Add `CausalLink` (60-day half-life, with HDC permute encoding)
-- Rename `Procedure` to `StrategyFragment` or keep both (14-day half-life)
-- Keep `Playbook` (compiled output, not a raw knowledge type)
-- Keep `Constraint` (hard restrictions, infinite half-life)
-- Keep `AntiKnowledge` (confidence floor 0.3)
+**Current reconciliation decision**: the enum stays PRD-native. Historical names such as `Fact`, `Procedure`, `Playbook`, and `Constraint` survive only as serde aliases so old persisted entries can still be read without carrying duplicate semantic variants in the live type system.
 
 ### The KnowledgeEntry Struct
 
@@ -390,16 +379,14 @@ The six knowledge types are **domain-agnostic** — they apply equally to any pr
 ## Current Status and Gaps
 
 **Implemented**:
-- `KnowledgeKind` enum with 7 variants (Fact, Insight, Procedure, Heuristic, Playbook, Constraint, AntiKnowledge)
+- `KnowledgeKind` enum with PRD-native variants (`Insight`, `Heuristic`, `Warning`, `CausalLink`, `StrategyFragment`, `AntiKnowledge`) plus serde aliases for historical names
 - `KnowledgeEntry` struct with all fields including `refuted_insight_id` and `refutation_evidence`
 - `refutation_warning()` method for AntiKnowledge challenge display
-- Half-life constants: `FACT_HALF_LIFE_DAYS = 365.0`, `INSIGHT_HALF_LIFE_DAYS = 30.0`, `HEURISTIC_HALF_LIFE_DAYS = 90.0`
+- Half-life constants for the PRD-native kinds and tier-scaled effective half-life computation
+- AntiKnowledge confidence floor enforcement during decay and GC
 
 **Missing**:
-- `Warning` variant with 7-day half-life (currently approximated by `Constraint`)
 - `CausalLink` variant with 60-day half-life and HDC permute encoding
-- `StrategyFragment` variant with 14-day half-life (currently approximated by `Procedure`)
-- Confidence floor enforcement for AntiKnowledge (the 0.3 floor is not yet enforced in GC)
 - Domain-configurable HDC role vectors for non-code domains
 - Reactive AntiKnowledge checking (new candidates checked against existing AntiKnowledge)
 
