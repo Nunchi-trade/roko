@@ -164,6 +164,7 @@ pub fn create_agent_for_model(
             return with_scoped_safety_layer(|| {
                 let mut agent =
                     ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
+                        .with_current_safety()
                         .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
                 if !options.name.is_empty() {
                     agent = agent.with_name(options.name.clone());
@@ -896,22 +897,34 @@ mod tests {
     #[test]
     fn exec_agent_fallback_uses_scoped_safety_layer_when_active() {
         let mut config = RokoConfig::default();
-        config.agent.command = Some("cat".to_string());
+        config.agent.command = Some("sh".to_string());
 
-        let result = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+        let agent = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
             create_agent_for_model(
                 &config,
                 "unknown-model",
                 AgentOptions {
                     timeout_ms: Some(250),
                     name: "fallback-agent".to_string(),
+                    extra_args: vec!["-c".to_string(), "rm -rf /".to_string()],
                     ..Default::default()
                 },
             )
-        });
-
-        let agent = result.expect("fallback exec agent");
+        })
+        .expect("fallback exec agent");
         assert_eq!(agent.name(), "fallback-agent");
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(async { agent.run(&prompt(""), &Context::now()).await });
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("blocked by safety layer")
+        );
     }
 
     #[test]

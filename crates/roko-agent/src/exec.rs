@@ -8,6 +8,8 @@ use crate::process::{
     GRACE_STDIN_CLOSE_MS, benign_stderr_warn_once, classify_benign_stderr, kill_tree,
     register_spawned_pid, set_process_group, unregister_pid,
 };
+use crate::provider::current_safety_layer;
+use crate::safety::SafetyLayer;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
@@ -37,6 +39,7 @@ pub struct ExecAgent {
     args: Vec<String>,
     env: Vec<(String, String)>,
     current_dir: Option<PathBuf>,
+    safety: Option<SafetyLayer>,
     timeout_ms: u64,
     name: String,
 }
@@ -52,6 +55,7 @@ impl ExecAgent {
             args,
             env: Vec::new(),
             current_dir: None,
+            safety: None,
             timeout_ms: 120_000,
             name,
         }
@@ -98,6 +102,20 @@ impl ExecAgent {
         self.current_dir = Some(dir.into());
         self
     }
+
+    /// Attach a safety layer to the subprocess runtime.
+    #[must_use]
+    pub fn with_safety_layer(mut self, safety: Option<SafetyLayer>) -> Self {
+        self.safety = safety;
+        self
+    }
+
+    /// Attach the safety layer currently scoped to provider-backed construction.
+    #[must_use]
+    pub fn with_current_safety(mut self) -> Self {
+        self.safety = current_safety_layer();
+        self
+    }
 }
 
 #[async_trait]
@@ -105,6 +123,16 @@ impl ExecAgent {
 impl Agent for ExecAgent {
     async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
+        if let Some(safety) = &self.safety
+            && let Err(err) = safety.check_exec_command(&self.program, &self.args)
+        {
+            return self.failure_signal(
+                input,
+                &format!("exec blocked by safety layer: {err}"),
+                started,
+            );
+        }
+
         let prompt_text = match input.body.as_text() {
             Ok(s) => s.to_string(),
             Err(_) => {
@@ -280,8 +308,8 @@ impl Agent for ExecAgent {
         heartbeat_handle.abort();
         let elapsed_secs = started.elapsed().as_secs();
 
-        let stdout = stdout_handle.await.unwrap_or_default();
-        let stderr = stderr_handle.await.unwrap_or_default();
+        let stdout = self.scrub_text(&stdout_handle.await.unwrap_or_default());
+        let stderr = self.scrub_text(&stderr_handle.await.unwrap_or_default());
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !status.success() {
@@ -345,6 +373,12 @@ impl ExecAgent {
             wall_ms,
             ..Default::default()
         })
+    }
+
+    fn scrub_text(&self, content: &str) -> String {
+        self.safety
+            .as_ref()
+            .map_or_else(|| content.to_string(), |safety| safety.scrub_text(content))
     }
 }
 
@@ -509,6 +543,53 @@ mod tests {
         assert_eq!(result.trace.len(), 1);
         assert_eq!(result.trace[0].kind, Kind::AgentMessage);
         assert!(result.trace[0].body.as_text().unwrap().contains("warning"));
+    }
+
+    #[tokio::test]
+    async fn safety_blocks_dangerous_shell_before_spawn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sentinel = temp.path().join("sentinel");
+        let command = format!("touch {}; rm -rf /", sentinel.display());
+        let agent = ExecAgent::new("sh", vec!["-c".into(), command])
+            .with_current_dir(temp.path())
+            .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        let result = agent.run(&prompt(""), &Context::now()).await;
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap()
+                .contains("blocked by safety layer")
+        );
+        assert!(!sentinel.exists());
+    }
+
+    #[tokio::test]
+    async fn safety_allows_safe_shell_wrapper() {
+        let agent = ExecAgent::new("sh", vec!["-c".into(), "echo ok".into()])
+            .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        let result = agent.run(&prompt(""), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap().trim(), "ok");
+    }
+
+    #[tokio::test]
+    async fn safety_scrubs_stdout_and_stderr() {
+        let secret = "sk-ant-api03-abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234-AAAAAA";
+        let command = format!("printf '%s' '{secret}'; printf '%s\\n' '{secret}' 1>&2");
+        let agent = ExecAgent::new("sh", vec!["-c".into(), command])
+            .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        let result = agent.run(&prompt(""), &Context::now()).await;
+        assert!(result.success);
+        let output = result.output.body.as_text().unwrap();
+        assert!(!output.contains(secret));
+        assert!(output.contains("[REDACTED]"));
+        assert_eq!(result.trace.len(), 1);
+        let stderr = result.trace[0].body.as_text().unwrap();
+        assert!(!stderr.contains(secret));
+        assert!(stderr.contains("[REDACTED]"));
     }
 
     #[tokio::test]

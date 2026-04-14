@@ -34,6 +34,7 @@ pub mod path;
 pub mod rate_limit;
 pub mod scrub;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
@@ -163,6 +164,31 @@ impl SafetyLayer {
         Ok(())
     }
 
+    /// Run the subset of safety checks that can be applied to a raw subprocess launch.
+    ///
+    /// This is intentionally narrower than [`Self::check_pre_execution`]: generic
+    /// subprocesses do not expose structured tool arguments, so we only validate
+    /// direct git invocations and shell-wrapper command strings that can be
+    /// reasoned about before spawn.
+    pub fn check_exec_command(&self, program: &str, args: &[String]) -> Result<(), ToolError> {
+        if let Some(command) = shell_command_arg(program, args) {
+            bash::check_command_with_policy(command, &self.bash_policy)?;
+            git::check_git_command_with_policy(command, &self.git_policy)?;
+            return Ok(());
+        }
+
+        if is_git_program(program) {
+            let mut command = String::from("git");
+            if !args.is_empty() {
+                command.push(' ');
+                command.push_str(&args.join(" "));
+            }
+            git::check_git_command_with_policy(&command, &self.git_policy)?;
+        }
+
+        Ok(())
+    }
+
     /// Scrub secrets from a successful tool result.
     ///
     /// Only `ToolResult::Ok` variants are scrubbed; errors pass through
@@ -185,6 +211,50 @@ impl SafetyLayer {
             err @ ToolResult::Err(_) => err,
         }
     }
+
+    /// Scrub secrets from an arbitrary text payload.
+    #[must_use]
+    pub fn scrub_text(&self, content: &str) -> String {
+        scrub::scrub_secrets(content, &self.scrub_policy)
+    }
+}
+
+fn shell_command_arg<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    if !is_shell_program(program) {
+        return None;
+    }
+
+    args.windows(2).find_map(|pair| {
+        let [flag, command] = pair else {
+            return None;
+        };
+        if is_shell_command_flag(flag) {
+            Some(command.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn is_shell_program(program: &str) -> bool {
+    let Some(name) = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+}
+
+fn is_git_program(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("git")
+}
+
+fn is_shell_command_flag(flag: &str) -> bool {
+    flag.starts_with('-') && flag.contains('c')
 }
 
 #[cfg(test)]
@@ -282,5 +352,40 @@ mod tests {
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());
         assert!(layer.check_pre_execution(&call, &ctx).is_err());
+    }
+
+    #[test]
+    fn exec_command_blocks_dangerous_shell_wrapper() {
+        let layer = SafetyLayer::with_defaults();
+        let args = vec!["-lc".to_string(), "rm -rf /".to_string()];
+        assert!(layer.check_exec_command("/bin/bash", &args).is_err());
+    }
+
+    #[test]
+    fn exec_command_blocks_direct_git_force_push() {
+        let layer = SafetyLayer::with_defaults();
+        let args = vec![
+            "push".to_string(),
+            "--force".to_string(),
+            "origin".to_string(),
+            "main".to_string(),
+        ];
+        assert!(layer.check_exec_command("git", &args).is_err());
+    }
+
+    #[test]
+    fn exec_command_allows_safe_shell_wrapper() {
+        let layer = SafetyLayer::with_defaults();
+        let args = vec!["-c".to_string(), "echo hi".to_string()];
+        assert!(layer.check_exec_command("sh", &args).is_ok());
+    }
+
+    #[test]
+    fn safety_layer_scrubs_text() {
+        let layer = SafetyLayer::with_defaults();
+        let cleaned = layer.scrub_text(
+            "sk-ant-api03-abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234-AAAAAA",
+        );
+        assert!(!cleaned.contains("sk-ant-api03"));
     }
 }

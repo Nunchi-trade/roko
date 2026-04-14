@@ -22,6 +22,7 @@ use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::{
     AgentOptions, create_agent_for_model, is_known_protocol_command, with_safety_layer,
+    with_scoped_safety_layer,
 };
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
@@ -100,7 +101,7 @@ use roko_learn::skill_library::{
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
 };
-use roko_orchestrator::worktree::{format_branch_name, WorktreeConfig, WorktreeManager};
+use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager, format_branch_name};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
     GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanStrategy, discover_plans,
@@ -1240,9 +1241,12 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else if is_known_protocol_command(&cfg.command) {
-        let mut agent = ExecAgent::new(&cfg.command, cfg.extra_args)
-            .with_timeout_ms(cfg.timeout_ms)
-            .with_current_dir(cfg.exec_dir.clone());
+        let mut agent = with_scoped_safety_layer(|| {
+            ExecAgent::new(&cfg.command, cfg.extra_args)
+                .with_current_safety()
+                .with_timeout_ms(cfg.timeout_ms)
+                .with_current_dir(cfg.exec_dir.clone())
+        });
         for (k, v) in &cfg.env_vars {
             agent = agent.with_env_var(k, v);
         }
