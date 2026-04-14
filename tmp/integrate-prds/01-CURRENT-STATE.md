@@ -116,7 +116,7 @@ All steps are CLI commands. The plan-execute-gate-persist loop is wired.
 
 2. `roko-dreams` depends on `roko-golem` for re-exports — needs to be self-contained
 
-3. `roko-serve` route stubs are largely gone: plan execution, plan generation, PRD draft, and research routes all run through the shared runtime. PRD/research episode logging in `crates/roko-cli/src/agent_exec.rs` is also now wired. The remaining runtime seam is narrower: direct `roko run` and provider fallback safety behavior are only partially unified.
+3. `roko-serve` route stubs are largely gone: plan execution, plan generation, PRD draft, and research routes all run through the shared runtime. PRD/research episode logging in `crates/roko-cli/src/agent_exec.rs` is also wired. Direct `roko run`, orchestrate fallback paths, and raw `ExecAgent` subprocess fallback now all enter the same scoped safety surface and share more prompt/config assembly. The remaining runtime gap is broader backend universality: some native/provider-specific paths still bypass the shared `ToolDispatcher` chain.
 
 4. Workspace metadata no longer references `bardo.run` email or `wpank/bardo` repo. Remaining naming work is concentrated in conceptual/documentation cleanup, not Cargo metadata.
 

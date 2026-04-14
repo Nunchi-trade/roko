@@ -57,10 +57,10 @@ roko prd idea → prd draft new → prd draft promote → prd plan → plan run 
 - **Symptom**: Generated plans may use old names (Signal, Bardo, etc.)
 - **Fix needed**: Inject `docs/00-architecture/01-naming-and-glossary.md` into `PLAN_GENERATOR_SYSTEM_PROMPT`
 
-#### Issue: Direct provider fallback safety is still not universal
-- **Symptom**: provider-backed paths used by `orchestrate.rs`, `agent_exec.rs`, and `run.rs` now enter a scoped safety layer, but raw fallback subprocess execution still exists below that layer
-- **Cause**: `create_agent_for_model()` still returns a plain `ExecAgent` when no provider can be resolved, and `ExecAgent` itself does not consult the shared `ToolDispatcher` safety chain
-- **Impact**: Medium — common PRD/research/plan/run paths are now covered better, but the lowest-level fallback is still not a real safety-enforced path
+#### Issue: Runtime safety is still not universal
+- **Symptom**: common PRD/research/plan/run paths now enter a scoped safety layer, and raw `ExecAgent` fallback now runs preflight command checks plus output scrubbing, but some native/provider-specific backends still bypass the shared `ToolDispatcher` chain
+- **Cause**: backend-specific paths such as Claude CLI, Gemini-native, embeddings, and async deep-research still own more of their execution loop instead of flowing through one universal dispatcher
+- **Impact**: Medium — the lowest-level subprocess fallback is now materially hardened, but full backend-universal enforcement is still incomplete
 
 ## What Works Now
 
@@ -70,8 +70,8 @@ roko prd idea → prd draft new → prd draft promote → prd plan → plan run 
 | Create draft | `roko prd draft new "slug"` | Works (after fixes) |
 | Promote draft | `roko prd draft promote slug` | Wired; auto-plan path supported |
 | Generate plan | `roko prd plan slug` | Wired; direct agent-exec episodes now logged |
-| Execute plan | `roko plan run plans/` | Works (tested in earlier sessions) |
-| Resume plan | `roko plan run plans/ --resume STATE` | Works |
+| Execute plan | `roko plan run .roko/plans/` | Works (tested in earlier sessions) |
+| Resume plan | `roko plan run .roko/plans/ --resume STATE` | Works |
 | Dashboard | `roko dashboard` | Works (text mode) |
 | Status | `roko status` | Works |
 
@@ -89,4 +89,4 @@ The output-capture approach now works for all providers:
 - CLI agents: write files directly (detected via mtime check), fallback to output capture
 - API agents: return text content, which is written to the target file
 
-PRD/research/plan-generation runs now also emit learning episodes via `agent_exec.rs`, and both `agent_exec.rs` and `run.rs` enter provider construction under a scoped safety layer by default.
+PRD/research/plan-generation runs now also emit learning episodes via `agent_exec.rs`, and `agent_exec.rs`, `run.rs`, orchestrate fallback paths, and raw `ExecAgent` fallback all enter the current scoped safety surface by default.

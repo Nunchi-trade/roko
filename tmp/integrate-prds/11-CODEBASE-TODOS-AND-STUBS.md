@@ -28,7 +28,7 @@ Remaining server/runtime gaps are higher-level:
 
 ## 3. Safety Subsystems in roko-agent: Built, Only Partially Called
 
-6 guards in `roko-agent/src/safety/` (~1,355 lines, 50+ tests) — fully implemented and now reached on shared ToolLoop paths for OpenAI-compatible providers, Gemini compat models, Anthropic API, and Perplexity tool-capable chat, but still not universal across all runtime backends:
+6 guards in `roko-agent/src/safety/` (~1,355 lines, 50+ tests) — fully implemented and now reached on shared ToolLoop paths for OpenAI-compatible providers, Gemini compat models, Anthropic API, and Perplexity tool-capable chat. Raw `ExecAgent` fallback now also runs scoped preflight checks and output scrubbing, but enforcement is still not universal across all runtime backends:
 
 | Guard | What |
 |-------|------|
@@ -151,7 +151,7 @@ The route stubs above are no longer the main gap. Remaining missing HTTP endpoin
 - successful task worktrees merge back into the plan worktree
 - terminal and interrupted plan paths now clean up tracked worktrees
 
-Remaining gap: abnormal lowest-level subprocess fallback and broader crash-proof cleanup semantics still deserve hardening, but “worktree manager never called” is no longer accurate.
+Remaining gap: broader crash-proof cleanup semantics still deserve hardening, but “worktree manager never called” and “lowest-level subprocess fallback is completely unguarded” are no longer accurate.
 
 ---
 
