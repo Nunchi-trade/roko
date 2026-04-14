@@ -499,6 +499,14 @@ pub struct DashboardData {
     event_log_stamp: FileStamp,
 }
 
+/// Derived executor snapshot fields used by TUI orchestration chrome.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ExecutorSummary {
+    pub orchestrator_state: String,
+    pub current_iteration: usize,
+    pub current_phase: String,
+}
+
 impl DashboardData {
     /// Load dashboard data from a workspace root, falling back to empty data on errors.
     #[must_use]
@@ -823,6 +831,12 @@ impl DashboardData {
     pub(crate) fn task_outputs(&self) -> &HashMap<String, Vec<String>> {
         &self.task_outputs
     }
+
+    /// Executor-level summary derived from `.roko/state/executor.json`.
+    #[must_use]
+    pub(crate) fn executor_summary(&self) -> ExecutorSummary {
+        summarize_executor_state(&self.executor_state)
+    }
 }
 
 /// Summary of a task that is currently active.
@@ -835,6 +849,8 @@ pub struct TaskSummary {
     pub iteration: u32,
     #[serde(default)]
     pub assigned_agents: Vec<String>,
+    #[serde(default)]
+    pub latest_gate: Option<String>,
 }
 
 /// Summary of an agent tracked by the process supervisor.
@@ -1628,10 +1644,7 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
     let mut tasks = Vec::new();
     for (plan_id, plan_state) in plan_states {
         let status = current_phase_label(plan_state).unwrap_or_else(|| "unknown".to_string());
-        if matches!(
-            status.to_ascii_lowercase().as_str(),
-            "complete" | "done" | "failed" | "skipped"
-        ) {
+        if matches!(status.to_ascii_lowercase().as_str(), "complete" | "skipped") {
             continue;
         }
         let task_id = plan_state
@@ -1655,6 +1668,13 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
                     .collect()
             })
             .unwrap_or_default();
+        let latest_gate = plan_state
+            .get("gate_results")
+            .and_then(Value::as_array)
+            .and_then(|results| results.last())
+            .and_then(|result| result.get("gate_name"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
 
         tasks.push(TaskSummary {
             plan_id: plan_id.clone(),
@@ -1662,6 +1682,7 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
             status,
             iteration,
             assigned_agents,
+            latest_gate,
         });
     }
 
@@ -1904,6 +1925,47 @@ fn load_current_plan_execution(
     })
 }
 
+fn summarize_executor_state(state: &Value) -> ExecutorSummary {
+    let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) else {
+        return ExecutorSummary::default();
+    };
+
+    if plan_states.is_empty() {
+        return ExecutorSummary::default();
+    }
+
+    let has_running = plan_states
+        .values()
+        .any(|plan_state| !plan_state_is_terminal(plan_state) && !plan_state_is_paused(plan_state));
+    let has_paused = plan_states
+        .values()
+        .any(|plan_state| !plan_state_is_terminal(plan_state) && plan_state_is_paused(plan_state));
+    let has_error = plan_states.values().any(plan_state_has_error);
+
+    let mut summary = ExecutorSummary {
+        orchestrator_state: if has_running {
+            String::from("running")
+        } else if has_paused {
+            String::from("paused")
+        } else if has_error {
+            String::from("error")
+        } else {
+            String::from("idle")
+        },
+        ..ExecutorSummary::default()
+    };
+
+    if let Some((_, plan_state)) = most_advanced_active_plan_state(state) {
+        summary.current_iteration = plan_state
+            .get("iteration")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize;
+        summary.current_phase = current_phase_label(plan_state).unwrap_or_default();
+    }
+
+    summary
+}
+
 fn current_task_id(
     tasks_file: &TasksFile,
     tracker: Option<&TaskTrackerSnapshot>,
@@ -1990,6 +2052,42 @@ fn task_phase_label(
     String::from("Queued")
 }
 
+fn plan_state_is_terminal(plan_state: &Value) -> bool {
+    current_phase_label(plan_state)
+        .map(|phase| {
+            matches!(
+                phase.to_ascii_lowercase().as_str(),
+                "complete" | "done" | "failed" | "skipped"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn plan_state_is_paused(plan_state: &Value) -> bool {
+    plan_state
+        .get("paused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn plan_state_has_error(plan_state: &Value) -> bool {
+    current_phase_label(plan_state)
+        .map(|phase| phase.eq_ignore_ascii_case("failed"))
+        .unwrap_or(false)
+        || plan_state
+            .get("last_error")
+            .and_then(Value::as_str)
+            .is_some_and(|err| !err.trim().is_empty())
+        || plan_state
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|err| !err.trim().is_empty())
+        || plan_state
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|err| !err.trim().is_empty())
+}
+
 fn title_case_phase(phase: &str) -> String {
     let mut out = String::new();
     let mut capitalize = true;
@@ -2026,6 +2124,41 @@ fn execution_phase_priority(phase: &str) -> u8 {
         "queued" => 0,
         _ => 0,
     }
+}
+
+fn most_advanced_active_plan_state<'a>(state: &'a Value) -> Option<(&'a str, &'a Value)> {
+    let plan_states = state.get("plan_states").and_then(Value::as_object)?;
+
+    let mut candidates = plan_states
+        .iter()
+        .filter_map(|(plan_id, plan_state)| {
+            if plan_state_is_paused(plan_state) || plan_state_is_terminal(plan_state) {
+                return None;
+            }
+            let phase = current_phase_label(plan_state)?;
+            let started_at_ms = plan_state
+                .get("started_at_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            Some((
+                execution_phase_priority(&phase),
+                started_at_ms,
+                plan_id.as_str(),
+                plan_state,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(b.2))
+    });
+
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, _, plan_id, plan_state)| (plan_id, plan_state))
 }
 
 fn default_model_for_tier(tier: &str) -> String {

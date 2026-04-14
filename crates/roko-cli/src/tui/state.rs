@@ -136,22 +136,6 @@ pub struct TaskEntry {
     pub agent_id: Option<String>,
 }
 
-/// A notification message shown in the TUI.
-#[derive(Debug, Clone)]
-pub struct Notification {
-    pub message: String,
-    pub level: NotificationLevel,
-    pub timestamp_ms: i64,
-}
-
-/// Notification severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotificationLevel {
-    Info,
-    Warning,
-    Error,
-}
-
 /// A log entry for the log viewer.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -447,9 +431,6 @@ pub struct TuiState {
     /// Cached full git view data for F4 Git tab (populated by background thread).
     pub git_view_data: Option<super::views::git_view::GitViewData>,
 
-    // -- notifications --
-    /// Active notification messages.
-    pub notifications: Vec<Notification>,
     /// Log messages for the log viewer.
     pub log_messages: Vec<LogEntry>,
 
@@ -587,7 +568,6 @@ impl Default for TuiState {
             git_summary_lines: Vec::new(),
             git_view_data: None,
 
-            notifications: Vec::new(),
             log_messages: Vec::new(),
 
             plan_detail_content: String::new(),
@@ -724,6 +704,11 @@ impl TuiState {
     /// This bridges the existing snapshot-based data model into the full
     /// TuiState. Fields not covered by `DashboardData` are left unchanged.
     pub fn update_from_snapshot(&mut self, data: &DashboardData) {
+        let executor_summary = data.executor_summary();
+        self.orchestrator_state = executor_summary.orchestrator_state;
+        self.current_iteration = executor_summary.current_iteration;
+        self.current_phase = executor_summary.current_phase;
+
         // Plans
         self.plans = data
             .plans
@@ -823,6 +808,23 @@ impl TuiState {
             }
         }
 
+        self.parallel_agents = self
+            .agents
+            .iter()
+            .filter(|a| a.active)
+            .map(|a| ParallelAgentState {
+                agent_id: a.id.clone(),
+                plan_id: a.current_plan.clone(),
+                task_id: a.current_task.clone(),
+                status: if a.active {
+                    "running".to_string()
+                } else {
+                    "idle".to_string()
+                },
+                progress_pct: 0.0,
+            })
+            .collect();
+
         // Cost from efficiency summary
         self.cumulative_cost_usd = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
@@ -842,8 +844,14 @@ impl TuiState {
             })
             .collect();
 
-        // Build phase_pipeline from canonical phases + active_tasks
-        self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
+        self.cumulative_cost_usd=data.efficiency.total_cost_usd;
+        self.cumulative_input_tokens=data.efficiency.total_input_tokens;
+        self.cumulative_output_tokens=data.efficiency.total_output_tokens;
+        self.cost_dollars=self.cumulative_cost_usd;
+        self.token_total=self.cumulative_input_tokens+self.cumulative_output_tokens;
+        sum_costs(data,&mut self.cost_per_plan,&mut self.cost_per_task);
+
+                                                                          self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
 
         // Populate phase elapsed times from episodes (Task 7)
         populate_phase_elapsed(&mut self.phase_pipeline, data.episodes());
@@ -933,51 +941,203 @@ impl TuiState {
 
 /// Build the canonical 9-phase pipeline, inferring status from active tasks.
 fn build_phase_pipeline(active_tasks: &[super::dashboard::TaskSummary]) -> Vec<PhaseStep> {
-    // Determine which phase is currently active based on task statuses
-    let active_statuses: Vec<&str> = active_tasks
-        .iter()
-        .filter(|t| t.status == "running" || t.status == "active" || t.status == "executing")
-        .map(|t| t.status.as_str())
-        .collect();
+    #[derive(Clone, Copy, Default)]
+    struct PhaseTaskCounts {
+        total: usize,
+        done: usize,
+        active: usize,
+        failed: usize,
+    }
 
-    let has_active = !active_statuses.is_empty();
-    let all_done = active_tasks
-        .iter()
-        .all(|t| t.status == "done" || t.status == "completed" || t.status == "passed");
+    let mut counts = vec![PhaseTaskCounts::default(); CANONICAL_PHASES.len()];
+
+    for task in active_tasks {
+        let Some(current_idx) = canonical_phase_index_for_task(task) else {
+            continue;
+        };
+
+        let failed = task_status_is_failed(&task.status);
+        let done = task_status_is_done(&task.status);
+        let active = !failed && !done;
+
+        for (phase_idx, phase_counts) in counts.iter_mut().enumerate() {
+            phase_counts.total += 1;
+
+            if phase_idx < current_idx {
+                phase_counts.done += 1;
+                continue;
+            }
+
+            if phase_idx == current_idx {
+                if failed {
+                    phase_counts.failed += 1;
+                } else if done {
+                    phase_counts.done += 1;
+                } else if active {
+                    phase_counts.active += 1;
+                }
+            }
+        }
+    }
 
     CANONICAL_PHASES
         .iter()
         .enumerate()
-        .map(|(i, &name)| {
-            let status = if all_done && !active_tasks.is_empty() {
+        .map(|(idx, &name)| {
+            let phase_counts = counts[idx];
+            let pct = if phase_counts.total > 0 {
+                (phase_counts.done as f64 / phase_counts.total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let status = if phase_counts.failed > 0 {
+                PhaseStatus::Failed
+            } else if phase_counts.total > 0 && phase_counts.done == phase_counts.total {
                 PhaseStatus::Done
-            } else if has_active {
-                // Simple heuristic: phases before the midpoint are done,
-                // one phase is active, rest are pending.
-                // In a real implementation this would map task statuses to phases.
-                let midpoint = CANONICAL_PHASES.len() / 3;
-                if i < midpoint {
-                    PhaseStatus::Done
-                } else if i == midpoint {
-                    PhaseStatus::Active
-                } else {
-                    PhaseStatus::Pending
-                }
+            } else if phase_counts.active > 0 {
+                PhaseStatus::Active
             } else {
                 PhaseStatus::Pending
             };
+
             PhaseStep {
                 name: name.to_string(),
                 status,
                 elapsed_secs: 0.0,
-                pct: match status {
-                    PhaseStatus::Done => 100.0,
-                    PhaseStatus::Active => 50.0,
-                    _ => 0.0,
-                },
+                pct,
             }
         })
         .collect()
+}
+
+fn canonical_phase_index_for_task(task: &super::dashboard::TaskSummary) -> Option<usize> {
+    let phase_name = canonical_phase_name_for_task(task)?;
+    CANONICAL_PHASES.iter().position(|&name| name == phase_name)
+}
+
+fn canonical_phase_name_for_task(task: &super::dashboard::TaskSummary) -> Option<&'static str> {
+    let status = task.status.to_ascii_lowercase();
+
+    match status.as_str() {
+        "preflight" => Some("preflight"),
+        "strategist" => Some("strategist"),
+        "implementer" => Some("implementer"),
+        "compile-gate" | "compile_gate" => Some("compile-gate"),
+        "test-gate" | "test_gate" => Some("test-gate"),
+        "reviewing" => Some("reviewing"),
+        "critic-review" | "critic_review" => Some("critic-review"),
+        "verdict" => Some("verdict"),
+        "committing" => Some("committing"),
+        "queued" => Some("preflight"),
+        "enriching" => Some("strategist"),
+        "implementing" | "auto-fixing" | "auto_fixing" => Some("implementer"),
+        "gating" => Some(classify_gate_phase(task)),
+        "verifying" | "regenerating-verify" | "regenerating_verify" => Some("test-gate"),
+        "review" => Some("reviewing"),
+        "doc-revision" | "doc_revision" => Some("critic-review"),
+        "done" | "passed" => Some("verdict"),
+        "merging" | "commit" | "complete" | "completed" => Some("committing"),
+        "failed" | "error" => Some(classify_failed_phase(task)),
+        "running" | "active" | "executing" | "in_progress" => Some(classify_phase_from_hints(task)),
+        _ => Some(classify_phase_from_hints(task)),
+    }
+}
+
+fn classify_gate_phase(task: &super::dashboard::TaskSummary) -> &'static str {
+    let latest_gate = task
+        .latest_gate
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let task_id = task.task_id.to_ascii_lowercase();
+
+    if latest_gate.contains("test")
+        || latest_gate.contains("verify")
+        || task_id.contains("test")
+        || task_id.contains("verify")
+    {
+        "test-gate"
+    } else {
+        "compile-gate"
+    }
+}
+
+fn classify_failed_phase(task: &super::dashboard::TaskSummary) -> &'static str {
+    let hint = classify_phase_from_hints(task);
+    if hint == "preflight" || hint == "strategist" {
+        hint
+    } else if task
+        .latest_gate
+        .as_deref()
+        .is_some_and(|gate| {
+            let gate = gate.to_ascii_lowercase();
+            gate.contains("test") || gate.contains("verify")
+        })
+    {
+        "test-gate"
+    } else if task.latest_gate.is_some() {
+        "compile-gate"
+    } else {
+        hint
+    }
+}
+
+fn classify_phase_from_hints(task: &super::dashboard::TaskSummary) -> &'static str {
+    let task_id = task.task_id.to_ascii_lowercase();
+    let assigned_agents = task
+        .assigned_agents
+        .iter()
+        .map(|agent| agent.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let latest_gate = task
+        .latest_gate
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+
+    if task_id.contains("preflight") {
+        "preflight"
+    } else if task_id.contains("strateg") || assigned_agents.contains("strateg") {
+        "strategist"
+    } else if task_id.contains("critic") || assigned_agents.contains("critic") {
+        "critic-review"
+    } else if task_id.contains("review") {
+        "reviewing"
+    } else if task_id.contains("merge")
+        || task_id.contains("commit")
+        || latest_gate.contains("merge")
+    {
+        "committing"
+    } else if task_id.contains("verdict") {
+        "verdict"
+    } else if latest_gate.contains("test")
+        || latest_gate.contains("verify")
+        || task_id.contains("test")
+        || task_id.contains("verify")
+    {
+        "test-gate"
+    } else if latest_gate.contains("compile")
+        || latest_gate.contains("clippy")
+        || task_id.contains("compile")
+        || task_id.contains("clippy")
+        || task_id.contains("build")
+    {
+        "compile-gate"
+    } else {
+        "implementer"
+    }
+}
+
+fn task_status_is_failed(status: &str) -> bool {
+    matches!(status.to_ascii_lowercase().as_str(), "failed" | "error")
+}
+
+fn task_status_is_done(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "done" | "completed" | "complete" | "passed"
+    )
 }
 
 /// Build execution waves from plan entries. Groups by `wave` field if set,
@@ -1054,15 +1214,18 @@ fn extract_episode_output(episode: &roko_learn::episode_logger::Episode) -> Stri
     episode.failure_reason.as_deref().unwrap_or("").to_string()
 }
 
-/// Build the task checklist using plan execution + task-tracker data (Task 3).
-///
-/// If a `PlanExecutionSnapshot` is available, uses its task rows which
-/// already reflect task-tracker completed/failed status. Falls back to
-/// `active_tasks` when no execution snapshot exists.
-fn build_task_checklist_from_execution(data: &super::dashboard::DashboardData) -> Vec<TaskRow> {
-    // Prefer the PlanExecutionSnapshot which already incorporates tracker data
-    if let Some(exec) = &data.current_plan_execution {
-        return exec
+fn sum_costs(data:&DashboardData,plans:&mut HashMap<String,f64>,tasks:&mut HashMap<String,f64>){
+    plans.clear();
+    tasks.clear();
+    for e in &data.efficiency_events {
+        if !e.plan_id.is_empty(){*plans.entry(e.plan_id.clone()).or_default()+=e.cost_usd;}
+        if !e.task_id.is_empty(){*tasks.entry(e.task_id.clone()).or_default()+=e.cost_usd;}
+    }
+}
+
+fn build_task_checklist_from_execution(data:&DashboardData)->Vec<TaskRow>{
+    if let Some(exec)=&data.current_plan_execution {
+                           return exec
             .tasks
             .iter()
             .map(|t| {
@@ -1268,8 +1431,12 @@ fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use roko_learn::efficiency::AgentEfficiencyEvent;
+    use crate::tui::dashboard::TaskSummary;
+    use tempfile::tempdir;
 
     fn efficiency_event(
         role: &str,
@@ -1425,6 +1592,100 @@ mod tests {
         assert_eq!(state.phase_pipeline.len(), 9);
         assert_eq!(state.phase_pipeline[0].name, "preflight");
         assert_eq!(state.phase_pipeline[8].name, "committing");
+    }
+
+    #[test]
+    fn phase_pipeline_uses_task_progression_instead_of_position_heuristics() {
+        let tasks = vec![
+            TaskSummary {
+                plan_id: "plan-a".to_string(),
+                task_id: "task-impl".to_string(),
+                status: "implementing".to_string(),
+                iteration: 1,
+                assigned_agents: vec!["implementer-1".to_string()],
+                latest_gate: None,
+            },
+            TaskSummary {
+                plan_id: "plan-b".to_string(),
+                task_id: "task-verify".to_string(),
+                status: "verifying".to_string(),
+                iteration: 1,
+                assigned_agents: vec!["implementer-2".to_string()],
+                latest_gate: Some("compile".to_string()),
+            },
+        ];
+
+        let pipeline = build_phase_pipeline(&tasks);
+
+        assert_eq!(pipeline[0].status, PhaseStatus::Done);
+        assert_eq!(pipeline[0].pct, 100.0);
+        assert_eq!(pipeline[1].status, PhaseStatus::Done);
+        assert_eq!(pipeline[1].pct, 100.0);
+        assert_eq!(pipeline[2].status, PhaseStatus::Active);
+        assert_eq!(pipeline[2].pct, 50.0);
+        assert_eq!(pipeline[3].status, PhaseStatus::Pending);
+        assert_eq!(pipeline[3].pct, 50.0);
+        assert_eq!(pipeline[4].status, PhaseStatus::Active);
+        assert_eq!(pipeline[4].pct, 0.0);
+        assert_eq!(pipeline[5].status, PhaseStatus::Pending);
+        assert_eq!(pipeline[5].pct, 0.0);
+    }
+
+    #[test]
+    fn phase_pipeline_marks_failed_gate_from_task_data() {
+        let tasks = vec![TaskSummary {
+            plan_id: "plan-a".to_string(),
+            task_id: "task-test".to_string(),
+            status: "failed".to_string(),
+            iteration: 2,
+            assigned_agents: vec!["implementer-1".to_string()],
+            latest_gate: Some("test".to_string()),
+        }];
+
+        let pipeline = build_phase_pipeline(&tasks);
+
+        assert_eq!(pipeline[0].status, PhaseStatus::Done);
+        assert_eq!(pipeline[1].status, PhaseStatus::Done);
+        assert_eq!(pipeline[2].status, PhaseStatus::Done);
+        assert_eq!(pipeline[3].status, PhaseStatus::Done);
+        assert_eq!(pipeline[4].status, PhaseStatus::Failed);
+        assert_eq!(pipeline[4].pct, 0.0);
+    }
+
+    #[test]
+    fn from_dashboard_data_populates_orchestrator_fields_from_executor_state() {
+        let tmpdir = tempdir().expect("tempdir");
+        let state_dir = tmpdir.path().join(".roko/state");
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "gating" },
+                    "iteration": 3,
+                    "started_at_ms": 10,
+                    "paused": false
+                },
+                "plan-b": {
+                    "current_phase": { "kind": "implementing" },
+                    "iteration": 2,
+                    "started_at_ms": 20,
+                    "paused": false
+                }
+            }
+        });
+        fs::write(
+            state_dir.join("executor.json"),
+            serde_json::to_vec(&executor_state).expect("executor json"),
+        )
+        .expect("write executor state");
+
+        let data = DashboardData::load_best_effort(tmpdir.path());
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.orchestrator_state, "running");
+        assert_eq!(state.current_iteration, 2);
+        assert_eq!(state.current_phase, "implementing");
     }
 
     #[test]

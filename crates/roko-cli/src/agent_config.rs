@@ -107,7 +107,8 @@ mod tests {
 
     use super::{
         GatewayEnv, RokoConfig, command_from_config, load_gateway_env, model_from_config,
-        synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
+        synthesize_claude_cli_config, synthesize_known_protocol_config,
+        synthesize_subprocess_config,
     };
 
     fn temp_workdir() -> std::path::PathBuf {
@@ -146,10 +147,7 @@ mod tests {
         assert_eq!(config.agent.command.as_deref(), Some("cursor-agent"));
         let defaults = RokoConfig::default();
         assert_eq!(config.agent.default_model, defaults.agent.default_model);
-        assert_eq!(
-            config.agent.default_backend,
-            defaults.agent.default_backend
-        );
+        assert_eq!(config.agent.default_backend, defaults.agent.default_backend);
     }
 
     #[test]
@@ -163,7 +161,10 @@ command = "claude"
 "#,
         );
 
-        assert_eq!(model_from_config(&workdir).as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            model_from_config(&workdir).as_deref(),
+            Some("claude-opus-4-6")
+        );
         assert_eq!(command_from_config(&workdir).as_deref(), Some("claude"));
     }
 
@@ -187,10 +188,7 @@ command = "claude"
                     "ANTHROPIC_BASE_URL".to_string(),
                     "https://example.test".to_string()
                 ),
-                (
-                    "ANTHROPIC_AUTH_TOKEN".to_string(),
-                    "secret".to_string()
-                ),
+                ("ANTHROPIC_AUTH_TOKEN".to_string(), "secret".to_string()),
             ]
         );
     }

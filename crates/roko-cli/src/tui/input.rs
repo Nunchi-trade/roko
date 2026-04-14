@@ -51,25 +51,55 @@ pub enum FocusZone {
 impl FocusZone {
     /// Cycle to the next focus zone.
     #[must_use]
-    pub const fn next(self) -> Self {
-        match self {
-            Self::PlanTree => Self::TaskProgress,
-            Self::TaskProgress => Self::AgentOutput,
-            Self::AgentOutput => Self::CommandOutput,
-            Self::CommandOutput => Self::RightPanel,
-            Self::RightPanel => Self::PlanTree,
+    pub const fn next(self, tab: Tab) -> Self {
+        match tab {
+            Tab::Dashboard => match self {
+                Self::PlanTree => Self::TaskProgress,
+                Self::TaskProgress => Self::AgentOutput,
+                Self::AgentOutput => Self::CommandOutput,
+                Self::CommandOutput => Self::RightPanel,
+                Self::RightPanel => Self::PlanTree,
+            },
+            Tab::Plans => match self {
+                Self::PlanTree | Self::TaskProgress | Self::AgentOutput | Self::CommandOutput => {
+                    Self::RightPanel
+                }
+                Self::RightPanel => Self::PlanTree,
+            },
+            Tab::Agents => match self {
+                Self::PlanTree | Self::TaskProgress | Self::CommandOutput | Self::RightPanel => {
+                    Self::AgentOutput
+                }
+                Self::AgentOutput => Self::RightPanel,
+            },
+            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => self,
         }
     }
 
     /// Cycle to the previous focus zone.
     #[must_use]
-    pub const fn prev(self) -> Self {
-        match self {
-            Self::PlanTree => Self::RightPanel,
-            Self::TaskProgress => Self::PlanTree,
-            Self::AgentOutput => Self::TaskProgress,
-            Self::CommandOutput => Self::AgentOutput,
-            Self::RightPanel => Self::CommandOutput,
+    pub const fn prev(self, tab: Tab) -> Self {
+        match tab {
+            Tab::Dashboard => match self {
+                Self::PlanTree => Self::RightPanel,
+                Self::TaskProgress => Self::PlanTree,
+                Self::AgentOutput => Self::TaskProgress,
+                Self::CommandOutput => Self::AgentOutput,
+                Self::RightPanel => Self::CommandOutput,
+            },
+            Tab::Plans => match self {
+                Self::PlanTree | Self::TaskProgress | Self::AgentOutput | Self::CommandOutput => {
+                    Self::RightPanel
+                }
+                Self::RightPanel => Self::PlanTree,
+            },
+            Tab::Agents => match self {
+                Self::PlanTree | Self::TaskProgress | Self::CommandOutput | Self::RightPanel => {
+                    Self::AgentOutput
+                }
+                Self::AgentOutput => Self::RightPanel,
+            },
+            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => self,
         }
     }
 }
@@ -149,6 +179,7 @@ pub enum TuiAction {
     // -- log scrolling --
     ScrollLogUp,
     ScrollLogDown,
+    ScrollLogEnd,
 
     // -- agent tab --
     SwitchAgentTab(usize),
@@ -479,6 +510,10 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ResetPlanState)
         }
+        // Ctrl-g: reconcile git state (confirm)
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::RequestConfirm(ConfirmAction::GitReconcile))
+        }
         // F8 / u: queue overview
         KeyCode::F(8) | KeyCode::Char('u') => Some(TuiAction::ShowQueueOverview),
         KeyCode::Tab => Some(TuiAction::FocusNext),
@@ -568,6 +603,14 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('/') => TuiAction::StartFilter,
 
         // Plan operations (Mori parity)
+        KeyCode::Char('d') => TuiAction::RequestConfirm(ConfirmAction::DiagnosePlan(String::new())),
+        KeyCode::Char('m') => TuiAction::RequestConfirm(ConfirmAction::MergePlan {
+            plan_id: String::new(),
+            branch: String::new(),
+        }),
+        KeyCode::Char('M') => TuiAction::RequestConfirm(ConfirmAction::MergeAllDone {
+            branches: Vec::new(),
+        }),
         KeyCode::Char('s') => TuiAction::RestartPlan, // soft retry
         KeyCode::Char('z') => TuiAction::ReverifyPlan, // diagnose
         KeyCode::Char('S') => TuiAction::ResetPlanState, // repair preserve
@@ -640,7 +683,7 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::PageUp => TuiAction::ScrollPageUp,
         KeyCode::PageDown => TuiAction::ScrollPageDown,
         KeyCode::Home => TuiAction::ScrollFocusedHome,
-        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollFocusedEnd,
+        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollLogEnd,
         KeyCode::Char('/') => TuiAction::StartFilter,
         _ => TuiAction::None,
     }
@@ -870,5 +913,63 @@ mod tests {
             &modals(),
         );
         assert_eq!(action, TuiAction::ScrollAgentEnd);
+    }
+
+    fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
+        let action = handle_key(
+            key(KeyCode::Char('d')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::DiagnosePlan(String::new()))
+        );
+
+        let action = handle_key(
+            key(KeyCode::Char('m')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::MergePlan {
+                plan_id: String::new(),
+                branch: String::new(),
+            })
+        );
+
+        let action = handle_key(
+            key(KeyCode::Char('M')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::MergeAllDone {
+                branches: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn ctrl_g_requests_git_reconcile_confirmation() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::GitReconcile)
+        );
     }
 }

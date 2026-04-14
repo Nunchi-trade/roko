@@ -93,16 +93,32 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
         }
     };
 
-    let title = if focused {
-        format!("Plans ({completed}/{total}{health_suffix}) [Enter:detail h/l:tree]")
+    let active_filter = active_filter_text(state);
+    let filtered_plan_indices = filtered_plan_indices(state, active_filter.as_deref());
+    let filtered_total = filtered_plan_indices.len();
+    let selected_plan_idx = clamped_selected_plan_idx(state.selected_plan_idx, filtered_total);
+    let selected_plan_id = filtered_plan_indices
+        .get(selected_plan_idx)
+        .and_then(|&idx| state.plans.get(idx))
+        .map(|plan| plan.id.as_str());
+    let filtered_suffix = if active_filter.is_some() {
+        format!(", {filtered_total}/{total} filtered")
     } else {
-        format!("Plans ({completed}/{total}{health_suffix})")
+        String::new()
+    };
+
+    let title = if focused {
+        format!(
+            "Plans ({completed}/{total}{health_suffix}{filtered_suffix}) [Enter:detail h/l:tree]"
+        )
+    } else {
+        format!("Plans ({completed}/{total}{health_suffix}{filtered_suffix})")
     };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Filter indicator
-    if !state.filter.is_empty() {
+    if active_filter.is_some() {
         lines.push(Line::from(vec![
             Span::styled(" /", Style::default().fg(MoriTheme::DREAM)),
             Span::styled(state.filter.clone(), Style::default().fg(MoriTheme::BONE)),
@@ -116,9 +132,23 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     }
 
     if state.execution_waves.is_empty() {
-        render_flat_plans(&mut lines, state, focused, area);
+        render_flat_plans(
+            &mut lines,
+            state,
+            focused,
+            area,
+            selected_plan_id,
+            active_filter.as_deref(),
+        );
     } else {
-        render_wave_tree(&mut lines, state, focused, area);
+        render_wave_tree(
+            &mut lines,
+            state,
+            focused,
+            area,
+            selected_plan_id,
+            active_filter.as_deref(),
+        );
     }
 
     // Border styling
@@ -174,8 +204,25 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
 // Wave tree rendering
 // ---------------------------------------------------------------------------
 
-fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: bool, area: Rect) {
+fn render_wave_tree(
+    lines: &mut Vec<Line<'static>>,
+    state: &TuiState,
+    focused: bool,
+    area: Rect,
+    selected_plan_id: Option<&str>,
+    filter_lower: Option<&str>,
+) {
     for wave in &state.execution_waves {
+        let wave_plans: Vec<&PlanEntry> = wave
+            .plans
+            .iter()
+            .filter_map(|plan_id| state.plans.iter().find(|p| p.id == *plan_id))
+            .filter(|plan| matches_filter(plan, filter_lower))
+            .collect();
+        if wave_plans.is_empty() {
+            continue;
+        }
+
         let all_done = wave.done == wave.total && wave.total > 0;
         let any_active = wave
             .plans
@@ -272,12 +319,8 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
         }
 
         // Plans within wave
-        for plan_id in &wave.plans {
-            if let Some(plan) = state.plans.iter().find(|p| p.id == *plan_id) {
-                if matches_filter(plan, &state.filter) {
-                    render_plan_line(lines, plan, state, focused, area, true);
-                }
-            }
+        for plan in wave_plans {
+            render_plan_line(lines, plan, focused, area, true, selected_plan_id);
         }
     }
 }
@@ -286,10 +329,17 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
 // Flat plan list (no waves)
 // ---------------------------------------------------------------------------
 
-fn render_flat_plans(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: bool, area: Rect) {
+fn render_flat_plans(
+    lines: &mut Vec<Line<'static>>,
+    state: &TuiState,
+    focused: bool,
+    area: Rect,
+    selected_plan_id: Option<&str>,
+    filter_lower: Option<&str>,
+) {
     for plan in &state.plans {
-        if matches_filter(plan, &state.filter) {
-            render_plan_line(lines, plan, state, focused, area, false);
+        if matches_filter(plan, filter_lower) {
+            render_plan_line(lines, plan, focused, area, false, selected_plan_id);
         }
     }
 }
@@ -301,13 +351,12 @@ fn render_flat_plans(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: 
 fn render_plan_line(
     lines: &mut Vec<Line<'static>>,
     plan: &PlanEntry,
-    state: &TuiState,
     focused: bool,
     area: Rect,
     indented: bool,
+    selected_plan_id: Option<&str>,
 ) {
-    let plan_idx = state.plans.iter().position(|p| p.id == plan.id);
-    let is_selected = focused && plan_idx.map(|i| i == state.selected_plan).unwrap_or(false);
+    let is_selected = focused && selected_plan_id == Some(plan.id.as_str());
 
     let (icon, icon_style) = plan_icon(plan);
 
@@ -681,13 +730,37 @@ fn render_scrollbar(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn matches_filter(plan: &PlanEntry, filter: &str) -> bool {
-    if filter.is_empty() {
-        return true;
+fn active_filter_text(state: &TuiState) -> Option<String> {
+    let filter = state.filter.trim();
+    if state.filter_active && !filter.is_empty() {
+        Some(filter.to_lowercase())
+    } else {
+        None
     }
-    let lower = plan.name.to_lowercase();
-    let filter_lower = filter.to_lowercase();
-    lower.contains(&filter_lower)
+}
+
+fn filtered_plan_indices(state: &TuiState, filter_lower: Option<&str>) -> Vec<usize> {
+    state
+        .plans
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, plan)| matches_filter(plan, filter_lower).then_some(idx))
+        .collect()
+}
+
+fn clamped_selected_plan_idx(selected_plan_idx: usize, filtered_total: usize) -> usize {
+    if filtered_total == 0 {
+        0
+    } else {
+        selected_plan_idx.min(filtered_total - 1)
+    }
+}
+
+fn matches_filter(plan: &PlanEntry, filter_lower: Option<&str>) -> bool {
+    let Some(filter_lower) = filter_lower else {
+        return true;
+    };
+    plan.name.to_lowercase().contains(filter_lower)
 }
 
 fn compact_progress_glyphs(width: usize, fill_pct: f64) -> String {
@@ -837,6 +910,17 @@ mod tests {
         state
     }
 
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn plan_tree_renders_without_panic() {
         let backend = TestBackend::new(100, 20);
@@ -877,6 +961,30 @@ mod tests {
                 render_plan_tree(frame, area, &state, false);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn plan_tree_filters_visible_plans_and_clamps_selection() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = sample_state();
+        state.filter_active = true;
+        state.filter = "BETA".into();
+        state.selected_plan_idx = 2;
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_plan_tree(frame, area, &state, true);
+            })
+            .unwrap();
+
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("1/3 filtered"), "{rendered}");
+        assert!(rendered.contains("plan-beta"), "{rendered}");
+        assert!(!rendered.contains("plan-alpha"), "{rendered}");
+        assert!(!rendered.contains("plan-gamma"), "{rendered}");
+        assert!(rendered.contains("phase done"), "{rendered}");
     }
 
     #[test]

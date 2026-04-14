@@ -146,10 +146,12 @@ pub fn render_with_entries(
         })
         .collect();
 
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    let max_scroll = max_scroll.min(u16::MAX as usize) as u16;
     let scroll = if view_state.auto_tail {
-        lines.len().saturating_sub(inner.height as usize) as u16
+        max_scroll
     } else {
-        view_state.scroll
+        view_state.scroll.min(max_scroll)
     };
 
     let paragraph = Paragraph::new(lines)

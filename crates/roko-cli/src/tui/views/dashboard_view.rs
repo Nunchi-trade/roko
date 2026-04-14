@@ -152,7 +152,7 @@ fn render_right_panel(
         2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
         3 => render_sub_errors(frame, sections[1], data, theme),
         4 => render_sub_git(frame, sections[1], tui_state, theme),
-        5 => render_sub_mcp(frame, sections[1], data, theme),
+        5 => render_sub_mcp(frame, sections[1], data, tui_state, theme),
         6 => render_sub_processes(frame, sections[1], data, focused, theme),
         _ => {}
     }
@@ -440,10 +440,16 @@ fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, th
 // ---------------------------------------------------------------------------
 
 fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let border = if focused {
+        theme.accent()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Git ")
-        .border_style(theme.muted());
+        .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -541,11 +547,23 @@ fn git_cmd(args: &[&str]) -> Option<String> {
 // Sub-tab: MCP / Context status
 // ---------------------------------------------------------------------------
 
-fn render_sub_mcp(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+fn render_sub_mcp(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    theme: &Theme,
+) {
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let border = if focused {
+        theme.accent()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" MCP / Context ")
-        .border_style(theme.muted());
+        .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
