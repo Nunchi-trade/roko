@@ -941,6 +941,17 @@ mod tests {
         state
     }
 
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn plan_tree_renders_without_panic() {
         let backend = TestBackend::new(100, 20);
@@ -981,6 +992,30 @@ mod tests {
                 render_plan_tree(frame, area, &state, false);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn plan_tree_filters_visible_plans_and_clamps_selection() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = sample_state();
+        state.filter_active = true;
+        state.filter = "BETA".into();
+        state.selected_plan_idx = 2;
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_plan_tree(frame, area, &state, true);
+            })
+            .unwrap();
+
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("1/3 filtered"), "{rendered}");
+        assert!(rendered.contains("plan-beta"), "{rendered}");
+        assert!(!rendered.contains("plan-alpha"), "{rendered}");
+        assert!(!rendered.contains("plan-gamma"), "{rendered}");
+        assert!(rendered.contains("phase done"), "{rendered}");
     }
 
     #[test]
