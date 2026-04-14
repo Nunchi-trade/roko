@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub use crate::workspace_paths::plans_dir;
+
 /// A plan summary (used in list output).
 #[derive(Debug, Clone)]
 pub struct PlanSummary {
@@ -126,12 +128,6 @@ impl Plan {
             Err(errors)
         }
     }
-}
-
-/// Resolve the canonical plans directory for a given workdir.
-#[must_use]
-pub fn plans_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("plans")
 }
 
 /// List plan files in the plans directory.

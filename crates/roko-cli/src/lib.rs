@@ -41,6 +41,7 @@ pub mod subscriptions;
 pub mod task_parser;
 pub mod tui;
 pub mod worker;
+pub mod workspace_paths;
 
 pub mod serve_runtime;
 

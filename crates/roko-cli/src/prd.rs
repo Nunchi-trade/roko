@@ -21,31 +21,15 @@ use std::sync::Arc;
 
 use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 use crate::task_parser::TasksFile;
+use crate::workspace_paths::{
+    drafts_dir, ideas_path, plans_dir as workspace_plans_dir, prd_dir, published_dir,
+};
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
 use roko_core::{Body, Engram, Kind, Provenance, Substrate};
 use roko_fs::FileSubstrate;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-// ─── Directory layout ──────────────────────────────���───────────────
-
-fn prd_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("prd")
-}
-fn ideas_path(workdir: &Path) -> PathBuf {
-    prd_dir(workdir).join("ideas.md")
-}
-fn drafts_dir(workdir: &Path) -> PathBuf {
-    prd_dir(workdir).join("drafts")
-}
-fn published_dir(workdir: &Path) -> PathBuf {
-    prd_dir(workdir).join("published")
-}
-
-fn tasks_root(workdir: &Path) -> PathBuf {
-    crate::plan::plans_dir(workdir)
-}
 
 fn collect_tasks_toml_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -754,7 +738,7 @@ pub fn cmd_status(workdir: &Path, plans_dir: Option<&Path>) -> Result<()> {
         .collect();
 
     // Count tasks across all plans
-    let plans_root = plans_dir.map_or_else(|| crate::plan::plans_dir(workdir), Path::to_path_buf);
+    let plans_root = plans_dir.map_or_else(|| workspace_plans_dir(workdir), Path::to_path_buf);
     let mut total_plans = 0u32;
     let mut total_tasks = 0u32;
     let mut total_done = 0u32;
@@ -890,7 +874,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
 
         let resolved = crate::load_layered(workdir_ref)?;
         let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
-        let plans_root = tasks_root(workdir_ref);
+        let plans_root = workspace_plans_dir(workdir_ref);
         let tasks_before = snapshot_tasks_files(&plans_root);
         let task_prompt = format!(
             "Read the PRD at {path} and generate implementation plan directories \
@@ -965,7 +949,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                 template_kind.max_task_count()
             );
         }
-        Ok((tasks_root(&workdir), task_count, estimated_complexity))
+        Ok((workspace_plans_dir(&workdir), task_count, estimated_complexity))
     }
     .await;
 
@@ -993,7 +977,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                     &workdir,
                     Kind::Custom("prd:plan:failed".into()),
                     serde_json::json!({
-                        "plan_path": tasks_root(&workdir).display().to_string(),
+                        "plan_path": workspace_plans_dir(&workdir).display().to_string(),
                         "error": format!("{err:#}"),
                     }),
                 )
@@ -1026,7 +1010,7 @@ pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
     );
 
     // Include the PRD index for detailed cross-references
-    let prd_index = std::fs::read_to_string(workdir.join(".roko/prd/INDEX.md")).unwrap_or_default();
+    let prd_index = std::fs::read_to_string(prd_dir(workdir).join("INDEX.md")).unwrap_or_default();
     if !prd_index.is_empty() {
         let _ = writeln!(prompt, "## PRD Index\n{prd_index}\n---\n");
     }

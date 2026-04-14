@@ -124,6 +124,7 @@ use crate::plan::plans_dir;
 use crate::prompting::{
     PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
 };
+use crate::workspace_paths::find_prd_path;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::worker::cloud::CloudExecution;
 
@@ -2621,28 +2622,6 @@ fn best_completed_task_match<'a>(
         }
     }
     best
-}
-
-fn find_prd_path(workdir: &Path, slug: &str) -> Option<PathBuf> {
-    let published = workdir
-        .join(".roko")
-        .join("prd")
-        .join("published")
-        .join(format!("{slug}.md"));
-    if published.exists() {
-        return Some(published);
-    }
-
-    let draft = workdir
-        .join(".roko")
-        .join("prd")
-        .join("drafts")
-        .join(format!("{slug}.md"));
-    if draft.exists() {
-        return Some(draft);
-    }
-
-    None
 }
 
 fn merge_regenerated_plan(

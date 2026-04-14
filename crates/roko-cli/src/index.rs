@@ -14,17 +14,18 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use crate::workspace_paths::{drafts_dir, ideas_path, plans_dir, prd_dir, published_dir, roko_dir};
 
 // ─── Index paths ───────────────────────────────────────────────────
 
 fn master_index_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("INDEX.md")
+    roko_dir(workdir).join("INDEX.md")
 }
 fn prd_index_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("prd").join("INDEX.md")
+    prd_dir(workdir).join("INDEX.md")
 }
 fn plans_index_path(workdir: &Path) -> PathBuf {
-    crate::plan::plans_dir(workdir).join("INDEX.md")
+    plans_dir(workdir).join("INDEX.md")
 }
 fn research_index_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("research").join("INDEX.md")
@@ -49,8 +50,8 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "> Rebuilt on every `roko prd` command.\n");
 
     // Ideas count
-    let ideas_path = workdir.join(".roko/prd/ideas.md");
-    let idea_count = std::fs::read_to_string(&ideas_path)
+    let ideas = ideas_path(workdir);
+    let idea_count = std::fs::read_to_string(&ideas)
         .unwrap_or_default()
         .lines()
         .filter(|l| l.starts_with("- "))
@@ -61,8 +62,7 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "## Published\n");
     let _ = writeln!(out, "| Slug | Title | Crates | Plans | Coverage |");
     let _ = writeln!(out, "|------|-------|--------|-------|----------|");
-    let published_dir = workdir.join(".roko/prd/published");
-    let published = list_md_sorted(&published_dir);
+    let published = list_md_sorted(&published_dir(workdir));
     if published.is_empty() {
         let _ = writeln!(out, "| _(none)_ | | | | |");
     }
@@ -87,8 +87,7 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "\n## Drafts\n");
     let _ = writeln!(out, "| Slug | Title | Created |");
     let _ = writeln!(out, "|------|-------|---------|");
-    let drafts_dir = workdir.join(".roko/prd/drafts");
-    let drafts = list_md_sorted(&drafts_dir);
+    let drafts = list_md_sorted(&drafts_dir(workdir));
     if drafts.is_empty() {
         let _ = writeln!(out, "| _(none)_ | | |");
     }
@@ -100,7 +99,7 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
 
     // Recent ideas (last 10)
     let _ = writeln!(out, "\n## Recent Ideas\n");
-    let ideas_content = std::fs::read_to_string(&ideas_path).unwrap_or_default();
+    let ideas_content = std::fs::read_to_string(&ideas).unwrap_or_default();
     let ideas: Vec<&str> = ideas_content
         .lines()
         .filter(|l| l.starts_with("- "))
@@ -134,15 +133,15 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "| Plan | Tasks | Done | Ready | Status | Parallel |");
     let _ = writeln!(out, "|------|-------|------|-------|--------|----------|");
 
-    let plans_dir = crate::plan::plans_dir(workdir);
-    if !plans_dir.is_dir() {
+    let plans_root = plans_dir(workdir);
+    if !plans_root.is_dir() {
         let _ = writeln!(out, "| _(no plans directory)_ | | | | | |");
         std::fs::write(plans_index_path(workdir), &out)?;
         return Ok(());
     }
 
     let mut plan_dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&plans_dir) {
+    if let Ok(entries) = std::fs::read_dir(&plans_root) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() && path.join("tasks.toml").exists() {
@@ -252,9 +251,9 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "> Single entry point for all roko artifacts.\n");
 
     // PRD summary
-    let published_count = list_md_sorted(&workdir.join(".roko/prd/published")).len();
-    let drafts_count = list_md_sorted(&workdir.join(".roko/prd/drafts")).len();
-    let ideas_count = std::fs::read_to_string(workdir.join(".roko/prd/ideas.md"))
+    let published_count = list_md_sorted(&published_dir(workdir)).len();
+    let drafts_count = list_md_sorted(&drafts_dir(workdir)).len();
+    let ideas_count = std::fs::read_to_string(ideas_path(workdir))
         .unwrap_or_default()
         .lines()
         .filter(|l| l.starts_with("- "))
@@ -266,12 +265,12 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "→ [Full index](.roko/prd/INDEX.md)\n");
 
     // Plans summary
-    let plans_dir = crate::plan::plans_dir(workdir);
+    let plans_root = plans_dir(workdir);
     let mut plan_count = 0u32;
     let mut task_count = 0u32;
     let mut done_count = 0u32;
-    if plans_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&plans_dir) {
+    if plans_root.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&plans_root) {
             for entry in entries.flatten() {
                 let tasks_path = entry.path().join("tasks.toml");
                 if tasks_path.exists() {

@@ -4524,15 +4524,8 @@ async fn cmd_subscription(cli: &Cli, cmd: SubscriptionCmd) -> Result<i32> {
 
 /// Find a PRD by slug in either published or drafts.
 fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
-    let published = workdir
-        .join(".roko/prd/published")
-        .join(format!("{slug}.md"));
-    if published.exists() {
-        return Ok(published);
-    }
-    let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
-    if draft.exists() {
-        return Ok(draft);
+    if let Some(path) = roko_cli::workspace_paths::find_prd_path(workdir, slug) {
+        return Ok(path);
     }
     anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
 }
@@ -4837,7 +4830,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             PrdDraftCmd::New { title } => {
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
-                let drafts = workdir.join(".roko").join("prd").join("drafts");
+                let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let target = drafts.join(format!("{slug}.md"));
                 // If the draft exists and has real content (not just scaffold),
@@ -4962,7 +4955,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Ok(exit_code)
             }
             PrdDraftCmd::Edit { slug } => {
-                let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
+                let draft = roko_cli::workspace_paths::draft_prd_path(&workdir, &slug);
                 if !draft.exists() {
                     eprintln!("Draft not found: {}", draft.display());
                     return Ok(1);
@@ -5052,7 +5045,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Ok(0)
             }
             PrdDraftCmd::List => {
-                let drafts = workdir.join(".roko").join("prd").join("drafts");
+                let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let files = roko_cli::prd::list_md_files(&drafts);
                 if files.is_empty() {
@@ -5075,7 +5068,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             println!("🔄 Scanning all PRDs for duplicates, gaps, and inconsistencies...");
             let mut all_context = String::new();
             for dir_name in ["published", "drafts"] {
-                let dir = workdir.join(".roko/prd").join(dir_name);
+                let dir = roko_cli::workspace_paths::prd_dir(&workdir).join(dir_name);
                 for path in roko_cli::prd::list_md_files(&dir) {
                     if let Ok(c) = std::fs::read_to_string(&path) {
                         let truncated: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
@@ -5083,8 +5076,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                 }
             }
-            let ideas =
-                std::fs::read_to_string(workdir.join(".roko/prd/ideas.md")).unwrap_or_default();
+            let ideas = std::fs::read_to_string(roko_cli::workspace_paths::ideas_path(&workdir))
+                .unwrap_or_default();
             let task_prompt = format!(
                 "Review ALL existing PRDs and ideas. Report: \
                  (1) DUPLICATES: PRDs covering the same thing (propose merge). \
