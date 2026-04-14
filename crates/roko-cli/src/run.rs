@@ -2,7 +2,7 @@
 //!
 //! This is the body of `roko run <prompt>`. It reads [`Config`], opens a
 //! [`FileSubstrate`] under `.roko/`, seeds prompt sections, composes them
-//! into a single Prompt signal, invokes the configured `ExecAgent`, runs
+//! into a single Prompt signal, invokes the configured agent backend, runs
 //! each configured gate on the working directory, and emits an Episode.
 
 use crate::clean;
@@ -11,11 +11,10 @@ use crate::episode::EpisodePolicy;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::{
-    AgentOptions, create_agent_for_model, current_safety_layer, is_known_protocol_command,
-    with_safety_layer,
+    AgentOptions, create_agent_for_model, is_known_protocol_command, with_scoped_safety_layer,
 };
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, OllamaLlmBackend, SafetyLayer};
+use roko_agent::{Agent, AgentResult, OllamaLlmBackend};
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
@@ -64,7 +63,7 @@ impl RunReport {
 ///
 /// - Opens (or creates) `workdir/.roko/signals.jsonl`.
 /// - Seeds a role + task `PromptSection`, composes them under the config's budget.
-/// - Invokes the configured `ExecAgent`.
+/// - Invokes the configured agent backend.
 /// - Runs every gate in the config in declaration order; each gate sees the
 ///   same `GatePayload` pointing at `workdir`.
 /// - Records an Episode signal and persists everything.
@@ -122,9 +121,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         .await
         .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
-    // Run the agent.
-    // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
-    // internally; ExecAgent stays available for non-Claude backends.
+    // Run the configured agent path for this provider/backend mix.
     let (agent_result, external_actions) =
         dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await?;
 
@@ -343,8 +340,7 @@ async fn dispatch_agent(
         })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "claude" {
-        // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
-        // internally; ExecAgent stays available for non-Claude backends.
+        // Claude CLI keeps its own prompt/tool/settings wiring internally.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, &tools_csv);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
@@ -477,11 +473,6 @@ async fn dispatch_agent(
         })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     }
-}
-
-fn with_scoped_safety_layer<R>(f: impl FnOnce() -> R) -> R {
-    let layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
-    with_safety_layer(layer, f)
 }
 
 /// Ollama agentic path for `roko run`.
@@ -1070,20 +1061,6 @@ mod tests {
             optional_resume_session_id(&cfg, None).as_deref(),
             Some("env-sess")
         );
-    }
-
-    #[test]
-    fn with_scoped_safety_layer_defaults_when_unscoped() {
-        let layer = with_scoped_safety_layer(current_safety_layer);
-        assert!(layer.is_some());
-    }
-
-    #[test]
-    fn with_scoped_safety_layer_preserves_existing_scope() {
-        let observed = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
-            with_scoped_safety_layer(current_safety_layer)
-        });
-        assert!(observed.is_some());
     }
 
     #[tokio::test]

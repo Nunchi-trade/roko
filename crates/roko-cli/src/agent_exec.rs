@@ -1,17 +1,15 @@
-//! Agent execution helper — drive the Claude CLI through the real runtime adapter.
+//! Agent execution helper for direct CLI flows such as PRD/research/plan generation.
 //!
 //! Used by `roko prd`, `roko research`, and `roko plan generate` to invoke
-//! an agent that can read/write files while preserving Roko's Claude wiring
-//! (system prompt, settings hooks, MCP discovery, resume, PID tracking, and
-//! stderr filtering).
+//! an agent that can read/write files while preserving provider-aware routing,
+//! safety scoping, resume threading, and learning-episode persistence.
 
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use roko_agent::SafetyLayer;
 use roko_agent::provider::{
-    AgentOptions, create_agent_for_model, current_safety_layer, with_safety_layer,
+    AgentOptions, create_agent_for_model, with_scoped_safety_layer,
 };
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
@@ -45,7 +43,7 @@ pub struct AgentExecEpisode<'a> {
     pub task_id: &'a str,
 }
 
-/// Drive `claude` with the given prompt and return just the exit code.
+/// Run the configured direct agent path and return just the exit code.
 ///
 /// Convenience wrapper around [`run_agent_capture`] for callers that
 /// don't need the agent's text output.
@@ -53,7 +51,7 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
     run_agent_capture(opts).await.map(|(code, _)| code)
 }
 
-/// Drive `claude` with the given prompt, echo the output, and persist an episode.
+/// Run the configured direct agent path, echo the output, and persist an episode.
 pub async fn run_agent_logged(
     opts: AgentExecOpts<'_>,
     episode: AgentExecEpisode<'_>,
@@ -63,15 +61,12 @@ pub async fn run_agent_logged(
         .map(|(code, _)| code)
 }
 
-/// Drive `claude` with the given prompt and return `(exit_code, output_text)`.
-///
-/// The Claude CLI adapter handles system prompt wiring, settings hooks,
-/// MCP discovery, resume session threading, and stderr filtering.
+/// Run the configured direct agent path and return `(exit_code, output_text)`.
 pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
     run_agent_capture_impl(opts, true, None).await
 }
 
-/// Drive `claude` with the given prompt, echo the output, and persist an episode.
+/// Run the configured direct agent path, echo the output, and persist an episode.
 pub async fn run_agent_capture_logged(
     opts: AgentExecOpts<'_>,
     episode: AgentExecEpisode<'_>,
@@ -79,7 +74,7 @@ pub async fn run_agent_capture_logged(
     run_agent_capture_impl(opts, true, Some(episode)).await
 }
 
-/// Drive `claude` with the given prompt and return `(exit_code, output_text)`
+/// Run the configured direct agent path and return `(exit_code, output_text)`
 /// without echoing the agent's rendered output to stdout.
 pub async fn run_agent_capture_silent(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
     run_agent_capture_impl(opts, false, None).await
@@ -180,11 +175,6 @@ async fn run_agent_capture_impl(
     }
 
     Ok((exit_code, rendered))
-}
-
-fn with_scoped_safety_layer<R>(f: impl FnOnce() -> R) -> R {
-    let layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
-    with_safety_layer(layer, f)
 }
 
 /// Read model from roko.toml config if available.
@@ -503,22 +493,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_scoped_safety_layer_defaults_when_unscoped() {
-        let layer = with_scoped_safety_layer(current_safety_layer);
-        assert!(layer.is_some());
-    }
-
-    #[test]
-    fn with_scoped_safety_layer_preserves_existing_scope() {
-        let expected = SafetyLayer::with_defaults().with_role("orchestrate");
-        let role = with_safety_layer(Some(expected.clone()), || {
-            with_scoped_safety_layer(|| {
-                current_safety_layer()
-                    .map(|layer| layer.role)
-                    .expect("safety layer should be present")
-            })
-        });
-        assert_eq!(role, expected.role);
-    }
 }
