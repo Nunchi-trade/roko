@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agent_exec::{AgentExecOpts, run_agent};
+use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 use crate::task_parser::TasksFile;
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
@@ -416,15 +416,26 @@ async fn regenerate_old_format_plan(
         existing = existing,
     );
 
-    let exit_code = match run_agent(AgentExecOpts {
-        prompt: &task_prompt,
-        workdir,
-        model,
-        effort,
-        system_prompt: Some(&system),
-        resume_session: None,
-        env_vars,
-    })
+    let plan_name = plan_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let task_id = format!("plan:regenerate:{plan_name}");
+    let exit_code = match run_agent_logged(
+        AgentExecOpts {
+            prompt: &task_prompt,
+            workdir,
+            model,
+            effort,
+            system_prompt: Some(&system),
+            resume_session: None,
+            env_vars,
+        },
+        AgentExecEpisode {
+            task_kind: "plan-regenerate",
+            task_id: &task_id,
+        },
+    )
     .await
     {
         Ok(code) => code,
@@ -895,15 +906,22 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             content = content,
         );
 
-        let exit_code = run_agent(AgentExecOpts {
-            prompt: &task_prompt,
-            workdir: workdir_ref,
-            model: resolved.config.agent.model.as_deref(),
-            effort: Some(resolved.config.agent.effort.as_str()),
-            system_prompt: Some(system),
-            resume_session: None,
-            env_vars: &resolved.config.agent.env,
-        })
+        let task_id = format!("prd:plan:{slug}");
+        let exit_code = run_agent_logged(
+            AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: workdir_ref,
+                model: resolved.config.agent.model.as_deref(),
+                effort: Some(resolved.config.agent.effort.as_str()),
+                system_prompt: Some(system),
+                resume_session: None,
+                env_vars: &resolved.config.agent.env,
+            },
+            AgentExecEpisode {
+                task_kind: "prd-plan-generate",
+                task_id: &task_id,
+            },
+        )
         .await?;
         if exit_code != 0 {
             return Err(anyhow!(

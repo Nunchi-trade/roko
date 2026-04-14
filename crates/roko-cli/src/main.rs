@@ -3279,7 +3279,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Generate { source, from_file } => {
             use roko_cli::agent_exec::{
-                AgentExecOpts, load_gateway_env, model_from_config, run_agent,
+                AgentExecEpisode, AgentExecOpts, load_gateway_env, model_from_config,
+                run_agent_logged,
             };
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
@@ -3307,6 +3308,12 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             } else {
                 "prompt"
             };
+            let task_id = from_file
+                .as_ref()
+                .and_then(|path| path.file_stem())
+                .and_then(|stem| stem.to_str())
+                .map(|stem| format!("plan:generate:{stem}"))
+                .unwrap_or_else(|| "plan:generate:prompt".to_string());
             let system = roko_cli::plan_generate::build_generation_prompt(
                 &workdir,
                 &source_text,
@@ -3321,20 +3328,27 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                  Use the cheapest model tier for each task.\n\n{source_text}"
             );
 
-            run_agent(AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: &workdir,
-                model: model_ref,
-                effort: Some("high"),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &gw.vars,
-            })
+            run_agent_logged(
+                AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    effort: Some("high"),
+                    system_prompt: Some(&system),
+                    resume_session: None,
+                    env_vars: &gw.vars,
+                },
+                AgentExecEpisode {
+                    task_kind: "plan-generate",
+                    task_id: &task_id,
+                },
+            )
             .await
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
             use roko_cli::agent_exec::{
-                AgentExecOpts, load_gateway_env, model_from_config, run_agent,
+                AgentExecEpisode, AgentExecOpts, load_gateway_env, model_from_config,
+                run_agent_logged,
             };
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
@@ -3391,16 +3405,27 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 tasks_path.display(),
                 existing = existing,
             );
+            let plan_name = plan_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            let task_id = format!("plan:regenerate:{plan_name}");
 
-            let exit_code = match run_agent(AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: &workdir,
-                model: model_ref,
-                effort: Some("high"),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &gw.vars,
-            })
+            let exit_code = match run_agent_logged(
+                AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    effort: Some("high"),
+                    system_prompt: Some(&system),
+                    resume_session: None,
+                    env_vars: &gw.vars,
+                },
+                AgentExecEpisode {
+                    task_kind: "plan-regenerate",
+                    task_id: &task_id,
+                },
+            )
             .await
             {
                 Ok(code) => code,
