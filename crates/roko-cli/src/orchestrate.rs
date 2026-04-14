@@ -31,11 +31,11 @@ use roko_agent::task_runner::{
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{
-    Agent, AgentResult, ExecAgent, SafetyLayer, current_safety_layer, with_scoped_safety_layer,
+    Agent, AgentResult, SafetyLayer,
 };
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
-    PromptSection, RoleSystemPromptSpec, SectionPriority, SectionScorer, TaskContext, budget_for,
+    PromptSection, SectionPriority, SectionScorer, TaskContext, budget_for,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
@@ -120,6 +120,9 @@ use tracing::{Instrument, info_span, instrument};
 
 use crate::config::Config;
 use crate::plan::plans_dir;
+use crate::prompting::{
+    PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
+};
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::worker::cloud::CloudExecution;
 
@@ -1242,16 +1245,44 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else if is_known_protocol_command(&cfg.command) {
-        let mut agent = with_scoped_safety_layer(|| {
-            ExecAgent::new(&cfg.command, cfg.extra_args)
-                .with_safety_layer(current_safety_layer())
-                .with_timeout_ms(cfg.timeout_ms)
-                .with_current_dir(cfg.exec_dir.clone())
-        });
-        for (k, v) in &cfg.env_vars {
-            agent = agent.with_env_var(k, v);
+        let mut fallback_config = RokoConfig::default();
+        fallback_config.agent.command = Some(cfg.command.clone());
+        fallback_config.agent.default_model = cfg.model.clone();
+        fallback_config.agent.default_backend = cfg.command.clone();
+
+        match create_agent_for_model(
+            &fallback_config,
+            &cfg.model,
+            AgentOptions {
+                command: Some(cfg.command.clone()),
+                timeout_ms: Some(cfg.timeout_ms),
+                system_prompt: None,
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(cfg.exec_dir.clone()),
+                provider_semaphores: None,
+                env: cfg.env_vars,
+                extra_args: cfg.extra_args,
+                effort: None,
+                bare_mode: cfg.bare_mode,
+                dangerously_skip_permissions: false,
+                name: String::new(),
+            },
+        ) {
+            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
+            Err(err) => AgentResult::fail(
+                prompt_signal
+                    .derive(
+                        Kind::AgentOutput,
+                        Body::text(format!(
+                            "create known-protocol subprocess agent for {} failed: {err}",
+                            cfg.command
+                        )),
+                    )
+                    .build(),
+            ),
         }
-        agent.run(&prompt_signal, &ctx).await
     } else {
         let mut fallback_config = RokoConfig::default();
         fallback_config.agent.command = Some(cfg.command.clone());
@@ -12054,13 +12085,16 @@ fn build_system_prompt_with_context(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    let spec =
-        RoleSystemPromptSpec::new(role, task_context, tools_csv).with_affect_state(affect_state);
-    if let Some(conventions) = task_dispatch_conventions(task_def) {
-        spec.with_extra_conventions(conventions).build()
-    } else {
-        spec.build()
-    }
+    build_role_system_prompt(
+        role,
+        task_context,
+        tools_csv,
+        PromptBuildOptions {
+            affect_state,
+            extra_conventions: task_dispatch_conventions(task_def),
+            ..PromptBuildOptions::default()
+        },
+    )
 }
 
 fn build_system_prompt_with_context_validated(
@@ -12080,17 +12114,18 @@ fn build_system_prompt_with_context_validated(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    let spec =
-        RoleSystemPromptSpec::new(role, task_context, tools_csv).with_affect_state(affect_state);
-    let spec = if let Some(conventions) = task_dispatch_conventions(task_def) {
-        spec.with_extra_conventions(conventions)
-    } else {
-        spec
-    };
-    Ok(spec.build_with_context_window_and_section_effectiveness(
+    build_role_system_prompt_validated(
+        role,
+        task_context,
+        tools_csv,
+        PromptBuildOptions {
+            affect_state,
+            extra_conventions: task_dispatch_conventions(task_def),
+            ..PromptBuildOptions::default()
+        },
         context_window_tokens,
         section_effectiveness,
-    )?)
+    )
 }
 
 fn effective_context_window_tokens(config: &Config) -> usize {
@@ -12364,25 +12399,24 @@ impl PlanRunner {
 
         let tools_csv =
             claude_tool_allowlist_with(AgentRole::Strategist, self.tool_registry.as_deref());
-        RoleSystemPromptSpec::new(
+        build_role_system_prompt(
             AgentRole::Strategist,
             TaskContext::new(format!("Enrich plan {plan_id} before agent dispatch"))
                 .with_plan_id(plan_id)
                 .with_workspace(plan_dir.display().to_string())
                 .with_domain_notes(context_summary),
             tools_csv,
+            PromptBuildOptions {
+                affect_state: Some(self.current_pad_state()),
+                extra_conventions: Some(
+                    "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.".to_string(),
+                ),
+                extra_anti_patterns: vec![
+                    "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.".to_string(),
+                    "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.".to_string(),
+                ],
+            },
         )
-        .with_affect_state(Some(self.current_pad_state()))
-        .with_extra_conventions(
-            "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.",
-        )
-        .add_anti_pattern(
-            "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.",
-        )
-        .add_anti_pattern(
-            "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.",
-        )
-        .build()
     }
 }
 

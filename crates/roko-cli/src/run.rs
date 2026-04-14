@@ -8,15 +8,14 @@
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
+use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::{AgentOptions, is_known_protocol_command};
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
 use roko_agent::{AgentResult, OllamaLlmBackend};
 use roko_agent::{create_agent_for_model, with_scoped_safety_layer};
-use roko_compose::{
-    Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
-};
+use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
@@ -222,16 +221,27 @@ fn build_system_prompt(role: &str, prompt_text: &str, tools_csv: &str) -> String
     let workspace = "Single-shot execution through `roko run`.";
     parse_agent_role(role).map_or_else(
         || {
-            let task_context = TaskContext::new(prompt_text)
-                .with_workspace(workspace)
-                .with_domain_notes(format!("User-configured role text: {role}"));
-            RoleSystemPromptSpec::new(AgentRole::Implementer, task_context, tools_csv)
-                .with_extra_conventions(format!("Treat the configured role hint literally: {role}"))
-                .build()
+            build_role_system_prompt(
+                AgentRole::Implementer,
+                TaskContext::new(prompt_text)
+                    .with_workspace(workspace)
+                    .with_domain_notes(format!("User-configured role text: {role}")),
+                tools_csv,
+                PromptBuildOptions {
+                    extra_conventions: Some(format!(
+                        "Treat the configured role hint literally: {role}"
+                    )),
+                    ..PromptBuildOptions::default()
+                },
+            )
         },
         |agent_role| {
-            let task_context = TaskContext::new(prompt_text).with_workspace(workspace);
-            RoleSystemPromptSpec::new(agent_role, task_context, tools_csv).build()
+            build_role_system_prompt(
+                agent_role,
+                TaskContext::new(prompt_text).with_workspace(workspace),
+                tools_csv,
+                PromptBuildOptions::default(),
+            )
         },
     )
 }

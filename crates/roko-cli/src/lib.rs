@@ -28,6 +28,7 @@ pub mod plan;
 pub mod plan_generate;
 pub mod prd;
 pub mod prd_prompt;
+pub mod prompting;
 pub mod repl;
 pub mod research;
 pub mod run;
