@@ -688,7 +688,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             .map_or(workdir.as_path(), |temp| temp.path());
 
         let resolved = crate::load_layered(workdir_ref)?;
-        let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
+        let system = crate::plan_generate::build_generator_system_prompt(workdir_ref);
         let plans_root = workspace_plans_dir(workdir_ref);
         let tasks_before = dry_run_fs::snapshot_tasks_files(&plans_root);
         let task_prompt = format!(
@@ -712,7 +712,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                 workdir: workdir_ref,
                 model: resolved.config.agent.model.as_deref(),
                 effort: Some(resolved.config.agent.effort.as_str()),
-                system_prompt: Some(system),
+                system_prompt: Some(&system),
                 resume_session: None,
                 env_vars: &resolved.config.agent.env,
             },

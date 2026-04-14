@@ -7335,7 +7335,8 @@ impl PlanRunner {
                     return;
                 };
                 let gate_report = self.gate_failure_report(plan_id);
-                let system_prompt = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT.to_string();
+                let system_prompt =
+                    crate::plan_generate::build_generator_system_prompt(&self.workdir);
                 let prompt = self.build_decompose_prompt(
                     plan_id,
                     &tasks_snapshot,

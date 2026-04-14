@@ -49,13 +49,9 @@ roko prd idea → prd draft new → prd draft promote → prd plan → plan run 
 - **Workaround**: Run roko commands in a separate terminal, not inside Claude Code
 - **Real fix**: Support `anthropic_api` provider as fallback, or detect nesting and switch provider automatically
 
-#### Issue: `prd draft edit` prompt assumes file tools
-- **Symptom**: Prompt says "Update the file in place" but API-only providers can't write files
-- **Fix needed**: Same pattern as `prd draft new` — detect provider type, capture output, write back
-
-#### Issue: Plan generator lacks naming context
-- **Symptom**: Generated plans may use old names (Signal, Bardo, etc.)
-- **Fix needed**: Inject `docs/00-architecture/01-naming-and-glossary.md` into `PLAN_GENERATOR_SYSTEM_PROMPT`
+#### Issue: Planner prompt context still drifts by caller
+- **Symptom**: some plan-generation and decomposition paths can bypass the shared planner prompt builder, which risks missing naming glossary or workspace-rule context
+- **Fix needed**: route every planner-style call site through the shared `plan_generate` prompt helpers instead of passing `PLAN_GENERATOR_SYSTEM_PROMPT` directly
 
 #### Issue: Runtime safety is still not universal
 - **Symptom**: provider-backed construction now defaults a real safety layer at factory time, and raw `ExecAgent` fallback runs under that same contract, but some native/provider-specific backends still bypass the shared `ToolDispatcher` chain

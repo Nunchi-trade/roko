@@ -14,6 +14,8 @@ use std::path::Path;
 
 const NAMING_GLOSSARY_RELATIVE_PATH: &str = "docs/00-architecture/01-naming-and-glossary.md";
 const NAMING_GLOSSARY_MAX_LINES: usize = 160;
+const CLAUDE_MD_RELATIVE_PATH: &str = "CLAUDE.md";
+const CLAUDE_MD_MAX_LINES: usize = 120;
 
 /// Built-in plan generation template presets.
 ///
@@ -264,11 +266,20 @@ Before finalizing, verify your tasks against:
 - [ ] The cheapest possible model is assigned to each task
 "#;
 
-/// Build the full prompt for plan generation from a source input.
-pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) -> String {
+/// Build the shared system prompt for plan generation and regeneration.
+#[must_use]
+pub fn build_generator_system_prompt(workdir: &Path) -> String {
     let mut prompt = String::new();
     let _ = writeln!(prompt, "{PLAN_GENERATOR_SYSTEM_PROMPT}");
     append_naming_glossary_prompt(&mut prompt, workdir);
+    append_claude_md_prompt(&mut prompt, workdir);
+    prompt
+}
+
+/// Build the full prompt for plan generation from a source input.
+#[must_use]
+pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) -> String {
+    let mut prompt = build_generator_system_prompt(workdir);
     let _ = writeln!(prompt, "\n---\n");
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
     let _ = writeln!(
@@ -283,7 +294,7 @@ mod template_tests {
     use super::*;
 
     #[test]
-    fn build_generation_prompt_includes_naming_glossary_excerpt_when_present() {
+    fn build_generator_system_prompt_includes_naming_glossary_excerpt_when_present() {
         let temp = tempfile::tempdir().expect("tempdir");
         let glossary_dir = temp.path().join("docs").join("00-architecture");
         std::fs::create_dir_all(&glossary_dir).expect("create glossary dir");
@@ -293,9 +304,24 @@ mod template_tests {
         )
         .expect("write glossary");
 
-        let prompt = build_generation_prompt(temp.path(), "source body", "prd");
+        let prompt = build_generator_system_prompt(temp.path());
         assert!(prompt.contains("## Naming glossary"));
         assert!(prompt.contains("Signal -> Engram"));
+    }
+
+    #[test]
+    fn build_generator_system_prompt_includes_claude_rules_when_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("CLAUDE.md"),
+            "# Rules\n\nNEVER reimplement what already exists.\n",
+        )
+        .expect("write claude");
+
+        let prompt = build_generator_system_prompt(temp.path());
+
+        assert!(prompt.contains("## Workspace rules"));
+        assert!(prompt.contains("NEVER reimplement what already exists."));
     }
 
     #[test]
@@ -331,10 +357,9 @@ mod template_tests {
 /// Strips the existing tasks to just `id`/`title`/`depends_on` and asks the
 /// agent to fill in `tier`, `model_hint`, `read_files`, `verify`, `context`,
 /// and `max_loc`.
+#[must_use]
 pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> String {
-    let mut prompt = String::new();
-    let _ = writeln!(prompt, "{PLAN_GENERATOR_SYSTEM_PROMPT}");
-    append_naming_glossary_prompt(&mut prompt, workdir);
+    let mut prompt = build_generator_system_prompt(workdir);
     let _ = writeln!(prompt, "\n---\n");
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
     let _ = writeln!(prompt, "## Task: Regenerate plan\n");
@@ -373,6 +398,28 @@ fn append_naming_glossary_prompt(prompt: &mut String, workdir: &Path) {
         prompt,
         "\n## Naming glossary\nUse the canonical names and renames below when generating plans. This excerpt comes from `{}`.\n\n```md\n{}\n```",
         NAMING_GLOSSARY_RELATIVE_PATH, excerpt
+    );
+}
+
+fn append_claude_md_prompt(prompt: &mut String, workdir: &Path) {
+    let claude_path = workdir.join(CLAUDE_MD_RELATIVE_PATH);
+    let Ok(claude_md) = std::fs::read_to_string(&claude_path) else {
+        return;
+    };
+
+    let excerpt = claude_md
+        .lines()
+        .take(CLAUDE_MD_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if excerpt.trim().is_empty() {
+        return;
+    }
+
+    let _ = writeln!(
+        prompt,
+        "\n## Workspace rules\nFollow the project-specific operating rules below from `{}` when generating plans.\n\n```md\n{}\n```",
+        CLAUDE_MD_RELATIVE_PATH, excerpt
     );
 }
 
