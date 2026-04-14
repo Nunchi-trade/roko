@@ -117,6 +117,7 @@ use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
 use crate::config::Config;
+use crate::plan::plans_dir;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::worker::cloud::CloudExecution;
 
@@ -3577,46 +3578,63 @@ impl PlanRunner {
         registry
     }
 
+    /// Pause a plan whose circuit breaker has tripped and emit the standard
+    /// intervention signals.
+    fn handle_tripped_circuit_breaker(&mut self, plan_id: &str) {
+        tracing::error!("[conductor] pausing {plan_id}: circuit breaker tripped");
+        let _ = self.executor.pause_plan(plan_id);
+        let error_output = self
+            .conductor
+            .circuit_breaker()
+            .get_record(plan_id)
+            .map(|record| {
+                if record.reasons.is_empty() {
+                    "failure budget exhausted".to_owned()
+                } else {
+                    record.reasons.join("\n")
+                }
+            })
+            .unwrap_or_else(|| "failure budget exhausted".to_owned());
+        let diagnosis_engine = DiagnosisEngine::default();
+        let diagnosis_results = diagnosis_engine.diagnose(&error_output);
+        let primary_diagnosis = diagnosis_results.first().cloned();
+        let payload = serde_json::json!({
+            "plan_id": plan_id,
+            "action": "pause",
+            "watcher": "circuit-breaker",
+            "reason": "failure budget exhausted",
+            "error_output": error_output,
+            "primary_diagnosis": primary_diagnosis,
+            "diagnosis_results": diagnosis_results,
+        });
+        self.event_log
+            .append(EventKind::InterventionFired, payload.clone());
+        self.emit_conductor_signal(Kind::Custom("conductor.circuit_breaker".into()), payload);
+        self.emit_execution_event(
+            plan_id,
+            crate::serve::events::ExecutionEvent::WatcherAlert {
+                watcher: "circuit-breaker".to_string(),
+                message: "failure budget exhausted".to_string(),
+            },
+        );
+    }
+
+    /// Refuse to dispatch work for a plan whose circuit breaker has tripped.
+    fn ensure_dispatch_allowed(&mut self, plan_id: &str) -> Result<()> {
+        if self.conductor.circuit_breaker().is_broken(plan_id) {
+            self.handle_tripped_circuit_breaker(plan_id);
+            return Err(anyhow!(
+                "plan {plan_id} refused before dispatch: circuit breaker tripped"
+            ));
+        }
+        Ok(())
+    }
+
     /// Run conductor watchers against accumulated signals.
     /// Returns the decision and logs non-continue outcomes.
     fn run_conductor_check(&mut self, plan_id: &str) -> ConductorDecision {
         if self.conductor.circuit_breaker().is_broken(plan_id) {
-            tracing::error!("[conductor] pausing {plan_id}: circuit breaker tripped");
-            let _ = self.executor.pause_plan(plan_id);
-            let error_output = self
-                .conductor
-                .circuit_breaker()
-                .get_record(plan_id)
-                .map(|record| {
-                    if record.reasons.is_empty() {
-                        "failure budget exhausted".to_owned()
-                    } else {
-                        record.reasons.join("\n")
-                    }
-                })
-                .unwrap_or_else(|| "failure budget exhausted".to_owned());
-            let diagnosis_engine = DiagnosisEngine::default();
-            let diagnosis_results = diagnosis_engine.diagnose(&error_output);
-            let primary_diagnosis = diagnosis_results.first().cloned();
-            let payload = serde_json::json!({
-                "plan_id": plan_id,
-                "action": "pause",
-                "watcher": "circuit-breaker",
-                "reason": "failure budget exhausted",
-                "error_output": error_output,
-                "primary_diagnosis": primary_diagnosis,
-                "diagnosis_results": diagnosis_results,
-            });
-            self.event_log
-                .append(EventKind::InterventionFired, payload.clone());
-            self.emit_conductor_signal(Kind::Custom("conductor.circuit_breaker".into()), payload);
-            self.emit_execution_event(
-                plan_id,
-                crate::serve::events::ExecutionEvent::WatcherAlert {
-                    watcher: "circuit-breaker".to_string(),
-                    message: "failure budget exhausted".to_string(),
-                },
-            );
+            self.handle_tripped_circuit_breaker(plan_id);
             return ConductorDecision::Continue;
         }
 
@@ -3912,7 +3930,7 @@ impl PlanRunner {
             if plan_id.is_empty() {
                 continue;
             }
-            let plan_dir = workdir.join("plans").join(&plan_id);
+            let plan_dir = plans_dir(workdir).join(&plan_id);
             let tasks_path = plan_dir.join("tasks.toml");
             let Ok(tf) = TasksFile::parse(&tasks_path) else {
                 continue;
@@ -3973,7 +3991,7 @@ impl PlanRunner {
             if trackers.contains_key(plan_id) {
                 continue;
             }
-            let plan_dir = workdir.join("plans").join(plan_id);
+            let plan_dir = plans_dir(workdir).join(plan_id);
             let tasks_path = plan_dir.join("tasks.toml");
             let Ok(tf) = TasksFile::parse(&tasks_path) else {
                 continue;
@@ -5771,7 +5789,7 @@ impl PlanRunner {
         let mut configs: Vec<(String, String, AgentRunConfig)> =
             Vec::with_capacity(task_dirs.len());
 
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
         let tasks_file = if tasks_toml.exists() {
             crate::task_parser::TasksFile::parse(&tasks_toml).ok()
@@ -8736,7 +8754,7 @@ impl PlanRunner {
         if self.task_trackers.contains_key(plan_id) {
             return;
         }
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_path = plan_dir.join("tasks.toml");
         if tasks_path.exists() {
             if let Ok(tf) = TasksFile::parse(&tasks_path) {
@@ -8959,6 +8977,7 @@ impl PlanRunner {
         exec_dir_override: Option<PathBuf>,
         system_prompt_override: Option<String>,
     ) -> Result<AgentResult> {
+        self.ensure_dispatch_allowed(plan_id)?;
         let ctx = Context::now();
         let exec_dir = match exec_dir_override {
             Some(dir) => dir,
@@ -8979,7 +8998,7 @@ impl PlanRunner {
         self.warn_plan_budget_pressure(plan_id, plan_spent);
 
         // ── Try to load structured task definition ──────────────────
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
         let tasks_file = if tasks_toml.exists() {
             crate::task_parser::TasksFile::parse(&tasks_toml).ok()
@@ -10731,7 +10750,7 @@ impl PlanRunner {
         use roko_compose::templates::reviewer::{Reviewer, ReviewerInput, ReviewerTemplate};
         use roko_compose::templates::{PlanSlice, RolePromptTemplate};
 
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
 
         // Load plan.md content
         let plan_md_path = plan_dir.join("plan.md");
@@ -10802,7 +10821,7 @@ impl PlanRunner {
         use roko_compose::templates::scribe::{ScribeInput, ScribeTemplate, ScribeVariant};
         use roko_compose::templates::{PlanSlice, RolePromptTemplate};
 
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let mut public_api_files = Vec::new();
         let mut source_snippets = Vec::new();
 
@@ -12095,7 +12114,7 @@ impl PlanRunner {
     /// but injects the plan's task context and inline read_files content so the
     /// strategist sees the full enrichment surface before dispatch.
     fn build_enrichment_system_prompt(&self, plan_id: &str) -> String {
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_file = self
             .task_trackers
             .get(plan_id)
