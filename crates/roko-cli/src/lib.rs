@@ -14,6 +14,7 @@ extern crate self as roko_cli;
 
 pub mod agent_exec;
 pub mod agent_config;
+pub mod agent_episode;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
