@@ -129,13 +129,22 @@ impl Plan {
 }
 
 /// Resolve the plans directory for a given workdir.
+///
+/// Canonical plan state lives under `.roko/plans`. We still fall back to a
+/// legacy top-level `plans/` directory when that is the only location present.
 #[must_use]
 pub fn plans_dir(workdir: &Path) -> PathBuf {
+    let canonical = workdir.join(".roko").join("plans");
+    if canonical.is_dir() {
+        return canonical;
+    }
+
     let top = workdir.join("plans");
     if top.is_dir() {
         return top;
     }
-    workdir.join(".roko").join("plans")
+
+    canonical
 }
 
 /// List plan files in the plans directory.
@@ -320,9 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_prefers_top_level_location_when_present() {
+    fn plans_dir_prefers_canonical_location_when_present() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("plans");
+        let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(&dir).unwrap();
 
         assert_eq!(plans_dir(tmp.path()), dir);
@@ -332,6 +341,26 @@ mod tests {
     fn plans_dir_falls_back_to_legacy_location() {
         let dir = plans_dir(Path::new("/project"));
         assert_eq!(dir, PathBuf::from("/project/.roko/plans"));
+    }
+
+    #[test]
+    fn plans_dir_uses_top_level_location_when_canonical_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plans");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(plans_dir(tmp.path()), dir);
+    }
+
+    #[test]
+    fn plans_dir_prefers_canonical_over_top_level_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().join("plans");
+        let canonical = tmp.path().join(".roko").join("plans");
+        std::fs::create_dir_all(&top).unwrap();
+        std::fs::create_dir_all(&canonical).unwrap();
+
+        assert_eq!(plans_dir(tmp.path()), canonical);
     }
 
     #[test]
