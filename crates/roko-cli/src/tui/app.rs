@@ -32,9 +32,9 @@ use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
 use super::input::{self, ConfirmAction, FocusZone, InputMode, TuiAction};
-use super::modals::{self, ModalState};
+use super::modals::{self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry};
 use super::pages::{PageId, PageRegistry};
-use super::state::TuiState;
+use super::state::{PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
@@ -113,6 +113,127 @@ struct GitBgData {
     commit_short: String,
     /// Commit age string (e.g. "3 hours ago").
     age: String,
+}
+
+fn plan_status_label(plan: &PlanEntry) -> String {
+    if !plan.phase.is_empty() {
+        plan.phase.clone()
+    } else if !plan.status.is_empty() {
+        plan.status.clone()
+    } else if plan.active {
+        "active".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+fn task_status_label(status: TaskRowStatus) -> &'static str {
+    match status {
+        TaskRowStatus::Pending => "pending",
+        TaskRowStatus::Active => "active",
+        TaskRowStatus::Done => "done",
+        TaskRowStatus::Failed => "failed",
+        TaskRowStatus::Blocked => "blocked",
+    }
+}
+
+fn execution_waves_for_modal(state: &TuiState) -> Vec<WaveInfo> {
+    let plans_by_id: HashMap<&str, &PlanEntry> = state
+        .plans
+        .iter()
+        .map(|plan| (plan.id.as_str(), plan))
+        .collect();
+
+    state
+        .execution_waves
+        .iter()
+        .map(|wave| WaveInfo {
+            wave_index: wave.index,
+            plans: wave
+                .plans
+                .iter()
+                .map(|plan_id| {
+                    if let Some(plan) = plans_by_id.get(plan_id.as_str()) {
+                        WavePlanEntry {
+                            plan_id: plan.id.clone(),
+                            status: plan_status_label(plan),
+                            duration_secs: Some(plan.elapsed_secs.max(0.0) as u64),
+                        }
+                    } else {
+                        WavePlanEntry {
+                            plan_id: plan_id.clone(),
+                            status: "queued".to_string(),
+                            duration_secs: None,
+                        }
+                    }
+                })
+                .collect(),
+            total_duration_secs: Some(
+                wave.plans
+                    .iter()
+                    .filter_map(|plan_id| plans_by_id.get(plan_id.as_str()))
+                    .map(|plan| plan.elapsed_secs.max(0.0) as u64)
+                    .sum(),
+            ),
+            eta_secs: None,
+        })
+        .collect()
+}
+
+fn queue_overview_milestones(state: &TuiState) -> Vec<Milestone> {
+    let plans_by_id: HashMap<&str, &PlanEntry> = state
+        .plans
+        .iter()
+        .map(|plan| (plan.id.as_str(), plan))
+        .collect();
+
+    state
+        .execution_waves
+        .iter()
+        .map(|wave| Milestone {
+            name: format!("Wave {}", wave.index),
+            tasks: wave
+                .plans
+                .iter()
+                .map(|plan_id| {
+                    if let Some(plan) = plans_by_id.get(plan_id.as_str()) {
+                        QueueTask {
+                            id: plan.id.clone(),
+                            title: if plan.name.is_empty() {
+                                plan.id.clone()
+                            } else {
+                                plan.name.clone()
+                            },
+                            status: plan_status_label(plan),
+                        }
+                    } else {
+                        QueueTask {
+                            id: plan_id.clone(),
+                            title: plan_id.clone(),
+                            status: "queued".to_string(),
+                        }
+                    }
+                })
+                .collect(),
+            completed: wave.done,
+            total: wave.total,
+        })
+        .collect()
+}
+
+fn task_picker_rows(state: &TuiState) -> Vec<TaskPickerRow> {
+    let plan_num = state.current_plan_idx.saturating_add(1) as u32;
+
+    state
+        .current_task_checklist
+        .iter()
+        .map(|task| TaskPickerRow {
+            plan_num,
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            status: task_status_label(task.status).to_string(),
+        })
+        .collect()
 }
 
 fn collect_git_age(workdir: &Path) -> String {
@@ -695,7 +816,7 @@ impl App {
                 self.tui_state.show_wave_overview = !self.tui_state.show_wave_overview;
                 if self.tui_state.show_wave_overview {
                     self.active_modal = Some(ModalState::WaveOverview {
-                        waves: Vec::new(),
+                        waves: execution_waves_for_modal(&self.tui_state),
                         scroll_offset: 0,
                     });
                 } else {
@@ -705,10 +826,14 @@ impl App {
             TuiAction::ShowQueueOverview => {
                 self.tui_state.show_queue_overview = !self.tui_state.show_queue_overview;
                 if self.tui_state.show_queue_overview {
+                    let milestones = queue_overview_milestones(&self.tui_state);
                     self.active_modal = Some(ModalState::QueueOverview {
-                        milestones: Vec::new(),
-                        selected_index: 0,
-                        scroll_offset: 0,
+                        selected_index: self
+                            .tui_state
+                            .current_wave()
+                            .min(milestones.len().saturating_sub(1)),
+                        scroll_offset: self.tui_state.current_wave() as u16,
+                        milestones,
                     });
                 } else {
                     self.active_modal = None;
@@ -716,10 +841,12 @@ impl App {
             }
             TuiAction::OpenTaskPicker => {
                 self.tui_state.show_task_picker = true;
+                let tasks = task_picker_rows(&self.tui_state);
+                let selected_index = self.tui_state.task_scroll.min(tasks.len().saturating_sub(1));
                 self.active_modal = Some(ModalState::TaskPicker {
-                    tasks: Vec::new(),
-                    selected_index: 0,
-                    scroll_offset: 0,
+                    tasks,
+                    selected_index,
+                    scroll_offset: selected_index as u16,
                 });
             }
             TuiAction::CloseTaskPicker => {
