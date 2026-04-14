@@ -428,6 +428,38 @@ impl App {
         // Footer: status line
         self.render_status_footer(frame, main_layout[footer_idx], &theme);
 
+        if matches!(
+            self.tui_state.input_mode,
+            InputMode::Inject | InputMode::Filter
+        ) && content_area.height > 0
+        {
+            let input_area = Rect::new(
+                content_area.x,
+                content_area.bottom().saturating_sub(1),
+                content_area.width,
+                1,
+            );
+            frame.render_widget(Clear, input_area);
+
+            let (label, buf) = match self.tui_state.input_mode {
+                InputMode::Inject => ("inject> ", self.tui_state.message_input.as_str()),
+                InputMode::Filter => ("filter> ", self.tui_state.filter_text.as_str()),
+                _ => unreachable!(),
+            };
+
+            let input = Paragraph::new(Line::from(vec![
+                Span::styled(label, theme.accent_bold()),
+                Span::styled(buf, theme.text()),
+            ]));
+            frame.render_widget(input, input_area);
+
+            let cursor_x = input_area
+                .x
+                .saturating_add((label.chars().count() + buf.chars().count()) as u16)
+                .min(input_area.right().saturating_sub(1));
+            frame.set_cursor_position((cursor_x, input_area.y));
+        }
+
         // Dim overlay before modals
         if self.active_modal.is_some() || self.tui_state.show_help {
             // Apply dim overlay on the buffer
@@ -726,6 +758,7 @@ impl App {
                 self.tui_state.filter_text.clear();
             }
             TuiAction::AcceptFilter => {
+                self.tui_state.filter = self.tui_state.filter_text.clone();
                 self.tui_state.input_mode = InputMode::Normal;
                 self.tui_state.filter_active = !self.tui_state.filter_text.is_empty();
             }

@@ -8,9 +8,15 @@ pub fn roko_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko")
 }
 
-/// Resolve the canonical plans directory.
+/// Resolve the plans directory, preferring the top-level layout and falling
+/// back to the legacy `.roko` location.
 #[must_use]
 pub fn plans_dir(workdir: &Path) -> PathBuf {
+    let top = workdir.join("plans");
+    if top.is_dir() {
+        return top;
+    }
+
     roko_dir(workdir).join("plans")
 }
 

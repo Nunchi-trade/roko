@@ -1,7 +1,8 @@
 //! `roko plan` subcommand group — list, show, and create plans.
 //!
 //! Plans are declarative task graphs stored as TOML/JSON files under
-//! `.roko/plans/`. Each plan describes a set of tasks with dependencies,
+//! `plans/` or the legacy `.roko/plans/`. Each plan describes a set of tasks
+//! with dependencies,
 //! assigned agent roles, and gate requirements.
 
 use std::path::{Path, PathBuf};
@@ -312,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_prefers_canonical_location_when_present() {
+    fn plans_dir_uses_legacy_location_when_top_level_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(&dir).unwrap();
@@ -327,13 +328,12 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_always_returns_canonical_location() {
+    fn plans_dir_prefers_top_level_location_when_present() {
         let tmp = tempfile::tempdir().unwrap();
         let top_level = tmp.path().join("plans");
         std::fs::create_dir_all(&top_level).unwrap();
 
-        let canonical = tmp.path().join(".roko").join("plans");
-        assert_eq!(plans_dir(tmp.path()), canonical);
+        assert_eq!(plans_dir(tmp.path()), top_level);
     }
 
     #[test]
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn list_plan_files_finds_toml_and_json() {
+    fn list_plan_files_finds_toml_and_json_in_legacy_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(&dir).unwrap();
@@ -359,14 +359,15 @@ mod tests {
     }
 
     #[test]
-    fn list_plan_files_ignores_legacy_top_level_dir() {
+    fn list_plan_files_reads_top_level_dir_when_present() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plans");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("plan1.toml"), "").unwrap();
 
         let plans = list_plan_files(tmp.path()).unwrap();
-        assert!(plans.is_empty());
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].ends_with("plan1.toml"));
     }
 
     #[test]
