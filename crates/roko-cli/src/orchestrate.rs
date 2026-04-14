@@ -7861,7 +7861,7 @@ impl PlanRunner {
              Regenerate the implementation plan from the PRD at {}.\
              This is the same work as `roko prd plan {prd_slug}`.\
              Preserve these completed task IDs when you rebuild the plan: {completed_task_ids:?}\n\n\
-             Regenerate the plan at plans/{plan_id}/tasks.toml so it can continue \
+             Regenerate the plan at .roko/plans/{plan_id}/tasks.toml so it can continue \
              from the failed task '{task_id}'. Keep only genuinely new tasks, skip \
              any task whose title matches a completed task, and rewrite the file in place.\n\n\
              ## PRD source\n\

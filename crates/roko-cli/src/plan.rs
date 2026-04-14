@@ -1,8 +1,8 @@
 //! `roko plan` subcommand group — list, show, and create plans.
 //!
 //! Plans are declarative task graphs stored as TOML/JSON files under
-//! `plans/` or the legacy `.roko/plans/`. Each plan describes a set of tasks
-//! with dependencies, assigned agent roles, and gate requirements.
+//! `.roko/plans/`. Each plan describes a set of tasks with dependencies,
+//! assigned agent roles, and gate requirements.
 
 use std::path::{Path, PathBuf};
 
@@ -128,23 +128,10 @@ impl Plan {
     }
 }
 
-/// Resolve the plans directory for a given workdir.
-///
-/// Canonical plan state lives under `.roko/plans`. We still fall back to a
-/// legacy top-level `plans/` directory when that is the only location present.
+/// Resolve the canonical plans directory for a given workdir.
 #[must_use]
 pub fn plans_dir(workdir: &Path) -> PathBuf {
-    let canonical = workdir.join(".roko").join("plans");
-    if canonical.is_dir() {
-        return canonical;
-    }
-
-    let top = workdir.join("plans");
-    if top.is_dir() {
-        return top;
-    }
-
-    canonical
+    workdir.join(".roko").join("plans")
 }
 
 /// List plan files in the plans directory.
@@ -344,22 +331,12 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_uses_top_level_location_when_canonical_is_missing() {
+    fn plans_dir_always_returns_canonical_location() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("plans");
-        std::fs::create_dir_all(&dir).unwrap();
+        let top_level = tmp.path().join("plans");
+        std::fs::create_dir_all(&top_level).unwrap();
 
-        assert_eq!(plans_dir(tmp.path()), dir);
-    }
-
-    #[test]
-    fn plans_dir_prefers_canonical_over_top_level_when_both_exist() {
-        let tmp = tempfile::tempdir().unwrap();
-        let top = tmp.path().join("plans");
         let canonical = tmp.path().join(".roko").join("plans");
-        std::fs::create_dir_all(&top).unwrap();
-        std::fs::create_dir_all(&canonical).unwrap();
-
         assert_eq!(plans_dir(tmp.path()), canonical);
     }
 
@@ -373,7 +350,7 @@ mod tests {
     #[test]
     fn list_plan_files_finds_toml_and_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("plans");
+        let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("plan1.toml"), "").unwrap();
         std::fs::write(dir.join("plan2.json"), "").unwrap();
@@ -386,15 +363,14 @@ mod tests {
     }
 
     #[test]
-    fn list_plan_files_falls_back_to_legacy_dir() {
+    fn list_plan_files_ignores_legacy_top_level_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join(".roko").join("plans");
+        let dir = tmp.path().join("plans");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("plan1.toml"), "").unwrap();
 
         let plans = list_plan_files(tmp.path()).unwrap();
-        assert_eq!(plans.len(), 1);
-        assert!(plans.iter().any(|p| p.ends_with("plan1.toml")));
+        assert!(plans.is_empty());
     }
 
     #[test]
