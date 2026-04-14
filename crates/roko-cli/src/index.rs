@@ -30,6 +30,15 @@ fn research_index_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("research").join("INDEX.md")
 }
 
+/// Append the master index to a prompt when it exists and is non-empty.
+pub fn append_master_index_prompt(out: &mut String, workdir: &Path, heading: &str) {
+    let master_index = std::fs::read_to_string(master_index_path(workdir)).unwrap_or_default();
+    if master_index.trim().is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "{heading}\n{master_index}\n---\n");
+}
+
 // ─── PRD index ─────────────────────────────────────────────────────
 
 /// Rebuild `.roko/prd/INDEX.md` from all published + draft PRDs.
@@ -477,5 +486,29 @@ mod tests {
         assert!(content.contains("## Research"));
         assert!(content.contains("## Episodes"));
         assert!(content.contains("## Config"));
+    }
+
+    #[test]
+    fn append_master_index_prompt_skips_empty_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prompt = String::from("prefix\n");
+
+        append_master_index_prompt(&mut prompt, tmp.path(), "## Existing");
+
+        assert_eq!(prompt, "prefix\n");
+    }
+
+    #[test]
+    fn append_master_index_prompt_includes_heading_and_separator() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".roko")).unwrap();
+        std::fs::write(master_index_path(tmp.path()), "# Master\n").unwrap();
+
+        let mut prompt = String::new();
+        append_master_index_prompt(&mut prompt, tmp.path(), "## Existing");
+
+        assert!(prompt.contains("## Existing"));
+        assert!(prompt.contains("# Master"));
+        assert!(prompt.ends_with("---\n\n"));
     }
 }

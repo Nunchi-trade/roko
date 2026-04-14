@@ -1019,14 +1019,11 @@ pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
     let _ = writeln!(prompt, "## Project workspace: {}\n", workdir.display());
 
     // Include the master index so the agent knows everything that exists
-    let master_index = std::fs::read_to_string(workdir.join(".roko/INDEX.md")).unwrap_or_default();
-    if !master_index.is_empty() {
-        let _ = writeln!(
-            prompt,
-            "## Master Index (what already exists — do NOT duplicate)\n"
-        );
-        let _ = writeln!(prompt, "{master_index}\n---\n");
-    }
+    crate::index::append_master_index_prompt(
+        &mut prompt,
+        workdir,
+        "## Master Index (what already exists — do NOT duplicate)",
+    );
 
     // Include the PRD index for detailed cross-references
     let prd_index = std::fs::read_to_string(workdir.join(".roko/prd/INDEX.md")).unwrap_or_default();
