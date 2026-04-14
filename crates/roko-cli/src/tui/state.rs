@@ -830,6 +830,16 @@ impl TuiState {
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.token_total = data.efficiency.total_input_tokens + data.efficiency.total_output_tokens;
+        self.gate_results = data
+            .gate_results
+            .iter()
+            .map(|gate_result| GateResultEntry {
+                gate: gate_result.gate_name.clone(),
+                plan_id: gate_result.plan_id.clone(),
+                passed: gate_result.passed,
+                output: gate_result.summary.clone(),
+            })
+            .collect();
 
         // Build phase_pipeline from canonical phases + active_tasks
         self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
