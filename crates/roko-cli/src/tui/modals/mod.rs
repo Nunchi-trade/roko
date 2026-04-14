@@ -25,6 +25,7 @@ pub use batch_review::{BatchTaskResult, render_batch_review};
 pub use confirm::{ConfirmAction, render_confirm};
 pub use inject::render_inject;
 pub use notification::{Notification, NotificationLevel, render_notifications};
+pub use plan_detail::render_plan_detail_modal;
 pub use queue_overview::{Milestone, QueueTask, render_queue_overview};
 pub use quit::render_quit;
 pub use task_picker::{TaskPickerRow, render_task_picker};
@@ -33,7 +34,8 @@ pub use wave_overview::{WaveInfo, WavePlanEntry, render_wave_overview};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
-use super::dashboard::Theme;
+use super::dashboard::{DashboardData, Theme};
+use super::state::TuiState;
 
 /// Which modal is currently active, if any.
 ///
@@ -89,6 +91,12 @@ pub enum ModalState {
         results: Vec<BatchTaskResult>,
         scroll_offset: u16,
     },
+
+    /// Selected plan detail.
+    PlanDetail {
+        plan_idx: usize,
+        scroll_offset: usize,
+    },
 }
 
 /// Render the currently active modal, if any.
@@ -96,7 +104,14 @@ pub enum ModalState {
 /// Call this after rendering the main dashboard content so the modal
 /// draws on top. Notifications are rendered independently since they can
 /// coexist with other modals.
-pub fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState, theme: &Theme) {
+pub fn render_modal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    modal: &ModalState,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    theme: &Theme,
+) {
     match modal {
         ModalState::Quit => {
             render_quit(frame, area, theme);
@@ -154,6 +169,20 @@ pub fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState, theme
         } => {
             render_batch_review(frame, area, batch_name, results, *scroll_offset, theme);
         }
+        ModalState::PlanDetail {
+            plan_idx,
+            scroll_offset,
+        } => {
+            render_plan_detail_modal(
+                frame,
+                area,
+                *plan_idx,
+                *scroll_offset,
+                data,
+                tui_state,
+                theme,
+            );
+        }
     }
 }
 
@@ -165,11 +194,13 @@ pub fn render_modals(
     frame: &mut Frame<'_>,
     area: Rect,
     active_modal: Option<&ModalState>,
+    data: &DashboardData,
+    tui_state: &TuiState,
     notifications: &[Notification],
     theme: &Theme,
 ) {
     if let Some(modal) = active_modal {
-        render_modal(frame, area, modal, theme);
+        render_modal(frame, area, modal, data, tui_state, theme);
     }
 
     // Notifications always render (they stack in the bottom-right corner).

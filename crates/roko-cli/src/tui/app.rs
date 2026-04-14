@@ -529,6 +529,8 @@ impl App {
             frame,
             full_area,
             self.active_modal.as_ref(),
+            &self.data,
+            &self.tui_state,
             &self.notifications,
             &theme,
         );
@@ -644,10 +646,20 @@ impl App {
                 self.tui_state.diff_scroll = self.tui_state.diff_scroll.saturating_add(1);
             }
             TuiAction::ScrollDetailUp => {
+                if let Some(ModalState::PlanDetail { scroll_offset, .. }) =
+                    self.active_modal.as_mut()
+                {
+                    *scroll_offset = scroll_offset.saturating_sub(1);
+                }
                 self.tui_state.plan_detail_scroll =
                     self.tui_state.plan_detail_scroll.saturating_sub(1);
             }
             TuiAction::ScrollDetailDown => {
+                if let Some(ModalState::PlanDetail { scroll_offset, .. }) =
+                    self.active_modal.as_mut()
+                {
+                    *scroll_offset = scroll_offset.saturating_add(1);
+                }
                 self.tui_state.plan_detail_scroll =
                     self.tui_state.plan_detail_scroll.saturating_add(1);
             }
@@ -655,12 +667,23 @@ impl App {
                 self.tui_state.show_help = !self.tui_state.show_help;
             }
             TuiAction::ShowPlanDetail => {
-                self.tui_state.show_plan_detail = !self.tui_state.show_plan_detail;
-                // Also toggle legacy detail overlay
-                self.toggle_detail_overlay();
+                if self.tui_state.plans.is_empty() {
+                    self.tui_state.show_plan_detail = false;
+                    self.active_modal = None;
+                } else {
+                    self.tui_state.show_plan_detail = true;
+                    self.tui_state.plan_detail_scroll = 0;
+                    self.active_modal = Some(ModalState::PlanDetail {
+                        plan_idx: self.tui_state.selected_plan_idx,
+                        scroll_offset: 0,
+                    });
+                }
             }
             TuiAction::ClosePlanDetail => {
                 self.tui_state.show_plan_detail = false;
+                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
+                    self.active_modal = None;
+                }
             }
             TuiAction::ShowTaskDetail => {
                 self.tui_state.show_task_detail = !self.tui_state.show_task_detail;

@@ -5,8 +5,8 @@ pub mod cache;
 pub mod compat;
 pub mod embed;
 pub mod native;
-pub(crate) mod wire;
 pub mod types;
+pub(crate) mod wire;
 
 pub use adapter::GeminiAdapter;
 pub use cache::{CacheError, GeminiCacheClient};

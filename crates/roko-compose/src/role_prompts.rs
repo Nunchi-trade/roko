@@ -266,7 +266,8 @@ impl RoleSystemPromptSpec {
     /// Build structured prompt sections via [`SystemPromptBuilder`].
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        self.builder_with_section_effectiveness(None).build_sections()
+        self.builder_with_section_effectiveness(None)
+            .build_sections()
     }
 
     /// Build structured prompt sections with learned section-effectiveness applied.

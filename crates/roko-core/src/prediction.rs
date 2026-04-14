@@ -380,7 +380,9 @@ mod tests {
         ));
         let scorer = PredictiveScorer::new(calibration);
         let signal = Engram::builder(Kind::PromptSection)
-            .body(crate::Body::text("Warning: verify assumptions and check likely failure modes"))
+            .body(crate::Body::text(
+                "Warning: verify assumptions and check likely failure modes",
+            ))
             .score(Score::new(0.8, 0.2, 0.2, 1.0))
             .tag("model_slug", "claude-sonnet-4-5")
             .tag("task_category", "implementation")
@@ -420,9 +422,15 @@ mod tests {
         let outputs = policy.decide(&stream, &Context::at(0));
 
         assert_eq!(outputs.len(), 2);
-        assert!(outputs.iter().any(|engram| engram.tag("alert_kind") == Some("systematic_bias")));
-        assert!(outputs
-            .iter()
-            .any(|engram| engram.tag("alert_kind") == Some("degrading_accuracy")));
+        assert!(
+            outputs
+                .iter()
+                .any(|engram| engram.tag("alert_kind") == Some("systematic_bias"))
+        );
+        assert!(
+            outputs
+                .iter()
+                .any(|engram| engram.tag("alert_kind") == Some("degrading_accuracy"))
+        );
     }
 }

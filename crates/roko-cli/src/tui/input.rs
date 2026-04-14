@@ -383,9 +383,9 @@ fn handle_wave_overview_key(key: KeyEvent) -> TuiAction {
 
 fn handle_plan_detail_key(key: KeyEvent) -> TuiAction {
     match key.code {
-        KeyCode::Esc | KeyCode::Enter => TuiAction::ClosePlanDetail,
-        KeyCode::Up => TuiAction::ScrollDetailUp,
-        KeyCode::Down => TuiAction::ScrollDetailDown,
+        KeyCode::Esc => TuiAction::ClosePlanDetail,
+        KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollDetailUp,
+        KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollDetailDown,
         _ => TuiAction::None,
     }
 }

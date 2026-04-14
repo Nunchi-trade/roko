@@ -128,9 +128,7 @@ impl DreamAgentConfig {
                 },
             )
             .with_context(|| format!("create synthesized dream review agent for model {model}"))?;
-            Ok(DreamReviewAgent {
-                inner: agent,
-            })
+            Ok(DreamReviewAgent { inner: agent })
         } else if is_known_protocol_command(&self.command) {
             let mut agent =
                 ExecAgent::new(&self.command, self.args.clone()).with_timeout_ms(self.timeout_ms);
@@ -141,10 +139,7 @@ impl DreamAgentConfig {
                 inner: Box::new(agent),
             })
         } else {
-            let model = self
-                .model
-                .clone()
-                .unwrap_or_else(|| self.command.clone());
+            let model = self.model.clone().unwrap_or_else(|| self.command.clone());
             let mut synthesized_config = RokoConfig::default();
             synthesized_config.agent.command = Some(self.command.clone());
             synthesized_config.agent.default_model = model.clone();
@@ -393,7 +388,8 @@ fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
         return Ok(RokoConfig::default());
     }
 
-    let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
 }
 

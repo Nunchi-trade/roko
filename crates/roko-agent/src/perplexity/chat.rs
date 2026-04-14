@@ -16,7 +16,7 @@ use crate::translate::openai::parse_usage;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 /// Perplexity Sonar chat agent with search-grounded completions.
@@ -571,12 +571,14 @@ mod tests {
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text")
-            .contains("model not found"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text")
+                .contains("model not found")
+        );
     }
 
     #[tokio::test]
@@ -585,12 +587,14 @@ mod tests {
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text")
-            .contains("malformed"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text")
+                .contains("malformed")
+        );
     }
 
     #[tokio::test]
@@ -600,12 +604,14 @@ mod tests {
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(result
-            .output
-            .body
-            .as_text()
-            .expect("text")
-            .contains("missing choices"));
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .expect("text")
+                .contains("missing choices")
+        );
     }
 
     // ── Wire details ──────────────────────────────────────────────────────────
