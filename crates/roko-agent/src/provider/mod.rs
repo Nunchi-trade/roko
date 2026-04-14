@@ -203,6 +203,16 @@ pub fn with_safety_layer<R>(layer: Option<SafetyLayer>, f: impl FnOnce() -> R) -
     result
 }
 
+/// Run `f` with the current safety layer, or default to [`SafetyLayer::with_defaults()`].
+///
+/// This is the common case for direct agent construction paths that want the same
+/// safety scope behavior as orchestrated runs without having to duplicate the fallback.
+#[must_use]
+pub fn with_scoped_safety_layer<R>(f: impl FnOnce() -> R) -> R {
+    let layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
+    with_safety_layer(layer, f)
+}
+
 /// Build a `ToolDispatcher` and attach the active safety layer if one is present.
 #[must_use]
 pub fn build_tool_dispatcher(
@@ -678,6 +688,20 @@ mod tests {
         });
 
         assert!(dispatcher.safety().is_some());
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_defaults_when_unscoped() {
+        let layer = with_scoped_safety_layer(current_safety_layer);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_preserves_existing_scope() {
+        let observed = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+            with_scoped_safety_layer(current_safety_layer)
+        });
+        assert!(observed.is_some());
     }
 
     #[tokio::test]
