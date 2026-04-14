@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::PlanRunner;
 use crate::config::Config;
 use crate::serve::deploy::CloudExecutionConfig;
+use crate::workspace_paths::relative_plans_dir;
 
 /// Cloud execution parameters for a single plan run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,7 +177,7 @@ impl CloudExecutionParams {
     pub fn plan_dir(&self) -> PathBuf {
         self.plan_dir
             .clone()
-            .unwrap_or_else(|| PathBuf::from(format!(".roko/plans/{}", self.plan_slug)))
+            .unwrap_or_else(|| relative_plans_dir().join(&self.plan_slug))
     }
 
     /// Resolve the workspace root using the configured default when absent.
@@ -528,7 +529,7 @@ mod tests {
             github_mcp_command: None,
             github_mcp_args: None,
         };
-        assert_eq!(params.plan_dir(), PathBuf::from(".roko/plans/slug"));
+        assert_eq!(params.plan_dir(), relative_plans_dir().join("slug"));
     }
 
     #[test]

@@ -5531,9 +5531,7 @@ mod tests {
         let tmpdir = tempdir().expect("tempdir");
         let root = tmpdir.path();
         let state_dir = root.join(".roko/state");
-        let plan_dir = root.join(".roko/plans/plan-a");
-        let memory_dir = root.join(".roko");
-
+        let plan_dir = crate::workspace_paths::plans_dir(root).join("plan-a");
         fs::create_dir_all(&state_dir).expect("state dir");
         fs::create_dir_all(&plan_dir).expect("plan dir");
 

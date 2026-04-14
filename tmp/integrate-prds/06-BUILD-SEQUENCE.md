@@ -35,8 +35,8 @@ These are all "built but never connected" — the code exists, just needs wiring
 
 ### B4: Wire SafetyLayer into ToolDispatcher
 - **PRD source**: `docs/06-safety/`
-- **Current state**: SafetyLayer is built in roko-agent and now reached on orchestrate provider paths, direct PRD/plan/research agent-exec paths, `roko run`, and raw `ExecAgent` fallback preflight/scrubbing
-- **What to build**: remaining work is backend universality, not first-call wiring: Claude CLI, Gemini-native, embeddings, and other specialty paths still bypass the shared dispatcher/tool loop chain
+- **Current state**: SafetyLayer is built in roko-agent and now defaults at provider factory time for orchestrate, direct PRD/plan/research agent-exec paths, `roko run`, and raw `ExecAgent` fallback
+- **What to build**: remaining work is backend universality, not factory wiring: Claude CLI, Gemini-native, embeddings, and other specialty paths still bypass the shared dispatcher/tool loop chain
 - **Effort**: Small
 
 ### B5: Wire Conductor (Watchers) into Executor

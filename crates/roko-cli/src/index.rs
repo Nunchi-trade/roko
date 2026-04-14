@@ -411,14 +411,15 @@ fn extract_toml_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_paths::{drafts_dir, ideas_path, plans_dir, published_dir};
 
     #[test]
     fn rebuild_all_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/published")).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/drafts")).unwrap();
+        std::fs::create_dir_all(published_dir(tmp.path())).unwrap();
+        std::fs::create_dir_all(drafts_dir(tmp.path())).unwrap();
         std::fs::create_dir_all(tmp.path().join(".roko/research")).unwrap();
-        std::fs::write(tmp.path().join(".roko/prd/ideas.md"), "# Ideas\n").unwrap();
+        std::fs::write(ideas_path(tmp.path()), "# Ideas\n").unwrap();
         rebuild_all(tmp.path()).unwrap();
         assert!(master_index_path(tmp.path()).exists());
         assert!(prd_index_path(tmp.path()).exists());
@@ -428,10 +429,10 @@ mod tests {
     #[test]
     fn prd_index_includes_drafts() {
         let tmp = tempfile::tempdir().unwrap();
-        let drafts = tmp.path().join(".roko/prd/drafts");
+        let drafts = drafts_dir(tmp.path());
         std::fs::create_dir_all(&drafts).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/published")).unwrap();
-        std::fs::write(tmp.path().join(".roko/prd/ideas.md"), "# Ideas\n").unwrap();
+        std::fs::create_dir_all(published_dir(tmp.path())).unwrap();
+        std::fs::write(ideas_path(tmp.path()), "# Ideas\n").unwrap();
         std::fs::write(
             drafts.join("test-prd.md"),
             "---\ntitle: Test PRD\nstatus: draft\ncreated: 2026-04-08\n---\n# Test\n",
@@ -446,7 +447,7 @@ mod tests {
     #[test]
     fn plans_index_counts_tasks() {
         let tmp = tempfile::tempdir().unwrap();
-        let plan = tmp.path().join(".roko/plans/test-plan");
+        let plan = plans_dir(tmp.path()).join("test-plan");
         std::fs::create_dir_all(&plan).unwrap();
         std::fs::write(
             plan.join("tasks.toml"),
@@ -474,10 +475,10 @@ mod tests {
     #[test]
     fn master_index_has_all_sections() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/published")).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/drafts")).unwrap();
+        std::fs::create_dir_all(published_dir(tmp.path())).unwrap();
+        std::fs::create_dir_all(drafts_dir(tmp.path())).unwrap();
         std::fs::create_dir_all(tmp.path().join(".roko/research")).unwrap();
-        std::fs::write(tmp.path().join(".roko/prd/ideas.md"), "# Ideas\n").unwrap();
+        std::fs::write(ideas_path(tmp.path()), "# Ideas\n").unwrap();
         rebuild_all(tmp.path()).unwrap();
         let content = std::fs::read_to_string(master_index_path(tmp.path())).unwrap();
         assert!(content.contains("## PRDs"));

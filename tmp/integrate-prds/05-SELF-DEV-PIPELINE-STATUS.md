@@ -58,9 +58,9 @@ roko prd idea → prd draft new → prd draft promote → prd plan → plan run 
 - **Fix needed**: Inject `docs/00-architecture/01-naming-and-glossary.md` into `PLAN_GENERATOR_SYSTEM_PROMPT`
 
 #### Issue: Runtime safety is still not universal
-- **Symptom**: common PRD/research/plan/run paths now enter a scoped safety layer, and raw `ExecAgent` fallback now runs preflight command checks plus output scrubbing, but some native/provider-specific backends still bypass the shared `ToolDispatcher` chain
+- **Symptom**: provider-backed construction now defaults a real safety layer at factory time, and raw `ExecAgent` fallback runs under that same contract, but some native/provider-specific backends still bypass the shared `ToolDispatcher` chain
 - **Cause**: backend-specific paths such as Claude CLI, Gemini-native, embeddings, and async deep-research still own more of their execution loop instead of flowing through one universal dispatcher
-- **Impact**: Medium — the lowest-level subprocess fallback is now materially hardened, but full backend-universal enforcement is still incomplete
+- **Impact**: Medium — the provider factory no longer has an unscoped fallback seam, but full backend-universal enforcement is still incomplete
 
 ## What Works Now
 

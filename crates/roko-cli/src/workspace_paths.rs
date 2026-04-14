@@ -11,7 +11,13 @@ pub fn roko_dir(workdir: &Path) -> PathBuf {
 /// Resolve the canonical plans directory.
 #[must_use]
 pub fn plans_dir(workdir: &Path) -> PathBuf {
-    roko_dir(workdir).join("plans")
+    workdir.join(relative_plans_dir())
+}
+
+/// Resolve the plans directory relative to a workspace root.
+#[must_use]
+pub fn relative_plans_dir() -> PathBuf {
+    PathBuf::from(".roko").join("plans")
 }
 
 /// Resolve the PRD root directory.
