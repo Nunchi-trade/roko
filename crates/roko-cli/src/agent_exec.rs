@@ -9,7 +9,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::SafetyLayer;
+use roko_agent::provider::{
+    AgentOptions, create_agent_for_model, current_safety_layer, with_safety_layer,
+};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, ContentHash, Context, Engram, Kind};
@@ -125,27 +128,29 @@ async fn run_agent_capture_impl(
         extra_args.push("--resume".to_string());
         extra_args.push(session_id.to_string());
     }
-    let agent = create_agent_for_model(
-        &routing_config,
-        &model,
-        AgentOptions {
-            command: routing_config.agent.command.clone(),
-            timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
-            system_prompt: opts.system_prompt.map(str::to_string),
-            cached_content: None,
-            tools: None,
-            mcp_config: None,
-            working_dir: Some(opts.workdir.to_path_buf()),
-            provider_semaphores: None,
-            env: opts.env_vars.to_vec(),
-            extra_args,
-            effort: Some(opts.effort.unwrap_or("medium").to_string()),
-            bare_mode: true,
-            dangerously_skip_permissions: true,
-            name: format!("{}:{model}", resolved.provider_kind.label()),
-        },
-    )
-    .with_context(|| format!("create agent for model {model}"))?;
+    let agent = with_scoped_safety_layer(|| {
+        create_agent_for_model(
+            &routing_config,
+            &model,
+            AgentOptions {
+                command: routing_config.agent.command.clone(),
+                timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
+                system_prompt: opts.system_prompt.map(str::to_string),
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(opts.workdir.to_path_buf()),
+                provider_semaphores: None,
+                env: opts.env_vars.to_vec(),
+                extra_args,
+                effort: Some(opts.effort.unwrap_or("medium").to_string()),
+                bare_mode: true,
+                dangerously_skip_permissions: true,
+                name: format!("{}:{model}", resolved.provider_kind.label()),
+            },
+        )
+        .with_context(|| format!("create agent for model {model}"))
+    })?;
 
     let prompt = Engram::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))
@@ -175,6 +180,11 @@ async fn run_agent_capture_impl(
     }
 
     Ok((exit_code, rendered))
+}
+
+fn with_scoped_safety_layer<R>(f: impl FnOnce() -> R) -> R {
+    let layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
+    with_safety_layer(layer, f)
 }
 
 /// Read model from roko.toml config if available.
@@ -466,7 +476,11 @@ mod tests {
         .await
         .expect("persist capture episode");
 
-        let episodes_path = tmp.path().join(".roko").join("memory").join("episodes.jsonl");
+        let episodes_path = tmp
+            .path()
+            .join(".roko")
+            .join("memory")
+            .join("episodes.jsonl");
         let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
         assert_eq!(episodes.len(), 1);
         let episode = &episodes[0];
@@ -487,5 +501,24 @@ mod tests {
             episode.extra.get("plan_id"),
             Some(&serde_json::json!("demo"))
         );
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_defaults_when_unscoped() {
+        let layer = with_scoped_safety_layer(current_safety_layer);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_preserves_existing_scope() {
+        let expected = SafetyLayer::with_defaults().with_role("orchestrate");
+        let role = with_safety_layer(Some(expected.clone()), || {
+            with_scoped_safety_layer(|| {
+                current_safety_layer()
+                    .map(|layer| layer.role)
+                    .expect("safety layer should be present")
+            })
+        });
+        assert_eq!(role, expected.role);
     }
 }
