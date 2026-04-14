@@ -411,13 +411,7 @@ impl App {
         let content_idx = 2;
         let footer_idx = 3;
 
-        let view_state = ViewState {
-            scroll: self.tui_state.plan_scroll_offset as u16,
-            selected: self.tui_state.selected_plan_idx,
-            sub_tab: self.tui_state.plan_detail_tab,
-            secondary_selected: 0,
-            auto_tail: self.tui_state.agent_scroll.is_none(),
-        };
+        let view_state = self.current_view_state();
         views::render_tab_content(
             frame,
             main_layout[content_idx],
@@ -843,24 +837,42 @@ impl App {
             TuiAction::ToggleAgentPaneGroup => {
                 self.tui_state.agent_pane_group = (self.tui_state.agent_pane_group + 1) % 2;
             }
-            TuiAction::DrillIn => {
-                if let Some(plan) = self
-                    .tui_state
-                    .plans
-                    .get_mut(self.tui_state.selected_plan_idx)
-                {
-                    plan.expanded = true;
+            TuiAction::DrillIn => match self.tui_state.active_tab {
+                Tab::Dashboard | Tab::Plans => {
+                    if let Some(plan) = self
+                        .tui_state
+                        .plans
+                        .get_mut(self.tui_state.selected_plan_idx)
+                    {
+                        plan.expanded = true;
+                    }
                 }
-            }
-            TuiAction::DrillOut => {
-                if let Some(plan) = self
-                    .tui_state
-                    .plans
-                    .get_mut(self.tui_state.selected_plan_idx)
-                {
-                    plan.expanded = false;
+                Tab::Git => {
+                    let max = self.git_branch_count().saturating_sub(1);
+                    if self.tui_state.git_branch_cursor < max {
+                        self.tui_state.git_branch_cursor += 1;
+                    }
                 }
-            }
+                Tab::Inspect => {}
+                Tab::Agents | Tab::Logs | Tab::Config => {}
+            },
+            TuiAction::DrillOut => match self.tui_state.active_tab {
+                Tab::Dashboard | Tab::Plans => {
+                    if let Some(plan) = self
+                        .tui_state
+                        .plans
+                        .get_mut(self.tui_state.selected_plan_idx)
+                    {
+                        plan.expanded = false;
+                    }
+                }
+                Tab::Git => {
+                    self.tui_state.git_branch_cursor =
+                        self.tui_state.git_branch_cursor.saturating_sub(1);
+                }
+                Tab::Inspect => {}
+                Tab::Agents | Tab::Logs | Tab::Config => {}
+            },
             TuiAction::WaveNext => {
                 let max = self.tui_state.plans.len().max(1);
                 self.tui_state.selected_wave_idx = (self.tui_state.selected_wave_idx + 1) % max;
@@ -1190,17 +1202,17 @@ impl App {
             FocusZone::RightPanel => {
                 let current = self.tui_state.diff_scroll as i32;
                 self.tui_state.diff_scroll = (current + delta).max(0) as usize;
+            }
         }
     }
-}
 
-fn apply_signed_scroll(current: usize, delta: i16) -> usize {
-    if delta < 0 {
-        current.saturating_sub(delta.saturating_abs() as usize)
-    } else {
-        current.saturating_add(delta as usize)
+    fn apply_signed_scroll(current: usize, delta: i16) -> usize {
+        if delta < 0 {
+            current.saturating_sub(delta.saturating_abs() as usize)
+        } else {
+            current.saturating_add(delta as usize)
+        }
     }
-}
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let action = match mouse.kind {
@@ -1398,6 +1410,26 @@ fn apply_signed_scroll(current: usize, delta: i16) -> usize {
                 }
             }
         }
+    }
+
+    fn current_view_state(&self) -> ViewState {
+        ViewState {
+            scroll: self.tui_state.plan_scroll_offset as u16,
+            selected: match self.tui_state.active_tab {
+                Tab::Git => self.tui_state.git_branch_cursor,
+                _ => self.tui_state.selected_plan_idx,
+            },
+            sub_tab: self.tui_state.plan_detail_tab,
+            secondary_selected: 0,
+            auto_tail: self.tui_state.agent_scroll.is_none(),
+        }
+    }
+
+    fn git_branch_count(&self) -> usize {
+        self.tui_state
+            .git_view_data
+            .as_ref()
+            .map_or(self.tui_state.git_branch_tree.len(), |data| data.branches.len())
     }
 
     // `update_sys_metrics` removed -- see `collect_sys_metrics_bg()` standalone
@@ -2133,5 +2165,43 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(!app.tui_state.show_help);
+    }
+
+    #[test]
+    fn drill_actions_on_git_use_git_cursor_not_plan_expansion() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.active_tab = Tab::Git;
+        app.tui_state.plans = vec![super::super::state::PlanEntry::default()];
+        app.tui_state.git_view_data = Some(super::views::git_view::GitViewData {
+            branches: vec![
+                super::views::git_view::GitBranchNode {
+                    name: "main".to_string(),
+                    is_current: true,
+                    tracking: None,
+                    ahead: 0,
+                    behind: 0,
+                    depth: 0,
+                },
+                super::views::git_view::GitBranchNode {
+                    name: "feature/test".to_string(),
+                    is_current: false,
+                    tracking: None,
+                    ahead: 0,
+                    behind: 0,
+                    depth: 1,
+                },
+            ],
+            ..Default::default()
+        });
+
+        app.dispatch_action(TuiAction::DrillIn);
+        assert_eq!(app.tui_state.git_branch_cursor, 1);
+        assert!(!app.tui_state.plans[0].expanded);
+        assert_eq!(app.current_view_state().selected, 1);
+
+        app.dispatch_action(TuiAction::DrillOut);
+        assert_eq!(app.tui_state.git_branch_cursor, 0);
+        assert!(!app.tui_state.plans[0].expanded);
     }
 }
