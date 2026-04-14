@@ -9979,14 +9979,39 @@ impl PlanRunner {
             )
             .entered();
             let agent: Box<dyn Agent> = if is_known_protocol_command(&self.config.agent.command) {
-                let mut agent =
-                    ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
-                        .with_timeout_ms(self.config.agent.timeout_ms)
-                        .with_current_dir(exec_dir.clone());
-                for (k, v) in &self.config.agent.env {
-                    agent = agent.with_env_var(k, v);
-                }
-                Box::new(agent)
+                let mut fallback_config = RokoConfig::default();
+                fallback_config.agent.command = Some(self.config.agent.command.clone());
+                fallback_config.agent.default_model = selected_model.clone();
+                fallback_config.agent.default_backend = self.config.agent.command.clone();
+                let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
+                    create_agent_for_model(
+                        &fallback_config,
+                        &selected_model,
+                        AgentOptions {
+                            command: Some(self.config.agent.command.clone()),
+                            timeout_ms: Some(self.config.agent.timeout_ms),
+                            system_prompt: None,
+                            cached_content: None,
+                            tools: None,
+                            mcp_config: None,
+                            working_dir: Some(exec_dir.clone()),
+                            provider_semaphores: None,
+                            env: self.config.agent.env.clone(),
+                            extra_args: self.config.agent.args.clone(),
+                            effort: None,
+                            bare_mode: self.config.agent.bare_mode,
+                            dangerously_skip_permissions: false,
+                            name: String::new(),
+                        },
+                    )
+                    .map_err(|e| {
+                        anyhow!(
+                            "create known-protocol subprocess agent for {}: {e}",
+                            self.config.agent.command
+                        )
+                    })
+                })?;
+                agent
             } else {
                 let mut fallback_config = RokoConfig::default();
                 fallback_config.agent.command = Some(self.config.agent.command.clone());
@@ -10863,16 +10888,23 @@ impl PlanRunner {
             .unwrap_or_default();
 
         // Get files changed via git diff
-        let exec_dir = self.plan_exec_dir(plan_id).await;
-        let files_changed = tokio::process::Command::new("git")
-            .args(["diff", "--name-only", "HEAD"])
-            .current_dir(&exec_dir)
-            .output()
-            .await
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().map(String::from).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let files_changed = match self.ensure_plan_exec_dir(plan_id).await {
+            Ok(exec_dir) => tokio::process::Command::new("git")
+                .args(["diff", "--name-only", "HEAD"])
+                .current_dir(&exec_dir)
+                .output()
+                .await
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().map(String::from).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(
+                    "[orchestrate] review prompt skipped worktree diff for {plan_id}: {err}"
+                );
+                Vec::new()
+            }
+        };
 
         // Prior review findings from tracker
         let prior_findings = self
@@ -13331,6 +13363,35 @@ depends_on = []
                 .plan_state("plan-1")
                 .is_some_and(|state| state.paused)
         );
+    }
+
+    #[tokio::test]
+    async fn build_review_prompt_skips_repo_root_when_worktree_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan_states = HashMap::new();
+        plan_states.insert("plan-1".to_string(), PlanState::new("plan-1"));
+        let snapshot = ExecutorSnapshot {
+            plan_states,
+            queue_order: vec!["plan-1".to_string()],
+            timestamp_ms: 0,
+        };
+        let snapshot_json = snapshot.to_json().unwrap();
+        let runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            {
+                let mut config = Config::default();
+                config.executor.use_worktrees = true;
+                config
+            },
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let prompt = runner.build_review_prompt("plan-1").await;
+        assert!(!prompt.contains("crates/roko-cli/src/orchestrate.rs"));
     }
 
     #[test]
