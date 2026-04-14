@@ -25,6 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
+use sysinfo::System;
 
 use super::atmosphere::Atmosphere;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
@@ -311,13 +312,7 @@ impl App {
         std::thread::Builder::new()
             .name("tui-sys-metrics".into())
             .spawn(move || {
-                loop {
-                    let metrics = collect_sys_metrics_bg();
-                    if sys_tx.send(metrics).is_err() {
-                        break; // main thread dropped, exit
-                    }
-                    std::thread::sleep(Duration::from_secs(3));
-                }
+                collect_sys_metrics_bg(sys_tx);
             })
             .ok(); // graceful: TUI works without background thread
         self.sys_rx = Some(sys_rx);
@@ -1692,149 +1687,27 @@ fn cycle_field_value(
 // Background sys metrics collection (runs on a dedicated thread)
 // ---------------------------------------------------------------------------
 
-/// Collect system metrics (CPU, memory, network, disk) from `top -l 2`.
-///
-/// Uses two samples to compute rates. Runs on a background thread (~2s).
-fn collect_sys_metrics_bg() -> super::state::SysMetrics {
-    let mut metrics = super::state::SysMetrics::default();
+/// Collect system metrics on a background thread using `sysinfo`.
+fn collect_sys_metrics_bg(tx: std::sync::mpsc::Sender<super::state::SysMetrics>) {
+    let mut sys = System::new();
 
-    #[cfg(target_os = "macos")]
-    {
-        // Run top with 2 samples to get delta-based rates
-        if let Ok(out) = std::process::Command::new("top")
-            .args(["-l", "2", "-n", "0", "-s", "1"])
-            .output()
-        {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                // Use the LAST occurrence of each line (second sample)
-                let mut cpu_idle = 0.0f64;
-                let mut net_in_bytes = 0u64;
-                let mut net_out_bytes = 0u64;
-                let mut disk_read_bytes = 0u64;
-                let mut disk_write_bytes = 0u64;
-                let mut phys_used = 0u64;
-                let mut phys_unused = 0u64;
+    loop {
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
 
-                for line in text.lines() {
-                    if line.starts_with("CPU usage:") {
-                        if let Some(idle) =
-                            line.split(',').find(|s| s.contains("idle")).and_then(|s| {
-                                s.trim()
-                                    .split('%')
-                                    .next()
-                                    .and_then(|n| n.trim().parse::<f64>().ok())
-                            })
-                        {
-                            cpu_idle = idle;
-                        }
-                    }
-                    if line.starts_with("Networks:") {
-                        // "Networks: packets: 138317421/91G in, 110081166/57G out."
-                        net_in_bytes = parse_top_bytes(line, "in");
-                        net_out_bytes = parse_top_bytes(line, "out");
-                    }
-                    if line.starts_with("Disks:") {
-                        // "Disks: 301657900/4397G read, 292906367/3965G written."
-                        disk_read_bytes = parse_top_bytes(line, "read");
-                        disk_write_bytes = parse_top_bytes(line, "written");
-                    }
-                    if line.starts_with("PhysMem:") {
-                        // "PhysMem: 49G used (4121M wired, ...), 2666M unused."
-                        phys_used = parse_phys_mem_bytes(line, "used");
-                        phys_unused = parse_phys_mem_bytes(line, "unused");
-                    }
-                }
+        let metrics = super::state::SysMetrics {
+            cpu_pct: sys.global_cpu_usage(),
+            mem_used_bytes: sys.used_memory(),
+            mem_total_bytes: sys.total_memory(),
+            ..Default::default()
+        };
 
-                metrics.cpu_pct = (100.0 - cpu_idle).max(0.0).min(100.0) as f32;
-                metrics.net_down_bytes_sec = net_in_bytes; // total, not rate
-                metrics.disk_read_bytes_sec = disk_read_bytes; // total, not rate
-                metrics.mem_used_bytes = phys_used;
-                metrics.mem_total_bytes = phys_used + phys_unused;
-
-                // Store raw totals for rate calculation in drain_background_channels
-                metrics.net_out_bytes_total = net_out_bytes;
-                metrics.disk_write_bytes_total = disk_write_bytes;
-            }
+        if tx.send(metrics).is_err() {
+            break;
         }
-    }
 
-    metrics
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Parse a byte value like "91G" or "57M" or "4397G" from a top output line.
-/// Looks for the segment containing `label` (e.g. "in", "read") and extracts
-/// the byte count with unit suffix.
-#[cfg(target_os = "macos")]
-fn parse_top_bytes(line: &str, label: &str) -> u64 {
-    for segment in line.split(',') {
-        let seg = segment.trim().trim_end_matches('.');
-        if seg.ends_with(label) {
-            // Find the "NNN/XXXU" part before the label
-            for part in seg.split_whitespace() {
-                if part.contains('/') {
-                    // "138317421/91G" — take after the slash
-                    if let Some(val_str) = part.split('/').nth(1) {
-                        return parse_size_str(val_str);
-                    }
-                }
-            }
-        }
+        std::thread::sleep(Duration::from_secs(3));
     }
-    0
-}
-
-/// Parse a PhysMem value like "49G" from "PhysMem: 49G used (...), 2666M unused."
-#[cfg(target_os = "macos")]
-fn parse_phys_mem_bytes(line: &str, label: &str) -> u64 {
-    for segment in line.split(',') {
-        let seg = segment.trim();
-        if seg.contains(label) {
-            for part in seg.split_whitespace() {
-                let val = parse_size_str(part);
-                if val > 0 {
-                    return val;
-                }
-            }
-        }
-    }
-    // Fallback: look in the main part before first comma
-    if label == "used" {
-        if let Some(main) = line.split(',').next() {
-            for part in main.split_whitespace() {
-                let val = parse_size_str(part);
-                if val > 0 {
-                    return val;
-                }
-            }
-        }
-    }
-    0
-}
-
-/// Parse a size string like "91G", "57M", "4397G", "2666M", "512K" to bytes.
-#[cfg(target_os = "macos")]
-fn parse_size_str(s: &str) -> u64 {
-    let s = s.trim().trim_end_matches('.');
-    if s.is_empty() {
-        return 0;
-    }
-    let last = s.as_bytes()[s.len() - 1];
-    let (num_str, multiplier) = match last {
-        b'G' => (&s[..s.len() - 1], 1_073_741_824u64),
-        b'M' => (&s[..s.len() - 1], 1_048_576u64),
-        b'K' => (&s[..s.len() - 1], 1_024u64),
-        b'B' => (&s[..s.len() - 1], 1u64),
-        _ => (s, 1u64),
-    };
-    num_str
-        .parse::<f64>()
-        .map(|n| (n * multiplier as f64) as u64)
-        .unwrap_or(0)
 }
 
 /// Map a Mori-style Tab to a legacy PageId (best effort).
