@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -314,6 +314,30 @@ impl Drop for PanicHookRestoreGuard {
     }
 }
 
+fn tui_log_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("tui.log")
+}
+
+fn tui_log_dispatch(workdir: &Path) -> Result<tracing::Dispatch> {
+    let roko_dir = workdir.join(".roko");
+    std::fs::create_dir_all(&roko_dir)
+        .with_context(|| format!("create TUI log directory {}", roko_dir.display()))?;
+
+    let log_path = tui_log_path(workdir);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open TUI log file {}", log_path.display()))?;
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(Mutex::new(log_file))
+        .finish();
+
+    Ok(tracing::Dispatch::new(subscriber))
+}
+
 /// Run the interactive dashboard event loop (async variant).
 pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
@@ -403,6 +427,11 @@ impl App {
 
     /// Run the terminal UI until the user quits.
     pub fn run(mut self) -> Result<()> {
+        let log_path = tui_log_path(&self.workdir);
+        let log_dispatch = tui_log_dispatch(&self.workdir).context("initialize TUI file logging")?;
+        let _log_guard = tracing::dispatcher::set_default(&log_dispatch);
+        tracing::info!(path = %log_path.display(), "TUI file logging enabled");
+
         let previous_hook: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static> =
             Arc::from(std::panic::take_hook());
         let panic_hook = Arc::clone(&previous_hook);
@@ -427,15 +456,25 @@ impl App {
 
     fn main_loop(&mut self, terminal: &mut TuiTerminal) -> Result<()> {
         let mut events = EventHandler::new(Duration::from_millis(16)); // ~60fps
+        let log_dispatch = tracing::dispatcher::get_default(|dispatch| dispatch.clone());
 
         // ---------------------------------------------------------------
         // Spawn background sys metrics collector thread
         // ---------------------------------------------------------------
         let (sys_tx, sys_rx) = std::sync::mpsc::channel::<super::state::SysMetrics>();
+        let sys_log_dispatch = log_dispatch.clone();
         std::thread::Builder::new()
             .name("tui-sys-metrics".into())
             .spawn(move || {
+                let _log_guard = tracing::dispatcher::set_default(&sys_log_dispatch);
                 collect_sys_metrics_bg(sys_tx);
+            })
+            .inspect_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    thread = "tui-sys-metrics",
+                    "failed to spawn background thread"
+                );
             })
             .ok(); // graceful: TUI works without background thread
         self.sys_rx = Some(sys_rx);
@@ -445,9 +484,11 @@ impl App {
         // ---------------------------------------------------------------
         let (data_tx, data_rx) = std::sync::mpsc::channel::<DashboardData>();
         let data_workdir = self.workdir.clone();
+        let data_log_dispatch = log_dispatch.clone();
         std::thread::Builder::new()
             .name("tui-data-refresh".into())
             .spawn(move || {
+                let _log_guard = tracing::dispatcher::set_default(&data_log_dispatch);
                 loop {
                     let data = DashboardData::load_best_effort(&data_workdir);
                     if data_tx.send(data).is_err() {
@@ -455,6 +496,13 @@ impl App {
                     }
                     std::thread::sleep(Duration::from_millis(500));
                 }
+            })
+            .inspect_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    thread = "tui-data-refresh",
+                    "failed to spawn background thread"
+                );
             })
             .ok();
         self.data_rx = Some(data_rx);
@@ -464,9 +512,11 @@ impl App {
         // ---------------------------------------------------------------
         let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
         let git_workdir = self.workdir.clone();
+        let git_log_dispatch = log_dispatch;
         std::thread::Builder::new()
             .name("tui-git-refresh".into())
             .spawn(move || {
+                let _log_guard = tracing::dispatcher::set_default(&git_log_dispatch);
                 loop {
                     let view_data = super::views::git_view::collect_git_data();
                     let summary_lines = super::views::dashboard_view::collect_git_summary();
@@ -489,6 +539,13 @@ impl App {
                     }
                     std::thread::sleep(Duration::from_secs(3));
                 }
+            })
+            .inspect_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    thread = "tui-git-refresh",
+                    "failed to spawn background thread"
+                );
             })
             .ok();
         self.git_rx = Some(git_rx);
@@ -922,14 +979,30 @@ impl App {
                         "created_at_ms": ts,
                         "payload": { "message": msg },
                     });
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                    std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&signal_path)
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(f, "{}", entry);
-                    }
+                        .inspect_err(|err| {
+                            tracing::warn!(
+                                error = %err,
+                                path = %signal_path.display(),
+                                "failed to open signal file for inject"
+                            );
+                        })
+                        .ok()
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "{}", entry)
+                                .inspect_err(|err| {
+                                    tracing::warn!(
+                                        error = %err,
+                                        path = %signal_path.display(),
+                                        "failed to append inject signal"
+                                    );
+                                })
+                                .ok()
+                        });
                     self.notifications
                         .push(super::modals::Notification::info(format!(
                             "Injected: {}",
@@ -1000,14 +1073,30 @@ impl App {
                         "created_at_ms": ts,
                         "payload": { "action": action_str },
                     });
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                    std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&signal_path)
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(f, "{}", entry);
-                    }
+                        .inspect_err(|err| {
+                            tracing::warn!(
+                                error = %err,
+                                path = %signal_path.display(),
+                                "failed to open signal file for confirm"
+                            );
+                        })
+                        .ok()
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "{}", entry)
+                                .inspect_err(|err| {
+                                    tracing::warn!(
+                                        error = %err,
+                                        path = %signal_path.display(),
+                                        "failed to append confirm signal"
+                                    );
+                                })
+                                .ok()
+                        });
                     self.notifications
                         .push(super::modals::Notification::info(format!(
                             "Confirmed: {}",
