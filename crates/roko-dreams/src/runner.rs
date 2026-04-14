@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
-use roko_agent::{Agent, AgentResult, ExecAgent};
+use roko_agent::{Agent, AgentResult};
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Context as RokoContext, Engram};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
@@ -57,7 +57,8 @@ pub struct DreamAgentConfig {
 
 impl DreamAgentConfig {
     fn build_agent(&self, workdir: &Path) -> Result<DreamReviewAgent> {
-        let mut routing_config = load_roko_config(workdir)?;
+        let mut routing_config = roko_core::config::load_config(workdir)
+            .with_context(|| format!("load routing config from {}", workdir.display()))?;
         routing_config.apply_process_env();
         let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
@@ -69,103 +70,63 @@ impl DreamAgentConfig {
                     (!routing_config.agent.default_model.trim().is_empty())
                         .then(|| routing_config.agent.default_model.clone())
                 })
-                .ok_or_else(|| anyhow::anyhow!("dream runner routing needs a configured model"))?;
+                .ok_or_else(|| anyhow::anyhow!("dream review routing needs a configured model"))?;
             let agent = create_agent_for_model(
                 &routing_config,
                 &model,
-                AgentOptions {
-                    command: Some(self.command.clone()),
-                    timeout_ms: Some(self.timeout_ms),
-                    system_prompt: None,
-                    cached_content: None,
-                    tools: None,
-                    mcp_config: None,
-                    working_dir: Some(workdir.to_path_buf()),
-                    provider_semaphores: None,
-                    env: self.env.clone(),
-                    extra_args: self.args.clone(),
-                    effort: Some(self.effort.clone()),
-                    bare_mode: self.bare_mode,
-                    dangerously_skip_permissions: false,
-                    name: format!("dream-review:{model}"),
-                },
+                self.agent_options(workdir, self.args.clone(), format!("dream-review:{model}")),
             )
             .with_context(|| format!("create dream review agent for model {model}"))?;
             Ok(DreamReviewAgent { inner: agent })
-        } else if self.command == "claude" {
-            let model = self
-                .model
-                .clone()
-                .unwrap_or_else(|| "claude-opus-4-6".to_string());
+        } else {
+            let model = if self.command == "claude" {
+                self.model
+                    .clone()
+                    .unwrap_or_else(|| "claude-opus-4-6".to_string())
+            } else {
+                self.model.clone().unwrap_or_else(|| self.command.clone())
+            };
             let mut synthesized_config = RokoConfig::default();
             synthesized_config.agent.command = Some(self.command.clone());
             synthesized_config.agent.default_model = model.clone();
-            synthesized_config.agent.default_backend = "claude".to_string();
+            if self.command == "claude" {
+                synthesized_config.agent.default_backend = "claude".to_string();
+            } else if is_known_protocol_command(&self.command) {
+                synthesized_config.agent.default_backend = self.command.clone();
+            }
 
             let mut extra_args = self.args.clone();
             if let Some(fallback_model) = &self.fallback_model {
                 extra_args.push("--fallback-model".to_string());
                 extra_args.push(fallback_model.clone());
             }
-            let agent = create_agent_for_model(
-                &synthesized_config,
-                &model,
-                AgentOptions {
-                    command: Some(self.command.clone()),
-                    timeout_ms: Some(self.timeout_ms),
-                    system_prompt: None,
-                    cached_content: None,
-                    tools: None,
-                    mcp_config: None,
-                    working_dir: Some(workdir.to_path_buf()),
-                    provider_semaphores: None,
-                    env: self.env.clone(),
-                    extra_args,
-                    effort: Some(self.effort.clone()),
-                    bare_mode: self.bare_mode,
-                    dangerously_skip_permissions: false,
-                    name: format!("dream-review:{model}"),
-                },
-            )
-            .with_context(|| format!("create synthesized dream review agent for model {model}"))?;
-            Ok(DreamReviewAgent { inner: agent })
-        } else if is_known_protocol_command(&self.command) {
-            let mut agent =
-                ExecAgent::new(&self.command, self.args.clone()).with_timeout_ms(self.timeout_ms);
-            for (key, value) in &self.env {
-                agent = agent.with_env_var(key, value);
-            }
-            Ok(DreamReviewAgent {
-                inner: Box::new(agent),
-            })
-        } else {
-            let model = self.model.clone().unwrap_or_else(|| self.command.clone());
-            let mut synthesized_config = RokoConfig::default();
-            synthesized_config.agent.command = Some(self.command.clone());
-            synthesized_config.agent.default_model = model.clone();
 
             let agent = create_agent_for_model(
                 &synthesized_config,
                 &model,
-                AgentOptions {
-                    command: Some(self.command.clone()),
-                    timeout_ms: Some(self.timeout_ms),
-                    system_prompt: None,
-                    cached_content: None,
-                    tools: None,
-                    mcp_config: None,
-                    working_dir: Some(workdir.to_path_buf()),
-                    provider_semaphores: None,
-                    env: self.env.clone(),
-                    extra_args: self.args.clone(),
-                    effort: Some(self.effort.clone()),
-                    bare_mode: self.bare_mode,
-                    dangerously_skip_permissions: false,
-                    name: String::new(),
-                },
+                self.agent_options(workdir, extra_args, format!("dream-review:{model}")),
             )
             .with_context(|| format!("create dream review subprocess agent for model {model}"))?;
             Ok(DreamReviewAgent { inner: agent })
+        }
+    }
+
+    fn agent_options(&self, workdir: &Path, extra_args: Vec<String>, name: String) -> AgentOptions {
+        AgentOptions {
+            command: Some(self.command.clone()),
+            timeout_ms: Some(self.timeout_ms),
+            system_prompt: None,
+            cached_content: None,
+            tools: None,
+            mcp_config: None,
+            working_dir: Some(workdir.to_path_buf()),
+            provider_semaphores: None,
+            env: self.env.clone(),
+            extra_args,
+            effort: Some(self.effort.clone()),
+            bare_mode: self.bare_mode,
+            dangerously_skip_permissions: false,
+            name,
         }
     }
 }
@@ -240,8 +201,7 @@ impl DreamRunner {
         let knowledge = Arc::new(KnowledgeStore::for_workdir(&self.workdir));
         let playbooks_root = self.workdir.join(".roko").join("learn").join("playbooks");
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
-        let dispatcher: Arc<dyn AgentDispatcher> =
-            Arc::new(self.config.agent.build_agent(&self.workdir)?);
+        let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
         cycle.run().await
     }
@@ -382,17 +342,15 @@ where
     }
 }
 
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+/// Build the dream review dispatcher from the configured agent backend.
+pub fn build_dream_review_dispatcher(
+    workdir: &Path,
+    config: &DreamAgentConfig,
+) -> Result<Arc<dyn AgentDispatcher>> {
+    Ok(Arc::new(config.build_agent(workdir)?))
 }
 
+/// Thin wrapper around the configured review agent used by dream consolidation.
 struct DreamReviewAgent {
     inner: Box<dyn Agent>,
 }

@@ -29,7 +29,7 @@ use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
 };
-use crate::tool_loop::backends::create_backend;
+use crate::tool_loop::backends::create_openai_compat_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
 use crate::translate::{OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
@@ -361,7 +361,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             let mut tool_loop_provider = provider.clone();
             tool_loop_provider.timeout_ms = Some(timeout);
             let poster = Arc::new(ReqwestPoster::new());
-            let backend = create_backend(&tool_loop_provider, model, poster)?;
+            let backend = create_openai_compat_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
                 .with_max_iterations(50)

@@ -161,6 +161,8 @@ impl ProviderAdapter for GeminiAdapter {
             return Ok(Box::new(agent));
         }
 
+        // Gemini grounding and code execution are surfaced by the native API itself,
+        // not the shared tool dispatcher. Keep these models on the native agent path.
         let needs_native = model.supports_grounding || model.supports_code_execution;
 
         if needs_native {

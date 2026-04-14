@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, MouseEvent, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -20,11 +20,9 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use serde_json::Value;
 use sysinfo::System;
 
 use super::atmosphere::Atmosphere;
@@ -32,7 +30,9 @@ use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
 use super::input::{self, ConfirmAction, FocusZone, InputMode, TuiAction};
-use super::modals::{self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry};
+use super::modals::{
+    self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry,
+};
 use super::pages::{PageId, PageRegistry};
 use super::state::{PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
@@ -83,9 +83,6 @@ pub struct App {
     pub signal_selection: usize,
     /// Selected gate-failure row on the Gate Results page (legacy).
     pub gate_failure_selection: usize,
-    /// Active overlay, if any (legacy help/detail).
-    overlay: Option<OverlayState>,
-
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
     sys_rx: Option<std::sync::mpsc::Receiver<super::state::SysMetrics>>,
@@ -299,12 +296,6 @@ impl std::fmt::Debug for App {
 
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
-#[derive(Debug, Clone)]
-enum OverlayState {
-    Help,
-    Detail(DetailState),
-}
-
 struct PanicHookRestoreGuard(Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>);
 
 impl Drop for PanicHookRestoreGuard {
@@ -400,7 +391,6 @@ impl App {
             scroll_offset: HashMap::new(),
             signal_selection: 0,
             gate_failure_selection: 0,
-            overlay: None,
             sys_rx: None,
             data_rx: None,
             git_rx: None,
@@ -428,7 +418,8 @@ impl App {
     /// Run the terminal UI until the user quits.
     pub fn run(mut self) -> Result<()> {
         let log_path = tui_log_path(&self.workdir);
-        let log_dispatch = tui_log_dispatch(&self.workdir).context("initialize TUI file logging")?;
+        let log_dispatch =
+            tui_log_dispatch(&self.workdir).context("initialize TUI file logging")?;
         let _log_guard = tracing::dispatcher::set_default(&log_dispatch);
         tracing::info!(path = %log_path.display(), "TUI file logging enabled");
 
@@ -713,11 +704,6 @@ impl App {
             &theme,
         );
 
-        // Legacy overlay (signal/gate detail)
-        if let Some(overlay) = &self.overlay {
-            self.render_overlay(frame, overlay);
-        }
-
         // PostFX pipeline
         if self.fx_config.screen_postfx {
             let buf = frame.buffer_mut();
@@ -737,13 +723,6 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) {
-        // Legacy overlay intercept
-        if self.overlay.is_some() {
-            if self.handle_overlay_key(key) {
-                return;
-            }
-        }
-
         // Route through the full TuiAction dispatch
         let action = input::handle_key(
             key,
@@ -759,11 +738,10 @@ impl App {
     fn dispatch_action(&mut self, action: TuiAction) {
         match action {
             TuiAction::Quit => {
-                // Bug fix: q with overlay closes overlay first
-                if self.tui_state.has_modal() || self.overlay.is_some() {
+                // Bug fix: q with modal closes modal first
+                if self.tui_state.has_modal() {
                     self.tui_state.dismiss_all_modals();
                     self.active_modal = None;
-                    self.overlay = None;
                 } else {
                     self.running = false;
                 }
@@ -899,7 +877,10 @@ impl App {
             TuiAction::OpenTaskPicker => {
                 self.tui_state.show_task_picker = true;
                 let tasks = task_picker_rows(&self.tui_state);
-                let selected_index = self.tui_state.task_scroll.min(tasks.len().saturating_sub(1));
+                let selected_index = self
+                    .tui_state
+                    .task_scroll
+                    .min(tasks.len().saturating_sub(1));
                 self.active_modal = Some(ModalState::TaskPicker {
                     tasks,
                     selected_index,
@@ -1308,9 +1289,10 @@ impl App {
                                     Ok(()) => {
                                         let count = self.tui_state.config_pending.len();
                                         self.tui_state.config_pending.clear();
-                                        self.notifications.push(super::modals::Notification::info(
-                                            &format!("Config saved ({count} changes written to roko.toml)"),
-                                        ));
+                                        self.notifications
+                                            .push(super::modals::Notification::info(&format!(
+                                            "Config saved ({count} changes written to roko.toml)"
+                                        )));
                                     }
                                     Err(e) => {
                                         self.notifications.push(
@@ -1547,80 +1529,6 @@ impl App {
         self.notifications.retain(|n| !n.is_expired());
     }
 
-    // -----------------------------------------------------------------------
-    // Legacy compatibility
-    // -----------------------------------------------------------------------
-
-    fn handle_overlay_key(&mut self, key: KeyEvent) -> bool {
-        let Some(overlay) = self.overlay.clone() else {
-            return false;
-        };
-
-        match key.code {
-            KeyCode::Esc => {
-                // Bug fix: close overlay instead of quitting
-                self.overlay = None;
-                true
-            }
-            KeyCode::Char('q') => {
-                // Bug fix: close overlay on first q, quit on second
-                self.overlay = None;
-                true
-            }
-            KeyCode::Char('r') => {
-                self.refresh_snapshot();
-                true
-            }
-            KeyCode::Char('?') => {
-                self.overlay = match overlay {
-                    OverlayState::Help => None,
-                    OverlayState::Detail(_) => Some(OverlayState::Help),
-                };
-                true
-            }
-            KeyCode::Enter => {
-                if matches!(overlay, OverlayState::Detail(_)) {
-                    self.overlay = None;
-                }
-                true
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if matches!(overlay, OverlayState::Detail(_)) {
-                    self.adjust_overlay_scroll(-1);
-                }
-                true
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if matches!(overlay, OverlayState::Detail(_)) {
-                    self.adjust_overlay_scroll(1);
-                }
-                true
-            }
-            KeyCode::PageUp => {
-                if matches!(overlay, OverlayState::Detail(_)) {
-                    self.adjust_overlay_scroll(-8);
-                }
-                true
-            }
-            KeyCode::PageDown => {
-                if matches!(overlay, OverlayState::Detail(_)) {
-                    self.adjust_overlay_scroll(8);
-                }
-                true
-            }
-            KeyCode::Home => {
-                if matches!(overlay, OverlayState::Detail(_)) {
-                    self.set_overlay_scroll(0);
-                }
-                true
-            }
-            // F-keys and tab switching should work even with overlay open
-            KeyCode::F(n) if (1..=7).contains(&n) => false,
-            KeyCode::Char('1'..='7') => false,
-            _ => true,
-        }
-    }
-
     #[allow(dead_code)]
     fn select_page_by_slot(&mut self, slot: usize) {
         let pages = self.pages().ids();
@@ -1788,38 +1696,6 @@ impl App {
         self.scroll_offset.get(&page).copied().unwrap_or(0)
     }
 
-    fn adjust_overlay_scroll(&mut self, delta: i16) {
-        if let Some(OverlayState::Detail(detail)) = &mut self.overlay {
-            detail.adjust_scroll(delta);
-        }
-    }
-
-    fn set_overlay_scroll(&mut self, value: u16) {
-        if let Some(OverlayState::Detail(detail)) = &mut self.overlay {
-            detail.set_scroll(value);
-        }
-    }
-
-    fn toggle_detail_overlay(&mut self) {
-        let next = match self.current_page {
-            PageId::Signals => self.signal_detail_overlay().map(OverlayState::Detail),
-            PageId::GateResults => self.gate_failure_detail_overlay().map(OverlayState::Detail),
-            _ => None,
-        };
-
-        if let Some(next) = next {
-            let next_title = match &next {
-                OverlayState::Detail(detail) => detail.title.clone(),
-                OverlayState::Help => String::from("help"),
-            };
-            let current = self.overlay.clone();
-            self.overlay = match current {
-                Some(OverlayState::Detail(current)) if current.title == next_title => None,
-                _ => Some(next),
-            };
-        }
-    }
-
     fn clamp_signal_selection(&mut self) {
         let len = self.data.recent_signals.len();
         if len == 0 {
@@ -1835,85 +1711,6 @@ impl App {
             self.gate_failure_selection = 0;
         } else if self.gate_failure_selection >= len {
             self.gate_failure_selection = len - 1;
-        }
-    }
-
-    fn signal_detail_overlay(&self) -> Option<DetailState> {
-        let signal = self.data.recent_signals.get(self.signal_selection)?;
-        let raw = load_signal_entry(&self.workdir, &signal.id)?;
-        let mut body = String::new();
-        let _ = std::fmt::Write::write_fmt(
-            &mut body,
-            format_args!(
-                "signal: {}\nkind: {}\ncreated: {}\nplan/task: {}\nlineage: {}\nparent: {}\n\nraw payload:\n{}\n",
-                signal.id,
-                signal.kind,
-                signal.created_at_ms,
-                signal
-                    .plan_id
-                    .as_deref()
-                    .or(signal.task_id.as_deref())
-                    .unwrap_or("-"),
-                if signal.lineage.is_empty() {
-                    String::from("-")
-                } else {
-                    signal.lineage.join(" -> ")
-                },
-                signal.parent_hash.as_deref().unwrap_or("-"),
-                pretty_json(&raw)
-            ),
-        );
-        Some(DetailState::new(format!("signal {}", signal.id), body))
-    }
-
-    fn gate_failure_detail_overlay(&self) -> Option<DetailState> {
-        let row = self
-            .data
-            .gate_results_page
-            .failure_rows
-            .get(self.gate_failure_selection)?;
-        let raw = load_gate_failure_entry(&self.workdir, row)?;
-        let mut body = String::new();
-        let _ = std::fmt::Write::write_fmt(
-            &mut body,
-            format_args!(
-                "gate: {}\ntask: {}\ncreated: {}\nexcerpt: {}\n\nraw payload:\n{}\n",
-                row.gate_name,
-                row.task_id,
-                row.created_at_ms,
-                row.error_excerpt,
-                pretty_json(&raw)
-            ),
-        );
-        Some(DetailState::new(
-            format!("gate failure {}", row.gate_name),
-            body,
-        ))
-    }
-
-    fn render_overlay(&self, frame: &mut Frame<'_>, overlay: &OverlayState) {
-        let theme = Theme::from_env();
-        let area = super::layout::centered_rect(86, 84, frame.area());
-        frame.render_widget(Clear, area);
-
-        match overlay {
-            OverlayState::Help => {
-                // Handled by render_help_overlay
-            }
-            OverlayState::Detail(detail) => {
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(detail.title.as_str())
-                    .border_style(theme.warning());
-                let inner = block.inner(area);
-                frame.render_widget(block, area);
-
-                let body = Paragraph::new(detail.body.as_str())
-                    .style(theme.text().add_modifier(Modifier::BOLD))
-                    .wrap(Wrap { trim: false })
-                    .scroll((detail.scroll, 0));
-                frame.render_widget(body, inner);
-            }
         }
     }
 
@@ -2013,32 +1810,6 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct DetailState {
-    title: String,
-    body: String,
-    scroll: u16,
-}
-
-impl DetailState {
-    fn new(title: String, body: String) -> Self {
-        Self {
-            title,
-            body,
-            scroll: 0,
-        }
-    }
-
-    fn adjust_scroll(&mut self, delta: i16) {
-        let current = self.scroll as i32;
-        self.scroll = (current + delta as i32).max(0).min(u16::MAX as i32) as u16;
-    }
-
-    fn set_scroll(&mut self, value: u16) {
-        self.scroll = value;
-    }
-}
-
 fn help_lines() -> Vec<Line<'static>> {
     let theme = Theme::from_env();
     vec![
@@ -2105,84 +1876,12 @@ fn help_lines() -> Vec<Line<'static>> {
     ]
 }
 
-/// Extract a numeric value from a vm_stat line like "Pages active:    123456."
-#[cfg(target_os = "macos")]
-fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
-    if !line.contains(key) {
-        return None;
-    }
-    line.split(':')
-        .nth(1)?
-        .trim()
-        .trim_end_matches('.')
-        .parse::<u64>()
-        .ok()
-}
-
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
-}
-
-fn pretty_json(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-}
-
-fn load_signal_entry(workdir: &Path, signal_id: &str) -> Option<Value> {
-    let path = workdir.join(".roko").join("signals.jsonl");
-    super::dashboard::read_jsonl_values(&path)
-        .into_iter()
-        .rev()
-        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(signal_id))
-}
-
-fn load_gate_failure_entry(
-    workdir: &Path,
-    row: &super::dashboard::GateFailureRow,
-) -> Option<Value> {
-    let path = workdir.join(".roko").join("signals.jsonl");
-    super::dashboard::read_jsonl_values(&path)
-        .into_iter()
-        .rev()
-        .find(|entry| {
-            let kind = entry
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            is_gate_result_kind(kind)
-                && entry
-                    .pointer("/tags/gate")
-                    .and_then(Value::as_str)
-                    .or_else(|| entry.pointer("/body/data/gate").and_then(Value::as_str))
-                    .or_else(|| entry.pointer("/body/gate").and_then(Value::as_str))
-                    == Some(row.gate_name.as_str())
-                && entry
-                    .pointer("/tags/task_id")
-                    .and_then(Value::as_str)
-                    .or_else(|| entry.pointer("/body/data/task_id").and_then(Value::as_str))
-                    .or_else(|| entry.pointer("/body/task_id").and_then(Value::as_str))
-                    == Some(row.task_id.as_str())
-                && entry_timestamp_ms(entry) == Some(row.created_at_ms)
-        })
-}
-
-fn entry_timestamp_ms(entry: &Value) -> Option<i64> {
-    entry
-        .get("created_at_ms")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            entry
-                .get("created_at_ms")
-                .and_then(Value::as_u64)
-                .map(|ts| ts as i64)
-        })
-}
-
-fn is_gate_result_kind(kind: &str) -> bool {
-    kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")
 }
 
 #[cfg(test)]

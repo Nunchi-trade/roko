@@ -28,6 +28,66 @@ use super::wire::{
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
+pub(crate) fn system_instruction_from_segments(segments: Vec<String>) -> Option<Content> {
+    let segments: Vec<String> = segments
+        .into_iter()
+        .map(|segment| segment.trim().to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    (!segments.is_empty()).then(|| Content {
+        role: "system".to_string(),
+        parts: vec![Part::Text {
+            text: segments.join("\n\n"),
+        }],
+    })
+}
+
+pub(crate) fn build_generation_config(
+    model: &ModelProfile,
+    thinking_level: Option<&str>,
+) -> Option<GenerationConfig> {
+    let thinking_config = thinking_level
+        .map(str::trim)
+        .filter(|level| !level.is_empty())
+        .map(|thinking_level| ThinkingConfig {
+            thinking_level: thinking_level.to_string(),
+        });
+
+    if model.max_output.is_none() && thinking_config.is_none() {
+        return None;
+    }
+
+    Some(GenerationConfig {
+        temperature: None,
+        top_p: None,
+        max_output_tokens: model.max_output.and_then(|value| u32::try_from(value).ok()),
+        stop_sequences: None,
+        response_mime_type: None,
+        response_schema: None,
+        thinking_config,
+    })
+}
+
+pub(crate) fn build_generate_content_request(
+    contents: Vec<Content>,
+    system_instruction: Option<Content>,
+    tools: Option<Vec<GeminiTool>>,
+    generation_config: Option<GenerationConfig>,
+    safety_settings: Option<Vec<SafetySettingRequest>>,
+    cached_content: Option<String>,
+) -> GenerateContentRequest {
+    GenerateContentRequest {
+        contents,
+        system_instruction,
+        tools,
+        tool_config: None,
+        generation_config,
+        safety_settings,
+        cached_content,
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
 enum ChatMessage {
@@ -118,16 +178,14 @@ impl GeminiNativeAgent {
         let tools = self.translate_tools(tools);
         let generation_config = self.generation_config();
 
-        GenerateContentRequest {
+        build_generate_content_request(
             contents,
             system_instruction,
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_config: None,
+            (!tools.is_empty()).then_some(tools),
             generation_config,
-            safety_settings: (!self.safety_settings.is_empty())
-                .then_some(self.safety_settings.clone()),
-            cached_content: self.cached_content.clone(),
-        }
+            (!self.safety_settings.is_empty()).then_some(self.safety_settings.clone()),
+            self.cached_content.clone(),
+        )
     }
 
     fn system_instruction(&self, messages: &[ChatMessage]) -> Option<Content> {
@@ -151,12 +209,7 @@ impl GeminiNativeAgent {
             }
         }
 
-        (!segments.is_empty()).then(|| Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text {
-                text: segments.join("\n\n"),
-            }],
-        })
+        system_instruction_from_segments(segments)
     }
 
     fn translate_messages(&self, messages: &[ChatMessage]) -> Vec<Content> {
@@ -223,31 +276,7 @@ impl GeminiNativeAgent {
     }
 
     fn generation_config(&self) -> Option<GenerationConfig> {
-        let thinking_config = self
-            .thinking_level
-            .as_deref()
-            .map(str::trim)
-            .filter(|level| !level.is_empty())
-            .map(|thinking_level| ThinkingConfig {
-                thinking_level: thinking_level.to_string(),
-            });
-
-        if self.model.max_output.is_none() && thinking_config.is_none() {
-            return None;
-        }
-
-        Some(GenerationConfig {
-            temperature: None,
-            top_p: None,
-            max_output_tokens: self
-                .model
-                .max_output
-                .and_then(|value| u32::try_from(value).ok()),
-            stop_sequences: None,
-            response_mime_type: None,
-            response_schema: None,
-            thinking_config,
-        })
+        build_generation_config(&self.model, self.thinking_level.as_deref())
     }
 
     fn parse_response(&self, response: &GenerateContentResponse) -> Result<ChatResponse, String> {

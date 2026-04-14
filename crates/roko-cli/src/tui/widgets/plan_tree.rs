@@ -634,37 +634,6 @@ fn render_gradient_bar(width: usize, fill_pct: f64, heartbeat: Option<f64>) -> V
 }
 
 // ---------------------------------------------------------------------------
-// Data-rain fill for empty space
-// ---------------------------------------------------------------------------
-
-fn render_data_rain(frame: &mut Frame<'_>, area: Rect, elapsed: f64, progress: f64) {
-    // Subtle animated rain effect — density increases with progress
-    let base_density = 0.02 + progress * 0.08;
-    let buf = frame.buffer_mut();
-
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            // Pseudo-random using position and time
-            let seed = (x as f64 * 13.37 + y as f64 * 7.31 + elapsed * 2.0).sin();
-            if seed.abs() < base_density {
-                let ch = match ((seed * 1000.0).abs() as usize) % 4 {
-                    0 => '\u{00b7}', // ·
-                    1 => '\u{2502}', // │
-                    2 => '\u{2500}', // ─
-                    _ => '\u{00b0}', // °
-                };
-                let brightness = 0.3 + (seed.abs() * 0.7);
-                let color = super::rosedust::brighten(MoriTheme::TEXT_PHANTOM, brightness);
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
-                    cell.set_fg(color);
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Scrollbar (lightweight, buffer-direct)
 // ---------------------------------------------------------------------------
 

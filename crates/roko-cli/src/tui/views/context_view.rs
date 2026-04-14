@@ -36,16 +36,6 @@ pub enum McpStatus {
     Error,
 }
 
-impl McpStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Connected => "ok",
-            Self::Disconnected => "off",
-            Self::Error => "err",
-        }
-    }
-}
-
 /// Token burn data for sparkline rendering.
 #[derive(Debug, Clone)]
 pub struct TokenBurnData {

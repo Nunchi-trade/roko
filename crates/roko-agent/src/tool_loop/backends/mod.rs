@@ -1,4 +1,4 @@
-//! Tool-loop backend adapters and provider-aware factory helpers.
+//! Tool-loop backend adapters and OpenAI-compatible factory helpers.
 
 use std::sync::Arc;
 
@@ -39,8 +39,8 @@ impl HttpPoster for SharedHttpPoster {
     }
 }
 
-/// Create the tool-loop backend for a resolved provider + model pair.
-pub fn create_backend(
+/// Create the OpenAI-compatible tool-loop backend for a resolved provider + model pair.
+pub fn create_openai_compat_backend(
     provider: &ProviderConfig,
     model: &ModelProfile,
     poster: Arc<dyn HttpPoster>,
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_backend_factory_builds_openai_compat_backend_for_zai() {
+    async fn create_openai_compat_backend_builds_openai_compat_backend_for_zai() {
         let poster = Arc::new(MockPoster::new(
             json!({
                 "choices": [{
@@ -176,7 +176,8 @@ mod tests {
         let provider = zai_provider();
         let model = glm_5_1_profile();
 
-        let backend = create_backend(&provider, &model, poster.clone()).expect("create backend");
+        let backend = create_openai_compat_backend(&provider, &model, poster.clone())
+            .expect("create backend");
         let response = backend
             .send_turn(
                 &[json!({ "role": "user", "content": "hi" })],

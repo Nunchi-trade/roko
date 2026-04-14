@@ -22,8 +22,8 @@ These three items complete autonomous operation.
 
 ### B3: Failure Feedback Loop
 - **PRD source**: `docs/05-learning/`
-- **Current state**: Gate failures are logged but don't feed back into plan generation
-- **What to build**: When a task fails gates, automatically analyze the failure, enrich the task context, and retry or re-plan
+- **Current state**: gate failures already trigger retries/re-plans in `orchestrate.rs`, including conductor-driven retry policy and auto-replan; higher-order causal analysis and context enrichment are still partial
+- **What to build**: tighten the failure-analysis loop so gate failures consistently enrich task context, feed back into knowledge stores, and choose the right retry vs. re-plan path
 - **Effort**: Medium
 - **Impact**: High — closes learn-from-failure, enables true self-correction
 
@@ -35,26 +35,26 @@ These are all "built but never connected" — the code exists, just needs wiring
 
 ### B4: Wire SafetyLayer into ToolDispatcher
 - **PRD source**: `docs/06-safety/`
-- **Current state**: SafetyLayer is built in roko-agent and now defaults at provider factory time for orchestrate, direct PRD/plan/research agent-exec paths, `roko run`, and raw `ExecAgent` fallback
-- **What to build**: remaining work is backend universality, not factory wiring: Claude CLI, Gemini-native, embeddings, and other specialty paths still bypass the shared dispatcher/tool loop chain
+- **Current state**: SafetyLayer is built in roko-agent and is already wired into the routed/provider-backed execution paths; the remaining gap is that some subprocess and specialty backend branches still bypass the shared dispatcher/tool loop chain
+- **What to build**: close the remaining branch coverage or add equivalent enforcement for Claude CLI, Gemini-native, embeddings, and any other direct-specialty execution path
 - **Effort**: Small
 
 ### B5: Wire Conductor (Watchers) into Executor
 - **PRD source**: `docs/11-observability/`
-- **Current state**: 10 watchers + circuit breaker built in roko-conductor, not called
-- **What to build**: Call conductor from the executor loop to detect anomalies (cost spikes, latency outliers, stuck tasks)
+- **Current state**: 10 watchers + circuit breaker are already called from orchestrate.rs after dispatch, gate results, and merge results; the remaining work is broader signal coverage and policy tuning
+- **What to build**: Expand the signal set and refine the intervention policy so conductor decisions are less heuristic and more comprehensive
 - **Effort**: Small
 
 ### B6: Wire Neuro (Knowledge) into Orchestrator
 - **PRD source**: `docs/06-neuro/`
-- **Current state**: KnowledgeStore + tiers + HDC built in roko-neuro, not queried during task execution
-- **What to build**: Query neuro for relevant knowledge when assembling task context. Write gate results + successful patterns back as knowledge entries.
+- **Current state**: KnowledgeStore + tiers + HDC are already queried during task context assembly, including strategy fragments; broader writeback and cross-task learning are still partial
+- **What to build**: Expand neuro writeback so successful patterns and failure context are persisted consistently, not just queried opportunistically
 - **Effort**: Medium
 
 ### B7: Wire Daimon (Affect) into Dispatch
 - **PRD source**: `docs/09-daimon/`
-- **Current state**: PAD vectors + behavioral states built in roko-daimon, not modulating dispatch
-- **What to build**: Appraise gate results and task outcomes via daimon. Use affect state to modulate model selection (low confidence → escalate model, high confidence → use cheaper model).
+- **Current state**: PAD vectors + behavioral states are already queried and used to modulate routing, task strategy, and model selection; what remains is broader policy coverage, not first wiring
+- **What to build**: Make affect-aware dispatch more pervasive and explicit so routing policy consistently reflects confidence and behavioral state
 - **Effort**: Medium
 
 ---

@@ -20,16 +20,13 @@ use serde_json::Value;
 use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
-use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::cascade_router::{CascadeStage, StageTransition};
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::pattern_discovery::CrossEpisodeConsolidator;
-use roko_learn::prompt_experiment::{
-    ExperimentStatus, ExperimentStore, PromptExperiment, PromptVariant, VariantStats,
-};
+use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::skill_library::Skill;
 
@@ -47,8 +44,6 @@ const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
 const SKILLS_FILE: &str = "skills.json";
 const PROVIDER_HEALTH_FILE: &str = "provider-health.json";
 const LATENCY_STATS_FILE: &str = "latency-stats.json";
-const DAIMON_DIR: &str = "daimon";
-const AFFECT_FILE: &str = "affect.json";
 const NEURO_DIR: &str = ".roko/neuro";
 const KNOWLEDGE_FILE: &str = "knowledge.jsonl";
 const KNOWLEDGE_CONFIRMATIONS_FILE: &str = "knowledge-confirmations.jsonl";
@@ -561,8 +556,7 @@ impl DashboardData {
         let task_outputs = load_task_outputs(&task_outputs_dir);
         let task_outputs_stamp = file_stamp(&task_outputs_dir);
 
-        let current_plan_execution =
-            load_current_plan_execution(&root, &state, &episodes, &task_outputs);
+        let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
         let efficiency_stamp = file_stamp(&efficiency_path);
 
         // Backfill agent_output_tail from task-outputs if episode didn't provide it
@@ -714,12 +708,7 @@ impl DashboardData {
             self.agents = load_agents(&self.executor_state);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
             self.current_plan_execution = backfill_agent_output_tail(
-                load_current_plan_execution(
-                    &self.root,
-                    &self.executor_state,
-                    &self.episodes,
-                    &self.task_outputs,
-                ),
+                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
                 &self.task_outputs,
             );
         }
@@ -794,12 +783,7 @@ impl DashboardData {
             offset: stamp.len,
         };
         self.current_plan_execution = backfill_agent_output_tail(
-            load_current_plan_execution(
-                &self.root,
-                &self.executor_state,
-                &self.episodes,
-                &self.task_outputs,
-            ),
+            load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
             &self.task_outputs,
         );
     }
@@ -1812,7 +1796,6 @@ fn load_current_plan_execution(
     root: &Path,
     state: &Value,
     episodes: &[Episode],
-    task_outputs: &HashMap<String, Vec<String>>,
 ) -> Option<PlanExecutionSnapshot> {
     let plan_states = state.get("plan_states").and_then(Value::as_object)?;
     let trackers = load_task_trackers(root);
@@ -2759,27 +2742,6 @@ struct CascadeSnapshotData {
 struct PersistedModelStatsData {
     trials: u64,
     successes: u64,
-}
-
-/// Deserialized provider health snapshot from `.roko/learn/provider-health.json`.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct ProviderHealthData {
-    #[serde(default)]
-    providers: HashMap<String, ProviderEntryData>,
-}
-
-/// Per-provider circuit breaker entry.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ProviderEntryData {
-    #[serde(default)]
-    #[allow(dead_code)]
-    provider_id: String,
-    #[serde(default)]
-    state: String,
-    #[serde(default)]
-    total_requests: u64,
-    #[serde(default)]
-    total_failures: u64,
 }
 
 /// Deserialized latency stats from `.roko/learn/latency-stats.json`.
@@ -4019,460 +3981,6 @@ impl DashboardSnapshot {
 
         Some(out)
     }
-}
-
-#[derive(Debug, Clone)]
-struct LearningCascadeRowSnapshot {
-    model: String,
-    weight: f64,
-    ucb_score: f64,
-}
-
-#[derive(Debug, Clone)]
-struct LearningExperimentRowSnapshot {
-    experiment: String,
-    variants: String,
-    sample_sizes: String,
-    winner: String,
-    significance: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LearningTrendSeriesSnapshot {
-    cost_per_task: Vec<u64>,
-    tokens_per_task: Vec<u64>,
-    success_rate: Vec<u64>,
-    first_try_rate: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LearningTaskAggregateSnapshot {
-    cost_usd: f64,
-    tokens: u64,
-    first_timestamp: Option<DateTime<Utc>>,
-    first_iteration: u32,
-    first_passed: bool,
-    latest_timestamp: Option<DateTime<Utc>>,
-    latest_passed: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LearningDayAggregateSnapshot {
-    tasks: u64,
-    cost_usd: f64,
-    tokens: u64,
-    successes: u64,
-    first_try_successes: u64,
-}
-
-fn learning_cascade_rows_snapshot(
-    snapshot: &CascadeSnapshotData,
-) -> Vec<LearningCascadeRowSnapshot> {
-    let mut rows = snapshot
-        .model_slugs
-        .iter()
-        .chain(snapshot.confidence_stats.keys())
-        .fold(Vec::<String>::new(), |mut acc, slug| {
-            if !acc.iter().any(|seen| seen == slug) {
-                acc.push(slug.clone());
-            }
-            acc
-        })
-        .into_iter()
-        .map(|model| {
-            let stats = snapshot.confidence_stats.get(&model);
-            let trials = stats.map(|stats| stats.trials).unwrap_or_default();
-            let successes = stats.map(|stats| stats.successes).unwrap_or_default();
-            let ucb_score = confidence_upper_bound_snapshot(trials, successes);
-            LearningCascadeRowSnapshot {
-                model,
-                weight: ucb_score,
-                ucb_score,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let total_weight = rows
-        .iter()
-        .map(|row| row.weight)
-        .sum::<f64>()
-        .max(f64::EPSILON);
-    for row in &mut rows {
-        row.weight /= total_weight;
-    }
-
-    rows.sort_by(|a, b| {
-        b.weight
-            .partial_cmp(&a.weight)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.model.cmp(&b.model))
-    });
-
-    rows
-}
-
-fn learning_recommendation_counts_snapshot(
-    rows: &[LearningCascadeRowSnapshot],
-) -> HashMap<String, u64> {
-    let mut counts = HashMap::new();
-    if rows.is_empty() {
-        return counts;
-    }
-
-    for category in [
-        TaskCategory::Scaffolding,
-        TaskCategory::Implementation,
-        TaskCategory::Integration,
-        TaskCategory::Verification,
-        TaskCategory::Research,
-        TaskCategory::Refactor,
-        TaskCategory::Infra,
-        TaskCategory::Docs,
-    ] {
-        let complexity = complexity_for_category_snapshot(category);
-        let tier = tier_for_complexity_snapshot(complexity);
-        let selected = select_model_for_tier_snapshot(rows, tier)
-            .or_else(|| rows.first())
-            .map(|row| row.model.clone());
-        if let Some(model) = selected {
-            *counts.entry(model).or_default() += 1;
-        }
-    }
-
-    counts
-}
-
-fn learning_experiment_rows_snapshot(
-    store: &ExperimentStore,
-) -> Vec<LearningExperimentRowSnapshot> {
-    let mut rows = store
-        .iter()
-        .filter(|experiment| experiment.status == ExperimentStatus::Running)
-        .map(|experiment| learning_experiment_row_snapshot(experiment))
-        .collect::<Vec<_>>();
-    rows.sort_by(|a, b| a.experiment.cmp(&b.experiment));
-    rows
-}
-
-fn learning_experiment_row_snapshot(
-    experiment: &PromptExperiment,
-) -> LearningExperimentRowSnapshot {
-    let mut variants = experiment
-        .variants
-        .iter()
-        .filter(|variant| variant.active)
-        .map(|variant| {
-            let stats = experiment
-                .stats
-                .get(&variant.id)
-                .cloned()
-                .unwrap_or_default();
-            (variant, stats)
-        })
-        .collect::<Vec<_>>();
-    variants.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
-
-    let sample_sizes = variants
-        .iter()
-        .map(|(variant, stats)| format!("{}={}", variant.id, stats.trials))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let variant_names = variants
-        .iter()
-        .map(|(variant, _)| variant.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let winner = experiment
-        .winner_id
-        .clone()
-        .or_else(|| {
-            variants
-                .iter()
-                .max_by(|(_, a), (_, b)| {
-                    a.success_rate()
-                        .partial_cmp(&b.success_rate())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| b.trials.cmp(&a.trials))
-                })
-                .map(|(variant, _)| variant.id.clone())
-        })
-        .unwrap_or_else(|| String::from("-"));
-    let significance = experiment_significance_label_snapshot(experiment, &variants);
-
-    LearningExperimentRowSnapshot {
-        experiment: experiment.section_name.clone(),
-        variants: if variant_names.is_empty() {
-            format!("{} variants", variants.len())
-        } else {
-            format!("{} variants: {}", variants.len(), variant_names)
-        },
-        sample_sizes: if sample_sizes.is_empty() {
-            String::from("-")
-        } else {
-            sample_sizes
-        },
-        winner,
-        significance,
-    }
-}
-
-fn experiment_significance_label_snapshot(
-    experiment: &PromptExperiment,
-    variants: &[(&PromptVariant, VariantStats)],
-) -> String {
-    if variants.len() < 2 {
-        return String::from("insufficient");
-    }
-
-    let mut ranked = variants
-        .iter()
-        .map(|(variant, stats)| (variant.id.as_str(), stats.clone()))
-        .collect::<Vec<_>>();
-    ranked.sort_by(|(_, a), (_, b)| {
-        b.success_rate()
-            .partial_cmp(&a.success_rate())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.trials.cmp(&a.trials))
-    });
-
-    let (best_id, best_stats) = &ranked[0];
-    let (runner_up_id, runner_up_stats) = &ranked[1];
-    let p_value = two_proportion_p_value_snapshot(
-        best_stats.successes,
-        best_stats.trials,
-        runner_up_stats.successes,
-        runner_up_stats.trials,
-    );
-    let gap = best_stats.success_rate() - runner_up_stats.success_rate();
-    let significant = p_value
-        .map(|p| p < 0.05 && gap >= experiment.min_effect_size)
-        .unwrap_or(false);
-
-    match p_value {
-        Some(p) if significant => format!("sig p={:.3}", p),
-        Some(p) => format!("p={:.3}", p),
-        None => format!("n.s. {best_id}/{runner_up_id}"),
-    }
-}
-
-fn learning_trend_series_snapshot(events: &[AgentEfficiencyEvent]) -> LearningTrendSeriesSnapshot {
-    let today = Utc::now().date_naive();
-    let mut tasks: HashMap<(String, String), LearningTaskAggregateSnapshot> = HashMap::new();
-    for event in events {
-        tasks
-            .entry((event.plan_id.clone(), event.task_id.clone()))
-            .or_default()
-            .record(event);
-    }
-
-    let mut buckets: BTreeMap<i64, LearningDayAggregateSnapshot> = BTreeMap::new();
-    for aggregate in tasks.values() {
-        let Some(day) = aggregate.latest_day() else {
-            continue;
-        };
-        let age = today.signed_duration_since(day).num_days();
-        if !(0..7).contains(&age) {
-            continue;
-        }
-        let bucket = buckets.entry(age).or_default();
-        bucket.tasks += 1;
-        bucket.cost_usd += aggregate.cost_usd;
-        bucket.tokens += aggregate.tokens;
-        if aggregate.latest_passed {
-            bucket.successes += 1;
-        }
-        if aggregate.first_try_passed() {
-            bucket.first_try_successes += 1;
-        }
-    }
-
-    LearningTrendSeriesSnapshot {
-        cost_per_task: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0)
-                        .round()
-                        .max(0.0) as u64
-                }
-            })
-            .collect(),
-        tokens_per_task: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    bucket.tokens / bucket.tasks
-                }
-            })
-            .collect(),
-        success_rate: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    ((bucket.successes as f64 / bucket.tasks as f64) * 100.0).round() as u64
-                }
-            })
-            .collect(),
-        first_try_rate: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    ((bucket.first_try_successes as f64 / bucket.tasks as f64) * 100.0).round()
-                        as u64
-                }
-            })
-            .collect(),
-    }
-}
-
-impl LearningTaskAggregateSnapshot {
-    fn record(&mut self, event: &AgentEfficiencyEvent) {
-        self.cost_usd += event.cost_usd;
-        self.tokens += event.total_tokens();
-
-        let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
-            return;
-        };
-
-        if self.first_timestamp.map_or(true, |first| timestamp < first) {
-            self.first_timestamp = Some(timestamp);
-            self.first_iteration = event.iteration;
-            self.first_passed = event.gate_passed;
-        }
-
-        if self
-            .latest_timestamp
-            .map_or(true, |latest| timestamp > latest)
-        {
-            self.latest_timestamp = Some(timestamp);
-            self.latest_passed = event.gate_passed;
-        }
-    }
-
-    fn latest_day(&self) -> Option<chrono::NaiveDate> {
-        self.latest_timestamp
-            .map(|timestamp| timestamp.date_naive())
-    }
-
-    fn first_try_passed(&self) -> bool {
-        self.first_iteration == 1 && self.first_passed
-    }
-}
-
-fn confidence_upper_bound_snapshot(trials: u64, successes: u64) -> f64 {
-    if trials == 0 {
-        return 1.0;
-    }
-
-    let p = successes as f64 / trials as f64;
-    let width = 1.96 * (p * (1.0 - p) / trials as f64).sqrt();
-    (p + width).min(1.0)
-}
-
-fn select_model_for_tier_snapshot<'a>(
-    rows: &'a [LearningCascadeRowSnapshot],
-    tier: &str,
-) -> Option<&'a LearningCascadeRowSnapshot> {
-    rows.iter()
-        .filter(|row| tier_for_model_snapshot(&row.model) == tier)
-        .max_by(|a, b| {
-            a.weight
-                .partial_cmp(&b.weight)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.model.cmp(&b.model))
-        })
-}
-
-fn complexity_for_category_snapshot(category: TaskCategory) -> TaskComplexityBand {
-    match category {
-        TaskCategory::Scaffolding | TaskCategory::Docs => TaskComplexityBand::Fast,
-        TaskCategory::Research | TaskCategory::Refactor => TaskComplexityBand::Complex,
-        TaskCategory::Implementation
-        | TaskCategory::Integration
-        | TaskCategory::Verification
-        | TaskCategory::Infra => TaskComplexityBand::Standard,
-        _ => TaskComplexityBand::Standard,
-    }
-}
-
-fn tier_for_complexity_snapshot(complexity: TaskComplexityBand) -> &'static str {
-    match complexity {
-        TaskComplexityBand::Fast => "fast",
-        TaskComplexityBand::Complex => "premium",
-        _ => "standard",
-    }
-}
-
-fn tier_for_model_snapshot(model: &str) -> &'static str {
-    let lower = model.to_ascii_lowercase();
-    if lower.contains("haiku") {
-        "fast"
-    } else if lower.contains("opus") || lower.contains("premium") {
-        "premium"
-    } else {
-        "standard"
-    }
-}
-
-fn format_series(values: &[u64]) -> String {
-    values
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn two_proportion_p_value_snapshot(
-    successes_a: u64,
-    trials_a: u64,
-    successes_b: u64,
-    trials_b: u64,
-) -> Option<f64> {
-    let z = two_proportion_z_score_snapshot(successes_a, trials_a, successes_b, trials_b)?;
-    Some(2.0 * (1.0 - standard_normal_cdf_snapshot(z.abs())))
-}
-
-fn two_proportion_z_score_snapshot(
-    successes_a: u64,
-    trials_a: u64,
-    successes_b: u64,
-    trials_b: u64,
-) -> Option<f64> {
-    if trials_a == 0 || trials_b == 0 {
-        return None;
-    }
-
-    let p1 = successes_a as f64 / trials_a as f64;
-    let p2 = successes_b as f64 / trials_b as f64;
-    let pooled = (successes_a + successes_b) as f64 / (trials_a + trials_b) as f64;
-    let standard_error =
-        (pooled * (1.0 - pooled) * (1.0 / trials_a as f64 + 1.0 / trials_b as f64)).sqrt();
-    if standard_error == 0.0 {
-        return None;
-    }
-
-    Some((p1 - p2) / standard_error)
-}
-
-fn standard_normal_cdf_snapshot(x: f64) -> f64 {
-    let t = 1.0 / (1.0 + 0.231_641_9 * x.abs());
-    let d = 0.398_942_3 * (-0.5 * x * x).exp();
-    let prob = d
-        * t
-        * (0.319_381_5 + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
-    if x >= 0.0 { 1.0 - prob } else { prob }
 }
 
 /// Per-agent aggregated stats.

@@ -15,7 +15,7 @@
 
 ## Overview
 
-This document describes the **#1 remaining integration gap** in the Roko safety architecture: the SafetyLayer is fully built and wired to the ToolDispatcher, but that pipeline is not yet universal across the CLI/runtime branches that actually run agents. Routed HTTP provider paths now reach the ToolDispatcher for OpenAI-compatible providers, Anthropic API, Gemini compat models, Gemini-native non-grounding tool-capable models, and Perplexity tool-capable chat, but known-protocol subprocess paths and native or specialty endpoints still bypass it.
+This document describes the **remaining integration gap** in the Roko safety architecture: the SafetyLayer is fully built and wired to the ToolDispatcher for the routed provider-backed paths, but that pipeline is still not universal across the CLI/runtime branches that actually run agents. Routed HTTP provider paths now reach the ToolDispatcher for OpenAI-compatible providers, Anthropic API, Gemini compat models, Gemini-native non-grounding tool-capable models, and Perplexity tool-capable chat. Known-protocol subprocess paths and some native or specialty endpoints still bypass it.
 
 This is not a design gap — the components exist and are connected. It is a **wiring gap** — some of the connected components are still not called from important execution paths. The pattern is documented in the implementation plan at `tmp/implementation-plans/11-inconsistencies.md` and remains a top-priority item for making the safety architecture universally effective.
 
@@ -25,7 +25,7 @@ This is not a design gap — the components exist and are connected. It is a **w
 
 ### What Is Built
 
-The safety infrastructure is substantial and well-tested:
+The safety infrastructure is substantial and well-tested, and the routed/provider-backed path now exercises it in production:
 
 **SafetyLayer** (`roko-agent/src/safety/mod.rs`, ~285 lines): A composite struct that chains six safety guards:
 
@@ -98,7 +98,7 @@ let result = agent.run(&prompt).await?;
 - **No RateLimiter** — there are no per-role, per-tool rate limits
 - **No audit emissions** — tool calls are not logged to the audit chain
 
-The SafetyLayer and ToolDispatcher are no longer completely unreachable from the CLI runtime, but they are still not constructed or called in every execution branch.
+The SafetyLayer and ToolDispatcher are no longer completely unreachable from the CLI runtime. They are constructed and called in the routed/provider-backed execution path, but not yet in every subprocess or backend-specific branch.
 
 ### Why This Happened
 
@@ -111,7 +111,13 @@ This is a documented pattern in the Roko codebase: "built but never connected" (
 ### The Architecture Mismatch
 
 ```
-CURRENT FLOW (no safety):
+CURRENT FLOW (partially wired):
+  orchestrate.rs → provider resolution → ToolLoop + ToolDispatcher
+                   ↓
+             safety-enabled routed providers
+                   ↓
+           raw subprocess / specialty branches still bypass when used
+
   orchestrate.rs → ExecAgent::run() → subprocess (Claude CLI)
                                         ↓
                                    Claude CLI handles its own
@@ -126,7 +132,7 @@ INTENDED FLOW (with safety):
                    └─── audit Engrams emitted at each stage ──────┘
 ```
 
-The mismatch: orchestrate.rs delegates to a subprocess that does its own tool dispatch, while the SafetyLayer is designed for in-process tool dispatch. Bridging this gap requires either:
+The mismatch is now narrower: orchestrate.rs delegates to a subprocess in the remaining branches that do their own tool dispatch, while the SafetyLayer is designed for in-process tool dispatch. Bridging the remaining gap requires either:
 
 **Option A: Hook into the subprocess.** Pass safety configuration to Claude CLI via `--settings` or `--allowed-tools`, relying on Claude CLI's own safety mechanisms. This is partial — it delegates enforcement to the subprocess and loses Roko's audit chain.
 
@@ -144,13 +150,13 @@ The mismatch: orchestrate.rs delegates to a subprocess that does its own tool di
 
 | Risk | Severity | Mitigation Without Roko Safety |
 |---|---|---|
-| Agent runs `rm -rf /` or destructive bash | Critical | Relies on Claude CLI's own safety settings |
-| Agent force-pushes to protected branch | High | Relies on Git server-side protections |
-| Agent accesses private networks | Medium | Relies on OS/network-level firewalls |
-| Agent escapes worktree sandbox | High | Relies on Claude CLI's `--worktree` flag |
-| Agent leaks API keys in output | High | No mitigation unless Claude CLI scrubs |
-| Agent exceeds rate limits | Medium | No mitigation — cost runaway possible |
-| Tool calls not audited | High | No forensic replay capability |
+| Agent runs `rm -rf /` or destructive bash | Critical | Relies on Claude CLI's own safety settings in the remaining bypass branches |
+| Agent force-pushes to protected branch | High | Relies on Git server-side protections in the remaining bypass branches |
+| Agent accesses private networks | Medium | Relies on OS/network-level firewalls in the remaining bypass branches |
+| Agent escapes worktree sandbox | High | Relies on Claude CLI's `--worktree` flag in the remaining bypass branches |
+| Agent leaks API keys in output | High | No mitigation unless Claude CLI scrubs in the remaining bypass branches |
+| Agent exceeds rate limits | Medium | No mitigation — cost runaway possible in the remaining bypass branches |
+| Tool calls not audited | High | No forensic replay capability in the remaining bypass branches |
 
 ### What Works Without the ToolDispatcher
 
@@ -228,7 +234,7 @@ The gap is documented in:
 - CLAUDE.md "What to work on" section (now completed for several items, but this gap persists)
 
 The implementation plan recommends:
-1. Update orchestrate.rs to create ToolDispatcher with SafetyLayer (Phase B)
+1. Extend orchestrate.rs coverage so the remaining subprocess/specialty branches also flow through the shared safety path
 2. Replace ExecAgent with ClaudeCliAgent for the primary execution path (deferred)
 3. Wire SystemPromptBuilder templates into agent prompts (completed)
 4. Add new checklist items for the ToolDispatcher gap
@@ -239,13 +245,13 @@ The implementation plan recommends:
 
 This document exists because the writing rules require that the #1 integration gap be flagged prominently. The gap is:
 
-- **Real**: orchestrate.rs does not construct or call ToolDispatcher
+- **Real**: orchestrate.rs constructs and calls ToolDispatcher in routed/provider-backed execution, but still bypasses it in some subprocess/specialty branches
 - **Verified**: confirmed by reading the active codebase (`crates/roko-cli/src/orchestrate.rs`, `crates/roko-agent/src/dispatcher/mod.rs`, `crates/roko-agent/src/safety/mod.rs`)
 - **Documented**: tracked in implementation plans and CLAUDE.md
-- **Impactful**: all six safety guards are inactive in the production code path
+- **Impactful**: all six safety guards are active in routed/provider-backed execution, but still inactive in the remaining subprocess/specialty branches
 - **Solvable**: the components exist and are tested — this is a wiring task, not a design task
 
-Until this gap is closed, the safety architecture described in this topic (00-defense-in-depth through 15-forensic-ai) represents the **target state**, not the **current state**. The current state has Gates (post-execution verification) and ProcessSupervisor (lifecycle management) active. The per-tool-call safety pipeline (pre-execution checks, real-time scrubbing, rate limiting, audit emissions) is built but dormant.
+Until this gap is closed, the safety architecture described in this topic (00-defense-in-depth through 15-forensic-ai) represents the **target state**, not the **current state**. The current state has Gates (post-execution verification) and ProcessSupervisor (lifecycle management) active. The per-tool-call safety pipeline is built and active in routed/provider-backed execution, but still dormant in the remaining subprocess/specialty branches.
 
 ---
 

@@ -11,7 +11,7 @@ pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
 pub use hypnagogia::HypnagogiaEngine;
 pub use runner::{
     DreamAgentConfig, DreamConfig, DreamEngine, DreamLoopConfig, DreamReport, DreamRunner, Episode,
-    Insight,
+    Insight, build_dream_review_dispatcher,
 };
 
 /// Stable subsystem identifiers still surfaced by the dreams crate.
