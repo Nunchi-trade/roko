@@ -10,9 +10,12 @@ use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
-use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
+use roko_agent::provider::{
+    AgentOptions, create_agent_for_model, current_safety_layer, is_known_protocol_command,
+    with_safety_layer,
+};
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ExecAgent, OllamaLlmBackend};
+use roko_agent::{Agent, AgentResult, OllamaLlmBackend, SafetyLayer};
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
@@ -313,29 +316,31 @@ async fn dispatch_agent(
             .clone()
             .unwrap_or_else(|| routing_config.agent.default_model.clone());
         let resolved = resolve_model(&routing_config, &model);
-        let agent = create_agent_for_model(
-            &routing_config,
-            &model,
-            AgentOptions {
-                command: Some(config.agent.command.clone()),
-                timeout_ms: Some(config.agent.timeout_ms),
-                system_prompt: Some(system_prompt),
-                cached_content: None,
-                tools: Some(tools_csv),
-                mcp_config: config.agent.mcp_config.clone(),
-                working_dir: Some(workdir.to_path_buf()),
-                provider_semaphores: None,
-                env: config.agent.env.clone(),
-                extra_args: config.agent.args.clone(),
-                effort: Some(config.agent.effort.clone()),
-                bare_mode: config.agent.bare_mode,
-                dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
-                    &config.prompt.role,
-                ),
-                name: format!("{}:{model}", resolved.provider_kind.label()),
-            },
-        )
-        .with_context(|| format!("create agent for model {model}"))?;
+        let agent = with_scoped_safety_layer(|| {
+            create_agent_for_model(
+                &routing_config,
+                &model,
+                AgentOptions {
+                    command: Some(config.agent.command.clone()),
+                    timeout_ms: Some(config.agent.timeout_ms),
+                    system_prompt: Some(system_prompt),
+                    cached_content: None,
+                    tools: Some(tools_csv),
+                    mcp_config: config.agent.mcp_config.clone(),
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: config.agent.env.clone(),
+                    extra_args: config.agent.args.clone(),
+                    effort: Some(config.agent.effort.clone()),
+                    bare_mode: config.agent.bare_mode,
+                    dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
+                        &config.prompt.role,
+                    ),
+                    name: format!("{}:{model}", resolved.provider_kind.label()),
+                },
+            )
+            .with_context(|| format!("create agent for model {model}"))
+        })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "claude" {
         // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
@@ -364,38 +369,74 @@ async fn dispatch_agent(
             synthetic_extra_args.push(fallback_model.clone());
         }
 
-        let agent = create_agent_for_model(
-            &synthesized_config,
-            &model,
-            AgentOptions {
-                command: Some(config.agent.command.clone()),
-                timeout_ms: Some(config.agent.timeout_ms),
-                system_prompt: Some(system_prompt),
-                cached_content: None,
-                tools: Some(tools_csv),
-                mcp_config: config.agent.mcp_config.clone(),
-                working_dir: Some(workdir.to_path_buf()),
-                provider_semaphores: None,
-                env: config.agent.env.clone(),
-                extra_args: synthetic_extra_args,
-                effort: Some(config.agent.effort.clone()),
-                bare_mode: config.agent.bare_mode,
-                dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
-                    &config.prompt.role,
-                ),
-                name: String::new(),
-            },
-        )
-        .with_context(|| format!("create synthesized claude agent for model {model}"))?;
+        let agent = with_scoped_safety_layer(|| {
+            create_agent_for_model(
+                &synthesized_config,
+                &model,
+                AgentOptions {
+                    command: Some(config.agent.command.clone()),
+                    timeout_ms: Some(config.agent.timeout_ms),
+                    system_prompt: Some(system_prompt),
+                    cached_content: None,
+                    tools: Some(tools_csv),
+                    mcp_config: config.agent.mcp_config.clone(),
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: config.agent.env.clone(),
+                    extra_args: synthetic_extra_args,
+                    effort: Some(config.agent.effort.clone()),
+                    bare_mode: config.agent.bare_mode,
+                    dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
+                        &config.prompt.role,
+                    ),
+                    name: String::new(),
+                },
+            )
+            .with_context(|| format!("create synthesized claude agent for model {model}"))
+        })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "ollama" {
         Ok(run_ollama_agentic_single(workdir, config, prompt_text).await)
     } else if is_known_protocol_command(&config.agent.command) {
-        let mut agent = ExecAgent::new(config.agent.command.clone(), config.agent.args.clone())
-            .with_timeout_ms(config.agent.timeout_ms);
-        for (key, value) in &config.agent.env {
-            agent = agent.with_env_var(key.clone(), value.clone());
-        }
+        let mut fallback_config = RokoConfig::default();
+        fallback_config.agent.command = Some(config.agent.command.clone());
+        fallback_config.agent.default_backend = config.agent.command.clone();
+
+        let model = config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| config.agent.command.clone());
+        fallback_config.agent.default_model = model.clone();
+
+        let agent = with_scoped_safety_layer(|| {
+            create_agent_for_model(
+                &fallback_config,
+                &model,
+                AgentOptions {
+                    command: Some(config.agent.command.clone()),
+                    timeout_ms: Some(config.agent.timeout_ms),
+                    system_prompt: None,
+                    cached_content: None,
+                    tools: None,
+                    mcp_config: None,
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: config.agent.env.clone(),
+                    extra_args: config.agent.args.clone(),
+                    effort: Some(config.agent.effort.clone()),
+                    bare_mode: config.agent.bare_mode,
+                    dangerously_skip_permissions: false,
+                    name: String::new(),
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "create known-protocol subprocess agent for {}",
+                    config.agent.command
+                )
+            })
+        })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else {
         let mut fallback_config = RokoConfig::default();
@@ -406,29 +447,41 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| config.agent.command.clone());
-        let agent = create_agent_for_model(
-            &fallback_config,
-            &model,
-            AgentOptions {
-                command: Some(config.agent.command.clone()),
-                timeout_ms: Some(config.agent.timeout_ms),
-                system_prompt: None,
-                cached_content: None,
-                tools: None,
-                mcp_config: None,
-                working_dir: Some(workdir.to_path_buf()),
-                provider_semaphores: None,
-                env: config.agent.env.clone(),
-                extra_args: config.agent.args.clone(),
-                effort: Some(config.agent.effort.clone()),
-                bare_mode: config.agent.bare_mode,
-                dangerously_skip_permissions: false,
-                name: String::new(),
-            },
-        )
-        .with_context(|| format!("create generic subprocess agent for {}", config.agent.command))?;
+        let agent = with_scoped_safety_layer(|| {
+            create_agent_for_model(
+                &fallback_config,
+                &model,
+                AgentOptions {
+                    command: Some(config.agent.command.clone()),
+                    timeout_ms: Some(config.agent.timeout_ms),
+                    system_prompt: None,
+                    cached_content: None,
+                    tools: None,
+                    mcp_config: None,
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: config.agent.env.clone(),
+                    extra_args: config.agent.args.clone(),
+                    effort: Some(config.agent.effort.clone()),
+                    bare_mode: config.agent.bare_mode,
+                    dangerously_skip_permissions: false,
+                    name: String::new(),
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "create generic subprocess agent for {}",
+                    config.agent.command
+                )
+            })
+        })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     }
+}
+
+fn with_scoped_safety_layer<R>(f: impl FnOnce() -> R) -> R {
+    let layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
+    with_safety_layer(layer, f)
 }
 
 /// Ollama agentic path for `roko run`.
@@ -1017,6 +1070,20 @@ mod tests {
             optional_resume_session_id(&cfg, None).as_deref(),
             Some("env-sess")
         );
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_defaults_when_unscoped() {
+        let layer = with_scoped_safety_layer(current_safety_layer);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_preserves_existing_scope() {
+        let observed = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+            with_scoped_safety_layer(current_safety_layer)
+        });
+        assert!(observed.is_some());
     }
 
     #[tokio::test]
