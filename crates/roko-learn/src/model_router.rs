@@ -91,6 +91,15 @@ pub struct RoutingContext {
     pub crate_familiarity: f64,
     /// Whether a prior attempt at this task has failed.
     pub has_prior_failure: bool,
+    /// Normalized conductor pressure in `[0, 1]` derived from active agents,
+    /// ready-queue depth, and queue wait time.
+    pub conductor_load: f64,
+    /// Number of currently active agent processes.
+    pub active_agents: u32,
+    /// Number of ready tasks currently waiting in the queue.
+    pub ready_queue_depth: u32,
+    /// Longest observed ready-queue wait across queued tasks, in hours.
+    pub max_queue_wait_hours: f64,
     /// First-class affect policy snapshot from the Daimon.
     pub daimon_policy: DaimonPolicy,
     /// Requested thinking / reasoning level for this task, if any.
@@ -1269,6 +1278,10 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
+            conductor_load: 0.0,
+            active_agents: 0,
+            ready_queue_depth: 0,
+            max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::new(0.5, roko_core::BehavioralState::Engaged),
             thinking_level: None,
             previous_model: None,

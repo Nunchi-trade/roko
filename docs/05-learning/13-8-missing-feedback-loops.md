@@ -78,7 +78,7 @@ CascadeRouter bias: PreferCheaper
 Routes to faster model to reduce queue pressure
 ```
 
-**Status:** Partially wired. The C-Factor provides an aggregate performance signal that influences routing bias, but direct conductor→routing wiring (queue depth, active agent count) is not yet implemented.
+**Status:** Wired for the live orchestration path. `RoutingContext` now carries conductor pressure derived from active agent count, ready-queue depth, and queue wait, and `CascadeRouter` explicitly biases selection toward cheaper tiers when pressure is high. The remaining gap is richer resource telemetry beyond the current heuristic snapshot.
 
 **Impact:** Prevents resource exhaustion during high-load periods by dynamically adjusting quality-cost tradeoffs.
 
@@ -127,7 +127,7 @@ Failure→Replanning trigger:
     └── Create new subtasks T3a, T3b, T3c
 ```
 
-**Status:** Not wired. The orchestrator currently retries tasks with the same decomposition. The replanning feedback path requires integration with the plan generator (`roko prd plan`).
+**Status:** Wired for the orchestrator path. Gate failures increment per-plan failure counters and, when auto-replan is enabled, trigger strategy-specific replan flows that can retry, escalate, or decompose the task into subtasks. The remaining gap is tighter coupling with the standalone `roko prd plan` generator and richer failure analysis.
 
 **Impact:** Prevents the system from burning budget on intractable tasks. Replanning turns a hard task into multiple easier tasks that may succeed individually.
 
@@ -157,7 +157,7 @@ Inject into prompt:
      4. Add a test in config_tests.rs"
 ```
 
-**Status:** Partially wired. The skill library stores and retrieves skills. The injection path from skill library to prompt composer requires integration with the `SystemPromptBuilder`.
+**Status:** Wired for live prompt composition. Matching skills from `SkillLibrary` are rendered into a dedicated `skill-library` prompt section before composition. The remaining gap is deeper section-native integration inside `SystemPromptBuilder` itself rather than the current orchestration-layer injection.
 
 **Impact:** Reduces iterations by providing agents with proven approaches. The 100th modification to a crate is dramatically cheaper than the 1st because the skill library has accumulated the crate's patterns.
 
@@ -181,7 +181,7 @@ BudgetGuardrail::check() → BudgetAction::Block
 CascadeRouter: only consider models cheaper than $0.10/M tokens
 ```
 
-**Status:** Cost tracking wired (CostsLog, CostRecord). Budget guardrail enforcement is defined in implementation plan 2H.05–2H.10 but not yet integrated into the cascade router's selection path.
+**Status:** Wired in the live dispatch path. `BudgetGuardrail` checks current spend before dispatch and can block execution or force a cheaper tier/model. The remaining gap is moving that pressure fully into first-class candidate scoring inside `CascadeRouter` instead of the current pre-dispatch override.
 
 **Impact:** Prevents cost overruns by dynamically adjusting the quality-cost tradeoff. The system degrades gracefully (cheaper models, lower quality) rather than halting entirely.
 
@@ -208,7 +208,7 @@ Reward adjustment:
 Bandit learns to prefer Model B when latency SLA is tight
 ```
 
-**Status:** Latency tracking wired (`LatencyRegistry` with EWMA per model/provider, p50/p95/p99 percentiles). The reward adjustment path is defined in implementation plan 2G.14 but not yet integrated into the bandit update function.
+**Status:** Wired. Runtime feedback computes routing reward with actual observed latency plus model/provider latency registries and records that reward into cascade-router observations. The remaining gap is more explicit latency-SLA-aware scalarization at route-selection time.
 
 **Impact:** Prevents the bandit from selecting high-latency models that violate SLAs. Particularly important for interactive use cases where the human is waiting for results.
 
@@ -231,7 +231,7 @@ Update static config:
 All future tasks use the winning variant by default
 ```
 
-**Status:** Experiment store wired (tracks variants, outcomes, UCB1 selection). The promotion path from concluded experiments to static configuration is defined in implementation plan 2O.12 but not yet automated.
+**Status:** Wired in persisted runtime defaults. Concluded prompt experiments keep returning their winner from the persisted experiment store on future assignments, and concluded role/model experiments already update the cascade router's static table. The remaining gap is optional materialization back into human-edited config/prompt source files.
 
 **Impact:** Experiment results are currently ephemeral — they influence routing while the experiment is running, but the winner isn't persisted into the static config. Closing this loop makes experiment improvements permanent.
 
@@ -242,13 +242,13 @@ All future tasks use the winning variant by default
 | # | Loop | Source | Target | Status |
 |---|------|--------|--------|--------|
 | 1 | Health → Routing | ProviderHealthRegistry | CascadeRouter candidate filter | **Wired** |
-| 2 | Conductor → Routing | Conductor load signals | CascadeRouter bias | Partial (via C-Factor) |
+| 2 | Conductor → Routing | Conductor load signals | CascadeRouter bias | **Wired (pressure heuristic)** |
 | 3 | Section → Scaffold | PromptSectionMeta | Composer section weights | **Wired (live orchestration path)** |
-| 4 | Failure → Replanning | Gate failure patterns | Plan generator | Not wired |
-| 5 | Skills → Prompts | SkillLibrary | SystemPromptBuilder | Partial |
-| 6 | Cost → Routing | Budget guardrails | CascadeRouter model tier | Data collection wired |
-| 7 | Latency → Reward | LatencyRegistry | Bandit reward signal | Data collection wired |
-| 8 | Experiments → Static | ExperimentStore | Static config | Not wired |
+| 4 | Failure → Replanning | Gate failure patterns | Plan generator | **Wired (orchestrator path)** |
+| 5 | Skills → Prompts | SkillLibrary | SystemPromptBuilder | **Wired (orchestration-layer injection)** |
+| 6 | Cost → Routing | Budget guardrails | CascadeRouter model tier | **Wired (pre-dispatch guardrail)** |
+| 7 | Latency → Reward | LatencyRegistry | Bandit reward signal | **Wired** |
+| 8 | Experiments → Static | ExperimentStore | Static config | **Wired (persisted winner + router sync)** |
 
 ---
 

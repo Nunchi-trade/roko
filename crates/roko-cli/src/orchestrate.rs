@@ -1650,6 +1650,7 @@ fn cascade_routing_context(
     use roko_core::TaskComplexityBand;
     use roko_learn::model_router::RoutingContext;
 
+    let completed_plans = runner.executor.completed_plans();
     let complexity = match task_def.map(|td| td.tier.as_str()).unwrap_or("focused") {
         "mechanical" | "fast" => TaskComplexityBand::Fast,
         "architectural" | "complex" | "premium" => TaskComplexityBand::Complex,
@@ -1667,6 +1668,22 @@ fn cascade_routing_context(
 
     let crate_familiarity = runner.crate_familiarity_tracker.score_for_task(task_def);
     let affect = runner.daimon.query();
+    let (ready_queue_depth, max_queue_wait_hours) = runner
+        .task_trackers
+        .get(plan_id)
+        .map(|tracker| {
+            let ready_ids = tracker.ready_task_ids(&completed_plans);
+            let max_wait = ready_ids
+                .iter()
+                .filter_map(|task_id| tracker.queue_wait_hours(task_id))
+                .fold(0.0, f64::max);
+            (
+                u32::try_from(ready_ids.len()).unwrap_or(u32::MAX),
+                max_wait,
+            )
+        })
+        .unwrap_or((0, 0.0));
+    let conductor_load = routing_load_pressure(0, ready_queue_depth, max_queue_wait_hours);
 
     RoutingContext {
         task_category: TaskCategory::Implementation,
@@ -1675,11 +1692,30 @@ fn cascade_routing_context(
         role,
         crate_familiarity,
         has_prior_failure,
+        conductor_load,
+        active_agents: 0,
+        ready_queue_depth,
+        max_queue_wait_hours,
         daimon_policy: DaimonPolicy::new(affect.confidence, affect.behavioral_state),
         thinking_level: Some(runner.config.agent.effort.clone()),
         previous_model: None,
         plan_context_tokens: None,
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RoutingLoadSnapshot {
+    pressure: f64,
+    active_agents: u32,
+    ready_queue_depth: u32,
+    max_queue_wait_hours: f64,
+}
+
+fn routing_load_pressure(active_agents: u32, ready_queue_depth: u32, max_queue_wait_hours: f64) -> f64 {
+    let active_pressure = (f64::from(active_agents) / 6.0).clamp(0.0, 1.0);
+    let queue_pressure = (f64::from(ready_queue_depth) / 6.0).clamp(0.0, 1.0);
+    let wait_pressure = (max_queue_wait_hours / 8.0).clamp(0.0, 1.0);
+    active_pressure.max(queue_pressure).max(wait_pressure)
 }
 
 fn coding_strategy_coordinates(
@@ -3166,6 +3202,37 @@ impl PlanRunner {
 
     fn worktrees_enabled(&self) -> bool {
         self.executor.config().use_worktrees && self.cloud_execution.is_none()
+    }
+
+    async fn routing_load_snapshot(&self) -> RoutingLoadSnapshot {
+        let active_agents = u32::try_from(self.supervisor.count().await).unwrap_or(u32::MAX);
+        let completed_plans = self.executor.completed_plans();
+        let mut ready_queue_depth = 0_u32;
+        let mut max_queue_wait_hours = 0.0;
+
+        for tracker in self.task_trackers.values() {
+            let ready_ids = tracker.ready_task_ids(&completed_plans);
+            ready_queue_depth = ready_queue_depth
+                .saturating_add(u32::try_from(ready_ids.len()).unwrap_or(u32::MAX));
+            let plan_max_wait = ready_ids
+                .iter()
+                .filter_map(|task_id| tracker.queue_wait_hours(task_id))
+                .fold(0.0, f64::max);
+            if plan_max_wait > max_queue_wait_hours {
+                max_queue_wait_hours = plan_max_wait;
+            }
+        }
+
+        RoutingLoadSnapshot {
+            pressure: routing_load_pressure(
+                active_agents,
+                ready_queue_depth,
+                max_queue_wait_hours,
+            ),
+            active_agents,
+            ready_queue_depth,
+            max_queue_wait_hours,
+        }
     }
 
     fn record_conductor_negative_feedback(&self, plan_id: &str, intervention: &ConductorDecision) {
@@ -8498,7 +8565,12 @@ impl PlanRunner {
             selected_model = forced_model;
         } else if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
-            let routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
+            let mut routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
+            let load_snapshot = self.routing_load_snapshot().await;
+            routing_ctx.conductor_load = load_snapshot.pressure;
+            routing_ctx.active_agents = load_snapshot.active_agents;
+            routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
+            routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
             let agent_id = format!("{role:?}");
             let all_model_slugs = cascade_router
                 .linucb()

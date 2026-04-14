@@ -716,6 +716,17 @@ fn behavioral_state_tier_shift(ctx: &RoutingContext) -> i8 {
     }
 }
 
+fn conductor_load_tier_shift(ctx: &RoutingContext) -> i8 {
+    let load = ctx.conductor_load.clamp(0.0, 1.0);
+    if load >= 0.9 {
+        -2
+    } else if load >= 0.65 {
+        -1
+    } else {
+        0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThinkingPreference {
     Neutral,
@@ -1252,6 +1263,45 @@ impl CascadeRouter {
             .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
             .map(ModelSpec::from_slug)
             .unwrap_or(model)
+    }
+
+    fn bias_model_for_conductor_load_among(
+        &self,
+        model: ModelSpec,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let shift = conductor_load_tier_shift(ctx);
+        if shift == 0 {
+            return model;
+        }
+
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let target_rank = target_tier_rank(current_rank, shift);
+        candidates
+            .iter()
+            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .map(ModelSpec::from_slug)
+            .unwrap_or(model)
+    }
+
+    fn apply_context_biases_among(
+        &self,
+        route: CascadeModel,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let primary =
+            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary =
+            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary =
+            self.bias_model_for_conductor_load_among(route.primary.clone(), ctx, candidates);
+        self.retarget_route_primary(route, candidates, primary)
     }
 
     /// Return the index of `slug` in the router's model list.
@@ -2133,21 +2183,21 @@ impl CascadeRouter {
             }
             ThinkingPreference::Neutral => None,
         } {
-            let selected = self.bias_model_for_behavioral_state_among(
-                ModelSpec::from_slug(thinking_selected),
-                ctx,
-                &self.model_slugs,
-            );
-            let selected = self.bias_model_for_cfactor(selected, cfactor, agent_id);
-            let tier = slug_to_tier(&selected.slug);
-
-            return CascadeModel {
-                primary: selected,
+            let tier = slug_to_tier(&thinking_selected);
+            let route = CascadeModel {
+                primary: ModelSpec::from_slug(thinking_selected),
                 fallback_chain: Vec::new(),
                 context_overflow_fallback: None,
                 latency_sla_ms: default_latency_sla(tier),
                 stage: CascadeStage::Static,
             };
+            return self.apply_context_biases_among(
+                route,
+                ctx,
+                &self.model_slugs,
+                cfactor,
+                agent_id,
+            );
         }
 
         // For research tasks, prefer Perplexity Sonar when available.
@@ -2170,25 +2220,19 @@ impl CascadeRouter {
                 .cloned()
                 .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
         };
+        let tier = slug_to_tier(&slug);
 
-        let selected = self.bias_model_for_behavioral_state_among(
-            ModelSpec::from_slug(&slug),
-            ctx,
-            &self.model_slugs,
-        );
-        let selected = self.bias_model_for_cfactor(selected, cfactor, agent_id);
-        let tier = slug_to_tier(&selected.slug);
-        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
-        let context_overflow_fallback =
-            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
-
-        CascadeModel {
-            primary: selected,
-            fallback_chain,
-            context_overflow_fallback,
+        let route = CascadeModel {
+            primary: ModelSpec::from_slug(&slug),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &slug),
+            context_overflow_fallback: context_overflow_fallback_for_model(
+                &self.model_slugs,
+                &slug,
+            ),
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Static,
-        }
+        };
+        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
     }
 
     fn route_static_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
@@ -2265,12 +2309,7 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         let route = self.route_static_filtered(ctx, candidates);
-        let primary =
-            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
-        let route = self.retarget_route_primary(route, candidates, primary);
-        let primary =
-            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
-        self.retarget_route_primary(route, candidates, primary)
+        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
     }
 
     fn route_confidence(
@@ -2282,25 +2321,19 @@ impl CascadeRouter {
         let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
         let scores = self.confidence_scores(&thinking_candidates, ctx);
         let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+        let tier = slug_to_tier(&best_slug);
 
-        let selected = self.bias_model_for_behavioral_state_among(
-            ModelSpec::from_slug(&best_slug),
-            ctx,
-            &self.model_slugs,
-        );
-        let selected = self.bias_model_for_cfactor(selected, cfactor, agent_id);
-        let tier = slug_to_tier(&selected.slug);
-        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
-        let context_overflow_fallback =
-            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
-
-        CascadeModel {
-            primary: selected,
-            fallback_chain,
-            context_overflow_fallback,
+        let route = CascadeModel {
+            primary: ModelSpec::from_slug(&best_slug),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &best_slug),
+            context_overflow_fallback: context_overflow_fallback_for_model(
+                &self.model_slugs,
+                &best_slug,
+            ),
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Confidence,
-        }
+        };
+        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
     }
 
     fn route_confidence_filtered(
@@ -2335,12 +2368,7 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         let route = self.route_confidence_filtered(ctx, candidates);
-        let primary =
-            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
-        let route = self.retarget_route_primary(route, candidates, primary);
-        let primary =
-            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
-        self.retarget_route_primary(route, candidates, primary)
+        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
     }
 
     fn route_ucb(
@@ -2351,20 +2379,18 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
         let model = self.select_ucb_model(ctx, &thinking_candidates);
-        let selected = self.bias_model_for_behavioral_state_among(model, ctx, &self.model_slugs);
-        let selected = self.bias_model_for_cfactor(selected, cfactor, agent_id);
-        let tier = slug_to_tier(&selected.slug);
-        let fallback_chain = fallback_chain_for_model(&self.model_slugs, &selected.slug);
-        let context_overflow_fallback =
-            context_overflow_fallback_for_model(&self.model_slugs, &selected.slug);
-
-        CascadeModel {
-            primary: selected,
-            fallback_chain,
-            context_overflow_fallback,
+        let tier = slug_to_tier(&model.slug);
+        let route = CascadeModel {
+            primary: model.clone(),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &model.slug),
+            context_overflow_fallback: context_overflow_fallback_for_model(
+                &self.model_slugs,
+                &model.slug,
+            ),
             latency_sla_ms: default_latency_sla(tier),
             stage: CascadeStage::Ucb,
-        }
+        };
+        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
     }
 
     fn route_ucb_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
@@ -2393,12 +2419,7 @@ impl CascadeRouter {
         agent_id: Option<&str>,
     ) -> CascadeModel {
         let route = self.route_ucb_filtered(ctx, candidates);
-        let primary =
-            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
-        let route = self.retarget_route_primary(route, candidates, primary);
-        let primary =
-            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
-        self.retarget_route_primary(route, candidates, primary)
+        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
     }
 
     /// Apply a C-Factor-based bias to a selected model.
@@ -2675,6 +2696,10 @@ fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> R
         role,
         crate_familiarity: 0.5,
         has_prior_failure: !primary_result.success,
+        conductor_load: 0.0,
+        active_agents: 0,
+        ready_queue_depth: 0,
+        max_queue_wait_hours: 0.0,
         // Shadow evaluation should compare alternate models against a neutral
         // routing baseline. Reusing the primary outcome's affective state here
         // would leak live dispatch bias into offline evaluation.
@@ -3051,6 +3076,10 @@ mod tests {
             role: AgentRole::Implementer,
             crate_familiarity: 0.5,
             has_prior_failure: false,
+            conductor_load: 0.0,
+            active_agents: 0,
+            ready_queue_depth: 0,
+            max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
             thinking_level: None,
             previous_model: None,
@@ -3372,6 +3401,33 @@ mod tests {
         ctx.daimon_policy.behavioral_state = BehavioralState::Coasting;
         let coasting = cascade.route(&ctx);
         assert_eq!(coasting.primary.slug, "claude-haiku-3-5");
+    }
+
+    #[test]
+    fn conductor_load_biases_static_routing_toward_cheaper_models() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let mut ctx = default_ctx();
+
+        ctx.conductor_load = 0.75;
+        ctx.active_agents = 4;
+        ctx.ready_queue_depth = 3;
+
+        let routed = cascade.route(&ctx);
+        assert_eq!(routed.primary.slug, "claude-haiku-3-5");
+    }
+
+    #[test]
+    fn critical_conductor_load_can_drop_two_tiers() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Architect;
+        ctx.conductor_load = 0.95;
+        ctx.active_agents = 6;
+        ctx.ready_queue_depth = 5;
+        ctx.max_queue_wait_hours = 2.0;
+
+        let routed = cascade.route(&ctx);
+        assert_eq!(routed.primary.slug, "claude-haiku-3-5");
     }
 
     #[test]

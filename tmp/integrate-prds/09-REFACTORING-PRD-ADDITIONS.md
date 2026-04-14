@@ -40,13 +40,13 @@ Tier 6: Korai Chain (deferred)
 These are the cybernetic wiring that makes the system self-improving:
 
 1. **Health → Routing**: Filter unhealthy providers from CascadeRouter
-2. **Conductor → Routing**: Penalize model that caused gate failure
+2. **Conductor → Routing**: Bias routing from live load pressure plus failed-model feedback
 3. **Section → Scaffold**: Track prompt section lift and feed it back into live prompt weighting
 4. **Failure → Replanning**: Re-plan on gate failures (not just retry)
 5. **Skills → Prompts**: Inject task-relevant skills from SkillLibrary
 6. **Cost → Routing**: Force cheaper tier on cost spikes
 7. **Latency → Reward**: Use actual latency (not static estimate) for routing reward
-8. **Experiments → Static**: Update default configs when experiments conclude
+8. **Experiments → Static**: Persist concluded winners into runtime defaults and static routing tables
 
 ## New Policy Implementations Specified
 
