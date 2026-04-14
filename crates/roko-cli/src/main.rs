@@ -502,12 +502,12 @@ enum ResearchCmd {
     },
     /// Optimize an implementation plan with research-backed task decomposition techniques.
     EnhancePlan {
-        /// Plan directory name under plans/.
+        /// Plan directory name under .roko/plans/.
         plan: String,
     },
     /// Optimize tasks for efficiency, parallelism, and cheapest viable model.
     EnhanceTasks {
-        /// Plan directory name under plans/.
+        /// Plan directory name under .roko/plans/.
         plan: String,
     },
     /// Analyze execution episodes for self-learning insights and bandit weight recommendations.
@@ -3314,7 +3314,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             );
 
             let task_prompt = format!(
-                "Read the source below and generate implementation plan directories under plans/. \
+                "Read the source below and generate implementation plan directories under .roko/plans/. \
                  Search the codebase first to understand what exists. \
                  Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
                  mcp_servers (per-task MCP server names), and verify steps (executable shell commands). \
@@ -4068,13 +4068,13 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             Ok(exit_code)
         }
         ResearchCmd::EnhancePlan { plan } => {
-            let plan_dir = workdir.join("plans").join(&plan);
+            let plan_dir = roko_cli::plan::plans_dir(&workdir).join(&plan);
             if !plan_dir.is_dir() {
                 anyhow::bail!("Plan directory not found: {}", plan_dir.display());
             }
             println!("🔬 Enhancing plan: {plan}");
             let task_prompt = format!(
-                "Read the plan at plans/{plan}/plan.md and plans/{plan}/tasks.toml. \
+                "Read the plan at .roko/plans/{plan}/plan.md and .roko/plans/{plan}/tasks.toml. \
                  Optimize them using research-backed techniques: \
                  (1) Better task decomposition (cite SWE-bench, Agentless). \
                  (2) More precise context injection per task (exact file:line ranges). \
@@ -4122,14 +4122,16 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             Ok(exit_code)
         }
         ResearchCmd::EnhanceTasks { plan } => {
-            let tasks_path = workdir.join("plans").join(&plan).join("tasks.toml");
+            let tasks_path = roko_cli::plan::plans_dir(&workdir)
+                .join(&plan)
+                .join("tasks.toml");
             if !tasks_path.exists() {
                 anyhow::bail!("tasks.toml not found: {}", tasks_path.display());
             }
             println!("🔬 Optimizing tasks: {plan}");
             let content = std::fs::read_to_string(&tasks_path)?;
             let task_prompt = format!(
-                "Read plans/{plan}/tasks.toml and optimize every task: \
+                "Read .roko/plans/{plan}/tasks.toml and optimize every task: \
                  (1) Split any task >50 LOC into smaller subtasks. \
                  (2) Add context.read_files with exact line ranges for each task. \
                  (3) Ensure every acceptance criterion is a runnable shell command. \

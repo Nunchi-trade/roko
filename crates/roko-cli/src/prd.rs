@@ -44,7 +44,7 @@ fn published_dir(workdir: &Path) -> PathBuf {
 }
 
 fn tasks_root(workdir: &Path) -> PathBuf {
-    workdir.join("plans")
+    crate::plan::plans_dir(workdir)
 }
 
 fn collect_tasks_toml_files(root: &Path) -> Vec<PathBuf> {
@@ -743,7 +743,7 @@ pub fn cmd_status(workdir: &Path, plans_dir: Option<&Path>) -> Result<()> {
         .collect();
 
     // Count tasks across all plans
-    let plans_root = plans_dir.map_or_else(|| workdir.join("plans"), Path::to_path_buf);
+    let plans_root = plans_dir.map_or_else(|| crate::plan::plans_dir(workdir), Path::to_path_buf);
     let mut total_plans = 0u32;
     let mut total_tasks = 0u32;
     let mut total_done = 0u32;
@@ -883,7 +883,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
         let tasks_before = snapshot_tasks_files(&plans_root);
         let task_prompt = format!(
             "Read the PRD at {path} and generate implementation plan directories \
-             under plans/. Each REQ-XXX requirement becomes one or more tasks. \
+             under .roko/plans/. Each REQ-XXX requirement becomes one or more tasks. \
              Each acceptance criterion becomes a task verification command. \
              Search the codebase first to understand what already exists. \
              Create plan.md and tasks.toml files directly, including per-task mcp_servers \
@@ -947,7 +947,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                 template_kind.max_task_count()
             );
         }
-        Ok((workdir.join("plans"), task_count, estimated_complexity))
+        Ok((tasks_root(&workdir), task_count, estimated_complexity))
     }
     .await;
 
@@ -975,7 +975,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                     &workdir,
                     Kind::Custom("prd:plan:failed".into()),
                     serde_json::json!({
-                        "plan_path": workdir.join("plans").display().to_string(),
+                        "plan_path": tasks_root(&workdir).display().to_string(),
                         "error": format!("{err:#}"),
                     }),
                 )

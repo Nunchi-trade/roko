@@ -5826,7 +5826,13 @@ impl PlanRunner {
             } else {
                 claude_tools_csv.clone()
             };
-            let system_prompt = build_system_prompt(role, plan_id, tid, &task_allowed_tools_csv);
+            let system_prompt = build_system_prompt(
+                role,
+                plan_id,
+                tid,
+                &task_allowed_tools_csv,
+                task_def.as_ref(),
+            );
             let env_vars: Vec<(String, String)> = self
                 .config
                 .agent
@@ -8164,7 +8170,14 @@ impl PlanRunner {
             )
         });
         let prompt_hash = roko_core::ContentHash::of(
-            build_system_prompt(role, plan_id, task_id, &task_allowed_tools_csv).as_bytes(),
+            build_system_prompt(
+                role,
+                plan_id,
+                task_id,
+                &task_allowed_tools_csv,
+                Some(task_def),
+            )
+            .as_bytes(),
         )
         .to_hex();
         let task_text = task_text
@@ -9511,6 +9524,7 @@ impl PlanRunner {
                 &task_allowed_tools_csv,
                 relevant_context.as_deref(),
                 Some(task_affect_state),
+                task_def.as_ref(),
                 context_window_tokens,
                 Some(&section_effectiveness),
             )?
@@ -11754,8 +11768,42 @@ fn detect_cost_anomaly_override(
     }
 }
 
-fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
-    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None)
+fn task_dispatch_conventions(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
+    let task_def = task_def?;
+    let mut sections = Vec::new();
+
+    if !task_def.files.is_empty() {
+        let mut write_scope = String::from(
+            "Honor the declared write scope strictly. Only create, edit, move, or delete files in this allowlist unless the user explicitly expands it:",
+        );
+        for path in &task_def.files {
+            write_scope.push_str("\n- ");
+            write_scope.push_str(path);
+        }
+        sections.push(write_scope);
+    }
+
+    if let Some(max_loc) = task_def.max_loc {
+        sections.push(format!(
+            "Keep the total code delta within roughly {max_loc} lines of change unless verification requires a tightly scoped follow-up."
+        ));
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
+    }
+}
+
+fn build_system_prompt(
+    role: AgentRole,
+    plan_id: &str,
+    task: &str,
+    tools_csv: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> String {
+    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None, task_def)
 }
 
 fn build_system_prompt_with_context(
@@ -11765,6 +11813,7 @@ fn build_system_prompt_with_context(
     tools_csv: &str,
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
+    task_def: Option<&crate::task_parser::TaskDef>,
 ) -> String {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -11772,9 +11821,13 @@ fn build_system_prompt_with_context(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    RoleSystemPromptSpec::new(role, task_context, tools_csv)
-        .with_affect_state(affect_state)
-        .build()
+    let spec =
+        RoleSystemPromptSpec::new(role, task_context, tools_csv).with_affect_state(affect_state);
+    if let Some(conventions) = task_dispatch_conventions(task_def) {
+        spec.with_extra_conventions(conventions).build()
+    } else {
+        spec.build()
+    }
 }
 
 fn build_system_prompt_with_context_validated(
@@ -11784,6 +11837,7 @@ fn build_system_prompt_with_context_validated(
     tools_csv: &str,
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
+    task_def: Option<&crate::task_parser::TaskDef>,
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
@@ -11793,12 +11847,17 @@ fn build_system_prompt_with_context_validated(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    Ok(RoleSystemPromptSpec::new(role, task_context, tools_csv)
-        .with_affect_state(affect_state)
-        .build_with_context_window_and_section_effectiveness(
-            context_window_tokens,
-            section_effectiveness,
-        )?)
+    let spec =
+        RoleSystemPromptSpec::new(role, task_context, tools_csv).with_affect_state(affect_state);
+    let spec = if let Some(conventions) = task_dispatch_conventions(task_def) {
+        spec.with_extra_conventions(conventions)
+    } else {
+        spec
+    };
+    Ok(spec.build_with_context_window_and_section_effectiveness(
+        context_window_tokens,
+        section_effectiveness,
+    )?)
 }
 
 fn effective_context_window_tokens(config: &Config) -> usize {
@@ -12939,6 +12998,54 @@ mod tests {
         );
         assert!(csv.contains("Read"));
         assert!(!csv.contains(",Write,") && !csv.starts_with("Write,") && !csv.ends_with(",Write"));
+    }
+
+    #[test]
+    fn task_dispatch_conventions_include_write_scope_and_loc() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Scope-limited refactor"
+tier = "focused"
+max_loc = 40
+files = ["crates/roko-cli/src/orchestrate.rs", "crates/roko-cli/src/task_parser.rs"]
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let conventions =
+            task_dispatch_conventions(Some(&task)).expect("dispatch conventions should exist");
+
+        assert!(conventions.contains("Honor the declared write scope strictly."));
+        assert!(conventions.contains("crates/roko-cli/src/orchestrate.rs"));
+        assert!(conventions.contains("crates/roko-cli/src/task_parser.rs"));
+        assert!(conventions.contains("40 lines of change"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_declared_write_scope() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Scope-limited refactor"
+tier = "focused"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let prompt = build_system_prompt(
+            AgentRole::Implementer,
+            "plan-1",
+            "T1",
+            "Read,Edit",
+            Some(&task),
+        );
+
+        assert!(prompt.contains("Honor the declared write scope strictly."));
+        assert!(prompt.contains("crates/roko-cli/src/orchestrate.rs"));
     }
 
     #[test]

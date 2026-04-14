@@ -1,8 +1,8 @@
 //! `roko plan` subcommand group — list, show, and create plans.
 //!
 //! Plans are declarative task graphs stored as TOML/JSON files under
-//! `.roko/plans/`. Each plan describes a set of tasks with dependencies,
-//! assigned agent roles, and gate requirements.
+//! `plans/` or the legacy `.roko/plans/`. Each plan describes a set of tasks
+//! with dependencies, assigned agent roles, and gate requirements.
 
 use std::path::{Path, PathBuf};
 
@@ -131,6 +131,10 @@ impl Plan {
 /// Resolve the plans directory for a given workdir.
 #[must_use]
 pub fn plans_dir(workdir: &Path) -> PathBuf {
+    let top = workdir.join("plans");
+    if top.is_dir() {
+        return top;
+    }
     workdir.join(".roko").join("plans")
 }
 
@@ -316,7 +320,16 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_location() {
+    fn plans_dir_prefers_top_level_location_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plans");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(plans_dir(tmp.path()), dir);
+    }
+
+    #[test]
+    fn plans_dir_falls_back_to_legacy_location() {
         let dir = plans_dir(Path::new("/project"));
         assert_eq!(dir, PathBuf::from("/project/.roko/plans"));
     }
@@ -331,7 +344,7 @@ mod tests {
     #[test]
     fn list_plan_files_finds_toml_and_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join(".roko").join("plans");
+        let dir = tmp.path().join("plans");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("plan1.toml"), "").unwrap();
         std::fs::write(dir.join("plan2.json"), "").unwrap();
@@ -341,6 +354,18 @@ mod tests {
         assert_eq!(plans.len(), 2);
         assert!(plans.iter().any(|p| p.ends_with("plan1.toml")));
         assert!(plans.iter().any(|p| p.ends_with("plan2.json")));
+    }
+
+    #[test]
+    fn list_plan_files_falls_back_to_legacy_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".roko").join("plans");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plan1.toml"), "").unwrap();
+
+        let plans = list_plan_files(tmp.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(plans.iter().any(|p| p.ends_with("plan1.toml")));
     }
 
     #[test]

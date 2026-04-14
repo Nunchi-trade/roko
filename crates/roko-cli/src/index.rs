@@ -24,7 +24,7 @@ fn prd_index_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("prd").join("INDEX.md")
 }
 fn plans_index_path(workdir: &Path) -> PathBuf {
-    workdir.join("plans").join("INDEX.md")
+    crate::plan::plans_dir(workdir).join("INDEX.md")
 }
 fn research_index_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("research").join("INDEX.md")
@@ -111,17 +111,21 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
 
 // ─── Plans index ───────────────────────────────────────────────────
 
-/// Rebuild `plans/INDEX.md` from all plan directories.
+/// Rebuild `.roko/plans/INDEX.md` from all plan directories.
 pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     let mut out = String::new();
     let _ = writeln!(out, "# Plans Index");
     let _ = writeln!(out, "\n> Auto-generated. Do not edit manually.");
     let _ = writeln!(out, "> Rebuilt on every `roko plan` command.\n");
 
+    if let Some(parent) = plans_index_path(workdir).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let _ = writeln!(out, "| Plan | Tasks | Done | Ready | Status | Parallel |");
     let _ = writeln!(out, "|------|-------|------|-------|--------|----------|");
 
-    let plans_dir = workdir.join("plans");
+    let plans_dir = crate::plan::plans_dir(workdir);
     if !plans_dir.is_dir() {
         let _ = writeln!(out, "| _(no plans directory)_ | | | | | |");
         std::fs::write(plans_index_path(workdir), &out)?;
@@ -253,7 +257,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "→ [Full index](.roko/prd/INDEX.md)\n");
 
     // Plans summary
-    let plans_dir = workdir.join("plans");
+    let plans_dir = crate::plan::plans_dir(workdir);
     let mut plan_count = 0u32;
     let mut task_count = 0u32;
     let mut done_count = 0u32;
@@ -274,7 +278,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
         out,
         "## Plans ({plan_count} plans, {task_count} tasks, {done_count} done)"
     );
-    let _ = writeln!(out, "→ [Full index](plans/INDEX.md)\n");
+    let _ = writeln!(out, "→ [Full index](.roko/plans/INDEX.md)\n");
 
     // Research summary
     let research_count = list_md_sorted(&workdir.join(".roko/research"))
@@ -434,7 +438,7 @@ mod tests {
     #[test]
     fn plans_index_counts_tasks() {
         let tmp = tempfile::tempdir().unwrap();
-        let plan = tmp.path().join("plans/test-plan");
+        let plan = tmp.path().join(".roko/plans/test-plan");
         std::fs::create_dir_all(&plan).unwrap();
         std::fs::write(
             plan.join("tasks.toml"),
@@ -448,6 +452,15 @@ mod tests {
         assert!(content.contains("test-plan"));
         assert!(content.contains("2")); // 2 tasks
         assert!(content.contains("1")); // 1 done
+    }
+
+    #[test]
+    fn plans_index_writes_under_dot_roko() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        rebuild_plans_index(tmp.path()).unwrap();
+
+        assert!(plans_index_path(tmp.path()).exists());
     }
 
     #[test]
