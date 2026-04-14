@@ -43,8 +43,8 @@ pub use context_provider::{
 };
 pub use conventions::{ProjectConventions, detect_conventions};
 pub use prompt::{
-    CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer, PromptSection,
-    SectionPriority, estimate_tokens,
+    AttentionBidder, CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer,
+    PromptSection, SectionPriority, estimate_tokens,
 };
 pub use prompt_hints::prompt_hints_for;
 pub use role_prompts::{

@@ -30,8 +30,8 @@ use roko_agent::task_runner::{
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, SafetyLayer};
 use roko_compose::{
-    ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer, PromptSection,
-    RoleSystemPromptSpec, SectionPriority, TaskContext, budget_for,
+    AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
+    PromptSection, RoleSystemPromptSpec, SectionPriority, SectionScorer, TaskContext, budget_for,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
@@ -94,7 +94,6 @@ use roko_orchestrator::{
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::ProcessSupervisor;
-use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -8879,14 +8878,14 @@ impl PlanRunner {
             "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
         );
 
+        let task_affect_state = self
+            .current_pad_state()
+            .with_somatic_hint(somatic_signal.valence, somatic_signal.intensity);
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
             system_prompt
         } else {
             let relevant_context = build_relevant_context_layer(&context_sections);
             let context_window_tokens = effective_context_window_tokens(&self.config);
-            let task_affect_state = self
-                .current_pad_state()
-                .with_somatic_hint(somatic_signal.valence, somatic_signal.intensity);
             build_system_prompt_with_context_validated(
                 role,
                 plan_id,
@@ -8900,11 +8899,13 @@ impl PlanRunner {
         let role_section = PromptSection::new("role", &role_instruction)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::Start)
+            .with_bidder(AttentionBidder::TaskContext)
             .into_signal()
             .map_err(|e| anyhow!("role section: {e}"))?;
         let task_section = PromptSection::new("task", &task_text)
             .with_priority(SectionPriority::Critical)
             .with_placement(Placement::End)
+            .with_bidder(AttentionBidder::TaskContext)
             .into_signal()
             .map_err(|e| anyhow!("task section: {e}"))?;
 
@@ -8920,6 +8921,7 @@ impl PlanRunner {
         if let Some((skill_section, skill_text_len)) = skill_context_section {
             sections.push(
                 skill_section
+                    .with_bidder(AttentionBidder::PlaybookRules)
                     .into_signal()
                     .map_err(|e| anyhow!("skill-library section: {e}"))?,
             );
@@ -8932,6 +8934,7 @@ impl PlanRunner {
         if let Some((playbook_section, playbook_text_len)) = playbook_context_section {
             sections.push(
                 playbook_section
+                    .with_bidder(AttentionBidder::PlaybookRules)
                     .into_signal()
                     .map_err(|e| anyhow!("playbook section: {e}"))?,
             );
@@ -8953,6 +8956,7 @@ impl PlanRunner {
             let learned_section = PromptSection::new("learned-context", &learned.text)
                 .with_priority(SectionPriority::Normal)
                 .with_placement(Placement::Middle)
+                .with_bidder(AttentionBidder::Neuro)
                 .into_signal()
                 .map_err(|e| anyhow!("learned-context section: {e}"))?;
             sections.push(learned_section);
@@ -8966,6 +8970,16 @@ impl PlanRunner {
             tracker.last_matched_skill_id = learned.matched_skill_id;
             tracker.last_matched_rule_id = learned.matched_rule_id;
             tracker.last_experiment_variant_id = learned.experiment_variant_id;
+        }
+
+        if let Some(daimon_section) =
+            build_daimon_context_section(task_affect_state, self.daimon.query().behavioral_state)
+        {
+            sections.push(
+                daimon_section
+                    .into_signal()
+                    .map_err(|e| anyhow!("daimon-state section: {e}"))?,
+            );
         }
 
         sections.push(task_section);
@@ -8986,6 +9000,7 @@ impl PlanRunner {
                 let tool_section = PromptSection::new("available-tools", &tool_manifest)
                     .with_priority(SectionPriority::Normal)
                     .with_placement(Placement::Middle)
+                    .with_bidder(AttentionBidder::TaskContext)
                     .into_signal()
                     .map_err(|e| anyhow!("tool manifest section: {e}"))?;
                 sections.push(tool_section);
@@ -8993,11 +9008,12 @@ impl PlanRunner {
         }
 
         let composer = PromptComposer::new();
+        let section_scorer = SectionScorer::new();
         let prompt = composer
             .compose(
                 &sections,
                 &Budget::tokens(self.config.prompt.token_budget),
-                &NoOpScorer,
+                &section_scorer,
                 &ctx,
             )
             .map_err(|e| anyhow!("compose: {e}"))?;
@@ -10951,6 +10967,46 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
     } else {
         Some(format!("## Relevant Context\n\n{content}"))
     }
+}
+
+fn build_daimon_context_section(
+    affect_state: PadState,
+    behavioral_state: roko_core::BehavioralState,
+) -> Option<PromptSection> {
+    let pad_magnitude = affect_state.pleasure.abs()
+        + affect_state.arousal.abs()
+        + affect_state.dominance.abs()
+        + affect_state.somatic_intensity;
+    if pad_magnitude < 0.35 {
+        return None;
+    }
+
+    let mut content = format!(
+        "## Daimon state\nBehavioral state: {behavioral_state:?}\nPAD: pleasure={:.2}, arousal={:.2}, dominance={:.2}\n",
+        affect_state.pleasure, affect_state.arousal, affect_state.dominance
+    );
+    if affect_state.somatic_intensity >= 0.15 {
+        content.push_str(&format!(
+            "Somatic hint: valence={:.2}, intensity={:.2}\n",
+            affect_state.somatic_valence, affect_state.somatic_intensity
+        ));
+        if affect_state.somatic_valence <= -0.2 {
+            content
+                .push_str("Interpretation: slow down, prefer caution, and verify risky moves.\n");
+        } else if affect_state.somatic_valence >= 0.2 {
+            content.push_str(
+                "Interpretation: this strategy region has positive prior outcomes; keep momentum without skipping checks.\n",
+            );
+        }
+    }
+
+    Some(
+        PromptSection::new("daimon-state", content)
+            .with_priority(SectionPriority::Normal)
+            .with_placement(Placement::Middle)
+            .with_bidder(AttentionBidder::Daimon)
+            .with_hard_cap(256),
+    )
 }
 
 impl PlanRunner {

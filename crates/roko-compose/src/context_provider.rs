@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
 use roko_core::OperatingFrequency;
@@ -210,7 +210,15 @@ impl ResolvedContext {
 
         apply_attention_curve_placements(&mut self.sections);
 
-        self.sections.into_iter().map(|cs| cs.section).collect()
+        self.sections
+            .into_iter()
+            .map(|mut cs| {
+                cs.section = cs
+                    .section
+                    .with_bidder(bidder_for_context_source(&cs.source));
+                cs.section
+            })
+            .collect()
     }
 
     /// Get source attribution for all included sections.
@@ -225,6 +233,29 @@ const fn placement_ord(p: Placement) -> u8 {
         Placement::Start => 0,
         Placement::Middle => 1,
         Placement::End => 2,
+    }
+}
+
+const fn bidder_for_context_source(source: &ContextSource) -> AttentionBidder {
+    match source {
+        ContextSource::KnowledgeEntry { .. } => AttentionBidder::Neuro,
+        ContextSource::Episode { .. } | ContextSource::PriorTaskOutput { .. } => {
+            AttentionBidder::IterationMemory
+        }
+        ContextSource::InlineFile { .. } | ContextSource::SymbolSignature { .. } => {
+            AttentionBidder::CodeIntelligence
+        }
+        ContextSource::ResearchMemo => AttentionBidder::Research,
+        ContextSource::RecentSignal { .. } => AttentionBidder::Oracles,
+        ContextSource::AntiPattern
+        | ContextSource::Verification
+        | ContextSource::TaskBrief
+        | ContextSource::PlanBrief
+        | ContextSource::Invariants
+        | ContextSource::CrossPlanContext
+        | ContextSource::PrdExtract
+        | ContextSource::Decomposition
+        | ContextSource::SiblingTasks => AttentionBidder::TaskContext,
     }
 }
 
@@ -1300,6 +1331,56 @@ mod tests {
         assert_eq!(prompt_sections[0].name, "system");
         assert_eq!(prompt_sections[1].name, "session");
         assert_eq!(prompt_sections[2].name, "task");
+        assert_eq!(prompt_sections[0].bidder, AttentionBidder::TaskContext);
+        assert_eq!(prompt_sections[1].bidder, AttentionBidder::TaskContext);
+        assert_eq!(prompt_sections[2].bidder, AttentionBidder::TaskContext);
+    }
+
+    #[test]
+    fn resolved_context_maps_sources_to_attention_bidders() {
+        let resolved = ResolvedContext {
+            sections: vec![
+                ContextSection {
+                    section: PromptSection::new("knowledge", "knowledge"),
+                    source: ContextSource::KnowledgeEntry {
+                        entry_id: "k1".into(),
+                        kind: "heuristic".into(),
+                        source: Some("neuro".into()),
+                    },
+                },
+                ContextSection {
+                    section: PromptSection::new("file", "file"),
+                    source: ContextSource::InlineFile {
+                        path: "src/lib.rs".into(),
+                        lines: None,
+                    },
+                },
+                ContextSection {
+                    section: PromptSection::new("research", "research"),
+                    source: ContextSource::ResearchMemo,
+                },
+            ],
+            tier: ContextTier::Focused,
+            total_tokens_estimate: 12,
+            budget_tokens: 12_000,
+        };
+
+        let prompt_sections = resolved.into_prompt_sections();
+        assert!(
+            prompt_sections
+                .iter()
+                .any(|section| section.bidder == AttentionBidder::Neuro)
+        );
+        assert!(
+            prompt_sections
+                .iter()
+                .any(|section| section.bidder == AttentionBidder::CodeIntelligence)
+        );
+        assert!(
+            prompt_sections
+                .iter()
+                .any(|section| section.bidder == AttentionBidder::Research)
+        );
     }
 
     #[test]

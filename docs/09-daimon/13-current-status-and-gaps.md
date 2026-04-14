@@ -13,7 +13,7 @@
 
 ## Abstract
 
-The Daimon affect engine has moved the shared emotional vocabulary into `roko-core`, while `roko-daimon` now owns the live PAD state, explicit behavioral-state classification, baseline behavioral modulation, and a real somatic landscape for coding-task routing. The largest remaining gaps are no longer the existence of a fast affective path, but the richer PRD control surfaces layered on top of it: collective contagion, VCG bidding integration, domain-extensible strategy spaces, and several frontier appraisal triggers. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
+The Daimon affect engine has moved the shared emotional vocabulary into `roko-core`, while `roko-daimon` now owns the live PAD state, explicit behavioral-state classification, baseline behavioral modulation, and a real somatic landscape for coding-task routing. The largest remaining gaps are no longer the existence of a fast affective path, but the richer PRD control surfaces layered on top of it: collective contagion, deeper VCG bidding/pricing integration, domain-extensible strategy spaces, and several frontier appraisal triggers. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
 
 ---
 

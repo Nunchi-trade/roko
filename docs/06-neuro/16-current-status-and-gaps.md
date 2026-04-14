@@ -109,7 +109,7 @@ However, significant gaps remain between the current implementation and the refa
 
 | Gap | Design Source | Status |
 |---|---|---|
-| **VCG attention auction** | `09-innovations.md` §II | Partially implemented — Neuro now does auction-style chunk allocation internally; the full multi-subsystem VCG market is still not implemented (Tier 2, P2) |
+| **VCG attention auction** | `09-innovations.md` §II | Partially implemented — Neuro does auction-style chunk allocation internally, and `PromptComposer` now runs a shared bidder-aware cross-subsystem auction over composed prompt sections; formal second-price VCG settlement and fuller bidder coverage are still missing (Tier 2, P2) |
 | **SomaticLandscape** (k-d tree, 8D) | `09-innovations.md` §III | Partially implemented — real k-d tree, routing/prompt/retrieval hooks, explicit runtime events, dream-time depotentiation, replay-driven marker synthesis, config-backed axis registration, and a shared strategy-space computer are present; dedicated non-coding extractors are still missing |
 | **Active inference context selection** | `09-innovations.md` §XIX.A-C | Partially implemented — track-record/uncertainty scoring, auction-style budgeting, and contrarian affect retention are present; full EFE-style subsystem integration is not |
 | **Cross-domain resonance detection** | `09-innovations.md` §XIII | Designed, not implemented |

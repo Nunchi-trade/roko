@@ -182,12 +182,14 @@ pub struct EmotionalTag {
 
 ### VCG Auction for Context Budget — PARTIAL
 - Inside Neuro, context chunks now compete via an auction-style allocator with token-cost awareness and a marginal-value stopping rule
-- The full Vickrey-Clarke-Groves mechanism is still not wired across subsystems: Neuro, Daimon, iteration memory, code intelligence, playbooks, research, task context, and oracles are not yet bidding in one shared market
+- `roko-compose::PromptComposer` now runs a shared bidder-aware auction across composed prompt sections, with explicit subsystem bidders (`Neuro`, `Daimon`, `IterationMemory`, `CodeIntelligence`, `PlaybookRules`, `Research`, `TaskContext`, `Oracles`) and diversity pressure so one subsystem does not monopolize the budget
+- `ContextProvider` now tags sections by bidder automatically, and orchestrator-built sections such as skills/playbooks, learned Neuro context, and live Daimon state now participate in that shared market
+- Remaining gap: this is still an approximation rather than a literal second-price VCG settlement, and several bidders such as Oracles / richer iteration memory are still sparsely populated in the runtime
 
 ### Daimon → CascadeRouter Integration — PARTIAL
 - Affect state already modulates dispatch through `DispatchParams`, and routing now receives a first-class `RoutingContext.daimon_policy`
 - CascadeRouter already uses explicit Daimon policy inputs for both low-confidence escalation and behavioral-state tier biasing
-- **Remaining gap**: the policy object is currently used in routing, but broader policy consumers such as cross-subsystem VCG bidding and other runtime decision layers are still not unified around it
+- **Remaining gap**: the policy object is now consumed by routing and prompt-time bidder composition, but other runtime decision layers are still not unified around it
 
 ---
 

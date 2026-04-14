@@ -175,7 +175,7 @@ copy. PAD-based affect biasing is also wired into ranking via `PadState`, and
 the allocator now enforces a small contrarian slice for affect-heavy retrieval
 so one mood does not monopolize the recalled knowledge set.
 
-The context assembly pipeline is designed to integrate with the VCG attention auction (see `refactoring-prd/09-innovations.md` §II), where different subsystems (Neuro, Daimon, iteration memory, code intelligence, etc.) bid for token budget. Neuro's bid is based on the expected value of including knowledge context for the current task.
+The context assembly pipeline now feeds a shared bidder-aware auction in `roko-compose::PromptComposer`, where different subsystems (Neuro, Daimon, iteration memory, code intelligence, playbooks, research, task context, and oracles) can bid for token budget via `PromptSection.bidder`. Neuro's bid is still based on the expected value of including knowledge context for the current task, but the remaining gap is a more literal VCG settlement / price model and fuller bidder coverage.
 
 ---
 
@@ -227,7 +227,7 @@ See [12-4-tier-distillation-pipeline.md](./12-4-tier-distillation-pipeline.md) f
 
 **Implemented**: `NeuroStore` trait, `KnowledgeStore` JSONL backend, `KnowledgeConfirmationRecord`, `KnowledgeStats`, `MemoryIndex` (feature-gated), and the canonical `ContextAssembler` retrieval/ranking/compression pipeline, including cost-aware auction-style chunk allocation inside Neuro.
 
-**Missing**: Cross-subsystem VCG attention auction integration. Richer combined retrieval scoring. Tier-aware query filtering. Within-domain vs. cross-domain threshold selection. Full somatic-state retrieval and resonance-driven selection.
+**Missing**: Formal second-price VCG settlement and fuller bidder coverage. Richer combined retrieval scoring. Tier-aware query filtering. Within-domain vs. cross-domain threshold selection. Full somatic-state retrieval and resonance-driven selection.
 
 ---
 
