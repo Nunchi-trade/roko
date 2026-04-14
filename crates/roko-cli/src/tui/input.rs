@@ -173,6 +173,10 @@ pub enum TuiAction {
     FocusPrev,
     ScrollFocusedUp,
     ScrollFocusedDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollFocusedHome,
+    ScrollFocusedEnd,
 
     // -- expand / collapse --
     ExpandCollapse,
@@ -467,9 +471,10 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
             FocusZone::AgentOutput => TuiAction::ScrollAgentDown,
             _ => TuiAction::ScrollFocusedDown,
         },
-        KeyCode::PageUp => TuiAction::ScrollFocusedUp,
-        KeyCode::PageDown => TuiAction::ScrollFocusedDown,
-        KeyCode::End => TuiAction::ScrollAgentEnd,
+        KeyCode::PageUp => TuiAction::ScrollPageUp,
+        KeyCode::PageDown => TuiAction::ScrollPageDown,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
 
         // Plan tree operations
         KeyCode::Enter => TuiAction::ShowPlanDetail,
@@ -521,8 +526,10 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char(']') => TuiAction::WaveNext,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
-        KeyCode::PageUp => TuiAction::ScrollFocusedUp,
-        KeyCode::PageDown => TuiAction::ScrollFocusedDown,
+        KeyCode::PageUp => TuiAction::ScrollPageUp,
+        KeyCode::PageDown => TuiAction::ScrollPageDown,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
 
         // Filter mode
         KeyCode::Char('/') => TuiAction::StartFilter,
@@ -552,10 +559,11 @@ fn handle_agents_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
             FocusZone::RightPanel => TuiAction::ScrollDiffDown,
             _ => TuiAction::ScrollFocusedDown,
         },
-        KeyCode::PageUp => TuiAction::ScrollAgentUp,
-        KeyCode::PageDown => TuiAction::ScrollAgentDown,
-        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollAgentEnd,
-        KeyCode::Home => TuiAction::ScrollAgentUp, // scroll to top
+        KeyCode::PageUp => TuiAction::ScrollPageUp,
+        KeyCode::PageDown => TuiAction::ScrollPageDown,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
+        KeyCode::Char('G') => TuiAction::ScrollAgentEnd,
 
         // Agent role tab switching (1-4 direct, backtick cycles)
         KeyCode::Char('`') => TuiAction::SwitchAgentTab(usize::MAX), // cycle
@@ -581,6 +589,10 @@ fn handle_git_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollFocusedUp,
         KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollFocusedDown,
+        KeyCode::PageUp => TuiAction::ScrollPageUp,
+        KeyCode::PageDown => TuiAction::ScrollPageDown,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
         KeyCode::Enter => TuiAction::ExpandCollapse,
@@ -592,10 +604,10 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollLogUp,
         KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollLogDown,
-        KeyCode::PageUp => TuiAction::ScrollLogUp,
-        KeyCode::PageDown => TuiAction::ScrollLogDown,
-        KeyCode::Home => TuiAction::ScrollLogUp,
-        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollAgentEnd,
+        KeyCode::PageUp => TuiAction::ScrollPageUp,
+        KeyCode::PageDown => TuiAction::ScrollPageDown,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollFocusedEnd,
         KeyCode::Char('/') => TuiAction::StartFilter,
         _ => TuiAction::None,
     }
@@ -631,6 +643,10 @@ fn handle_inspect_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollFocusedUp,
         KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollFocusedDown,
+        KeyCode::PageUp => TuiAction::ScrollPageUp,
+        KeyCode::PageDown => TuiAction::ScrollPageDown,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
         KeyCode::Enter => TuiAction::ExpandCollapse,
@@ -770,5 +786,56 @@ mod tests {
             &modals(),
         );
         assert_eq!(action, TuiAction::ScrollDiffDown);
+    }
+
+    #[test]
+    fn page_keys_use_page_scroll_actions() {
+        let action = handle_key(
+            key(KeyCode::PageUp),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::TaskProgress,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ScrollPageUp);
+
+        let action = handle_key(
+            key(KeyCode::PageDown),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::CommandOutput,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ScrollPageDown);
+    }
+
+    #[test]
+    fn home_end_use_focused_jump_actions() {
+        let action = handle_key(
+            key(KeyCode::Home),
+            InputMode::Normal,
+            Tab::Agents,
+            FocusZone::RightPanel,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ScrollFocusedHome);
+
+        let action = handle_key(
+            key(KeyCode::End),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::CommandOutput,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ScrollFocusedEnd);
+
+        let action = handle_key(
+            key(KeyCode::Char('G')),
+            InputMode::Normal,
+            Tab::Agents,
+            FocusZone::AgentOutput,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ScrollAgentEnd);
     }
 }

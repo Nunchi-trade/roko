@@ -38,6 +38,8 @@ use super::state::TuiState;
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
+const PAGE_SCROLL_LINES: i32 = 20;
+
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
 /// Supports two rendering paths:
@@ -614,6 +616,10 @@ impl App {
             }
             TuiAction::ScrollFocusedUp => self.scroll_focused(-1),
             TuiAction::ScrollFocusedDown => self.scroll_focused(1),
+            TuiAction::ScrollPageUp => self.scroll_focused(-PAGE_SCROLL_LINES),
+            TuiAction::ScrollPageDown => self.scroll_focused(PAGE_SCROLL_LINES),
+            TuiAction::ScrollFocusedHome => self.set_focused_scroll(0),
+            TuiAction::ScrollFocusedEnd => self.set_focused_scroll(usize::MAX),
             TuiAction::ScrollLogUp => {
                 self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_sub(1);
             }
@@ -1227,6 +1233,26 @@ impl App {
         }
     }
 
+    fn set_focused_scroll(&mut self, offset: usize) {
+        match self.tui_state.focus {
+            FocusZone::PlanTree => {
+                self.tui_state.plan_scroll_offset = offset;
+            }
+            FocusZone::TaskProgress => {
+                self.tui_state.task_scroll = offset;
+            }
+            FocusZone::AgentOutput => {
+                self.tui_state.agent_scroll = Some(offset);
+            }
+            FocusZone::CommandOutput => {
+                self.tui_state.command_output_scroll = offset;
+            }
+            FocusZone::RightPanel => {
+                self.tui_state.diff_scroll = offset;
+            }
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let action = match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => TuiAction::MouseClick {
@@ -1819,7 +1845,8 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("x          reject pending command"),
         Line::from("`          cycle agent tabs"),
         Line::from("1-7        switch agent tab directly"),
-        Line::from("G/End      resume auto-scroll"),
+        Line::from("Home/End   jump to top/bottom"),
+        Line::from("G          resume auto-scroll"),
         Line::from(""),
         Line::from(Span::styled("Plans (F2)", theme.accent_bold())),
         Line::from("e          expand/collapse plan"),
@@ -2040,5 +2067,33 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(!app.tui_state.show_help);
+    }
+
+    #[test]
+    fn page_scroll_moves_focused_panel_by_twenty_lines() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.focus = FocusZone::PlanTree;
+        app.tui_state.plan_scroll_offset = 40;
+
+        app.dispatch_action(TuiAction::ScrollPageUp);
+        assert_eq!(app.tui_state.plan_scroll_offset, 20);
+
+        app.dispatch_action(TuiAction::ScrollPageDown);
+        assert_eq!(app.tui_state.plan_scroll_offset, 40);
+    }
+
+    #[test]
+    fn focused_home_end_jump_to_bounds() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.focus = FocusZone::RightPanel;
+        app.tui_state.diff_scroll = 12;
+
+        app.dispatch_action(TuiAction::ScrollFocusedHome);
+        assert_eq!(app.tui_state.diff_scroll, 0);
+
+        app.dispatch_action(TuiAction::ScrollFocusedEnd);
+        assert_eq!(app.tui_state.diff_scroll, usize::MAX);
     }
 }
