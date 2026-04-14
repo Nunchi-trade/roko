@@ -5,6 +5,10 @@
 //! into a single Prompt signal, invokes the configured agent backend, runs
 //! each configured gate on the working directory, and emits an Episode.
 
+use crate::agent_config::{
+    synthesize_claude_cli_config, synthesize_known_protocol_config,
+    synthesize_subprocess_config,
+};
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
@@ -17,7 +21,6 @@ use roko_agent::{AgentResult, OllamaLlmBackend};
 use roko_agent::{create_agent_for_model, with_scoped_safety_layer};
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
-use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
@@ -359,10 +362,8 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| "claude-opus-4-6".to_string());
-        let mut synthesized_config = RokoConfig::default();
-        synthesized_config.agent.command = Some(config.agent.command.clone());
-        synthesized_config.agent.default_model = model.clone();
-        synthesized_config.agent.default_backend = "claude".to_string();
+        let synthesized_config =
+            synthesize_claude_cli_config(&config.agent.command, &model);
 
         let mut synthetic_extra_args = extra_args;
         if let Some(resume_session) = optional_resume {
@@ -403,16 +404,12 @@ async fn dispatch_agent(
     } else if config.agent.command == "ollama" {
         Ok(run_ollama_agentic_single(workdir, config, prompt_text).await)
     } else if is_known_protocol_command(&config.agent.command) {
-        let mut fallback_config = RokoConfig::default();
-        fallback_config.agent.command = Some(config.agent.command.clone());
-        fallback_config.agent.default_backend = config.agent.command.clone();
-
         let model = config
             .agent
             .model
             .clone()
             .unwrap_or_else(|| config.agent.command.clone());
-        fallback_config.agent.default_model = model.clone();
+        let fallback_config = synthesize_known_protocol_config(&config.agent.command, &model);
 
         let agent = with_scoped_safety_layer(|| {
             create_agent_for_model(
@@ -444,14 +441,12 @@ async fn dispatch_agent(
         })?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else {
-        let mut fallback_config = RokoConfig::default();
-        fallback_config.agent.command = Some(config.agent.command.clone());
-
         let model = config
             .agent
             .model
             .clone()
             .unwrap_or_else(|| config.agent.command.clone());
+        let fallback_config = synthesize_subprocess_config(&config.agent.command);
         let agent = with_scoped_safety_layer(|| {
             create_agent_for_model(
                 &fallback_config,

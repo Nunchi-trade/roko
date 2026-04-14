@@ -118,6 +118,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
+use crate::agent_config::{
+    synthesize_claude_cli_config, synthesize_known_protocol_config,
+    synthesize_subprocess_config,
+};
 use crate::config::Config;
 use crate::plan::plans_dir;
 use crate::prompting::{
@@ -1195,10 +1199,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else if cfg.command == "claude" {
-        let mut synthesized_config = RokoConfig::default();
-        synthesized_config.agent.command = Some(cfg.command.clone());
-        synthesized_config.agent.default_model = cfg.model.clone();
-        synthesized_config.agent.default_backend = "claude".to_string();
+        let synthesized_config = synthesize_claude_cli_config(&cfg.command, &cfg.model);
 
         let mut extra_args = cfg.read_args;
         extra_args.extend(cfg.extra_args);
@@ -1245,10 +1246,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else if is_known_protocol_command(&cfg.command) {
-        let mut fallback_config = RokoConfig::default();
-        fallback_config.agent.command = Some(cfg.command.clone());
-        fallback_config.agent.default_model = cfg.model.clone();
-        fallback_config.agent.default_backend = cfg.command.clone();
+        let fallback_config = synthesize_known_protocol_config(&cfg.command, &cfg.model);
 
         match create_agent_for_model(
             &fallback_config,
@@ -1284,10 +1282,8 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else {
-        let mut fallback_config = RokoConfig::default();
-        fallback_config.agent.command = Some(cfg.command.clone());
-
         let model = cfg.model.clone();
+        let fallback_config = synthesize_subprocess_config(&cfg.command);
         match create_agent_for_model(
             &fallback_config,
             &model,
@@ -10021,10 +10017,8 @@ impl PlanRunner {
             )
             .entered();
             let agent: Box<dyn Agent> = if is_known_protocol_command(&self.config.agent.command) {
-                let mut fallback_config = RokoConfig::default();
-                fallback_config.agent.command = Some(self.config.agent.command.clone());
-                fallback_config.agent.default_model = selected_model.clone();
-                fallback_config.agent.default_backend = self.config.agent.command.clone();
+                let fallback_config =
+                    synthesize_known_protocol_config(&self.config.agent.command, &selected_model);
                 let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
                     create_agent_for_model(
                         &fallback_config,
@@ -10055,8 +10049,7 @@ impl PlanRunner {
                 })?;
                 agent
             } else {
-                let mut fallback_config = RokoConfig::default();
-                fallback_config.agent.command = Some(self.config.agent.command.clone());
+                let fallback_config = synthesize_subprocess_config(&self.config.agent.command);
                 let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
                     create_agent_for_model(
                         &fallback_config,
