@@ -5136,6 +5136,7 @@ impl PlanRunner {
                     &ExecutorEvent::Fatal(reason),
                     "failed",
                 );
+                self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::CompletePlan { plan_id } => {
                 tracing::info!("[orchestrate] CompletePlan {plan_id}");
@@ -5157,6 +5158,7 @@ impl PlanRunner {
                         }),
                     },
                 );
+                self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::Reorder {
                 plan_id,
@@ -9032,7 +9034,7 @@ impl PlanRunner {
         let ctx = Context::now();
         let exec_dir = match exec_dir_override {
             Some(dir) => dir,
-            None => self.plan_exec_dir(plan_id).await,
+            None => self.ensure_plan_exec_dir(plan_id).await?,
         };
         let preexisting_changed_files = self.git_changed_files(&exec_dir).await.ok();
 
@@ -10474,7 +10476,7 @@ impl PlanRunner {
 
     /// Run gates at the specified rung level and return whether all passed.
     async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
-        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
         let started = std::time::Instant::now();
         let payload_sig = Engram::builder(Kind::Task)
@@ -10687,17 +10689,23 @@ impl PlanRunner {
         }
     }
 
-    async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+    async fn ensure_plan_exec_dir(&self, plan_id: &str) -> Result<PathBuf> {
         if !self.worktrees_enabled() {
-            return self.workdir.clone();
+            return Ok(self.workdir.clone());
         }
         self.clear_stale_worktree_locks().await;
-        match self.worktrees.ensure_for_plan(plan_id).await {
-            Ok(handle) => handle.path,
+        self.worktrees
+            .ensure_for_plan(plan_id)
+            .await
+            .map(|handle| handle.path)
+            .map_err(|err| anyhow!("worktree unavailable for plan={plan_id}: {err}"))
+    }
+
+    async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+        match self.ensure_plan_exec_dir(plan_id).await {
+            Ok(path) => path,
             Err(err) => {
-                tracing::error!(
-                    "[orchestrate] worktree unavailable for plan={plan_id}, using repo root: {err}"
-                );
+                tracing::error!("[orchestrate] {err}; using repo root");
                 self.workdir.clone()
             }
         }
@@ -10783,7 +10791,14 @@ impl PlanRunner {
             return Ok(());
         }
 
-        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let exec_dir = self.ensure_plan_exec_dir(plan_id).await.map_err(|err| {
+            (
+                plan_id.to_string(),
+                "worktree".to_string(),
+                "ensure_plan_exec_dir".to_string(),
+                err.to_string(),
+            )
+        })?;
         tracing::info!(
             "[orchestrate] Running plan verify for {plan_id} across {} task(s)",
             steps_to_run.len()
@@ -13407,6 +13422,38 @@ depends_on = []
         assert!(plan_dir.exists(), "plan worktree should exist");
 
         runner.cleanup_plan_worktree("plan-1").await;
+
+        assert!(runner.worktrees.get("plan-1").is_none());
+        assert!(!plan_dir.exists(), "plan worktree should be removed");
+    }
+
+    #[tokio::test]
+    async fn ensure_plan_exec_dir_errors_when_worktree_creation_fails() {
+        let tmp = TempDir::new().expect("tempdir");
+        let runner = runner_for_repo(tmp.path(), true).await;
+
+        let err = runner
+            .ensure_plan_exec_dir("plan-1")
+            .await
+            .expect_err("non-git worktree acquisition should fail");
+
+        assert!(err.to_string().contains("worktree unavailable"));
+    }
+
+    #[tokio::test]
+    async fn complete_plan_dispatch_cleans_up_plan_worktree() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let mut runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        assert!(plan_dir.exists(), "plan worktree should exist");
+
+        runner
+            .dispatch_action(ExecutorAction::CompletePlan {
+                plan_id: "plan-1".to_string(),
+            })
+            .await;
 
         assert!(runner.worktrees.get("plan-1").is_none());
         assert!(!plan_dir.exists(), "plan worktree should be removed");
