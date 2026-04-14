@@ -73,7 +73,10 @@ pub use perplexity::{
     PerplexityMetadata, PerplexitySearchClient, SearchOptions, SearchResult,
 };
 pub use pool::{AgentInstanceId, AgentPool};
-pub use provider::{ProviderAdapter, adapter_for_kind, create_agent_for_model};
+pub use provider::{
+    ProviderAdapter, adapter_for_kind, create_agent_for_model, current_safety_layer,
+    with_scoped_safety_layer,
+};
 pub use rate_limit::ProviderRateLimiter;
 pub use safety::SafetyLayer;
 pub use streaming::{StreamAccumulator, StreamChunk};

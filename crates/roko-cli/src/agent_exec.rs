@@ -8,9 +8,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use roko_agent::provider::{
-    AgentOptions, create_agent_for_model, with_scoped_safety_layer,
-};
+use roko_agent::provider::AgentOptions;
+use roko_agent::{create_agent_for_model, with_scoped_safety_layer};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, ContentHash, Context, Engram, Kind};
@@ -492,5 +491,4 @@ mod tests {
             Some(&serde_json::json!("demo"))
         );
     }
-
 }

@@ -4923,12 +4923,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 if file_was_modified {
                     // Agent wrote the file directly — verify it has content.
                     let content = std::fs::read_to_string(&target).unwrap_or_default();
-                    let has_content = content.lines().any(|l| {
-                        !l.starts_with("---")
-                            && !l.starts_with('#')
-                            && !l.starts_with("##")
-                            && !l.trim().is_empty()
-                    });
+                    let has_content = roko_cli::prd::has_substantive_markdown_content(&content);
                     if has_content {
                         println!("📄 Draft written to {}", target.display());
                     } else {
@@ -4939,11 +4934,9 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                 } else if exit_code == 0 && !output.trim().is_empty() {
                     // Agent returned content as text — write it to the file.
-                    let content = if output.trim_start().starts_with("---") {
-                        output.clone()
-                    } else {
-                        format!("{scaffold}\n{output}")
-                    };
+                    let content =
+                        roko_cli::prd::materialize_agent_markdown_output(&output, Some(&scaffold))
+                            .unwrap_or_else(|| scaffold.clone());
                     std::fs::write(&target, content)?;
                     println!("📄 Draft written to {}", target.display());
                 } else if exit_code != 0 {
@@ -4983,6 +4976,9 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     &workdir,
                     &format!(
                         "Read and improve the draft PRD at {path}. \
+                         If you have file tools, update that file directly. \
+                         If you do NOT have file tools, output the complete improved PRD markdown \
+                         with YAML frontmatter and no code fences. \
                          Follow the PRD quality standards in your system prompt.",
                         path = draft.display()
                     ),
@@ -4993,9 +4989,12 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                      (2) Are acceptance criteria machine-verifiable shell commands? \
                      (3) Are there 10+ citations with [AUTHOR-YEAR] format? \
                      (4) Are there 2+ mermaid diagrams with color styling? \
-                     Search the codebase to verify claims. Update the file in place.",
+                     Search the codebase to verify claims. \
+                     If you have file tools, update the file in place. \
+                     Otherwise, output the complete improved PRD markdown with YAML frontmatter.",
                     path = draft.display()
                 );
+                let mtime_before = std::fs::metadata(&draft).and_then(|m| m.modified()).ok();
                 let started = Instant::now();
                 let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                     prompt: &task_prompt,
@@ -5007,7 +5006,34 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     env_vars: &gw.vars,
                 })
                 .await?;
-                if !output.is_empty() {
+                let mtime_after = std::fs::metadata(&draft).and_then(|m| m.modified()).ok();
+                let file_was_modified = match (mtime_before, mtime_after) {
+                    (Some(before), Some(after)) => after > before,
+                    _ => false,
+                };
+                if file_was_modified {
+                    let content = std::fs::read_to_string(&draft).unwrap_or_default();
+                    if roko_cli::prd::has_substantive_markdown_content(&content) {
+                        println!("📄 Draft updated at {}", draft.display());
+                    } else {
+                        eprintln!(
+                            "Agent modified file but left it empty at {}",
+                            draft.display()
+                        );
+                    }
+                } else if exit_code == 0 {
+                    if let Some(content) =
+                        roko_cli::prd::materialize_agent_markdown_output(&output, None)
+                    {
+                        std::fs::write(&draft, content)?;
+                        println!("📄 Draft updated at {}", draft.display());
+                    } else {
+                        eprintln!(
+                            "Agent returned empty output. Existing draft preserved at {}",
+                            draft.display()
+                        );
+                    }
+                } else if !output.is_empty() {
                     print!("{output}");
                 }
                 let _ = persist_capture_episode(

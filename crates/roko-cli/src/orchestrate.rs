@@ -22,7 +22,6 @@ use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::{
     AgentOptions, create_agent_for_model, is_known_protocol_command, with_safety_layer,
-    with_scoped_safety_layer,
 };
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
@@ -31,7 +30,9 @@ use roko_agent::task_runner::{
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ExecAgent, SafetyLayer};
+use roko_agent::{
+    Agent, AgentResult, ExecAgent, SafetyLayer, current_safety_layer, with_scoped_safety_layer,
+};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
     PromptSection, RoleSystemPromptSpec, SectionPriority, SectionScorer, TaskContext, budget_for,
@@ -1243,7 +1244,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
     } else if is_known_protocol_command(&cfg.command) {
         let mut agent = with_scoped_safety_layer(|| {
             ExecAgent::new(&cfg.command, cfg.extra_args)
-                .with_current_safety()
+                .with_safety_layer(current_safety_layer())
                 .with_timeout_ms(cfg.timeout_ms)
                 .with_current_dir(cfg.exec_dir.clone())
         });

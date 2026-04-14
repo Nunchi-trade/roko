@@ -1077,6 +1077,60 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
     )
 }
 
+/// Returns true if a PRD markdown string contains substantive body content.
+#[must_use]
+pub fn has_substantive_markdown_content(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty()
+            && !trimmed.starts_with("---")
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("##")
+    })
+}
+
+/// Normalize markdown emitted by an agent and optionally prepend a scaffold.
+///
+/// If the model returns fenced markdown, the outer code fence is stripped.
+/// When `scaffold` is provided and the returned markdown lacks YAML frontmatter,
+/// the scaffold is prepended so draft creation can still recover a full PRD file.
+#[must_use]
+pub fn materialize_agent_markdown_output(output: &str, scaffold: Option<&str>) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = strip_markdown_code_fence(trimmed).trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Some(scaffold) = scaffold
+        && !normalized.starts_with("---")
+    {
+        return Some(format!("{scaffold}\n{normalized}"));
+    }
+
+    Some(normalized.to_string())
+}
+
+fn strip_markdown_code_fence(output: &str) -> &str {
+    let trimmed = output.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed;
+    }
+
+    let Some(first_newline) = trimmed.find('\n') else {
+        return trimmed;
+    };
+    let inner = &trimmed[first_newline + 1..];
+    let Some(closing) = inner.rfind("\n```") else {
+        return trimmed;
+    };
+    &inner[..closing]
+}
+
 /// Slugify a title.
 pub fn slugify(title: &str) -> String {
     title
@@ -1182,5 +1236,34 @@ mod tests {
         assert!(fm.contains("id: prd-test-prd"));
         assert!(fm.contains("title: Test PRD"));
         assert!(fm.contains("status: draft"));
+    }
+
+    #[test]
+    fn has_substantive_markdown_content_ignores_headers_only() {
+        let content = "---\nid: demo\n---\n# Title\n\n## Overview\n";
+        assert!(!has_substantive_markdown_content(content));
+    }
+
+    #[test]
+    fn has_substantive_markdown_content_detects_body_text() {
+        let content = "---\nid: demo\n---\n# Title\n\nActual requirement text.\n";
+        assert!(has_substantive_markdown_content(content));
+    }
+
+    #[test]
+    fn materialize_agent_markdown_output_strips_fences() {
+        let output = "```markdown\n---\nid: demo\n---\n# Demo\n\nBody\n```";
+        let rendered = materialize_agent_markdown_output(output, None).expect("rendered");
+        assert!(rendered.starts_with("---"));
+        assert!(rendered.contains("Body"));
+        assert!(!rendered.contains("```"));
+    }
+
+    #[test]
+    fn materialize_agent_markdown_output_prepends_scaffold_when_frontmatter_missing() {
+        let rendered = materialize_agent_markdown_output("Body only", Some("---\nid: demo\n---"))
+            .expect("rendered");
+        assert!(rendered.starts_with("---\nid: demo\n---"));
+        assert!(rendered.contains("Body only"));
     }
 }

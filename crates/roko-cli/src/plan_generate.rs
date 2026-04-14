@@ -12,6 +12,9 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+const NAMING_GLOSSARY_RELATIVE_PATH: &str = "docs/00-architecture/01-naming-and-glossary.md";
+const NAMING_GLOSSARY_MAX_LINES: usize = 160;
+
 /// Built-in plan generation template presets.
 ///
 /// The PRD frontmatter selects one of these presets. Each preset controls the
@@ -265,6 +268,7 @@ Before finalizing, verify your tasks against:
 pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) -> String {
     let mut prompt = String::new();
     let _ = writeln!(prompt, "{PLAN_GENERATOR_SYSTEM_PROMPT}");
+    append_naming_glossary_prompt(&mut prompt, workdir);
     let _ = writeln!(prompt, "\n---\n");
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
     let _ = writeln!(
@@ -277,6 +281,22 @@ pub fn build_generation_prompt(workdir: &Path, source: &str, source_type: &str) 
 #[cfg(test)]
 mod template_tests {
     use super::*;
+
+    #[test]
+    fn build_generation_prompt_includes_naming_glossary_excerpt_when_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let glossary_dir = temp.path().join("docs").join("00-architecture");
+        std::fs::create_dir_all(&glossary_dir).expect("create glossary dir");
+        std::fs::write(
+            glossary_dir.join("01-naming-and-glossary.md"),
+            "# Naming Map\n\nSignal -> Engram\n",
+        )
+        .expect("write glossary");
+
+        let prompt = build_generation_prompt(temp.path(), "source body", "prd");
+        assert!(prompt.contains("## Naming glossary"));
+        assert!(prompt.contains("Signal -> Engram"));
+    }
 
     #[test]
     fn resolves_missing_template_to_default() {
@@ -314,6 +334,7 @@ mod template_tests {
 pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> String {
     let mut prompt = String::new();
     let _ = writeln!(prompt, "{PLAN_GENERATOR_SYSTEM_PROMPT}");
+    append_naming_glossary_prompt(&mut prompt, workdir);
     let _ = writeln!(prompt, "\n---\n");
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
     let _ = writeln!(prompt, "## Task: Regenerate plan\n");
@@ -331,6 +352,28 @@ pub fn build_regeneration_prompt(workdir: &Path, existing_tasks_toml: &str) -> S
          ## Existing tasks.toml:\n\n```toml\n{existing_tasks_toml}\n```"
     );
     prompt
+}
+
+fn append_naming_glossary_prompt(prompt: &mut String, workdir: &Path) {
+    let glossary_path = workdir.join(NAMING_GLOSSARY_RELATIVE_PATH);
+    let Ok(glossary) = std::fs::read_to_string(&glossary_path) else {
+        return;
+    };
+
+    let excerpt = glossary
+        .lines()
+        .take(NAMING_GLOSSARY_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if excerpt.trim().is_empty() {
+        return;
+    }
+
+    let _ = writeln!(
+        prompt,
+        "\n## Naming glossary\nUse the canonical names and renames below when generating plans. This excerpt comes from `{}`.\n\n```md\n{}\n```",
+        NAMING_GLOSSARY_RELATIVE_PATH, excerpt
+    );
 }
 
 #[cfg(test)]

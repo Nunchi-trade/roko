@@ -10,11 +10,10 @@ use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
-use roko_agent::provider::{
-    AgentOptions, create_agent_for_model, is_known_protocol_command, with_scoped_safety_layer,
-};
+use roko_agent::provider::{AgentOptions, is_known_protocol_command};
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
 use roko_agent::{AgentResult, OllamaLlmBackend};
+use roko_agent::{create_agent_for_model, with_scoped_safety_layer};
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
