@@ -826,15 +826,14 @@ impl TuiState {
             })
             .collect();
 
-        // Cost from efficiency summary
-        self.cumulative_cost_usd = data.efficiency.total_cost_usd;
-        self.cumulative_input_tokens = data.efficiency.total_input_tokens;
-        self.cumulative_output_tokens = data.efficiency.total_output_tokens;
-        self.cost_dollars = data.efficiency.total_cost_usd;
-        self.token_total = data.efficiency.total_input_tokens + data.efficiency.total_output_tokens;
+        self.cumulative_cost_usd=data.efficiency.total_cost_usd;
+        self.cumulative_input_tokens=data.efficiency.total_input_tokens;
+        self.cumulative_output_tokens=data.efficiency.total_output_tokens;
+        self.cost_dollars=self.cumulative_cost_usd;
+        self.token_total=self.cumulative_input_tokens+self.cumulative_output_tokens;
+        sum_costs(data,&mut self.cost_per_plan,&mut self.cost_per_task);
 
-        // Build phase_pipeline from canonical phases + active_tasks
-        self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
+                                                                          self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
 
         // Populate phase elapsed times from episodes (Task 7)
         populate_phase_elapsed(&mut self.phase_pipeline, data.episodes());
@@ -1046,15 +1045,18 @@ fn extract_episode_output(episode: &roko_learn::episode_logger::Episode) -> Stri
     episode.failure_reason.as_deref().unwrap_or("").to_string()
 }
 
-/// Build the task checklist using plan execution + task-tracker data (Task 3).
-///
-/// If a `PlanExecutionSnapshot` is available, uses its task rows which
-/// already reflect task-tracker completed/failed status. Falls back to
-/// `active_tasks` when no execution snapshot exists.
-fn build_task_checklist_from_execution(data: &super::dashboard::DashboardData) -> Vec<TaskRow> {
-    // Prefer the PlanExecutionSnapshot which already incorporates tracker data
-    if let Some(exec) = &data.current_plan_execution {
-        return exec
+fn sum_costs(data:&DashboardData,plans:&mut HashMap<String,f64>,tasks:&mut HashMap<String,f64>){
+    plans.clear();
+    tasks.clear();
+    for e in &data.efficiency_events {
+        if !e.plan_id.is_empty(){*plans.entry(e.plan_id.clone()).or_default()+=e.cost_usd;}
+        if !e.task_id.is_empty(){*tasks.entry(e.task_id.clone()).or_default()+=e.cost_usd;}
+    }
+}
+
+fn build_task_checklist_from_execution(data:&DashboardData)->Vec<TaskRow>{
+    if let Some(exec)=&data.current_plan_execution {
+                           return exec
             .tasks
             .iter()
             .map(|t| {
