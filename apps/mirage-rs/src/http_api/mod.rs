@@ -130,7 +130,7 @@ async fn request_id_middleware(mut request: axum::extract::Request, next: Next) 
 /// recomputing the same projection for repeated queries.
 #[derive(Clone)]
 pub struct ProjectionCache {
-    inner: Arc<std::sync::Mutex<lru::LruCache<String, bardo_primitives::HdcVector>>>,
+    inner: Arc<std::sync::Mutex<lru::LruCache<String, roko_primitives::HdcVector>>>,
 }
 
 impl ProjectionCache {
@@ -143,7 +143,7 @@ impl ProjectionCache {
     }
 
     /// Returns a cached projection or computes and inserts it.
-    pub fn get_or_insert(&self, text: &str) -> bardo_primitives::HdcVector {
+    pub fn get_or_insert(&self, text: &str) -> roko_primitives::HdcVector {
         let mut cache = self.inner.lock().unwrap();
         if let Some(v) = cache.get(text) {
             return *v; // HdcVector is Copy

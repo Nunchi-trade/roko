@@ -21,12 +21,12 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
 pub mod launchd;
@@ -35,7 +35,7 @@ use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
 use roko_core::config::load_config;
-use roko_serve::{self, deploy, dispatch, feedback, fswatcher, scheduler, state::AppState};
+use roko_serve::{self, deploy, dispatch, dreams, feedback, fswatcher, scheduler, state::AppState};
 
 /// State of the headless daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,15 +222,35 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
 
     let core_config = load_config(&workdir)?;
     let cli_config = load_layered(&workdir)?.config;
+    let dream_settings = cli_config.dreams.clone();
+    let agent_settings = cli_config.agent.clone();
+    let daimon_strategy_space = cli_config.daimon.strategy_space.clone();
     let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
     let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::new_with_daimon_strategy(
         workdir.clone(),
         runtime,
         core_config,
         deploy_backend,
+        daimon_strategy_space,
     ));
+
+    let dream_config = dreams::DreamLoopConfig {
+        auto_dream: dream_settings.auto_dream,
+        idle_threshold_mins: dream_settings.idle_threshold_mins,
+        min_episodes_for_dream: dream_settings.min_episodes_for_dream,
+        agent: dreams::DreamAgentConfig {
+            command: agent_settings.command,
+            args: agent_settings.args,
+            model: agent_settings.model,
+            bare_mode: agent_settings.bare_mode,
+            effort: agent_settings.effort,
+            fallback_model: agent_settings.fallback_model,
+            timeout_ms: agent_settings.timeout_ms,
+            env: agent_settings.env,
+        },
+    };
 
     let info = DaemonInfo {
         pid: std::process::id(),
@@ -245,6 +265,7 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     let _watchers = fswatcher::start_watchers(Arc::clone(&state));
     let _dispatch = dispatch::start_dispatch_loop(Arc::clone(&state));
     let _feedback = feedback::start_feedback_loop(Arc::clone(&state));
+    let _dreams = dreams::start_dream_loop(Arc::clone(&state), dream_config);
     let shutdown_request = CancellationToken::new();
     let http_shutdown = CancellationToken::new();
     let ipc_server = match start_ipc_server(Arc::clone(&state), shutdown_request.clone()).await {
@@ -365,8 +386,7 @@ pub fn daemon_install() -> Result<()> {
     let plist_dir = plist_path
         .parent()
         .context("resolve LaunchAgents directory")?;
-    fs::create_dir_all(plist_dir)
-        .with_context(|| format!("create {}", plist_dir.display()))?;
+    fs::create_dir_all(plist_dir).with_context(|| format!("create {}", plist_dir.display()))?;
 
     let home_dir = dirs::home_dir().context("resolve home directory")?;
     let logs_dir = home_dir.join(".roko").join("logs");
@@ -411,8 +431,7 @@ pub fn daemon_uninstall() -> Result<()> {
     }
 
     if plist_path.exists() {
-        fs::remove_file(&plist_path)
-            .with_context(|| format!("remove {}", plist_path.display()))?;
+        fs::remove_file(&plist_path).with_context(|| format!("remove {}", plist_path.display()))?;
     }
 
     Ok(())
@@ -467,15 +486,22 @@ pub async fn daemon_status() -> Result<()> {
         .write_all(b"status")
         .await
         .context("send daemon status request")?;
-    stream.shutdown().await.context("close daemon status request")?;
+    stream
+        .shutdown()
+        .await
+        .context("close daemon status request")?;
 
     let mut buf = Vec::new();
     stream
         .read_to_end(&mut buf)
         .await
         .context("read daemon status response")?;
-    let response: DaemonStatusResponse = serde_json::from_slice(&buf)
-        .with_context(|| format!("parse daemon status response from {}", socket_path.display()))?;
+    let response: DaemonStatusResponse = serde_json::from_slice(&buf).with_context(|| {
+        format!(
+            "parse daemon status response from {}",
+            socket_path.display()
+        )
+    })?;
 
     print_daemon_status_table(
         state,
@@ -510,21 +536,30 @@ pub async fn daemon_reload() -> Result<()> {
         .read_to_end(&mut buf)
         .await
         .context("read daemon reload response")?;
-    let response: DaemonReloadResponse = serde_json::from_slice(&buf)
-        .with_context(|| format!("parse daemon reload response from {}", socket_path.display()))?;
+    let response: DaemonReloadResponse = serde_json::from_slice(&buf).with_context(|| {
+        format!(
+            "parse daemon reload response from {}",
+            socket_path.display()
+        )
+    })?;
 
     println!(
         "daemon {}: subscriptions={}, templates={}, loaded={}",
-        response.command,
-        response.subscriptions,
-        response.templates,
-        response.loaded
+        response.command, response.subscriptions, response.templates, response.loaded
     );
+
+    if !response.warnings.is_empty() {
+        println!("warnings: {}", response.warnings.join("; "));
+    }
 
     if response.ok {
         Ok(())
     } else {
-        Err(anyhow!("daemon reload failed"))
+        Err(anyhow!(
+            response
+                .error
+                .unwrap_or_else(|| "daemon reload failed".to_string())
+        ))
     }
 }
 
@@ -608,7 +643,8 @@ fn read_daemon_info(workdir: &Path) -> Result<Option<DaemonInfo>> {
 fn write_daemon_info(workdir: &Path, info: &DaemonInfo) -> Result<()> {
     write_daemon_json(workdir, info)?;
     let pid_path = daemon_pid_path(workdir);
-    fs::write(&pid_path, info.pid.to_string()).with_context(|| format!("write {}", pid_path.display()))?;
+    fs::write(&pid_path, info.pid.to_string())
+        .with_context(|| format!("write {}", pid_path.display()))?;
     Ok(())
 }
 
@@ -703,8 +739,7 @@ async fn print_recent_daemon_logs(path: &Path, lines: usize) -> Result<()> {
     };
 
     let mut contents = Vec::new();
-    file
-        .read_to_end(&mut contents)
+    file.read_to_end(&mut contents)
         .await
         .with_context(|| format!("read {}", path.display()))?;
     if contents.is_empty() {
@@ -758,6 +793,10 @@ struct DaemonReloadResponse {
     subscriptions: usize,
     templates: usize,
     loaded: usize,
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 fn print_daemon_status_table(
@@ -799,8 +838,7 @@ fn print_daemon_status_table(
     );
     println!(
         "{:<26}{}",
-        "total signals processed",
-        total_signals_processed
+        "total signals processed", total_signals_processed
     );
 }
 
@@ -854,7 +892,8 @@ async fn start_ipc_server(
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     if socket_path.exists() {
-        fs::remove_file(&socket_path).with_context(|| format!("remove {}", socket_path.display()))?;
+        fs::remove_file(&socket_path)
+            .with_context(|| format!("remove {}", socket_path.display()))?;
     }
 
     let listener = UnixListener::bind(&socket_path)
@@ -901,7 +940,9 @@ async fn handle_ipc_command(
         .read(&mut buf)
         .await
         .context("read daemon IPC request")?;
-    let request = String::from_utf8_lossy(&buf[..n]).trim().to_ascii_lowercase();
+    let request = String::from_utf8_lossy(&buf[..n])
+        .trim()
+        .to_ascii_lowercase();
 
     if request == "status" {
         let active_agents = state.supervisor.count().await;
@@ -920,7 +961,26 @@ async fn handle_ipc_command(
 
     if request == "reload" {
         let response = reload_daemon_runtime(&state).await;
-        let response = serde_json::to_string(&response).context("serialize daemon reload response")?;
+        if response.ok {
+            if response.warnings.is_empty() {
+                info!(
+                    subscriptions = response.subscriptions,
+                    templates = response.templates,
+                    loaded = response.loaded,
+                    "daemon config reloaded after IPC request"
+                );
+            } else {
+                warn!(
+                    subscriptions = response.subscriptions,
+                    templates = response.templates,
+                    loaded = response.loaded,
+                    warnings = ?response.warnings,
+                    "daemon config reloaded after IPC request with warnings"
+                );
+            }
+        }
+        let response =
+            serde_json::to_string(&response).context("serialize daemon reload response")?;
         stream.write_all(response.as_bytes()).await?;
         stream.write_all(b"\n").await?;
         return Ok(());
@@ -935,7 +995,9 @@ async fn handle_ipc_command(
     }
 
     if request == "shutdown" {
-        stream.write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n").await?;
+        stream
+            .write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n")
+            .await?;
         shutdown_request.cancel();
         return Ok(());
     }
@@ -950,10 +1012,28 @@ async fn handle_ipc_command(
 }
 
 async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
+    let warnings = match roko_serve::reload_config_from_disk(state) {
+        Ok(warnings) => warnings,
+        Err(err) => {
+            error!(error = %err, "daemon config reload failed; keeping previous config");
+            return DaemonReloadResponse {
+                ok: false,
+                command: "reload".to_string(),
+                subscriptions: 0,
+                templates: 0,
+                loaded: 0,
+                warnings: Vec::new(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
     let subscriptions_report = {
-        let roko_config = state.roko_config.read().await.clone();
-        let registry =
-            roko_serve::dispatch::SubscriptionRegistry::load_from_project(&state.workdir, &roko_config);
+        let roko_config = state.load_roko_config().as_ref().clone();
+        let registry = roko_serve::dispatch::SubscriptionRegistry::load_from_project(
+            &state.workdir,
+            &roko_config,
+        );
         state.subscriptions.replace_with(registry.all())
     };
 
@@ -968,6 +1048,8 @@ async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
         subscriptions: subscriptions_report,
         templates: templates_report.loaded,
         loaded: subscriptions_report + templates_report.loaded,
+        warnings,
+        error: None,
     }
 }
 
@@ -976,13 +1058,26 @@ async fn wait_for_reload_signal(state: Arc<AppState>) {
     {
         let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
         while sighup.recv().await.is_some() {
+            info!("SIGHUP received, reloading config");
             let response = reload_daemon_runtime(&state).await;
-            info!(
-                subscriptions = response.subscriptions,
-                templates = response.templates,
-                loaded = response.loaded,
-                "daemon reloaded after SIGHUP"
-            );
+            if response.ok {
+                if response.warnings.is_empty() {
+                    info!(
+                        subscriptions = response.subscriptions,
+                        templates = response.templates,
+                        loaded = response.loaded,
+                        "daemon config reloaded after SIGHUP"
+                    );
+                } else {
+                    warn!(
+                        subscriptions = response.subscriptions,
+                        templates = response.templates,
+                        loaded = response.loaded,
+                        warnings = ?response.warnings,
+                        "daemon config reloaded after SIGHUP with warnings"
+                    );
+                }
+            }
         }
         return;
     }
@@ -1015,7 +1110,7 @@ async fn run_daemon_http_server(
     port: u16,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let roko_config = state.roko_config.read().await.clone();
+    let roko_config = state.load_roko_config().as_ref().clone();
     let router = roko_serve::routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,

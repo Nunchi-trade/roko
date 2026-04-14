@@ -12,11 +12,17 @@
 //!    raw object. The translator stringifies on the way out and parses
 //!    strings on the way in.
 //!
+//! Kimi-K2.5 also returns non-standard tool-call IDs like
+//! `functions.Read:0`. We preserve those IDs verbatim here so
+//! [`Translator::render_results`] can echo the exact same `tool_call_id`
+//! back to the backend.
+//!
 //! Both the outbound tool spec and the tool-result messages re-use the
 //! same layout as the Ollama translator; only the inbound JSON pointer
 //! and the arguments decoding differ.
 
-use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
+use crate::usage::Usage;
+use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult, ToolSource};
 
 use super::{BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError};
 
@@ -28,25 +34,23 @@ use super::{BackendResponse, RenderedResults, RenderedTools, Translator, Transla
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiTranslator;
 
+/// Build a continuation message for Kimi's partial mode.
+#[must_use]
+pub fn build_partial_continuation(truncated_content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "role": "assistant",
+        "content": truncated_content,
+        "partial": true
+    })
+}
+
 impl Translator for OpenAiTranslator {
     fn format(&self) -> ToolFormat {
         ToolFormat::OpenAiJson
     }
 
     fn render_tools(&self, tools: &[ToolDef]) -> RenderedTools {
-        let arr: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters.as_value(),
-                    }
-                })
-            })
-            .collect();
+        let arr: Vec<serde_json::Value> = tools.iter().map(render_tool).collect();
         RenderedTools::JsonArray(serde_json::Value::Array(arr))
     }
 
@@ -64,6 +68,9 @@ impl Translator for OpenAiTranslator {
 
         let mut out = Vec::with_capacity(arr.len());
         for call in arr {
+            // Preserve backend-issued IDs verbatim. Kimi uses IDs such as
+            // `functions.Read:0`, and the result message must echo the
+            // exact same value back to the provider.
             let id = call
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -102,12 +109,103 @@ impl Translator for OpenAiTranslator {
             .collect();
         RenderedResults::JsonMessages(serde_json::Value::Array(msgs))
     }
+
+    fn render_assistant_message(&self, response: &BackendResponse) -> Option<serde_json::Value> {
+        let BackendResponse::Json(json) = response else {
+            return None;
+        };
+        json.pointer("/choices/0/message").cloned()
+    }
+}
+
+fn render_tool(t: &ToolDef) -> serde_json::Value {
+    match &t.source {
+        ToolSource::Builtin | ToolSource::Mcp { .. } | ToolSource::Plugin { .. } => {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters.as_value(),
+                }
+            })
+        }
+        ToolSource::WebSearch { config, .. } => serde_json::json!({
+            "type": "web_search",
+            "web_search": config,
+        }),
+        ToolSource::Retrieval { knowledge_id } => serde_json::json!({
+            "type": "retrieval",
+            "retrieval": {
+                "knowledge_id": knowledge_id,
+            },
+        }),
+    }
+}
+
+/// Parse the OpenAI-compatible `usage` block into canonical [`Usage`].
+///
+/// GLM-5.1 reports cached tokens under `prompt_tokens_details.cached_tokens`,
+/// while Kimi-K2.5 uses a top-level `cached_tokens` field.
+#[must_use]
+pub(crate) fn parse_usage(response: &serde_json::Value) -> Usage {
+    let Some(usage) = response.get("usage") else {
+        return Usage::default();
+    };
+
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .or_else(|| usage.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    Usage {
+        input_tokens: u32::try_from(input_tokens).unwrap_or(u32::MAX),
+        output_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
+        cache_read_tokens: u32::try_from(cache_read_tokens).unwrap_or(u32::MAX),
+        ..Default::default()
+    }
+}
+
+#[must_use]
+pub(crate) fn parse_glm_response(json: &serde_json::Value) -> (String, Option<String>) {
+    let message = &json["choices"][0]["message"];
+    let content = message["content"].as_str().unwrap_or("").to_string();
+    let reasoning = message["reasoning_content"].as_str().map(|s| s.to_string());
+    (content, reasoning)
+}
+
+#[must_use]
+pub fn parse_glm_metadata(json: &serde_json::Value) -> crate::translate::ResponseMetadata {
+    crate::translate::ResponseMetadata {
+        model_used: json
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.to_string()),
+        content_filter: json
+            .get("content_filter")
+            .filter(|value| value.is_array())
+            .cloned(),
+        web_search: json
+            .get("web_search")
+            .filter(|value| value.is_array())
+            .cloned(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::tool::{ToolCategory, ToolError, ToolPermission, ToolSchema};
+    use roko_core::tool::{ToolCategory, ToolError, ToolPermission, ToolSchema, ToolSource};
 
     fn tool(name: &str, desc: &str) -> ToolDef {
         ToolDef::new(name, desc, ToolCategory::Read, ToolPermission::read_only()).with_parameters(
@@ -154,6 +252,104 @@ mod tests {
             panic!("expected JsonArray");
         };
         assert_eq!(v.as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn render_tools_with_source() {
+        let mut web_search = ToolDef::new(
+            "web_search",
+            "Search the web",
+            ToolCategory::Network,
+            ToolPermission::networked(),
+        );
+        web_search.source = ToolSource::WebSearch {
+            provider: "glm".to_string(),
+            config: serde_json::json!({
+                "enable": true,
+                "search_engine": "search_std",
+                "count": 10,
+                "content_size": "high",
+            }),
+        };
+
+        let mut retrieval = ToolDef::new(
+            "retrieval",
+            "Retrieve from knowledge base",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        );
+        retrieval.source = ToolSource::Retrieval {
+            knowledge_id: "kb_123".to_string(),
+        };
+
+        let tools = [tool("read_file", "Read a file"), web_search, retrieval];
+
+        let rendered = OpenAiTranslator.render_tools(&tools);
+        let RenderedTools::JsonArray(v) = rendered else {
+            panic!("expected JsonArray");
+        };
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["type"], "function");
+        assert_eq!(arr[0]["function"]["name"], "read_file");
+        assert_eq!(arr[1]["type"], "web_search");
+        assert_eq!(arr[1]["web_search"]["enable"], true);
+        assert_eq!(arr[1]["web_search"]["search_engine"], "search_std");
+        assert_eq!(arr[1]["web_search"]["count"], 10);
+        assert_eq!(arr[1]["web_search"]["content_size"], "high");
+        assert_eq!(arr[2]["type"], "retrieval");
+        assert_eq!(arr[2]["retrieval"]["knowledge_id"], "kb_123");
+    }
+
+    #[test]
+    fn mcp_source_renders_as_standard_function() {
+        let mut mcp_tool = ToolDef::new(
+            "zread",
+            "Search docs",
+            ToolCategory::Mcp,
+            ToolPermission::networked(),
+        )
+        .with_parameters(ToolSchema::from_value(serde_json::json!({
+            "server_label": "zread",
+            "server_url": "https://api.z.ai/api/mcp/zread/mcp",
+            "transport_type": "http",
+            "allowed_tools": ["search_doc", "read_file"],
+            "headers": {
+                "Authorization": "Bearer KEY"
+            }
+        })));
+        mcp_tool.source = ToolSource::Mcp {
+            server: "zread".to_string(),
+        };
+
+        let tools = [mcp_tool];
+
+        let rendered = OpenAiTranslator.render_tools(&tools);
+        let RenderedTools::JsonArray(v) = rendered else {
+            panic!("expected JsonArray");
+        };
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "function");
+        assert_eq!(arr[0]["function"]["name"], "zread");
+        assert_eq!(arr[0]["function"]["description"], "Search docs");
+        assert_eq!(
+            arr[0]["function"]["parameters"]["server_url"],
+            "https://api.z.ai/api/mcp/zread/mcp"
+        );
+        assert_eq!(arr[0]["function"]["parameters"]["transport_type"], "http");
+        assert_eq!(
+            arr[0]["function"]["parameters"]["allowed_tools"][0],
+            "search_doc"
+        );
+        assert_eq!(
+            arr[0]["function"]["parameters"]["allowed_tools"][1],
+            "read_file"
+        );
+        assert_eq!(
+            arr[0]["function"]["parameters"]["headers"]["Authorization"],
+            "Bearer KEY"
+        );
     }
 
     #[test]
@@ -367,6 +563,38 @@ mod tests {
     }
 
     #[test]
+    fn kimi_tool_call_ids_are_preserved() {
+        let resp = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "functions.Read:0",
+                        "function": {
+                            "name": "Read",
+                            "arguments": "{\"path\":\"src/lib.rs\"}"
+                        }
+                    }]
+                }
+            }]
+        }));
+
+        let calls = OpenAiTranslator
+            .parse_calls(&resp)
+            .expect("parse should succeed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "functions.Read:0");
+
+        let rendered =
+            OpenAiTranslator.render_results(&[(calls[0].clone(), ok_text("file contents"))]);
+        let RenderedResults::JsonMessages(v) = rendered else {
+            panic!("expected JsonMessages");
+        };
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["tool_call_id"], "functions.Read:0");
+    }
+
+    #[test]
     fn render_results_uses_role_tool_and_tool_call_id() {
         let call = ToolCall::at(
             "call_9",
@@ -527,5 +755,90 @@ mod tests {
             .expect("parse should succeed");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "first");
+    }
+
+    #[test]
+    fn kimi_cached_tokens() {
+        let glm = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 300,
+                "prompt_tokens_details": { "cached_tokens": 800 }
+            }
+        });
+        let kimi = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 300,
+                "cached_tokens": 800
+            }
+        });
+
+        assert_eq!(parse_usage(&glm).cache_read_tokens, 800);
+        assert_eq!(parse_usage(&kimi).cache_read_tokens, 800);
+    }
+
+    #[test]
+    fn kimi_partial_continuation() {
+        let continuation = build_partial_continuation("truncated...");
+        assert_eq!(continuation["role"], "assistant");
+        assert_eq!(continuation["content"], "truncated...");
+        assert_eq!(continuation["partial"], true);
+    }
+
+    #[test]
+    fn glm_reasoning_parse() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think step by step..."
+                }
+            }]
+        });
+
+        let (content, reasoning) = parse_glm_response(&raw);
+        let response = crate::translate::ChatResponse {
+            content,
+            reasoning,
+            ..Default::default()
+        };
+
+        assert_eq!(response.content, "The answer is 42.");
+        assert_eq!(
+            response.reasoning,
+            Some("Let me think step by step...".to_string())
+        );
+    }
+
+    #[test]
+    fn glm_content_filter() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "The answer is 42."
+                }
+            }],
+            "content_filter": [
+                { "role": "user", "level": 2 },
+                { "role": "assistant", "level": 0 }
+            ]
+        });
+
+        let (content, reasoning) = parse_glm_response(&raw);
+        let response = crate::translate::ChatResponse {
+            content,
+            reasoning,
+            metadata: parse_glm_metadata(&raw),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            response.metadata.content_filter,
+            Some(serde_json::json!([
+                { "role": "user", "level": 2 },
+                { "role": "assistant", "level": 0 }
+            ]))
+        );
     }
 }

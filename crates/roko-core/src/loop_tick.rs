@@ -19,7 +19,7 @@
 //! ```
 
 use crate::{
-    Budget, Composer, Context, Gate, Policy, Query, Router, Scorer, Signal, Substrate, Verdict,
+    Budget, Composer, Context, Engram, Gate, Policy, Query, Router, Scorer, Substrate, Verdict,
     error::Result,
 };
 
@@ -29,11 +29,11 @@ pub struct TickOutcome {
     /// How many candidates the substrate returned.
     pub candidates_examined: usize,
     /// The composed signal (if one was produced).
-    pub composed: Option<Signal>,
+    pub composed: Option<Engram>,
     /// The gate's verdict (if composition happened).
     pub verdict: Option<Verdict>,
     /// Signals emitted by the policy.
-    pub emitted: Vec<Signal>,
+    pub emitted: Vec<Engram>,
     /// Content hashes of signals written back to substrate.
     pub written: Vec<crate::ContentHash>,
 }

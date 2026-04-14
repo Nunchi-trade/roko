@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
 
 /// Content-addressed identifier for an [`InsightEntry`].

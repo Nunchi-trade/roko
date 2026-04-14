@@ -93,9 +93,9 @@ async fn create_deployment(
         env_vars.insert("ANTHROPIC_API_KEY".to_string(), key);
     }
 
-    // Read all config values we need in one lock acquisition
+    // Read all config values we need from one config snapshot.
     let (control_url, image, region) = {
-        let rc = state.roko_config.read().await;
+        let rc = state.load_roko_config();
         let url = format!("http://{}:{}", rc.server.bind, rc.server.port);
         let img = rc
             .deploy
@@ -103,7 +103,6 @@ async fn create_deployment(
             .clone()
             .unwrap_or_else(|| "roko-worker:latest".to_string());
         let rgn = rc.deploy.default_region.clone();
-        drop(rc);
         (url, img, rgn)
     };
     env_vars.insert("ROKO_CONTROL_PLANE_URL".to_string(), control_url);
@@ -119,7 +118,7 @@ async fn create_deployment(
 
     // Create per-request backend if overridden, otherwise use the server default
     let backend: Arc<dyn crate::deploy::DeployBackend> = if let Some(ref name) = req.backend {
-        let rc = state.roko_config.read().await;
+        let rc = state.load_roko_config();
         let b = crate::deploy::create_backend(
             name,
             rc.deploy.railway_api_token.as_deref(),
@@ -127,7 +126,6 @@ async fn create_deployment(
             rc.deploy.environment_id.as_deref(),
         )
         .map_err(|e| ApiError::bad_request(format!("invalid backend '{name}': {e}")))?;
-        drop(rc);
         Arc::from(b)
     } else {
         Arc::clone(&state.deploy_backend)

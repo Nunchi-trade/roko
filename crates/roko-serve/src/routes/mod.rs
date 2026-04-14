@@ -11,10 +11,12 @@ mod learning;
 mod middleware;
 mod plans;
 mod prds;
+mod providers;
 mod research;
-mod subscriptions;
 mod run;
+mod sse;
 mod status;
+mod subscriptions;
 mod templates;
 mod webhooks;
 mod ws;
@@ -25,6 +27,8 @@ use super::state::AppState;
 use axum::Router;
 use roko_core::config::ServeAuthConfig;
 use tower_http::trace::TraceLayer;
+
+pub use self::config::reload_config_from_disk;
 
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(
@@ -45,7 +49,11 @@ pub fn build_router(
         .merge(agents::routes())
         .merge(learning::routes())
         .merge(config::routes())
-        .merge(deployments::routes());
+        .merge(deployments::routes())
+        .nest("/providers", providers::router())
+        .nest("/models", providers::models_router())
+        .nest("/routing", providers::routing_router())
+        .merge(sse::routes());
 
     let api = if api_auth.enabled {
         api.layer(axum::middleware::from_fn_with_state(
@@ -55,6 +63,13 @@ pub fn build_router(
     } else {
         api
     };
+
+    // Secret-scrubbing layer: redacts API keys / tokens from JSON responses.
+    let scrubber = Arc::clone(&state.scrubber);
+    let api = api.layer(axum::middleware::from_fn_with_state(
+        scrubber,
+        middleware::scrub_secrets,
+    ));
 
     Router::new()
         .merge(webhooks::routes())

@@ -1,0 +1,21 @@
+//! `roko-primitives` — pure compute primitives with zero internal workspace dependencies.
+//!
+//! This crate holds shared data structures that multiple top-level crates need
+//! without pulling in Roko-platform-specific code:
+//!
+//! - [`HdcVector`]: 10,240-bit hyperdimensional computing vector (XOR bind, majority bundle,
+//!   Hamming similarity, serialization, deterministic seeding)
+//! - [`InferenceTier`]: three-tier inference gate (T0/T1/T2) with u8 conversion
+//! - [`TierRouter`]: pure model-selection function mapping tier + vitality -> model name
+//!
+//! Any crate that needs HDC or tier routing should depend on this crate directly rather
+//! than pulling in higher-level workspace crates.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod hdc;
+pub mod tier;
+
+pub use hdc::HdcVector;
+pub use tier::{InferenceTier, T2_VITALITY_THRESHOLD, TierError, TierRouter};

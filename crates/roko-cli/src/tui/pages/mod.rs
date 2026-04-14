@@ -37,6 +37,10 @@ pub enum PageId {
     Signals,
     /// Effective config view.
     ConfigView,
+    /// Provider health monitoring.
+    ProviderHealth,
+    /// Model comparison metrics.
+    ModelComparison,
 }
 
 impl PageId {
@@ -57,6 +61,8 @@ impl PageId {
             Self::LogView => "Log View",
             Self::Signals => "Signals",
             Self::ConfigView => "Config View",
+            Self::ProviderHealth => "Provider Health",
+            Self::ModelComparison => "Model Comparison",
         }
     }
 
@@ -77,6 +83,8 @@ impl PageId {
             Self::LogView => "log-view",
             Self::Signals => "signals",
             Self::ConfigView => "config-view",
+            Self::ProviderHealth => "provider-health",
+            Self::ModelComparison => "model-comparison",
         }
     }
 
@@ -96,7 +104,9 @@ impl PageId {
             | Self::PlanView
             | Self::LogView
             | Self::Signals
-            | Self::ConfigView => "operations",
+            | Self::ConfigView
+            | Self::ProviderHealth
+            | Self::ModelComparison => "operations",
         }
     }
 }

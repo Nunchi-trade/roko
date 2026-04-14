@@ -71,7 +71,7 @@ impl std::fmt::Display for SubscriptionId {
 mod tests {
     use super::*;
     use crate::chain::PheromoneKind;
-    use bardo_primitives::HdcVector;
+    use roko_primitives::HdcVector;
     use std::sync::Arc;
 
     #[test]

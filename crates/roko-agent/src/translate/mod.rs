@@ -18,6 +18,7 @@
 //! # Submodules
 //!
 //! - [`claude`] — Claude CLI (`--tools=...` flag + stream-json `tool_use` blocks)
+//! - [`gemini`] — Gemini native `functionDeclarations` / `functionCall` / `functionResponse`
 //! - [`ollama`] — OpenAI-compatible JSON over `/api/chat`
 //! - [`openai`] — `/v1/chat/completions` (mostly same wire as Ollama)
 //! - [`react`] — prompt-level `ReAct` fallback for models without native tools
@@ -33,19 +34,62 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub use crate::chat_types::{FinishReason, SessionState};
+use crate::usage::Usage;
 use roko_core::tool::{ToolCall, ToolDef, ToolFormat, ToolResult};
 
 pub mod capability;
 pub mod claude;
+pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod react;
 
-pub use capability::{ModelCapabilities, capabilities_for, translator_for};
+pub use capability::{
+    ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for,
+};
 pub use claude::ClaudeTranslator;
+pub use gemini::GeminiTranslator;
 pub use ollama::OllamaTranslator;
 pub use openai::OpenAiTranslator;
 pub use react::ReActTranslator;
+
+/// Canonical response from any provider, after adapter parsing.
+#[derive(Debug, Clone, Default)]
+pub struct ChatResponse {
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+    pub finish_reason: crate::chat_types::FinishReason,
+    pub metadata: ResponseMetadata,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResponseMetadata {
+    pub response_id: Option<String>,
+    pub model_used: Option<String>,
+    pub cached_tokens: Option<u64>,
+    pub content_filter: Option<serde_json::Value>,
+    pub web_search: Option<serde_json::Value>,
+    pub extra: Option<serde_json::Value>,
+    pub provider_latency_ms: Option<u64>,
+    pub raw_finish_reason: Option<String>,
+}
+
+/// Normalize provider-specific finish reasons into canonical [`FinishReason`] values.
+#[must_use]
+pub fn normalize_finish_reason(raw: &str) -> FinishReason {
+    match raw {
+        "stop" | "end_turn" => FinishReason::Stop,
+        "length" | "max_tokens" => FinishReason::Length,
+        "tool_calls" | "tool_use" => FinishReason::ToolCalls,
+        "content_filter" | "sensitive" => FinishReason::ContentFilter,
+        "network_error" => FinishReason::Error("network_error".into()),
+        "model_context_window_exceeded" => FinishReason::Error("context_overflow".into()),
+        other => FinishReason::Error(other.to_string()),
+    }
+}
 
 /// Bidirectional bridge between canonical tools and a backend's wire format.
 ///
@@ -140,6 +184,7 @@ impl BackendResponse {
                     v.pointer("/choices/0/message/content")
                         .and_then(|x| x.as_str())
                 })
+                .or_else(|| extract_gemini_text(v))
                 .unwrap_or("")
                 .to_string(),
             Self::StreamJson(events) => {
@@ -157,6 +202,129 @@ impl BackendResponse {
             }
         }
     }
+
+    /// Extract reasoning/thinking content from the response.
+    #[must_use]
+    pub fn extract_reasoning(&self) -> Option<String> {
+        match self {
+            Self::Json(v) => v
+                .pointer("/choices/0/message")
+                .and_then(extract_reasoning_from_value)
+                .or_else(|| v.pointer("/message").and_then(extract_reasoning_from_value))
+                .or_else(|| extract_reasoning_from_value(v)),
+            Self::StreamJson(events) => {
+                let mut buf = String::new();
+                for ev in events {
+                    if let Some(reasoning) = extract_reasoning_from_stream_event(ev) {
+                        buf.push_str(&reasoning);
+                    }
+                }
+                if buf.is_empty() { None } else { Some(buf) }
+            }
+            Self::Text(_) => None,
+        }
+    }
+
+    /// Extract token usage metadata when the backend reports it.
+    #[must_use]
+    pub fn extract_usage(&self) -> Usage {
+        match self {
+            Self::Json(v) => openai::parse_usage(v),
+            Self::StreamJson(_) | Self::Text(_) => Usage::default(),
+        }
+    }
+}
+
+fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(reasoning) = value
+        .get("reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    value
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|blocks| extract_reasoning_from_blocks(blocks.as_slice()))
+}
+
+fn extract_gemini_text(value: &serde_json::Value) -> Option<&str> {
+    value
+        .pointer("/candidates/0/content/parts")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|parts| {
+            parts.iter().find_map(|part| {
+                part.get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| !text.is_empty())
+            })
+        })
+}
+
+fn extract_reasoning_from_blocks(blocks: &[serde_json::Value]) -> Option<String> {
+    let mut buf = String::new();
+
+    for block in blocks {
+        if block.get("type").and_then(serde_json::Value::as_str) != Some("thinking") {
+            continue;
+        }
+
+        if let Some(reasoning) = block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| block.get("text").and_then(serde_json::Value::as_str))
+        {
+            buf.push_str(reasoning);
+        }
+    }
+
+    if buf.is_empty() { None } else { Some(buf) }
+}
+
+fn extract_reasoning_from_stream_event(event: &serde_json::Value) -> Option<String> {
+    if let Some(reasoning) = event
+        .pointer("/delta/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(reasoning) = event
+        .pointer("/delta/thinking")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(reasoning) = event
+        .pointer("/content_block/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(block) = event.get("content_block")
+        && block.get("type").and_then(serde_json::Value::as_str) == Some("thinking")
+        && let Some(reasoning) = block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| block.get("text").and_then(serde_json::Value::as_str))
+    {
+        return Some(reasoning.to_string());
+    }
+
+    if let Some(delta) = event.get("delta")
+        && delta.get("type").and_then(serde_json::Value::as_str) == Some("thinking_delta")
+        && let Some(reasoning) = delta
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| delta.get("text").and_then(serde_json::Value::as_str))
+    {
+        return Some(reasoning.to_string());
+    }
+
+    None
 }
 
 /// Errors a [`Translator`] may produce.
@@ -197,6 +365,21 @@ mod tests {
     }
 
     #[test]
+    fn backend_response_extract_text_from_gemini_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "functionCall": { "name": "read_file", "args": { "path": "x" } } },
+                        { "text": "done" }
+                    ]
+                }
+            }]
+        }));
+        assert_eq!(r.extract_text(), "done");
+    }
+
+    #[test]
     fn backend_response_extract_text_from_stream_json() {
         let r = BackendResponse::StreamJson(vec![
             serde_json::json!({"delta": {"text": "one "}}),
@@ -209,6 +392,125 @@ mod tests {
     fn backend_response_extract_text_empty_when_absent() {
         let r = BackendResponse::Json(serde_json::json!({}));
         assert_eq!(r.extract_text(), "");
+    }
+
+    #[test]
+    fn backend_response_extract_reasoning_from_openai_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "answer",
+                    "reasoning_content": "thinking"
+                }
+            }]
+        }));
+        assert_eq!(r.extract_reasoning(), Some("thinking".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_reasoning_from_claude_json_blocks() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "content": [
+                { "type": "text", "text": "answer" },
+                { "type": "thinking", "thinking": "hmm" }
+            ]
+        }));
+        assert_eq!(r.extract_reasoning(), Some("hmm".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_reasoning_from_stream_json() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({
+                "type": "content_block_start",
+                "content_block": { "type": "thinking", "thinking": "step 1" }
+            }),
+            serde_json::json!({
+                "type": "content_block_delta",
+                "delta": { "type": "thinking_delta", "thinking": " step 2" }
+            }),
+        ]);
+        assert_eq!(r.extract_reasoning(), Some("step 1 step 2".to_string()));
+    }
+
+    #[test]
+    fn backend_response_extract_usage_from_openai_json() {
+        let r = BackendResponse::Json(serde_json::json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {
+                    "cached_tokens": 3
+                }
+            }
+        }));
+        assert_eq!(
+            r.extract_usage(),
+            Usage {
+                input_tokens: 12,
+                output_tokens: 5,
+                cache_read_tokens: 3,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn chat_response_defaults_and_variants() {
+        let response = ChatResponse::default();
+        assert_eq!(response.content, "");
+        assert_eq!(response.reasoning, None);
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.usage, Usage::default());
+        assert!(matches!(response.finish_reason, FinishReason::Stop));
+        assert_eq!(response.metadata.response_id, None);
+        assert_eq!(response.metadata.model_used, None);
+        assert_eq!(response.metadata.cached_tokens, None);
+        assert_eq!(response.metadata.content_filter, None);
+        assert_eq!(response.metadata.extra, None);
+        assert_eq!(response.metadata.provider_latency_ms, None);
+        assert_eq!(response.metadata.raw_finish_reason, None);
+
+        assert_eq!(FinishReason::Length, FinishReason::Length);
+        assert_eq!(FinishReason::ToolCalls, FinishReason::ToolCalls);
+        assert_eq!(FinishReason::ContentFilter, FinishReason::ContentFilter);
+        assert_eq!(
+            FinishReason::Error("boom".into()),
+            FinishReason::Error("boom".into())
+        );
+    }
+
+    #[test]
+    fn glm_finish_reasons() {
+        assert_eq!(normalize_finish_reason("stop"), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason("end_turn"), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason("length"), FinishReason::Length);
+        assert_eq!(normalize_finish_reason("max_tokens"), FinishReason::Length);
+        assert_eq!(
+            normalize_finish_reason("tool_calls"),
+            FinishReason::ToolCalls
+        );
+        assert_eq!(normalize_finish_reason("tool_use"), FinishReason::ToolCalls);
+        assert_eq!(
+            normalize_finish_reason("content_filter"),
+            FinishReason::ContentFilter
+        );
+        assert_eq!(
+            normalize_finish_reason("sensitive"),
+            FinishReason::ContentFilter
+        );
+        assert_eq!(
+            normalize_finish_reason("network_error"),
+            FinishReason::Error("network_error".into())
+        );
+        assert_eq!(
+            normalize_finish_reason("model_context_window_exceeded"),
+            FinishReason::Error("context_overflow".into())
+        );
+        assert_eq!(
+            normalize_finish_reason("something_else"),
+            FinishReason::Error("something_else".into())
+        );
     }
 
     #[test]

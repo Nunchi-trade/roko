@@ -1,0 +1,49 @@
+schema_version = 2
+
+[project]
+name = "roko-kimi"
+root = "."
+fresh_base_branch = "main"
+
+[agent]
+model = "kimi-k2-5"
+effort = "high"
+bare_mode = true
+fallback_model = "glm-5-1"
+timeout_ms = 300000
+
+[agent.tier_models]
+mechanical = "kimi-k2-5"
+focused = "kimi-k2-5"
+integrative = "kimi-k2-5"
+architectural = "kimi-k2-5"
+
+[prompt]
+token_budget = 12000
+role = "You are a Roko agent using the Kimi provider. Favor concise reasoning and code-first answers."
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+[providers.moonshot]
+kind = "openai_compat"
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+timeout_ms = 180000
+
+[models.kimi-k2-5]
+provider = "moonshot"
+slug = "kimi-k2.5"
+context_window = 256000
+max_output = 65535
+supports_tools = true
+supports_thinking = true
+supports_vision = true
+supports_partial = true
+tool_format = "openai_json"
+cost_input_per_m = 0.60
+cost_output_per_m = 3.00
+cost_cache_read_per_m = 0.10
+max_tools = 128

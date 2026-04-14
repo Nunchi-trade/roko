@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use octocrab::{Octocrab, Page};
 use reqwest::Client;
 use roko_core::tool::ExternalAction;
-use roko_core::{Body, Kind, Provenance, Signal};
+use roko_core::{Body, Engram, Kind, Provenance};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use serde_json::{Value, json};
@@ -251,7 +251,7 @@ async fn persist_feedback_result(
     observation: FeedbackObservation,
 ) -> Result<()> {
     let feedback_kind = feedback_signal_kind(&action.service, &action.action_type);
-    let signal = Signal::builder(feedback_kind)
+    let signal = Engram::builder(feedback_kind)
         .body(Body::from_json(&json!({
             "episode_id": episode.episode_id,
             "episode_hash": episode.id,
@@ -288,20 +288,33 @@ async fn persist_feedback_result(
 
     if let (Some(experiment_name), Some(variant_id)) =
         (experiment_name, episode_experiment_variant(episode))
-        && let Err(err) = record_experiment_metric(
+    {
+        if let Err(err) =
+            record_experiment_outcome(&state.workdir, &variant_id, observation.success)
+        {
+            warn!(
+                error = %err,
+                episode_id = %episode.episode_id,
+                experiment = %experiment_name,
+                variant_id = %variant_id,
+                "failed to record experiment outcome"
+            );
+        }
+
+        if let Err(err) = record_experiment_metric(
             &state.workdir,
             &experiment_name,
             &variant_id,
             observation.sentiment,
-        )
-    {
-        warn!(
-            error = %err,
-            episode_id = %episode.episode_id,
-            experiment = %experiment_name,
-            variant_id = %variant_id,
-            "failed to record experiment metric"
-        );
+        ) {
+            warn!(
+                error = %err,
+                episode_id = %episode.episode_id,
+                experiment = %experiment_name,
+                variant_id = %variant_id,
+                "failed to record experiment metric"
+            );
+        }
     }
 
     if observation.sentiment > 0.0
@@ -350,6 +363,16 @@ fn episode_experiment_variant(episode: &Episode) -> Option<String> {
 
 fn sentiment_to_metric_value(sentiment: f64) -> f64 {
     ((sentiment.clamp(-1.0, 1.0) + 1.0) / 2.0).clamp(0.0, 1.0)
+}
+
+fn record_experiment_outcome(workdir: &Path, variant_id: &str, success: bool) -> Result<()> {
+    let path = workdir.join(".roko/learn/experiments.json");
+    let mut store = ExperimentStore::load_or_new(&path);
+    store.record_outcome(variant_id, success);
+    store
+        .save(&path)
+        .with_context(|| format!("save {}", path.display()))?;
+    Ok(())
 }
 
 fn record_experiment_metric(
@@ -847,8 +870,8 @@ async fn collect_slack_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_learn::cascade_router::CascadeRouter;
     use roko_learn::prompt_experiment::{ExperimentStore, PromptExperiment, PromptVariant};
-    use uuid::Uuid;
     use serde_json::json;
     use std::fs;
     use uuid::Uuid;
@@ -1012,6 +1035,7 @@ mod tests {
                 name: "Variant A".into(),
                 section_name: "template-section".into(),
                 content: "Use the short form.".into(),
+                slug: None,
                 active: true,
             }],
         ));
@@ -1022,10 +1046,59 @@ mod tests {
 
         let saved = std::fs::read_to_string(&path).expect("read experiment store");
         let json: serde_json::Value = serde_json::from_str(&saved).expect("parse experiment store");
-        let metric = json["experiments"]["template-experiment"]["metric_stats"]["variant-a"]["samples"]
-            .as_u64()
-            .expect("metric samples");
+        let metric =
+            json["experiments"]["template-experiment"]["metric_stats"]["variant-a"]["samples"]
+                .as_u64()
+                .expect("metric samples");
         assert_eq!(metric, 1);
+    }
+
+    #[test]
+    fn experiment_outcome_updates_variant_trials_and_successes() {
+        let root = std::env::temp_dir().join(format!("roko-feedback-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp root");
+
+        let path = root.join(".roko/learn/experiments.json");
+        let mut store = ExperimentStore::new();
+        store.register(PromptExperiment::new(
+            "outcome-experiment",
+            "outcome-section",
+            vec![
+                PromptVariant {
+                    id: "variant-a".into(),
+                    name: "Variant A".into(),
+                    section_name: "outcome-section".into(),
+                    content: "Be concise.".into(),
+                    slug: None,
+                    active: true,
+                },
+                PromptVariant {
+                    id: "variant-b".into(),
+                    name: "Variant B".into(),
+                    section_name: "outcome-section".into(),
+                    content: "Be thorough.".into(),
+                    slug: None,
+                    active: true,
+                },
+            ],
+        ));
+        store.save(&path).expect("seed experiment store");
+
+        record_experiment_outcome(&root, "variant-a", true).expect("record success outcome");
+        record_experiment_outcome(&root, "variant-a", false).expect("record failure outcome");
+        record_experiment_outcome(&root, "variant-b", true).expect("record success outcome b");
+
+        let reloaded = ExperimentStore::load_or_new(&path);
+        let experiment = reloaded
+            .get("outcome-experiment")
+            .expect("experiment exists");
+        let stats_a = experiment.stats.get("variant-a").expect("variant-a stats");
+        assert_eq!(stats_a.trials, 2);
+        assert_eq!(stats_a.successes, 1);
+
+        let stats_b = experiment.stats.get("variant-b").expect("variant-b stats");
+        assert_eq!(stats_b.trials, 1);
+        assert_eq!(stats_b.successes, 1);
     }
 
     #[test]

@@ -1,11 +1,11 @@
-//! Signal body payloads consumed and emitted by gates.
+//! Engram body payloads consumed and emitted by gates.
 //!
 //! These are structured types that round-trip through [`Body::Json`]. They
 //! live here (not in a shared `roko-types` crate) until a second crate needs
 //! them; then we extract.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The input payload a gate expects to find in a signal's body.
 ///
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 /// # Example
 ///
 /// ```
-/// use roko_core::{Signal, Kind, Body};
+/// use roko_core::{Engram, Kind, Body};
 /// use roko_gate::GatePayload;
 /// use std::path::PathBuf;
 ///
@@ -26,7 +26,7 @@ use std::path::PathBuf;
 ///     extra_env: vec![],
 ///     label: Some("check-login-module".into()),
 /// };
-/// let sig = Signal::builder(Kind::Task)
+/// let sig = Engram::builder(Kind::Task)
 ///     .body(Body::from_json(&payload).unwrap())
 ///     .build();
 /// ```
@@ -99,6 +99,27 @@ pub enum BuildSystem {
 }
 
 impl BuildSystem {
+    /// Detect the build system from common root marker files in `workdir`.
+    #[must_use]
+    pub fn detect(workdir: &Path) -> Self {
+        if workdir.join("Cargo.toml").exists() {
+            return Self::Cargo;
+        }
+        if workdir.join("package.json").exists() {
+            return Self::Npm;
+        }
+        if workdir.join("go.mod").exists() {
+            return Self::Go;
+        }
+        if workdir.join("pyproject.toml").exists() || workdir.join("setup.py").exists() {
+            return Self::Python;
+        }
+        if workdir.join("foundry.toml").exists() {
+            return Self::Forge;
+        }
+        Self::Make
+    }
+
     /// The default "check" command for this build system (args after the program).
     #[must_use]
     #[allow(clippy::match_same_arms)]
@@ -234,6 +255,11 @@ impl TestSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn write_marker(dir: &Path, marker: &str) {
+        std::fs::write(dir.join(marker), "").expect("write marker");
+    }
 
     #[test]
     fn builder_chain() {
@@ -267,5 +293,53 @@ mod tests {
     #[test]
     fn build_system_check_args() {
         assert!(BuildSystem::Cargo.check_args().contains(&"check"));
+    }
+
+    #[test]
+    fn build_system_detect_rust() {
+        let dir = TempDir::new().expect("tempdir");
+        write_marker(dir.path(), "Cargo.toml");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Cargo);
+    }
+
+    #[test]
+    fn build_system_detect_node() {
+        let dir = TempDir::new().expect("tempdir");
+        write_marker(dir.path(), "package.json");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Npm);
+    }
+
+    #[test]
+    fn build_system_detect_go() {
+        let dir = TempDir::new().expect("tempdir");
+        write_marker(dir.path(), "go.mod");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Go);
+    }
+
+    #[test]
+    fn build_system_detect_python_pyproject() {
+        let dir = TempDir::new().expect("tempdir");
+        write_marker(dir.path(), "pyproject.toml");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Python);
+    }
+
+    #[test]
+    fn build_system_detect_python_setup_py() {
+        let dir = TempDir::new().expect("tempdir");
+        write_marker(dir.path(), "setup.py");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Python);
+    }
+
+    #[test]
+    fn build_system_detect_solidity() {
+        let dir = TempDir::new().expect("tempdir");
+        write_marker(dir.path(), "foundry.toml");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Forge);
+    }
+
+    #[test]
+    fn build_system_detect_falls_back_to_make() {
+        let dir = TempDir::new().expect("tempdir");
+        assert_eq!(BuildSystem::detect(dir.path()), BuildSystem::Make);
     }
 }

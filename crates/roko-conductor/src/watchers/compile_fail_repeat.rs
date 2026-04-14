@@ -3,7 +3,7 @@
 //! When the same compile diagnostic appears [`MAX_IDENTICAL_COMPILE_FAILURES`]
 //! consecutive times, the agent is stuck on the same error and needs a restart.
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 
 /// Maximum consecutive identical compile failures before firing.
 pub const MAX_IDENTICAL_COMPILE_FAILURES: usize = 3;
@@ -39,7 +39,7 @@ impl CompileFailRepeatWatcher {
 }
 
 /// Extract a normalized error key from a compile diagnostic signal.
-fn diagnostic_key(signal: &Signal) -> Option<String> {
+fn diagnostic_key(signal: &Engram) -> Option<String> {
     match &signal.body {
         Body::Text(s) => {
             let trimmed = s.trim();
@@ -61,9 +61,9 @@ fn diagnostic_key(signal: &Signal) -> Option<String> {
 }
 
 impl Policy for CompileFailRepeatWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Collect compile diagnostic signals in order.
-        let diagnostics: Vec<&Signal> = stream
+        let diagnostics: Vec<&Engram> = stream
             .iter()
             .filter(|s| s.kind == Kind::CompileDiagnostic)
             .collect();
@@ -84,7 +84,7 @@ impl Policy for CompileFailRepeatWatcher {
 
         if all_same {
             vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
                         "{} consecutive identical compile failures: {}",
                         self.max_failures,
@@ -120,8 +120,8 @@ fn truncate(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
-    fn compile_error(msg: &str) -> Signal {
-        Signal::builder(Kind::CompileDiagnostic)
+    fn compile_error(msg: &str) -> Engram {
+        Engram::builder(Kind::CompileDiagnostic)
             .body(Body::text(msg))
             .build()
     }
@@ -182,11 +182,11 @@ mod tests {
         let w = CompileFailRepeatWatcher::default();
         let stream = vec![
             compile_error("same error"),
-            Signal::builder(Kind::AgentOutput)
+            Engram::builder(Kind::AgentOutput)
                 .body(Body::text("trying to fix..."))
                 .build(),
             compile_error("same error"),
-            Signal::builder(Kind::AgentOutput)
+            Engram::builder(Kind::AgentOutput)
                 .body(Body::text("trying again..."))
                 .build(),
             compile_error("same error"),

@@ -75,7 +75,7 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
                 ),
                 WidgetScaffold::new(
                     "signal_tree",
-                    "Signal DAG Explorer",
+                    "Engram DAG Explorer",
                     "Indented parent-hash chain for the selected signal.",
                 ),
             ],
@@ -94,6 +94,40 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
                     "source_tags",
                     "Source Tags",
                     "Default/global/project/CLI override origin.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
+            PageId::ProviderHealth,
+            "Provider Health",
+            "Per-provider circuit breaker state, latency, and error rates.",
+            vec![
+                WidgetScaffold::new(
+                    "provider_table",
+                    "Provider Status",
+                    "Provider name, state (open/half-open/closed), p50/p99 latency, error rate.",
+                ),
+                WidgetScaffold::new(
+                    "request_summary",
+                    "Request Summary",
+                    "Total requests, failures, and circuit breaker trips.",
+                ),
+            ],
+        ),
+        PageScaffold::new(
+            PageId::ModelComparison,
+            "Model Comparison",
+            "Side-by-side model performance, cost, and quality metrics.",
+            vec![
+                WidgetScaffold::new(
+                    "model_table",
+                    "Model Metrics",
+                    "Model ID, provider, cost/M tokens, latency, gate pass rate.",
+                ),
+                WidgetScaffold::new(
+                    "cost_comparison",
+                    "Cost Comparison",
+                    "Relative cost per task across models.",
                 ),
             ],
         ),

@@ -4,7 +4,7 @@
 //! phase, this watcher fires a warning so the conductor can restart or
 //! escalate.
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 
 /// Maximum times the same review feedback can appear before firing.
 pub const MAX_REVIEW_CYCLES: usize = 3;
@@ -37,7 +37,7 @@ impl ReviewLoopWatcher {
     }
 }
 
-fn signal_plan_id(signal: &Signal) -> Option<String> {
+fn signal_plan_id(signal: &Engram) -> Option<String> {
     signal.tag(PLAN_ID_TAG).map(str::to_owned).or_else(|| {
         if signal.kind != Kind::PlanPhase {
             return None;
@@ -55,11 +55,11 @@ fn signal_plan_id(signal: &Signal) -> Option<String> {
     })
 }
 
-fn latest_plan_id(stream: &[Signal]) -> Option<String> {
+fn latest_plan_id(stream: &[Engram]) -> Option<String> {
     stream.iter().rev().find_map(signal_plan_id)
 }
 
-fn plan_event(signal: &Signal) -> Option<String> {
+fn plan_event(signal: &Engram) -> Option<String> {
     if signal.kind != Kind::PlanPhase {
         return None;
     }
@@ -76,7 +76,7 @@ fn plan_event(signal: &Signal) -> Option<String> {
 }
 
 impl Policy for ReviewLoopWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(plan_id) = latest_plan_id(stream) else {
             return Vec::new();
         };
@@ -94,7 +94,7 @@ impl Policy for ReviewLoopWatcher {
                         review_rejects += 1;
                         if review_rejects >= self.max_cycles {
                             return vec![
-                                Signal::builder(Kind::Custom(
+                                Engram::builder(Kind::Custom(
                                     "conductor.intervention".into(),
                                 ))
                                 .body(Body::text(format!(
@@ -129,8 +129,8 @@ impl Policy for ReviewLoopWatcher {
 mod tests {
     use super::*;
 
-    fn review_phase(event: &str) -> Signal {
-        Signal::builder(Kind::PlanPhase)
+    fn review_phase(event: &str) -> Engram {
+        Engram::builder(Kind::PlanPhase)
             .body(Body::Json(serde_json::json!({
                 "plan_id": "plan-1",
                 "event": event,
@@ -139,8 +139,8 @@ mod tests {
             .build()
     }
 
-    fn other_plan_phase(event: &str) -> Signal {
-        Signal::builder(Kind::PlanPhase)
+    fn other_plan_phase(event: &str) -> Engram {
+        Engram::builder(Kind::PlanPhase)
             .body(Body::Json(serde_json::json!({
                 "plan_id": "plan-2",
                 "event": event,

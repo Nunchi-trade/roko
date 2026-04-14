@@ -7,7 +7,7 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -55,7 +55,7 @@ impl ShellGate {
 
 #[async_trait]
 impl Gate for ShellGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: Option<GatePayload> = signal.body.as_json().ok();
 
@@ -122,8 +122,8 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
-    fn empty_signal() -> Signal {
-        Signal::builder(Kind::Task).body(Body::empty()).build()
+    fn empty_signal() -> Engram {
+        Engram::builder(Kind::Task).body(Body::empty()).build()
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Webhook ingress endpoints.
 //!
 //! GitHub and Slack webhooks are verified, converted into typed
-//! [`roko_core::Signal`]s, persisted through `.roko/signals.jsonl`, and
+//! [`roko_core::Engram`]s, persisted through `.roko/signals.jsonl`, and
 //! published onto the shared event bus.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use hmac::{Hmac, Mac};
 use roko_core::signal_kinds;
-use roko_core::{Body, Kind, Provenance, Signal};
+use roko_core::{Body, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
@@ -34,14 +34,14 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `POST /webhooks/github` — verify the GitHub signature, convert the payload
-/// into a `Signal`, persist it, and publish it to the server event bus.
+/// into a `Engram`, persist it, and publish it to the server event bus.
 async fn github_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
     let secret = {
-        let config = state.roko_config.read().await;
+        let config = state.load_roko_config();
         config.webhooks.github.secret.clone()
     };
 
@@ -71,10 +71,12 @@ async fn github_webhook(
     let kind = github_signal_kind(event_type, &payload)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported github event: {event_type}")))?;
 
-    let signal = attach_hdc_fingerprint(Signal::builder(kind)
-        .body(Body::Json(payload))
-        .provenance(Provenance::external("github:webhook"))
-        .build());
+    let signal = attach_hdc_fingerprint(
+        Engram::builder(kind)
+            .body(Body::Json(payload))
+            .provenance(Provenance::external("github:webhook"))
+            .build(),
+    );
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -82,7 +84,7 @@ async fn github_webhook(
 }
 
 /// `POST /webhooks/slack` — verify the Slack signature, handle URL
-/// verification challenges, convert supported events into a `Signal`, persist
+/// verification challenges, convert supported events into a `Engram`, persist
 /// them, and publish them to the server event bus.
 async fn slack_webhook(
     State(state): State<Arc<AppState>>,
@@ -138,10 +140,12 @@ async fn slack_webhook(
     let kind = slack_signal_kind(event_type)
         .ok_or_else(|| ApiError::bad_request(format!("unsupported slack event: {event_type}")))?;
 
-    let signal = attach_hdc_fingerprint(Signal::builder(kind)
-        .body(Body::Json(payload))
-        .provenance(Provenance::external("slack:webhook"))
-        .build());
+    let signal = attach_hdc_fingerprint(
+        Engram::builder(kind)
+            .body(Body::Json(payload))
+            .provenance(Provenance::external("slack:webhook"))
+            .build(),
+    );
 
     persist_webhook_signal(&state, signal).await?;
 
@@ -149,7 +153,7 @@ async fn slack_webhook(
 }
 
 /// `POST /webhooks/generic` — accept arbitrary JSON, convert it into a
-/// `Signal`, persist it, and publish it to the server event bus. This endpoint skips
+/// `Engram`, persist it, and publish it to the server event bus. This endpoint skips
 /// signature verification and is intended for internal use behind auth.
 async fn generic_webhook(
     State(state): State<Arc<AppState>>,
@@ -164,32 +168,33 @@ async fn generic_webhook(
     Ok(StatusCode::OK)
 }
 
-fn generic_webhook_signal(payload: Value) -> Signal {
-    Signal::builder(Kind::Custom("webhook:generic".into()))
+fn generic_webhook_signal(payload: Value) -> Engram {
+    Engram::builder(Kind::Custom("webhook:generic".into()))
         .body(Body::Json(payload))
         .provenance(Provenance::external("webhook:generic"))
         .build()
 }
 
 #[cfg(feature = "hdc")]
-fn attach_hdc_fingerprint(mut signal: Signal) -> Signal {
-    use base64::engine::general_purpose::STANDARD as BASE64;
+fn attach_hdc_fingerprint(mut signal: Engram) -> Engram {
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
 
-    let fingerprint = bardo_primitives::hdc::fingerprint(&signal.body);
-    signal
-        .tags
-        .insert("hdc_fingerprint".into(), BASE64.encode(fingerprint.to_bytes()));
+    let fingerprint = roko_primitives::hdc::fingerprint(&signal.body);
+    signal.tags.insert(
+        "hdc_fingerprint".into(),
+        BASE64.encode(fingerprint.to_bytes()),
+    );
     signal.id = signal.content_hash();
     signal
 }
 
 #[cfg(not(feature = "hdc"))]
-fn attach_hdc_fingerprint(signal: Signal) -> Signal {
+fn attach_hdc_fingerprint(signal: Engram) -> Engram {
     signal
 }
 
-async fn persist_webhook_signal(state: &AppState, signal: Signal) -> Result<(), ApiError> {
+async fn persist_webhook_signal(state: &AppState, signal: Engram) -> Result<(), ApiError> {
     state
         .signal_store
         .put(signal.clone())
@@ -209,8 +214,25 @@ fn github_signal_kind(event_type: &str, payload: &Value) -> Option<Kind> {
         "pull_request" => payload
             .get("action")
             .and_then(Value::as_str)
-            .filter(|action| *action == "opened")
-            .map(|_| Kind::Custom(signal_kinds::GITHUB_PR_OPENED.into())),
+            .and_then(|action| match action {
+                "opened" => Some(Kind::Custom(signal_kinds::GITHUB_PR_OPENED.into())),
+                "closed"
+                    if payload
+                        .get("pull_request")
+                        .and_then(|pr| pr.get("merged"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        && payload
+                            .get("pull_request")
+                            .and_then(|pr| pr.get("head"))
+                            .and_then(|head| head.get("ref"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|branch| branch.starts_with("plan/")) =>
+                {
+                    Some(Kind::Custom(signal_kinds::PRD_PLAN_APPROVED.into()))
+                }
+                _ => None,
+            }),
         "pull_request_review" => Some(Kind::Custom(signal_kinds::GITHUB_PR_REVIEW.into())),
         "issues" => payload
             .get("action")
@@ -337,9 +359,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     #[cfg(feature = "hdc")]
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    #[cfg(feature = "hdc")]
     use base64::Engine as _;
+    #[cfg(feature = "hdc")]
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -366,6 +388,20 @@ mod tests {
         let issue_opened = github_signal_kind("issues", &serde_json::json!({ "action": "opened" }));
         assert!(
             matches!(issue_opened.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::GITHUB_ISSUE_OPENED)
+        );
+
+        let plan_approved = github_signal_kind(
+            "pull_request",
+            &serde_json::json!({
+                "action": "closed",
+                "pull_request": {
+                    "merged": true,
+                    "head": { "ref": "plan/test-feature" }
+                }
+            }),
+        );
+        assert!(
+            matches!(plan_approved.as_ref().map(Kind::as_str), Some(kind) if kind == signal_kinds::PRD_PLAN_APPROVED)
         );
     }
 
@@ -447,14 +483,14 @@ mod tests {
     #[cfg(feature = "hdc")]
     #[test]
     fn attach_hdc_fingerprint_populates_signal_metadata() {
-        use bardo_primitives::hdc::{fingerprint, HdcVector};
+        use roko_primitives::hdc::{HdcVector, fingerprint};
 
         let body = Body::Json(serde_json::json!({
             "event": "push",
             "repository": "roko",
             "changes": ["a.rs", "b.rs"],
         }));
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(body.clone())
             .provenance(Provenance::external("github:webhook"))
             .build();

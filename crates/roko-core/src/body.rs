@@ -1,4 +1,4 @@
-//! Signal body — the typed payload carried by a signal.
+//! Engram body — the typed payload carried by a signal.
 //!
 //! A signal's body can be JSON (structured data), bytes (binary), text (UTF-8),
 //! or empty (marker signals). The body's format is explicit — consumers can
@@ -7,7 +7,7 @@
 use crate::error::{Result, RokoError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// The payload carried by a [`Signal`](crate::Signal).
+/// The payload carried by a [`Engram`](crate::Engram).
 ///
 /// Bodies are tagged: consumers can tell at runtime whether the body is
 /// structured JSON, raw bytes, text, or absent.

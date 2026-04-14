@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-authors = ["Roko <engineering@bardo.run>"]
+authors = ["Roko <engineering@roko.dev>"]
 description = "HTTP server crate for the roko API."
 
 [lints]
@@ -12,13 +12,14 @@ workspace = true
 
 [features]
 default = []
-hdc = ["dep:bardo-primitives"]
+hdc = ["dep:roko-primitives"]
 
 [dependencies]
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
+roko-dreams = { path = "../roko-dreams" }
 roko-gate = { path = "../roko-gate" }
 roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }
@@ -26,10 +27,12 @@ roko-std = { path = "../roko-std" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
-bardo-runtime = { path = "../bardo-runtime" }
-bardo-primitives = { path = "../bardo-primitives", optional = true }
+roko-daimon = { path = "../roko-daimon" }
+roko-runtime = { path = "../roko-runtime" }
+roko-primitives = { path = "../roko-primitives", optional = true }
 
 anyhow = { workspace = true }
+arc-swap = "1"
 async-trait = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }

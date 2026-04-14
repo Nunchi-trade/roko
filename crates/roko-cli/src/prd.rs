@@ -24,7 +24,7 @@ use crate::task_parser::TasksFile;
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
-use roko_core::{Body, Kind, Provenance, Signal, Substrate};
+use roko_core::{Body, Engram, Kind, Provenance, Substrate};
 use roko_fs::FileSubstrate;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -502,7 +502,7 @@ async fn emit_prd_plan_signal(workdir: &Path, kind: Kind, body: serde_json::Valu
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
         .with_context(|| format!("open {}", workdir.join(".roko").display()))?;
-    let signal = Signal::builder(kind)
+    let signal = Engram::builder(kind)
         .body(Body::Json(body))
         .provenance(Provenance::trusted("roko.prd"))
         .build();

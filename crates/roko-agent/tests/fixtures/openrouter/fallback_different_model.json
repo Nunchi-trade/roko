@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-openrouter-fallback-1",
+  "object": "chat.completion",
+  "created": 1760000202,
+  "model": "z-ai/glm-5",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "OpenRouter fell back to glm-5."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 8,
+    "total_tokens": 23
+  }
+}

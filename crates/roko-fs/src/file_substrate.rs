@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use roko_core::{
-    ContentHash, Context, Query, Signal, Substrate,
+    ContentHash, Context, Engram, Query, Substrate,
     error::{Result, RokoError},
 };
 use std::collections::HashMap;
@@ -20,8 +20,8 @@ use tokio::sync::Mutex;
 pub struct FileSubstrate {
     /// Directory containing `signals.jsonl`.
     root: PathBuf,
-    /// In-memory index: `ContentHash` → `Signal`.
-    index: RwLock<HashMap<ContentHash, Signal>>,
+    /// In-memory index: `ContentHash` → `Engram`.
+    index: RwLock<HashMap<ContentHash, Engram>>,
     /// Serializes writes to the log file.
     log_writer: Mutex<File>,
     /// Human-readable name (kept for Debug / logging).
@@ -83,7 +83,7 @@ impl FileSubstrate {
     ///
     /// Returns an error if the temp-file swap fails.
     pub async fn compact(&self) -> Result<()> {
-        let snapshot: Vec<Signal> = self.index.read().values().cloned().collect();
+        let snapshot: Vec<Engram> = self.index.read().values().cloned().collect();
         let log_path = self.log_path();
         let tmp_path = self.root.join("signals.jsonl.tmp");
 
@@ -116,7 +116,7 @@ impl FileSubstrate {
     }
 }
 
-async fn replay_log(log_path: &Path) -> Result<HashMap<ContentHash, Signal>> {
+async fn replay_log(log_path: &Path) -> Result<HashMap<ContentHash, Engram>> {
     let mut index = HashMap::new();
     if !log_path.exists() {
         return Ok(index);
@@ -130,7 +130,7 @@ async fn replay_log(log_path: &Path) -> Result<HashMap<ContentHash, Signal>> {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<Signal>(&line) {
+        match serde_json::from_str::<Engram>(&line) {
             Ok(sig) => {
                 index.insert(sig.id, sig);
             }
@@ -152,7 +152,7 @@ fn tracing_line_error(path: &Path, line: usize, err: &serde_json::Error) {
     );
 }
 
-fn matches_query(signal: &Signal, q: &Query, ctx: &Context) -> bool {
+fn matches_query(signal: &Engram, q: &Query, ctx: &Context) -> bool {
     if let Some(kinds) = &q.kinds {
         if !kinds.contains(&signal.kind) {
             return false;
@@ -194,12 +194,17 @@ fn matches_query(signal: &Signal, q: &Query, ctx: &Context) -> bool {
 
 #[async_trait]
 impl Substrate for FileSubstrate {
-    async fn put(&self, signal: Signal) -> Result<ContentHash> {
-        let id = signal.id;
+    async fn put(&self, signal: Engram) -> Result<ContentHash> {
         // Dedupe: skip write if already present.
-        if self.index.read().contains_key(&id) {
-            return Ok(id);
+        if self.index.read().contains_key(&signal.id) {
+            return Ok(signal.id);
         }
+        // Attach HDC fingerprint when the feature is enabled and the signal
+        // does not already carry one. The fingerprint is stored as a
+        // base64-encoded tag so it survives JSON serialization without
+        // inflating the line with raw bytes.
+        let signal = attach_hdc_fingerprint(signal);
+        let id = signal.id;
         // Serialize and append.
         let line = serde_json::to_string(&signal).map_err(RokoError::body_encode)?;
         let mut guard = self.log_writer.lock().await;
@@ -212,12 +217,12 @@ impl Substrate for FileSubstrate {
         Ok(id)
     }
 
-    async fn get(&self, id: &ContentHash) -> Result<Option<Signal>> {
+    async fn get(&self, id: &ContentHash) -> Result<Option<Engram>> {
         Ok(self.index.read().get(id).cloned())
     }
 
-    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Signal>> {
-        let mut matching: Vec<Signal> = self
+    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Engram>> {
+        let mut matching: Vec<Engram> = self
             .index
             .read()
             .values()
@@ -254,14 +259,46 @@ impl Substrate for FileSubstrate {
     }
 }
 
+/// HDC fingerprint tag key. The value is a base64-encoded 1280-byte
+/// HDC vector computed from the signal's kind + body.
+const HDC_TAG: &str = "hdc_fingerprint";
+
+/// Attach a deterministic HDC fingerprint to a signal's tags.
+///
+/// The fingerprint is derived from `kind|body` so that signals with
+/// identical semantic content produce identical vectors. Signals that
+/// already carry the tag are returned unchanged. Fingerprinting never
+/// fails: if anything goes wrong the signal is returned as-is.
+#[cfg(feature = "hdc")]
+fn attach_hdc_fingerprint(mut signal: Engram) -> Engram {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    if signal.tags.contains_key(HDC_TAG) {
+        return signal;
+    }
+    let fingerprint = roko_primitives::hdc::fingerprint(&signal.body);
+    signal
+        .tags
+        .insert(HDC_TAG.into(), BASE64.encode(fingerprint.to_bytes()));
+    // Recompute the content hash since tags are identity-bearing.
+    signal.id = signal.content_hash();
+    signal
+}
+
+#[cfg(not(feature = "hdc"))]
+fn attach_hdc_fingerprint(signal: Engram) -> Engram {
+    signal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use roko_core::{Body, Decay, Kind, Score};
     use tempfile::TempDir;
 
-    fn sig(kind: Kind, body: &str, t: i64) -> Signal {
-        Signal::builder(kind)
+    fn sig(kind: Kind, body: &str, t: i64) -> Engram {
+        Engram::builder(kind)
             .body(Body::text(body))
             .created_at_ms(t)
             .build()
@@ -351,7 +388,7 @@ mod tests {
         let sub = FileSubstrate::open(tmp.path()).await.unwrap();
 
         sub.put(
-            Signal::builder(Kind::Pheromone)
+            Engram::builder(Kind::Pheromone)
                 .body(Body::text("transient"))
                 .score(Score::new(1.0, 0.0, 0.0, 1.0))
                 .decay(Decay::HalfLife { half_life_ms: 100 })
@@ -361,7 +398,7 @@ mod tests {
         .await
         .unwrap();
         sub.put(
-            Signal::builder(Kind::Task)
+            Engram::builder(Kind::Task)
                 .body(Body::text("eternal"))
                 .score(Score::new(1.0, 0.0, 0.0, 1.0))
                 .decay(Decay::None)
@@ -461,5 +498,43 @@ mod tests {
             h.await.unwrap().unwrap();
         }
         assert_eq!(sub.len().await.unwrap(), 20);
+    }
+
+    #[tokio::test]
+    async fn hdc_fingerprint_is_attached_on_put() {
+        let tmp = TempDir::new().unwrap();
+        let sub = FileSubstrate::open(tmp.path()).await.unwrap();
+        let s = sig(Kind::Task, "fingerprint me", 0);
+        assert!(s.tags.get(HDC_TAG).is_none());
+        let id = sub.put(s).await.unwrap();
+        let stored = sub.get(&id).await.unwrap().expect("signal must exist");
+        // When the hdc feature is enabled the tag is present; otherwise
+        // the signal is stored unmodified.
+        #[cfg(feature = "hdc")]
+        {
+            assert!(stored.tags.contains_key(HDC_TAG));
+            // Fingerprint is a base64-encoded 1280-byte vector.
+            let encoded = stored.tags.get(HDC_TAG).unwrap();
+            let decoded =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                    .expect("valid base64");
+            assert_eq!(decoded.len(), 1280);
+        }
+        #[cfg(not(feature = "hdc"))]
+        {
+            assert!(!stored.tags.contains_key(HDC_TAG));
+        }
+    }
+
+    #[tokio::test]
+    async fn hdc_fingerprint_not_overwritten_if_present() {
+        let tmp = TempDir::new().unwrap();
+        let sub = FileSubstrate::open(tmp.path()).await.unwrap();
+        let mut s = sig(Kind::Task, "already tagged", 0);
+        s.tags.insert(HDC_TAG.into(), "pre-existing".into());
+        s.id = s.content_hash();
+        let id = sub.put(s).await.unwrap();
+        let stored = sub.get(&id).await.unwrap().expect("signal must exist");
+        assert_eq!(stored.tags.get(HDC_TAG).unwrap(), "pre-existing");
     }
 }

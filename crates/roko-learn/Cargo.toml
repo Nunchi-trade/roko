@@ -12,13 +12,17 @@ workspace = true
 
 [dependencies]
 roko-core = { path = "../roko-core" }
-bardo-primitives = { path = "../bardo-primitives" }
+roko-agent = { path = "../roko-agent" }
+roko-daimon = { path = "../roko-daimon" }
+roko-primitives = { path = "../roko-primitives" }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros"] }
 chrono = { workspace = true }
+tracing = { workspace = true }
 globset = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }

@@ -100,6 +100,127 @@ fn init_run_produces_expected_signals() {
 }
 
 #[test]
+fn status_cfactor_reports_trend_and_components() {
+    let tmp = TempDir::new().unwrap();
+    let workdir = tmp.path();
+
+    Command::cargo_bin("roko")
+        .unwrap()
+        .arg("init")
+        .arg(workdir)
+        .assert()
+        .success();
+
+    let learn_dir = workdir.join(".roko").join("learn");
+    fs::create_dir_all(&learn_dir).unwrap();
+
+    // Episode must live under learn/ — that is where LearningPaths::under()
+    // resolves episodes_jsonl when refresh_cfactor_snapshot is called with
+    // the learn directory as root.
+    let now = chrono::Utc::now();
+    let episode_ts = now.to_rfc3339();
+    let episode = serde_json::json!({
+        "kind": "agent_turn",
+        "id": "ep-1",
+        "timestamp": episode_ts,
+        "agent_id": "agent-a",
+        "task_id": "task-a",
+        "input_signal_hash": "",
+        "output_signal_hash": "",
+        "episode_id": "episode-1",
+        "agent_template": "Implementer",
+        "model": "claude-sonnet",
+        "trigger_kind": "manual",
+        "trigger_signal_hash": "",
+        "started_at": episode_ts,
+        "completed_at": episode_ts,
+        "duration_secs": 1.0,
+        "gate_verdicts": [],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": 1.0,
+            "cost_usd_without_cache": 1.0,
+            "wall_ms": 100
+        },
+        "success": true,
+        "turns": 1,
+        "tokens_used": 150,
+        "external_actions": [],
+        "failure_reason": null,
+        "headline": false,
+        "extra": {}
+    });
+    fs::write(learn_dir.join("episodes.jsonl"), episode.to_string() + "\n").unwrap();
+
+    // Use timestamps relative to now so the history entries are always
+    // inside the 7-day trend window used by trend_arrow.
+    let earlier_ts = (now - chrono::Duration::days(5)).to_rfc3339();
+    let recent_ts = (now - chrono::Duration::days(2)).to_rfc3339();
+    let earlier = serde_json::json!({
+        "overall": 0.25,
+        "components": {
+            "gate_pass_rate": 0.20,
+            "cost_efficiency": 0.20,
+            "speed": 0.20,
+            "first_try_rate": 0.20,
+            "knowledge_growth": 0.20,
+            "turn_taking_equality": 0.20
+        },
+        "computed_at": earlier_ts,
+        "episode_count": 1
+    });
+    let recent = serde_json::json!({
+        "overall": 0.40,
+        "components": {
+            "gate_pass_rate": 0.30,
+            "cost_efficiency": 0.30,
+            "speed": 0.30,
+            "first_try_rate": 0.30,
+            "knowledge_growth": 0.10,
+            "turn_taking_equality": 0.30
+        },
+        "computed_at": recent_ts,
+        "episode_count": 1
+    });
+
+    fs::write(
+        learn_dir.join("c-factor.jsonl"),
+        [earlier.to_string(), recent.to_string()].join("\n") + "\n",
+    )
+    .unwrap();
+
+    let status = Command::cargo_bin("roko")
+        .unwrap()
+        .arg("status")
+        .arg("--cfactor")
+        .arg("--workdir")
+        .arg(workdir)
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&status.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("c-factor:"),
+        "status output missing c-factor summary: {stdout}"
+    );
+    assert!(
+        stdout.contains("trend="),
+        "status output missing trend: {stdout}"
+    );
+    assert!(
+        stdout.contains("gate="),
+        "status output missing components: {stdout}"
+    );
+    assert!(
+        stdout.contains('↑'),
+        "status output missing upward trend arrow: {stdout}"
+    );
+}
+
+#[test]
 fn run_fails_when_gate_fails() {
     let tmp = TempDir::new().unwrap();
     let workdir = tmp.path();

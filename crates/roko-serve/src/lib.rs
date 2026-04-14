@@ -6,11 +6,12 @@
 
 pub mod deploy;
 pub mod dispatch;
+pub mod dreams;
 pub mod error;
 pub mod event_bus;
 pub mod events;
-pub mod fswatcher;
 pub mod feedback;
+pub mod fswatcher;
 pub mod plan_types;
 pub mod routes;
 pub mod runtime;
@@ -18,18 +19,20 @@ pub mod scheduler;
 pub mod state;
 pub mod templates;
 
+pub use crate::routes::reload_config_from_disk;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
-use roko_core::Signal;
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
 use crate::events::ServerEvent;
@@ -129,9 +132,11 @@ impl ServerBuilder {
             self.state
                 .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
         );
+        let dispatcher_roko_config = state.load_roko_config().as_ref().clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
             None,
+            dispatcher_roko_config,
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
@@ -186,7 +191,7 @@ pub async fn run_server(
 
 /// Run the HTTP server against an already constructed [`AppState`].
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
-    let roko_config = state.roko_config.read().await.clone();
+    let roko_config = state.load_roko_config().as_ref().clone();
     let router = routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,
@@ -234,7 +239,7 @@ pub(crate) fn start_event_source_group(
         cancel_for_shutdown.cancel();
     });
 
-    let (signal_tx, signal_rx) = mpsc::channel::<Signal>(256);
+    let (signal_tx, signal_rx) = mpsc::channel::<Engram>(256);
     tokio::spawn(signal_ingest_loop(
         Arc::clone(&state),
         signal_rx,
@@ -266,11 +271,15 @@ fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
     let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
 
     if !roko_config.scheduler.is_empty() {
-        sources.push(Box::new(CronEventSource::from_config(roko_config.scheduler.clone())));
+        sources.push(Box::new(CronEventSource::from_config(
+            roko_config.scheduler.clone(),
+        )));
     }
 
     if !roko_config.watcher.is_empty() {
-        sources.push(Box::new(FileWatchEventSource::from_config(roko_config.watcher.clone())));
+        sources.push(Box::new(FileWatchEventSource::from_config(
+            roko_config.watcher.clone(),
+        )));
     }
 
     if sources.is_empty() {
@@ -282,7 +291,7 @@ fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
 
 async fn signal_ingest_loop(
     state: Arc<AppState>,
-    mut receiver: mpsc::Receiver<Signal>,
+    mut receiver: mpsc::Receiver<Engram>,
     cancel: CancellationToken,
 ) {
     loop {

@@ -1,0 +1,19 @@
+app = "roko-agent"
+primary_region = "iad"
+
+[build]
+dockerfile = "Dockerfile"
+
+[http_service]
+internal_port = 3000
+force_https = true
+
+[[http_service.checks]]
+interval = "30s"
+timeout = "5s"
+path = "/api/health"
+method = "GET"
+
+[mounts]
+source = "roko_data"
+destination = "/data/.roko"

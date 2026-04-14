@@ -1,16 +1,16 @@
 //! Telemetry events emitted by mirage internals.
 //!
-//! Mirage publishes cross-subsystem telemetry on a [`bardo_runtime::event_bus::EventBus`]
+//! Mirage publishes cross-subsystem telemetry on a [`roko_runtime::event_bus::EventBus`]
 //! so that observers (other roko crates, monitoring daemons, TUI frontends) can subscribe
 //! to resource pressure, cache behaviour, and proxy-mode transitions without polling.
 //!
 //! This enum replaces the earlier `golem-core::event::EventPayload` coupling so that
 //! `mirage-rs` can live in the roko workspace without pulling in `golem-core`.
 //! The roko integration bridge (feature `roko`) can re-route these events into a
-//! `roko-core` `Signal` stream if needed.
+//! `roko-core` `Engram` stream if needed.
 //!
 //! ```no_run
-//! use bardo_runtime::event_bus::EventBus;
+//! use roko_runtime::event_bus::EventBus;
 //! use mirage_rs::events::MirageTelemetryEvent;
 //!
 //! let bus = EventBus::<MirageTelemetryEvent>::new(1024);
@@ -86,7 +86,7 @@ impl MirageTelemetryEvent {
 #[cfg(test)]
 mod tests {
     use super::MirageTelemetryEvent;
-    use bardo_runtime::event_bus::EventBus;
+    use roko_runtime::event_bus::EventBus;
 
     #[test]
     fn resource_warning_roundtrips_through_bus() {

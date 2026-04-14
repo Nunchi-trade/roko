@@ -39,7 +39,7 @@ use crate::{
     scenario::{ScenarioJob, ScenarioSet},
 };
 
-use bardo_runtime::event_bus::{BusSender, EventBus};
+use roko_runtime::event_bus::{BusSender, EventBus};
 
 use crate::events::MirageTelemetryEvent;
 
@@ -1134,7 +1134,7 @@ pub(crate) struct MirageState {
     pub(crate) speculative_executor: Arc<Mutex<SpeculativeExecutor>>,
     /// Telemetry sender for mirage subsystems (resource warnings, proxy demotions, etc.).
     ///
-    /// Backed by a [`bardo_runtime::event_bus::EventBus`] with bounded broadcast + replay ring;
+    /// Backed by a [`roko_runtime::event_bus::EventBus`] with bounded broadcast + replay ring;
     /// emits are non-blocking (overflow drops oldest replay entries; live send errors ignored when
     /// unsubscribed). Wired in `main` for cross-crate telemetry contracts.
     pub(crate) telemetry: BusSender<MirageTelemetryEvent>,

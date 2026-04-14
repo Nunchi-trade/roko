@@ -5,11 +5,11 @@
 //! while enforcing per-subscription concurrency, cooldown, and dedup
 //! constraints.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -17,44 +17,48 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use regex::Regex;
 use parking_lot::{Mutex, RwLock};
-use roko_agent::{
-    Agent, AgentResult, ClaudeCliAgent,
-    mcp::{McpConfig, McpServerConfig, find_mcp_config},
-};
+use regex::Regex;
+use roko_agent::chat_types::FinishReason;
+use roko_agent::mcp::{McpConfig, McpServerConfig, find_mcp_config};
+use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::{Agent, AgentResult};
 use roko_compose::SystemPromptBuilder;
+use roko_core::OperatingFrequency;
 use roko_core::agent::AgentRole;
 use roko_core::config::schema::{RokoConfig, SubscriptionConfig, SubscriptionFilterConfig};
 use roko_core::tool::ExternalAction;
-use roko_core::tool::role_allowlist::role_allowlist;
 use roko_core::tool::ToolRegistry;
-use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
+use roko_core::tool::role_allowlist::role_allowlist;
+use roko_core::{Body, Context as RokoContext, Engram, Kind, Provenance};
 use roko_core::{ContentHash, Verdict};
+use roko_daimon::{AffectEngine as _, AffectEvent};
+use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::episode_logger::{
-    Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage,
-};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage as EpisodeUsage};
+use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_neuro::spawn_episode_distillation;
+use roko_std::tool::StaticToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use uuid::Uuid;
-use roko_std::tool::StaticToolRegistry;
 
 use crate::events::ServerEvent;
+use crate::runtime::RepoInfo;
 use crate::state::{AppState, TemplateRunRecord};
 use crate::templates::{AgentTemplate, TemplateRegistry};
+use roko_fs::layout::RokoLayout;
 
 /// Async agent-dispatch interface used by the routing loop.
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
     /// Dispatch a signal through the agent template identified by `template`.
-    async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult>;
+    async fn dispatch(&self, template: AgentTemplate, signal: Engram) -> Result<AgentResult>;
 }
 
 /// Public subscription filter type used by the subscription API.
@@ -63,7 +67,7 @@ pub type SubscriptionFilter = SubscriptionFilterConfig;
 /// Extended episode metadata for webhook- and event-driven agents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebhookEpisodeMetadata {
-    /// Signal kind that triggered the agent.
+    /// Engram kind that triggered the agent.
     #[serde(default)]
     pub trigger_kind: String,
     /// Content hash of the trigger signal.
@@ -103,11 +107,71 @@ impl WebhookEpisodeMetadata {
     }
 }
 
+/// Resolved per-repo context for a dispatch. When a webhook signal comes
+/// from a known repository, the dispatch uses repo-specific paths for data
+/// isolation (episodes, learn artifacts, signals).
+#[derive(Debug, Clone)]
+struct RepoContext {
+    /// Short repo name (e.g. `"roko"`) — used for `.roko/repos/{name}/`.
+    name: String,
+    /// Filesystem path to the repository root (the agent's working directory).
+    repo_workdir: PathBuf,
+    /// Per-repo layout under `.roko/repos/{name}/`.
+    layout: RokoLayout,
+    /// Optional merged `RokoConfig` from the repo's `.roko/roko.toml`.
+    /// When present, repo-local settings take priority over globals.
+    repo_config: Option<RokoConfig>,
+}
+
+/// Extract the repo full name (e.g. `"nunchi/roko"`) from a webhook signal's
+/// JSON body by probing `repository.full_name` and `repository.name`.
+fn signal_repo_full_name(signal: &Engram) -> Option<String> {
+    let candidates = signal_repo_candidates(signal);
+    candidates.into_iter().next().map(str::to_string)
+}
+
+/// Attempt to resolve a [`RepoContext`] from a signal using the runtime's
+/// repo registry. Returns `None` when the signal's repo is not configured.
+fn resolve_repo_context(state: &AppState, signal: &Engram) -> Option<RepoContext> {
+    let full_name = signal_repo_full_name(signal)?;
+    let repo_workdir = state.runtime.resolve_repo_workdir(&full_name)?;
+
+    // Use the bare repo name for the per-repo data directory.
+    let bare_name = full_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(&full_name)
+        .to_string();
+    let layout = RokoLayout::for_repo(&state.workdir, &bare_name);
+
+    // Load repo-local config override (4B.05). When present, the repo's
+    // .roko/roko.toml takes priority over the global config for settings
+    // like model selection, gate thresholds, etc.
+    let repo_config = state.runtime.repo_roko_config(&bare_name);
+    if repo_config.is_some() {
+        info!(repo = %bare_name, "loaded repo-local config override");
+    }
+
+    Some(RepoContext {
+        name: bare_name,
+        repo_workdir,
+        layout,
+        repo_config,
+    })
+}
+
 /// Template-backed agent runner used by the webhook dispatch loop.
 #[derive(Clone, Debug)]
 pub struct TemplateAgentDispatcher {
     workdir: PathBuf,
     base_mcp_config: Option<PathBuf>,
+    /// Full config used to resolve providers and models for dispatch.
+    roko_config: RokoConfig,
+    /// Optional per-repo working directory override. When set, the agent
+    /// process runs in this directory instead of the global `workdir`.
+    repo_workdir: Option<PathBuf>,
+    /// Configured repos (injected for cross-repo context in prompts).
+    repo_listing: Vec<RepoInfo>,
 }
 
 #[derive(Debug)]
@@ -115,7 +179,32 @@ struct DispatchOutcome {
     result: AgentResult,
     gate_verdicts: Vec<GateVerdict>,
     success: bool,
+    model_used: String,
 }
+
+#[derive(Debug)]
+struct QueuedAnomaly {
+    anomaly: Anomaly,
+    model_slug: String,
+}
+
+#[derive(Debug)]
+struct DispatchAnomalySession {
+    detector: AnomalyDetector,
+    pending: VecDeque<QueuedAnomaly>,
+}
+
+impl DispatchAnomalySession {
+    fn new() -> Self {
+        Self {
+            detector: AnomalyDetector::new(Utc::now().timestamp_millis()),
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+static DISPATCH_ANOMALY_SESSIONS: OnceLock<Mutex<HashMap<PathBuf, DispatchAnomalySession>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 struct EfficiencyTracker {
@@ -125,7 +214,13 @@ struct EfficiencyTracker {
 impl EfficiencyTracker {
     fn new(workdir: &Path) -> Self {
         Self {
-            path: workdir.join(".roko").join("learn").join("efficiency.jsonl"),
+            path: RokoLayout::for_project(workdir).efficiency_path(),
+        }
+    }
+
+    fn for_layout(layout: &RokoLayout) -> Self {
+        Self {
+            path: layout.efficiency_path(),
         }
     }
 
@@ -151,6 +246,7 @@ impl EfficiencyTracker {
             task_id: String::new(),
             input_tokens: tokens,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: 0.0,
@@ -174,6 +270,7 @@ impl EfficiencyTracker {
             },
             gate_errors: Vec::new(),
             model_used: template_name.to_string(),
+            frequency: OperatingFrequency::Theta,
             strategy_attempted: String::new(),
             timestamp: Utc::now().to_rfc3339(),
         };
@@ -191,13 +288,219 @@ impl EfficiencyTracker {
     }
 }
 
+fn dispatch_anomaly_sessions() -> &'static Mutex<HashMap<PathBuf, DispatchAnomalySession>> {
+    DISPATCH_ANOMALY_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn with_dispatch_anomaly_session<T>(
+    session_root: &Path,
+    f: impl FnOnce(&mut DispatchAnomalySession) -> T,
+) -> T {
+    let sessions = dispatch_anomaly_sessions();
+    let mut sessions = sessions.lock();
+    let session = sessions
+        .entry(session_root.to_path_buf())
+        .or_insert_with(DispatchAnomalySession::new);
+    f(session)
+}
+
+fn drain_pending_anomalies(session_root: &Path) -> Vec<QueuedAnomaly> {
+    with_dispatch_anomaly_session(session_root, |session| session.pending.drain(..).collect())
+}
+
+fn queue_pending_anomaly(session_root: &Path, anomaly: Anomaly, model_slug: String) {
+    with_dispatch_anomaly_session(session_root, |session| {
+        session.pending.push_back(QueuedAnomaly {
+            anomaly,
+            model_slug,
+        });
+    });
+}
+
+fn prompt_hash_u64(signal: &Engram) -> u64 {
+    let hash = signal.content_hash();
+    let bytes: [u8; 8] = hash.0[..8].try_into().expect("content hash prefix");
+    u64::from_be_bytes(bytes)
+}
+
+fn downgrade_model_slug(current: &str, config: &RokoConfig) -> Option<String> {
+    if let Some(fallback) = config.agent.fallback_model.as_ref()
+        && !fallback.trim().is_empty()
+        && fallback != current
+    {
+        return Some(fallback.clone());
+    }
+
+    if current.contains("opus") {
+        return Some(current.replacen("opus", "sonnet", 1));
+    }
+    if current.contains("sonnet") {
+        return Some(current.replacen("sonnet", "haiku", 1));
+    }
+    if current.contains("gpt-5-pro") {
+        return Some(current.replacen("gpt-5-pro", "gpt-5", 1));
+    }
+    if current.contains("gpt-5") && !current.contains("mini") {
+        return Some(current.replacen("gpt-5", "gpt-5-mini", 1));
+    }
+    None
+}
+
+async fn apply_pending_anomalies(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    session_root: &Path,
+    repo_layout: Option<&RokoLayout>,
+    routed_model: &mut String,
+    config: &RokoConfig,
+) -> Result<()> {
+    let pending = drain_pending_anomalies(session_root);
+    for queued in pending {
+        match queued.anomaly {
+            Anomaly::CostSpike { z_score } => {
+                warn!(
+                    template = %template.name,
+                    model = %routed_model,
+                    z_score,
+                    "cost spike detected; downgrading model"
+                );
+                if let Some(downgraded) = downgrade_model_slug(routed_model, config) {
+                    warn!(
+                        template = %template.name,
+                        from_model = %routed_model,
+                        to_model = %downgraded,
+                        "applying anomaly-driven model downgrade"
+                    );
+                    *routed_model = downgraded;
+                }
+            }
+            Anomaly::QualityDegradation { avg_drop } => {
+                warn!(
+                    template = %template.name,
+                    model = %queued.model_slug,
+                    avg_drop,
+                    "quality degradation detected; recording negative router observation"
+                );
+                let mut observation_template = template.clone();
+                observation_template.model = queued.model_slug;
+                record_cascade_router_outcome_with_layout(
+                    state,
+                    &observation_template,
+                    false,
+                    repo_layout,
+                )
+                .await?;
+            }
+            Anomaly::PromptLoop { repeated_count } => {
+                return Err(anyhow::anyhow!(
+                    "prompt loop detected after {} identical prompts",
+                    repeated_count
+                ));
+            }
+            Anomaly::BudgetExhausted { used, limit } => {
+                return Err(anyhow::anyhow!(
+                    "session budget exhausted: ${used:.2} >= ${limit:.2}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_anomaly_preflight(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    dispatch_signal: &Engram,
+    repo_ctx: Option<&RepoContext>,
+    routed_model: &mut String,
+) -> Result<()> {
+    let session_root = repo_ctx
+        .map(|ctx| ctx.repo_workdir.as_path())
+        .unwrap_or_else(|| state.workdir.as_path());
+    let repo_layout = repo_ctx.map(|ctx| &ctx.layout);
+    let base_config = state.load_roko_config().as_ref().clone();
+    let effective_config = repo_ctx
+        .and_then(|ctx| ctx.repo_config.clone())
+        .unwrap_or(base_config);
+
+    apply_pending_anomalies(
+        state,
+        template,
+        session_root,
+        repo_layout,
+        routed_model,
+        &effective_config,
+    )
+    .await?;
+
+    let prompt_hash = prompt_hash_u64(dispatch_signal);
+    if let Some(Anomaly::PromptLoop { repeated_count }) =
+        with_dispatch_anomaly_session(session_root, |session| {
+            session.detector.check_prompt(prompt_hash)
+        })
+    {
+        return Err(anyhow::anyhow!(
+            "prompt loop detected after {} identical prompts",
+            repeated_count
+        ));
+    }
+
+    let budget_limit = f64::from(effective_config.budget.max_plan_usd);
+    if let Some(Anomaly::BudgetExhausted { used, limit }) =
+        with_dispatch_anomaly_session(session_root, |session| {
+            session.detector.check_budget(budget_limit)
+        })
+    {
+        let _ = (used, limit);
+        return Err(anyhow::anyhow!(
+            "session budget exhausted: ${used:.2} >= ${limit:.2}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn record_post_turn_anomalies(
+    session_root: &Path,
+    model_slug: &str,
+    cost_usd: f64,
+    quality_score: f64,
+    budget_limit: f64,
+) {
+    let anomalies = with_dispatch_anomaly_session(session_root, |session| {
+        let mut observed = Vec::new();
+        if let Some(anomaly) = session.detector.check_cost(cost_usd) {
+            observed.push(anomaly);
+        }
+        if let Some(anomaly) = session.detector.check_quality(quality_score) {
+            observed.push(anomaly);
+        }
+        if let Some(anomaly) = session.detector.check_budget(budget_limit) {
+            observed.push(anomaly);
+        }
+        observed
+    });
+
+    for anomaly in anomalies {
+        queue_pending_anomaly(session_root, anomaly, model_slug.to_string());
+    }
+}
+
 impl TemplateAgentDispatcher {
     /// Create a dispatcher rooted at `workdir`.
     #[must_use]
-    pub fn new(workdir: PathBuf, base_mcp_config: Option<PathBuf>) -> Self {
+    pub fn new(
+        workdir: PathBuf,
+        base_mcp_config: Option<PathBuf>,
+        roko_config: RokoConfig,
+    ) -> Self {
         Self {
             workdir,
             base_mcp_config,
+            roko_config,
+            repo_workdir: None,
+            repo_listing: Vec::new(),
         }
     }
 }
@@ -206,36 +509,56 @@ impl TemplateAgentDispatcher {
 #[must_use]
 pub fn start_dispatch_loop(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let dispatcher = Arc::new(TemplateAgentDispatcher::new(state.workdir.clone(), None));
+        let roko_config = state.load_roko_config().as_ref().clone();
+        let dispatcher = Arc::new(TemplateAgentDispatcher::new(
+            state.workdir.clone(),
+            None,
+            roko_config,
+        ));
         dispatch_loop(state, dispatcher).await;
     })
 }
 
 #[async_trait]
 impl AgentDispatcher for TemplateAgentDispatcher {
-    async fn dispatch(&self, template: AgentTemplate, signal: Signal) -> Result<AgentResult> {
-        let experiment_variant = template
-            .experiment
-            .as_ref()
-            .and_then(|experiment| load_template_experiment_variant(&self.workdir, &experiment.name));
-        let system_prompt = build_template_system_prompt(
+    async fn dispatch(&self, template: AgentTemplate, signal: Engram) -> Result<AgentResult> {
+        let experiment_variant = template.experiment.as_ref().and_then(|experiment| {
+            load_template_experiment_variant(&self.workdir, &experiment.name)
+        });
+        let mut system_prompt = build_template_system_prompt(
             &template,
             Some(&signal),
-            experiment_variant.as_ref().map(|(_, content)| content.as_str()),
+            experiment_variant
+                .as_ref()
+                .map(|(_, content)| content.as_str()),
         );
+        // 4B.06: Inject cross-repo context so the agent knows about
+        // the multi-repo setup.
+        if !self.repo_listing.is_empty() {
+            system_prompt.push_str(&build_cross_repo_context(&self.repo_listing));
+        }
         let allowed_tools = build_allowed_tools_csv(&template);
-        let mcp_config = resolve_template_mcp_config(self.base_mcp_config.as_ref(), &self.workdir, &template)?;
+        // Use repo-specific workdir when available (4B.04).
+        let effective_workdir = self.repo_workdir.as_deref().unwrap_or(&self.workdir);
+        let mcp_config = resolve_template_mcp_config(
+            self.base_mcp_config.as_ref(),
+            effective_workdir,
+            &template,
+        )?;
         let agent = build_agent(
+            &self.roko_config,
             &template,
             &system_prompt,
             &allowed_tools,
             mcp_config.as_ref(),
-            &self.workdir,
         )?;
         let ctx = dispatch_context(&template, &signal);
         let mut result = agent.run(&signal, &ctx).await;
         if let Some((variant_id, _)) = experiment_variant {
-            result.output.tags.insert("experiment_variant".into(), variant_id.clone());
+            result
+                .output
+                .tags
+                .insert("experiment_variant".into(), variant_id.clone());
             result
                 .output
                 .tags
@@ -253,7 +576,7 @@ pub struct Subscription {
     pub id: String,
     /// Agent template name associated with this subscription.
     pub template: String,
-    /// Signal kind glob used to match incoming signals.
+    /// Engram kind glob used to match incoming signals.
     pub trigger: String,
     /// Additional filters applied after the trigger matches.
     pub filter: SubscriptionFilter,
@@ -415,7 +738,7 @@ impl Subscription {
 
     /// Check whether this subscription should trigger for `signal`.
     #[must_use]
-    pub fn matches(&self, signal: &Signal) -> bool {
+    pub fn matches(&self, signal: &Engram) -> bool {
         self.is_enabled()
             && glob_match(self.trigger(), signal.kind.as_str())
             && subscription_filter_matches(self.filter(), signal)
@@ -434,7 +757,7 @@ impl Subscription {
 
     /// Check and update the deduplication gate using the signal content hash.
     #[must_use]
-    pub fn check_dedup(&self, signal: &Signal) -> bool {
+    pub fn check_dedup(&self, signal: &Engram) -> bool {
         if self.dedup_ttl.is_zero() {
             return true;
         }
@@ -591,7 +914,9 @@ impl SubscriptionRegistry {
     #[must_use]
     pub fn update_by_id(&self, id: &str, subscription: Subscription) -> Option<Subscription> {
         let mut subscriptions = self.subscriptions.write();
-        let existing = subscriptions.iter_mut().find(|candidate| candidate.id == id)?;
+        let existing = subscriptions
+            .iter_mut()
+            .find(|candidate| candidate.id == id)?;
         let subscription_id = existing.subscription_id();
         *existing = subscription.with_subscription_id(subscription_id);
         Some(existing.clone())
@@ -600,7 +925,9 @@ impl SubscriptionRegistry {
     /// Remove a subscription by public ID.
     pub fn remove_by_id(&self, id: &str) -> Option<Subscription> {
         let mut subscriptions = self.subscriptions.write();
-        let index = subscriptions.iter().position(|subscription| subscription.id == id)?;
+        let index = subscriptions
+            .iter()
+            .position(|subscription| subscription.id == id)?;
         let removed = subscriptions.remove(index);
         self.active_counts.lock().remove(&removed.subscription_id());
         self.last_dispatches
@@ -611,7 +938,7 @@ impl SubscriptionRegistry {
 
     /// Return subscriptions whose trigger and filters match `signal`.
     #[must_use]
-    pub fn find_matching(&self, signal: &Signal) -> Vec<Subscription> {
+    pub fn find_matching(&self, signal: &Engram) -> Vec<Subscription> {
         self.subscriptions
             .read()
             .iter()
@@ -732,7 +1059,7 @@ fn load_subscription_file(path: &Path) -> anyhow::Result<Vec<Subscription>> {
     Ok(subscriptions)
 }
 
-fn subscription_filter_matches(filter: &SubscriptionFilterConfig, signal: &Signal) -> bool {
+fn subscription_filter_matches(filter: &SubscriptionFilterConfig, signal: &Engram) -> bool {
     if filter.is_empty() {
         return true;
     }
@@ -751,7 +1078,8 @@ fn subscription_filter_matches(filter: &SubscriptionFilterConfig, signal: &Signa
         return false;
     }
 
-    if !filter.label.is_empty() && !matches_any_exact(signal_label_candidates(signal), &filter.label)
+    if !filter.label.is_empty()
+        && !matches_any_exact(signal_label_candidates(signal), &filter.label)
     {
         return false;
     }
@@ -785,7 +1113,10 @@ fn matches_any_regex<'a>(
     let candidates: Vec<&'a str> = candidates.into_iter().collect();
     patterns.iter().any(|pattern| {
         Regex::new(pattern).ok().is_some_and(|regex: Regex| {
-            candidates.iter().copied().any(|candidate| regex.is_match(candidate))
+            candidates
+                .iter()
+                .copied()
+                .any(|candidate| regex.is_match(candidate))
         })
     })
 }
@@ -795,12 +1126,15 @@ fn matches_any_exact<'a>(
     patterns: &[String],
 ) -> bool {
     let candidates: Vec<&'a str> = candidates.into_iter().collect();
-    patterns
-        .iter()
-        .any(|pattern| candidates.iter().copied().any(|candidate| candidate == pattern))
+    patterns.iter().any(|pattern| {
+        candidates
+            .iter()
+            .copied()
+            .any(|candidate| candidate == pattern)
+    })
 }
 
-fn signal_repo_candidates(signal: &Signal) -> Vec<&str> {
+fn signal_repo_candidates(signal: &Engram) -> Vec<&str> {
     json_string_fields(
         &signal.body,
         &[
@@ -812,7 +1146,7 @@ fn signal_repo_candidates(signal: &Signal) -> Vec<&str> {
     )
 }
 
-fn signal_branch_candidates(signal: &Signal) -> Vec<&str> {
+fn signal_branch_candidates(signal: &Engram) -> Vec<&str> {
     let mut values = json_string_fields(
         &signal.body,
         &[
@@ -837,7 +1171,7 @@ fn signal_branch_candidates(signal: &Signal) -> Vec<&str> {
     values
 }
 
-fn signal_path_candidates(signal: &Signal) -> Vec<&str> {
+fn signal_path_candidates(signal: &Engram) -> Vec<&str> {
     let mut values = Vec::new();
     values.extend(json_string_array_fields(
         &signal.body,
@@ -861,7 +1195,7 @@ fn signal_path_candidates(signal: &Signal) -> Vec<&str> {
     values
 }
 
-fn signal_label_candidates(signal: &Signal) -> Vec<&str> {
+fn signal_label_candidates(signal: &Engram) -> Vec<&str> {
     json_stringish_array_fields(
         &signal.body,
         &[
@@ -872,7 +1206,7 @@ fn signal_label_candidates(signal: &Signal) -> Vec<&str> {
     )
 }
 
-fn signal_author_candidates(signal: &Signal) -> Vec<&str> {
+fn signal_author_candidates(signal: &Engram) -> Vec<&str> {
     json_loginish_fields(
         &signal.body,
         &[
@@ -1094,9 +1428,25 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
             continue;
         }
 
+        // Resolve per-repo context from the signal's repository info.
+        // When matched, data (episodes, learn artifacts) is isolated under
+        // .roko/repos/{repo_name}/ and the agent runs in the repo's directory.
+        let repo_ctx = resolve_repo_context(&state, &signal);
+        if let Some(ref ctx) = repo_ctx {
+            info!(
+                repo = %ctx.name,
+                workdir = %ctx.repo_workdir.display(),
+                "resolved per-repo context for dispatch"
+            );
+        }
+
         let matched = subscriptions.find_matching(&signal);
         if matched.is_empty() {
-            let episodes_path = state.layout.episodes_path();
+            // Use per-repo episodes path for similarity suggestion when available.
+            let episodes_path = repo_ctx
+                .as_ref()
+                .map(|ctx| ctx.layout.episodes_path())
+                .unwrap_or_else(|| state.layout.episodes_path());
             match EpisodeLogger::suggest_template_from_recent_episodes(&episodes_path, &signal)
                 .await
             {
@@ -1109,12 +1459,12 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                     let signal = signal.clone();
                     let dispatcher = Arc::clone(&dispatcher);
                     let state = Arc::clone(&state);
-                    let suggested_subscription = Subscription::new(
-                        template_name.clone(),
-                        signal.kind.as_str(),
-                    );
+                    let repo_ctx = repo_ctx.clone();
+                    let suggested_subscription =
+                        Subscription::new(template_name.clone(), signal.kind.as_str());
                     tokio::spawn(async move {
-                        dispatch_agent(state, suggested_subscription, signal, dispatcher).await;
+                        dispatch_agent(state, suggested_subscription, signal, dispatcher, repo_ctx)
+                            .await;
                     });
                 }
                 Ok(None) => {}
@@ -1136,8 +1486,9 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                 let state = Arc::clone(&state);
                 let subscriptions = subscriptions.clone();
                 let sub_for_task = sub.clone();
+                let repo_ctx = repo_ctx.clone();
                 tokio::spawn(async move {
-                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher).await;
+                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher, repo_ctx).await;
                     sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {
@@ -1150,8 +1501,9 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
 async fn dispatch_agent(
     state: Arc<AppState>,
     subscription: Subscription,
-    signal: Signal,
+    signal: Engram,
     dispatcher: Arc<dyn AgentDispatcher>,
+    repo_ctx: Option<RepoContext>,
 ) {
     let template_name = subscription.template().to_owned();
     let started_at = Utc::now();
@@ -1174,6 +1526,7 @@ async fn dispatch_agent(
         template.clone(),
         signal.clone(),
         dispatcher,
+        repo_ctx.as_ref(),
     )
     .await
     {
@@ -1193,6 +1546,7 @@ async fn dispatch_agent(
                 result: AgentResult::fail(fallback_output),
                 gate_verdicts: Vec::new(),
                 success: false,
+                model_used: template.model.clone(),
             }
         }
     };
@@ -1206,6 +1560,7 @@ async fn dispatch_agent(
         started_at,
         completed_at,
         started.elapsed().as_secs_f64(),
+        repo_ctx.as_ref(),
     )
     .await;
 }
@@ -1213,13 +1568,41 @@ async fn dispatch_agent(
 async fn dispatch_template(
     state: Arc<AppState>,
     template: AgentTemplate,
-    signal: Signal,
+    signal: Engram,
     dispatcher: Arc<dyn AgentDispatcher>,
+    repo_ctx: Option<&RepoContext>,
 ) -> Result<DispatchOutcome> {
     let dispatch_started = Instant::now();
     let dispatch_signal = build_dispatch_signal(&template, &signal)?;
-    let dispatch_result = match dispatcher
-        .dispatch(template.clone(), dispatch_signal.clone())
+    let mut routed_template = template.clone();
+    run_anomaly_preflight(
+        &state,
+        &template,
+        &dispatch_signal,
+        repo_ctx,
+        &mut routed_template.model,
+    )
+    .await?;
+
+    // When a repo context is available, create a repo-aware dispatcher
+    // so the agent runs in the repo's directory with cross-repo context.
+    let effective_dispatcher: Arc<dyn AgentDispatcher> = if let Some(ctx) = repo_ctx {
+        let repo_listing = state.runtime.list_repos();
+        let roko_config = match ctx.repo_config.clone() {
+            Some(config) => config,
+            None => state.load_roko_config().as_ref().clone(),
+        };
+        let mut repo_dispatcher =
+            TemplateAgentDispatcher::new(state.workdir.clone(), None, roko_config);
+        repo_dispatcher.repo_workdir = Some(ctx.repo_workdir.clone());
+        repo_dispatcher.repo_listing = repo_listing;
+        Arc::new(repo_dispatcher)
+    } else {
+        Arc::clone(&dispatcher)
+    };
+
+    let dispatch_result = match effective_dispatcher
+        .dispatch(routed_template.clone(), dispatch_signal.clone())
         .await
     {
         Ok(result) => result,
@@ -1245,6 +1628,7 @@ async fn dispatch_template(
                 result,
                 gate_verdicts: Vec::new(),
                 success: false,
+                model_used: routed_template.model.clone(),
             });
         }
     };
@@ -1266,6 +1650,24 @@ async fn dispatch_template(
     }
 
     let success = dispatch_result.success && gate_verdicts.iter().all(|verdict| verdict.passed);
+    let model_used = output
+        .tag("model")
+        .map(str::to_string)
+        .unwrap_or_else(|| routed_template.model.clone());
+    let session_root = repo_ctx
+        .map(|ctx| ctx.repo_workdir.as_path())
+        .unwrap_or_else(|| state.workdir.as_path());
+    let budget_limit = {
+        let roko_config = state.load_roko_config();
+        f64::from(roko_config.budget.max_plan_usd)
+    };
+    record_post_turn_anomalies(
+        session_root,
+        &model_used,
+        f64::from(dispatch_result.usage.cost_usd),
+        if success { 1.0 } else { 0.0 },
+        budget_limit,
+    );
     record_template_run(&state, &template.name, success).await;
 
     let completion_kind = format!("template_dispatch:{}", template.name);
@@ -1286,38 +1688,49 @@ async fn dispatch_template(
         result: dispatch_result,
         gate_verdicts,
         success,
+        model_used,
     })
 }
 
 fn build_agent(
+    roko_config: &RokoConfig,
     template: &AgentTemplate,
     system_prompt: &str,
     allowed_tools: &str,
     mcp_config: Option<&PathBuf>,
-    workdir: &Path,
 ) -> Result<Box<dyn Agent>> {
-    let mut agent = ClaudeCliAgent::new("claude", workdir, template.model.clone())
-        .with_system_prompt(system_prompt.to_string())
-        .with_allowed_tools(allowed_tools.to_string())
-        .with_max_turns(template.max_turns)
-        .with_timeout_ms(120_000);
-    if let Some(path) = mcp_config {
-        agent = agent.with_mcp_config(path);
-    }
-    Ok(Box::new(agent))
+    create_agent_for_model(
+        roko_config,
+        &template.model,
+        AgentOptions {
+            command: roko_config.agent.command.clone(),
+            timeout_ms: None,
+            system_prompt: Some(system_prompt.to_string()),
+            cached_content: None,
+            tools: Some(allowed_tools.to_string()),
+            mcp_config: mcp_config.cloned(),
+            working_dir: None,
+            provider_semaphores: None,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            effort: None,
+            bare_mode: roko_config.agent.bare_mode,
+            dangerously_skip_permissions: true,
+            name: String::new(),
+        },
+    )
+    .with_context(|| format!("create agent for template '{}'", template.name))
 }
 
 fn build_template_system_prompt(
     template: &AgentTemplate,
-    signal: Option<&Signal>,
+    signal: Option<&Engram>,
     experiment_variant: Option<&str>,
 ) -> String {
     let role_prompt = match signal {
-        Some(signal) => TemplateRegistry::render_prompt_with_signal(
-            template,
-            &HashMap::new(),
-            Some(signal),
-        ),
+        Some(signal) => {
+            TemplateRegistry::render_prompt_with_signal(template, &HashMap::new(), Some(signal))
+        }
         None => TemplateRegistry::render_prompt(template, &HashMap::new()),
     };
     let mut prompt = role_prompt;
@@ -1339,6 +1752,27 @@ fn build_template_system_prompt(
         }
     }
     SystemPromptBuilder::new(prompt).build()
+}
+
+/// Build a cross-repo context section for the system prompt.
+///
+/// Lists all known repositories so the agent can reference files across
+/// repos. This is a stub — a future iteration will inject richer context
+/// (recent commits, open PRs, etc.).
+fn build_cross_repo_context(repos: &[RepoInfo]) -> String {
+    if repos.is_empty() {
+        return String::new();
+    }
+    let mut section = String::from("\n\n## Available Repositories\n\n");
+    for repo in repos {
+        section.push_str(&format!(
+            "- **{}**: `{}` (branch: {})\n",
+            repo.name,
+            repo.path.display(),
+            repo.branch,
+        ));
+    }
+    section
 }
 
 fn output_format_instructions(format: &crate::templates::TemplateOutputFormat) -> Option<String> {
@@ -1475,14 +1909,13 @@ fn resolve_template_mcp_config(
     let path = dir.join(format!("{}-{}.mcp.json", template.name, Uuid::new_v4()));
     std::fs::write(
         &path,
-        serde_json::to_string_pretty(&generated)
-            .context("serialize template MCP config")?,
+        serde_json::to_string_pretty(&generated).context("serialize template MCP config")?,
     )
     .with_context(|| format!("write {}", path.display()))?;
     Ok(Some(path))
 }
 
-fn dispatch_context(template: &AgentTemplate, signal: &Signal) -> RokoContext {
+fn dispatch_context(template: &AgentTemplate, signal: &Engram) -> RokoContext {
     let mut ctx = RokoContext::now()
         .with_attr("template", template.name.clone())
         .with_attr("signal.id", signal.id.to_hex())
@@ -1497,16 +1930,16 @@ fn dispatch_context(template: &AgentTemplate, signal: &Signal) -> RokoContext {
     )
 }
 
-fn build_dispatch_signal(template: &AgentTemplate, signal: &Signal) -> Result<Signal> {
+fn build_dispatch_signal(template: &AgentTemplate, signal: &Engram) -> Result<Engram> {
     let mut context = serde_json::Map::new();
     context.insert("signal".into(), serde_json::to_value(signal)?);
     context.insert("template".into(), serde_json::to_value(template)?);
 
     let mut body = String::new();
-    body.push_str("Signal context:\n");
+    body.push_str("Engram context:\n");
     body.push_str(&serde_json::to_string_pretty(&context)?);
 
-    Ok(Signal::builder(Kind::Prompt)
+    Ok(Engram::builder(Kind::Prompt)
         .body(Body::text(body))
         .provenance(Provenance::trusted("roko-serve"))
         .lineage([signal.id])
@@ -1529,7 +1962,7 @@ fn signal_body_to_text(body: &Body) -> String {
 async fn run_template_gates(
     _state: &Arc<AppState>,
     _template: &AgentTemplate,
-    output: &Signal,
+    output: &Engram,
 ) -> Vec<Verdict> {
     let _ = output;
     Vec::new()
@@ -1552,17 +1985,20 @@ async fn record_template_run(state: &Arc<AppState>, template_name: &str, success
 async fn append_dispatch_episode(
     state: &Arc<AppState>,
     template: &AgentTemplate,
-    signal: &Signal,
+    signal: &Engram,
     outcome: &DispatchOutcome,
     started_at: chrono::DateTime<Utc>,
     completed_at: chrono::DateTime<Utc>,
     duration_secs: f64,
+    repo_ctx: Option<&RepoContext>,
 ) {
     let agent_id = outcome
         .result
         .output
         .tag("agent")
         .map_or_else(|| "claude".to_string(), ToString::to_string);
+    let mut recording_template = template.clone();
+    recording_template.model = outcome.model_used.clone();
     let episode_id = Uuid::new_v4().to_string();
     let turns = 1_u64;
     let tokens_used = u64::from(outcome.result.usage.total_tokens());
@@ -1572,7 +2008,7 @@ async fn append_dispatch_episode(
     episode.id = episode_id.clone();
     episode.episode_id = episode_id;
     episode.agent_template = template.name.clone();
-    episode.model = template.model.clone();
+    episode.model = recording_template.model.clone();
     episode.trigger_kind = signal.kind.as_str().to_string();
     episode.trigger_signal_hash = signal.id.to_hex();
     episode.started_at = started_at;
@@ -1599,9 +2035,10 @@ async fn append_dispatch_episode(
     );
 
     if let Some(variant) = webhook_metadata.experiment_variant.as_deref() {
-        episode
-            .extra
-            .insert("experiment_variant".into(), Value::String(variant.to_string()));
+        episode.extra.insert(
+            "experiment_variant".into(),
+            Value::String(variant.to_string()),
+        );
     }
     if let Some(variant_id) = outcome.result.output.tag("experiment_variant_id") {
         episode.extra.insert(
@@ -1621,32 +2058,204 @@ async fn append_dispatch_episode(
         cost_usd_without_cache: f64::from(outcome.result.usage.cost_usd),
         wall_ms: outcome.result.usage.wall_ms,
     };
-    episode.attach_text_fingerprint();
+    // Tag the episode with the repo name when dispatched in a per-repo context.
+    if let Some(ctx) = repo_ctx {
+        episode
+            .extra
+            .insert("repo".into(), Value::String(ctx.name.clone()));
+    }
 
-    let logger = EpisodeLogger::new(state.layout.episodes_path());
+    episode.attach_all_fingerprints();
+    apply_affect_signature(state, &mut episode);
+
+    // Use per-repo layout for data isolation when a repo context is available.
+    // This writes episodes, efficiency, and cascade router data under
+    // .roko/repos/{repo_name}/ instead of the global .roko/.
+    let repo_layout = repo_ctx.map(|ctx| &ctx.layout);
+    let episodes_path = repo_layout
+        .map(RokoLayout::episodes_path)
+        .unwrap_or_else(|| state.layout.episodes_path());
+
+    // Ensure parent directories exist for per-repo paths.
+    if let Some(parent) = episodes_path.parent() {
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            warn!(error = %err, path = %parent.display(), "failed to create per-repo episodes dir");
+        }
+    }
+
+    let logger = EpisodeLogger::new(episodes_path);
     if let Err(err) = logger.append(&episode).await {
         warn!(error = %err, template = %template.name, "failed to append episode");
         return;
     }
-    spawn_episode_distillation(state.workdir.clone(), episode.clone());
 
-    if let Err(err) = record_cascade_router_outcome(state, template, outcome.result.success).await {
-        warn!(error = %err, template = %template.name, "failed to record cascade router outcome");
-    }
+    let distill_workdir = repo_ctx
+        .map(|ctx| ctx.repo_workdir.clone())
+        .unwrap_or_else(|| state.workdir.clone());
+    spawn_episode_distillation(distill_workdir, episode.clone());
 
-    let efficiency = EfficiencyTracker::new(&state.workdir);
-    if let Err(err) = efficiency
-        .record_event(&template.name, turns, tokens_used, outcome.success)
-        .await
+    if let Err(err) = publish_dispatch_learning_feedback(
+        state,
+        &recording_template,
+        signal,
+        repo_layout,
+        &template.name,
+        turns,
+        tokens_used,
+        outcome,
+    )
+    .await
     {
-        warn!(error = %err, template = %template.name, "failed to record efficiency event");
+        warn!(error = %err, template = %template.name, "failed to apply learning events");
     }
 }
 
+async fn publish_dispatch_learning_feedback(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    signal: &Engram,
+    repo_layout: Option<&RokoLayout>,
+    template_name: &str,
+    turns: u64,
+    tokens_used: u64,
+    outcome: &DispatchOutcome,
+) -> Result<()> {
+    let event_bus = LearningEventBus::new(16);
+    let mut rx = event_bus.subscribe();
+    let provider = outcome
+        .result
+        .output
+        .tag("agent")
+        .map_or_else(|| "roko-serve".to_string(), ToString::to_string);
+
+    event_bus.publish(AgentEvent::TurnStarted {
+        task_id: signal.id.to_hex(),
+        model: template.model.clone(),
+        provider,
+        timestamp_ms: signal.created_at_ms,
+    });
+    event_bus.publish(AgentEvent::TurnCompleted {
+        turn: turns.min(u64::from(u32::MAX)) as u32,
+        usage: outcome.result.usage,
+        tool_call_count: 0,
+        gate_passed: Some(outcome.success),
+        finish_reason: if outcome.success {
+            FinishReason::Stop
+        } else {
+            FinishReason::Error("dispatch failed".to_string())
+        },
+    });
+
+    drain_dispatch_learning_events(
+        &mut rx,
+        state,
+        template,
+        repo_layout,
+        template_name,
+        turns,
+        tokens_used,
+        outcome,
+    )
+    .await
+}
+
+async fn drain_dispatch_learning_events(
+    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    repo_layout: Option<&RokoLayout>,
+    template_name: &str,
+    turns: u64,
+    tokens_used: u64,
+    outcome: &DispatchOutcome,
+) -> Result<()> {
+    loop {
+        match rx.try_recv() {
+            Ok(AgentEvent::TurnCompleted { .. }) => {
+                record_cascade_router_outcome_with_layout(
+                    state,
+                    template,
+                    outcome.result.success,
+                    repo_layout,
+                )
+                .await?;
+
+                let efficiency = match repo_layout {
+                    Some(layout) => EfficiencyTracker::for_layout(layout),
+                    None => EfficiencyTracker::new(&state.workdir),
+                };
+                efficiency
+                    .record_event(template_name, turns, tokens_used, outcome.success)
+                    .await?;
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                warn!(
+                    skipped,
+                    "dispatch learning feedback lagged behind event stream"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_affect_signature(state: &AppState, episode: &mut Episode) {
+    let task_key = if episode.task_id.trim().is_empty() {
+        episode.agent_id.clone()
+    } else {
+        episode.task_id.clone()
+    };
+
+    let mut engine = state.affect_engine.lock();
+    for (rung, verdict) in episode.gate_verdicts.iter().enumerate() {
+        let _ = engine.appraise(AffectEvent::GateResult {
+            plan_id: String::new(),
+            task_id: task_key.clone(),
+            passed: verdict.passed,
+            rung: rung as u32,
+        });
+    }
+    if episode.success {
+        let _ = engine.appraise(AffectEvent::TaskOutcome {
+            task_id: task_key.clone(),
+            succeeded: true,
+        });
+    } else {
+        let _ = engine.appraise(AffectEvent::TaskOutcome {
+            task_id: task_key.clone(),
+            succeeded: false,
+        });
+    }
+
+    let state = engine.query();
+    episode.extra.insert(
+        "pad".into(),
+        serde_json::json!({
+            "pleasure": state.pad.pleasure,
+            "arousal": state.pad.arousal,
+            "dominance": state.pad.dominance,
+        }),
+    );
+}
+
+#[allow(dead_code)]
 async fn record_cascade_router_outcome(
     state: &Arc<AppState>,
     template: &AgentTemplate,
     success: bool,
+) -> Result<()> {
+    record_cascade_router_outcome_with_layout(state, template, success, None).await
+}
+
+async fn record_cascade_router_outcome_with_layout(
+    state: &Arc<AppState>,
+    template: &AgentTemplate,
+    success: bool,
+    repo_layout: Option<&RokoLayout>,
 ) -> Result<()> {
     let model_slugs = {
         let templates = state.templates.read().await;
@@ -1668,7 +2277,10 @@ async fn record_cascade_router_outcome(
         slugs
     };
 
-    record_cascade_router_observation(&state.workdir, model_slugs, &template.model, success)?;
+    let path = repo_layout
+        .map(RokoLayout::cascade_router_path)
+        .unwrap_or_else(|| RokoLayout::for_project(&state.workdir).cascade_router_path());
+    record_cascade_router_observation_at(&path, model_slugs, &template.model, success)?;
     Ok(())
 }
 
@@ -1678,15 +2290,25 @@ pub(crate) fn record_cascade_router_observation(
     model_slug: &str,
     success: bool,
 ) -> Result<bool> {
-    let path = workdir
-        .join(".roko")
-        .join("learn")
-        .join("cascade-router.json");
+    let path = RokoLayout::for_project(workdir).cascade_router_path();
+    record_cascade_router_observation_at(&path, model_slugs, model_slug, success)
+}
 
-    let cascade_router = CascadeRouter::load_or_new(&path, model_slugs);
+fn record_cascade_router_observation_at(
+    path: &Path,
+    model_slugs: Vec<String>,
+    model_slug: &str,
+    success: bool,
+) -> Result<bool> {
+    // Ensure parent directory exists for per-repo paths.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+
+    let cascade_router = CascadeRouter::load_or_new(path, model_slugs);
     if cascade_router.record_outcome(model_slug, success) {
         cascade_router
-            .save(&path)
+            .save(path)
             .with_context(|| format!("save {}", path.display()))?;
         Ok(true)
     } else {
@@ -1745,7 +2367,7 @@ mod tests {
             Subscription::new("reviewer", "github:*"),
             Subscription::new("ops", "slack:*").disabled(),
         ]);
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(Body::Json(serde_json::json!({"repo": "roko"})))
             .provenance(Provenance::external("github:webhook"))
             .build();
@@ -1767,7 +2389,7 @@ mod tests {
                 ..SubscriptionFilterConfig::default()
             }),
             Subscription::new("paths", "github:**").with_filter(SubscriptionFilterConfig {
-                path: vec!["src/**/*.rs".into()],
+                path: vec!["src/*.rs".into()],
                 ..SubscriptionFilterConfig::default()
             }),
             Subscription::new("labels", "github:**").with_filter(SubscriptionFilterConfig {
@@ -1780,7 +2402,7 @@ mod tests {
             }),
         ]);
 
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(Body::Json(serde_json::json!({
                 "repository": { "full_name": "roko/roko" },
                 "ref": "refs/heads/main",
@@ -1806,7 +2428,7 @@ mod tests {
     #[test]
     fn dedup_blocks_repeat_signals_within_window() {
         let sub = Subscription::new("reviewer", "github:*").with_dedup_ttl(Duration::from_secs(60));
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(Body::Json(serde_json::json!({"repo": "roko"})))
             .provenance(Provenance::external("github:webhook"))
             .build();
@@ -1820,7 +2442,7 @@ mod tests {
         let registry = SubscriptionRegistry::with_subscriptions(vec![
             Subscription::new("reviewer", "github:*").with_cooldown(Duration::from_secs(60)),
         ]);
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(Body::Json(serde_json::json!({"repo": "roko"})))
             .provenance(Provenance::external("github:webhook"))
             .build();
@@ -1839,7 +2461,7 @@ mod tests {
             Subscription::new("ops", "slack:*").with_concurrency_limit(2),
         ]);
 
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(Body::Json(serde_json::json!({"repo": "roko"})))
             .provenance(Provenance::external("github:webhook"))
             .build();
@@ -1879,7 +2501,7 @@ template = "path-review"
 trigger = "github:push"
 concurrency_limit = 1
 cooldown_secs = 10
-filter = { path = "src/**/*.rs" }
+filter = { path = "src/*.rs" }
 "#;
         std::fs::write(subscriptions_dir.join("path-review.toml"), file_toml)
             .expect("write subscription file");
@@ -1887,7 +2509,7 @@ filter = { path = "src/**/*.rs" }
         let config = RokoConfig::from_toml(roko_toml).expect("parse roko.toml");
         let registry = SubscriptionRegistry::load_from_project(&workdir, &config);
 
-        let signal = Signal::builder(Kind::Custom("github:push".into()))
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
             .body(Body::Json(serde_json::json!({
                 "repository": { "full_name": "roko/roko" },
                 "ref": "refs/heads/main",
@@ -1954,7 +2576,10 @@ filter = { path = "src/**/*.rs" }
                 McpServerConfig {
                     name: "filesystem".into(),
                     command: "npx".into(),
-                    args: vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()],
+                    args: vec![
+                        "-y".into(),
+                        "@modelcontextprotocol/server-filesystem".into(),
+                    ],
                     env: Default::default(),
                 },
                 McpServerConfig {
@@ -1985,12 +2610,162 @@ filter = { path = "src/**/*.rs" }
             experiment: None,
         };
 
-        let generated =
-            resolve_template_mcp_config(None, tmp.path(), &template).expect("resolve");
+        let generated = resolve_template_mcp_config(None, tmp.path(), &template).expect("resolve");
         let generated = generated.expect("generated path");
         let rendered = std::fs::read_to_string(&generated).expect("read generated config");
         let parsed: McpConfig = serde_json::from_str(&rendered).expect("parse generated config");
         assert_eq!(parsed.servers.len(), 1);
         assert_eq!(parsed.servers[0].name, "filesystem");
+    }
+
+    #[test]
+    fn signal_repo_full_name_extracts_from_github_payload() {
+        let signal = Engram::builder(Kind::Custom("github:push".into()))
+            .body(Body::Json(serde_json::json!({
+                "repository": { "full_name": "nunchi/roko", "name": "roko" }
+            })))
+            .provenance(Provenance::external("github:webhook"))
+            .build();
+
+        let full_name = signal_repo_full_name(&signal);
+        assert_eq!(full_name.as_deref(), Some("nunchi/roko"));
+    }
+
+    #[test]
+    fn signal_repo_full_name_returns_none_for_non_repo_signals() {
+        let signal = Engram::builder(Kind::Custom("cron:tick".into()))
+            .body(Body::Json(serde_json::json!({ "schedule": "hourly" })))
+            .provenance(Provenance::trusted("scheduler"))
+            .build();
+
+        assert!(signal_repo_full_name(&signal).is_none());
+    }
+
+    #[test]
+    fn repo_context_layout_isolates_per_repo_data() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = RokoLayout::for_repo(tmp.path(), "my-repo");
+
+        // Per-repo paths should be under .roko/repos/my-repo/
+        let episodes = layout.episodes_path();
+        assert!(
+            episodes.to_str().unwrap().contains("repos/my-repo"),
+            "episodes path should be under repos/my-repo: {episodes:?}"
+        );
+
+        let efficiency = layout.efficiency_path();
+        assert!(
+            efficiency.to_str().unwrap().contains("repos/my-repo"),
+            "efficiency path should be under repos/my-repo: {efficiency:?}"
+        );
+
+        let cascade_router = layout.cascade_router_path();
+        assert!(
+            cascade_router.to_str().unwrap().contains("repos/my-repo"),
+            "cascade router path should be under repos/my-repo: {cascade_router:?}"
+        );
+    }
+
+    #[test]
+    fn efficiency_tracker_for_layout_uses_repo_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = RokoLayout::for_repo(tmp.path(), "test-repo");
+        let tracker = EfficiencyTracker::for_layout(&layout);
+
+        assert!(
+            tracker.path.to_str().unwrap().contains("repos/test-repo"),
+            "tracker path should be under repos/test-repo: {:?}",
+            tracker.path
+        );
+        assert!(
+            tracker.path.to_str().unwrap().ends_with("efficiency.jsonl"),
+            "tracker path should end with efficiency.jsonl: {:?}",
+            tracker.path
+        );
+    }
+
+    #[test]
+    fn cross_repo_context_is_empty_for_no_repos() {
+        let repos: Vec<RepoInfo> = Vec::new();
+        assert!(build_cross_repo_context(&repos).is_empty());
+    }
+
+    #[test]
+    fn cross_repo_context_lists_all_configured_repos() {
+        let repos = vec![
+            RepoInfo {
+                name: "roko".into(),
+                path: PathBuf::from("/repos/roko"),
+                branch: "main".into(),
+            },
+            RepoInfo {
+                name: "collab".into(),
+                path: PathBuf::from("/repos/collab"),
+                branch: "develop".into(),
+            },
+        ];
+        let section = build_cross_repo_context(&repos);
+        assert!(section.contains("roko"));
+        assert!(section.contains("collab"));
+        assert!(section.contains("/repos/roko"));
+        assert!(section.contains("/repos/collab"));
+        assert!(section.contains("main"));
+        assert!(section.contains("develop"));
+        assert!(section.contains("## Available Repositories"));
+    }
+
+    #[test]
+    fn template_dispatcher_uses_repo_workdir_over_global() {
+        let global_dir = tempfile::tempdir().expect("global tempdir");
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+
+        let mut dispatcher = TemplateAgentDispatcher::new(
+            global_dir.path().to_path_buf(),
+            None,
+            RokoConfig::default(),
+        );
+        dispatcher.repo_workdir = Some(repo_dir.path().to_path_buf());
+
+        // Verify the effective workdir resolves to repo_workdir.
+        let effective = dispatcher
+            .repo_workdir
+            .as_deref()
+            .unwrap_or(global_dir.path());
+        assert_eq!(effective, repo_dir.path());
+    }
+
+    #[test]
+    fn anomaly_dispatch_prompt_loop_halts_after_five_identical_prompts() {
+        let session_root = tempfile::tempdir().expect("session tempdir");
+        let signal = Engram::builder(Kind::Prompt)
+            .body(Body::text("looping prompt"))
+            .provenance(Provenance::trusted("test"))
+            .build();
+        let prompt_hash = prompt_hash_u64(&signal);
+
+        for _ in 0..4 {
+            let anomaly = with_dispatch_anomaly_session(session_root.path(), |session| {
+                session.detector.check_prompt(prompt_hash)
+            });
+            assert!(anomaly.is_none());
+        }
+
+        let anomaly = with_dispatch_anomaly_session(session_root.path(), |session| {
+            session.detector.check_prompt(prompt_hash)
+        });
+
+        assert!(matches!(
+            anomaly,
+            Some(Anomaly::PromptLoop { repeated_count: 5 })
+        ));
+    }
+
+    #[test]
+    fn anomaly_dispatch_model_downgrade_prefers_configured_fallback() {
+        let mut config = RokoConfig::default();
+        config.agent.fallback_model = Some("claude-haiku-3-5".to_string());
+
+        let downgraded = downgrade_model_slug("claude-opus-4", &config);
+        assert_eq!(downgraded.as_deref(), Some("claude-haiku-3-5"));
     }
 }

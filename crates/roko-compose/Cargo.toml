@@ -11,12 +11,23 @@ description = "Composer implementations for Roko: prompt assembly with token bud
 workspace = true
 
 [dependencies]
+roko-agent = { path = "../roko-agent" }
 roko-core = { path = "../roko-core" }
+roko-learn = { path = "../roko-learn" }
+roko-neuro = { path = "../roko-neuro" }
+roko-primitives = { path = "../roko-primitives", optional = true }
+chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+tiktoken-rs = "0.11.0"
+tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
+
+[features]
+default = []
+hdc = ["dep:roko-primitives", "roko-neuro/hdc"]
 
 [dev-dependencies]
 roko-std = { path = "../roko-std" }

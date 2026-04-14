@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 roko-core = { path = "../roko-core" }
+roko-agent = { path = "../roko-agent" }
 async-trait = "0.1"
 tokio = { workspace = true, features = ["process", "time", "rt", "macros"] }
 serde = { workspace = true, features = ["derive"] }

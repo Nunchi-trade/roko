@@ -59,6 +59,15 @@ impl ExecutorSnapshot {
     /// Falls back to a legacy `tasks`-based schema if the current
     /// `plan_states` layout is unavailable.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        // Peek at the raw value: if it has a `tasks` key but no
+        // `plan_states`, it is a legacy snapshot and should use the
+        // compat loader even though the primary path would succeed
+        // (all fields are `#[serde(default)]`).
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+            if value.get("tasks").is_some() && value.get("plan_states").is_none() {
+                return Self::from_legacy_json(json);
+            }
+        }
         match serde_json::from_str(json) {
             Ok(snapshot) => Ok(snapshot),
             Err(primary) => Self::from_legacy_json(json).or(Err(primary)),
@@ -218,12 +227,14 @@ mod tests {
 
     #[test]
     fn snapshot_with_partial_plan_state_uses_defaults() {
+        // PlanPhase uses `#[serde(tag = "kind", rename_all = "kebab-case")]`,
+        // so it is internally tagged: `{"kind": "queued"}` not `"Queued"`.
         let json = r#"
         {
             "plan_states": {
                 "plan-1": {
                     "plan_id": "plan-1",
-                    "current_phase": "Queued"
+                    "current_phase": {"kind": "queued"}
                 }
             },
             "queue_order": ["plan-1"]

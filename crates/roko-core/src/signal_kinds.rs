@@ -4,6 +4,7 @@ pub const GITHUB_PUSH: &str = "github:push";
 pub const GITHUB_PR_OPENED: &str = "github:pull_request:opened";
 pub const GITHUB_PR_REVIEW: &str = "github:pull_request_review";
 pub const GITHUB_ISSUE_OPENED: &str = "github:issues:opened";
+pub const PRD_PLAN_APPROVED: &str = "prd.plan_approved";
 pub const SLACK_MESSAGE: &str = "slack:message";
 pub const SLACK_REACTION: &str = "slack:reaction_added";
 pub const CRON_TICK: &str = "scheduler:cron";

@@ -459,12 +459,12 @@ mod tests {
         }
     }
 
-    /// Mirage telemetry emits `ResourceWarning` via bardo-runtime's `EventBus`
+    /// Mirage telemetry emits `ResourceWarning` via roko-runtime's `EventBus`
     /// (non-blocking emit path; see `apply_resource_pressure` in `rpc.rs`).
     #[test]
     fn telemetry_bus_emits_resource_warning() {
         use crate::events::MirageTelemetryEvent;
-        use bardo_runtime::event_bus::EventBus;
+        use roko_runtime::event_bus::EventBus;
 
         let bus = EventBus::<MirageTelemetryEvent>::new(4);
         bus.sender().emit(MirageTelemetryEvent::ResourceWarning {

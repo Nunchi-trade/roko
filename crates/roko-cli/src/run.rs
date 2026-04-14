@@ -10,16 +10,19 @@ use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
+use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, OllamaLlmBackend};
+use roko_agent::{Agent, AgentResult, ExecAgent, OllamaLlmBackend};
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
+use roko_core::agent::resolve_model;
+use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Gate, Kind, Provenance, Signal, Substrate, Verdict,
+    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, Provenance, Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
@@ -72,7 +75,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     let ctx = Context::now();
 
     // Seed prompt sections: system role + user prompt + any injected files.
-    let mut sections: Vec<Signal> = Vec::with_capacity(2 + config.prompt.files.len());
+    let mut sections: Vec<Engram> = Vec::with_capacity(2 + config.prompt.files.len());
 
     let role_sig = PromptSection::new("role", &config.prompt.role)
         .with_priority(SectionPriority::Critical)
@@ -120,7 +123,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
     // internally; ExecAgent stays available for non-Claude backends.
     let (agent_result, external_actions) =
-        dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await;
+        dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await?;
 
     // Optionally post-process the agent output to strip ANSI escapes and
     // reasoning-model thinking traces. The raw body is preserved as an
@@ -152,7 +155,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         .await
         .map_err(|e| anyhow!("persist gate input: {e}"))?;
 
-    let mut verdict_sigs: Vec<Signal> = Vec::new();
+    let mut verdict_sigs: Vec<Engram> = Vec::new();
     let mut verdict_summary: Vec<(String, bool)> = Vec::new();
     for gate_cfg in &config.gates {
         let verdict = run_gate(gate_cfg, &gate_input, &ctx).await;
@@ -292,13 +295,51 @@ fn parse_agent_role(role: &str) -> Option<AgentRole> {
 async fn dispatch_agent(
     workdir: &Path,
     config: &Config,
-    prompt: &Signal,
+    prompt: &Engram,
     prompt_text: &str,
     ctx: &Context,
-) -> (AgentResult, Vec<ExternalAction>) {
-    // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
-    // internally; ExecAgent stays available for non-Claude backends.
-    if config.agent.command == "claude" {
+) -> Result<(AgentResult, Vec<ExternalAction>)> {
+    let mut routing_config = roko_core::config::load_config(workdir)
+        .with_context(|| format!("load routing config from {}", workdir.display()))?;
+    routing_config.apply_process_env();
+    let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
+
+    if has_routing {
+        let tools_csv = claude_tool_allowlist(&config.prompt.role);
+        let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, &tools_csv);
+        let model = config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| routing_config.agent.default_model.clone());
+        let resolved = resolve_model(&routing_config, &model);
+        let agent = create_agent_for_model(
+            &routing_config,
+            &model,
+            AgentOptions {
+                command: Some(config.agent.command.clone()),
+                timeout_ms: Some(config.agent.timeout_ms),
+                system_prompt: Some(system_prompt),
+                cached_content: None,
+                tools: Some(tools_csv),
+                mcp_config: config.agent.mcp_config.clone(),
+                working_dir: Some(workdir.to_path_buf()),
+                provider_semaphores: None,
+                env: config.agent.env.clone(),
+                extra_args: config.agent.args.clone(),
+                effort: Some(config.agent.effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
+                    &config.prompt.role,
+                ),
+                name: format!("{}:{model}", resolved.provider_kind.label()),
+            },
+        )
+        .with_context(|| format!("create agent for model {model}"))?;
+        Ok((agent.run(prompt, ctx).await, Vec::new()))
+    } else if config.agent.command == "claude" {
+        // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
+        // internally; ExecAgent stays available for non-Claude backends.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, &tools_csv);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
@@ -308,34 +349,85 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| "claude-opus-4-6".to_string());
-        let mut agent = ClaudeCliAgent::new(&config.agent.command, workdir, model.clone())
-            .with_timeout_ms(config.agent.timeout_ms)
-            .with_bare_mode(config.agent.bare_mode)
-            .with_effort(config.agent.effort.clone())
-            .with_system_prompt(system_prompt)
-            .with_tools(tools_csv)
-            .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
-            .with_extra_args(extra_args)
-            .with_dangerously_skip_permissions(role_allows_dangerous_skip_permissions(
-                &config.prompt.role,
-            ))
-            .with_optional_resume(optional_resume);
+        let mut synthesized_config = RokoConfig::default();
+        synthesized_config.agent.command = Some(config.agent.command.clone());
+        synthesized_config.agent.default_model = model.clone();
+        synthesized_config.agent.default_backend = "claude".to_string();
+
+        let mut synthetic_extra_args = extra_args;
+        if let Some(resume_session) = optional_resume {
+            synthetic_extra_args.push("--resume".to_string());
+            synthetic_extra_args.push(resume_session);
+        }
         if let Some(fallback_model) = &config.agent.fallback_model {
-            agent = agent.with_fallback_model(fallback_model.clone());
+            synthetic_extra_args.push("--fallback-model".to_string());
+            synthetic_extra_args.push(fallback_model.clone());
         }
-        for (k, v) in &config.agent.env {
-            agent = agent.with_env_var(k, v);
-        }
-        (agent.run(prompt, ctx).await, Vec::new())
+
+        let agent = create_agent_for_model(
+            &synthesized_config,
+            &model,
+            AgentOptions {
+                command: Some(config.agent.command.clone()),
+                timeout_ms: Some(config.agent.timeout_ms),
+                system_prompt: Some(system_prompt),
+                cached_content: None,
+                tools: Some(tools_csv),
+                mcp_config: config.agent.mcp_config.clone(),
+                working_dir: Some(workdir.to_path_buf()),
+                provider_semaphores: None,
+                env: config.agent.env.clone(),
+                extra_args: synthetic_extra_args,
+                effort: Some(config.agent.effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
+                    &config.prompt.role,
+                ),
+                name: String::new(),
+            },
+        )
+        .with_context(|| format!("create synthesized claude agent for model {model}"))?;
+        Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "ollama" {
-        run_ollama_agentic_single(workdir, config, prompt_text).await
-    } else {
-        let mut agent = ExecAgent::new(&config.agent.command, config.agent.args.clone())
+        Ok(run_ollama_agentic_single(workdir, config, prompt_text).await)
+    } else if is_known_protocol_command(&config.agent.command) {
+        let mut agent = ExecAgent::new(config.agent.command.clone(), config.agent.args.clone())
             .with_timeout_ms(config.agent.timeout_ms);
-        for (k, v) in &config.agent.env {
-            agent = agent.with_env_var(k, v);
+        for (key, value) in &config.agent.env {
+            agent = agent.with_env_var(key.clone(), value.clone());
         }
-        (agent.run(prompt, ctx).await, Vec::new())
+        Ok((agent.run(prompt, ctx).await, Vec::new()))
+    } else {
+        let mut fallback_config = RokoConfig::default();
+        fallback_config.agent.command = Some(config.agent.command.clone());
+
+        let model = config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| config.agent.command.clone());
+        let agent = create_agent_for_model(
+            &fallback_config,
+            &model,
+            AgentOptions {
+                command: Some(config.agent.command.clone()),
+                timeout_ms: Some(config.agent.timeout_ms),
+                system_prompt: None,
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(workdir.to_path_buf()),
+                provider_semaphores: None,
+                env: config.agent.env.clone(),
+                extra_args: config.agent.args.clone(),
+                effort: Some(config.agent.effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: false,
+                name: String::new(),
+            },
+        )
+        .with_context(|| format!("create generic subprocess agent for {}", config.agent.command))?;
+        Ok((agent.run(prompt, ctx).await, Vec::new()))
     }
 }
 
@@ -407,7 +499,7 @@ async fn run_ollama_agentic_single(
         )
     };
 
-    let sig = Signal::builder(Kind::AgentOutput)
+    let sig = Engram::builder(Kind::AgentOutput)
         .body(Body::text(body_text))
         .provenance(Provenance::agent(&agent_name))
         .tag("agent", &agent_name)
@@ -431,8 +523,8 @@ async fn run_ollama_agentic_single(
 async fn append_episode_log(
     workdir: &Path,
     config: &Config,
-    prompt: &Signal,
-    final_output: &Signal,
+    prompt: &Engram,
+    final_output: &Engram,
     verdicts: &[(String, bool)],
     agent_result: &AgentResult,
     external_actions: &[ExternalAction],
@@ -543,7 +635,7 @@ async fn append_episode_log(
 
 fn build_task_metric(
     config: &Config,
-    prompt: &Signal,
+    prompt: &Engram,
     verdicts: &[(String, bool)],
     agent_result: &AgentResult,
 ) -> TaskMetric {
@@ -575,7 +667,7 @@ fn build_task_metric(
     metric
 }
 
-fn final_output_run_id(prompt: &Signal, agent_result: &AgentResult) -> String {
+fn final_output_run_id(prompt: &Engram, agent_result: &AgentResult) -> String {
     agent_result
         .output
         .tag("run_id")
@@ -681,7 +773,7 @@ fn split_resume_arg(args: &[String]) -> (Vec<String>, Option<String>) {
     (cleaned, resume)
 }
 
-fn load_file_section(workdir: &Path, spec: &PromptFile) -> Result<Signal> {
+fn load_file_section(workdir: &Path, spec: &PromptFile) -> Result<Engram> {
     let full_path = if spec.path.is_absolute() {
         spec.path.clone()
     } else {
@@ -715,10 +807,10 @@ fn load_file_section(workdir: &Path, spec: &PromptFile) -> Result<Signal> {
 /// Persists both the raw output (as an `AgentMessage` trace) and the cleaned
 /// version (as the canonical `AgentOutput`). Returns the cleaned signal.
 async fn maybe_clean_output(
-    prompt: &Signal,
+    prompt: &Engram,
     agent_result: &AgentResult,
     substrate: &FileSubstrate,
-) -> Result<Signal> {
+) -> Result<Engram> {
     let raw = agent_result.output.body.as_text().unwrap_or("").to_string();
     let cleaned = clean::clean(&raw);
     if cleaned == raw.trim() {
@@ -763,20 +855,20 @@ async fn maybe_clean_output(
     Ok(clean_sig)
 }
 
-fn build_gate_input(workdir: &Path, parent_id: roko_core::ContentHash) -> Result<Signal> {
+fn build_gate_input(workdir: &Path, parent_id: roko_core::ContentHash) -> Result<Engram> {
     let working_dir: PathBuf = workdir
         .canonicalize()
         .with_context(|| format!("canonicalize workdir {}", workdir.display()))?;
     let payload = GatePayload::in_dir(working_dir).with_label("roko-cli");
     let body = Body::from_json(&payload).map_err(|e| anyhow!("encode gate payload: {e}"))?;
-    Ok(Signal::builder(Kind::Task)
+    Ok(Engram::builder(Kind::Task)
         .body(body)
         .provenance(Provenance::trusted("cli_run"))
         .lineage([parent_id])
         .build())
 }
 
-async fn run_gate(cfg: &GateConfig, input: &Signal, ctx: &Context) -> Verdict {
+async fn run_gate(cfg: &GateConfig, input: &Engram, ctx: &Context) -> Verdict {
     match cfg {
         GateConfig::Shell {
             program,
@@ -842,6 +934,7 @@ fn parse_build_system(s: &str) -> Result<BuildSystem, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn parse_agent_role_accepts_known_labels_and_aliases() {
@@ -924,5 +1017,28 @@ mod tests {
             optional_resume_session_id(&cfg, None).as_deref(),
             Some("env-sess")
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_uses_exec_agent_for_plain_commands_without_routing() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let config = Config::default();
+        let prompt = Engram::builder(Kind::Prompt)
+            .body(Body::text("plain-exec-ok"))
+            .build();
+
+        let (result, external_actions) = dispatch_agent(
+            tempdir.path(),
+            &config,
+            &prompt,
+            "plain-exec-ok",
+            &Context::now(),
+        )
+        .await
+        .expect("dispatch succeeds");
+
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "plain-exec-ok");
+        assert!(external_actions.is_empty());
     }
 }

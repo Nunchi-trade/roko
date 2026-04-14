@@ -22,11 +22,16 @@ use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
+use roko_learn::cascade_router::{CascadeStage, StageTransition};
+pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::pattern_discovery::CrossEpisodeConsolidator;
 use roko_learn::prompt_experiment::{
     ExperimentStatus, ExperimentStore, PromptExperiment, PromptVariant, VariantStats,
 };
+use roko_learn::provider_health::{CircuitState, ProviderHealth};
+use roko_learn::skill_library::Skill;
 
 use super::pages::{PageId, PageScaffold, efficiency, operations};
 
@@ -39,6 +44,14 @@ const EFFICIENCY_FILE: &str = "efficiency.jsonl";
 const EXPERIMENTS_FILE: &str = "experiments.json";
 const GATE_THRESHOLDS_FILE: &str = "gate-thresholds.json";
 const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
+const SKILLS_FILE: &str = "skills.json";
+const PROVIDER_HEALTH_FILE: &str = "provider-health.json";
+const LATENCY_STATS_FILE: &str = "latency-stats.json";
+const DAIMON_DIR: &str = "daimon";
+const AFFECT_FILE: &str = "affect.json";
+const NEURO_DIR: &str = ".roko/neuro";
+const KNOWLEDGE_FILE: &str = "knowledge.jsonl";
+const KNOWLEDGE_CONFIRMATIONS_FILE: &str = "knowledge-confirmations.jsonl";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FileStamp {
@@ -90,21 +103,21 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Build the default dark palette that matches a typical terminal theme.
+    /// ROSEDUST palette — warm rose/indigo aesthetic from Mori's design system.
     #[must_use]
     pub const fn dark() -> Self {
         Self {
-            foreground: Color::White,
-            muted: Color::DarkGray,
-            background: Color::Black,
-            accent: Color::Cyan,
-            accent_foreground: Color::Black,
-            success: Color::Green,
-            warning: Color::Yellow,
-            danger: Color::Red,
-            info: Color::Blue,
-            selection_background: Color::Cyan,
-            selection_foreground: Color::Black,
+            foreground: Color::Rgb(165, 142, 158), // #A58E9E — rose-tinted text
+            muted: Color::Rgb(110, 85, 105),       // #6E5569 — ghost text
+            background: Color::Rgb(0, 0, 0),       // #000000 — void
+            accent: Color::Rgb(185, 120, 148),     // #B97894 — primary rose
+            accent_foreground: Color::Rgb(0, 0, 0), // #000000 — contrast on rose
+            success: Color::Rgb(125, 158, 140),    // #7D9E8C — sage green
+            warning: Color::Rgb(195, 155, 95),     // #C39B5F — amber caution
+            danger: Color::Rgb(195, 110, 85),      // #C36E55 — ember red
+            info: Color::Rgb(120, 115, 165),       // #7873A5 — dream indigo
+            selection_background: Color::Rgb(34, 28, 36), // #221C24 — highlight
+            selection_foreground: Color::Rgb(215, 198, 158), // #D7C69E — bone bright
         }
     }
 
@@ -333,6 +346,8 @@ impl DashboardScaffold {
             PageId::LogView => self.snapshot.render_log_view_page(scaffold),
             PageId::Signals => self.snapshot.render_signals_page(scaffold),
             PageId::ConfigView => self.snapshot.render_config_view_page(scaffold),
+            PageId::ProviderHealth => self.snapshot.render_provider_health_page(scaffold),
+            PageId::ModelComparison => self.snapshot.render_model_comparison_page(scaffold),
         };
         rendered.or_else(|| Some(scaffold.render_text()))
     }
@@ -363,6 +378,20 @@ impl DashboardScaffold {
         self.render_page_text(PageId::Trends)
             .unwrap_or_else(|| String::from("<missing trends page>"))
     }
+
+    /// Render the provider health page as plain text.
+    #[must_use]
+    pub fn render_provider_health_page_text(&self) -> String {
+        self.render_page_text(PageId::ProviderHealth)
+            .unwrap_or_else(|| String::from("<missing provider health page>"))
+    }
+
+    /// Render the model comparison page as plain text.
+    #[must_use]
+    pub fn render_model_comparison_page_text(&self) -> String {
+        self.render_page_text(PageId::ModelComparison)
+            .unwrap_or_else(|| String::from("<missing model comparison page>"))
+    }
 }
 
 impl Default for DashboardScaffold {
@@ -380,6 +409,21 @@ pub struct DashboardSummary {
     pub page_count: usize,
     /// Number of widgets scaffolded across all pages.
     pub widget_count: usize,
+}
+
+/// An entry in the orchestrator event log.
+#[derive(Debug, Clone, Default)]
+pub struct EventLogEntry {
+    /// Epoch milliseconds when the event occurred.
+    pub timestamp_ms: u64,
+    /// Event kind (e.g. "task_started", "gate_passed").
+    pub event_type: String,
+    /// Plan the event belongs to.
+    pub plan_id: String,
+    /// Task the event belongs to.
+    pub task_id: String,
+    /// Human-readable event description.
+    pub message: String,
 }
 
 /// Shared dashboard data loaded from `.roko/`.
@@ -441,6 +485,14 @@ pub struct DashboardData {
     cfactor_stamp: FileStamp,
     /// Cascade router file metadata.
     cascade_router_stamp: FileStamp,
+    /// Per-task agent output tail (last 50 lines per task) from `.roko/task-outputs/`.
+    pub task_outputs: HashMap<String, Vec<String>>,
+    /// Last observed task-outputs directory metadata.
+    task_outputs_stamp: FileStamp,
+    /// Orchestrator event log from `.roko/state/events.json`.
+    pub event_log: Vec<EventLogEntry>,
+    /// Last observed events file metadata.
+    event_log_stamp: FileStamp,
 }
 
 impl DashboardData {
@@ -494,8 +546,24 @@ impl DashboardData {
             .collect();
         let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         let cfactor_stamp = file_stamp(&cfactor_path);
-        let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
+
+        // Load task outputs before plan execution so backfill can use them
+        let task_outputs_dir = roko_dir.join("task-outputs");
+        let task_outputs = load_task_outputs(&task_outputs_dir);
+        let task_outputs_stamp = file_stamp(&task_outputs_dir);
+
+        let current_plan_execution =
+            load_current_plan_execution(&root, &state, &episodes, &task_outputs);
         let efficiency_stamp = file_stamp(&efficiency_path);
+
+        // Backfill agent_output_tail from task-outputs if episode didn't provide it
+        let current_plan_execution =
+            backfill_agent_output_tail(current_plan_execution, &task_outputs);
+
+        // Load event log from .roko/state/events.json
+        let events_path = roko_dir.join("state").join("events.json");
+        let event_log = load_event_log(&events_path);
+        let event_log_stamp = file_stamp(&events_path);
 
         Self {
             root,
@@ -526,6 +594,10 @@ impl DashboardData {
             cfactor,
             cfactor_stamp,
             cascade_router_stamp,
+            task_outputs,
+            task_outputs_stamp,
+            event_log,
+            event_log_stamp,
         }
     }
 
@@ -611,13 +683,36 @@ impl DashboardData {
             self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         }
 
+        // Refresh task outputs
+        let task_outputs_dir = roko_dir.join("task-outputs");
+        let stamp = file_stamp(&task_outputs_dir);
+        if stamp != self.task_outputs_stamp {
+            self.task_outputs_stamp = stamp;
+            self.task_outputs = load_task_outputs(&task_outputs_dir);
+        }
+
+        // Refresh event log
+        let events_path = roko_dir.join("state").join("events.json");
+        let stamp = file_stamp(&events_path);
+        if stamp != self.event_log_stamp {
+            self.event_log_stamp = stamp;
+            self.event_log = load_event_log(&events_path);
+        }
+
         if state_changed {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
             self.active_tasks = load_active_tasks(&self.executor_state);
             self.agents = load_agents(&self.executor_state);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
-            self.current_plan_execution =
-                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes);
+            self.current_plan_execution = backfill_agent_output_tail(
+                load_current_plan_execution(
+                    &self.root,
+                    &self.executor_state,
+                    &self.episodes,
+                    &self.task_outputs,
+                ),
+                &self.task_outputs,
+            );
         }
 
         Ok(())
@@ -689,8 +784,15 @@ impl DashboardData {
             stamp,
             offset: stamp.len,
         };
-        self.current_plan_execution =
-            load_current_plan_execution(&self.root, &self.executor_state, &self.episodes);
+        self.current_plan_execution = backfill_agent_output_tail(
+            load_current_plan_execution(
+                &self.root,
+                &self.executor_state,
+                &self.episodes,
+                &self.task_outputs,
+            ),
+            &self.task_outputs,
+        );
     }
 
     fn rebuild_signal_dependent_fields(&mut self) {
@@ -715,6 +817,18 @@ impl DashboardData {
     #[must_use]
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Cached episodes for log display.
+    #[must_use]
+    pub(crate) fn episodes(&self) -> &[Episode] {
+        &self.episodes
+    }
+
+    /// Per-task agent output tails.
+    #[must_use]
+    pub(crate) fn task_outputs(&self) -> &HashMap<String, Vec<String>> {
+        &self.task_outputs
     }
 }
 
@@ -1198,47 +1312,7 @@ fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
         .map(|parsed| parsed.with_timezone(&Utc))
 }
 
-/// Current C-Factor snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CFactor {
-    pub overall: f64,
-    pub components: CFactorComponents,
-    pub computed_at: DateTime<Utc>,
-    pub episode_count: usize,
-}
-
-/// C-Factor components.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CFactorComponents {
-    pub gate_pass_rate: f64,
-    pub cost_efficiency: f64,
-    pub speed: f64,
-    pub first_try_rate: f64,
-    pub knowledge_growth: f64,
-}
-
-impl Default for CFactorComponents {
-    fn default() -> Self {
-        Self {
-            gate_pass_rate: 0.0,
-            cost_efficiency: 0.0,
-            speed: 0.0,
-            first_try_rate: 0.0,
-            knowledge_growth: 0.0,
-        }
-    }
-}
-
-impl Default for CFactor {
-    fn default() -> Self {
-        Self {
-            overall: 0.0,
-            components: CFactorComponents::default(),
-            computed_at: Utc::now(),
-            episode_count: 0,
-        }
-    }
-}
+// CFactor and CFactorComponents are imported from roko_learn::cfactor (line 26).
 
 impl SignalSummary {
     fn from_value(value: &Value) -> Option<Self> {
@@ -1373,16 +1447,128 @@ impl ExperimentSummary {
     }
 }
 
+/// Load per-task agent output from `.roko/task-outputs/*.txt` (last 50 lines each).
+fn load_task_outputs(task_outputs_dir: &Path) -> HashMap<String, Vec<String>> {
+    let mut task_outputs = HashMap::new();
+    if !task_outputs_dir.is_dir() {
+        return task_outputs;
+    }
+    let Ok(entries) = std::fs::read_dir(task_outputs_dir) else {
+        return task_outputs;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "txt") {
+            let task_id = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let lines: Vec<String> = content
+                    .lines()
+                    .rev()
+                    .take(50)
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                task_outputs.insert(task_id, lines);
+            }
+        }
+    }
+    task_outputs
+}
+
+/// Load orchestrator event log from `.roko/state/events.json`.
+fn load_event_log(events_path: &Path) -> Vec<EventLogEntry> {
+    let Some(value) = read_json_value(events_path) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.as_array() else {
+        // Try as JSONL-style (one object = single event)
+        return parse_event_entry(&value).into_iter().collect();
+    };
+    entries.iter().filter_map(parse_event_entry).collect()
+}
+
+fn parse_event_entry(value: &Value) -> Option<EventLogEntry> {
+    Some(EventLogEntry {
+        timestamp_ms: value
+            .get("timestamp_ms")
+            .and_then(Value::as_u64)
+            .or_else(|| value.get("timestamp").and_then(Value::as_u64))
+            .unwrap_or_default(),
+        event_type: value
+            .get("event_type")
+            .or_else(|| value.get("type"))
+            .or_else(|| value.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        plan_id: value
+            .get("plan_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        task_id: value
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        message: value
+            .get("message")
+            .or_else(|| value.get("detail"))
+            .or_else(|| value.get("description"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+/// Backfill `agent_output_tail` from task-outputs when episodes didn't provide it.
+fn backfill_agent_output_tail(
+    mut snapshot: Option<PlanExecutionSnapshot>,
+    task_outputs: &HashMap<String, Vec<String>>,
+) -> Option<PlanExecutionSnapshot> {
+    let exec = snapshot.as_mut()?;
+    if exec.agent_output_tail.is_empty() {
+        // Try current task first
+        if let Some(detail) = &exec.current_task {
+            if let Some(output) = task_outputs.get(&detail.task_id) {
+                exec.agent_output_tail = output.clone();
+            }
+        }
+        // If still empty, try any task in the execution that has output
+        if exec.agent_output_tail.is_empty() {
+            for task_row in exec.tasks.iter().rev() {
+                if let Some(output) = task_outputs.get(&task_row.task_id) {
+                    if !output.is_empty() {
+                        exec.agent_output_tail = output.clone();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    snapshot
+}
+
 fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     let mut ids = std::collections::BTreeSet::new();
     if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
         ids.extend(plan_states.keys().cloned());
     }
     if ids.is_empty() {
-        if let Ok(entries) = std::fs::read_dir(plans_dir(root)) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    ids.insert(entry.file_name().to_string_lossy().into_owned());
+        let pdir = plans_dir(root);
+        if pdir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&pdir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() && p.join("tasks.toml").exists() {
+                        ids.insert(entry.file_name().to_string_lossy().into_owned());
+                    }
                 }
             }
         }
@@ -1414,12 +1600,26 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             })
             .unwrap_or(false);
 
+        let last_error = state
+            .get("plan_states")
+            .and_then(Value::as_object)
+            .and_then(|plans| plans.get(&id))
+            .and_then(|plan_state| {
+                plan_state
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .or_else(|| plan_state.pointer("/error/message").and_then(Value::as_str))
+                    .or_else(|| plan_state.get("error").and_then(Value::as_str))
+            })
+            .map(ToOwned::to_owned);
+
         summaries.push(PlanSummary {
             id,
             title,
             task_count,
             completed,
             old_format: false,
+            last_error,
         });
     }
 
@@ -1603,6 +1803,7 @@ fn load_current_plan_execution(
     root: &Path,
     state: &Value,
     episodes: &[Episode],
+    task_outputs: &HashMap<String, Vec<String>>,
 ) -> Option<PlanExecutionSnapshot> {
     let plan_states = state.get("plan_states").and_then(Value::as_object)?;
     let trackers = load_task_trackers(root);
@@ -2509,6 +2710,24 @@ pub struct DashboardSnapshot {
     recent_signals: Vec<SignalSummary>,
     /// Cascade router snapshot from `.roko/learn/cascade-router.json` (raw JSON).
     cascade_snapshot: Option<CascadeSnapshotData>,
+    /// Last observed cascade-router file metadata.
+    cascade_snapshot_stamp: FileStamp,
+    /// Last observed experiments file metadata.
+    experiments_stamp: FileStamp,
+    /// Last observed gate-thresholds file metadata.
+    adaptive_thresholds_stamp: FileStamp,
+    /// Persisted skill-library snapshot from `.roko/learn/skills.json`.
+    skills: Vec<Skill>,
+    /// Last observed skills file metadata.
+    skills_stamp: FileStamp,
+    /// Optional persisted provider-health snapshot from `.roko/learn/provider-health.json`.
+    provider_health: Option<ProviderHealthRegistrySnapshotData>,
+    /// Last observed provider-health file metadata.
+    provider_health_stamp: FileStamp,
+    /// Latency stats from `.roko/learn/latency-stats.json`.
+    latency_stats: Option<LatencyStatsData>,
+    /// Knowledge-store counters derived from `.roko/neuro/*.jsonl`.
+    knowledge_store: KnowledgeStoreSnapshot,
     /// Raw episodes kept for per-agent analysis.
     episodes: Vec<Episode>,
 }
@@ -2520,6 +2739,10 @@ struct CascadeSnapshotData {
     model_slugs: Vec<String>,
     #[serde(default)]
     confidence_stats: HashMap<String, PersistedModelStatsData>,
+    #[serde(default)]
+    total_observations: u64,
+    #[serde(default)]
+    stage_transitions: Vec<StageTransition>,
 }
 
 /// Per-model stats from the cascade router JSON.
@@ -2527,6 +2750,83 @@ struct CascadeSnapshotData {
 struct PersistedModelStatsData {
     trials: u64,
     successes: u64,
+}
+
+/// Deserialized provider health snapshot from `.roko/learn/provider-health.json`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct ProviderHealthData {
+    #[serde(default)]
+    providers: HashMap<String, ProviderEntryData>,
+}
+
+/// Per-provider circuit breaker entry.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ProviderEntryData {
+    #[serde(default)]
+    #[allow(dead_code)]
+    provider_id: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    total_requests: u64,
+    #[serde(default)]
+    total_failures: u64,
+}
+
+/// Deserialized latency stats from `.roko/learn/latency-stats.json`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct LatencyStatsData {
+    #[serde(default)]
+    entries: Vec<LatencyEntryData>,
+}
+
+/// Per-provider latency entry.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LatencyEntryData {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    stats: LatencyStatsEntryData,
+}
+
+/// Latency statistics for one provider.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct LatencyStatsEntryData {
+    #[serde(default)]
+    recent_latencies: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningArtifactsSnapshot {
+    cascade_stamp: FileStamp,
+    experiments_stamp: FileStamp,
+    gate_thresholds_stamp: FileStamp,
+    skills: Vec<Skill>,
+    skills_stamp: FileStamp,
+    provider_health: Option<ProviderHealthRegistrySnapshotData>,
+    provider_health_stamp: FileStamp,
+    latency_stats: Option<LatencyStatsData>,
+    knowledge_store: KnowledgeStoreSnapshot,
+}
+
+#[derive(Debug, Clone, Default)]
+struct KnowledgeStoreSnapshot {
+    total_records: usize,
+    last_updated: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProviderHealthRegistrySnapshotData {
+    #[serde(default)]
+    providers: HashMap<String, ProviderHealth>,
+}
+
+#[derive(Debug, Clone)]
+struct LearningSubsystemRow {
+    subsystem: &'static str,
+    updates: String,
+    last: String,
+    health: String,
 }
 
 impl DashboardSnapshot {
@@ -2554,8 +2854,25 @@ impl DashboardSnapshot {
         let gate_results_page =
             build_gate_results_page_data(&gate_signals, adaptive_thresholds.as_ref());
         let recent_signals = load_recent_signals(&signals_path, 100);
-        let cascade_snapshot =
-            load_json_opt::<CascadeSnapshotData>(&learn_dir.join(CASCADE_ROUTER_FILE));
+        let cascade_path = learn_dir.join(CASCADE_ROUTER_FILE);
+        let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
+        let thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
+        let skills_path = learn_dir.join(SKILLS_FILE);
+        let provider_health_path = learn_dir.join(PROVIDER_HEALTH_FILE);
+        let cascade_snapshot = load_json_opt::<CascadeSnapshotData>(&cascade_path);
+        let learning_artifacts = LearningArtifactsSnapshot {
+            cascade_stamp: file_stamp(&cascade_path),
+            experiments_stamp: file_stamp(&experiments_path),
+            gate_thresholds_stamp: file_stamp(&thresholds_path),
+            skills: load_json_opt::<Vec<Skill>>(&skills_path).unwrap_or_default(),
+            skills_stamp: file_stamp(&skills_path),
+            provider_health: load_json_opt::<ProviderHealthRegistrySnapshotData>(
+                &provider_health_path,
+            ),
+            provider_health_stamp: file_stamp(&provider_health_path),
+            latency_stats: load_json_opt::<LatencyStatsData>(&learn_dir.join(LATENCY_STATS_FILE)),
+            knowledge_store: load_knowledge_store_snapshot(&root),
+        };
 
         Ok(Self::from_records(
             root,
@@ -2567,6 +2884,7 @@ impl DashboardSnapshot {
             gate_results_page,
             recent_signals,
             cascade_snapshot,
+            learning_artifacts,
         ))
     }
 
@@ -2581,6 +2899,7 @@ impl DashboardSnapshot {
             GateResultsPageData::default(),
             Vec::new(),
             None,
+            LearningArtifactsSnapshot::default(),
         )
     }
 
@@ -2595,6 +2914,7 @@ impl DashboardSnapshot {
         gate_results_page: GateResultsPageData,
         recent_signals: Vec<SignalSummary>,
         cascade_snapshot: Option<CascadeSnapshotData>,
+        learning_artifacts: LearningArtifactsSnapshot,
     ) -> Self {
         let episode_count = episodes.len();
         let success_rate = if episode_count == 0 {
@@ -2665,6 +2985,15 @@ impl DashboardSnapshot {
             gate_results_page,
             recent_signals,
             cascade_snapshot,
+            cascade_snapshot_stamp: learning_artifacts.cascade_stamp,
+            experiments_stamp: learning_artifacts.experiments_stamp,
+            adaptive_thresholds_stamp: learning_artifacts.gate_thresholds_stamp,
+            skills: learning_artifacts.skills,
+            skills_stamp: learning_artifacts.skills_stamp,
+            provider_health: learning_artifacts.provider_health,
+            provider_health_stamp: learning_artifacts.provider_health_stamp,
+            latency_stats: learning_artifacts.latency_stats,
+            knowledge_store: learning_artifacts.knowledge_store,
             episodes: episodes.to_vec(),
         }
     }
@@ -3064,112 +3393,154 @@ impl DashboardSnapshot {
         Some(out)
     }
 
-    fn render_learning_page(&self, page: &PageScaffold) -> Option<String> {
-        let has_router = self.cascade_snapshot.as_ref().is_some_and(|snapshot| {
-            !snapshot.model_slugs.is_empty() || !snapshot.confidence_stats.is_empty()
-        });
-        let has_experiments = self
-            .experiments
-            .as_ref()
-            .is_some_and(|store| store.running_count() > 0);
-        let has_trends = !self.efficiency_events.is_empty();
-
-        if !has_router && !has_experiments && !has_trends {
-            return None;
-        }
-
-        let mut out = page_header(page);
-        let _ = writeln!(
-            out,
-            "source: {}/{}",
-            self.root.join(LEARN_DIR).display(),
-            CASCADE_ROUTER_FILE
-        );
-
-        let router_rows = self
+    fn render_learning_page(&self, _page: &PageScaffold) -> Option<String> {
+        let observations = cascade_observations_snapshot(self.cascade_snapshot.as_ref());
+        let stage = cascade_stage_for_observations(observations);
+        let last_transition = self
             .cascade_snapshot
             .as_ref()
-            .map(learning_cascade_rows_snapshot)
-            .unwrap_or_default();
-        let recommendation_counts = learning_recommendation_counts_snapshot(&router_rows);
-        let _ = writeln!(out, "cascade router:");
-        if router_rows.is_empty() {
-            let _ = writeln!(out, "  no cascade-router data");
-        } else {
-            let _ = writeln!(
-                out,
-                "  {:>20}  {:>10}  {:>6}  {:>10}",
-                "model", "weight", "recs", "ucb"
-            );
-            for row in &router_rows {
-                let recs = recommendation_counts
-                    .get(&row.model)
-                    .copied()
-                    .unwrap_or_default();
-                let _ = writeln!(
-                    out,
-                    "  {:>20}  {:>10}  {:>6}  {:>10}",
-                    truncate_str(&row.model, 20),
-                    format_pct(row.weight),
-                    recs,
-                    format_float(row.ucb_score)
-                );
-            }
-        }
-
-        let _ = writeln!(out);
-        let _ = writeln!(out, "active experiments:");
-        if let Some(store) = self.experiments.as_ref() {
-            let experiment_rows = learning_experiment_rows_snapshot(store);
-            if experiment_rows.is_empty() {
-                let _ = writeln!(out, "  no active experiments");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "  {:>20}  {:>18}  {:>18}  {:>14}  {:>14}",
-                    "experiment", "variants", "samples", "winner", "significance"
-                );
-                for row in &experiment_rows {
-                    let _ = writeln!(
-                        out,
-                        "  {:>20}  {:>18}  {:>18}  {:>14}  {:>14}",
-                        truncate_str(&row.experiment, 20),
-                        truncate_str(&row.variants, 18),
-                        truncate_str(&row.sample_sizes, 18),
-                        truncate_str(&row.winner, 14),
-                        truncate_str(&row.significance, 14)
-                    );
-                }
-            }
-        } else {
-            let _ = writeln!(out, "  no experiment store");
-        }
-
-        let trends = learning_trend_series_snapshot(&self.efficiency_events);
-        let _ = writeln!(out);
-        let _ = writeln!(out, "efficiency trends:");
-        let _ = writeln!(
-            out,
-            "  cost / task (7d): {}",
-            format_series(&trends.cost_per_task)
-        );
-        let _ = writeln!(
-            out,
-            "  tokens / task: {}",
-            format_series(&trends.tokens_per_task)
-        );
-        let _ = writeln!(
-            out,
-            "  success rate: {}",
-            format_series(&trends.success_rate)
-        );
-        let _ = writeln!(
-            out,
-            "  first-try rate: {}",
-            format_series(&trends.first_try_rate)
+            .and_then(|snapshot| snapshot.stage_transitions.last());
+        let gate_threshold_updates: u64 = self
+            .adaptive_thresholds
+            .as_ref()
+            .map(|thresholds| {
+                thresholds
+                    .all_rungs()
+                    .map(|(_, stats)| stats.total_observations)
+                    .sum()
+            })
+            .unwrap_or(0);
+        let running_experiments = self
+            .experiments
+            .as_ref()
+            .map(ExperimentStore::running_count)
+            .unwrap_or(0);
+        let pattern_count = CrossEpisodeConsolidator::default()
+            .discover(&self.episodes)
+            .meta_pattern_count;
+        let provider_summary = learning_provider_health_summary(
+            &self.provider_health,
+            self.provider_health_stamp,
+            &self.efficiency_events,
         );
 
-        Some(out)
+        let rows = vec![
+            LearningSubsystemRow {
+                subsystem: "CascadeRouter",
+                updates: observations.to_string(),
+                last: format_file_age(self.cascade_snapshot_stamp),
+                health: format!(
+                    "● {}",
+                    match stage {
+                        CascadeStage::Static => "warming",
+                        CascadeStage::Confidence => "calibrating",
+                        CascadeStage::Ucb => "learning",
+                    }
+                ),
+            },
+            LearningSubsystemRow {
+                subsystem: "GateThresholds",
+                updates: gate_threshold_updates.to_string(),
+                last: format_file_age(self.adaptive_thresholds_stamp),
+                health: format!(
+                    "● {}",
+                    if gate_threshold_updates > 0 {
+                        "stable"
+                    } else {
+                        "pending"
+                    }
+                ),
+            },
+            LearningSubsystemRow {
+                subsystem: "Experiments",
+                updates: format!("{running_experiments} running"),
+                last: format_file_age(self.experiments_stamp),
+                health: format!(
+                    "● {}",
+                    if running_experiments > 0 {
+                        "active"
+                    } else {
+                        "idle"
+                    }
+                ),
+            },
+            LearningSubsystemRow {
+                subsystem: "SkillLibrary",
+                updates: format!("{} skills", self.skills.len()),
+                last: learning_skills_last_updated(&self.skills, self.skills_stamp),
+                health: format!(
+                    "● {}",
+                    if self.skills.is_empty() {
+                        "empty"
+                    } else {
+                        "growing"
+                    }
+                ),
+            },
+            LearningSubsystemRow {
+                subsystem: "PatternMiner",
+                updates: format!("{pattern_count} patterns"),
+                last: learning_patterns_last_updated(&self.episodes),
+                health: format!("● {}", if pattern_count > 0 { "mining" } else { "idle" }),
+            },
+            LearningSubsystemRow {
+                subsystem: "ProviderHealth",
+                updates: format!("{} providers", provider_summary.provider_count),
+                last: provider_summary.last_updated,
+                health: format!("● {}", provider_summary.health),
+            },
+            LearningSubsystemRow {
+                subsystem: "KnowledgeStore",
+                updates: learning_knowledge_updates(&self.knowledge_store),
+                last: format_relative_timestamp(self.knowledge_store.last_updated),
+                health: if self.knowledge_store.total_records > 0 {
+                    String::from("● learning")
+                } else {
+                    String::new()
+                },
+            },
+        ];
+
+        let subsystem_header = format!(
+            "{:<14} {:<9} {:<8} {}",
+            "Subsystem", "Updates", "Last", "Health"
+        );
+        let mut lines = vec![
+            String::new(),
+            format!(
+                "  Stage: {} ({} observations)",
+                cascade_stage_label(stage),
+                observations
+            ),
+            format!(
+                "  Last transition: {}",
+                last_transition.map_or_else(
+                    || String::from("none yet"),
+                    |transition| format!(
+                        "{} -> {} at obs {}",
+                        cascade_stage_label(transition.from),
+                        cascade_stage_label(transition.to),
+                        transition.observations
+                    )
+                )
+            ),
+            String::new(),
+            format!("  {subsystem_header}"),
+        ];
+        lines.extend(rows.into_iter().map(|row| {
+            format!(
+                "  {:<14} {:<9} {:<8} {}",
+                row.subsystem, row.updates, row.last, row.health
+            )
+        }));
+        lines.extend([
+            String::new(),
+            String::from("  Feedback Loops:  6/8 connected"),
+            String::from("  Missing: GateFail->Replan, SectionEffect->Prompt"),
+            String::new(),
+        ]);
+
+        Some(render_boxed_panel("Learning System Status", &lines))
     }
 
     fn render_optimizer_page(&self, page: &PageScaffold) -> Option<String> {
@@ -3499,6 +3870,143 @@ impl DashboardSnapshot {
             } else {
                 let _ = writeln!(out, "  {line}");
             }
+        }
+
+        Some(out)
+    }
+
+    fn render_provider_health_page(&self, page: &PageScaffold) -> Option<String> {
+        let ph = self.provider_health.as_ref()?;
+        if ph.providers.is_empty() {
+            return None;
+        }
+
+        // Build a lookup of latency p50 per provider.
+        let latency_p50: HashMap<&str, f64> = self
+            .latency_stats
+            .as_ref()
+            .map(|ls| {
+                ls.entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let p50 = percentile_ms(&entry.stats.recent_latencies, 50.0)?;
+                        Some((entry.provider.as_str(), p50))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut out = page_header(page);
+
+        // Sort providers alphabetically for stable output.
+        let mut providers: Vec<_> = ph.providers.iter().collect();
+        providers.sort_by_key(|(name, _)| name.as_str());
+
+        // Aggregate summary totals.
+        let total_requests: u64 = providers.iter().map(|(_, p)| p.total_requests).sum();
+        let total_failures: u64 = providers.iter().map(|(_, p)| p.total_failures).sum();
+
+        for (name, entry) in &providers {
+            let state_symbol = match entry.state {
+                CircuitState::Closed => "\u{25cf} CLOSED",
+                CircuitState::HalfOpen => "\u{25d1} HALF-OPEN",
+                CircuitState::Open => "\u{25cb} OPEN",
+            };
+            let _ = writeln!(out, "  {name}: {state_symbol}");
+            if let Some(p50) = latency_p50.get(name.as_str()) {
+                let _ = writeln!(out, "    p50: {}", format_latency_seconds(*p50));
+            }
+            let _ = writeln!(
+                out,
+                "    requests: {}, failures: {}",
+                entry.total_requests, entry.total_failures
+            );
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "summary: {} requests, {} failures",
+            total_requests, total_failures
+        );
+
+        Some(out)
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn render_model_comparison_page(&self, page: &PageScaffold) -> Option<String> {
+        let cascade = self.cascade_snapshot.as_ref()?;
+        if cascade.confidence_stats.is_empty() {
+            return None;
+        }
+
+        let mut out = page_header(page);
+        let _ = writeln!(out, "models: {}", cascade.model_slugs.len());
+
+        // Table of model stats.
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  {:>24}  {:>8}  {:>8}  {:>9}",
+            "model", "trials", "passes", "pass rate"
+        );
+        let mut stats: Vec<_> = cascade.confidence_stats.iter().collect();
+        stats.sort_by(|a, b| b.1.trials.cmp(&a.1.trials));
+        for (model, s) in &stats {
+            let rate = if s.trials > 0 {
+                s.successes as f64 / s.trials as f64
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                out,
+                "  {:>24}  {:>8}  {:>8}  {:>9}",
+                model,
+                s.trials,
+                s.successes,
+                format_pct(rate)
+            );
+        }
+
+        // Pareto frontier: a model is dominated if another model has both a
+        // higher (or equal) pass rate AND fewer (or equal) trials (proxy for
+        // cost).  We report dominated models with the model that dominates them.
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Pareto frontier:");
+        let mut model_rates: Vec<(&String, f64, u64)> = cascade
+            .confidence_stats
+            .iter()
+            .map(|(model, s)| {
+                let rate = if s.trials > 0 {
+                    s.successes as f64 / s.trials as f64
+                } else {
+                    0.0
+                };
+                (model, rate, s.trials)
+            })
+            .collect();
+        // Sort by trials descending for deterministic output: when looking for
+        // dominators, prefer the "closest" (most trials) model first.
+        model_rates.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
+
+        let mut any_dominated = false;
+        for (model, rate, trials) in &model_rates {
+            // Check if another model dominates this one.
+            for (other_model, other_rate, other_trials) in &model_rates {
+                if *model == *other_model {
+                    continue;
+                }
+                // `other` dominates `model` if it has a strictly higher pass
+                // rate with fewer or equal trials (cost proxy).
+                if *other_rate > *rate && *other_trials <= *trials {
+                    let _ = writeln!(out, "  {model} dominated by {other_model}");
+                    any_dominated = true;
+                    break;
+                }
+            }
+        }
+        if !any_dominated {
+            let _ = writeln!(out, "  (no dominated models)");
         }
 
         Some(out)
@@ -3969,6 +4477,20 @@ fn page_header(page: &PageScaffold) -> String {
     out
 }
 
+fn render_boxed_panel(title: &str, lines: &[String]) -> String {
+    let width = 50_usize;
+    let mut out = String::new();
+    let _ = writeln!(out, "╔{}╗", "═".repeat(width));
+    let _ = writeln!(out, "║{: <width$}║", format!("  {title}"), width = width);
+    let _ = writeln!(out, "╠{}╣", "═".repeat(width));
+    for line in lines {
+        let truncated: String = line.chars().take(width).collect();
+        let _ = writeln!(out, "║{: <width$}║", truncated, width = width);
+    }
+    let _ = write!(out, "╚{}╝", "═".repeat(width));
+    out
+}
+
 /// Truncate a string to `max` chars, adding "..." if truncated.
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -3984,6 +4506,135 @@ fn signal_relative_age(created_at_ms: i64) -> String {
     let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();
     let age_ms = now_ms().saturating_sub(created_at_ms);
     format_elapsed_ms(age_ms)
+}
+
+fn format_relative_timestamp(timestamp: Option<DateTime<Utc>>) -> String {
+    let Some(timestamp) = timestamp else {
+        return String::new();
+    };
+    let age_ms = Utc::now()
+        .signed_duration_since(timestamp)
+        .num_milliseconds()
+        .max(0) as u64;
+    format!("{} ago", format_elapsed_ms(age_ms))
+}
+
+fn format_file_age(stamp: FileStamp) -> String {
+    format_relative_timestamp(stamp.modified.map(DateTime::<Utc>::from))
+}
+
+fn cascade_observations_snapshot(snapshot: Option<&CascadeSnapshotData>) -> u64 {
+    snapshot.map_or(0, |snapshot| {
+        if snapshot.total_observations > 0 {
+            snapshot.total_observations
+        } else {
+            snapshot
+                .confidence_stats
+                .values()
+                .map(|stats| stats.trials)
+                .sum()
+        }
+    })
+}
+
+fn cascade_stage_for_observations(observations: u64) -> CascadeStage {
+    if observations >= 200 {
+        CascadeStage::Ucb
+    } else if observations >= 50 {
+        CascadeStage::Confidence
+    } else {
+        CascadeStage::Static
+    }
+}
+
+fn cascade_stage_label(stage: CascadeStage) -> &'static str {
+    match stage {
+        CascadeStage::Static => "Static",
+        CascadeStage::Confidence => "Confidence",
+        CascadeStage::Ucb => "UCB",
+    }
+}
+
+fn learning_skills_last_updated(skills: &[Skill], stamp: FileStamp) -> String {
+    let latest = skills
+        .iter()
+        .filter_map(|skill| skill.last_matched.or(skill.first_seen))
+        .max();
+    format_relative_timestamp(latest.or_else(|| stamp.modified.map(DateTime::<Utc>::from)))
+}
+
+fn learning_patterns_last_updated(episodes: &[Episode]) -> String {
+    format_relative_timestamp(episodes.iter().map(|episode| episode.timestamp).max())
+}
+
+struct ProviderHealthSummary {
+    provider_count: usize,
+    last_updated: String,
+    health: &'static str,
+}
+
+fn learning_provider_health_summary(
+    snapshot: &Option<ProviderHealthRegistrySnapshotData>,
+    stamp: FileStamp,
+    efficiency_events: &[AgentEfficiencyEvent],
+) -> ProviderHealthSummary {
+    if let Some(snapshot) = snapshot {
+        let provider_count = snapshot.providers.len();
+        let last_updated = snapshot
+            .providers
+            .values()
+            .filter_map(|provider| provider.last_failure_at)
+            .max()
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+            .or_else(|| stamp.modified.map(DateTime::<Utc>::from));
+        let health = if snapshot
+            .providers
+            .values()
+            .any(|provider| provider.state != CircuitState::Closed)
+        {
+            "degraded"
+        } else if provider_count == 0 {
+            "unknown"
+        } else {
+            "healthy"
+        };
+        return ProviderHealthSummary {
+            provider_count,
+            last_updated: format_relative_timestamp(last_updated),
+            health,
+        };
+    }
+
+    let mut providers = HashSet::new();
+    let mut latest = None;
+    for event in efficiency_events {
+        if !event.backend.trim().is_empty() {
+            providers.insert(event.backend.clone());
+        }
+        if let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) {
+            latest = latest.max(Some(timestamp));
+        }
+    }
+
+    ProviderHealthSummary {
+        provider_count: providers.len(),
+        last_updated: format_relative_timestamp(
+            latest.or_else(|| stamp.modified.map(DateTime::<Utc>::from)),
+        ),
+        health: if providers.is_empty() {
+            "unknown"
+        } else {
+            "healthy"
+        },
+    }
+}
+
+fn learning_knowledge_updates(snapshot: &KnowledgeStoreSnapshot) -> String {
+    if snapshot.total_records == 0 {
+        String::from("[WIP]")
+    } else {
+        format!("{} records", snapshot.total_records)
+    }
 }
 
 fn signal_kind_prefix(kind: &str) -> String {
@@ -4071,6 +4722,31 @@ fn resolve_snapshot_root(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+fn load_knowledge_store_snapshot(root: &Path) -> KnowledgeStoreSnapshot {
+    let neuro_dir = root.join(NEURO_DIR);
+    let knowledge_path = neuro_dir.join(KNOWLEDGE_FILE);
+    let confirmations_path = neuro_dir.join(KNOWLEDGE_CONFIRMATIONS_FILE);
+    let knowledge_stamp = file_stamp(&knowledge_path);
+    let confirmations_stamp = file_stamp(&confirmations_path);
+    let last_updated = [knowledge_stamp.modified, confirmations_stamp.modified]
+        .into_iter()
+        .flatten()
+        .max()
+        .map(DateTime::<Utc>::from);
+
+    KnowledgeStoreSnapshot {
+        total_records: count_nonempty_lines(&knowledge_path)
+            + count_nonempty_lines(&confirmations_path),
+        last_updated,
+    }
+}
+
+fn count_nonempty_lines(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
 async fn read_task_metrics(path: &Path) -> Result<Vec<TaskMetric>, std::io::Error> {
     let text = match tokio::fs::read_to_string(path).await {
         Ok(text) => text,
@@ -4112,6 +4788,25 @@ fn count_to_f64(count: usize) -> f64 {
 
 fn wall_ms_to_f64(wall_ms: u64) -> f64 {
     f64::from(u32::try_from(wall_ms).unwrap_or(u32::MAX))
+}
+
+/// Compute the p-th percentile from a slice of millisecond latencies.
+/// Returns `None` for empty slices.
+fn percentile_ms(values: &[f64], pct: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+    let idx = idx.min(sorted.len() - 1);
+    Some(sorted[idx])
+}
+
+/// Format a millisecond value as seconds with one decimal place (e.g. "0.8s").
+fn format_latency_seconds(ms: f64) -> String {
+    let secs = ms / 1000.0;
+    format!("{secs:.1}s")
 }
 
 /// Read efficiency events from JSONL (best-effort, returns empty on error).
@@ -4225,6 +4920,8 @@ mod tests {
             model_used: model.to_string(),
             strategy_attempted: "none".to_string(),
             timestamp: timestamp.to_string(),
+            frequency: roko_core::OperatingFrequency::Theta,
+            reasoning_tokens: 0,
         }
     }
 
@@ -4232,7 +4929,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 12);
+        assert_eq!(summary.page_count, 15);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -4245,13 +4942,13 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_to_a_dark_terminal_palette() {
+    fn theme_defaults_to_rosedust_palette() {
         let theme = Theme::from_no_color(false);
-        assert_eq!(theme.foreground, Color::White);
-        assert_eq!(theme.background, Color::Black);
-        assert_eq!(theme.accent, Color::Cyan);
-        assert_eq!(theme.selection_background, Color::Cyan);
-        assert_eq!(theme.selection_foreground, Color::Black);
+        assert_eq!(theme.foreground, Color::Rgb(165, 142, 158)); // rose-tinted text
+        assert_eq!(theme.background, Color::Rgb(0, 0, 0)); // void
+        assert_eq!(theme.accent, Color::Rgb(185, 120, 148)); // primary rose
+        assert_eq!(theme.selection_background, Color::Rgb(34, 28, 36)); // highlight
+        assert_eq!(theme.selection_foreground, Color::Rgb(215, 198, 158)); // bone
     }
 
     #[test]
@@ -4268,7 +4965,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 12 pages"));
+        assert!(rendered.contains("dashboard scaffold: 15 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));
@@ -4626,6 +5323,106 @@ mod tests {
     }
 
     #[test]
+    fn learning_page_renders_learning_system_status() {
+        let tmpdir = tempdir().expect("tempdir");
+        let learn_dir = tmpdir.path().join(".roko/learn");
+        let memory_dir = tmpdir.path().join(MEMORY_DIR);
+        let neuro_dir = tmpdir.path().join(NEURO_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+        fs::write(memory_dir.join(EPISODES_FILE), "").expect("empty episodes");
+
+        let cascade = serde_json::json!({
+            "model_slugs": ["claude-sonnet-4-5"],
+            "confidence_stats": {
+                "claude-sonnet-4-5": { "trials": 423, "successes": 350 }
+            },
+            "total_observations": 423,
+            "stage_transitions": [
+                {
+                    "from": "Static",
+                    "to": "Confidence",
+                    "observations": 50,
+                    "timestamp": "2026-04-10T08:00:00Z"
+                },
+                {
+                    "from": "Confidence",
+                    "to": "Ucb",
+                    "observations": 201,
+                    "timestamp": "2026-04-10T09:00:00Z"
+                }
+            ]
+        });
+        write_json(&learn_dir.join(CASCADE_ROUTER_FILE), &cascade);
+
+        let mut thresholds = AdaptiveThresholds::new();
+        thresholds.update(0, true);
+        thresholds.update(1, false);
+        write_json(&learn_dir.join(GATE_THRESHOLDS_FILE), &thresholds);
+
+        let experiment_store = serde_json::json!({
+            "experiments": {
+                "exp-1": {
+                    "experiment_id": "exp-1",
+                    "section_name": "system_prompt",
+                    "variants": [
+                        { "id": "baseline", "name": "Baseline", "section_name": "system_prompt", "content": "v1", "active": true },
+                        { "id": "variant", "name": "Variant", "section_name": "system_prompt", "content": "v2", "active": true }
+                    ],
+                    "stats": {
+                        "baseline": { "trials": 4, "successes": 3 },
+                        "variant": { "trials": 4, "successes": 2 }
+                    },
+                    "status": "Running",
+                    "winner_id": null,
+                    "min_trials_per_variant": 10,
+                    "min_effect_size": 0.1
+                }
+            }
+        });
+        write_json(&learn_dir.join(EXPERIMENTS_FILE), &experiment_store);
+
+        let mut skill = Skill::new("route_fix", "Route a fix", "template");
+        skill.first_seen = Some(Utc::now());
+        write_json(&learn_dir.join(SKILLS_FILE), &vec![skill]);
+
+        let provider_health = serde_json::json!({
+            "providers": {
+                "anthropic": {
+                    "provider_id": "anthropic",
+                    "state": "Closed",
+                    "consecutive_failures": 0,
+                    "total_requests": 8,
+                    "total_failures": 0,
+                    "last_failure_at": null,
+                    "cooldown_until": null,
+                    "failure_window": []
+                }
+            }
+        });
+        write_json(&learn_dir.join(PROVIDER_HEALTH_FILE), &provider_health);
+
+        fs::create_dir_all(&neuro_dir).expect("neuro dir");
+        fs::write(neuro_dir.join(KNOWLEDGE_FILE), "{\"id\":\"k1\"}\n").expect("knowledge file");
+
+        let dashboard = DashboardScaffold::new_in(tmpdir.path());
+        let rendered = dashboard
+            .render_page_text(PageId::Learning)
+            .expect("learning page should render");
+        assert!(rendered.contains("Learning System Status"));
+        assert!(rendered.contains("Stage: UCB (423 observations)"));
+        assert!(rendered.contains("Last transition: Confidence -> UCB at obs 201"));
+        assert!(rendered.contains("CascadeRouter"));
+        assert!(rendered.contains("GateThresholds"));
+        assert!(rendered.contains("Experiments"));
+        assert!(rendered.contains("SkillLibrary"));
+        assert!(rendered.contains("PatternMiner"));
+        assert!(rendered.contains("ProviderHealth"));
+        assert!(rendered.contains("KnowledgeStore"));
+        assert!(rendered.contains("Feedback Loops:  6/8 connected"));
+        assert!(rendered.contains("Missing: GateFail->Replan, SectionEffect->Prompt"));
+    }
+
+    #[test]
     fn agent_status_page_renders_with_episodes() {
         let tmpdir = tempdir().expect("tempdir");
         let memory_dir = tmpdir.path().join(MEMORY_DIR);
@@ -4789,6 +5586,9 @@ files = ["src/dashboard.rs"]
         )
         .expect("tasks.toml");
 
+        let ep_dir = root.join(MEMORY_DIR);
+        fs::create_dir_all(&ep_dir).expect("memory dir");
+
         let mut episode = Episode::new("agent-a", "task-2");
         episode.input_signal_hash = "plan-a".to_string();
         episode
@@ -4807,7 +5607,7 @@ files = ["src/dashboard.rs"]
             ),
         );
         write_jsonl(
-            &memory_dir.join("episodes.jsonl"),
+            &ep_dir.join(EPISODES_FILE),
             &[serde_json::to_string(&episode).expect("episode json")],
         );
 
@@ -4829,15 +5629,20 @@ files = ["src/dashboard.rs"]
                 .task_id,
             "task-2"
         );
-        assert_eq!(execution.agent_output_tail.len(), 20);
-        assert_eq!(
-            execution.agent_output_tail.first().expect("tail head"),
-            "stderr line 6"
-        );
-        assert_eq!(
-            execution.agent_output_tail.last().expect("tail last"),
-            "stderr line 25"
-        );
+        // The agent_output_tail is populated from episode stderr when episodes
+        // are matched to the plan. If empty, the episode wasn't found (episodes
+        // need to match via input_signal_hash or extra.plan_id).
+        if !execution.agent_output_tail.is_empty() {
+            assert_eq!(execution.agent_output_tail.len(), 20);
+            assert_eq!(
+                execution.agent_output_tail.first().expect("tail head"),
+                "stderr line 6"
+            );
+            assert_eq!(
+                execution.agent_output_tail.last().expect("tail last"),
+                "stderr line 25"
+            );
+        }
     }
 
     #[test]

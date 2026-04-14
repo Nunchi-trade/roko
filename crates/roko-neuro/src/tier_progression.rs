@@ -8,7 +8,7 @@
 //! The implementation is deterministic and uses the existing episode and
 //! pattern primitives already present in the workspace.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -18,7 +18,7 @@ use roko_learn::episode_logger::Episode;
 use roko_learn::pattern_discovery::{EpisodeView, PatternMiner};
 use serde::{Deserialize, Serialize};
 
-use crate::{KnowledgeEntry, KnowledgeKind};
+use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeTier};
 
 const DEFAULT_MIN_SUPPORT: usize = 3;
 const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
@@ -88,6 +88,12 @@ pub struct HeuristicRule {
     pub last_seen_ms: i64,
     /// Distinct episode ids that support this heuristic.
     pub source_episodes: Vec<String>,
+    /// Which model this heuristic is specific to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+    /// How broadly the heuristic applies across models.
+    #[serde(default = "default_model_generality")]
+    pub model_generality: f64,
 }
 
 impl HeuristicRule {
@@ -95,6 +101,13 @@ impl HeuristicRule {
     #[must_use]
     pub fn summary(&self) -> String {
         format!("If {}, then {}.", self.when_clause, self.then_clause)
+    }
+
+    /// Return whether the heuristic should be injected for
+    /// `current_model`.
+    #[must_use]
+    pub fn applies_to_model(&self, current_model: &str) -> bool {
+        self.model_generality > 0.7 || self.source_model.as_deref() == Some(current_model)
     }
 }
 
@@ -172,6 +185,50 @@ impl TierProgression {
         }
     }
 
+    /// Replay heuristics against the supplied episodes and revise confidence.
+    pub fn replay_heuristics(&self, report: &mut TierProgressionReport, episodes: &[Episode]) {
+        let mut episode_success_by_id: HashMap<String, bool> = HashMap::new();
+        for episode in episodes {
+            episode_success_by_id
+                .entry(episode_source_id(episode).to_string())
+                .or_insert(episode.success);
+        }
+
+        for heuristic in &mut report.heuristics {
+            let Some(_expected_success) = heuristic_expected_success(heuristic) else {
+                continue;
+            };
+
+            let mut supporting = 0usize;
+            let mut contradicting = 0usize;
+            for source_episode_id in &heuristic.source_episodes {
+                if let Some(&success) = episode_success_by_id.get(source_episode_id) {
+                    // Use actual episode success as the confirmation signal.
+                    // For corrective heuristics (expected_success == false),
+                    // continued failure means the corrective action isn't
+                    // working, so those episodes count as contradictions.
+                    if success {
+                        supporting += 1;
+                    } else {
+                        contradicting += 1;
+                    }
+                }
+            }
+
+            let total = supporting + contradicting;
+            if total == 0 {
+                continue;
+            }
+
+            let validation = supporting as f64 / total as f64;
+            let adjustment = (validation - 0.5) * 0.2;
+            heuristic.confidence = (heuristic.confidence + adjustment).clamp(0.0, 1.0);
+        }
+
+        report.heuristics.sort_by(compare_heuristics);
+        report.playbook = self.compile_playbook(&report.heuristics, report.insights.len());
+    }
+
     /// Extract D1 insights from raw episodes.
     #[must_use]
     pub fn extract_insights(
@@ -195,11 +252,7 @@ impl TierProgression {
 
             let mut seen_in_episode: BTreeSet<(String, String, String)> = BTreeSet::new();
             for window in actions.windows(3) {
-                let key = (
-                    window[0].clone(),
-                    window[1].clone(),
-                    window[2].clone(),
-                );
+                let key = (window[0].clone(), window[1].clone(), window[2].clone());
                 antecedent_support
                     .entry((key.0.clone(), key.1.clone()))
                     .or_default()
@@ -211,7 +264,9 @@ impl TierProgression {
                     continue;
                 }
 
-                let entry = by_pattern.entry(key).or_insert_with(PatternSupport::default);
+                let entry = by_pattern
+                    .entry(key)
+                    .or_insert_with(PatternSupport::default);
                 entry.support_episodes.insert(episode_id.clone());
             }
         }
@@ -231,7 +286,8 @@ impl TierProgression {
                     .map(BTreeSet::len)
                     .unwrap_or(support_count)
                     .max(1);
-                let confidence = (support_count as f64 / antecedent_episode_count as f64).clamp(0.0, 1.0);
+                let confidence =
+                    (support_count as f64 / antecedent_episode_count as f64).clamp(0.0, 1.0);
                 let source_episodes = sorted_ids(&support.support_episodes);
 
                 Some(InsightRecord {
@@ -277,6 +333,8 @@ impl TierProgression {
                 first_seen_ms: insight.first_seen_ms,
                 last_seen_ms: insight.last_seen_ms,
                 source_episodes: insight.source_episodes.clone(),
+                source_model: None,
+                model_generality: default_model_generality(),
             })
             .collect();
 
@@ -291,7 +349,11 @@ impl TierProgression {
         heuristics: &[HeuristicRule],
         insight_count: usize,
     ) -> PlaybookCompilation {
-        let rules: Vec<HeuristicRule> = heuristics.iter().take(self.playbook_limit).cloned().collect();
+        let rules: Vec<HeuristicRule> = heuristics
+            .iter()
+            .take(self.playbook_limit)
+            .cloned()
+            .collect();
         let markdown = render_playbook_markdown(&rules, heuristics.len(), insight_count);
         PlaybookCompilation { markdown, rules }
     }
@@ -323,16 +385,25 @@ impl From<&InsightRecord> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Insight,
+            source: None,
             content: value.summary(),
             confidence: value.confidence,
+            confidence_weight: value.confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: value.source_episodes.clone(),
             tags: vec![
                 "tier:insight".to_string(),
                 "raw-episodes".to_string(),
                 "validated".to_string(),
             ],
+            source_model: None,
+            model_generality: default_model_generality(),
             created_at: Utc::now(),
             half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Consolidated,
+            emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -343,16 +414,25 @@ impl From<&HeuristicRule> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Heuristic,
+            source: None,
             content: value.summary(),
             confidence: value.confidence,
+            confidence_weight: value.confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: value.source_episodes.clone(),
             tags: vec![
                 "tier:heuristic".to_string(),
                 "actionable".to_string(),
                 "validated".to_string(),
             ],
+            source_model: value.source_model.clone(),
+            model_generality: value.model_generality,
             created_at: Utc::now(),
             half_life_days: KnowledgeKind::Heuristic.default_half_life_days(),
+            tier: KnowledgeTier::Consolidated,
+            emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -362,9 +442,13 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
     fn from(value: &PlaybookCompilation) -> Self {
         Self {
             id: format!("playbook:{:016x}", stable_hash(value.markdown.as_bytes())),
-            kind: KnowledgeKind::Playbook,
+            kind: KnowledgeKind::StrategyFragment,
+            source: None,
             content: value.markdown.clone(),
             confidence: if value.rules.is_empty() { 0.0 } else { 1.0 },
+            confidence_weight: if value.rules.is_empty() { 0.0 } else { 1.0 },
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: value
                 .rules
                 .iter()
@@ -372,9 +456,18 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),
-            tags: vec!["tier:playbook".to_string(), "machine-parseable".to_string()],
+            tags: vec![
+                "tier:strategy_fragment".to_string(),
+                "machine-parseable".to_string(),
+                "playbook".to_string(),
+            ],
+            source_model: playbook_source_model(&value.rules),
+            model_generality: playbook_model_generality(&value.rules),
             created_at: Utc::now(),
             half_life_days: DEFAULT_HALF_LIFE_DAYS,
+            tier: KnowledgeTier::Persistent,
+            emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -420,10 +513,13 @@ fn discover_patterns(
 /// Synthesize a short, stable action stream from the raw episode fields.
 fn episode_actions(episode: &Episode) -> Vec<String> {
     vec![
-        format!("trigger:{}", normalize_component(first_non_empty(
-            &[episode.trigger_kind.as_str(), episode.kind.as_str()],
-            "unknown",
-        ))),
+        format!(
+            "trigger:{}",
+            normalize_component(first_non_empty(
+                &[episode.trigger_kind.as_str(), episode.kind.as_str()],
+                "unknown",
+            ))
+        ),
         format!(
             "agent:{}",
             normalize_component(first_non_empty(
@@ -431,10 +527,7 @@ fn episode_actions(episode: &Episode) -> Vec<String> {
                 "unknown",
             ))
         ),
-        format!(
-            "gate:{}",
-            normalize_gate_label(first_gate_label(episode))
-        ),
+        format!("gate:{}", normalize_gate_label(first_gate_label(episode))),
         if episode.success {
             "outcome:success".to_string()
         } else {
@@ -520,8 +613,39 @@ fn heuristic_then_clause(insight: &InsightRecord) -> String {
         }
         "outcome:failure" => "add a verification step before proceeding".to_string(),
         "outcome:success" => "reuse this path as the default play".to_string(),
-        _ => format!("treat {} as the expected follow-up", humanize_action(&insight.consequent)),
+        _ => format!(
+            "treat {} as the expected follow-up",
+            humanize_action(&insight.consequent)
+        ),
     }
+}
+
+fn heuristic_expected_success(heuristic: &HeuristicRule) -> Option<bool> {
+    let then_clause = heuristic.then_clause.trim().to_ascii_lowercase();
+    if then_clause.is_empty() {
+        return None;
+    }
+
+    if then_clause.contains("reuse this path as the default play")
+        || then_clause.contains("expected follow-up")
+        || then_clause.contains("prioritize gate")
+        || then_clause.contains("passed")
+    {
+        return Some(true);
+    }
+
+    if then_clause.starts_with("add ")
+        || then_clause.starts_with("avoid ")
+        || then_clause.starts_with("escalate ")
+        || then_clause.starts_with("retry ")
+        || then_clause.starts_with("switch ")
+        || then_clause.contains("verification")
+        || then_clause.contains("failed")
+    {
+        return Some(false);
+    }
+
+    None
 }
 
 fn heuristic_id(insight: &InsightRecord) -> String {
@@ -569,6 +693,28 @@ fn render_playbook_markdown(
     }
 
     out
+}
+
+fn playbook_source_model(rules: &[HeuristicRule]) -> Option<String> {
+    let mut models = rules.iter().filter_map(|rule| rule.source_model.as_deref());
+    let first = models.next()?;
+    if models.all(|model| model == first) {
+        Some(first.to_string())
+    } else {
+        None
+    }
+}
+
+fn playbook_model_generality(rules: &[HeuristicRule]) -> f64 {
+    rules
+        .iter()
+        .map(|rule| rule.model_generality)
+        .reduce(f64::min)
+        .unwrap_or_else(default_model_generality)
+}
+
+const fn default_model_generality() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Serialize)]
@@ -646,7 +792,13 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 fn normalize_component(value: String) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_alphanumeric() { ch.to_ascii_lowercase() } else { '_' })
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string()
@@ -697,7 +849,14 @@ mod tests {
     use super::*;
     use roko_learn::episode_logger::GateVerdict;
 
-    fn episode(id: &str, trigger: &str, agent: &str, gate: &str, passed: bool, success: bool) -> Episode {
+    fn episode(
+        id: &str,
+        trigger: &str,
+        agent: &str,
+        gate: &str,
+        passed: bool,
+        success: bool,
+    ) -> Episode {
         let mut episode = Episode::new(agent, id);
         episode.id = id.to_string();
         episode.episode_id = id.to_string();
@@ -712,11 +871,46 @@ mod tests {
     #[test]
     fn extracts_insights_and_promotes_heuristics() {
         let episodes = vec![
-            episode("ep-1", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-2", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-3", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-4", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-5", "gate_failure", "Implementer", "compile", false, false),
+            episode(
+                "ep-1",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-2",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-3",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-4",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-5",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
         ];
 
         let progression = TierProgression::default();
@@ -738,10 +932,38 @@ mod tests {
     #[test]
     fn four_episode_insights_stay_at_insight_tier() {
         let episodes = vec![
-            episode("ep-1", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-2", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-3", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-4", "gate_failure", "Implementer", "compile", false, false),
+            episode(
+                "ep-1",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-2",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-3",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-4",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
         ];
 
         let progression = TierProgression::default();
@@ -749,18 +971,57 @@ mod tests {
 
         assert!(!report.insights.is_empty());
         assert!(report.heuristics.is_empty());
-        assert!(report
-            .insights
-            .iter()
-            .all(|insight| insight.source_episodes.len() < 5));
+        assert!(
+            report
+                .insights
+                .iter()
+                .all(|insight| insight.source_episodes.len() < 5)
+        );
     }
 
     #[test]
     fn playbook_markdown_contains_machine_parseable_rules() {
         let episodes = vec![
-            episode("ep-a", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-b", "gate_failure", "Implementer", "compile", false, false),
-            episode("ep-c", "gate_failure", "Implementer", "compile", false, false),
+            episode(
+                "ep-a",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-b",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-c",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-d",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
+            episode(
+                "ep-e",
+                "gate_failure",
+                "Implementer",
+                "compile",
+                false,
+                false,
+            ),
         ];
 
         let progression = TierProgression::default();
@@ -771,5 +1032,86 @@ mod tests {
         assert!(markdown.contains("```json"));
         assert!(markdown.contains("confidence"));
         assert!(markdown.contains("source episodes"));
+    }
+
+    #[test]
+    fn replay_heuristics_strengthens_validated_rules_and_weakens_contradicted_rules() {
+        let episodes = vec![
+            episode("ep-1", "gate_success", "Implementer", "compile", true, true),
+            episode("ep-2", "gate_success", "Implementer", "compile", true, true),
+            episode(
+                "ep-3",
+                "gate_success",
+                "Implementer",
+                "compile",
+                true,
+                false,
+            ),
+            episode(
+                "ep-4",
+                "gate_success",
+                "Implementer",
+                "compile",
+                true,
+                false,
+            ),
+        ];
+
+        let mut report = TierProgressionReport {
+            insights: Vec::new(),
+            heuristics: vec![
+                HeuristicRule {
+                    id: "heuristic-success".to_string(),
+                    insight_id: "insight-success".to_string(),
+                    title: "If trigger gate success then reuse path".to_string(),
+                    when_clause: "trigger gate success and agent implementer".to_string(),
+                    then_clause: "reuse this path as the default play".to_string(),
+                    confidence: 0.5,
+                    confirmations: 2,
+                    first_seen_ms: 1,
+                    last_seen_ms: 2,
+                    source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                    source_model: None,
+                    model_generality: default_model_generality(),
+                },
+                HeuristicRule {
+                    id: "heuristic-failure".to_string(),
+                    insight_id: "insight-failure".to_string(),
+                    title: "If trigger gate failure then add verification".to_string(),
+                    when_clause: "trigger gate failure and agent implementer".to_string(),
+                    then_clause: "add a verification step before proceeding".to_string(),
+                    confidence: 0.8,
+                    confirmations: 2,
+                    first_seen_ms: 3,
+                    last_seen_ms: 4,
+                    source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
+                    source_model: None,
+                    model_generality: default_model_generality(),
+                },
+            ],
+            playbook: PlaybookCompilation {
+                markdown: String::new(),
+                rules: Vec::new(),
+            },
+        };
+
+        let progression = TierProgression::default();
+        progression.replay_heuristics(&mut report, &episodes);
+
+        let strengthened = report
+            .heuristics
+            .iter()
+            .find(|heuristic| heuristic.id == "heuristic-success")
+            .expect("strengthened heuristic");
+        let weakened = report
+            .heuristics
+            .iter()
+            .find(|heuristic| heuristic.id == "heuristic-failure")
+            .expect("weakened heuristic");
+
+        assert!(strengthened.confidence > 0.5);
+        assert!(weakened.confidence < 0.8);
+        assert_eq!(report.playbook.rules.len(), 2);
+        assert!(report.playbook.markdown.contains("confidence"));
     }
 }

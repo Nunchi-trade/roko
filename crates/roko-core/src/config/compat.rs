@@ -10,9 +10,9 @@ use serde::Deserialize;
 
 use super::schema::{
     AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
-    DeployConfig, GatesConfig, GithubWebhookConfig, LearningConfig, PrdConfig, ProjectConfig,
-    RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig,
-    TuiConfig, WatcherConfig, WebhooksConfig,
+    DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig, PerplexityConfig,
+    PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
+    SchedulerConfig, ServeConfig, ServerConfig, TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -97,12 +97,14 @@ pub fn from_mori_toml(text: &str) -> Result<RokoConfig, toml::de::Error> {
 
 fn convert(m: &MoriConfig) -> RokoConfig {
     RokoConfig {
+        config_version: 1,
         schema_version: CURRENT_SCHEMA_VERSION,
         project: convert_project(m),
         prd: PrdConfig::default(),
         agent: convert_agent(m),
         gates: convert_gates(m),
         routing: convert_routing(m),
+        pipeline: PipelineConfig::default(),
         budget: BudgetConfig::default(),
         conductor: convert_conductor(m),
         watcher: WatcherConfig::default(),
@@ -113,9 +115,13 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         webhooks: WebhooksConfig {
             github: GithubWebhookConfig::default(),
         },
+        providers: HashMap::new(),
+        models: HashMap::new(),
         subscriptions: Vec::new(),
         server: ServerConfig::default(),
         deploy: DeployConfig::default(),
+        perplexity: PerplexityConfig::default(),
+        gemini: GeminiConfig::default(),
     }
 }
 
@@ -165,6 +171,11 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         default_effort,
         context_limit_k: m.context_limit_k.unwrap_or(d.context_limit_k),
         bare_mode: m.agent_bare_mode.unwrap_or(d.bare_mode),
+        command: None,
+        args: None,
+        timeout_ms: None,
+        env: None,
+        tier_models: d.tier_models,
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
     }
@@ -183,12 +194,15 @@ fn convert_routing(m: &MoriConfig) -> RoutingConfig {
     let d = RoutingConfig::default();
     RoutingConfig {
         mode: m.routing_mode.clone().unwrap_or(d.mode),
+        algorithm: d.algorithm,
+        discount_factor: d.discount_factor,
         fast_task_model: m.fast_task_model.clone().unwrap_or(d.fast_task_model),
         standard_task_model: m
             .standard_task_model
             .clone()
             .unwrap_or(d.standard_task_model),
         complex_task_model: m.complex_task_model.clone().unwrap_or(d.complex_task_model),
+        weights: d.weights,
         context_strategy: m.context_strategy.clone().unwrap_or(d.context_strategy),
     }
 }

@@ -17,9 +17,12 @@
 //! event. Downstream consumers (bandits, dashboards, regression detector)
 //! read from the accumulated event stream.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use roko_core::OperatingFrequency;
 use serde::{Deserialize, Serialize};
+
+const BASELINE_PLAN_COUNT: usize = 10;
 
 // ─── PromptSectionMeta ──────────────────────────────────────────────────────
 
@@ -55,6 +58,15 @@ pub struct ToolCallMeta {
     pub result_tokens: u64,
     /// Whether the tool call succeeded.
     pub succeeded: bool,
+    /// Whether this call contributed useful progress toward the final solution.
+    #[serde(default)]
+    pub advanced_task: bool,
+    /// Whether this call was later determined to be unnecessary.
+    #[serde(default)]
+    pub was_redundant: bool,
+    /// Failure category for the call, when one was identified.
+    #[serde(default)]
+    pub error_category: Option<String>,
 }
 
 // ─── AgentEfficiencyEvent ───────────────────────────────────────────────────
@@ -85,6 +97,9 @@ pub struct AgentEfficiencyEvent {
     pub input_tokens: u64,
     /// Output tokens from provider response.
     pub output_tokens: u64,
+    /// Tokens used for reasoning/thinking.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
     /// Tokens served from cache (subset of input).
     pub cache_read_tokens: u64,
     /// Tokens written to cache.
@@ -137,6 +152,9 @@ pub struct AgentEfficiencyEvent {
     /// Model used for the task attempt.
     #[serde(default)]
     pub model_used: String,
+    /// Operating frequency for the turn.
+    #[serde(default = "default_operating_frequency")]
+    pub frequency: OperatingFrequency,
     /// Replanning or retry strategy attempted after failure.
     #[serde(default)]
     pub strategy_attempted: String,
@@ -179,6 +197,10 @@ impl AgentEfficiencyEvent {
     }
 }
 
+fn default_operating_frequency() -> OperatingFrequency {
+    OperatingFrequency::Theta
+}
+
 impl Default for AgentEfficiencyEvent {
     fn default() -> Self {
         Self {
@@ -190,6 +212,7 @@ impl Default for AgentEfficiencyEvent {
             task_id: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: 0.0,
@@ -209,6 +232,7 @@ impl Default for AgentEfficiencyEvent {
             outcome: String::new(),
             gate_errors: Vec::new(),
             model_used: String::new(),
+            frequency: default_operating_frequency(),
             strategy_attempted: String::new(),
             timestamp: String::new(),
         }
@@ -366,6 +390,92 @@ pub struct RoleCostProfile {
     pub pass_rate: f64,
 }
 
+impl RoleCostProfile {
+    /// Cost of one successful task for this role.
+    #[must_use]
+    pub fn cost_per_successful_task(&self) -> f64 {
+        if self.pass_rate <= 0.0 {
+            return f64::INFINITY;
+        }
+        self.avg_cost_usd / self.pass_rate
+    }
+}
+
+/// Aggregate cost profile for a single operating frequency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrequencyCostProfile {
+    /// Operating frequency this profile covers.
+    pub frequency: OperatingFrequency,
+    /// Number of efficiency events contributing.
+    pub observations: u64,
+    /// Average cost in USD per turn.
+    pub avg_cost_usd: f64,
+    /// Total cost in USD across all turns.
+    pub total_cost_usd: f64,
+    /// Overall gate pass rate for this frequency.
+    pub pass_rate: f64,
+    /// Total cost / gate passes — true cost of one success.
+    pub cost_per_pass: f64,
+}
+
+/// Composite C-Factor snapshot for a single `roko plan run` session.
+///
+/// This aggregates efficiency telemetry across all agents participating in the
+/// run, grouped by plan. It is the fleet-level counterpart to the episode-based
+/// C-Factor in [`crate::cfactor`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCFactor {
+    /// 0.0-1.0 composite score for the session.
+    pub overall: f64,
+    /// Component breakdown for the score.
+    pub components: FleetCFactorComponents,
+    /// Number of distinct plans represented in the session.
+    pub plan_count: usize,
+    /// Number of distinct agents represented in the session.
+    pub agent_count: usize,
+    /// Number of efficiency events contributing to the snapshot.
+    pub observation_count: usize,
+}
+
+/// Individual fleet C-Factor components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCFactorComponents {
+    /// Fraction of plans that used more than one agent.
+    pub multi_agent_coverage: f64,
+    /// Fraction of plan groups that passed at least one gate.
+    pub pass_rate: f64,
+    /// Inverse of cost per successful plan, normalized against the run's baseline.
+    pub cost_efficiency: f64,
+    /// Inverse of duration per successful plan, normalized against the run's baseline.
+    pub speed: f64,
+    /// Evenness of agent participation inside plan groups, normalized to `[0..1]`.
+    pub turn_taking_equality: f64,
+}
+
+impl Default for FleetCFactorComponents {
+    fn default() -> Self {
+        Self {
+            multi_agent_coverage: 0.0,
+            pass_rate: 0.0,
+            cost_efficiency: 0.0,
+            speed: 0.0,
+            turn_taking_equality: 0.0,
+        }
+    }
+}
+
+impl Default for FleetCFactor {
+    fn default() -> Self {
+        Self {
+            overall: 0.0,
+            components: FleetCFactorComponents::default(),
+            plan_count: 0,
+            agent_count: 0,
+            observation_count: 0,
+        }
+    }
+}
+
 /// Compute a [`RoleCostProfile`] for each distinct role in the given events.
 #[allow(clippy::cast_precision_loss)]
 pub fn compute_role_profiles(events: &[AgentEfficiencyEvent]) -> Vec<RoleCostProfile> {
@@ -428,6 +538,228 @@ pub fn compute_role_profiles(events: &[AgentEfficiencyEvent]) -> Vec<RoleCostPro
     profiles
 }
 
+/// Compute a [`FrequencyCostProfile`] for each distinct operating frequency.
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_frequency_profiles(events: &[AgentEfficiencyEvent]) -> Vec<FrequencyCostProfile> {
+    let mut groups: HashMap<OperatingFrequency, Vec<&AgentEfficiencyEvent>> = HashMap::new();
+    for e in events {
+        groups.entry(e.frequency).or_default().push(e);
+    }
+
+    let mut profiles: Vec<FrequencyCostProfile> = groups
+        .into_iter()
+        .map(|(frequency, evts)| {
+            let n = evts.len() as f64;
+            let n_u64 = evts.len() as u64;
+            let total_cost = evts.iter().map(|e| e.cost_usd).sum::<f64>();
+            let avg_cost_usd = if n == 0.0 { 0.0 } else { total_cost / n };
+            let pass_count = evts.iter().filter(|e| e.gate_passed).count();
+            let pass_rate = if n == 0.0 { 0.0 } else { pass_count as f64 / n };
+            let cost_per_pass = if pass_count > 0 {
+                total_cost / pass_count as f64
+            } else {
+                0.0
+            };
+
+            FrequencyCostProfile {
+                frequency,
+                observations: n_u64,
+                avg_cost_usd,
+                total_cost_usd: total_cost,
+                pass_rate,
+                cost_per_pass,
+            }
+        })
+        .collect();
+
+    profiles.sort_by_key(|profile| profile.frequency);
+    profiles
+}
+
+/// Compute a fleet-level C-Factor for a single plan-run session.
+///
+/// The snapshot groups efficiency events by `plan_id`, then scores the session
+/// using pass rate, baseline-relative cost and speed, multi-agent coverage, and
+/// turn-taking equality across agents.
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_fleet_cfactor(events: &[AgentEfficiencyEvent]) -> FleetCFactor {
+    if events.is_empty() {
+        return FleetCFactor::default();
+    }
+
+    let mut groups: HashMap<String, FleetPlanAggregate> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut agent_ids: HashSet<String> = HashSet::new();
+
+    for event in events {
+        let plan_id = event.plan_id.trim();
+        if plan_id.is_empty() {
+            continue;
+        }
+
+        agent_ids.insert(event.agent_id.clone());
+        let entry = groups.entry(plan_id.to_string()).or_insert_with(|| {
+            order.push(plan_id.to_string());
+            FleetPlanAggregate::default()
+        });
+        entry.observe(event);
+    }
+
+    let plans: Vec<(String, FleetPlanAggregate)> = order
+        .into_iter()
+        .filter_map(|plan_id| groups.remove_entry(&plan_id))
+        .collect();
+    if plans.is_empty() {
+        return FleetCFactor::default();
+    }
+
+    let plan_count = plans.len();
+    let multi_agent_plan_count = plans
+        .iter()
+        .filter(|(_, plan)| plan.distinct_agents.len() > 1)
+        .count();
+    let passed_plan_count = plans.iter().filter(|(_, plan)| plan.passed_gate).count();
+    let successful_plans: Vec<&FleetPlanAggregate> = plans
+        .iter()
+        .filter_map(|(_, plan)| plan.passed_gate.then_some(plan))
+        .collect();
+
+    let pass_rate = passed_plan_count as f64 / plan_count as f64;
+    let multi_agent_coverage = multi_agent_plan_count as f64 / plan_count as f64;
+    let turn_taking_equality = {
+        let mut total = 0.0;
+        let mut counted = 0.0;
+        for (_, plan) in &plans {
+            if plan.distinct_agents.len() < 2 {
+                continue;
+            }
+            let equality =
+                turn_taking_equality_for_counts(plan.agent_turn_counts.values().copied().collect());
+            total += equality;
+            counted += 1.0;
+        }
+        if counted == 0.0 {
+            0.0
+        } else {
+            (total / counted).clamp(0.0, 1.0)
+        }
+    };
+
+    let (avg_cost_per_successful_plan, avg_duration_per_successful_plan) =
+        if successful_plans.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let count = successful_plans.len() as f64;
+            let total_cost: f64 = successful_plans.iter().map(|plan| plan.cost_usd).sum();
+            let total_duration: f64 = successful_plans.iter().map(|plan| plan.duration_ms).sum();
+            (total_cost / count, total_duration / count)
+        };
+
+    let baseline_plan_count = plans.len().min(BASELINE_PLAN_COUNT);
+    let (baseline_cost, baseline_duration) = if baseline_plan_count == 0 {
+        (0.0, 0.0)
+    } else {
+        let baseline_plans: Vec<&(String, FleetPlanAggregate)> =
+            plans.iter().take(baseline_plan_count).collect();
+        let total_cost: f64 = baseline_plans.iter().map(|(_, plan)| plan.cost_usd).sum();
+        let total_duration: f64 = baseline_plans
+            .iter()
+            .map(|(_, plan)| plan.duration_ms)
+            .sum();
+        (
+            total_cost / baseline_plan_count as f64,
+            total_duration / baseline_plan_count as f64,
+        )
+    };
+
+    let cost_efficiency = if baseline_cost > 0.0 && avg_cost_per_successful_plan > 0.0 {
+        baseline_cost / avg_cost_per_successful_plan
+    } else {
+        0.0
+    };
+
+    let speed = if baseline_duration > 0.0 && avg_duration_per_successful_plan > 0.0 {
+        baseline_duration / avg_duration_per_successful_plan
+    } else {
+        0.0
+    };
+
+    let overall = (pass_rate * 0.30
+        + cost_efficiency * 0.20
+        + speed * 0.15
+        + multi_agent_coverage * 0.15
+        + turn_taking_equality * 0.20)
+        .clamp(0.0, 1.0);
+
+    FleetCFactor {
+        overall,
+        components: FleetCFactorComponents {
+            multi_agent_coverage,
+            pass_rate,
+            cost_efficiency,
+            speed,
+            turn_taking_equality,
+        },
+        plan_count,
+        agent_count: agent_ids.len(),
+        observation_count: events.len(),
+    }
+}
+
+#[derive(Debug, Default)]
+struct FleetPlanAggregate {
+    cost_usd: f64,
+    duration_ms: f64,
+    passed_gate: bool,
+    distinct_agents: HashSet<String>,
+    agent_turn_counts: HashMap<String, u64>,
+}
+
+impl FleetPlanAggregate {
+    fn observe(&mut self, event: &AgentEfficiencyEvent) {
+        self.cost_usd += event.cost_usd;
+        self.duration_ms += event.wall_time_ms as f64;
+        self.passed_gate |= event.gate_passed;
+        self.distinct_agents.insert(event.agent_id.clone());
+        *self
+            .agent_turn_counts
+            .entry(event.agent_id.clone())
+            .or_default() += 1;
+    }
+}
+
+fn turn_taking_equality_for_counts(counts: Vec<u64>) -> f64 {
+    if counts.len() < 2 {
+        return 0.0;
+    }
+
+    let gini = gini_coefficient(&counts);
+    (1.0 - gini).clamp(0.0, 1.0)
+}
+
+fn gini_coefficient(counts: &[u64]) -> f64 {
+    if counts.len() < 2 {
+        return 0.0;
+    }
+
+    let mut values: Vec<f64> = counts.iter().map(|&count| count as f64).collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total: f64 = values.iter().sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+
+    let weighted_sum: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index as f64 + 1.0) * value)
+        .sum();
+    let n = values.len() as f64;
+    let gini = (2.0 * weighted_sum) / (n * total) - (n + 1.0) / n;
+    gini.clamp(0.0, 1.0)
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Create a minimal test fixture [`AgentEfficiencyEvent`].
@@ -453,6 +785,7 @@ fn make_test_event(
         task_id: "t1".into(),
         input_tokens,
         output_tokens,
+        reasoning_tokens: 0,
         cache_read_tokens: cache_read,
         cache_write_tokens: 0,
         cost_usd: cost,
@@ -480,6 +813,7 @@ fn make_test_event(
             vec!["test gate failed".into()]
         },
         model_used: "claude-sonnet-4-5".into(),
+        frequency: OperatingFrequency::Theta,
         strategy_attempted: if passed {
             "none".into()
         } else {
@@ -601,6 +935,19 @@ mod tests {
         assert_eq!(e, e2);
     }
 
+    #[test]
+    fn efficiency_reasoning_tokens() {
+        let mut e = make_test_event("Implementer", 0.42, 1500, 300, 200, 45000, 8, 3, true, true);
+        e.reasoning_tokens = 120;
+
+        let json = serde_json::to_string(&e).expect("serialize");
+        assert!(json.contains("\"reasoning_tokens\":120"));
+
+        let e2: AgentEfficiencyEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(e2.reasoning_tokens, 120);
+        assert_eq!(e, e2);
+    }
+
     // ── RoleCostProfile tests ───────────────────────────────────────
 
     #[test]
@@ -682,6 +1029,63 @@ mod tests {
     }
 
     #[test]
+    fn efficiency_role_profile_cost_per_successful_task() {
+        let events = vec![
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, true),
+            make_test_event("Impl", 0.50, 1000, 200, 0, 10000, 10, 5, false, false),
+        ];
+
+        let profiles = compute_role_profiles(&events);
+        assert_eq!(profiles.len(), 1);
+
+        let p = &profiles[0];
+        assert!((p.avg_cost_usd - 0.50).abs() < 1e-9);
+        assert!((p.pass_rate - 0.80).abs() < 1e-9);
+        assert!((p.cost_per_successful_task() - 0.625).abs() < 1e-9);
+    }
+
+    #[test]
+    fn efficiency_frequency_profile_groups_by_frequency() {
+        let mut gamma = make_test_event("Impl", 1.0, 100, 20, 0, 1000, 5, 2, false, false);
+        gamma.frequency = OperatingFrequency::Gamma;
+        let mut delta = make_test_event("Reviewer", 3.0, 150, 40, 0, 1500, 5, 3, false, true);
+        delta.frequency = OperatingFrequency::Delta;
+
+        let profiles = compute_frequency_profiles(&[gamma, delta]);
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].frequency, OperatingFrequency::Gamma);
+        assert_eq!(profiles[0].observations, 1);
+        assert_eq!(profiles[0].pass_rate, 0.0);
+        assert_eq!(profiles[1].frequency, OperatingFrequency::Delta);
+        assert_eq!(profiles[1].observations, 1);
+        assert_eq!(profiles[1].pass_rate, 1.0);
+    }
+
+    #[test]
+    fn efficiency_fleet_cfactor_groups_by_plan_and_agents() {
+        let mut a1 = make_test_event("Implementer", 0.40, 900, 100, 0, 4000, 8, 4, false, true);
+        a1.plan_id = "plan-a".into();
+        a1.agent_id = "agent-a".into();
+        let mut a2 = make_test_event("Reviewer", 0.20, 600, 80, 0, 3000, 8, 2, false, true);
+        a2.plan_id = "plan-a".into();
+        a2.agent_id = "agent-b".into();
+        let mut b1 = make_test_event("Implementer", 0.10, 400, 50, 0, 1500, 8, 2, false, false);
+        b1.plan_id = "plan-b".into();
+        b1.agent_id = "agent-c".into();
+
+        let fleet = compute_fleet_cfactor(&[a1, a2, b1]);
+        assert_eq!(fleet.plan_count, 2);
+        assert_eq!(fleet.agent_count, 3);
+        assert_eq!(fleet.observation_count, 3);
+        assert!(fleet.components.multi_agent_coverage > 0.0);
+        assert!(fleet.components.turn_taking_equality > 0.0);
+        assert!(fleet.overall >= 0.0);
+    }
+
+    #[test]
     fn efficiency_prompt_section_meta_serialization() {
         let s = PromptSectionMeta {
             name: "prd2".into(),
@@ -702,10 +1106,47 @@ mod tests {
             duration_ms: 150,
             result_tokens: 800,
             succeeded: true,
+            advanced_task: true,
+            was_redundant: false,
+            error_category: None,
         };
         let json = serde_json::to_string(&t).expect("serialize");
         let t2: ToolCallMeta = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(t, t2);
+    }
+
+    #[test]
+    fn tool_call_reward_roundtrip_preserves_reward_indicators() {
+        let meta = ToolCallMeta {
+            tool_name: "Bash".into(),
+            duration_ms: 875,
+            result_tokens: 120,
+            succeeded: false,
+            advanced_task: false,
+            was_redundant: true,
+            error_category: Some("timeout".into()),
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let restored: ToolCallMeta = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, meta);
+    }
+
+    #[test]
+    fn tool_call_reward_defaults_for_legacy_payloads() {
+        let json = r#"{
+            "tool_name":"Read",
+            "duration_ms":150,
+            "result_tokens":800,
+            "succeeded":true
+        }"#;
+
+        let restored: ToolCallMeta = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(restored.tool_name, "Read");
+        assert!(restored.succeeded);
+        assert!(!restored.advanced_task);
+        assert!(!restored.was_redundant);
+        assert_eq!(restored.error_category, None);
     }
 
     #[test]

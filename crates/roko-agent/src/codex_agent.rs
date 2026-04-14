@@ -20,10 +20,13 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::provider::ProviderSemaphores;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -47,6 +50,29 @@ struct ApiUsage {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+impl ApiUsage {
+    fn cache_read_tokens(&self) -> u32 {
+        self.cached_tokens
+            .or_else(|| {
+                self.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cached_tokens)
+            })
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,6 +114,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     messages: Vec<RequestMessage<'a>>,
+    #[serde(flatten)]
+    extra_body_params: Map<String, Value>,
 }
 
 // ─── CodexAgent ────────────────────────────────────────────────────────────
@@ -112,7 +140,11 @@ pub struct CodexAgent {
     base_url: String,
     timeout_ms: u64,
     max_tokens: u32,
+    extra_headers: Vec<(String, String)>,
+    extra_body_params: Map<String, Value>,
     poster: Arc<dyn HttpPoster>,
+    provider_id: Option<String>,
+    provider_semaphores: Option<Arc<ProviderSemaphores>>,
 }
 
 impl std::fmt::Debug for CodexAgent {
@@ -140,7 +172,11 @@ impl CodexAgent {
             base_url: DEFAULT_BASE_URL.to_owned(),
             timeout_ms: 120_000,
             max_tokens: DEFAULT_MAX_TOKENS,
+            extra_headers: Vec::new(),
+            extra_body_params: Map::new(),
             poster: Arc::new(ReqwestPoster::new()),
+            provider_id: None,
+            provider_semaphores: None,
         }
     }
 
@@ -172,6 +208,22 @@ impl CodexAgent {
         self
     }
 
+    /// Inject additional HTTP headers on every request.
+    #[must_use]
+    pub fn with_extra_headers(mut self, extra_headers: HashMap<String, String>) -> Self {
+        let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
+        extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        self.extra_headers = extra_headers;
+        self
+    }
+
+    /// Inject additional JSON fields into the outbound chat-completions body.
+    #[must_use]
+    pub fn with_extra_body_params(mut self, extra_body_params: Map<String, Value>) -> Self {
+        self.extra_body_params = extra_body_params;
+        self
+    }
+
     /// Override the agent's display name.
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -183,6 +235,19 @@ impl CodexAgent {
     #[must_use]
     pub fn with_http_poster(mut self, poster: Arc<dyn HttpPoster>) -> Self {
         self.poster = poster;
+        self
+    }
+
+    /// Attach shared provider semaphores so outbound requests respect the
+    /// provider's max in-flight limit.
+    #[must_use]
+    pub fn with_provider_semaphores(
+        mut self,
+        provider_id: impl Into<String>,
+        provider_semaphores: Arc<ProviderSemaphores>,
+    ) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self.provider_semaphores = Some(provider_semaphores);
         self
     }
 
@@ -203,16 +268,18 @@ impl CodexAgent {
     }
 
     fn headers(&self) -> Vec<(String, String)> {
-        vec![
+        let mut headers = vec![
             (
                 "authorization".to_owned(),
                 format!("Bearer {}", self.api_key),
             ),
             ("content-type".to_owned(), "application/json".to_owned()),
-        ]
+        ];
+        headers.extend(self.extra_headers.iter().cloned());
+        headers
     }
 
-    fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+    fn fail(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -229,7 +296,7 @@ impl CodexAgent {
 
 #[async_trait]
 impl Agent for CodexAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -253,6 +320,7 @@ impl Agent for CodexAgent {
                 role: "user",
                 content: &prompt_text,
             }],
+            extra_body_params: self.extra_body_params.clone(),
         };
         let body = match serde_json::to_vec(&req) {
             Ok(v) => v,
@@ -264,18 +332,27 @@ impl Agent for CodexAgent {
         let url = self.endpoint();
         let headers = self.headers();
 
-        let response_text = match self
-            .poster
-            .post_json(&url, &headers, &body, self.timeout_ms)
-            .await
-        {
-            Ok(text) => text,
-            Err(e) => {
-                let reason = match e.status {
-                    Some(code) => format!("http {code}: {}", e.message),
-                    None => format!("transport error: {}", e.message),
-                };
-                return self.fail(input, &reason, started);
+        let response_text = {
+            let _permit = match (&self.provider_id, &self.provider_semaphores) {
+                (Some(provider_id), Some(provider_semaphores)) => {
+                    Some(provider_semaphores.acquire(provider_id).await)
+                }
+                _ => None,
+            };
+
+            match self
+                .poster
+                .post_json(&url, &headers, &body, self.timeout_ms)
+                .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    let reason = match e.status {
+                        Some(code) => format!("http {code}: {}", e.message),
+                        None => format!("transport error: {}", e.message),
+                    };
+                    return self.fail(input, &reason, started);
+                }
             }
         };
 
@@ -306,7 +383,7 @@ impl Agent for CodexAgent {
         let usage = Usage {
             input_tokens: parsed.usage.prompt_tokens,
             output_tokens: parsed.usage.completion_tokens,
-            cache_read_tokens: 0,
+            cache_read_tokens: parsed.usage.cache_read_tokens(),
             cache_create_tokens: 0,
             cost_usd: 0.0,
             wall_ms,
@@ -340,7 +417,13 @@ impl Agent for CodexAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::agent::ProviderKind;
+    use roko_core::config::schema::ProviderConfig;
+    use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+    use tokio::time::{Duration, sleep, timeout};
 
     // A mock HttpPoster that returns canned responses and records calls.
     struct MockPoster {
@@ -412,8 +495,68 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    struct BlockingPoster {
+        response: String,
+        first_call_entered: Notify,
+        release_first_call: Notify,
+        entered_calls: AtomicUsize,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    impl BlockingPoster {
+        fn new(body: impl Into<String>) -> Arc<Self> {
+            Arc::new(Self {
+                response: body.into(),
+                first_call_entered: Notify::new(),
+                release_first_call: Notify::new(),
+                entered_calls: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            })
+        }
+
+        fn update_max_in_flight(&self, current: usize) {
+            let mut observed = self.max_in_flight.load(Ordering::SeqCst);
+            while current > observed {
+                match self.max_in_flight.compare_exchange(
+                    observed,
+                    current,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => observed = actual,
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpPoster for BlockingPoster {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            _body: &[u8],
+            _timeout_ms: u64,
+        ) -> Result<String, HttpPostError> {
+            let call_number = self.entered_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let current_in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.update_max_in_flight(current_in_flight);
+
+            if call_number == 1 {
+                self.first_call_entered.notify_waiters();
+                self.release_first_call.notified().await;
+            }
+
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+    }
+
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Arc<dyn HttpPoster>) -> CodexAgent {
@@ -456,6 +599,50 @@ mod tests {
         assert_eq!(result.output.tag("stop_reason"), Some("stop"));
         assert_eq!(result.output.tag("response_id"), Some("chatcmpl-abc"));
         assert_eq!(poster.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn parse_cached_tokens() {
+        let cases = [
+            serde_json::json!({
+                "id": "chatcmpl-abc",
+                "model": "gpt-5-codex",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello world"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 34,
+                    "total_tokens": 46,
+                    "prompt_tokens_details": { "cached_tokens": 8 }
+                }
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-abc",
+                "model": "gpt-5-codex",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello world"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 34,
+                    "total_tokens": 46,
+                    "cached_tokens": 8
+                }
+            }),
+        ];
+
+        for response in cases {
+            let poster = MockPoster::ok(response.to_string());
+            let agent = agent_with(poster.clone());
+            let result = agent.run(&prompt("hi"), &Context::now()).await;
+            assert!(result.success);
+            assert_eq!(result.usage.cache_read_tokens, 8);
+        }
     }
 
     #[tokio::test]
@@ -646,6 +833,90 @@ mod tests {
         let _ = agent.run(&prompt("x"), &Context::now()).await;
         let call = poster.last_call().expect("call recorded");
         assert_eq!(call.timeout_ms, 42_000);
+    }
+
+    #[tokio::test]
+    async fn extra_headers_are_included_in_request() {
+        let poster = MockPoster::ok(canned_ok("ok", 1, 1));
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert("HTTP-Referer".to_string(), "roko-agent".to_string());
+        extra_headers.insert("X-Title".to_string(), "roko".to_string());
+
+        let agent = CodexAgent::new("k", "m")
+            .with_http_poster(poster.clone())
+            .with_extra_headers(extra_headers);
+        let _ = agent.run(&prompt("x"), &Context::now()).await;
+        let call = poster.last_call().expect("call recorded");
+        let header_map: std::collections::HashMap<String, String> =
+            call.headers.into_iter().collect();
+        assert_eq!(
+            header_map.get("HTTP-Referer"),
+            Some(&"roko-agent".to_string())
+        );
+        assert_eq!(header_map.get("X-Title"), Some(&"roko".to_string()));
+        assert_eq!(
+            header_map.get("authorization"),
+            Some(&"Bearer k".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn semaphore_wired_blocks_second_openai_compat_request() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "zai".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".to_string()),
+                api_key_env: Some("ZAI_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: Some(1_500),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: Some(1),
+            },
+        );
+
+        let semaphores = Arc::new(ProviderSemaphores::new(&configs));
+        let poster = BlockingPoster::new(canned_ok("ok", 1, 1));
+        let agent = Arc::new(
+            agent_with(poster.clone()).with_provider_semaphores("zai", Arc::clone(&semaphores)),
+        );
+
+        let first_agent = Arc::clone(&agent);
+        let first_prompt = prompt("first");
+        let first =
+            tokio::spawn(async move { first_agent.run(&first_prompt, &Context::now()).await });
+
+        timeout(Duration::from_secs(1), poster.first_call_entered.notified())
+            .await
+            .expect("first request should reach the poster");
+
+        let second_agent = Arc::clone(&agent);
+        let second_prompt = prompt("second");
+        let second =
+            tokio::spawn(async move { second_agent.run(&second_prompt, &Context::now()).await });
+
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(poster.entered_calls.load(Ordering::SeqCst), 1);
+
+        poster.release_first_call.notify_waiters();
+
+        let first_result = timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first request should finish")
+            .expect("first task should join");
+        let second_result = timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second request should finish")
+            .expect("second task should join");
+
+        assert!(first_result.success);
+        assert!(second_result.success);
+        assert_eq!(poster.entered_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(poster.max_in_flight.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

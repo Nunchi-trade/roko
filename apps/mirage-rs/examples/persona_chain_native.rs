@@ -15,7 +15,7 @@
 //! of the input tokens.
 
 use mirage_rs::roko_bridge::HdcSubstrate;
-use roko_core::{Body, Context, Kind, Provenance, Query, Score, Signal, traits::Substrate};
+use roko_core::{Body, Context, Engram, Kind, Provenance, Query, Score, traits::Substrate};
 
 const PERSONA: &str = "chain-native/uniswap-analyst";
 
@@ -51,7 +51,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 1) Build signals for each insight and put them into the substrate.
     println!("writing {} insights into HdcSubstrate", INSIGHTS.len());
     for (label, content) in INSIGHTS {
-        let sig = Signal::builder(Kind::Insight)
+        let sig = Engram::builder(Kind::Insight)
             .body(Body::text(*content))
             .provenance(Provenance::agent(PERSONA).with_session("demo"))
             .score(Score::new(0.85, 0.6, 1.0, 1.0))
@@ -70,7 +70,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     println!("top-{} hits:", results.len());
     for (i, sig) in results.iter().enumerate() {
         let body = sig.body.as_text().unwrap_or("<non-text>");
-        // `Signal::tag` / score / provenance are part of roko-core Signal.
+        // `Engram::tag` / score / provenance are part of roko-core Engram.
         let effective = sig.score.effective();
         println!(
             "  #{}: effective_score={:.3}  body={:?}",

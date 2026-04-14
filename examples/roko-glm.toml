@@ -1,0 +1,48 @@
+schema_version = 2
+
+[project]
+name = "roko-glm"
+root = "."
+fresh_base_branch = "main"
+
+[agent]
+model = "glm-5-1"
+effort = "high"
+bare_mode = true
+fallback_model = "kimi-k2-5"
+timeout_ms = 300000
+
+[agent.tier_models]
+mechanical = "glm-5-1"
+focused = "glm-5-1"
+integrative = "glm-5-1"
+architectural = "glm-5-1"
+
+[prompt]
+token_budget = 12000
+role = "You are a Roko agent using the GLM provider. Be concise, direct, and implementation-focused."
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 180000
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 200000
+max_output = 131072
+supports_tools = true
+supports_thinking = true
+supports_web_search = true
+supports_mcp_tools = true
+tool_format = "openai_json"
+cost_input_per_m = 1.40
+cost_output_per_m = 4.40
+cost_cache_read_per_m = 0.26

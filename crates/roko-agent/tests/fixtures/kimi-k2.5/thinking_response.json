@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-kimi-thinking-1",
+  "object": "chat.completion",
+  "created": 1760000103,
+  "model": "kimi-k2.5",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "I should inspect the file before editing it.",
+        "content": "I will read the file first."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 38,
+    "completion_tokens": 17,
+    "total_tokens": 55,
+    "cached_tokens": 9
+  }
+}

@@ -1,9 +1,10 @@
 //! Prompt assembly: compose typed sections into a final prompt under a token budget.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use roko_core::{
-    Body, Budget, Composer, Context, Kind, Provenance, Scorer, Signal,
+    Body, Budget, Composer, Context, Engram, Kind, Provenance, Scorer,
     error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};
@@ -37,20 +38,20 @@ pub enum SectionPriority {
 
 /// Which cache layer this section belongs to, in an LLM prefix-cache model.
 ///
-/// Sections with `CacheLayer::Static` should be identical across runs so
-/// prefix caching wins; `CacheLayer::Dynamic` sections change per-request.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Stable layers must come before volatile layers so the model can reuse
+/// the longest possible KV-cache prefix across related turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheLayer {
-    /// Role definition, coding standards — stable across runs (cache-win).
-    System = 0,
-    /// Per-plan / per-session content (workspace map, recent learnings).
-    Session = 1,
-    /// Per-task content (the actual task, dynamic context).
+    /// System prompt, role instructions, tool definitions.
+    Role = 0,
+    /// Workspace map, cross-plan context, durable project context.
+    Workspace = 1,
+    /// Plan/task brief content that is stable within a plan.
     #[default]
-    Task = 2,
-    /// Per-iteration (error digest, last attempt).
-    Dynamic = 3,
+    Plan = 2,
+    /// Turn-local content such as review feedback or error output.
+    Volatile = 3,
 }
 
 /// Where in the final prompt the section should be placed.
@@ -68,6 +69,29 @@ pub enum Placement {
     Middle,
     /// Place near the bottom (current task, recent errors).
     End,
+}
+
+/// Which cognitive subsystem is bidding for prompt budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionBidder {
+    /// Durable knowledge retrieved from Neuro.
+    Neuro,
+    /// Affect or somatic guidance from Daimon.
+    Daimon,
+    /// Recent turns, retries, and prior task outputs.
+    IterationMemory,
+    /// Symbols, files, and structural workspace context.
+    CodeIntelligence,
+    /// Skills, playbooks, and distilled reusable rules.
+    PlaybookRules,
+    /// Research memos and external domain context.
+    Research,
+    /// Task brief, plan brief, verification, PRD slices, and related directives.
+    #[default]
+    TaskContext,
+    /// Predictions, warnings, or forecast-like oracle outputs.
+    Oracles,
 }
 
 /// A single labeled fragment of a prompt.
@@ -88,19 +112,23 @@ pub struct PromptSection {
     /// the head of the content). `None` means "unlimited, subject only to
     /// the overall budget".
     pub hard_cap: Option<usize>,
+    /// Which subsystem is bidding for this section's inclusion.
+    #[serde(default)]
+    pub bidder: AttentionBidder,
 }
 
 impl PromptSection {
-    /// Create a new section with defaults (Normal priority, Task cache layer, Middle placement).
+    /// Create a new section with defaults (Normal priority, Plan cache layer, Middle placement).
     #[must_use]
     pub fn new(name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             content: content.into(),
             priority: SectionPriority::Normal,
-            cache_layer: CacheLayer::Task,
+            cache_layer: CacheLayer::Plan,
             placement: Placement::Middle,
             hard_cap: None,
+            bidder: AttentionBidder::default(),
         }
     }
 
@@ -130,6 +158,13 @@ impl PromptSection {
     #[must_use]
     pub const fn with_hard_cap(mut self, tokens: usize) -> Self {
         self.hard_cap = Some(tokens);
+        self
+    }
+
+    /// Set the subsystem bidder for this section.
+    #[must_use]
+    pub const fn with_bidder(mut self, bidder: AttentionBidder) -> Self {
+        self.bidder = bidder;
         self
     }
 
@@ -168,19 +203,20 @@ impl PromptSection {
         self
     }
 
-    /// Wrap this section in a `Signal<Kind::PromptSection>`.
+    /// Wrap this section in a `Engram<Kind::PromptSection>`.
     ///
     /// # Errors
     ///
     /// Returns an error if the section cannot be serialized to JSON.
-    pub fn into_signal(self) -> Result<Signal> {
+    pub fn into_signal(self) -> Result<Engram> {
         let body = Body::from_json(&self)?;
-        Ok(Signal::builder(Kind::PromptSection)
+        Ok(Engram::builder(Kind::PromptSection)
             .body(body)
             .provenance(Provenance::trusted("prompt_section"))
             .tag("name", &self.name)
             .tag("priority", priority_tag(self.priority))
             .tag("cache_layer", cache_tag(self.cache_layer))
+            .tag("bidder", bidder_tag(self.bidder))
             .build())
     }
 
@@ -189,7 +225,7 @@ impl PromptSection {
     /// # Errors
     ///
     /// Returns an error if the signal body isn't a `PromptSection` JSON value.
-    pub fn from_signal(signal: &Signal) -> Result<Self> {
+    pub fn from_signal(signal: &Engram) -> Result<Self> {
         signal.body.as_json()
     }
 }
@@ -205,16 +241,29 @@ const fn priority_tag(p: SectionPriority) -> &'static str {
 
 const fn cache_tag(l: CacheLayer) -> &'static str {
     match l {
-        CacheLayer::System => "system",
-        CacheLayer::Session => "session",
-        CacheLayer::Task => "task",
-        CacheLayer::Dynamic => "dynamic",
+        CacheLayer::Role => "role",
+        CacheLayer::Workspace => "workspace",
+        CacheLayer::Plan => "plan",
+        CacheLayer::Volatile => "volatile",
+    }
+}
+
+const fn bidder_tag(bidder: AttentionBidder) -> &'static str {
+    match bidder {
+        AttentionBidder::Neuro => "neuro",
+        AttentionBidder::Daimon => "daimon",
+        AttentionBidder::IterationMemory => "iteration_memory",
+        AttentionBidder::CodeIntelligence => "code_intelligence",
+        AttentionBidder::PlaybookRules => "playbook_rules",
+        AttentionBidder::Research => "research",
+        AttentionBidder::TaskContext => "task_context",
+        AttentionBidder::Oracles => "oracles",
     }
 }
 
 // ─── Composer ──────────────────────────────────────────────────────────────
 
-/// Assembles `Signal<PromptSection>` inputs into a final `Signal<Prompt>`
+/// Assembles `Engram<PromptSection>` inputs into a final `Engram<Prompt>`
 /// under a token budget.
 ///
 /// # Algorithm
@@ -226,7 +275,7 @@ const fn cache_tag(l: CacheLayer) -> &'static str {
 ///    `Critical` priority sections (that's a contract violation).
 /// 5. Order the kept sections by placement (Start → Middle → End), ties
 ///    broken by `cache_layer` order.
-/// 6. Concatenate with section headers, wrap in a `Signal<Kind::Prompt>`.
+/// 6. Concatenate with section headers, wrap in a `Engram<Kind::Prompt>`.
 ///
 /// # Budget
 ///
@@ -273,11 +322,11 @@ impl PromptComposer {
 impl Composer for PromptComposer {
     fn compose(
         &self,
-        signals: &[Signal],
+        signals: &[Engram],
         budget: &Budget,
-        _scorer: &dyn Scorer,
-        _ctx: &Context,
-    ) -> Result<Signal> {
+        scorer: &dyn Scorer,
+        ctx: &Context,
+    ) -> Result<Engram> {
         // Decode sections; skip anything that doesn't parse. Enforce any
         // per-section hard cap at decode time so downstream accounting
         // reflects the actual bytes that will land in the prompt.
@@ -300,15 +349,6 @@ impl Composer for PromptComposer {
             }
         }
 
-        // Sort optional sections: cache_layer ASC (cache-wins first), then priority DESC.
-        let mut optional = optional;
-        optional.sort_by(|a, b| {
-            (a.0.cache_layer as u8)
-                .cmp(&(b.0.cache_layer as u8))
-                .then_with(|| (b.0.priority as u8).cmp(&(a.0.priority as u8)))
-        });
-
-        // Greedy inclusion: take optional sections until we'd exceed budget.
         let remaining_tokens = budget
             .max_tokens
             .map_or(usize::MAX, |m| m.saturating_sub(critical_tokens));
@@ -316,29 +356,46 @@ impl Composer for PromptComposer {
             .max_signals
             .map_or(usize::MAX, |m| m.saturating_sub(critical.len()));
 
-        let mut kept: Vec<(PromptSection, &Signal)> = critical;
+        let mut kept: Vec<(PromptSection, &Engram)> = critical;
         let mut token_total = critical_tokens;
+        let affect = AuctionAffectState::from_context(ctx);
+        let mut optional = optional
+            .into_iter()
+            .map(|(section, source_signal)| AuctionCandidate {
+                bid_density: candidate_bid_density(&section, source_signal, scorer, ctx),
+                section,
+                source_signal,
+            })
+            .collect::<Vec<_>>();
+        optional.sort_by(|a, b| {
+            b.bid_density
+                .partial_cmp(&a.bid_density)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.section.cache_layer.cmp(&b.section.cache_layer))
+                .then_with(|| (b.section.priority as u8).cmp(&(a.section.priority as u8)))
+        });
 
-        for (section, source_signal) in optional {
-            let toks = section.estimated_tokens();
-            if token_total.saturating_add(toks) > budget.max_tokens.unwrap_or(usize::MAX) {
-                continue; // too big — skip
-            }
-            if kept.len() >= remaining_signals.saturating_add(critical_count(&kept)) {
-                break;
-            }
-            kept.push((section, source_signal));
-            token_total += toks;
-            if token_total >= remaining_tokens.saturating_add(critical_tokens) {
-                break;
-            }
+        let allocation = select_optional_candidates(
+            &optional,
+            remaining_tokens,
+            remaining_signals,
+            affect.as_ref(),
+            None,
+        );
+        let payment_summary =
+            vcg_payment_summary(&optional, &allocation.selected, remaining_tokens, remaining_signals, affect.as_ref());
+
+        for winner in &allocation.selected {
+            let candidate = &optional[winner.candidate_index];
+            token_total += candidate.section.estimated_tokens();
+            kept.push((candidate.section.clone(), candidate.source_signal));
         }
 
         // Order by placement for final output (U-shaped).
         kept.sort_by(|a, b| {
             placement_order(a.0.placement)
                 .cmp(&placement_order(b.0.placement))
-                .then_with(|| (a.0.cache_layer as u8).cmp(&(b.0.cache_layer as u8)))
+                .then_with(|| a.0.cache_layer.cmp(&b.0.cache_layer))
         });
 
         // Concatenate.
@@ -346,12 +403,19 @@ impl Composer for PromptComposer {
 
         // Build the output signal. Lineage = all source signal ids.
         let lineage: Vec<_> = kept.iter().map(|(_, s)| s.id).collect();
-        let sig = Signal::builder(Kind::Prompt)
+        let sig = Engram::builder(Kind::Prompt)
             .body(Body::text(prompt_text))
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
             .tag("sections", kept.len().to_string())
             .tag("tokens", token_total.to_string())
+            .tag("distinct_bidders", bidder_count(&kept).to_string())
+            .tag("auction_total_bid", format!("{:.4}", allocation.total_bid))
+            .tag("auction_total_payments", format!("{:.4}", payment_summary.total_payments))
+            .tag("auction_urgency", format!("{:.4}", affect.as_ref().map_or(1.0, AuctionAffectState::urgency_multiplier)))
+            .tag("auction_affect_weight", format!("{:.4}", affect.as_ref().map_or(1.0, AuctionAffectState::affect_weight_multiplier)))
+            .tag("highest_payment_section", payment_summary.highest_payment_section.unwrap_or_else(|| "none".to_string()))
+            .tag("highest_payment_value", format!("{:.4}", payment_summary.highest_payment_value))
             .build();
         Ok(sig)
     }
@@ -359,6 +423,291 @@ impl Composer for PromptComposer {
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+#[derive(Clone)]
+struct AuctionCandidate<'a> {
+    bid_density: f32,
+    section: PromptSection,
+    source_signal: &'a Engram,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AuctionAffectState {
+    pleasure: f32,
+    arousal: f32,
+    dominance: f32,
+}
+
+impl AuctionAffectState {
+    fn from_context(ctx: &Context) -> Option<Self> {
+        let pleasure = ctx.attr("roko.daimon.pleasure")?.parse::<f32>().ok()?;
+        let arousal = ctx.attr("roko.daimon.arousal")?.parse::<f32>().ok()?;
+        let dominance = ctx.attr("roko.daimon.dominance")?.parse::<f32>().ok()?;
+        Some(Self {
+            pleasure: pleasure.clamp(-1.0, 1.0),
+            arousal: arousal.clamp(-1.0, 1.0),
+            dominance: dominance.clamp(-1.0, 1.0),
+        })
+    }
+
+    fn urgency_multiplier(&self) -> f32 {
+        1.0 + self.arousal.clamp(0.0, 1.0) * 0.5
+    }
+
+    fn affect_weight_multiplier(&self) -> f32 {
+        1.0 + 0.3 * (self.pleasure - 0.5).abs()
+    }
+
+    fn low_dominance_pressure(&self) -> f32 {
+        (-self.dominance).clamp(0.0, 1.0)
+    }
+
+    fn low_pleasure_pressure(&self) -> f32 {
+        (0.5 - self.pleasure).clamp(0.0, 1.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SelectedCandidate {
+    candidate_index: usize,
+    adjusted_bid: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AuctionAllocation {
+    selected: Vec<SelectedCandidate>,
+    total_bid: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PaymentSummary {
+    total_payments: f32,
+    highest_payment_value: f32,
+    highest_payment_section: Option<String>,
+}
+
+fn bidder_count(kept: &[(PromptSection, &Engram)]) -> usize {
+    kept.iter()
+        .map(|(section, _)| section.bidder)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn select_optional_candidates(
+    candidates: &[AuctionCandidate<'_>],
+    remaining_tokens: usize,
+    remaining_signals: usize,
+    affect: Option<&AuctionAffectState>,
+    excluded_candidate: Option<usize>,
+) -> AuctionAllocation {
+    let mut allocation = AuctionAllocation::default();
+    let mut bidder_wins: HashMap<AttentionBidder, usize> = HashMap::new();
+    let mut used_tokens = 0usize;
+    let mut remaining: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, _)| (Some(idx) != excluded_candidate).then_some(idx))
+        .collect();
+
+    while !remaining.is_empty()
+        && used_tokens < remaining_tokens
+        && allocation.selected.len() < remaining_signals
+    {
+        let mut winner_idx = None;
+        let mut winner_bid = f32::MIN;
+
+        for &idx in &remaining {
+            let candidate = &candidates[idx];
+            let toks = candidate.section.estimated_tokens();
+            if used_tokens.saturating_add(toks) > remaining_tokens {
+                continue;
+            }
+            let adjusted_bid = effective_candidate_bid(candidate, &bidder_wins, affect);
+            if adjusted_bid > winner_bid {
+                winner_bid = adjusted_bid;
+                winner_idx = Some(idx);
+            }
+        }
+
+        let Some(winner_idx) = winner_idx else {
+            break;
+        };
+        if winner_bid <= 0.0 {
+            break;
+        }
+
+        let winner = &candidates[winner_idx];
+        let bidder = winner.section.bidder;
+        *bidder_wins.entry(bidder).or_insert(0) += 1;
+        used_tokens += winner.section.estimated_tokens();
+        allocation.total_bid += winner_bid;
+        allocation.selected.push(SelectedCandidate {
+            candidate_index: winner_idx,
+            adjusted_bid: winner_bid,
+        });
+        remaining.retain(|idx| *idx != winner_idx);
+    }
+
+    allocation
+}
+
+fn vcg_payment_summary(
+    candidates: &[AuctionCandidate<'_>],
+    winners: &[SelectedCandidate],
+    remaining_tokens: usize,
+    remaining_signals: usize,
+    affect: Option<&AuctionAffectState>,
+) -> PaymentSummary {
+    let actual_total = winners.iter().map(|winner| winner.adjusted_bid).sum::<f32>();
+    let mut summary = PaymentSummary::default();
+
+    for winner in winners {
+        let without_winner = select_optional_candidates(
+            candidates,
+            remaining_tokens,
+            remaining_signals,
+            affect,
+            Some(winner.candidate_index),
+        );
+        let others_with_winner = actual_total - winner.adjusted_bid;
+        let payment = (without_winner.total_bid - others_with_winner).max(0.0);
+        summary.total_payments += payment;
+        if payment > summary.highest_payment_value {
+            summary.highest_payment_value = payment;
+            summary.highest_payment_section =
+                Some(candidates[winner.candidate_index].section.name.clone());
+        }
+    }
+
+    summary
+}
+
+fn effective_candidate_bid(
+    candidate: &AuctionCandidate<'_>,
+    bidder_wins: &HashMap<AttentionBidder, usize>,
+    affect: Option<&AuctionAffectState>,
+) -> f32 {
+    let bidder = candidate.section.bidder;
+    let wins = bidder_wins.get(&bidder).copied().unwrap_or(0);
+    let diversity_boost = if wins == 0 { 1.18 } else { 1.0 };
+    let diminishing_returns = 0.82_f32.powi(wins as i32);
+    let affect_multiplier = bidder_affect_multiplier(&candidate.section, affect);
+    candidate.bid_density * diversity_boost * diminishing_returns * affect_multiplier
+}
+
+fn bidder_affect_multiplier(
+    section: &PromptSection,
+    affect: Option<&AuctionAffectState>,
+) -> f32 {
+    let Some(affect) = affect else {
+        return 1.0;
+    };
+    let urgency = affect.urgency_multiplier();
+    let affect_weight = affect.affect_weight_multiplier();
+    let low_dominance = affect.low_dominance_pressure();
+    let low_pleasure = affect.low_pleasure_pressure();
+
+    let text = format!(
+        "{} {}",
+        section.name.to_ascii_lowercase(),
+        section.content.to_ascii_lowercase()
+    );
+    let warningish = keyword_weight(
+        &text,
+        &["warning", "caution", "avoid", "risk", "failure", "regression", "blocker"],
+    );
+    let exploratory = keyword_weight(
+        &text,
+        &["explore", "novel", "research", "investigate", "hypothesis", "experiment"],
+    );
+    let proven = keyword_weight(
+        &text,
+        &["playbook", "proven", "stable", "known good", "best practice", "repeatable"],
+    );
+    let conservative = keyword_weight(
+        &text,
+        &["conservative", "safe", "warning", "avoid", "guardrail", "rollback"],
+    );
+    let deadline = keyword_weight(
+        &text,
+        &["deadline", "blocking", "critical", "must", "acceptance", "verify", "required"],
+    );
+    let failure = keyword_weight(
+        &text,
+        &["failure", "failed", "error", "retry", "regression", "incident", "blocker"],
+    );
+    let prediction = keyword_weight(
+        &text,
+        &["prediction", "forecast", "uncertain", "error", "warning", "confidence", "probe"],
+    );
+
+    let subsystem_bias = match section.bidder {
+        AttentionBidder::Neuro => {
+            1.0 + urgency * 0.12 * warningish
+                + low_dominance * 0.18 * exploratory
+                + low_pleasure * 0.28 * warningish
+        }
+        AttentionBidder::Daimon => {
+            1.0 + urgency * 0.20 + low_dominance * 0.18 + low_pleasure * 0.24
+        }
+        AttentionBidder::IterationMemory => {
+            1.0 + urgency * 0.15 * failure + low_pleasure * 0.32 * failure
+        }
+        AttentionBidder::CodeIntelligence => 1.0 + urgency * 0.18 * warningish.max(deadline),
+        AttentionBidder::PlaybookRules => {
+            1.0 + urgency * 0.14 * proven
+                + low_dominance * 0.20 * exploratory
+                + low_pleasure * 0.22 * conservative.max(proven)
+        }
+        AttentionBidder::Research => 1.0 + low_dominance * 0.30 * exploratory.max(1.0),
+        AttentionBidder::TaskContext => 1.0 + urgency * 0.18 * deadline.max(1.0),
+        AttentionBidder::Oracles => 1.0 + urgency * 0.22 * prediction.max(1.0),
+    };
+
+    urgency * affect_weight * subsystem_bias
+}
+
+fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
+    keywords.iter().any(|keyword| text.contains(keyword)).then_some(1.0).unwrap_or(0.0)
+}
+
+fn candidate_bid_density(
+    section: &PromptSection,
+    signal: &Engram,
+    scorer: &dyn Scorer,
+    ctx: &Context,
+) -> f32 {
+    let score = scorer.score(signal, ctx);
+    let learned = score.effective();
+    let fallback = fallback_section_score(section, signal, ctx);
+    let value = learned.max(fallback);
+    let token_cost = section.estimated_tokens().max(1) as f32;
+    value / token_cost
+}
+
+fn fallback_section_score(section: &PromptSection, signal: &Engram, ctx: &Context) -> f32 {
+    let priority = match section.priority {
+        SectionPriority::Critical => 1.0,
+        SectionPriority::High => 0.82,
+        SectionPriority::Normal => 0.55,
+        SectionPriority::Low => 0.25,
+    };
+    let cache = match section.cache_layer {
+        CacheLayer::Role => 0.95,
+        CacheLayer::Workspace => 0.8,
+        CacheLayer::Plan => 0.65,
+        CacheLayer::Volatile => 0.6,
+    };
+    let age_ms = (ctx.now_ms - signal.created_at_ms).max(0) as f32;
+    let recency = if age_ms <= 60.0 * 60.0 * 1000.0 {
+        1.0
+    } else if age_ms >= 24.0 * 60.0 * 60.0 * 1000.0 {
+        0.35
+    } else {
+        1.0 - (age_ms - 60.0 * 60.0 * 1000.0) / (23.0 * 60.0 * 60.0 * 1000.0) * 0.65
+    };
+    priority * (0.55 + 0.45 * cache) * recency
 }
 
 /// Context-gathering strategy used to produce a prompt.
@@ -451,12 +800,6 @@ impl PromptBuild {
     }
 }
 
-fn critical_count(kept: &[(PromptSection, &Signal)]) -> usize {
-    kept.iter()
-        .filter(|(p, _)| p.priority == SectionPriority::Critical)
-        .count()
-}
-
 const fn placement_order(p: Placement) -> u8 {
     match p {
         Placement::Start => 0,
@@ -465,7 +808,7 @@ const fn placement_order(p: Placement) -> u8 {
     }
 }
 
-fn render_sections(kept: &[(PromptSection, &Signal)], headers: bool) -> String {
+fn render_sections(kept: &[(PromptSection, &Engram)], headers: bool) -> String {
     let mut out = String::new();
     for (section, _) in kept {
         if headers {
@@ -489,7 +832,7 @@ mod tests {
     use super::*;
     use roko_std::NoOpScorer;
 
-    fn section(name: &str, content: &str, pri: SectionPriority) -> Signal {
+    fn section(name: &str, content: &str, pri: SectionPriority) -> Engram {
         PromptSection::new(name, content)
             .with_priority(pri)
             .into_signal()
@@ -507,11 +850,29 @@ mod tests {
     fn section_roundtrips_signal() {
         let s = PromptSection::new("role", "you are an agent")
             .with_priority(SectionPriority::Critical)
-            .with_cache_layer(CacheLayer::System)
+            .with_cache_layer(CacheLayer::Role)
             .with_placement(Placement::Start);
         let sig = s.clone().into_signal().unwrap();
         let decoded = PromptSection::from_signal(&sig).unwrap();
         assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn cache_layer_ordering() {
+        assert!(CacheLayer::Role < CacheLayer::Workspace);
+        assert!(CacheLayer::Workspace < CacheLayer::Plan);
+        assert!(CacheLayer::Plan < CacheLayer::Volatile);
+
+        let mut sections = vec![
+            PromptSection::new("volatile", "v").with_cache_layer(CacheLayer::Volatile),
+            PromptSection::new("plan", "p").with_cache_layer(CacheLayer::Plan),
+            PromptSection::new("role", "r").with_cache_layer(CacheLayer::Role),
+            PromptSection::new("workspace", "w").with_cache_layer(CacheLayer::Workspace),
+        ];
+        sections.sort_by_key(|section| section.cache_layer);
+
+        let ordered: Vec<_> = sections.into_iter().map(|section| section.name).collect();
+        assert_eq!(ordered, vec!["role", "workspace", "plan", "volatile"]);
     }
 
     #[test]
@@ -551,6 +912,109 @@ mod tests {
         let text = out.body.as_text().unwrap();
         assert!(text.contains("small important"));
         assert!(!text.contains("word word"));
+    }
+
+    #[test]
+    fn composer_spreads_budget_across_bidders_when_scores_are_close() {
+        let composer = PromptComposer::new().without_headers();
+        let sections = [
+            PromptSection::new("code-a", "relevant symbol context")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::CodeIntelligence)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("code-b", "more symbol context")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::CodeIntelligence)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("research", "important research memo")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::Research)
+                .into_signal()
+                .unwrap(),
+        ];
+        let out = composer
+            .compose(&sections, &Budget::tokens(12), &NoOpScorer, &Context::at(0))
+            .unwrap();
+        let text = out.body.as_text().unwrap();
+        assert!(text.contains("relevant symbol context") || text.contains("more symbol context"));
+        assert!(text.contains("important research memo"));
+        assert_eq!(out.tag("distinct_bidders"), Some("2"));
+    }
+
+    #[test]
+    fn auction_affect_multiplier_boosts_urgent_task_context() {
+        let section = PromptSection::new(
+            "deadline-prd",
+            "must ship before deadline and verify acceptance criteria",
+        )
+        .with_priority(SectionPriority::High)
+        .with_bidder(AttentionBidder::TaskContext);
+        let neutral = AuctionAffectState {
+            pleasure: 0.5,
+            arousal: 0.0,
+            dominance: 0.2,
+        };
+        let urgent = AuctionAffectState {
+            pleasure: -0.3,
+            arousal: 0.8,
+            dominance: -0.4,
+        };
+
+        assert!(
+            bidder_affect_multiplier(&section, Some(&urgent))
+                > bidder_affect_multiplier(&section, Some(&neutral))
+        );
+    }
+
+    #[test]
+    fn composer_emits_auction_payment_diagnostics() {
+        let composer = PromptComposer::new().without_headers();
+        let sections = [
+            PromptSection::new("code-a", "relevant symbol context")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::CodeIntelligence)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new("research", "important research memo")
+                .with_priority(SectionPriority::High)
+                .with_bidder(AttentionBidder::Research)
+                .into_signal()
+                .unwrap(),
+            PromptSection::new(
+                "deadline-prd",
+                "must ship before deadline and verify acceptance criteria",
+            )
+            .with_priority(SectionPriority::High)
+            .with_bidder(AttentionBidder::TaskContext)
+            .into_signal()
+            .unwrap(),
+        ];
+        let ctx = Context::at(0)
+            .with_attr("roko.daimon.pleasure", "-0.3")
+            .with_attr("roko.daimon.arousal", "0.8")
+            .with_attr("roko.daimon.dominance", "-0.4");
+        let out = composer
+            .compose(&sections, &Budget::tokens(16), &NoOpScorer, &ctx)
+            .unwrap();
+
+        assert_ne!(out.tag("highest_payment_section"), Some("none"));
+        let total_payments = out
+            .tag("auction_total_payments")
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap();
+        let urgency = out
+            .tag("auction_urgency")
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap();
+        let affect_weight = out
+            .tag("auction_affect_weight")
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap();
+        assert!(total_payments >= 0.0);
+        assert!(urgency > 1.0);
+        assert!(affect_weight > 1.0);
     }
 
     #[test]
@@ -649,7 +1113,7 @@ mod tests {
     fn composer_ignores_non_section_signals() {
         let composer = PromptComposer::new();
         let real_section = section("task", "implement X", SectionPriority::High);
-        let fake = Signal::builder(Kind::Task)
+        let fake = Engram::builder(Kind::Task)
             .body(Body::text("this is not a section"))
             .build();
         let out = composer

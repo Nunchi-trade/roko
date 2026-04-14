@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{Body, ContentHash, Context, Query, Signal, error::Result, traits::Substrate};
+use roko_core::{Body, ContentHash, Context, Engram, Query, error::Result, traits::Substrate};
 
 use crate::{
     chain::{
@@ -14,7 +14,7 @@ use crate::{
     },
     roko_bridge::map_kind,
 };
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 
 /// Configuration for a [`ChainSubstrate`].
 #[derive(Clone, Copy, Debug)]
@@ -41,7 +41,7 @@ impl Default for ChainSubstrateConfig {
 /// (state transition), and decayed by time. The knowledge layer applies
 /// HDC-based duplicate collapsing on near-identical content (>95% similarity).
 ///
-/// Reads via `get()` return the original `Signal` byte-for-byte.
+/// Reads via `get()` return the original `Engram` byte-for-byte.
 pub struct ChainSubstrate {
     state: RwLock<ChainSubstrateState>,
     name: String,
@@ -49,7 +49,7 @@ pub struct ChainSubstrate {
 }
 
 struct ChainSubstrateState {
-    signals: HashMap<ContentHash, Signal>,
+    signals: HashMap<ContentHash, Engram>,
     /// ContentHash → InsightId routing (for decay/confirm/challenge APIs).
     routing: HashMap<ContentHash, InsightId>,
     reverse: HashMap<InsightId, ContentHash>,
@@ -91,7 +91,7 @@ impl ChainSubstrate {
         }
     }
 
-    fn project_signal(signal: &Signal) -> HdcVector {
+    fn project_signal(signal: &Engram) -> HdcVector {
         match &signal.body {
             Body::Text(s) => project_tokens(s),
             Body::Json(v) => project_tokens(&v.to_string()),
@@ -100,7 +100,7 @@ impl ChainSubstrate {
         }
     }
 
-    fn signal_text(signal: &Signal) -> String {
+    fn signal_text(signal: &Engram) -> String {
         match &signal.body {
             Body::Text(s) => s.clone(),
             Body::Json(v) => v.to_string(),
@@ -139,7 +139,7 @@ impl ChainSubstrate {
 
 #[async_trait]
 impl Substrate for ChainSubstrate {
-    async fn put(&self, signal: Signal) -> Result<ContentHash> {
+    async fn put(&self, signal: Engram) -> Result<ContentHash> {
         let hash = signal.content_hash();
         let text = Self::signal_text(&signal);
         let vector = Self::project_signal(&signal);
@@ -173,12 +173,12 @@ impl Substrate for ChainSubstrate {
         Ok(hash)
     }
 
-    async fn get(&self, id: &ContentHash) -> Result<Option<Signal>> {
+    async fn get(&self, id: &ContentHash) -> Result<Option<Engram>> {
         let st = self.state.read();
         Ok(st.signals.get(id).cloned())
     }
 
-    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Signal>> {
+    async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Engram>> {
         let st = self.state.read();
 
         let text_query = q
@@ -187,7 +187,7 @@ impl Substrate for ChainSubstrate {
             .find(|(k, _)| k == "text_query")
             .map(|(_, v)| v.as_str());
 
-        let mut results: Vec<Signal> = if let Some(text) = text_query {
+        let mut results: Vec<Engram> = if let Some(text) = text_query {
             let vec = project_tokens(text);
             let k_cap = q.limit.unwrap_or(50).min(st.signals.len().max(1));
             st.knowledge
@@ -240,7 +240,7 @@ impl Substrate for ChainSubstrate {
         let now_secs = (now_ms / 1000).max(0) as u64;
         st.knowledge.apply_decay(now_secs);
 
-        // Walk signals and drop any whose Signal.weight_at(now) is below threshold
+        // Walk signals and drop any whose Engram.weight_at(now) is below threshold
         // OR whose backing insight was pruned/stale.
         let victims: Vec<ContentHash> = st
             .signals
@@ -291,10 +291,10 @@ impl Substrate for ChainSubstrate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Kind, Provenance, Score, Signal};
+    use roko_core::{Body, Context, Engram, Kind, Provenance, Score};
 
-    fn signal(kind: Kind, text: &str, author: &str) -> Signal {
-        Signal::builder(kind)
+    fn signal(kind: Kind, text: &str, author: &str) -> Engram {
+        Engram::builder(kind)
             .body(Body::text(text))
             .provenance(Provenance::agent(author))
             .score(Score::new(0.8, 0.5, 1.0, 1.0))
@@ -360,7 +360,7 @@ mod tests {
     async fn prune_drops_pruned_insights() {
         let sub = ChainSubstrate::new("chain-test");
         // Warnings have 180s half-life — 20 half-lives drives them below 0.01× initial.
-        let s = Signal::builder(Kind::CompileDiagnostic)
+        let s = Engram::builder(Kind::CompileDiagnostic)
             .body(Body::text("temp oracle drift"))
             .provenance(Provenance::agent("alice"))
             .score(Score::NEUTRAL)

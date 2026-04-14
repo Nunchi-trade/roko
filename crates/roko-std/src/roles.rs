@@ -10,6 +10,12 @@ use crate::tool::builtin::{
     run_tests, task_agent, todo_write, web_fetch, web_search, write_file,
 };
 
+/// Execution-only tools denied to the Scribe role.
+///
+/// Scribes can write documentation files but cannot execute shell commands
+/// or run tests — they are limited to read + write tools.
+pub const EXEC_TOOLS: [&str; 2] = [bash::NAME, run_tests::NAME];
+
 /// Named tool-profile archetypes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoleToolProfileKind {
@@ -21,6 +27,8 @@ pub enum RoleToolProfileKind {
     Reviewer,
     /// Planning role. Read tools plus plan-management tools.
     Strategist,
+    /// Documentation role. Can read and write files but cannot execute commands.
+    Scribe,
 }
 
 /// Canonical tool profile for a role archetype.
@@ -133,13 +141,57 @@ pub const STRATEGIST_TOOL_PROFILE: RoleToolProfile = RoleToolProfile::allow_deny
     &DESTRUCTIVE_TOOLS,
 );
 
+/// Canonical scribe allowlist — read tools plus write tools (no exec).
+pub const SCRIBE_TOOLS: [&str; 10] = [
+    read_file::NAME,
+    grep::NAME,
+    glob::NAME,
+    web_search::NAME,
+    web_fetch::NAME,
+    write_file::NAME,
+    edit_file::NAME,
+    multi_edit::NAME,
+    apply_patch::NAME,
+    todo_write::NAME,
+];
+
+/// Scribe: read + write tools, but no shell execution.
+pub const SCRIBE_TOOL_PROFILE: RoleToolProfile =
+    RoleToolProfile::allow_deny(RoleToolProfileKind::Scribe, &SCRIBE_TOOLS, &EXEC_TOOLS);
+
 /// All built-in profiles in declaration order.
-pub const ROLE_TOOL_PROFILES: [RoleToolProfile; 4] = [
+pub const ROLE_TOOL_PROFILES: [RoleToolProfile; 5] = [
     IMPLEMENTER_TOOL_PROFILE,
     RESEARCHER_TOOL_PROFILE,
     REVIEWER_TOOL_PROFILE,
     STRATEGIST_TOOL_PROFILE,
+    SCRIBE_TOOL_PROFILE,
 ];
+
+/// Look up role-based denied tools by role label string.
+///
+/// Maps the kebab-case role label (as it appears in `tasks.toml`) to the
+/// canonical [`RoleToolProfile`] denied-tool list. Returns `None` for roles
+/// that have no profile-level denied tools (e.g. `"implementer"`) or for
+/// unknown role strings.
+///
+/// This is the single authoritative mapping from role strings to denied
+/// tools, consumed by the task parser's `apply_role_tool_defaults`.
+pub fn denied_tools_for_role(role: &str) -> Option<&'static [&'static str]> {
+    let profile = match role.to_ascii_lowercase().as_str() {
+        "researcher" => &RESEARCHER_TOOL_PROFILE,
+        "reviewer" | "auditor" | "quick-reviewer" | "critic" => &REVIEWER_TOOL_PROFILE,
+        "strategist" | "architect" | "pre-planner" => &STRATEGIST_TOOL_PROFILE,
+        "scribe" | "doc-verifier" => &SCRIBE_TOOL_PROFILE,
+        // Implementer, auto-fixer, refactorer, etc. — full access, no denials.
+        _ => return None,
+    };
+    if profile.denied_tools.is_empty() {
+        None
+    } else {
+        Some(profile.denied_tools)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -177,11 +229,70 @@ mod tests {
     }
 
     #[test]
+    fn scribe_profile_allows_read_and_write_but_not_exec() {
+        assert_eq!(SCRIBE_TOOL_PROFILE.allowed_tools, Some(&SCRIBE_TOOLS[..]));
+        assert_eq!(SCRIBE_TOOL_PROFILE.denied_tools, &EXEC_TOOLS);
+        // Scribe can write files...
+        let allowed: HashSet<&str> = SCRIBE_TOOLS.iter().copied().collect();
+        assert!(allowed.contains(write_file::NAME));
+        assert!(allowed.contains(edit_file::NAME));
+        // ...but cannot execute commands.
+        let denied: HashSet<&str> = EXEC_TOOLS.iter().copied().collect();
+        assert!(denied.contains(bash::NAME));
+        assert!(denied.contains(run_tests::NAME));
+    }
+
+    #[test]
     fn profiles_have_unique_kinds() {
         let mut seen = HashSet::new();
         for profile in ROLE_TOOL_PROFILES {
             assert!(seen.insert(profile.kind));
         }
         assert_eq!(seen.len(), ROLE_TOOL_PROFILES.len());
+    }
+
+    #[test]
+    fn denied_tools_for_role_returns_correct_profiles() {
+        // Researcher denies write + edit + bash.
+        let denied = denied_tools_for_role("researcher").unwrap();
+        assert!(denied.contains(&write_file::NAME));
+        assert!(denied.contains(&edit_file::NAME));
+        assert!(denied.contains(&bash::NAME));
+
+        // Reviewer/auditor deny write + edit.
+        let denied = denied_tools_for_role("reviewer").unwrap();
+        assert!(denied.contains(&write_file::NAME));
+        assert!(denied.contains(&edit_file::NAME));
+        assert!(!denied.contains(&bash::NAME));
+
+        let denied = denied_tools_for_role("auditor").unwrap();
+        assert_eq!(denied, denied_tools_for_role("reviewer").unwrap());
+
+        // Strategist denies all destructive tools.
+        let denied = denied_tools_for_role("strategist").unwrap();
+        assert_eq!(denied, &DESTRUCTIVE_TOOLS[..]);
+
+        // Scribe denies exec tools.
+        let denied = denied_tools_for_role("scribe").unwrap();
+        assert!(denied.contains(&bash::NAME));
+        assert!(denied.contains(&run_tests::NAME));
+        assert!(!denied.contains(&write_file::NAME));
+
+        // Implementer has no denials.
+        assert!(denied_tools_for_role("implementer").is_none());
+        // Unknown role has no denials.
+        assert!(denied_tools_for_role("unknown-role").is_none());
+    }
+
+    #[test]
+    fn denied_tools_for_role_is_case_insensitive() {
+        assert_eq!(
+            denied_tools_for_role("Researcher"),
+            denied_tools_for_role("researcher")
+        );
+        assert_eq!(
+            denied_tools_for_role("SCRIBE"),
+            denied_tools_for_role("scribe")
+        );
     }
 }

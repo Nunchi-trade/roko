@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::error::{ApiError, validate_path_segment};
 use crate::events::ServerEvent;
 use crate::plan_types::{Plan, PlanTask};
+use crate::runtime::RunResult;
 use crate::state::{AppState, OperationHandle, OperationStatus, PlanHandle};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -25,7 +26,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 /// `GET /api/plans` — list plans from `.roko/plans/`.
 async fn list_plans(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let plans_dir = state.workdir.join(".roko").join("plans");
+    let plans_dir = plans_dir(&state.workdir);
     if !plans_dir.is_dir() {
         return Ok(Json(json!([])));
     }
@@ -120,7 +121,7 @@ async fn create_plan(
         return Err(ApiError::bad_request(errors.join("; ")));
     }
 
-    let plans_dir = state.workdir.join(".roko").join("plans");
+    let plans_dir = plans_dir(&state.workdir);
     tokio::fs::create_dir_all(&plans_dir)
         .await
         .map_err(|e| ApiError::internal(format!("create plans dir: {e}")))?;
@@ -145,11 +146,14 @@ async fn execute_plan(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Verify the plan exists.
-    let _plan = find_plan(&state.workdir, &id).await?;
+    let plan = find_plan(&state.workdir, &id).await?;
 
     // Acquire write lock once to check-and-insert atomically (no TOCTOU race).
     let run_id = uuid::Uuid::new_v4().to_string();
     let bus = state.event_bus.clone();
+    let runtime = state.runtime.clone();
+    let workdir = state.workdir.clone();
+    let prompt = build_plan_execution_prompt(&plan);
     let plan_id = id.clone();
 
     let mut active = state.active_plans.write().await;
@@ -159,23 +163,26 @@ async fn execute_plan(
         )));
     }
 
-    // Spawn a placeholder execution task. Full PlanRunner wiring is a
-    // separate task — for now we mark the operation as completed immediately.
     let handle = tokio::spawn({
         let plan_id = plan_id.clone();
         async move {
             bus.publish(ServerEvent::PlanStarted {
                 plan_id: plan_id.clone(),
             });
-            // TODO: Wire PlanRunner execution here.
-            bus.publish(ServerEvent::PlanCompleted {
-                plan_id,
-                success: true,
-            });
+            let success = match runtime.run_once(&workdir, &prompt).await {
+                Ok(RunResult { success }) => success,
+                Err(err) => {
+                    bus.publish(ServerEvent::Error {
+                        message: format!("plan execution failed for {plan_id}: {err}"),
+                    });
+                    false
+                }
+            };
+            bus.publish(ServerEvent::PlanCompleted { plan_id, success });
         }
     });
 
-    let plans_dir = state.workdir.join(".roko").join("plans");
+    let plans_dir = plans_dir(&state.workdir);
     let plan_handle = PlanHandle {
         id: run_id.clone(),
         plan_dir: plans_dir,
@@ -225,25 +232,39 @@ async fn generate_plan(
         return Err(ApiError::bad_request("slug must not be empty"));
     }
 
+    let (prd_path, prd_content) = find_prd(&state.workdir, &body.slug).await?;
     let op_id = uuid::Uuid::new_v4().to_string();
     let bus = state.event_bus.clone();
+    let runtime = state.runtime.clone();
+    let workdir = state.workdir.clone();
+    let prompt = build_plan_generation_prompt(&prd_path, &prd_content);
     let slug = body.slug.clone();
+    let kind = format!("plan_generate:{slug}");
+    let slug_for_task = slug.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
-            // TODO: Wire actual plan generation (`prd plan <slug>`).
+            let success = match runtime.run_once(&workdir, &prompt).await {
+                Ok(RunResult { success }) => success,
+                Err(err) => {
+                    bus.publish(ServerEvent::Error {
+                        message: format!("plan generation failed for {slug_for_task}: {err}"),
+                    });
+                    false
+                }
+            };
             bus.publish(ServerEvent::OperationCompleted {
                 op_id,
                 kind: "plan_generate".into(),
-                success: true,
+                success,
             });
         }
     });
 
     let op = OperationHandle {
         id: op_id.clone(),
-        kind: format!("plan_generate:{slug}"),
+        kind,
         status: OperationStatus::Running,
         handle,
     };
@@ -261,7 +282,7 @@ async fn generate_plan(
 /// Locate and load a plan file by ID (checks `.json` then `.toml`).
 async fn find_plan(workdir: &std::path::Path, id: &str) -> Result<Plan, ApiError> {
     validate_path_segment(id, "plan id")?;
-    let plans_dir = workdir.join(".roko").join("plans");
+    let plans_dir = plans_dir(workdir);
     for ext in &["json", "toml"] {
         let path = plans_dir.join(format!("{id}.{ext}"));
         if path.is_file() {
@@ -341,17 +362,127 @@ fn plan_to_json(plan: &Plan) -> Value {
     })
 }
 
+async fn find_prd(
+    workdir: &std::path::Path,
+    slug: &str,
+) -> Result<(std::path::PathBuf, String), ApiError> {
+    validate_path_segment(slug, "PRD slug")?;
+
+    let prds_dir = workdir.join(".roko").join("prd");
+    for section in ["published", "drafts"] {
+        let path = prds_dir.join(section).join(format!("{slug}.md"));
+        if path.is_file() {
+            let content = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| ApiError::internal(format!("read prd file: {e}")))?;
+            return Ok((path, content));
+        }
+    }
+
+    Err(ApiError::not_found(format!("PRD '{slug}' not found")))
+}
+
+fn build_plan_execution_prompt(plan: &Plan) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(&format!(
+        "Read the implementation plan at `.roko/plans/{id}` and execute it in the current workspace.\n\
+         Use the plan as the source of truth for task order, file scope, and completion criteria.\n\
+         Keep changes surgical and stop when the plan is complete.\n\n",
+        id = plan.id,
+    ));
+    prompt.push_str("## Plan summary\n");
+    prompt.push_str(&format!("- id: {}\n", plan.id));
+    prompt.push_str(&format!("- title: {}\n", plan.title));
+    prompt.push_str(&format!("- description: {}\n", plan.description));
+    prompt.push_str("- tasks:\n");
+
+    for task in &plan.tasks {
+        prompt.push_str(&format!(
+            "  - {}: {}\n    depends_on: {:?}\n    files: {:?}\n    completed: {}\n",
+            task.id, task.description, task.depends_on, task.files, task.completed
+        ));
+    }
+
+    prompt
+}
+
+fn build_plan_generation_prompt(prd_path: &std::path::Path, prd_content: &str) -> String {
+    format!(
+        "Read the PRD at {path} and generate implementation plan directories under .roko/plans.\n\
+         Search the codebase first to understand what already exists.\n\
+         Create or update plan.md and tasks.toml files directly, including per-task mcp_servers when a task needs a specific MCP server.\n\
+         Each requirement and acceptance criterion should become one or more small, executable tasks.\n\n\
+         PRD content:\n{content}\n",
+        path = prd_path.display(),
+        content = prd_content,
+    )
+}
+
+fn plans_dir(workdir: &std::path::Path) -> std::path::PathBuf {
+    workdir.join(".roko").join("plans")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use axum::Json;
     use tempfile::tempdir;
+    use tokio::sync::Notify;
 
     use crate::deploy::create_backend;
-    use crate::runtime::NoOpRuntime;
+    use crate::runtime::{CliRuntime, DashboardInfo, NoOpRuntime, RunResult, SessionStatusInfo};
+
+    #[derive(Clone)]
+    struct RecordingRuntime {
+        calls: Arc<Mutex<Vec<(PathBuf, String)>>>,
+        notify: Arc<Notify>,
+        success: bool,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CliRuntime for RecordingRuntime {
+        async fn run_once(
+            &self,
+            workdir: &std::path::Path,
+            prompt: &str,
+        ) -> anyhow::Result<RunResult> {
+            self.calls
+                .lock()
+                .expect("lock calls")
+                .push((workdir.to_path_buf(), prompt.to_string()));
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.notify.notify_waiters();
+            Ok(RunResult {
+                success: self.success,
+            })
+        }
+
+        fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {
+            SessionStatusInfo {
+                session_id: None,
+                workdir,
+                daemon_running: false,
+                signal_count: None,
+                episode_count: None,
+                last_episode_passed: None,
+            }
+        }
+
+        fn dashboard_scaffold(&self, _workdir: &std::path::Path) -> DashboardInfo {
+            DashboardInfo {
+                rendered: String::new(),
+            }
+        }
+    }
 
     fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
@@ -361,6 +492,20 @@ mod tests {
         let state = Arc::new(AppState::new(
             workdir,
             Arc::new(NoOpRuntime),
+            roko_core::config::schema::RokoConfig::default(),
+            deploy_backend,
+        ));
+        (dir, state)
+    }
+
+    fn test_state_with_runtime(runtime: Arc<dyn CliRuntime>) -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let state = Arc::new(AppState::new(
+            workdir,
+            runtime,
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
         ));
@@ -437,6 +582,111 @@ mod tests {
         };
 
         assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn execute_plan_runs_runtime_with_plan_context() {
+        let runtime = Arc::new(RecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            success: true,
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
+        let notify = Arc::clone(&runtime.as_ref().notify);
+        let calls = Arc::clone(&runtime.as_ref().calls);
+        let (_dir, state) = test_state_with_runtime(runtime);
+
+        let plans_dir = state.workdir.join(".roko").join("plans");
+        tokio::fs::create_dir_all(&plans_dir)
+            .await
+            .expect("create plans dir");
+        tokio::fs::write(
+            plans_dir.join("demo.json"),
+            serde_json::to_string_pretty(&json!({
+                "id": "demo",
+                "title": "Demo Plan",
+                "description": "Implement the demo",
+                "tasks": [
+                    {
+                        "id": "T1",
+                        "description": "Update the widget",
+                        "depends_on": [],
+                        "files": ["src/widget.rs"],
+                        "completed": false
+                    }
+                ]
+            }))
+            .expect("serialize plan"),
+        )
+        .await
+        .expect("write plan");
+
+        let response = execute_plan(State(Arc::clone(&state)), Path("demo".into()))
+            .await
+            .expect("execute plan");
+
+        assert_eq!(
+            response.into_response().status(),
+            axum::http::StatusCode::ACCEPTED
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("runtime should be called");
+
+        let calls = calls.lock().expect("lock calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, state.workdir);
+        assert!(calls[0].1.contains("Demo Plan"));
+        assert!(calls[0].1.contains("Update the widget"));
+    }
+
+    #[tokio::test]
+    async fn generate_plan_runs_runtime_with_prd_context() {
+        let runtime = Arc::new(RecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            success: true,
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
+        let notify = Arc::clone(&runtime.as_ref().notify);
+        let calls = Arc::clone(&runtime.as_ref().calls);
+        let (_dir, state) = test_state_with_runtime(runtime);
+
+        let published_dir = state.workdir.join(".roko").join("prd").join("published");
+        tokio::fs::create_dir_all(&published_dir)
+            .await
+            .expect("create published dir");
+        tokio::fs::write(
+            published_dir.join("demo.md"),
+            "---\nstatus: published\n---\n# Demo PRD\nBuild the widget.\n",
+        )
+        .await
+        .expect("write prd");
+
+        let response = generate_plan(
+            State(Arc::clone(&state)),
+            Json(GenerateRequest {
+                slug: "demo".into(),
+            }),
+        )
+        .await
+        .expect("generate plan");
+
+        assert_eq!(
+            response.into_response().status(),
+            axum::http::StatusCode::ACCEPTED
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("runtime should be called");
+
+        let calls = calls.lock().expect("lock calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, state.workdir);
+        assert!(calls[0].1.contains(".roko/prd/published/demo.md"));
+        assert!(calls[0].1.contains("Build the widget."));
     }
 
     #[tokio::test]

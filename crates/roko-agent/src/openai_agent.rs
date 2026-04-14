@@ -19,10 +19,12 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::translate::openai::parse_usage;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Default `OpenAI` base URL.
@@ -37,7 +39,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 ///
 /// ```ignore
 /// let agent = OpenAiAgent::new("sk-test-key", "gpt-4o-mini");
-/// let prompt = Signal::builder(Kind::Prompt)
+/// let prompt = Engram::builder(Kind::Prompt)
 ///     .body(Body::text("Say hi"))
 ///     .build();
 /// let result = agent.run(&prompt, &Context::now()).await;
@@ -49,6 +51,7 @@ pub struct OpenAiAgent {
     base_url: String,
     timeout_ms: u64,
     name: String,
+    extra_headers: Vec<(String, String)>,
     poster: Box<dyn HttpPoster>,
 }
 
@@ -64,6 +67,7 @@ impl OpenAiAgent {
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             name,
+            extra_headers: Vec::new(),
             poster: Box::new(ReqwestPoster::new()),
         }
     }
@@ -82,6 +86,15 @@ impl OpenAiAgent {
         self
     }
 
+    /// Inject additional HTTP headers on every request.
+    #[must_use]
+    pub fn with_extra_headers(mut self, extra_headers: HashMap<String, String>) -> Self {
+        let mut extra_headers: Vec<(String, String)> = extra_headers.into_iter().collect();
+        extra_headers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        self.extra_headers = extra_headers;
+        self
+    }
+
     /// Internal constructor used by tests to inject a mock poster.
     #[cfg(test)]
     fn with_poster(mut self, poster: Box<dyn HttpPoster>) -> Self {
@@ -94,7 +107,19 @@ impl OpenAiAgent {
         format!("{trimmed}/chat/completions")
     }
 
-    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
+    fn headers(&self) -> Vec<(String, String)> {
+        let mut headers = vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", self.api_key),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        headers.extend(self.extra_headers.iter().cloned());
+        headers
+    }
+
+    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -111,7 +136,7 @@ impl OpenAiAgent {
 
 #[async_trait]
 impl Agent for OpenAiAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         // Extract prompt text (JSON fallback for non-text bodies).
@@ -144,13 +169,7 @@ impl Agent for OpenAiAgent {
         };
 
         let url = self.endpoint();
-        let headers = vec![
-            (
-                "Authorization".to_string(),
-                format!("Bearer {}", self.api_key),
-            ),
-            ("Content-Type".to_string(), "application/json".to_string()),
-        ];
+        let headers = self.headers();
 
         // POST via the injected http poster; the poster enforces the timeout.
         let response_text = match self
@@ -201,17 +220,7 @@ impl Agent for OpenAiAgent {
         };
 
         // Pull usage if present.
-        let (input_tokens, output_tokens) = parsed.get("usage").map_or((0, 0), |u| {
-            let p = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let c = u
-                .get("completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            (
-                u32::try_from(p).unwrap_or(u32::MAX),
-                u32::try_from(c).unwrap_or(u32::MAX),
-            )
-        });
+        let usage = parse_usage(&parsed);
 
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -223,8 +232,9 @@ impl Agent for OpenAiAgent {
             .build();
 
         AgentResult::ok(out_signal).with_usage(Usage {
-            input_tokens,
-            output_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
             wall_ms,
             ..Default::default()
         })
@@ -313,8 +323,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(api_key: &str, model: &str, poster: Box<dyn HttpPoster>) -> OpenAiAgent {
@@ -545,6 +555,30 @@ mod tests {
                 .as_text()
                 .expect("text body")
                 .contains("timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_headers_are_included_in_request() {
+        let (mock, captured) = MockPoster::ok(canned_ok("ok", 1, 1));
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert("HTTP-Referer".to_string(), "roko-agent".to_string());
+        extra_headers.insert("X-Title".to_string(), "roko".to_string());
+
+        let agent = OpenAiAgent::new("sk-x", "m")
+            .with_extra_headers(extra_headers)
+            .with_poster(Box::new(mock));
+        let _ = agent.run(&prompt("x"), &Context::now()).await;
+        let c = captured.lock().expect("lock").clone().expect("captured");
+        let header_map: std::collections::HashMap<String, String> = c.headers.into_iter().collect();
+        assert_eq!(
+            header_map.get("HTTP-Referer"),
+            Some(&"roko-agent".to_string())
+        );
+        assert_eq!(header_map.get("X-Title"), Some(&"roko".to_string()));
+        assert_eq!(
+            header_map.get("Authorization"),
+            Some(&"Bearer sk-x".to_string())
         );
     }
 

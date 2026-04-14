@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-kimi-tool-1",
+  "object": "chat.completion",
+  "created": 1760000102,
+  "model": "kimi-k2.5",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "functions.Read:0",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"path\":\"note.txt\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 12,
+    "total_tokens": 37
+  }
+}

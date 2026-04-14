@@ -13,6 +13,7 @@ use tracing::{error, info};
 
 use crate::config::Config;
 use crate::serve::templates::TemplateRegistry;
+use crate::worker::cloud::run_code_implementer_cloud;
 
 use super::WorkerState;
 
@@ -78,54 +79,93 @@ async fn status(State(state): State<Arc<WorkerState>>) -> impl IntoResponse {
 async fn run_task(
     State(state): State<Arc<WorkerState>>,
     Json(req): Json<TaskRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     info!(template = %state.template.name, params = ?req.params, "executing task");
 
     let start = std::time::Instant::now();
 
-    // Interpolate params into template prompt
-    let prompt = TemplateRegistry::render_prompt(&state.template, &req.params);
+    let result = if state.template.name == "code-implementer" {
+        let params = req.params.clone();
+        match tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| anyhow::anyhow!("build runtime: {e}"))?;
+            runtime.block_on(run_code_implementer_cloud(&params))
+        })
+        .await
+        {
+            Ok(Ok(result)) => TaskResult {
+                success: result.success,
+                episode_id: result.episode_id,
+                gate_verdicts: result.gate_verdicts,
+                error: result.error,
+                duration_ms: elapsed_ms(start),
+            },
+            Ok(Err(e)) => TaskResult {
+                success: false,
+                episode_id: None,
+                gate_verdicts: Vec::new(),
+                error: Some(format!("{e:#}")),
+                duration_ms: elapsed_ms(start),
+            },
+            Err(e) => TaskResult {
+                success: false,
+                episode_id: None,
+                gate_verdicts: Vec::new(),
+                error: Some(format!("cloud task join failed: {e}")),
+                duration_ms: elapsed_ms(start),
+            },
+        }
+    } else {
+        // Interpolate params into template prompt
+        let prompt = TemplateRegistry::render_prompt(&state.template, &req.params);
 
-    // Create temp workdir
-    let work_id = uuid::Uuid::new_v4();
-    let workdir = std::env::temp_dir().join(format!("roko-worker-{work_id}"));
-    if let Err(e) = std::fs::create_dir_all(&workdir) {
-        let result = TaskResult {
-            success: false,
-            episode_id: None,
-            gate_verdicts: Vec::new(),
-            error: Some(format!("failed to create workdir: {e}")),
-            duration_ms: elapsed_ms(start),
+        // Create temp workdir
+        let work_id = uuid::Uuid::new_v4();
+        let workdir = std::env::temp_dir().join(format!("roko-worker-{work_id}"));
+        if let Err(e) = std::fs::create_dir_all(&workdir) {
+            let result = TaskResult {
+                success: false,
+                episode_id: None,
+                gate_verdicts: Vec::new(),
+                error: Some(format!("failed to create workdir: {e}")),
+                duration_ms: elapsed_ms(start),
+            };
+            *state.last_task.write().await = Some(result.clone());
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::to_value(result).unwrap_or_default()),
+            )
+                .into_response();
+        }
+
+        // Build a Config from the template's agent settings
+        let mut config = Config::default();
+        config.agent.command = "claude".to_string();
+        config.agent.model = Some(state.template.model.clone());
+        config.prompt.role = state.template.role.clone();
+
+        // Run the universal loop
+        let result = match crate::run::run_once(&workdir, &config, &prompt).await {
+            Ok(report) => TaskResult {
+                success: report.overall_success(),
+                episode_id: Some(report.episode_id),
+                gate_verdicts: report.gate_verdicts,
+                error: None,
+                duration_ms: elapsed_ms(start),
+            },
+            Err(e) => TaskResult {
+                success: false,
+                episode_id: None,
+                gate_verdicts: Vec::new(),
+                error: Some(format!("{e:#}")),
+                duration_ms: elapsed_ms(start),
+            },
         };
-        *state.last_task.write().await = Some(result.clone());
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::to_value(result).unwrap_or_default()),
-        );
-    }
 
-    // Build a Config from the template's agent settings
-    let mut config = Config::default();
-    config.agent.command = "claude".to_string();
-    config.agent.model = Some(state.template.model.clone());
-    config.prompt.role = state.template.role.clone();
-
-    // Run the universal loop
-    let result = match crate::run::run_once(&workdir, &config, &prompt).await {
-        Ok(report) => TaskResult {
-            success: report.overall_success(),
-            episode_id: Some(report.episode_id),
-            gate_verdicts: report.gate_verdicts,
-            error: None,
-            duration_ms: elapsed_ms(start),
-        },
-        Err(e) => TaskResult {
-            success: false,
-            episode_id: None,
-            gate_verdicts: Vec::new(),
-            error: Some(format!("{e:#}")),
-            duration_ms: elapsed_ms(start),
-        },
+        let _ = std::fs::remove_dir_all(&workdir);
+        result
     };
 
     *state.last_task.write().await = Some(result.clone());
@@ -139,9 +179,6 @@ async fn run_task(
         }
     }
 
-    // Clean up temp workdir
-    let _ = std::fs::remove_dir_all(&workdir);
-
     let status_code = if result.success {
         axum::http::StatusCode::OK
     } else {
@@ -152,4 +189,5 @@ async fn run_task(
         status_code,
         Json(serde_json::to_value(result).unwrap_or_default()),
     )
+        .into_response()
 }

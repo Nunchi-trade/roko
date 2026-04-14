@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "Upstream provider failure.",
+    "type": "server_error"
+  }
+}

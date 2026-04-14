@@ -13,6 +13,14 @@ env = [
   ["ANTHROPIC_API_KEY", "mori-local-gateway"],
 ]
 
+[providers.claude_cli]
+kind = "claude_cli"
+command = "claude"
+
+[models.claude-sonnet-4-6]
+provider = "claude_cli"
+slug = "claude-sonnet-4-6"
+
 # Per-tier model mapping (matches mori's band→model system)
 # Overrides the global model when tasks.toml specifies a tier.
 # mechanical = cheapest model for imports/renames (≤20 LOC)

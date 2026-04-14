@@ -2,8 +2,8 @@
 resolver = "2"
 members = [
     # Support primitives (copied from bardo/) — reusable, not Mori code
-    "crates/bardo-primitives",
-    "crates/bardo-runtime",
+    "crates/roko-primitives",
+    "crates/roko-runtime",
 
     # Roko kernel
     "crates/roko-core",
@@ -56,8 +56,9 @@ members = [
     # Neuro subsystem — knowledge + memory.
     "crates/roko-neuro",
 
-    # Golem scaffold — phase-2 subsystem placeholders (feature-gated).
-    "crates/roko-golem",
+    "crates/roko-dreams",
+    # Daimon subsystem — affect and motivation modeling.
+    "crates/roko-daimon",
 
     # Demo environment orchestrator — deploys contracts from roko/contracts/,
     # seeds fixtures, spawns a clade of agents per declarative scenario manifest.
@@ -76,9 +77,9 @@ members = [
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-authors = ["Roko <engineering@bardo.run>"]
-repository = "https://github.com/wpank/bardo"
-homepage = "https://github.com/wpank/bardo"
+authors = ["Roko <engineering@roko.dev>"]
+repository = "https://github.com/nunchi/roko"
+homepage = "https://github.com/nunchi/roko"
 
 [workspace.dependencies]
 # Async runtime
@@ -133,6 +134,7 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 futures-util = "0.3"
 bytes = "1"
+http-body-util = "0.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sysinfo = "0.33"
 lru = "0.12"

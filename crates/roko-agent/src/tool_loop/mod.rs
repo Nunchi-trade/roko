@@ -8,23 +8,40 @@
 //! # Submodules
 //!
 //! - [`max_iter`] — iteration-cap configuration (§36.54).
+//! - [`compaction`] — gentle tool-result truncation (§36.58).
 //! - [`prune`] — context-growth guard (§36.55).
 //! - [`result_msg`] — tool-result message construction (§36.56).
 //! - [`checkpoint`] — resumable state (§36.57).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use roko_core::tool::{ToolCall, ToolContext, ToolDef};
+use roko_core::{
+    config::schema::ModelProfile,
+    tool::{ToolCall, ToolContext, ToolDef},
+};
+use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
-use crate::translate::{BackendResponse, RenderedTools, Translator};
+use crate::provider::ProviderError;
+use crate::retry::RetryPolicy;
+use crate::streaming::StreamChunk;
+use crate::translate::{BackendResponse, RenderedTools, SessionState, Translator};
+use crate::usage::Usage;
 
+pub mod agent_wrapper;
+pub mod backends;
 pub mod checkpoint;
+pub mod compaction;
 pub mod max_iter;
 pub mod prune;
 pub mod result_msg;
 
+pub use agent_wrapper::ToolLoopAgent;
+pub use backends::OpenAiCompatBackend;
 pub use checkpoint::Checkpoint;
 pub use max_iter::DEFAULT_MAX_ITERATIONS;
 pub use prune::DEFAULT_CONTEXT_TOKEN_LIMIT;
@@ -50,7 +67,28 @@ pub trait LlmBackend: Send + Sync {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        session: &SessionState,
     ) -> Result<BackendResponse, LlmError>;
+
+    /// Extract provider-issued session or conversation identifiers from a turn response.
+    fn extract_session(&self, response: &BackendResponse) -> SessionState {
+        let _ = response;
+        SessionState::default()
+    }
+
+    /// Send the current conversation state to the backend in streaming mode.
+    ///
+    /// Backends that do not implement streaming fall back to [`send_turn`](Self::send_turn).
+    async fn send_turn_streaming(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<BackendResponse, LlmError> {
+        let _ = event_tx;
+        self.send_turn(messages, tools, session).await
+    }
 }
 
 /// Errors from an [`LlmBackend`].
@@ -62,6 +100,12 @@ pub enum LlmError {
     /// A network-level failure (DNS, timeout, connection reset).
     #[error("network error: {0}")]
     Network(String),
+    /// The backend returned a provider-classified error suitable for retry logic.
+    #[error("provider error: {0}")]
+    Provider(ProviderError),
+    /// Retry budget was exhausted before a successful backend response arrived.
+    #[error("retries exhausted")]
+    RetriesExhausted,
 }
 
 // ─── StopReason + Output ─────────────────────────────────────────────
@@ -88,10 +132,19 @@ pub struct ToolLoopOutput {
     pub iterations: usize,
     /// All tool calls dispatched across every iteration.
     pub tool_calls: Vec<ToolCall>,
+    /// Aggregated usage across every backend turn in the loop.
+    pub total_usage: Usage,
     /// Why the loop stopped.
     pub stop_reason: StopReason,
     /// Resumable snapshot — populated when `stop_reason != Stop`.
     pub checkpoint: Option<Checkpoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverflowAction {
+    Ok,
+    CompactRecommended,
+    CompactRequired,
 }
 
 // ─── ToolLoop ────────────────────────────────────────────────────────
@@ -101,12 +154,16 @@ pub struct ToolLoopOutput {
 /// Drives the `prompt -> LLM -> tool_calls -> dispatch -> results -> LLM`
 /// cycle until the LLM stops calling tools, the iteration cap is
 /// reached, the cancel token fires, or the backend errors.
+#[derive(Clone)]
 pub struct ToolLoop {
     translator: Arc<dyn Translator>,
     dispatcher: Arc<ToolDispatcher>,
     backend: Arc<dyn LlmBackend>,
     max_iterations: usize,
     context_token_limit: usize,
+    checkpoint_path: Option<PathBuf>,
+    model_profile: Option<ModelProfile>,
+    retry_policy: RetryPolicy,
 }
 
 impl ToolLoop {
@@ -123,6 +180,9 @@ impl ToolLoop {
             backend,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             context_token_limit: DEFAULT_CONTEXT_TOKEN_LIMIT,
+            checkpoint_path: None,
+            model_profile: None,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -140,6 +200,27 @@ impl ToolLoop {
         self
     }
 
+    /// Persist resumable checkpoints at the provided path.
+    #[must_use]
+    pub fn with_checkpoint_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.checkpoint_path = Some(path.into());
+        self
+    }
+
+    /// Configure the model profile used for context-overflow detection.
+    #[must_use]
+    pub fn with_model_profile(mut self, model_profile: ModelProfile) -> Self {
+        self.model_profile = Some(model_profile);
+        self
+    }
+
+    /// Override the default retry policy used for provider-backed backend calls.
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -148,8 +229,50 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
+        if let Some(path) = self.checkpoint_path.as_deref().filter(|path| path.exists()) {
+            match Checkpoint::load(path) {
+                Ok(cp) => return self.resume(cp, tools, ctx).await,
+                Err(err) => {
+                    return ToolLoopOutput {
+                        final_text: String::new(),
+                        iterations: 0,
+                        tool_calls: Vec::new(),
+                        total_usage: Usage::default(),
+                        stop_reason: StopReason::BackendError(format!(
+                            "checkpoint load {}: {err}",
+                            path.display()
+                        )),
+                        checkpoint: None,
+                    };
+                }
+            }
+        }
+
         let messages = result_msg::initial_messages(system, user);
-        self.run_inner(messages, 0, Vec::new(), tools, ctx).await
+        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx, None)
+            .await
+    }
+
+    /// Run a fresh tool loop and forward streaming chunks as each backend turn arrives.
+    pub async fn run_streaming(
+        &self,
+        system: &str,
+        user: &str,
+        tools: &[ToolDef],
+        ctx: &ToolContext,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> ToolLoopOutput {
+        let messages = result_msg::initial_messages(system, user);
+        self.run_inner(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            Some(event_tx),
+        )
+        .await
     }
 
     /// Resume a tool loop from a previously saved [`Checkpoint`].
@@ -159,8 +282,16 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
     ) -> ToolLoopOutput {
-        self.run_inner(cp.messages, cp.iterations, cp.tool_calls, tools, ctx)
-            .await
+        self.run_inner(
+            cp.messages,
+            cp.iterations,
+            cp.tool_calls,
+            Usage::default(),
+            tools,
+            ctx,
+            None,
+        )
+        .await
     }
 
     /// Core loop shared by [`run`](Self::run) and [`resume`](Self::resume).
@@ -169,12 +300,17 @@ impl ToolLoop {
         mut messages: Vec<serde_json::Value>,
         mut iterations: usize,
         mut all_calls: Vec<ToolCall>,
+        mut total_usage: Usage,
         tools: &[ToolDef],
         ctx: &ToolContext,
+        event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
+        let mut session = SessionState::default();
 
         loop {
+            self.prune_context_if_needed(&mut messages);
+
             // §36.54 — iteration cap.
             if max_iter::is_exhausted(iterations, self.max_iterations) {
                 let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
@@ -182,6 +318,7 @@ impl ToolLoop {
                     final_text: String::new(),
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::MaxIterations,
                     checkpoint: Some(cp),
                 };
@@ -194,13 +331,24 @@ impl ToolLoop {
                     final_text: String::new(),
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
                 };
             }
 
             // Send current conversation to the backend.
-            let response = match self.backend.send_turn(&messages, &rendered_tools).await {
+            let response = match match &event_tx {
+                Some(event_tx) => {
+                    self.backend
+                        .send_turn_streaming(&messages, &rendered_tools, &session, event_tx.clone())
+                        .await
+                }
+                None => {
+                    self.send_turn_with_retry(&messages, &rendered_tools, &session)
+                        .await
+                }
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
@@ -208,11 +356,14 @@ impl ToolLoop {
                         final_text: String::new(),
                         iterations,
                         tool_calls: all_calls,
+                        total_usage,
                         stop_reason: StopReason::BackendError(e.to_string()),
                         checkpoint: Some(cp),
                     };
                 }
             };
+            merge_session_state(&mut session, self.backend.extract_session(&response));
+            total_usage.add(&response.extract_usage());
 
             // Parse tool calls from the response.
             let calls = match self.translator.parse_calls(&response) {
@@ -223,6 +374,7 @@ impl ToolLoop {
                         final_text: String::new(),
                         iterations,
                         tool_calls: all_calls,
+                        total_usage,
                         stop_reason: StopReason::BackendError(format!("parse: {e}")),
                         checkpoint: Some(cp),
                     };
@@ -231,11 +383,13 @@ impl ToolLoop {
 
             // No tool calls -> final answer.
             if calls.is_empty() {
+                self.clear_checkpoint_file();
                 let final_text = response.extract_text();
                 return ToolLoopOutput {
                     final_text,
                     iterations,
                     tool_calls: all_calls,
+                    total_usage,
                     stop_reason: StopReason::Stop,
                     checkpoint: None,
                 };
@@ -255,10 +409,128 @@ impl ToolLoop {
             result_msg::append_results(&mut messages, rendered_results);
 
             // §36.55 — context-growth guard.
-            prune::prune_if_needed(&mut messages, self.context_token_limit);
+            self.prune_context_if_needed(&mut messages);
 
             iterations += 1;
+            self.save_checkpoint_snapshot(iterations, &all_calls, &messages);
         }
+    }
+
+    fn check_context_overflow(&self, messages: &[Value], model: &ModelProfile) -> OverflowAction {
+        let estimated_tokens = prune::estimate_message_tokens(messages);
+        let limit = Self::model_context_limit(model);
+
+        if estimated_tokens > limit {
+            return OverflowAction::CompactRequired;
+        }
+        if estimated_tokens > Self::compaction_target(limit) {
+            return OverflowAction::CompactRecommended;
+        }
+        OverflowAction::Ok
+    }
+
+    fn prune_context_if_needed(&self, messages: &mut Vec<Value>) {
+        match self.model_profile.as_ref() {
+            Some(model) => match self.check_context_overflow(messages, model) {
+                OverflowAction::Ok => {}
+                OverflowAction::CompactRecommended | OverflowAction::CompactRequired => {
+                    compaction::compact_tool_results(messages);
+                    prune::prune_if_needed(
+                        messages,
+                        Self::compaction_target(Self::model_context_limit(model)),
+                    );
+                }
+            },
+            None => {
+                if prune::estimate_message_tokens(messages) > self.context_token_limit {
+                    compaction::compact_tool_results(messages);
+                }
+                prune::prune_if_needed(messages, self.context_token_limit);
+            }
+        }
+    }
+
+    fn model_context_limit(model: &ModelProfile) -> usize {
+        usize::try_from(model.context_window)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(128_000)
+    }
+
+    const fn compaction_target(limit: usize) -> usize {
+        limit.saturating_mul(80) / 100
+    }
+
+    async fn send_turn_with_retry(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &RenderedTools,
+        session: &SessionState,
+    ) -> Result<BackendResponse, LlmError> {
+        for attempt in 0..self.retry_policy.max_attempts {
+            match self.backend.send_turn(messages, tools, session).await {
+                Ok(response) => return Ok(response),
+                Err(LlmError::Provider(ref error))
+                    if self.retry_policy.should_retry(error, attempt) =>
+                {
+                    let delay = self
+                        .retry_policy
+                        .delay_with_retry_after(attempt, error.retry_after_ms());
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(LlmError::RetriesExhausted)
+    }
+}
+
+impl ToolLoop {
+    fn save_checkpoint_snapshot(
+        &self,
+        iterations: usize,
+        all_calls: &[ToolCall],
+        messages: &[serde_json::Value],
+    ) {
+        let Some(path) = self.checkpoint_path.as_deref() else {
+            return;
+        };
+
+        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec());
+        if let Err(err) = cp.save(path) {
+            tracing::warn!(path = %path.display(), error = %err, "failed to persist tool loop checkpoint");
+        }
+    }
+
+    fn clear_checkpoint_file(&self) {
+        let Some(path) = self.checkpoint_path.as_deref() else {
+            return;
+        };
+
+        if let Err(err) = remove_checkpoint_file(path) {
+            tracing::warn!(path = %path.display(), error = %err, "failed to clear tool loop checkpoint");
+        }
+    }
+}
+
+fn remove_checkpoint_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn merge_session_state(current: &mut SessionState, next: SessionState) {
+    if next.session_id.is_some() {
+        current.session_id = next.session_id;
+    }
+    if next.thread_id.is_some() {
+        current.thread_id = next.thread_id;
+    }
+    if next.conversation_id.is_some() {
+        current.conversation_id = next.conversation_id;
     }
 }
 
@@ -270,6 +542,14 @@ impl std::fmt::Debug for ToolLoop {
             .field("backend", &"Arc<dyn LlmBackend>")
             .field("max_iterations", &self.max_iterations)
             .field("context_token_limit", &self.context_token_limit)
+            .field(
+                "model_profile",
+                &self
+                    .model_profile
+                    .as_ref()
+                    .map(|model| (&model.provider, &model.slug, model.context_window)),
+            )
+            .field("retry_policy", &self.retry_policy)
             .finish()
     }
 }
@@ -350,6 +630,16 @@ mod tests {
                 .collect();
             RenderedResults::JsonMessages(serde_json::json!(msgs))
         }
+
+        fn render_assistant_message(
+            &self,
+            response: &BackendResponse,
+        ) -> Option<serde_json::Value> {
+            let BackendResponse::Json(ref v) = *response else {
+                return None;
+            };
+            v.get("assistant_message").cloned()
+        }
     }
 
     // ─── Mock handler ────────────────────────────────────────────────
@@ -379,6 +669,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Ok(BackendResponse::Json(
                 serde_json::json!({"message": {"content": self.text}}),
@@ -395,6 +686,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Ok(BackendResponse::Json(serde_json::json!({
                 "tool_calls": [{"id": "c1", "name": "echo", "arguments": {}}]
@@ -421,6 +713,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -444,6 +737,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             Err(LlmError::Backend("server error".into()))
         }
@@ -468,6 +762,7 @@ mod tests {
             &self,
             _messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -500,12 +795,52 @@ mod tests {
         }
     }
 
+    struct RetryingBackend {
+        attempts: AtomicUsize,
+        failures_before_success: usize,
+        error: ProviderError,
+    }
+
+    impl RetryingBackend {
+        fn new(failures_before_success: usize, error: ProviderError) -> Self {
+            Self {
+                attempts: AtomicUsize::new(0),
+                failures_before_success,
+                error,
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for RetryingBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.failures_before_success {
+                Err(LlmError::Provider(self.error.clone()))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final after retry"}}),
+                ))
+            }
+        }
+    }
+
     #[async_trait]
     impl LlmBackend for CapturingBackend {
         async fn send_turn(
             &self,
             messages: &[serde_json::Value],
             _tools: &RenderedTools,
+            _session: &SessionState,
         ) -> Result<BackendResponse, LlmError> {
             self.captured.lock().push(messages.to_vec());
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -518,6 +853,161 @@ mod tests {
                     serde_json::json!({"message": {"content": "final"}}),
                 ))
             }
+        }
+    }
+
+    /// Captures messages on each call.  First call: three tool calls with large
+    /// arguments (enough to overflow a 1 000-token context).  Second call: final
+    /// answer.  Used by [`context_overflow_detection_prunes_before_next_request`].
+    struct OverflowCapturingBackend {
+        call_count: AtomicUsize,
+        captured: parking_lot::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    impl OverflowCapturingBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                captured: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for OverflowCapturingBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.captured.lock().push(messages.to_vec());
+            let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // Return 3 tool calls with large arguments so that the
+                // accumulated messages exceed a 1 000-token context window.
+                // Each tool result will echo back ~700 chars of padding,
+                // producing ~700 * 3 / 4 ≈ 525 tokens of tool output alone.
+                let pad = "x".repeat(700);
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "assistant_message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"id": "ov-1", "name": "echo"},
+                            {"id": "ov-2", "name": "echo"},
+                            {"id": "ov-3", "name": "echo"},
+                        ]
+                    },
+                    "tool_calls": [
+                        {"id": "ov-1", "name": "echo", "arguments": {"pad": pad}},
+                        {"id": "ov-2", "name": "echo", "arguments": {"pad": pad}},
+                        {"id": "ov-3", "name": "echo", "arguments": {"pad": pad}},
+                    ]
+                })))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final after pruning"}}),
+                ))
+            }
+        }
+    }
+
+    struct SessionTrackingBackend {
+        call_count: AtomicUsize,
+        extracted_sessions: AtomicUsize,
+    }
+
+    impl SessionTrackingBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                extracted_sessions: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for SessionTrackingBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "id": "chatcmpl-turn-1",
+                    "tool_calls": [{"id": "c1", "name": "echo", "arguments": {"x": 1}}]
+                })))
+            } else {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "id": "chatcmpl-turn-2",
+                    "message": {"content": "final answer"}
+                })))
+            }
+        }
+
+        fn extract_session(&self, _response: &BackendResponse) -> SessionState {
+            self.extracted_sessions.fetch_add(1, Ordering::SeqCst);
+            SessionState {
+                conversation_id: Some("conversation-1".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Captures each request and emits three thinking tool-call turns before
+    /// returning a final answer.
+    struct ReasoningCaptureBackend {
+        call_count: AtomicUsize,
+        captured: parking_lot::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    impl ReasoningCaptureBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                captured: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for ReasoningCaptureBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.captured.lock().push(messages.to_vec());
+
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let response = match turn {
+                1..=3 => serde_json::json!({
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": format!("reasoning turn {turn}"),
+                        "tool_calls": [{
+                            "id": format!("call-{turn}"),
+                            "name": "echo",
+                            "arguments": { "turn": turn }
+                        }]
+                    },
+                    "tool_calls": [{
+                        "id": format!("call-{turn}"),
+                        "name": "echo",
+                        "arguments": { "turn": turn }
+                    }]
+                }),
+                _ => serde_json::json!({
+                    "message": { "content": "final" }
+                }),
+            };
+
+            Ok(BackendResponse::Json(response))
         }
     }
 
@@ -549,6 +1039,138 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         ToolLoop::new(translator, dispatcher, backend).with_max_iterations(max_iterations)
+    }
+
+    struct SessionContinuityBackend {
+        call_count: AtomicUsize,
+        seen_sessions: parking_lot::Mutex<Vec<SessionState>>,
+    }
+
+    impl SessionContinuityBackend {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+                seen_sessions: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    struct CheckpointPersistenceBackend;
+
+    #[async_trait]
+    impl LlmBackend for CheckpointPersistenceBackend {
+        async fn send_turn(
+            &self,
+            messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            _session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            let resumed = messages
+                .iter()
+                .any(|message| message["role"] == "tool" && message.get("tool_call_id").is_some());
+
+            if resumed {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "resumed final answer"}}),
+                ))
+            } else {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "tool_calls": [{
+                        "id": "persist-1",
+                        "name": "echo",
+                        "arguments": {"step": 1}
+                    }]
+                })))
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for SessionContinuityBackend {
+        async fn send_turn(
+            &self,
+            _messages: &[serde_json::Value],
+            _tools: &RenderedTools,
+            session: &SessionState,
+        ) -> Result<BackendResponse, LlmError> {
+            self.seen_sessions.lock().push(session.clone());
+            let turn = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(BackendResponse::Json(serde_json::json!({
+                    "tool_calls": [{"id": "c1", "name": "echo", "arguments": {"x": 1}}]
+                })))
+            } else {
+                Ok(BackendResponse::Json(
+                    serde_json::json!({"message": {"content": "final answer"}}),
+                ))
+            }
+        }
+
+        fn extract_session(&self, response: &BackendResponse) -> SessionState {
+            let turn = response
+                .extract_text()
+                .is_empty()
+                .then_some("session-1")
+                .map(str::to_string);
+            SessionState {
+                session_id: turn,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn test_retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            ..RetryPolicy::default()
+        }
+    }
+
+    fn test_model_profile(context_window: u64) -> ModelProfile {
+        ModelProfile {
+            provider: "test-provider".to_string(),
+            slug: "test-model".to_string(),
+            context_window,
+            max_output: None,
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            ..Default::default()
+        }
+    }
+
+    fn messages_for_estimated_tokens(target_tokens: usize) -> Vec<Value> {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "usr"}),
+        ];
+        while prune::estimate_message_tokens(&messages) < target_tokens {
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": format!("c{}", messages.len()),
+                "content": "x".repeat(512),
+            }));
+        }
+        messages
     }
 
     // ─── Tests ───────────────────────────────────────────────────────
@@ -671,6 +1293,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_with_jitter_retries_rate_limits_until_success() {
+        let backend = Arc::new(RetryingBackend::new(
+            2,
+            ProviderError::RateLimit {
+                retry_after_ms: None,
+            },
+        ));
+        let tl = make_tool_loop(backend.clone(), 25).with_retry_policy(test_retry_policy());
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.final_text, "final after retry");
+        assert_eq!(backend.attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_with_jitter_does_not_retry_auth_failures() {
+        let backend = Arc::new(RetryingBackend::new(usize::MAX, ProviderError::AuthFailure));
+        let tl = make_tool_loop(backend.clone(), 25).with_retry_policy(test_retry_policy());
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        match &out.stop_reason {
+            StopReason::BackendError(msg) => {
+                assert!(msg.contains("authentication failed"), "msg={msg}");
+            }
+            other => panic!("expected BackendError, got {other:?}"),
+        }
+        assert_eq!(backend.attempts(), 1);
+    }
+
+    #[tokio::test]
     async fn parallel_tool_calls_dispatched_in_one_batch() {
         let backend = Arc::new(ParallelCallsBackend::new());
         let tl = make_tool_loop(backend, 25);
@@ -709,6 +1366,129 @@ mod tests {
         assert_eq!(msgs[1]["role"], "user");
     }
 
+    #[test]
+    fn context_overflow_detection_classifies_utilization_thresholds() {
+        let backend = Arc::new(FinalAnswerBackend {
+            text: "unused".into(),
+        });
+        let tl = make_tool_loop(backend, 25).with_model_profile(test_model_profile(2_000));
+
+        let ok_messages = messages_for_estimated_tokens(1_400);
+        assert_eq!(
+            tl.check_context_overflow(&ok_messages, tl.model_profile.as_ref().expect("model")),
+            OverflowAction::Ok
+        );
+
+        let recommended_messages = messages_for_estimated_tokens(1_700);
+        assert_eq!(
+            tl.check_context_overflow(
+                &recommended_messages,
+                tl.model_profile.as_ref().expect("model"),
+            ),
+            OverflowAction::CompactRecommended
+        );
+
+        let required_messages = messages_for_estimated_tokens(2_100);
+        assert_eq!(
+            tl.check_context_overflow(
+                &required_messages,
+                tl.model_profile.as_ref().expect("model"),
+            ),
+            OverflowAction::CompactRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_detection_prunes_before_next_request() {
+        let backend = Arc::new(OverflowCapturingBackend::new());
+        // Use a context window small enough that the 3 x 700-char tool
+        // results (~619 estimated tokens) exceed the 80% compaction
+        // target (770 * 0.8 = 616), triggering a prune pass that removes
+        // exactly one droppable message before the second backend call.
+        let tl = make_tool_loop(backend.clone(), 25).with_model_profile(test_model_profile(770));
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.final_text, "final after pruning");
+
+        let captured = backend.captured.lock();
+        assert_eq!(captured.len(), 2, "backend should be called twice");
+        let second_call_messages = &captured[1];
+        assert_eq!(
+            second_call_messages.len(),
+            5,
+            "one message should be pruned from the 6-message history"
+        );
+        assert_eq!(second_call_messages[0]["role"], "system");
+        assert_eq!(second_call_messages[1]["role"], "user");
+        assert!(
+            prune::estimate_message_tokens(second_call_messages)
+                <= ToolLoop::compaction_target(770),
+            "expected second request to be compacted below the 80% target",
+        );
+    }
+
+    #[test]
+    fn tool_result_compaction_runs_before_pruning() {
+        let backend = Arc::new(FinalAnswerBackend {
+            text: "unused".into(),
+        });
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "usr"}),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "old"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "old",
+                "content": "a".repeat(900),
+            }),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "recent-1"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "recent-1",
+                "content": "b".repeat(900),
+            }),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "recent-2"}]}),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "recent-2",
+                "content": "c".repeat(900),
+            }),
+        ];
+        let mut compacted = messages.clone();
+        compaction::compact_tool_results(&mut compacted);
+
+        let before_tokens = prune::estimate_message_tokens(&messages);
+        let compacted_tokens = prune::estimate_message_tokens(&compacted);
+        assert!(
+            compacted_tokens < before_tokens,
+            "compaction should shrink old results"
+        );
+
+        let target = compacted_tokens + ((before_tokens - compacted_tokens) / 2).max(1);
+        let limit = (target * 100).div_ceil(80);
+        let tl = make_tool_loop(backend, 25).with_model_profile(test_model_profile(limit as u64));
+
+        tl.prune_context_if_needed(&mut messages);
+
+        assert_eq!(
+            messages.len(),
+            8,
+            "compaction should avoid dropping messages"
+        );
+        assert_eq!(messages[3]["tool_call_id"], "old");
+        assert!(
+            messages[3]["content"]
+                .as_str()
+                .expect("compacted old content")
+                .contains("[truncated, 900 chars total]"),
+        );
+        assert_eq!(messages[5]["content"], "b".repeat(900));
+        assert_eq!(messages[7]["content"], "c".repeat(900));
+    }
+
     #[tokio::test]
     async fn tool_call_ids_flow_through_to_result_messages() {
         let capturing = Arc::new(CapturingBackend::new());
@@ -735,6 +1515,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_extraction_runs_after_each_turn() {
+        let backend = Arc::new(SessionTrackingBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(backend.extracted_sessions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn session_continuity_passes_previous_state_into_next_turn() {
+        let backend = Arc::new(SessionContinuityBackend::new());
+        let tl = make_tool_loop(backend.clone(), 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+
+        let seen_sessions = backend.seen_sessions.lock();
+        assert_eq!(seen_sessions.len(), 2);
+        assert_eq!(seen_sessions[0].session_id, None);
+        assert_eq!(seen_sessions[1].session_id.as_deref(), Some("session-1"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_preservation_across_loop_turns() {
+        let capturing = Arc::new(ReasoningCaptureBackend::new());
+        let backend = capturing.clone() as Arc<dyn LlmBackend>;
+        let tl = make_tool_loop(backend, 25);
+        let ctx = ToolContext::testing("/tmp");
+
+        let out = tl.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out.stop_reason, StopReason::Stop);
+        assert_eq!(out.iterations, 3);
+        assert_eq!(out.final_text, "final");
+
+        let captured = capturing.captured.lock();
+        assert_eq!(captured.len(), 4, "backend should be called four times");
+
+        let fourth_turn_msgs = &captured[3];
+        let reasoning_values: Vec<&str> = fourth_turn_msgs
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .filter_map(|message| message["reasoning_content"].as_str())
+            .collect();
+        assert_eq!(
+            reasoning_values,
+            vec!["reasoning turn 1", "reasoning turn 2", "reasoning turn 3"]
+        );
+    }
+
+    #[tokio::test]
     async fn resume_continues_from_checkpoint() {
         // Run a loop that hits max iterations at 3.
         let backend = Arc::new(AlwaysToolCallBackend);
@@ -756,6 +1592,42 @@ mod tests {
         assert_eq!(out2.iterations, 5);
         // 3 from the first run (in the checkpoint) + 2 new ones.
         assert_eq!(out2.tool_calls.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_persistence_survives_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let checkpoint_path = dir
+            .path()
+            .join(".roko")
+            .join("state")
+            .join("tool-loop-task-1.json");
+        let ctx = ToolContext::testing(dir.path());
+
+        let first = make_tool_loop(Arc::new(CheckpointPersistenceBackend), 1)
+            .with_checkpoint_path(checkpoint_path.clone());
+        let out1 = first.run("system", "user", &test_tools(), &ctx).await;
+
+        assert_eq!(out1.stop_reason, StopReason::MaxIterations);
+        assert!(checkpoint_path.exists(), "checkpoint should be persisted");
+
+        let persisted = Checkpoint::load(&checkpoint_path).expect("load persisted checkpoint");
+        assert_eq!(persisted.iterations, 1);
+        assert_eq!(persisted.tool_calls.len(), 1);
+        assert_eq!(persisted.tool_calls[0].id, "persist-1");
+
+        let resumed = make_tool_loop(Arc::new(CheckpointPersistenceBackend), 5)
+            .with_checkpoint_path(checkpoint_path.clone());
+        let out2 = resumed.run("ignored", "ignored", &test_tools(), &ctx).await;
+
+        assert_eq!(out2.stop_reason, StopReason::Stop);
+        assert_eq!(out2.iterations, 1);
+        assert_eq!(out2.tool_calls.len(), 1);
+        assert_eq!(out2.final_text, "resumed final answer");
+        assert!(
+            !checkpoint_path.exists(),
+            "successful completion should clear the persisted checkpoint"
+        );
     }
 
     #[tokio::test]

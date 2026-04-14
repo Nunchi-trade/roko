@@ -1,5 +1,6 @@
-//! Parse `tasks.toml` into structured task definitions with tiers, context,
-//! dependencies, model hints, and per-task verification pipelines.
+//! Parse `tasks.toml` into structured task definitions with tiers, operating
+//! frequencies, context, dependencies, model hints, and per-task verification
+//! pipelines.
 //!
 //! This is the bridge between the plan generator output and the orchestrator.
 //! It reads the extended task format (with `tier`, `model_hint`, `context`,
@@ -10,8 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use roko_core::OperatingFrequency;
 use roko_orchestrator::ReplanStrategy;
-use roko_std::RESEARCHER_TOOL_PROFILE;
+use roko_std::denied_tools_for_role;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Parsed `[meta]` section of tasks.toml.
@@ -47,6 +49,9 @@ pub struct TaskDef {
     pub status: String,
     /// Task complexity tier: mechanical, focused, integrative, architectural.
     pub tier: String,
+    /// Optional operating frequency override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<OperatingFrequency>,
     /// Suggested model for this task.
     pub model_hint: Option<String>,
     /// Explicit replan strategy override for this task.
@@ -93,6 +98,8 @@ struct TaskDefSerde {
     pub status: String,
     #[serde(default = "default_tier")]
     pub tier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<OperatingFrequency>,
     #[serde(default)]
     pub model_hint: Option<String>,
     #[serde(default)]
@@ -134,6 +141,7 @@ impl From<TaskDefSerde> for TaskDef {
             role: raw.role,
             status: raw.status,
             tier: raw.tier,
+            frequency: raw.frequency,
             model_hint: raw.model_hint,
             replan_strategy: raw.replan_strategy,
             max_loc: raw.max_loc,
@@ -165,7 +173,7 @@ pub enum TaskValidationIssue {
         /// Missing field name.
         field: &'static str,
     },
-    /// A dependency points at a task that does not exist in the plan.
+    /// A dependency points at a task or plan that does not exist.
     UnknownDependency {
         /// Task identifier being validated.
         task_id: String,
@@ -227,7 +235,7 @@ impl std::fmt::Display for TaskValidationIssue {
                 task_id,
                 dependency,
             } => {
-                write!(f, "{task_id}: depends on unknown task `{dependency}`")
+                write!(f, "{task_id}: depends on unknown dependency `{dependency}`")
             }
             Self::CircularDependency { cycle } => {
                 write!(f, "circular dependency detected: {}", cycle.join(" -> "))
@@ -305,7 +313,72 @@ fn default_max_retries() -> u32 {
     3
 }
 
+fn is_valid_plan_dependency_reference(dependency: &str, current_plan: &str) -> bool {
+    let dependency = dependency.trim();
+    if dependency.is_empty() || dependency == current_plan {
+        return false;
+    }
+    if dependency.starts_with('.') || dependency.starts_with('-') || dependency.contains("..") {
+        return false;
+    }
+
+    dependency.chars().all(|ch| {
+        !matches!(
+            ch,
+            '/' | '\\' | '\0' | '~' | '^' | ':' | '?' | '*' | '[' | '@'
+        ) && !ch.is_whitespace()
+            && !ch.is_control()
+    })
+}
+
+fn infer_operating_frequency(description: Option<&str>) -> OperatingFrequency {
+    let Some(description) = description else {
+        return OperatingFrequency::Theta;
+    };
+
+    let description = description.to_ascii_lowercase();
+    if description.contains("fix")
+        || description.contains("quick")
+        || description.contains("typo")
+        || description.contains("rename")
+    {
+        OperatingFrequency::Gamma
+    } else if description.contains("plan")
+        || description.contains("design")
+        || description.contains("architect")
+        || description.contains("consolidate")
+        || description.contains("dream")
+    {
+        OperatingFrequency::Delta
+    } else {
+        OperatingFrequency::Theta
+    }
+}
+
 impl TaskDef {
+    /// Whether this task may benefit from pre-dispatch search context enrichment.
+    ///
+    /// Returns `true` for complex tiers (`architectural`, `integrative`) that
+    /// typically benefit from real-world examples and best-practice documentation
+    /// found via the Perplexity Sonar search API.
+    #[must_use]
+    pub fn needs_external_context(&self) -> bool {
+        matches!(self.tier.as_str(), "architectural" | "integrative")
+    }
+
+    /// Map the task to an operating frequency.
+    ///
+    /// If the task declares a frequency, use it. Otherwise infer it from the
+    /// description:
+    /// - contains `fix`, `quick`, `typo`, or `rename` → `Gamma`
+    /// - contains `plan`, `design`, `architect`, `consolidate`, or `dream` → `Delta`
+    /// - otherwise → `Theta`
+    #[must_use]
+    pub fn operating_frequency(&self) -> OperatingFrequency {
+        self.frequency
+            .unwrap_or_else(|| infer_operating_frequency(self.description.as_deref()))
+    }
+
     /// Get the model to use for this task, falling back through:
     /// 1. model_hint from task definition
     /// 2. tier_models from config (if provided)
@@ -458,18 +531,8 @@ impl TaskDef {
             return;
         }
 
-        if self
-            .role
-            .as_deref()
-            .is_some_and(|role| role.eq_ignore_ascii_case("researcher"))
-        {
-            self.denied_tools = Some(
-                RESEARCHER_TOOL_PROFILE
-                    .denied_tools
-                    .iter()
-                    .map(|tool| (*tool).to_string())
-                    .collect(),
-            );
+        if let Some(denied) = self.role.as_deref().and_then(denied_tools_for_role) {
+            self.denied_tools = Some(denied.iter().map(|tool| (*tool).to_string()).collect());
         }
     }
 }
@@ -682,6 +745,7 @@ impl TasksFile {
     pub fn validate_structure(&self) -> Vec<TaskValidationIssue> {
         let mut issues = Vec::new();
         let task_ids: HashSet<&str> = self.tasks.iter().map(|task| task.id.as_str()).collect();
+        let current_plan = self.meta.plan.trim();
 
         for task in &self.tasks {
             let tid = task.id.trim();
@@ -710,6 +774,15 @@ impl TasksFile {
 
             for dependency in &task.depends_on {
                 if !task_ids.contains(dependency.as_str()) {
+                    issues.push(TaskValidationIssue::UnknownDependency {
+                        task_id: task.id.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+
+            for dependency in &task.depends_on_plan {
+                if !is_valid_plan_dependency_reference(dependency, current_plan) {
                     issues.push(TaskValidationIssue::UnknownDependency {
                         task_id: task.id.clone(),
                         dependency: dependency.clone(),
@@ -980,6 +1053,7 @@ id = "T1"
 title = "Wire module"
 role = "researcher"
 tier = "focused"
+frequency = "delta"
 model_hint = "claude-sonnet-4-6"
 replan_strategy = "decompose"
 max_loc = 50
@@ -1008,6 +1082,7 @@ command = "cargo check -p roko-cli"
         let parsed: TasksFile = toml::from_str(toml).unwrap();
         let task = &parsed.tasks[0];
         assert_eq!(task.tier, "focused");
+        assert_eq!(task.frequency, Some(OperatingFrequency::Delta));
         assert_eq!(task.model_hint.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(task.replan_strategy, Some(ReplanStrategy::Decompose));
         assert_eq!(task.max_loc, Some(50));
@@ -1021,16 +1096,12 @@ command = "cargo check -p roko-cli"
             Some(vec!["filesystem".into(), "git".into()])
         );
         assert_eq!(task.max_retries, 5);
-        assert_eq!(
-            task.denied_tools,
-            Some(
-                RESEARCHER_TOOL_PROFILE
-                    .denied_tools
-                    .iter()
-                    .map(|tool| (*tool).to_string())
-                    .collect()
-            )
-        );
+        let expected_denied: Vec<String> = denied_tools_for_role("researcher")
+            .unwrap()
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect();
+        assert_eq!(task.denied_tools, Some(expected_denied));
         assert_eq!(task.timeout_secs, 600);
         assert!(task.context.is_some());
         let ctx = task.context.as_ref().unwrap();
@@ -1039,6 +1110,7 @@ command = "cargo check -p roko-cli"
         assert_eq!(ctx.anti_patterns.len(), 1);
         assert_eq!(task.verify.len(), 2);
         let rendered = toml::to_string(&parsed).unwrap();
+        assert!(rendered.contains("frequency = \"delta\""));
         assert!(rendered.contains("replan_strategy = \"decompose\""));
     }
 
@@ -1051,6 +1123,7 @@ command = "cargo check -p roko-cli"
             role: None,
             status: "ready".into(),
             tier: "mechanical".into(),
+            frequency: None,
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
@@ -1082,6 +1155,119 @@ command = "cargo check -p roko-cli"
             ..task
         };
         assert_eq!(t3.effective_model("fallback", None), "custom-model");
+    }
+
+    #[test]
+    fn operating_frequency_uses_explicit_frequency() {
+        let task = TaskDef {
+            id: "T1".into(),
+            title: "test".into(),
+            description: Some("test task".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "mechanical".into(),
+            frequency: Some(OperatingFrequency::Gamma),
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(task.operating_frequency(), OperatingFrequency::Gamma);
+    }
+
+    #[test]
+    fn operating_frequency_infers_from_description() {
+        let reactive = TaskDef {
+            id: "T1".into(),
+            title: "test".into(),
+            description: Some("quick fix the typo in the rename flow".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "mechanical".into(),
+            frequency: None,
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(reactive.operating_frequency(), OperatingFrequency::Gamma);
+
+        let reflective = TaskDef {
+            id: "T2".into(),
+            title: "plan".into(),
+            description: Some("plan and design a consolidation pass".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "focused".into(),
+            frequency: None,
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(reflective.operating_frequency(), OperatingFrequency::Delta);
+
+        let deliberative = TaskDef {
+            id: "T3".into(),
+            title: "implement".into(),
+            description: Some("implement code change".into()),
+            role: None,
+            status: "ready".into(),
+            tier: "architectural".into(),
+            frequency: None,
+            model_hint: None,
+            replan_strategy: None,
+            max_loc: None,
+            files: vec![],
+            allowed_tools: None,
+            denied_tools: None,
+            mcp_servers: None,
+            depends_on: vec![],
+            depends_on_plan: vec![],
+            split_into: None,
+            context: None,
+            verify: vec![],
+            timeout_secs: 600,
+            max_retries: 3,
+            acceptance: vec![],
+        };
+        assert_eq!(
+            deliberative.operating_frequency(),
+            OperatingFrequency::Theta
+        );
     }
 
     #[test]
@@ -1213,21 +1399,68 @@ depends_on = ["missing"]
         .unwrap();
 
         let issues = tasks.validate_structure();
-        assert!(
-            issues
-                .iter()
-                .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. }))
-        );
-        assert!(
-            issues
-                .iter()
-                .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. }))
-        );
-        assert!(
-            issues
-                .iter()
-                .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode))
-        );
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. })));
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. })));
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode)));
+    }
+
+    #[test]
+    fn validate_structure_accepts_valid_plan_dependencies() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "consumer-plan"
+total = 1
+
+[[task]]
+id = "T1"
+title = "consume upstream work"
+description = "wait for upstream"
+depends_on = []
+depends_on_plan = ["upstream-core", "shared-utils"]
+"#,
+        )
+        .unwrap();
+
+        assert!(tasks.validate_structure().is_empty());
+    }
+
+    #[test]
+    fn validate_structure_reports_invalid_plan_dependencies() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "consumer-plan"
+total = 1
+
+[[task]]
+id = "T1"
+title = "consume upstream work"
+description = "wait for upstream"
+depends_on = []
+depends_on_plan = ["consumer-plan", "upstream:task"]
+"#,
+        )
+        .unwrap();
+
+        let issues = tasks.validate_structure();
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().any(|issue| matches!(
+            issue,
+            TaskValidationIssue::UnknownDependency { dependency, .. }
+                if dependency == "consumer-plan"
+        )));
+        assert!(issues.iter().any(|issue| matches!(
+            issue,
+            TaskValidationIssue::UnknownDependency { dependency, .. }
+                if dependency == "upstream:task"
+        )));
     }
 
     #[test]
@@ -1316,6 +1549,7 @@ depends_on = []
                 role: None,
                 status: "ready".into(),
                 tier: "focused".into(),
+                frequency: None,
                 model_hint: None,
                 replan_strategy: None,
                 max_loc: None,
@@ -1395,6 +1629,7 @@ depends_on = ["other-plan:T3"]
             role: None,
             status: "ready".into(),
             tier: "focused".into(),
+            frequency: None,
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
@@ -1429,6 +1664,7 @@ depends_on = ["other-plan:T3"]
             role: None,
             status: "ready".into(),
             tier: "focused".into(),
+            frequency: None,
             model_hint: None,
             replan_strategy: None,
             max_loc: None,
@@ -1525,5 +1761,124 @@ read_files = [{ path = "src/lib.rs" }]
 "#;
         let issues = validate_modern_fields_content(content).unwrap();
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_reviewer_denies_write_tools() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Review code"
+role = "reviewer"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("reviewer should have denied_tools");
+        assert!(denied.contains(&"write_file".to_string()));
+        assert!(denied.contains(&"edit_file".to_string()));
+        assert!(!denied.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_strategist_denies_destructive_tools() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Plan work"
+role = "strategist"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("strategist should have denied_tools");
+        assert!(denied.contains(&"write_file".to_string()));
+        assert!(denied.contains(&"edit_file".to_string()));
+        assert!(denied.contains(&"bash".to_string()));
+        assert!(denied.contains(&"run_tests".to_string()));
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_scribe_denies_exec_tools() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Write docs"
+role = "scribe"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("scribe should have denied_tools");
+        assert!(denied.contains(&"bash".to_string()));
+        assert!(denied.contains(&"run_tests".to_string()));
+        // Scribe CAN write files.
+        assert!(!denied.contains(&"write_file".to_string()));
+        assert!(!denied.contains(&"edit_file".to_string()));
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_implementer_has_no_denials() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Write code"
+role = "implementer"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        assert!(
+            task.denied_tools.is_none(),
+            "implementer should have no denied tools"
+        );
+    }
+
+    #[test]
+    fn apply_role_tool_defaults_auditor_gets_reviewer_profile() {
+        let toml = r#"
+[meta]
+plan = "test"
+total = 1
+
+[[task]]
+id = "T1"
+title = "Audit code"
+role = "auditor"
+depends_on = []
+"#;
+        let parsed: TasksFile = toml::from_str(toml).unwrap();
+        let task = &parsed.tasks[0];
+        let denied = task
+            .denied_tools
+            .as_ref()
+            .expect("auditor should have denied_tools");
+        assert!(denied.contains(&"write_file".to_string()));
+        assert!(denied.contains(&"edit_file".to_string()));
     }
 }

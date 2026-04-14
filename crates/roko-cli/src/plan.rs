@@ -19,6 +19,8 @@ pub struct PlanSummary {
     pub completed: bool,
     /// Whether the plan's `tasks.toml` is missing modern fields.
     pub old_format: bool,
+    /// Last error message from executor state, if any.
+    pub last_error: Option<String>,
 }
 
 impl std::fmt::Display for PlanSummary {
@@ -88,6 +90,7 @@ impl Plan {
             task_count: self.tasks.len(),
             completed,
             old_format: false,
+            last_error: None,
         }
     }
 
@@ -276,6 +279,7 @@ mod tests {
             task_count: 3,
             completed: false,
             old_format: false,
+            last_error: None,
         }];
         let text = format_plan_list(&summaries);
         assert!(text.contains("p1"));
@@ -292,6 +296,7 @@ mod tests {
                 task_count: 1,
                 completed: true,
                 old_format: false,
+                last_error: None,
             },
             PlanSummary {
                 id: "b".into(),
@@ -299,6 +304,7 @@ mod tests {
                 task_count: 2,
                 completed: false,
                 old_format: true,
+                last_error: None,
             },
         ];
         let json = format_plan_list_json(&summaries);
@@ -345,6 +351,7 @@ mod tests {
             task_count: 5,
             completed: true,
             old_format: true,
+            last_error: None,
         };
         let text = summary.to_string();
         assert!(text.contains("p1"));

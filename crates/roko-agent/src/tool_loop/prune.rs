@@ -18,7 +18,7 @@ const TAIL_KEEP: usize = 3;
 ///
 /// This is a cheap heuristic, not a real tokenizer.  Good enough for
 /// budget-guard decisions where +/- 20% doesn't matter.
-fn estimate_tokens(messages: &[serde_json::Value]) -> usize {
+pub(crate) fn estimate_message_tokens(messages: &[serde_json::Value]) -> usize {
     messages
         .iter()
         .map(|m| serde_json::to_string(m).map_or(0, |s| s.len()))
@@ -40,7 +40,7 @@ pub fn prune_if_needed(messages: &mut Vec<serde_json::Value>, token_limit: usize
     if messages.len() <= min_len {
         return;
     }
-    while estimate_tokens(messages) > token_limit && messages.len() > min_len {
+    while estimate_message_tokens(messages) > token_limit && messages.len() > min_len {
         // Remove the oldest droppable message (first one after the head).
         messages.remove(HEAD_KEEP);
     }

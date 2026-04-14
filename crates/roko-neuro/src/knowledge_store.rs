@@ -5,38 +5,72 @@
 //! (`decay` and `gc`) rewrite the file atomically through a temporary
 //! sibling.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{KnowledgeEntry, KnowledgeKind};
+#[cfg(feature = "hdc")]
+use crate::hdc::KnowledgeHdcEncoder;
+use crate::{KnowledgeEntry, KnowledgeKind, NeuroStore};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
+/// Minimum retained confidence for AntiKnowledge entries.
+const ANTI_KNOWLEDGE_CONFIDENCE_FLOOR: f64 = 0.3;
 /// Multiplier applied when a knowledge entry has multiple independent sources.
 const CONFIRMATION_BOOST: f64 = 1.5;
+/// Minimum number of shared tags for two entries to be considered similar.
+const MIN_TAG_OVERLAP: usize = 1;
+/// Minimum number of shared content keywords for two entries to be
+/// considered similar (applied when tag overlap meets the threshold).
+const MIN_KEYWORD_OVERLAP: usize = 2;
+
+/// A record emitted when a newly ingested knowledge entry overlaps with
+/// an existing entry, indicating that an insight has been independently
+/// confirmed by a separate episode.
+///
+/// These records are consumed by the C-Factor metrics
+/// (`knowledge_integration_rate` and `convergence_velocity`) in
+/// `roko-learn`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeConfirmationRecord {
+    /// Timestamp of the confirmation event.
+    pub created_at: DateTime<Utc>,
+    /// Combined source episodes from the existing entry and the new entry.
+    pub source_episodes: Vec<String>,
+    /// ID of the existing entry that was confirmed.
+    pub confirmed_entry_id: String,
+    /// ID of the new entry that confirmed the existing one.
+    pub confirming_entry_id: String,
+}
 
 #[cfg(feature = "hdc")]
 const HDC_VECTOR_BYTES: usize = 1280;
 
 #[cfg(feature = "hdc")]
-use bardo_primitives::hdc::HdcVector;
+use roko_primitives::hdc::HdcVector;
 
 /// Persistent knowledge store backed by an append-only JSONL file.
 ///
 /// The store is cheap to clone: it holds the path and a process-local
 /// write gate so that concurrent maintenance operations never interleave
 /// file rewrites.
+///
+/// When new entries overlap with existing entries (by tag and keyword
+/// similarity), the store emits [`KnowledgeConfirmationRecord`]s to a
+/// sibling JSONL file. These records feed the C-Factor metrics
+/// `knowledge_integration_rate` and `convergence_velocity`.
 #[derive(Debug, Clone)]
 pub struct KnowledgeStore {
     path: PathBuf,
+    confirmations_path: PathBuf,
     write_gate: Arc<Mutex<()>>,
 }
 
@@ -57,10 +91,19 @@ pub struct KnowledgeStats {
 
 impl KnowledgeStore {
     /// Construct a store pointed at an explicit JSONL path.
+    ///
+    /// Confirmation records are written to a sibling file named
+    /// `knowledge-confirmations.jsonl` in the same directory.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let confirmations_path = path
+            .parent()
+            .map(|parent| parent.join("knowledge-confirmations.jsonl"))
+            .unwrap_or_else(|| PathBuf::from("knowledge-confirmations.jsonl"));
         Self {
-            path: path.into(),
+            path,
+            confirmations_path,
             write_gate: Arc::new(Mutex::new(())),
         }
     }
@@ -70,12 +113,7 @@ impl KnowledgeStore {
     /// The resulting file is `.roko/neuro/knowledge.jsonl`.
     #[must_use]
     pub fn for_roko_dir(roko_dir: impl AsRef<Path>) -> Self {
-        Self::new(
-            roko_dir
-                .as_ref()
-                .join("neuro")
-                .join("knowledge.jsonl"),
-        )
+        Self::new(roko_dir.as_ref().join("neuro").join("knowledge.jsonl"))
     }
 
     /// Construct a store from a workspace root.
@@ -104,6 +142,12 @@ impl KnowledgeStore {
         &self.path
     }
 
+    /// Path of the confirmation records JSONL file.
+    #[must_use]
+    pub fn confirmations_path(&self) -> &Path {
+        &self.confirmations_path
+    }
+
     /// Append a knowledge entry to the JSONL log.
     ///
     /// # Errors
@@ -111,23 +155,90 @@ impl KnowledgeStore {
     /// Returns an error if the directory cannot be created, the entry
     /// cannot be serialized, or the write fails.
     pub fn add(&self, entry: KnowledgeEntry) -> Result<()> {
+        self.ingest(vec![entry])
+    }
+
+    /// Append a batch of knowledge entries to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created, an entry
+    /// cannot be serialized, or the write fails.
+    pub fn ingest(&self, entries: Vec<KnowledgeEntry>) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let entries = prepare_entries_for_ingest(entries);
+
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
         }
 
         let _guard = self.write_gate.lock();
-        let mut line = serde_json::to_string(&entry).context("serialize knowledge entry")?;
-        line.push('\n');
+
+        let mut has_antiknowledge = false;
+        for entry in &entries {
+            if entry.kind == KnowledgeKind::AntiKnowledge
+                && entry
+                    .refuted_insight_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|refuted_id| !refuted_id.is_empty())
+            {
+                has_antiknowledge = true;
+                break;
+            }
+        }
+
+        if has_antiknowledge {
+            let mut current = self.read_all()?;
+            current.extend(entries.iter().cloned());
+
+            for anti in &entries {
+                if anti.kind != KnowledgeKind::AntiKnowledge {
+                    continue;
+                }
+
+                let Some(refuted_id) = anti.refuted_insight_id.as_deref().map(str::trim) else {
+                    continue;
+                };
+                if refuted_id.is_empty() {
+                    continue;
+                }
+
+                if let Some(original) = current.iter_mut().find(|entry| entry.id == refuted_id) {
+                    original.confidence *= 0.5;
+                }
+            }
+
+            self.rewrite_all(&current)?;
+            return Ok(());
+        }
+
+        // Detect confirmations by comparing new entries against existing ones.
+        let existing = self.read_all().unwrap_or_default();
+        let confirmations = detect_confirmations(&existing, &entries);
 
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("open knowledge store at {}", self.path.display()))?;
-        file.write_all(line.as_bytes())
-            .context("append knowledge entry")?;
+        for entry in entries {
+            let mut line = serde_json::to_string(&entry).context("serialize knowledge entry")?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .context("append knowledge entry")?;
+        }
         file.flush().context("flush knowledge entry")?;
         file.sync_all().context("sync knowledge entry")?;
+
+        // Append confirmation records to the sibling JSONL file.
+        if !confirmations.is_empty() {
+            self.append_confirmations(&confirmations)?;
+        }
+
         Ok(())
     }
 
@@ -142,6 +253,38 @@ impl KnowledgeStore {
     ///
     /// Returns an error if the backing file cannot be read.
     pub fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        self.query_filtered(topic, limit, |_| true)
+    }
+
+    /// Query the store for entries of a specific knowledge kind relevant to
+    /// `topic`.
+    ///
+    /// This is a thin extension over [`KnowledgeStore::query`] used by prompt
+    /// assembly to recall only the highest-tier distilled guidance (for
+    /// example, StrategyFragment entries) without pulling lower-tier noise into the
+    /// prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_kind(
+        &self,
+        topic: &str,
+        kind: KnowledgeKind,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.query_filtered(topic, limit, |entry| entry.kind == kind)
+    }
+
+    fn query_filtered<F>(
+        &self,
+        topic: &str,
+        limit: usize,
+        mut include: F,
+    ) -> Result<Vec<KnowledgeEntry>>
+    where
+        F: FnMut(&KnowledgeEntry) -> bool,
+    {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -154,6 +297,9 @@ impl KnowledgeStore {
         let mut scored: Vec<(f64, KnowledgeEntry)> = entries
             .into_iter()
             .filter_map(|entry| {
+                if !include(&entry) {
+                    return None;
+                }
                 let keyword_score = keyword_score(&entry, &topic_terms, &topic_norm);
                 let recency = recency_factor(&entry, now);
                 let confidence = effective_confidence(&entry);
@@ -231,17 +377,24 @@ impl KnowledgeStore {
     /// # Errors
     ///
     /// Returns an error if the store cannot be read or rewritten.
-    pub fn decay(&self) -> Result<()> {
+    pub fn decay(&self) -> Result<usize> {
         let _guard = self.write_gate.lock();
         let now = Utc::now();
         let mut entries = self.read_all()?;
+        let decayed = entries.len();
 
         for entry in &mut entries {
             let factor = recency_factor(entry, now);
-            entry.confidence = (entry.confidence.max(0.0) * factor).clamp(0.0, 1.0);
+            let decayed_confidence = (entry.confidence.max(0.0) * factor).clamp(0.0, 1.0);
+            entry.confidence = if entry.kind == KnowledgeKind::AntiKnowledge {
+                decayed_confidence.max(ANTI_KNOWLEDGE_CONFIDENCE_FLOOR)
+            } else {
+                decayed_confidence
+            };
         }
 
-        self.rewrite_all(&entries)
+        self.rewrite_all(&entries)?;
+        Ok(decayed)
     }
 
     /// Garbage-collect entries whose confidence falls below `min_confidence`.
@@ -249,31 +402,43 @@ impl KnowledgeStore {
     /// # Errors
     ///
     /// Returns an error if the store cannot be read or rewritten.
-    pub fn gc(&self, min_confidence: f64) -> Result<()> {
+    pub fn gc(&self, min_confidence: f64) -> Result<usize> {
         let _guard = self.write_gate.lock();
         let threshold = min_confidence.max(0.0);
-        let entries = self
-            .read_all()?
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let entries = before
             .into_iter()
-            .filter(|entry| effective_confidence(entry) >= threshold)
+            .filter(|entry| {
+                entry.kind == KnowledgeKind::AntiKnowledge
+                    || effective_confidence(entry) >= threshold
+            })
             .collect::<Vec<_>>();
-        self.rewrite_all(&entries)
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
     }
 
-    fn read_all(&self) -> Result<Vec<KnowledgeEntry>> {
+    /// Read all knowledge entries from the store.
+    pub fn read_all(&self) -> Result<Vec<KnowledgeEntry>> {
         let file = match File::open(&self.path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err).with_context(|| {
-                format!("open knowledge store at {}", self.path.display())
-            }),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("open knowledge store at {}", self.path.display()));
+            }
         };
 
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
         for (line_idx, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
-                format!("read knowledge line {} from {}", line_idx + 1, self.path.display())
+                format!(
+                    "read knowledge line {} from {}",
+                    line_idx + 1,
+                    self.path.display()
+                )
             })?;
             if line.trim().is_empty() {
                 continue;
@@ -283,6 +448,70 @@ impl KnowledgeStore {
             }
         }
         Ok(entries)
+    }
+
+    /// Read all confirmation records from the confirmations JSONL file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read.
+    pub fn read_confirmations(&self) -> Result<Vec<KnowledgeConfirmationRecord>> {
+        let file = match File::open(&self.confirmations_path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "open confirmations file at {}",
+                        self.confirmations_path.display()
+                    )
+                });
+            }
+        };
+
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+        for line in reader.lines() {
+            let line = line.context("read confirmation line")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(record) = serde_json::from_str::<KnowledgeConfirmationRecord>(&line) {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    fn append_confirmations(&self, records: &[KnowledgeConfirmationRecord]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(parent) = self.confirmations_path.parent() {
+            fs::create_dir_all(parent).context("create confirmations directory")?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.confirmations_path)
+            .with_context(|| {
+                format!(
+                    "open confirmations file at {}",
+                    self.confirmations_path.display()
+                )
+            })?;
+        for record in records {
+            let mut line =
+                serde_json::to_string(record).context("serialize confirmation record")?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .context("append confirmation record")?;
+        }
+        file.flush().context("flush confirmation records")?;
+        file.sync_all().context("sync confirmation records")?;
+        Ok(())
     }
 
     fn rewrite_all(&self, entries: &[KnowledgeEntry]) -> Result<()> {
@@ -332,11 +561,33 @@ impl KnowledgeStore {
     }
 }
 
+impl NeuroStore for KnowledgeStore {
+    fn init(path: &Path) -> Result<Self> {
+        Ok(Self::new(path))
+    }
+
+    fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        KnowledgeStore::query(self, topic, limit)
+    }
+
+    fn ingest(&mut self, entries: Vec<KnowledgeEntry>) -> Result<()> {
+        KnowledgeStore::ingest(self, entries)
+    }
+
+    fn decay(&mut self) -> Result<usize> {
+        KnowledgeStore::decay(self)
+    }
+
+    fn gc(&mut self, min_confidence: f64) -> Result<usize> {
+        KnowledgeStore::gc(self, min_confidence)
+    }
+}
+
 #[cfg(feature = "hdc")]
 /// A precomputed HDC index over durable knowledge entries.
 ///
 /// The index fingerprints each entry's content with
-/// [`bardo_primitives::hdc::HdcVector::from_seed`] and stores the
+/// [`roko_primitives::hdc::HdcVector::from_seed`] and stores the
 /// resulting vectors alongside the source entries. Searches fingerprint
 /// the query string once and rank entries by HDC similarity, which keeps
 /// semantic lookup fast when the corpus is already indexed.
@@ -403,7 +654,7 @@ impl MemoryIndex {
             return Vec::new();
         }
 
-        let query_fingerprint = HdcVector::from_seed(query.as_bytes());
+        let query_fingerprint = KnowledgeHdcEncoder.encode_query(query);
         let mut scored: Vec<MemoryHit> = self
             .entries
             .iter()
@@ -433,7 +684,34 @@ impl MemoryIndex {
 
 #[cfg(feature = "hdc")]
 fn fingerprint_entry(entry: &KnowledgeEntry) -> HdcVector {
-    HdcVector::from_seed(entry.content.as_bytes())
+    if let Some(vector) = entry.hdc_vector.as_deref()
+        && let Ok(bytes) = <[u8; HDC_VECTOR_BYTES]>::try_from(vector)
+    {
+        return HdcVector::from_bytes(&bytes);
+    }
+    KnowledgeHdcEncoder.encode_entry(entry)
+}
+
+#[cfg(feature = "hdc")]
+fn prepare_entries_for_ingest(entries: Vec<KnowledgeEntry>) -> Vec<KnowledgeEntry> {
+    entries.into_iter().map(ensure_hdc_vector).collect()
+}
+
+#[cfg(not(feature = "hdc"))]
+fn prepare_entries_for_ingest(entries: Vec<KnowledgeEntry>) -> Vec<KnowledgeEntry> {
+    entries
+}
+
+#[cfg(feature = "hdc")]
+fn ensure_hdc_vector(mut entry: KnowledgeEntry) -> KnowledgeEntry {
+    let has_valid_vector = entry
+        .hdc_vector
+        .as_ref()
+        .is_some_and(|vector| vector.len() == HDC_VECTOR_BYTES);
+    if !has_valid_vector {
+        entry.hdc_vector = Some(fingerprint_entry(&entry).to_bytes().to_vec());
+    }
+    entry
 }
 
 #[cfg(feature = "hdc")]
@@ -453,7 +731,13 @@ fn compare_hits(left: &MemoryHit, right: &MemoryHit) -> std::cmp::Ordering {
 
 fn normalize(text: &str) -> String {
     text.chars()
-        .map(|ch| if ch.is_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
 }
 
@@ -474,13 +758,20 @@ fn keyword_score(entry: &KnowledgeEntry, terms: &[String], topic_norm: &str) -> 
         if content.contains(topic_norm) {
             score += 1.0;
         }
-        if tags.iter().any(|tag| tag.contains(topic_norm) || topic_norm.contains(tag)) {
+        if tags
+            .iter()
+            .any(|tag| tag.contains(topic_norm) || topic_norm.contains(tag))
+        {
             score += 1.0;
         }
     }
 
     for term in terms {
-        if content.contains(term) || tags.iter().any(|tag| tag.contains(term) || term.contains(tag)) {
+        if content.contains(term)
+            || tags
+                .iter()
+                .any(|tag| tag.contains(term) || term.contains(tag))
+        {
             score += 1.0;
         }
     }
@@ -499,15 +790,20 @@ fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
 }
 
 fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
-    if entry.half_life_days.is_finite() && entry.half_life_days > 0.0 {
-        entry.half_life_days
-    } else {
-        entry.kind.default_half_life_days()
-    }
+    entry.effective_half_life_days()
 }
 
 fn effective_confidence(entry: &KnowledgeEntry) -> f64 {
-    entry.confidence.clamp(0.0, 1.0) * confirmation_boost(entry)
+    bounded_confidence(entry) * confirmation_boost(entry) * entry.emotional_reliability_boost()
+}
+
+fn bounded_confidence(entry: &KnowledgeEntry) -> f64 {
+    let confidence = entry.confidence.clamp(0.0, 1.0);
+    if entry.kind == KnowledgeKind::AntiKnowledge {
+        confidence.max(ANTI_KNOWLEDGE_CONFIDENCE_FLOOR)
+    } else {
+        confidence
+    }
 }
 
 fn confirmation_boost(entry: &KnowledgeEntry) -> f64 {
@@ -535,15 +831,7 @@ fn compare_scores(
 }
 
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Fact => "fact",
-        KnowledgeKind::Insight => "insight",
-        KnowledgeKind::Procedure => "procedure",
-        KnowledgeKind::Heuristic => "heuristic",
-        KnowledgeKind::Playbook => "playbook",
-        KnowledgeKind::Constraint => "constraint",
-        KnowledgeKind::AntiKnowledge => "anti_knowledge",
-    }
+    kind.as_str()
 }
 
 #[cfg(feature = "hdc")]
@@ -555,15 +843,87 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
         return 0.0;
     };
     let entry_vec = HdcVector::from_bytes(&bytes);
-    let topic_vec = HdcVector::from_seed(topic.as_bytes());
+    let topic_vec = KnowledgeHdcEncoder.encode_query(topic);
     topic_vec.similarity(&entry_vec) as f64
+}
+
+/// Compare two knowledge entries for topic-level similarity using tag
+/// overlap and content keyword matching. This is deliberately lightweight
+/// (no ML, no embedding) to keep `ingest()` fast.
+fn entries_are_similar(existing: &KnowledgeEntry, new_entry: &KnowledgeEntry) -> bool {
+    // Skip AntiKnowledge entries -- they are refutations, not confirmations.
+    if existing.kind == KnowledgeKind::AntiKnowledge
+        || new_entry.kind == KnowledgeKind::AntiKnowledge
+    {
+        return false;
+    }
+
+    // Tag overlap: normalize and intersect.
+    let existing_tags: HashSet<String> = existing.tags.iter().map(|tag| normalize(tag)).collect();
+    let new_tags: HashSet<String> = new_entry.tags.iter().map(|tag| normalize(tag)).collect();
+    let tag_overlap = existing_tags.intersection(&new_tags).count();
+
+    if tag_overlap < MIN_TAG_OVERLAP {
+        return false;
+    }
+
+    // Content keyword overlap: tokenize and intersect.
+    let existing_keywords: HashSet<String> = tokenize(&existing.content).into_iter().collect();
+    let new_keywords: HashSet<String> = tokenize(&new_entry.content).into_iter().collect();
+    let keyword_overlap = existing_keywords.intersection(&new_keywords).count();
+
+    keyword_overlap >= MIN_KEYWORD_OVERLAP
+}
+
+/// Scan new entries against existing entries to find confirmations.
+///
+/// Returns a list of confirmation records for each (existing, new) pair
+/// where the entries are similar enough to indicate independent
+/// confirmation of the same insight.
+fn detect_confirmations(
+    existing: &[KnowledgeEntry],
+    new_entries: &[KnowledgeEntry],
+) -> Vec<KnowledgeConfirmationRecord> {
+    let now = Utc::now();
+    let mut confirmations = Vec::new();
+
+    for new_entry in new_entries {
+        for existing_entry in existing {
+            if existing_entry.id == new_entry.id {
+                continue;
+            }
+            if !entries_are_similar(existing_entry, new_entry) {
+                continue;
+            }
+
+            // Merge source episodes from both entries.
+            let mut source_episodes: Vec<String> = existing_entry
+                .source_episodes
+                .iter()
+                .chain(new_entry.source_episodes.iter())
+                .cloned()
+                .collect();
+            source_episodes.sort();
+            source_episodes.dedup();
+
+            confirmations.push(KnowledgeConfirmationRecord {
+                created_at: now,
+                source_episodes,
+                confirmed_entry_id: existing_entry.id.clone(),
+                confirming_entry_id: new_entry.id.clone(),
+            });
+        }
+    }
+
+    confirmations
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{KnowledgeKind, KnowledgeTier};
     use chrono::Duration;
-    use crate::KnowledgeKind;
+    use roko_core::PadVector;
     use tempfile::TempDir;
 
     fn entry(
@@ -578,15 +938,24 @@ mod tests {
         KnowledgeEntry {
             id: id.to_owned(),
             kind,
+            source: None,
             content: content.to_owned(),
             confidence,
+            confidence_weight: confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: source_episodes
                 .iter()
                 .map(|source| (*source).to_owned())
                 .collect(),
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            source_model: None,
+            model_generality: 1.0,
             created_at,
             half_life_days: kind.default_half_life_days(),
+            tier: KnowledgeTier::Consolidated,
+            emotional_tag: None,
+            emotional_provenance: None,
             hdc_vector: None,
         }
     }
@@ -599,7 +968,7 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "Rust async actors and memory stores",
                 &["rust", "async"],
@@ -610,7 +979,7 @@ mod tests {
             .expect("add first");
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "Rust data pipelines",
                 &["rust"],
@@ -621,7 +990,7 @@ mod tests {
             .expect("add second");
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k3",
                 "Completely unrelated note",
                 &["misc"],
@@ -667,6 +1036,90 @@ mod tests {
     }
 
     #[test]
+    fn query_prefers_entries_validated_across_diverse_emotional_states() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut high_diversity = entry(
+            KnowledgeKind::Warning,
+            "k-diverse",
+            "Check rollback health before retrying a failed rollout",
+            &["deploy", "rollback"],
+            0.8,
+            &["ep-a", "ep-b"],
+            now,
+        );
+        high_diversity.emotional_provenance = Some(crate::EmotionalProvenance {
+            average_pad: PadVector::new(-0.2, 0.3, 0.0),
+            discovery_emotion: "negative_high_arousal".to_string(),
+            validation_arc: Some(crate::ValidationArc::Redemptive),
+            emotional_diversity: 1.0,
+        });
+
+        let mut low_diversity = entry(
+            KnowledgeKind::Warning,
+            "k-narrow",
+            "Check rollback health before retrying a failed rollout",
+            &["deploy", "rollback"],
+            0.8,
+            &["ep-c", "ep-d"],
+            now,
+        );
+        low_diversity.emotional_provenance = Some(crate::EmotionalProvenance {
+            average_pad: PadVector::new(-0.2, 0.3, 0.0),
+            discovery_emotion: "negative_high_arousal".to_string(),
+            validation_arc: Some(crate::ValidationArc::Stable),
+            emotional_diversity: 0.0,
+        });
+
+        store.add(low_diversity).expect("add narrow");
+        store.add(high_diversity).expect("add diverse");
+
+        let results = store
+            .query("retry failed rollout rollback health", 2)
+            .expect("query");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "k-diverse");
+        assert_eq!(results[1].id, "k-narrow");
+    }
+
+    #[test]
+    fn decay_preserves_antiknowledge_confidence_floor() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let created_at = Utc::now() - Duration::days(365);
+
+        store
+            .add(KnowledgeEntry {
+                id: "anti-floor".to_owned(),
+                kind: KnowledgeKind::AntiKnowledge,
+                source: None,
+                content: "This previously successful pattern regressed badly.".to_owned(),
+                confidence: 0.8,
+                confidence_weight: -0.8,
+                refuted_insight_id: Some("insight-1".to_owned()),
+                refutation_evidence: Some("repeated gate failures".to_owned()),
+                source_episodes: vec!["ep-a".to_owned()],
+                tags: vec!["anti_knowledge".to_owned(), "regression".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at,
+                half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                tier: KnowledgeTier::Working,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            })
+            .expect("add anti knowledge");
+
+        store.decay().expect("decay");
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert!((all[0].confidence - ANTI_KNOWLEDGE_CONFIDENCE_FLOOR).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn decay_uses_kind_specific_half_lives() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
@@ -674,15 +1127,15 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
-                "fact",
-                "Long-lived factual memory",
-                &["fact"],
+                KnowledgeKind::StrategyFragment,
+                "strategy",
+                "Reusable long-lived strategy fragment",
+                &["strategy_fragment"],
                 1.0,
                 &[],
                 created_at,
             ))
-            .expect("add fact");
+            .expect("add strategy fragment");
         store
             .add(entry(
                 KnowledgeKind::Insight,
@@ -708,7 +1161,10 @@ mod tests {
 
         store.decay().expect("decay");
         let all = store.read_all().expect("read");
-        let fact = all.iter().find(|entry| entry.id == "fact").expect("fact");
+        let strategy = all
+            .iter()
+            .find(|entry| entry.id == "strategy")
+            .expect("strategy");
         let insight = all
             .iter()
             .find(|entry| entry.id == "insight")
@@ -718,10 +1174,10 @@ mod tests {
             .find(|entry| entry.id == "heuristic")
             .expect("heuristic");
 
-        assert!(fact.confidence > heuristic.confidence);
         assert!(heuristic.confidence > insight.confidence);
+        assert!(insight.confidence > strategy.confidence);
         assert!((insight.confidence - 0.5).abs() < 0.05);
-        assert!(fact.confidence > 0.9);
+        assert!((strategy.confidence - 0.22).abs() < 0.05);
         assert!((heuristic.confidence - 0.79).abs() < 0.05);
     }
 
@@ -790,6 +1246,96 @@ mod tests {
     }
 
     #[test]
+    fn gc_preserves_antiknowledge_even_below_threshold() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(KnowledgeEntry {
+                id: "anti-gc".to_owned(),
+                kind: KnowledgeKind::AntiKnowledge,
+                source: None,
+                content: "This optimization path is deceptively harmful.".to_owned(),
+                confidence: 0.01,
+                confidence_weight: -0.4,
+                refuted_insight_id: Some("insight-2".to_owned()),
+                refutation_evidence: Some("caused repeated failures".to_owned()),
+                source_episodes: vec!["ep-a".to_owned()],
+                tags: vec!["anti_knowledge".to_owned(), "optimization".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: now,
+                half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                tier: KnowledgeTier::Working,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            })
+            .expect("add anti knowledge");
+
+        store.gc(0.95).expect("gc");
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "anti-gc");
+        assert!(
+            (effective_confidence(&all[0]) - ANTI_KNOWLEDGE_CONFIDENCE_FLOOR).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn antiknowledge_halves_refuted_entry_confidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "insight-1",
+                "A reusable insight",
+                &["insight"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add original");
+        store
+            .add(KnowledgeEntry {
+                id: "anti-1".to_owned(),
+                kind: KnowledgeKind::AntiKnowledge,
+                source: None,
+                content: "Previous insight insight-1 was wrong because it failed in practice."
+                    .to_owned(),
+                confidence: 0.9,
+                confidence_weight: -0.9,
+                refuted_insight_id: Some("insight-1".to_owned()),
+                refutation_evidence: Some("it failed in practice".to_owned()),
+                source_episodes: vec!["ep-b".to_owned()],
+                tags: vec!["anti_knowledge".to_owned(), "insight".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: now,
+                half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+                tier: KnowledgeTier::Working,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            })
+            .expect("add anti knowledge");
+
+        let all = store.read_all().expect("read");
+        let original = all
+            .iter()
+            .find(|entry| entry.id == "insight-1")
+            .expect("original");
+        let anti = all.iter().find(|entry| entry.id == "anti-1").expect("anti");
+
+        assert!((original.confidence - 0.5).abs() < f64::EPSILON);
+        assert_eq!(anti.kind, KnowledgeKind::AntiKnowledge);
+    }
+
+    #[test]
     fn stats_aggregate_by_kind_and_age() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
@@ -798,50 +1344,83 @@ mod tests {
         store
             .add(KnowledgeEntry {
                 id: "oldest".to_owned(),
-                kind: KnowledgeKind::Fact,
+                kind: KnowledgeKind::Insight,
+                source: None,
                 content: "first".to_owned(),
                 confidence: 0.8,
+                confidence_weight: 0.8,
+                refuted_insight_id: None,
+                refutation_evidence: None,
                 source_episodes: Vec::new(),
                 tags: Vec::new(),
+                source_model: None,
+                model_generality: 1.0,
                 created_at: now - Duration::days(3),
-                half_life_days: KnowledgeKind::Fact.default_half_life_days(),
+                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add oldest");
         store
             .add(KnowledgeEntry {
                 id: "middle".to_owned(),
-                kind: KnowledgeKind::Procedure,
+                kind: KnowledgeKind::StrategyFragment,
+                source: None,
                 content: "second".to_owned(),
                 confidence: 0.6,
+                confidence_weight: 0.6,
+                refuted_insight_id: None,
+                refutation_evidence: None,
                 source_episodes: Vec::new(),
                 tags: Vec::new(),
+                source_model: None,
+                model_generality: 1.0,
                 created_at: now - Duration::days(1),
-                half_life_days: KnowledgeKind::Procedure.default_half_life_days(),
+                half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add middle");
         store
             .add(KnowledgeEntry {
                 id: "newest".to_owned(),
-                kind: KnowledgeKind::Fact,
+                kind: KnowledgeKind::Insight,
+                source: None,
                 content: "third".to_owned(),
                 confidence: 1.0,
+                confidence_weight: 1.0,
+                refuted_insight_id: None,
+                refutation_evidence: None,
                 source_episodes: Vec::new(),
                 tags: Vec::new(),
+                source_model: None,
+                model_generality: 1.0,
                 created_at: now,
-                half_life_days: KnowledgeKind::Fact.default_half_life_days(),
+                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .expect("add newest");
 
         let stats = store.stats().expect("stats");
         assert_eq!(stats.total_entries, 3);
-        assert_eq!(stats.kind_counts.get("fact"), Some(&2));
-        assert_eq!(stats.kind_counts.get("procedure"), Some(&1));
+        assert_eq!(stats.kind_counts.get("insight"), Some(&2));
+        assert_eq!(stats.kind_counts.get("strategy_fragment"), Some(&1));
         assert!((stats.average_confidence.expect("average") - 0.8).abs() < f64::EPSILON);
-        assert_eq!(stats.oldest_entry.as_ref().map(|entry| entry.id.as_str()), Some("oldest"));
-        assert_eq!(stats.newest_entry.as_ref().map(|entry| entry.id.as_str()), Some("newest"));
+        assert_eq!(
+            stats.oldest_entry.as_ref().map(|entry| entry.id.as_str()),
+            Some("oldest")
+        );
+        assert_eq!(
+            stats.newest_entry.as_ref().map(|entry| entry.id.as_str()),
+            Some("newest")
+        );
     }
 
     #[cfg(feature = "hdc")]
@@ -850,7 +1429,7 @@ mod tests {
         let now = Utc::now();
         let index = MemoryIndex::from_entries(vec![
             entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "rust async memory retrieval",
                 &["rust", "memory"],
@@ -859,7 +1438,7 @@ mod tests {
                 now,
             ),
             entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "postgres maintenance routine",
                 &["db"],
@@ -887,7 +1466,7 @@ mod tests {
 
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k1",
                 "semantic retrieval over durable knowledge",
                 &["memory"],
@@ -898,7 +1477,7 @@ mod tests {
             .expect("add first");
         store
             .add(entry(
-                KnowledgeKind::Fact,
+                KnowledgeKind::Insight,
                 "k2",
                 "completely unrelated topic",
                 &["misc"],
@@ -913,5 +1492,319 @@ mod tests {
         let hits = index.search("semantic retrieval over durable knowledge", 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.id, "k1");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn causal_links_match_queries_by_cause_and_effect() {
+        let now = Utc::now();
+        let index = MemoryIndex::from_entries(vec![
+            entry(
+                KnowledgeKind::CausalLink,
+                "k1",
+                "high complexity -> more review",
+                &[
+                    "cause:high complexity",
+                    "effect:more review",
+                    "domain:coding",
+                ],
+                0.9,
+                &["ep-a"],
+                now,
+            ),
+            entry(
+                KnowledgeKind::Insight,
+                "k2",
+                "postgres vacuum keeps tables healthy",
+                &["postgres"],
+                0.9,
+                &["ep-b"],
+                now,
+            ),
+        ]);
+
+        let cause_hits = index.search("high complexity", 1);
+        assert_eq!(cause_hits.len(), 1);
+        assert_eq!(cause_hits[0].entry.id, "k1");
+
+        let effect_hits = index.search("more review", 1);
+        assert_eq!(effect_hits.len(), 1);
+        assert_eq!(effect_hits[0].entry.id, "k1");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn ingest_populates_hdc_vector_when_feature_is_enabled() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "semantic retrieval over durable knowledge",
+                &["memory"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add entry");
+
+        let all = store.read_all().expect("read");
+        let vector = all[0].hdc_vector.as_ref().expect("persisted hdc vector");
+        assert_eq!(vector.len(), HDC_VECTOR_BYTES);
+    }
+
+    // ── Confirmation detection tests ─────────────────────────────────
+
+    #[test]
+    fn entries_are_similar_detects_tag_and_keyword_overlap() {
+        let now = Utc::now();
+        let existing = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async", "concurrency"],
+            1.0,
+            &["ep-a"],
+            now,
+        );
+        let similar = entry(
+            KnowledgeKind::Insight,
+            "k2",
+            "Rust async runtime handles concurrent execution well",
+            &["rust", "async"],
+            0.9,
+            &["ep-b"],
+            now,
+        );
+        let unrelated = entry(
+            KnowledgeKind::Insight,
+            "k3",
+            "PostgreSQL requires VACUUM for dead tuple cleanup",
+            &["postgres", "maintenance"],
+            0.8,
+            &["ep-c"],
+            now,
+        );
+
+        assert!(entries_are_similar(&existing, &similar));
+        assert!(!entries_are_similar(&existing, &unrelated));
+    }
+
+    #[test]
+    fn entries_are_similar_requires_minimum_keyword_overlap() {
+        let now = Utc::now();
+        let existing = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "Rust async actors are useful",
+            &["rust"],
+            1.0,
+            &["ep-a"],
+            now,
+        );
+        // Shares the tag "rust" but only one keyword overlap ("rust").
+        let one_keyword = entry(
+            KnowledgeKind::Insight,
+            "k2",
+            "Rust borrow checker prevents data races",
+            &["rust"],
+            0.9,
+            &["ep-b"],
+            now,
+        );
+
+        // Meets MIN_TAG_OVERLAP but not MIN_KEYWORD_OVERLAP.
+        assert!(!entries_are_similar(&existing, &one_keyword));
+    }
+
+    #[test]
+    fn entries_are_similar_skips_antiknowledge() {
+        let now = Utc::now();
+        let existing = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async"],
+            1.0,
+            &["ep-a"],
+            now,
+        );
+        let anti = KnowledgeEntry {
+            id: "anti-1".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Rust async actors are not suitable for all concurrent pipelines".to_owned(),
+            confidence: 0.9,
+            confidence_weight: -0.9,
+            refuted_insight_id: Some("k1".to_owned()),
+            refutation_evidence: Some("test".to_owned()),
+            source_episodes: vec!["ep-b".to_owned()],
+            tags: vec!["rust".to_owned(), "async".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: now,
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+        };
+
+        assert!(!entries_are_similar(&existing, &anti));
+    }
+
+    #[test]
+    fn detect_confirmations_finds_similar_entries() {
+        let now = Utc::now();
+        let existing = vec![entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async"],
+            1.0,
+            &["ep-a"],
+            now,
+        )];
+        let new_entries = vec![entry(
+            KnowledgeKind::Insight,
+            "k2",
+            "Rust async runtime handles concurrent execution well",
+            &["rust", "async"],
+            0.9,
+            &["ep-b"],
+            now,
+        )];
+
+        let confirmations = detect_confirmations(&existing, &new_entries);
+        assert_eq!(confirmations.len(), 1);
+        assert_eq!(confirmations[0].confirmed_entry_id, "k1");
+        assert_eq!(confirmations[0].confirming_entry_id, "k2");
+        assert!(
+            confirmations[0]
+                .source_episodes
+                .contains(&"ep-a".to_owned())
+        );
+        assert!(
+            confirmations[0]
+                .source_episodes
+                .contains(&"ep-b".to_owned())
+        );
+    }
+
+    #[test]
+    fn detect_confirmations_skips_unrelated_entries() {
+        let now = Utc::now();
+        let existing = vec![entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "Rust async actors are useful for concurrent pipelines",
+            &["rust", "async"],
+            1.0,
+            &["ep-a"],
+            now,
+        )];
+        let new_entries = vec![entry(
+            KnowledgeKind::Insight,
+            "k3",
+            "PostgreSQL requires VACUUM for dead tuple cleanup",
+            &["postgres", "maintenance"],
+            0.8,
+            &["ep-c"],
+            now,
+        )];
+
+        let confirmations = detect_confirmations(&existing, &new_entries);
+        assert!(confirmations.is_empty());
+    }
+
+    #[test]
+    fn ingest_writes_confirmation_records_for_similar_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        // Add first entry.
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Rust async actors are useful for concurrent pipelines",
+                &["rust", "async"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add first");
+
+        // No confirmations after first entry.
+        let records = store.read_confirmations().expect("read confirmations");
+        assert!(records.is_empty());
+
+        // Add a similar entry.
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k2",
+                "Rust async runtime handles concurrent execution well",
+                &["rust", "async"],
+                0.9,
+                &["ep-b"],
+                now,
+            ))
+            .expect("add similar");
+
+        // Now there should be a confirmation record.
+        let records = store.read_confirmations().expect("read confirmations");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].confirmed_entry_id, "k1");
+        assert_eq!(records[0].confirming_entry_id, "k2");
+        assert!(records[0].source_episodes.contains(&"ep-a".to_owned()));
+        assert!(records[0].source_episodes.contains(&"ep-b".to_owned()));
+    }
+
+    #[test]
+    fn ingest_does_not_write_confirmations_for_unrelated_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Rust async actors are useful for concurrent pipelines",
+                &["rust", "async"],
+                1.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add first");
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k3",
+                "PostgreSQL requires VACUUM for dead tuple cleanup",
+                &["postgres", "maintenance"],
+                0.8,
+                &["ep-c"],
+                now,
+            ))
+            .expect("add unrelated");
+
+        let records = store.read_confirmations().expect("read confirmations");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn confirmations_path_is_sibling_of_knowledge_path() {
+        let store = KnowledgeStore::new("/some/path/neuro/knowledge.jsonl");
+        assert_eq!(
+            store.confirmations_path(),
+            Path::new("/some/path/neuro/knowledge-confirmations.jsonl")
+        );
     }
 }

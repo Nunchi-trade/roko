@@ -1,0 +1,16 @@
+//! Gemini provider support.
+
+pub mod adapter;
+pub mod cache;
+pub mod compat;
+pub mod embed;
+pub mod native;
+pub(crate) mod wire;
+pub mod types;
+
+pub use adapter::GeminiAdapter;
+pub use cache::{CacheError, GeminiCacheClient};
+pub use compat::GeminiCompatAgent;
+pub use embed::{EmbedError, GeminiEmbedAgent};
+pub use native::GeminiNativeAgent;
+pub use types::*;

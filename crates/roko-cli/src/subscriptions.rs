@@ -146,7 +146,8 @@ fn next_subscription_id(
     let mut candidate = base.clone();
     let mut suffix = 2usize;
 
-    while registry.get_by_id(&candidate).is_some() || subscription_path(workdir, &candidate).exists()
+    while registry.get_by_id(&candidate).is_some()
+        || subscription_path(workdir, &candidate).exists()
     {
         candidate = format!("{base}-{suffix}");
         suffix += 1;

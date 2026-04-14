@@ -1,4 +1,4 @@
-//! Signal kinds — what a signal represents.
+//! Engram kinds — what a signal represents.
 //!
 //! A signal's [`Kind`] tells consumers how to interpret its body. Kinds are
 //! grouped by architectural concern (agent runtime, verification, context,

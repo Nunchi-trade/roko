@@ -2,18 +2,18 @@
 
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Context, Signal};
+use roko_core::{Context, Engram};
 
 /// The result of running an agent once.
 #[derive(Clone, Debug)]
 pub struct AgentResult {
-    /// The primary output signal. Typically `Signal<Kind::AgentOutput>` containing
+    /// The primary output signal. Typically `Engram<Kind::AgentOutput>` containing
     /// the agent's final response.
-    pub output: Signal,
+    pub output: Engram,
 
     /// Intermediate signals emitted during the run (stream messages, tool calls,
     /// diff updates, errors). These are ordered chronologically.
-    pub trace: Vec<Signal>,
+    pub trace: Vec<Engram>,
 
     /// Token usage + cost.
     pub usage: Usage,
@@ -25,7 +25,7 @@ pub struct AgentResult {
 impl AgentResult {
     /// Construct a successful result with just an output signal.
     #[must_use]
-    pub const fn ok(output: Signal) -> Self {
+    pub const fn ok(output: Engram) -> Self {
         Self {
             output,
             trace: Vec::new(),
@@ -36,7 +36,7 @@ impl AgentResult {
 
     /// Construct a failed result with an output signal describing the failure.
     #[must_use]
-    pub const fn fail(output: Signal) -> Self {
+    pub const fn fail(output: Engram) -> Self {
         Self {
             output,
             trace: Vec::new(),
@@ -47,7 +47,7 @@ impl AgentResult {
 
     /// Attach trace signals.
     #[must_use]
-    pub fn with_trace(mut self, trace: Vec<Signal>) -> Self {
+    pub fn with_trace(mut self, trace: Vec<Engram>) -> Self {
         self.trace = trace;
         self
     }
@@ -61,7 +61,7 @@ impl AgentResult {
 
     /// All signals produced by this run (trace + output), in chronological order.
     #[must_use]
-    pub fn all_signals(&self) -> Vec<Signal> {
+    pub fn all_signals(&self) -> Vec<Engram> {
         let mut v = self.trace.clone();
         v.push(self.output.clone());
         v
@@ -87,7 +87,7 @@ impl AgentResult {
 ///
 /// ```ignore
 /// let agent = ExecAgent::new("echo", vec![]);
-/// let prompt = Signal::builder(Kind::Prompt).body(Body::text("hello")).build();
+/// let prompt = Engram::builder(Kind::Prompt).body(Body::text("hello")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// assert!(result.success);
 /// ```
@@ -95,12 +95,12 @@ impl AgentResult {
 pub trait Agent: Send + Sync {
     /// Run the agent against the input signal.
     ///
-    /// The `input` is typically a `Signal<Kind::Prompt>`, but agents may
-    /// accept any kind (e.g. a `Signal<Kind::Task>` for task-aware agents).
+    /// The `input` is typically a `Engram<Kind::Prompt>`, but agents may
+    /// accept any kind (e.g. a `Engram<Kind::Task>` for task-aware agents).
     ///
     /// Returns an [`AgentResult`] with the primary output, trace of
     /// intermediate signals, and usage metrics.
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult;
+    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult;
 
     /// Human-readable name for logs/metrics.
     fn name(&self) -> &str;
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn agent_result_ok_sets_success() {
-        let out = Signal::builder(Kind::AgentOutput)
+        let out = Engram::builder(Kind::AgentOutput)
             .body(Body::text("ok"))
             .build();
         let r = AgentResult::ok(out);
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn agent_result_fail_sets_success_false() {
-        let out = Signal::builder(Kind::AgentOutput)
+        let out = Engram::builder(Kind::AgentOutput)
             .body(Body::text("boom"))
             .build();
         let r = AgentResult::fail(out);
@@ -137,13 +137,13 @@ mod tests {
 
     #[test]
     fn all_signals_is_trace_then_output() {
-        let trace1 = Signal::builder(Kind::AgentMessage)
+        let trace1 = Engram::builder(Kind::AgentMessage)
             .body(Body::text("1"))
             .build();
-        let trace2 = Signal::builder(Kind::AgentMessage)
+        let trace2 = Engram::builder(Kind::AgentMessage)
             .body(Body::text("2"))
             .build();
-        let out = Signal::builder(Kind::AgentOutput)
+        let out = Engram::builder(Kind::AgentOutput)
             .body(Body::text("done"))
             .build();
         let r = AgentResult::ok(out.clone()).with_trace(vec![trace1.clone(), trace2.clone()]);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn builder_chain() {
-        let out = Signal::builder(Kind::AgentOutput)
+        let out = Engram::builder(Kind::AgentOutput)
             .body(Body::text("x"))
             .build();
         let r = AgentResult::ok(out).with_trace(vec![]).with_usage(Usage {

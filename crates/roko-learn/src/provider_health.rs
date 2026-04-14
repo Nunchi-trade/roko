@@ -21,11 +21,393 @@
 //!
 //! Recovery timestamps use [`std::time::Instant`] so they are immune to
 //! wall-clock adjustments. Because `Instant` is not serializable, the
-//! tracker is an in-memory runtime component only.
+//! tracker is an in-memory runtime component only. Persisted provider
+//! snapshots use unix milliseconds and are handled by
+//! [`ProviderHealthRegistry`].
 
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use chrono::{DateTime, Utc};
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// ─── Serializable health snapshot types ────────────────────────────────────
+
+/// Serialized circuit state for persisted provider-health snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CircuitState {
+    /// Normal operation.
+    Closed,
+    /// Requests are blocked while the provider cools down.
+    Open,
+    /// One probe request is allowed after cooldown expires.
+    HalfOpen,
+}
+
+/// Classified error category used to pick cooldown durations later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorClass {
+    /// Provider returned a rate limit response.
+    RateLimit,
+    /// Provider returned an authentication or authorization failure.
+    AuthFailure,
+    /// Request timed out before completing.
+    Timeout,
+    /// Provider returned a 5xx or other transient server error.
+    ServerError,
+    /// Request was blocked by content policy.
+    ContentPolicy,
+    /// Context exceeded the provider's maximum window.
+    ContextOverflow,
+    /// Fallback classification when the exact class is unknown.
+    Unknown,
+}
+
+/// Timestamped failure entry for the rolling failure window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureRecord {
+    /// Failure timestamp in unix milliseconds.
+    pub timestamp_ms: i64,
+    /// Classified failure type.
+    pub error_class: ErrorClass,
+}
+
+/// Serializable per-provider health snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHealth {
+    /// Stable provider identifier.
+    pub provider_id: String,
+    /// Snapshot circuit state.
+    pub state: CircuitState,
+    /// Consecutive failures seen most recently.
+    pub consecutive_failures: u32,
+    /// Lifetime request count.
+    pub total_requests: u64,
+    /// Lifetime failure count.
+    pub total_failures: u64,
+    /// Timestamp of the most recent failure, in unix milliseconds.
+    pub last_failure_at: Option<i64>,
+    /// Timestamp when the provider may be retried, in unix milliseconds.
+    pub cooldown_until: Option<i64>,
+    /// Rolling window of recent failures.
+    pub failure_window: VecDeque<FailureRecord>,
+}
+
+impl ProviderHealth {
+    /// Record a successful request.
+    ///
+    /// A success from `HalfOpen` or `Open` closes the circuit. The `Open`
+    /// case handles providers whose state was persisted as Open and whose
+    /// cooldown expired before the process reloaded — without this, a
+    /// success would clear `consecutive_failures` but leave the circuit
+    /// permanently locked out.
+    pub fn record_success(&mut self) {
+        self.total_requests = self.total_requests.saturating_add(1);
+        self.consecutive_failures = 0;
+        self.cooldown_until = None;
+        if self.state == CircuitState::HalfOpen || self.state == CircuitState::Open {
+            self.state = CircuitState::Closed;
+        }
+    }
+
+    /// Record a failed request and update the circuit state.
+    pub fn record_failure(&mut self, error: ErrorClass, now_ms: i64) {
+        self.total_requests = self.total_requests.saturating_add(1);
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.total_failures = self.total_failures.saturating_add(1);
+        self.last_failure_at = Some(now_ms);
+        self.failure_window.push_back(FailureRecord {
+            timestamp_ms: now_ms,
+            error_class: error,
+        });
+        if self.failure_window.len() > 20 {
+            self.failure_window.pop_front();
+        }
+
+        // Trip to Open after 3 consecutive failures.
+        if self.consecutive_failures >= 3 {
+            self.state = CircuitState::Open;
+            self.cooldown_until = Some(now_ms + self.cooldown_ms(error));
+        }
+    }
+
+    /// Return whether the provider can receive a request at `now_ms`.
+    ///
+    /// When an open circuit's cooldown expires, the state advances to
+    /// `HalfOpen` so the next request can act as a probe.
+    pub fn is_available(&mut self, now_ms: i64) -> bool {
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                if let Some(until) = self.cooldown_until {
+                    if now_ms >= until {
+                        self.state = CircuitState::HalfOpen;
+                        return true;
+                    }
+                }
+                false
+            }
+            CircuitState::HalfOpen => true,
+        }
+    }
+
+    /// Error-class-specific cooldown in milliseconds.
+    fn cooldown_ms(&self, error: ErrorClass) -> i64 {
+        match error {
+            ErrorClass::RateLimit => 5_000,
+            ErrorClass::Timeout => 10_000,
+            ErrorClass::ServerError => 30_000,
+            ErrorClass::AuthFailure => 300_000,
+            _ => 5_000,
+        }
+    }
+}
+
+/// Persisted registry snapshot for loading and saving provider health.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ProviderHealthRegistrySnapshot {
+    /// Per-provider health snapshots keyed by provider id.
+    providers: HashMap<String, ProviderHealth>,
+}
+
+/// Thread-safe registry of provider health snapshots.
+///
+/// The registry stores [`ProviderHealth`] values keyed by provider id and
+/// provides a disk-backed persistence layer for the runtime circuit breaker.
+pub struct ProviderHealthRegistry {
+    providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
+    save_tx: Option<Sender<PersistCommand>>,
+    save_worker: Option<JoinHandle<()>>,
+}
+
+const HEALTH_SAVE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy)]
+enum PersistCommand {
+    Dirty,
+    FlushAndStop,
+}
+
+impl ProviderHealthRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            providers: Arc::new(Mutex::new(HashMap::new())),
+            save_tx: None,
+            save_worker: None,
+        }
+    }
+
+    /// Record a successful request for `provider_id`.
+    pub fn record_success(&self, provider_id: &str) {
+        let mut providers = self.providers.lock();
+        let health = providers
+            .entry(provider_id.to_owned())
+            .or_insert_with(|| new_provider_health(provider_id));
+        health.record_success();
+        drop(providers);
+        self.schedule_persist();
+    }
+
+    /// Record a failed request for `provider_id`.
+    pub fn record_failure(&self, provider_id: &str, error: ErrorClass) {
+        let mut providers = self.providers.lock();
+        let health = providers
+            .entry(provider_id.to_owned())
+            .or_insert_with(|| new_provider_health(provider_id));
+        health.record_failure(error, unix_ms_now());
+        drop(providers);
+        self.schedule_persist();
+    }
+
+    /// Return whether `provider_id` is currently available for routing.
+    ///
+    /// Unknown providers are treated as available.
+    pub fn is_available(&self, provider_id: &str) -> bool {
+        let mut providers = self.providers.lock();
+        let mut should_persist = false;
+        let available = match providers.get_mut(provider_id) {
+            Some(health) => {
+                let previous_state = health.state;
+                let available = health.is_available(unix_ms_now());
+                should_persist = previous_state != health.state;
+                available
+            }
+            None => true,
+        };
+        drop(providers);
+        if should_persist {
+            self.schedule_persist();
+        }
+        available
+    }
+
+    /// Filter `candidates` to only providers that are currently available.
+    pub fn available_providers(&self, candidates: &[String]) -> Vec<String> {
+        candidates
+            .iter()
+            .filter(|provider_id| self.is_available(provider_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Persist the registry to `path` as JSON.
+    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let snapshot = ProviderHealthRegistrySnapshot {
+            providers: self.providers.lock().clone(),
+        };
+        save_snapshot(path, &snapshot)
+    }
+
+    /// Load the registry from `path`, or return a new empty registry.
+    pub fn load_or_new(path: &Path) -> Self {
+        let snapshot = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<ProviderHealthRegistrySnapshot>(&s).ok());
+
+        match snapshot {
+            Some(snapshot) => Self::with_persistence(path.to_path_buf(), snapshot.providers),
+            None => Self::with_persistence(path.to_path_buf(), HashMap::new()),
+        }
+    }
+
+    fn with_persistence(path: PathBuf, providers: HashMap<String, ProviderHealth>) -> Self {
+        let providers = Arc::new(Mutex::new(providers));
+        let (save_tx, save_worker) = spawn_save_worker(path, Arc::clone(&providers));
+        Self {
+            providers,
+            save_tx: Some(save_tx),
+            save_worker: Some(save_worker),
+        }
+    }
+
+    fn schedule_persist(&self) {
+        if let Some(tx) = &self.save_tx {
+            let _ = tx.send(PersistCommand::Dirty);
+        }
+    }
+}
+
+impl Default for ProviderHealthRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ProviderHealthRegistry {
+    fn drop(&mut self) {
+        if let Some(tx) = self.save_tx.take() {
+            let _ = tx.send(PersistCommand::FlushAndStop);
+        }
+        if let Some(handle) = self.save_worker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_save_worker(
+    path: PathBuf,
+    providers: Arc<Mutex<HashMap<String, ProviderHealth>>>,
+) -> (Sender<PersistCommand>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        loop {
+            match rx.recv() {
+                Ok(PersistCommand::Dirty) => loop {
+                    match rx.recv_timeout(HEALTH_SAVE_DEBOUNCE) {
+                        Ok(PersistCommand::Dirty) => continue,
+                        Ok(PersistCommand::FlushAndStop) => {
+                            let snapshot = ProviderHealthRegistrySnapshot {
+                                providers: providers.lock().clone(),
+                            };
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            let snapshot = ProviderHealthRegistrySnapshot {
+                                providers: providers.lock().clone(),
+                            };
+                            let _ = save_snapshot(&path, &snapshot);
+                            break;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            let snapshot = ProviderHealthRegistrySnapshot {
+                                providers: providers.lock().clone(),
+                            };
+                            let _ = save_snapshot(&path, &snapshot);
+                            return;
+                        }
+                    }
+                },
+                Ok(PersistCommand::FlushAndStop) => {
+                    let snapshot = ProviderHealthRegistrySnapshot {
+                        providers: providers.lock().clone(),
+                    };
+                    let _ = save_snapshot(&path, &snapshot);
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    (tx, handle)
+}
+
+fn save_snapshot(
+    path: &Path,
+    snapshot: &ProviderHealthRegistrySnapshot,
+) -> Result<(), std::io::Error> {
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = unique_tmp_path(path);
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("provider-health.json");
+    parent.join(format!(".{stem}.tmp-{stamp}-{seq}"))
+}
+
+fn new_provider_health(provider_id: &str) -> ProviderHealth {
+    ProviderHealth {
+        provider_id: provider_id.to_owned(),
+        state: CircuitState::Closed,
+        consecutive_failures: 0,
+        total_requests: 0,
+        total_failures: 0,
+        last_failure_at: None,
+        cooldown_until: None,
+        failure_window: VecDeque::new(),
+    }
+}
+
+fn unix_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
 
 // ─── HealthState ─────────────────────────────────────────────────────────────
 
@@ -56,9 +438,9 @@ pub struct ProviderStatus {
     /// Number of failures since the last success.
     pub consecutive_failures: u32,
     /// When the most recent failure was recorded.
-    pub last_failure_at: Option<Instant>,
+    pub last_failure_at: Option<DateTime<Utc>>,
     /// When the most recent success was recorded.
-    pub last_success_at: Option<Instant>,
+    pub last_success_at: Option<DateTime<Utc>>,
     /// Lifetime attempts routed through this provider.
     pub total_attempts: u64,
     /// Lifetime successful attempts.
@@ -77,6 +459,17 @@ impl ProviderStatus {
             total_attempts: 0,
             total_successes: 0,
         }
+    }
+
+    /// Return the observed failure rate across all lifetime attempts.
+    #[must_use]
+    pub fn error_rate(&self) -> f64 {
+        if self.total_attempts == 0 {
+            return 0.0;
+        }
+
+        (self.total_attempts.saturating_sub(self.total_successes)) as f64
+            / self.total_attempts as f64
     }
 }
 
@@ -118,7 +511,7 @@ impl ProviderHealthTracker {
     /// [`HealthState::Healthy`] regardless of current state.
     #[allow(clippy::significant_drop_tightening)]
     pub fn record_success(&self, provider: &str) {
-        let now = Instant::now();
+        let now = Utc::now();
         let mut map = self.providers.write();
         let status = map
             .entry(provider.to_owned())
@@ -138,7 +531,8 @@ impl ProviderHealthTracker {
     /// [`HealthState::Unhealthy`].
     #[allow(clippy::significant_drop_tightening)]
     pub fn record_failure(&self, provider: &str) {
-        let now = Instant::now();
+        let now = Utc::now();
+        let recovery_at = Instant::now() + self.recovery_window;
         let mut map = self.providers.write();
         let status = map
             .entry(provider.to_owned())
@@ -152,9 +546,7 @@ impl ProviderHealthTracker {
         if status.consecutive_failures >= self.failure_threshold
             || status.state == HealthState::Probing
         {
-            status.state = HealthState::Unhealthy {
-                recovery_at: now + self.recovery_window,
-            };
+            status.state = HealthState::Unhealthy { recovery_at };
         }
     }
 
@@ -222,6 +614,16 @@ impl ProviderHealthTracker {
     pub fn snapshot(&self) -> Vec<ProviderStatus> {
         self.providers.read().values().cloned().collect()
     }
+
+    /// Return the current status for `provider`, defaulting to a healthy entry.
+    #[must_use]
+    pub fn get(&self, provider: &str) -> ProviderStatus {
+        self.providers
+            .read()
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| ProviderStatus::new(provider.to_owned()))
+    }
 }
 
 impl Default for ProviderHealthTracker {
@@ -236,6 +638,7 @@ impl Default for ProviderHealthTracker {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     /// Unknown provider is implicitly healthy.
     #[test]
@@ -450,5 +853,170 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].total_attempts, 100);
         assert_eq!(snap[0].total_successes, 50);
+    }
+
+    /// Serializable snapshot types round-trip through JSON.
+    #[test]
+    fn provider_health_types() {
+        let health = ProviderHealth {
+            provider_id: "anthropic".to_owned(),
+            state: CircuitState::HalfOpen,
+            consecutive_failures: 3,
+            total_requests: 42,
+            total_failures: 7,
+            last_failure_at: Some(1_725_000_000_000),
+            cooldown_until: Some(1_725_000_030_000),
+            failure_window: VecDeque::from(vec![
+                FailureRecord {
+                    timestamp_ms: 1_725_000_000_000,
+                    error_class: ErrorClass::RateLimit,
+                },
+                FailureRecord {
+                    timestamp_ms: 1_725_000_010_000,
+                    error_class: ErrorClass::Timeout,
+                },
+            ]),
+        };
+
+        let json = serde_json::to_string(&health).expect("serialize provider health");
+        let decoded: ProviderHealth =
+            serde_json::from_str(&json).expect("deserialize provider health");
+        assert_eq!(decoded, health);
+
+        let state_json = serde_json::to_string(&CircuitState::Open).expect("serialize state");
+        let decoded_state: CircuitState =
+            serde_json::from_str(&state_json).expect("deserialize state");
+        assert_eq!(decoded_state, CircuitState::Open);
+    }
+
+    /// Three consecutive failures trip the circuit to Open, and cooldown
+    /// expiry advances it to HalfOpen.
+    #[test]
+    fn provider_health_circuit_breaker_transitions() {
+        let mut health = ProviderHealth {
+            provider_id: "openai".to_owned(),
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            total_requests: 0,
+            total_failures: 0,
+            last_failure_at: None,
+            cooldown_until: None,
+            failure_window: VecDeque::new(),
+        };
+
+        health.record_failure(ErrorClass::Timeout, 1_000);
+        health.record_failure(ErrorClass::Timeout, 2_000);
+        assert_eq!(health.state, CircuitState::Closed);
+        assert!(health.is_available(2_500));
+
+        health.record_failure(ErrorClass::Timeout, 3_000);
+        assert_eq!(health.state, CircuitState::Open);
+        assert_eq!(health.cooldown_until, Some(13_000));
+        assert!(!health.is_available(12_999));
+        assert!(health.is_available(13_000));
+        assert_eq!(health.state, CircuitState::HalfOpen);
+
+        health.record_success();
+        assert_eq!(health.state, CircuitState::Closed);
+        assert_eq!(health.consecutive_failures, 0);
+    }
+
+    /// Error classes map to distinct cooldown durations.
+    #[test]
+    fn provider_health_circuit_breaker_cooldowns() {
+        let mut health = ProviderHealth {
+            provider_id: "anthropic".to_owned(),
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            total_requests: 0,
+            total_failures: 0,
+            last_failure_at: None,
+            cooldown_until: None,
+            failure_window: VecDeque::new(),
+        };
+
+        health.record_failure(ErrorClass::RateLimit, 10);
+        health.record_failure(ErrorClass::RateLimit, 20);
+        health.record_failure(ErrorClass::RateLimit, 30);
+        assert_eq!(health.cooldown_until, Some(5_030));
+
+        health.state = CircuitState::Closed;
+        health.consecutive_failures = 0;
+        health.cooldown_until = None;
+
+        health.record_failure(ErrorClass::AuthFailure, 100);
+        health.record_failure(ErrorClass::AuthFailure, 200);
+        health.record_failure(ErrorClass::AuthFailure, 300);
+        assert_eq!(health.cooldown_until, Some(300_300));
+    }
+
+    /// Registry stores per-provider state and filters unavailable providers.
+    #[test]
+    fn provider_health_registry_filters_unavailable_providers() {
+        let registry = ProviderHealthRegistry::new();
+        registry.record_success("good");
+        registry.record_failure("bad", ErrorClass::Timeout);
+        registry.record_failure("bad", ErrorClass::Timeout);
+        registry.record_failure("bad", ErrorClass::Timeout);
+
+        let candidates = vec!["good".to_owned(), "bad".to_owned(), "unknown".to_owned()];
+        assert_eq!(
+            registry.available_providers(&candidates),
+            vec!["good".to_owned(), "unknown".to_owned()]
+        );
+    }
+
+    /// Registry snapshots persist to disk and load back intact.
+    #[test]
+    fn provider_health_registry_roundtrip() {
+        let tmp = TempDir::new().expect("create tempdir");
+        let path = tmp.path().join("provider-health.json");
+
+        let registry = ProviderHealthRegistry::new();
+        registry.record_success("alpha");
+        registry.record_failure("beta", ErrorClass::RateLimit);
+        registry.record_failure("beta", ErrorClass::RateLimit);
+        registry.record_failure("beta", ErrorClass::RateLimit);
+        registry.save(&path).expect("save registry");
+
+        let loaded = ProviderHealthRegistry::load_or_new(&path);
+        assert!(loaded.is_available("alpha"));
+        assert!(!loaded.is_available("beta"));
+
+        let mut providers = loaded.providers.lock().keys().cloned().collect::<Vec<_>>();
+        providers.sort();
+        assert_eq!(providers, vec!["alpha".to_owned(), "beta".to_owned()]);
+    }
+
+    /// Persisted registry state survives a restart without a manual save.
+    #[test]
+    fn provider_health_health_persistence_round_trip() {
+        let tmp = TempDir::new().expect("create tempdir");
+        let path = tmp.path().join(".roko/learn/provider-health.json");
+
+        {
+            let registry = ProviderHealthRegistry::load_or_new(&path);
+            registry.record_success("alpha");
+            registry.record_failure("beta", ErrorClass::Timeout);
+            registry.record_failure("beta", ErrorClass::Timeout);
+            registry.record_failure("beta", ErrorClass::Timeout);
+
+            std::thread::sleep(Duration::from_millis(250));
+            assert!(path.exists(), "debounced autosave should create the file");
+
+            let loaded = ProviderHealthRegistry::load_or_new(&path);
+            assert!(loaded.is_available("alpha"));
+            assert!(!loaded.is_available("beta"));
+
+            let beta = loaded
+                .providers
+                .lock()
+                .get("beta")
+                .cloned()
+                .expect("beta state");
+            assert_eq!(beta.provider_id, "beta");
+            assert_eq!(beta.total_failures, 3);
+            assert_eq!(beta.state, CircuitState::Open);
+        }
     }
 }

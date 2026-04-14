@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult};
-use roko_core::{Body, Kind, Provenance, Signal, ToolPermissions};
+use roko_core::{Body, Engram, Kind, Provenance, ToolPermissions};
 use serde_json::{Value, json};
 
 use crate::safety::SafetyLayer;
@@ -336,7 +336,7 @@ impl ToolDispatcher {
         status: &'static str,
         details: &Value,
     ) {
-        let signal = Signal::builder(Kind::ToolInvocation)
+        let signal = Engram::builder(Kind::ToolInvocation)
             .body(audit_body(call, phase, status, details))
             .provenance(Provenance::trusted("tool_dispatcher"))
             .tag("call_id", &call.id)
@@ -603,17 +603,17 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct CollectAuditSink {
-        signals: Mutex<Vec<Signal>>,
+        signals: Mutex<Vec<Engram>>,
     }
 
     impl CollectAuditSink {
-        fn snapshot(&self) -> Vec<Signal> {
+        fn snapshot(&self) -> Vec<Engram> {
             self.signals.lock().expect("audit signals lock").clone()
         }
     }
 
     impl AuditSink for CollectAuditSink {
-        fn emit(&self, signal: Signal) {
+        fn emit(&self, signal: Engram) {
             self.signals
                 .lock()
                 .expect("audit signals lock")
@@ -621,7 +621,7 @@ mod tests {
         }
     }
 
-    fn status_phases(signals: &[Signal]) -> Vec<(String, String)> {
+    fn status_phases(signals: &[Engram]) -> Vec<(String, String)> {
         signals
             .iter()
             .map(|signal| {

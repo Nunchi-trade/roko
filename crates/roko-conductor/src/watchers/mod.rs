@@ -1,7 +1,7 @@
 //! Conductor watchers — each implements [`Policy`] and scans the signal
 //! stream for a specific anomaly pattern.
 //!
-//! Watchers are **pure functions**: they examine `&[Signal]` and emit
+//! Watchers are **pure functions**: they examine `&[Engram]` and emit
 //! intervention signals. They have no side effects and hold no mutable
 //! state beyond their configuration thresholds.
 

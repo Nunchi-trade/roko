@@ -10,7 +10,7 @@
 
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -59,7 +59,7 @@ impl CompileGate {
 #[async_trait]
 #[allow(clippy::cast_possible_truncation)]
 impl Gate for CompileGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,

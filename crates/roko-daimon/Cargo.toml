@@ -1,0 +1,24 @@
+[package]
+name = "roko-daimon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Daimon subsystem for affect and motivation modeling."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+kiddo = { version = "5.3.0", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

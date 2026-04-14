@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
 
 use super::{

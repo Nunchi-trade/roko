@@ -5,6 +5,8 @@
 //! role-template identities from [`crate::templates`] and exposes a typed API
 //! suitable for both single-shot and orchestrated execution paths.
 
+use crate::PadState;
+use crate::prompt::estimate_tokens;
 use crate::prompt::{PromptComposer, PromptSection};
 use crate::scorer::SectionScorer;
 use crate::system_prompt_builder::SystemPromptBuilder;
@@ -17,8 +19,10 @@ use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
 use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use crate::templates::task_impl::TaskImplTemplate;
-use roko_core::error::Result;
+use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context};
+use roko_learn::section_effect::SectionEffectivenessRegistry;
+use tracing::warn;
 
 /// Default conventions appended to every constructed system prompt.
 pub const DEFAULT_CONVENTIONS_SUFFIX: &str = "\
@@ -40,6 +44,8 @@ pub struct TaskContext {
     pub plan_id: Option<String>,
     /// Optional workspace label/path.
     pub workspace: Option<String>,
+    /// Optional structured context assembled for this task.
+    pub context_layer: Option<String>,
     /// Optional extra domain notes.
     pub domain_notes: Option<String>,
 }
@@ -65,6 +71,13 @@ impl TaskContext {
     #[must_use]
     pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
         self.workspace = Some(workspace.into());
+        self
+    }
+
+    /// Attach a structured relevant-context section.
+    #[must_use]
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context_layer = Some(context.into());
         self
     }
 
@@ -98,10 +111,16 @@ impl TaskContext {
         }
         parts.join("\n")
     }
+
+    fn context_layer(&self) -> Option<&str> {
+        self.context_layer
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+    }
 }
 
 /// Typed specification for building a role-scoped system prompt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RoleSystemPromptSpec {
     /// Role/persona that will run the task.
     pub role: AgentRole,
@@ -109,10 +128,14 @@ pub struct RoleSystemPromptSpec {
     pub task_context: TaskContext,
     /// Comma-separated hosted-backend tool allowlist.
     pub tool_allowlist_csv: String,
+    /// Optional model slug hint for future model-specific prompt formatting.
+    pub model_hint: Option<String>,
     /// Optional extra conventions appended after defaults.
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended after defaults.
     pub extra_anti_patterns: Vec<String>,
+    /// Optional affect state used to tune tone and focus.
+    pub affect_state: Option<PadState>,
     /// Whether to include cache markers between stability tiers.
     pub cache_markers: bool,
 }
@@ -125,8 +148,10 @@ impl RoleSystemPromptSpec {
             role,
             task_context,
             tool_allowlist_csv: tool_csv.into(),
+            model_hint: None,
             extra_conventions: None,
             extra_anti_patterns: Vec::new(),
+            affect_state: None,
             cache_markers: false,
         }
     }
@@ -138,10 +163,24 @@ impl RoleSystemPromptSpec {
         self
     }
 
+    /// Attach an optional model slug hint for future prompt adaptation.
+    #[must_use]
+    pub fn with_model_hint(mut self, model_hint: impl Into<String>) -> Self {
+        self.model_hint = Some(model_hint.into());
+        self
+    }
+
     /// Append one anti-pattern rule.
     #[must_use]
     pub fn add_anti_pattern(mut self, rule: impl Into<String>) -> Self {
         self.extra_anti_patterns.push(rule.into());
+        self
+    }
+
+    /// Attach affect state for tone/focus guidance.
+    #[must_use]
+    pub const fn with_affect_state(mut self, affect_state: Option<PadState>) -> Self {
+        self.affect_state = affect_state;
         self
     }
 
@@ -177,17 +216,26 @@ impl RoleSystemPromptSpec {
         out
     }
 
-    /// Build the raw prompt text via [`SystemPromptBuilder`].
-    #[must_use]
-    pub fn build(&self) -> String {
+    fn builder_with_section_effectiveness(
+        &self,
+        section_effectiveness: Option<&SectionEffectivenessRegistry>,
+    ) -> SystemPromptBuilder {
         let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
             .with_conventions(self.conventions_text())
             .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
-            .with_anti_patterns(self.anti_patterns());
+            .with_anti_patterns(self.anti_patterns())
+            .with_affect_state(self.affect_state);
+
+        if let Some(registry) = section_effectiveness {
+            builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
+        }
 
         let domain = self.task_context.domain_layer();
         if !domain.is_empty() {
             builder = builder.with_domain(domain);
+        }
+        if let Some(context) = self.task_context.context_layer() {
+            builder = builder.with_context(context);
         }
         let task = self.task_context.task_layer();
         if !task.is_empty() {
@@ -196,29 +244,39 @@ impl RoleSystemPromptSpec {
         if self.cache_markers {
             builder = builder.with_cache_markers();
         }
-        builder.build()
+        builder
+    }
+
+    /// Build the raw prompt text via [`SystemPromptBuilder`].
+    #[must_use]
+    pub fn build(&self) -> String {
+        self.builder_with_section_effectiveness(None).build()
+    }
+
+    /// Build the raw prompt text with learned section-effectiveness applied.
+    #[must_use]
+    pub fn build_with_section_effectiveness(
+        &self,
+        section_effectiveness: &SectionEffectivenessRegistry,
+    ) -> String {
+        self.builder_with_section_effectiveness(Some(section_effectiveness))
+            .build()
     }
 
     /// Build structured prompt sections via [`SystemPromptBuilder`].
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
-            .with_conventions(self.conventions_text())
-            .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
-            .with_anti_patterns(self.anti_patterns());
+        self.builder_with_section_effectiveness(None).build_sections()
+    }
 
-        let domain = self.task_context.domain_layer();
-        if !domain.is_empty() {
-            builder = builder.with_domain(domain);
-        }
-        let task = self.task_context.task_layer();
-        if !task.is_empty() {
-            builder = builder.with_task(task);
-        }
-        if self.cache_markers {
-            builder = builder.with_cache_markers();
-        }
-        builder.build_sections()
+    /// Build structured prompt sections with learned section-effectiveness applied.
+    #[must_use]
+    pub fn build_sections_with_section_effectiveness(
+        &self,
+        section_effectiveness: &SectionEffectivenessRegistry,
+    ) -> Vec<PromptSection> {
+        self.builder_with_section_effectiveness(Some(section_effectiveness))
+            .build_sections()
     }
 
     /// Compose the section form under a token budget using [`PromptComposer`].
@@ -238,6 +296,80 @@ impl RoleSystemPromptSpec {
             &Context::now(),
         )?;
         composed.body.as_text().map(str::to_string)
+    }
+
+    /// Build the prompt and validate it against a model context window.
+    ///
+    /// If the composed prompt exceeds 30% of the available window, the
+    /// builder re-runs composition with a tighter budget to drop lower-value
+    /// sections. If it exceeds 50% of the window, the prompt is rejected.
+    pub fn build_with_context_window(&self, context_window_tokens: usize) -> Result<String> {
+        self.build_with_context_window_and_section_effectiveness(context_window_tokens, None)
+    }
+
+    /// Build the prompt and validate it against a model context window,
+    /// optionally applying learned section-effectiveness.
+    pub fn build_with_context_window_and_section_effectiveness(
+        &self,
+        context_window_tokens: usize,
+        section_effectiveness: Option<&SectionEffectivenessRegistry>,
+    ) -> Result<String> {
+        let prompt = self
+            .builder_with_section_effectiveness(section_effectiveness)
+            .build();
+        let prompt_tokens = estimate_tokens(&prompt);
+        let soft_limit = context_window_tokens.saturating_mul(3) / 10;
+        let hard_limit = context_window_tokens / 2;
+        let soft_limit = soft_limit.max(1);
+        let hard_limit = hard_limit.max(1);
+
+        if prompt_tokens > hard_limit {
+            return Err(RokoError::BudgetExceeded {
+                dimension: "system_prompt_tokens",
+                used: prompt_tokens,
+                limit: hard_limit,
+            });
+        }
+
+        if prompt_tokens > soft_limit {
+            warn!(
+                role = %self.role.label(),
+                prompt_tokens,
+                soft_limit,
+                hard_limit,
+                "system prompt exceeds the soft context-window budget; recomposing with tighter budget"
+            );
+
+            let sections = if let Some(registry) = section_effectiveness {
+                self.build_sections_with_section_effectiveness(registry)
+            } else {
+                self.build_sections()
+            };
+            let signals = sections
+                .into_iter()
+                .map(PromptSection::into_signal)
+                .collect::<Result<Vec<_>>>()?;
+            let composed = PromptComposer::new().compose(
+                &signals,
+                &Budget::tokens(soft_limit),
+                &SectionScorer::new(),
+                &Context::now(),
+            )?;
+            let prompt = composed.body.as_text().map(str::to_string)?;
+            let prompt_tokens = estimate_tokens(&prompt);
+
+            if prompt_tokens > hard_limit {
+                return Err(RokoError::BudgetExceeded {
+                    dimension: "system_prompt_tokens",
+                    used: prompt_tokens,
+                    limit: hard_limit,
+                });
+            }
+
+            return Ok(prompt);
+        }
+
+        Ok(prompt)
     }
 }
 
@@ -322,6 +454,9 @@ mod tests {
         let ctx = TaskContext::new("Implement task wiring")
             .with_plan_id("042-golem-mortality")
             .with_workspace("roko-cli orchestration")
+            .with_context(
+                "## Relevant Context\n\n### Knowledge\n- [Heuristic] Keep the prompt compact.",
+            )
             .with_domain_notes("Focus on runtime prompt-path parity.");
         let spec = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit,Bash")
             .with_extra_conventions("Prefer additive changes.");
@@ -329,8 +464,31 @@ mod tests {
         assert!(prompt.contains("Plan: 042-golem-mortality"));
         assert!(prompt.contains("Task: Implement task wiring"));
         assert!(prompt.contains("Workspace: roko-cli orchestration"));
+        assert!(prompt.contains("## Relevant Context"));
         assert!(prompt.contains("Claude tool allowlist: Read,Edit,Bash"));
         assert!(prompt.contains("Prefer additive changes."));
+    }
+
+    #[test]
+    fn built_prompt_includes_affect_guidance() {
+        let ctx = TaskContext::new("Implement affect wiring");
+        let spec = RoleSystemPromptSpec::new(AgentRole::Conductor, ctx, "Read,Edit")
+            .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)));
+
+        let prompt = spec.build();
+        assert!(prompt.contains("You are under time pressure, focus on the most critical path."));
+    }
+
+    #[test]
+    fn model_hint_passthrough() {
+        let ctx = TaskContext::new("Implement model hint passthrough");
+        let baseline = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx.clone(), "Read,Edit");
+        let hinted = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .with_model_hint("glm-5.1");
+
+        assert_eq!(hinted.model_hint.as_deref(), Some("glm-5.1"));
+        assert_eq!(baseline.build(), hinted.build());
+        assert_eq!(baseline.build_sections(), hinted.build_sections());
     }
 
     #[test]

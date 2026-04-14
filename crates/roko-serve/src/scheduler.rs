@@ -13,12 +13,14 @@ use crate::state::AppState;
 pub fn start_scheduler(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let scheduler = {
-            let config = state.roko_config.read().await;
+            let config = state.load_roko_config();
             if config.scheduler.is_empty() {
                 Vec::new()
             } else {
-                vec![Box::new(CronEventSource::from_config(config.scheduler.clone()))
-                    as Box<dyn EventSource>]
+                vec![
+                    Box::new(CronEventSource::from_config(config.scheduler.clone()))
+                        as Box<dyn EventSource>,
+                ]
             }
         };
 

@@ -1,9 +1,11 @@
 //! Episode distillation into durable knowledge candidates.
 //!
 //! The distiller batches stored episodes, asks a small model to extract
-//! reusable facts, procedures, heuristics, and constraints, then
+//! reusable insights, heuristics, warnings, causal links, and strategy
+//! fragments, then
 //! normalizes the structured response into [`KnowledgeEntry`] values.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -13,12 +15,12 @@ use chrono::Utc;
 use roko_agent::Agent;
 use roko_agent::claude_agent::ClaudeAgent;
 use roko_agent::nl_to_format::NlToFormatConverter;
-use roko_core::{Body, Context as RokoContext, Kind, Provenance, Signal};
+use roko_core::{Body, Context as RokoContext, EmotionalTag, Engram, Kind, PadVector, Provenance};
 use roko_learn::episode_logger::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{KnowledgeEntry, KnowledgeKind};
+use crate::{EmotionalProvenance, KnowledgeEntry, KnowledgeKind, ValidationArc};
 
 const DEFAULT_MODEL: &str = "claude-haiku-3-5";
 const DEFAULT_MAX_TOKENS: u32 = 2_048;
@@ -112,7 +114,7 @@ impl ClaudeDistillationBackend {
 #[async_trait]
 impl DistillationBackend for ClaudeDistillationBackend {
     async fn complete(&self, prompt: &str) -> Result<String> {
-        let signal = Signal::builder(Kind::Prompt)
+        let signal = Engram::builder(Kind::Prompt)
             .body(Body::text(prompt))
             .provenance(Provenance::agent("roko-neuro:distiller"))
             .build();
@@ -148,14 +150,15 @@ struct DistillationEnvelope {
 
 impl DistillationEnvelope {
     fn into_entries(self, episodes: &[Episode]) -> Vec<KnowledgeEntry> {
-        let fallback_source = match episodes {
-            [episode] => Some(episode_source_id(episode).to_string()),
-            _ => None,
-        };
+        let fallback_source = batch_source_episodes(episodes);
+        let episode_models = episode_models_by_source(episodes);
+        let episode_affect = episode_affect_by_source(episodes);
 
         self.entries
             .into_iter()
-            .filter_map(|candidate| candidate.into_entry(fallback_source.as_deref()))
+            .filter_map(|candidate| {
+                candidate.into_entry(fallback_source.as_deref(), &episode_models, &episode_affect)
+            })
             .collect()
     }
 }
@@ -173,11 +176,20 @@ struct DistillationCandidate {
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
+    source_model: Option<String>,
+    #[serde(default = "default_candidate_model_generality")]
+    model_generality: f64,
+    #[serde(default)]
     half_life_days: Option<f64>,
 }
 
 impl DistillationCandidate {
-    fn into_entry(mut self, fallback_source: Option<&str>) -> Option<KnowledgeEntry> {
+    fn into_entry(
+        mut self,
+        fallback_source: Option<&[String]>,
+        episode_models: &BTreeMap<String, String>,
+        episode_affect: &BTreeMap<String, EpisodeAffectSnapshot>,
+    ) -> Option<KnowledgeEntry> {
         let content = self.content.trim();
         if content.is_empty() {
             return None;
@@ -186,7 +198,7 @@ impl DistillationCandidate {
         if self.source_episodes.is_empty()
             && let Some(source) = fallback_source
         {
-            self.source_episodes.push(source.to_string());
+            self.source_episodes.extend(source.iter().cloned());
         }
 
         self.source_episodes.sort();
@@ -200,23 +212,49 @@ impl DistillationCandidate {
         self.tags.dedup();
 
         let confidence = self.confidence.clamp(0.0, 1.0);
+        let (source_model, model_generality) = inferred_model_scope(
+            self.kind,
+            self.source_model.take(),
+            self.model_generality,
+            &self.source_episodes,
+            &self.tags,
+            episode_models,
+        );
         let half_life_days = self
             .half_life_days
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or_else(|| self.kind.default_half_life_days());
+        let (emotional_tag, emotional_provenance) =
+            aggregate_emotional_metadata(&self.source_episodes, episode_affect, self.kind);
 
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
             kind: self.kind,
+            source: None,
             content: content.to_string(),
             confidence,
+            confidence_weight: confidence,
+            refuted_insight_id: None,
+            refutation_evidence: None,
             source_episodes: self.source_episodes,
             tags: self.tags,
+            source_model,
+            model_generality,
             created_at: Utc::now(),
             half_life_days,
+            tier: Default::default(),
+            emotional_tag,
+            emotional_provenance,
             hdc_vector: None,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct EpisodeAffectSnapshot {
+    tag: EmotionalTag,
+    success: bool,
+    completed_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,6 +274,7 @@ struct EpisodePromptRecord {
     tokens_used: u64,
     duration_secs: f64,
     failure_reason: Option<String>,
+    emotional_tag: Option<roko_core::EmotionalTag>,
     gate_verdicts: Vec<roko_learn::episode_logger::GateVerdict>,
     usage: roko_learn::episode_logger::Usage,
     external_actions: Vec<Value>,
@@ -265,6 +304,7 @@ impl EpisodePromptRecord {
             tokens_used: episode.tokens_used,
             duration_secs: episode.duration_secs,
             failure_reason: episode.failure_reason.clone(),
+            emotional_tag: episode.emotional_tag.clone(),
             gate_verdicts: episode.gate_verdicts.clone(),
             usage: episode.usage.clone(),
             external_actions: episode.external_actions.clone(),
@@ -288,11 +328,13 @@ fn build_prompt(episodes: &[Episode]) -> Result<String> {
          Extract reusable knowledge from the corpus.\n\
          Return only structured JSON that matches the schema in the system prompt.\n\
          Be conservative: emit entries only when the episodes support them.\n\
+         Treat emotional tags as supporting provenance: high-arousal repeated episodes deserve more weight, but do not infer durable knowledge from mood alone.\n\
          Target categories:\n\
-         - fact: declarative observations such as file structure, function arity, or stable project facts\n\
-         - procedure: repeatable steps that fixed a problem or completed a task\n\
+         - insight: declarative observations such as file structure, function arity, or stable project facts\n\
          - heuristic: an empirical rule inferred from repeated episode patterns\n\
-         - constraint: a hard rule inferred from repeated failures or explicit guardrails\n\
+         - warning: a recurring failure mode, guardrail, or risk to avoid\n\
+         - causal_link: a cause-and-effect observation grounded in the episodes\n\
+         - strategy_fragment: a reusable approach or recipe that solved a task\n\
          Prefer concise content strings with concrete wording.\n"
     ))
 }
@@ -304,10 +346,14 @@ fn distillation_system_prompt() -> String {
         "You are Roko's knowledge distiller.\n\
          Read the episode corpus and synthesize durable knowledge.\n\
          Merge duplicate ideas across episodes.\n\
-         Facts should be direct observations.\n\
-         Procedures should describe a fix or recipe.\n\
+         Insights should be direct observations.\n\
          Heuristics should only appear when the episodes show a recurring pattern.\n\
-         Constraints should only appear when the episodes show repeated failures or guardrails.\n\n\
+         Warnings should capture recurring failures, guardrails, or things to avoid.\n\
+         Causal links should state what caused what when the evidence is strong enough.\n\
+         Strategy fragments should describe a reusable fix, recipe, or approach.\n\
+         For heuristics and strategy fragments, set source_model plus a low model_generality only when the guidance depends on one model's behavior, formatting, or tool syntax.\n\
+         Use model_generality near 1.0 for heuristics that work across models and omit source_model for those general rules.\n\
+         Avoid legacy category names like fact, procedure, playbook, or constraint in the output.\n\n\
          {}\n",
         extractor.extraction_prompt(&schema)
     )
@@ -334,6 +380,8 @@ fn distillation_schema() -> Value {
                             "type": "array",
                             "items": { "type": "string" }
                         },
+                        "source_model": { "type": ["string", "null"] },
+                        "model_generality": { "type": "number" },
                         "half_life_days": { "type": "number" }
                     }
                 }
@@ -369,15 +417,7 @@ fn derive_knowledge_id(
 }
 
 fn knowledge_kind_tag(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Fact => "fact",
-        KnowledgeKind::Insight => "insight",
-        KnowledgeKind::Procedure => "procedure",
-        KnowledgeKind::Heuristic => "heuristic",
-        KnowledgeKind::Playbook => "playbook",
-        KnowledgeKind::Constraint => "constraint",
-        KnowledgeKind::AntiKnowledge => "anti_knowledge",
-    }
+    kind.as_str()
 }
 
 fn episode_source_id(episode: &Episode) -> &str {
@@ -388,8 +428,240 @@ fn episode_source_id(episode: &Episode) -> &str {
     }
 }
 
+fn batch_source_episodes(episodes: &[Episode]) -> Option<Vec<String>> {
+    let mut source_episodes: Vec<String> = episodes
+        .iter()
+        .map(episode_source_id)
+        .filter(|source| !source.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    source_episodes.sort();
+    source_episodes.dedup();
+
+    if source_episodes.is_empty() {
+        None
+    } else {
+        Some(source_episodes)
+    }
+}
+
+fn episode_models_by_source(episodes: &[Episode]) -> BTreeMap<String, String> {
+    let mut models = BTreeMap::new();
+    for episode in episodes {
+        let model = episode.model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        models.insert(episode_source_id(episode).to_string(), model.to_string());
+    }
+    models
+}
+
+fn episode_affect_by_source(episodes: &[Episode]) -> BTreeMap<String, EpisodeAffectSnapshot> {
+    let mut affect = BTreeMap::new();
+    for episode in episodes {
+        let Some(tag) = episode.emotional_tag.clone() else {
+            continue;
+        };
+        affect.insert(
+            episode_source_id(episode).to_string(),
+            EpisodeAffectSnapshot {
+                tag,
+                success: episode.success,
+                completed_at: episode.completed_at,
+            },
+        );
+    }
+    affect
+}
+
+fn aggregate_emotional_metadata(
+    source_episodes: &[String],
+    episode_affect: &BTreeMap<String, EpisodeAffectSnapshot>,
+    kind: KnowledgeKind,
+) -> (Option<EmotionalTag>, Option<EmotionalProvenance>) {
+    let mut snapshots = Vec::new();
+    let mut pads = Vec::new();
+    let mut moods = Vec::new();
+    let mut intensity_sum = 0.0_f64;
+
+    for source in source_episodes {
+        let Some(snapshot) = episode_affect.get(source) else {
+            continue;
+        };
+        pads.push(snapshot.tag.pad);
+        moods.push(snapshot.tag.mood_snapshot);
+        intensity_sum += f64::from(snapshot.tag.intensity).clamp(0.0, 1.0);
+        snapshots.push(snapshot.clone());
+    }
+
+    if pads.is_empty() {
+        return (None, None);
+    }
+
+    let average_pad = average_pad_vector(&pads);
+    let average_mood = average_pad_vector(&moods);
+    let mean_intensity = (intensity_sum / pads.len() as f64).clamp(0.0, 1.0) as f32;
+    snapshots.sort_by_key(|snapshot| snapshot.completed_at);
+
+    let emotional_tag = EmotionalTag::new(
+        average_pad,
+        mean_intensity,
+        format!("distilled:{}", kind.as_str()),
+        average_mood,
+    );
+    let emotional_provenance = EmotionalProvenance {
+        average_pad,
+        discovery_emotion: snapshots
+            .first()
+            .map(|snapshot| EmotionalProvenance::coarse_emotion_label(snapshot.tag.pad))
+            .unwrap_or_else(|| "neutral_mid_arousal".to_string()),
+        validation_arc: infer_validation_arc(&snapshots),
+        emotional_diversity: emotional_diversity(&snapshots),
+    };
+
+    (Some(emotional_tag), Some(emotional_provenance))
+}
+
+fn average_pad_vector(vectors: &[PadVector]) -> PadVector {
+    if vectors.is_empty() {
+        return PadVector::neutral();
+    }
+
+    let len = vectors.len() as f64;
+    let pleasure = vectors.iter().map(|pad| pad.pleasure).sum::<f64>() / len;
+    let arousal = vectors.iter().map(|pad| pad.arousal).sum::<f64>() / len;
+    let dominance = vectors.iter().map(|pad| pad.dominance).sum::<f64>() / len;
+    PadVector::new(pleasure, arousal, dominance).clamped()
+}
+
+fn emotional_diversity(snapshots: &[EpisodeAffectSnapshot]) -> f64 {
+    if snapshots.is_empty() {
+        return 0.0;
+    }
+
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for snapshot in snapshots {
+        *counts
+            .entry(EmotionalProvenance::coarse_emotion_label(snapshot.tag.pad))
+            .or_insert(0) += 1;
+    }
+
+    let total = counts.values().copied().sum::<u32>() as f64;
+    if total <= 0.0 {
+        return 0.0;
+    }
+
+    let mut entropy = 0.0_f64;
+    for count in counts.values().copied() {
+        let p = count as f64 / total;
+        if p > 0.0 {
+            entropy -= p * p.log2();
+        }
+    }
+
+    let max_entropy = (counts.len() as f64).log2();
+    if max_entropy > 0.0 {
+        (entropy / max_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn infer_validation_arc(snapshots: &[EpisodeAffectSnapshot]) -> Option<ValidationArc> {
+    if snapshots.len() < 2 {
+        return None;
+    }
+
+    let first = episode_sentiment(snapshots.first()?);
+    let last = episode_sentiment(snapshots.last()?);
+    let all_same_outcome = snapshots
+        .windows(2)
+        .all(|pair| pair[0].success == pair[1].success);
+
+    if first <= -0.15 && last >= 0.15 {
+        return Some(ValidationArc::Redemptive);
+    }
+    if first >= 0.15 && last <= -0.15 {
+        return Some(ValidationArc::Contaminating);
+    }
+    if last > first + 0.20 {
+        return Some(ValidationArc::Progressive);
+    }
+    if all_same_outcome {
+        return Some(ValidationArc::Stable);
+    }
+
+    Some(ValidationArc::Stable)
+}
+
+fn episode_sentiment(snapshot: &EpisodeAffectSnapshot) -> f64 {
+    let outcome_bias = if snapshot.success { 0.20 } else { -0.20 };
+    (snapshot.tag.pad.pleasure + outcome_bias).clamp(-1.0, 1.0)
+}
+
+fn inferred_model_scope(
+    kind: KnowledgeKind,
+    source_model: Option<String>,
+    model_generality: f64,
+    source_episodes: &[String],
+    tags: &[String],
+    episode_models: &BTreeMap<String, String>,
+) -> (Option<String>, f64) {
+    if kind != KnowledgeKind::Heuristic && kind != KnowledgeKind::StrategyFragment {
+        return (None, 1.0);
+    }
+
+    let explicit_model = source_model
+        .and_then(normalize_model_slug)
+        .or_else(|| tagged_model(tags, "target-model:"))
+        .or_else(|| tagged_model(tags, "source-model:"));
+    let explicit_generality = sanitize_model_generality(model_generality);
+
+    if explicit_model.is_some() || explicit_generality <= 0.7 {
+        return (explicit_model, explicit_generality);
+    }
+
+    let models: BTreeSet<String> = source_episodes
+        .iter()
+        .filter_map(|episode_id| episode_models.get(episode_id))
+        .filter_map(|model| normalize_model_slug(model.to_string()))
+        .collect();
+
+    if models.len() == 1 && explicit_generality < 1.0 {
+        return (models.into_iter().next(), explicit_generality);
+    }
+
+    (None, explicit_generality)
+}
+
+fn tagged_model(tags: &[String], prefix: &str) -> Option<String> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_model_slug(model: String) -> Option<String> {
+    let model = model.trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+fn sanitize_model_generality(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        default_candidate_model_generality()
+    }
+}
+
 fn default_candidate_confidence() -> f64 {
     DEFAULT_CONFIDENCE
+}
+
+fn default_candidate_model_generality() -> f64 {
+    1.0
 }
 
 #[cfg(test)]
@@ -445,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn distiller_maps_structured_response_into_entries() {
         let backend = MockBackend::new(
-            r#"<|json|>{"entries":[{"kind":"fact","content":"file src/lib.rs contains struct Widget","confidence":0.9,"source_episodes":["ep-a"],"tags":["rust","struct"],"half_life_days":45},{"kind":"constraint","content":"never modify file X without also updating Y","confidence":0.8,"source_episodes":["ep-b"],"tags":["guardrail"],"half_life_days":60}]}<|/json|>"#,
+            r#"<|json|>{"entries":[{"kind":"insight","content":"file src/lib.rs contains struct Widget","confidence":0.9,"source_episodes":["ep-a"],"tags":["rust","struct"],"half_life_days":45},{"kind":"warning","content":"never modify file X without also updating Y","confidence":0.8,"source_episodes":["ep-b"],"tags":["guardrail"],"half_life_days":60}]}<|/json|>"#,
         );
         let distiller = Distiller::with_backend(backend.clone());
         let episodes = vec![
@@ -455,10 +727,10 @@ mod tests {
 
         let entries = distiller.distill(&episodes).await.expect("distill");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].kind, KnowledgeKind::Fact);
+        assert_eq!(entries[0].kind, KnowledgeKind::Insight);
         assert_eq!(entries[0].source_episodes, vec!["ep-a"]);
-        assert!(entries[0].tags.iter().any(|tag| tag == "fact"));
-        assert_eq!(entries[1].kind, KnowledgeKind::Constraint);
+        assert!(entries[0].tags.iter().any(|tag| tag == "insight"));
+        assert_eq!(entries[1].kind, KnowledgeKind::Warning);
         assert_eq!(entries[1].source_episodes, vec!["ep-b"]);
         assert!(entries[1].id.starts_with("kn_"));
 
@@ -467,6 +739,89 @@ mod tests {
         assert!(prompt.contains("ep-a"));
         assert!(prompt.contains("ep-b"));
         assert!(prompt.contains("Target categories"));
+    }
+
+    #[tokio::test]
+    async fn distiller_falls_back_to_batch_confirmation_chain() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"insight","content":"shared insight","confidence":0.9,"tags":["shared"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let episodes = vec![
+            episode("signal-a", "ep-a", true),
+            episode("signal-b", "ep-b", true),
+        ];
+
+        let entries = distiller.distill(&episodes).await.expect("distill");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source_episodes, vec!["ep-a", "ep-b"]);
+    }
+
+    #[tokio::test]
+    async fn model_specific_heuristics_preserve_model_metadata() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"heuristic","content":"Use XML tool tags for tool calls.","confidence":0.82,"source_episodes":["ep-a"],"source_model":"claude-sonnet-4-5","model_generality":0.2}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let episodes = vec![episode("signal-a", "ep-a", true)];
+
+        let entries = distiller.distill(&episodes).await.expect("distill");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, KnowledgeKind::Heuristic);
+        assert_eq!(
+            entries[0].source_model.as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert!((entries[0].model_generality - 0.2).abs() < f64::EPSILON);
+        assert!(entries[0].applies_to_model("claude-sonnet-4-5"));
+        assert!(!entries[0].applies_to_model("gpt-5.4"));
+    }
+
+    #[tokio::test]
+    async fn distiller_transfers_emotional_provenance_from_supporting_episodes() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"warning","content":"Do not retry the rollout until rollback health is confirmed.","confidence":0.84,"source_episodes":["ep-a","ep-b"],"tags":["deploy","rollback"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let mut first = episode("signal-a", "ep-a", false);
+        first.completed_at = Utc::now() - chrono::Duration::minutes(10);
+        first.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(-0.8, 0.7, -0.1),
+            0.9,
+            "rollout_failure",
+            PadVector::new(-0.7, 0.6, -0.1),
+        ));
+        let mut second = episode("signal-b", "ep-b", false);
+        second.completed_at = Utc::now();
+        second.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(0.7, 0.2, 0.4),
+            0.7,
+            "rollback_recovered",
+            PadVector::new(0.6, 0.1, 0.3),
+        ));
+        second.success = true;
+
+        let entries = distiller.distill(&[first, second]).await.expect("distill");
+        assert_eq!(entries.len(), 1);
+        let tag = entries[0]
+            .emotional_tag
+            .as_ref()
+            .expect("emotional provenance");
+        assert_eq!(tag.trigger, "distilled:warning");
+        assert!((f64::from(tag.intensity) - 0.8).abs() < 0.001);
+        assert!((tag.pad.pleasure + 0.05).abs() < 0.001);
+        assert!(tag.pad.arousal > 0.44);
+        assert!((tag.mood_snapshot.pleasure + 0.05).abs() < 0.001);
+        assert!(tag.mood_snapshot.arousal > 0.34);
+
+        let provenance = entries[0]
+            .emotional_provenance
+            .as_ref()
+            .expect("emotional provenance metadata");
+        assert_eq!(provenance.discovery_emotion, "negative_high_arousal");
+        assert_eq!(provenance.validation_arc, Some(ValidationArc::Redemptive));
+        assert!((provenance.emotional_diversity - 1.0).abs() < 0.001);
+        assert!((provenance.average_pad.pleasure + 0.05).abs() < 0.001);
     }
 
     #[test]

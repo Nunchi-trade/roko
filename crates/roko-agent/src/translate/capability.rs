@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use roko_core::config::schema::ModelProfile;
 use roko_core::tool::{ToolFormat, format::profile_for_model};
 
 use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
@@ -29,6 +30,7 @@ use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
 /// Derived from [`roko_core::tool::format::profile_for_model`]. Used by
 /// [`translator_for`] to pick the right translator for a model slug and
 /// by the multi-turn loop to cap tool counts before degrading.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct ModelCapabilities {
     /// Whether the model supports any native tool-calling format.
@@ -39,6 +41,18 @@ pub struct ModelCapabilities {
     pub tool_format: ToolFormat,
     /// Tool-count ceiling before the model starts misbehaving.
     pub max_tools_before_degrade: u8,
+    /// Whether the model supports thinking / reasoning content.
+    pub supports_thinking: bool,
+    /// Whether the model supports vision inputs.
+    pub supports_vision: bool,
+    /// Whether the model supports built-in web search.
+    pub supports_web_search: bool,
+    /// Whether the model supports native MCP tools.
+    pub supports_mcp_tools: bool,
+    /// Whether the model supports partial continuation.
+    pub supports_partial: bool,
+    /// Whether the model supports streaming tool events.
+    pub supports_tool_streaming: bool,
 }
 
 /// Return the capability snapshot for a model slug.
@@ -47,12 +61,86 @@ pub struct ModelCapabilities {
 /// profile into a smaller, translator-facing shape.
 #[must_use]
 pub fn capabilities_for(slug: &str) -> ModelCapabilities {
+    if slug.starts_with("glm-5") || slug == "glm-5.1" {
+        return ModelCapabilities {
+            supports_tools: true,
+            supports_parallel_tool_calls: true,
+            tool_format: ToolFormat::OpenAiJson,
+            max_tools_before_degrade: 128,
+            supports_thinking: true,
+            supports_vision: false,
+            supports_web_search: true,
+            supports_mcp_tools: true,
+            supports_partial: false,
+            supports_tool_streaming: true,
+        };
+    }
+
+    if slug.starts_with("kimi-k2") {
+        return ModelCapabilities {
+            supports_tools: true,
+            supports_parallel_tool_calls: true,
+            tool_format: ToolFormat::OpenAiJson,
+            max_tools_before_degrade: 128,
+            supports_thinking: true,
+            supports_vision: slug.contains("k2.5") || slug.contains("k2-5"),
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: true,
+            supports_tool_streaming: false,
+        };
+    }
+
     let profile = profile_for_model(slug);
     ModelCapabilities {
         supports_tools: profile.supports_tools,
         supports_parallel_tool_calls: profile.parallel_safe,
         tool_format: profile.preferred.clone(),
         max_tools_before_degrade: profile.max_tools_before_degrade,
+        supports_thinking: false,
+        supports_vision: false,
+        supports_web_search: false,
+        supports_mcp_tools: false,
+        supports_partial: false,
+        supports_tool_streaming: false,
+    }
+}
+
+/// Project a full model profile into translator-facing capabilities.
+#[must_use]
+pub fn capabilities_from_profile(profile: &ModelProfile) -> ModelCapabilities {
+    let tool_profile = profile_for_model(&profile.slug);
+    let tool_format = tool_format_from_str(&profile.tool_format);
+    let max_tools_before_degrade = profile
+        .max_tools
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(tool_profile.max_tools_before_degrade);
+    ModelCapabilities {
+        supports_tools: profile.supports_tools,
+        supports_parallel_tool_calls: tool_profile.parallel_safe,
+        tool_format,
+        max_tools_before_degrade,
+        supports_thinking: profile.supports_thinking,
+        supports_vision: profile.supports_vision,
+        supports_web_search: profile.supports_web_search,
+        supports_mcp_tools: profile.supports_mcp_tools,
+        supports_partial: profile.supports_partial,
+        supports_tool_streaming: false,
+    }
+}
+
+fn tool_format_from_str(tool_format: &str) -> ToolFormat {
+    match tool_format.trim() {
+        "openai_json" => ToolFormat::OpenAiJson,
+        "anthropic_blocks" => ToolFormat::AnthropicBlocks,
+        "hermes_json" => ToolFormat::HermesJson,
+        "gemma4_tokens" => ToolFormat::Gemma4Tokens,
+        "mistral_tokens" => ToolFormat::MistralTokens,
+        "pythonic" => ToolFormat::Pythonic,
+        "qwen_xml" => ToolFormat::QwenXml,
+        "react_text" => ToolFormat::ReActText,
+        "json_mode" => ToolFormat::JsonMode,
+        other => ToolFormat::Custom(other.to_string()),
     }
 }
 
@@ -79,7 +167,7 @@ pub fn translator_for(slug: &str) -> Arc<dyn Translator> {
 
 /// Short, stable name of the translator Roko picks for a model slug.
 ///
-/// Returns one of `"claude"`, `"ollama"`, or `"react"`. Useful for logs,
+/// Returns one of `"claude"`, `"openai"`, or `"react"`. Useful for logs,
 /// TUI telemetry, and tests where the concrete type is hidden behind a
 /// `dyn Translator` object.
 ///
@@ -92,7 +180,7 @@ pub fn translator_name_for(slug: &str) -> &'static str {
     }
     match caps.tool_format {
         ToolFormat::AnthropicBlocks => "claude",
-        ToolFormat::OpenAiJson => "ollama",
+        ToolFormat::OpenAiJson => "openai",
         // ReActText + every format without a dedicated translator
         // (HermesJson, Gemma4Tokens, MistralTokens, Pythonic, QwenXml,
         // JsonMode, Custom) falls through to the ReAct fallback.
@@ -126,6 +214,34 @@ mod tests {
         let caps = capabilities_for("gpt-4.1");
         assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
         assert!(caps.supports_tools);
+    }
+
+    #[test]
+    fn glm_capabilities_for_glm_51_returns_expected_profile() {
+        let caps = capabilities_for("glm-5.1");
+        assert!(caps.supports_tools);
+        assert!(caps.supports_parallel_tool_calls);
+        assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
+        assert_eq!(caps.max_tools_before_degrade, 128);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_web_search);
+        assert!(caps.supports_mcp_tools);
+        assert!(caps.supports_tool_streaming);
+    }
+
+    #[test]
+    fn kimi_capabilities_for_kimi_k25_returns_expected_profile() {
+        let caps = capabilities_for("kimi-k2.5");
+        assert!(caps.supports_tools);
+        assert!(caps.supports_parallel_tool_calls);
+        assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
+        assert_eq!(caps.max_tools_before_degrade, 128);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_vision);
+        assert!(caps.supports_partial);
+        assert!(!caps.supports_web_search);
+        assert!(!caps.supports_mcp_tools);
+        assert!(!caps.supports_tool_streaming);
     }
 
     #[test]
@@ -165,6 +281,49 @@ mod tests {
                 "tool_format mismatch for {slug}"
             );
         }
+    }
+
+    #[test]
+    fn capabilities_from_profile_maps_all_fields() {
+        let profile = ModelProfile {
+            provider: "zai".to_string(),
+            slug: "gpt-5".to_string(),
+            context_window: 200_000,
+            max_output: Some(131_072),
+            supports_tools: true,
+            supports_thinking: true,
+            supports_vision: true,
+            supports_web_search: true,
+            supports_mcp_tools: true,
+            supports_partial: true,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: Some(1.40),
+            cost_output_per_m: Some(4.40),
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: Some(32),
+            tokenizer_ratio: Some(1.0),
+            ..Default::default()
+        };
+
+        let caps = capabilities_from_profile(&profile);
+        assert!(caps.supports_tools);
+        assert!(caps.supports_parallel_tool_calls);
+        assert_eq!(caps.tool_format, ToolFormat::OpenAiJson);
+        assert_eq!(caps.max_tools_before_degrade, 32);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_vision);
+        assert!(caps.supports_web_search);
+        assert!(caps.supports_mcp_tools);
+        assert!(caps.supports_partial);
+        assert!(!caps.supports_tool_streaming);
     }
 
     #[test]
@@ -240,8 +399,8 @@ mod tests {
     fn translator_name_for_known_slugs() {
         assert_eq!(translator_name_for("claude-opus-4-6"), "claude");
         assert_eq!(translator_name_for("claude-sonnet-4-5"), "claude");
-        assert_eq!(translator_name_for("gpt-5"), "ollama");
-        assert_eq!(translator_name_for("gpt-4.1"), "ollama");
+        assert_eq!(translator_name_for("gpt-5"), "openai");
+        assert_eq!(translator_name_for("gpt-4.1"), "openai");
         assert_eq!(translator_name_for("random-model-123"), "react");
         assert_eq!(translator_name_for("llama3.2-3b"), "react");
         // HermesJson has no dedicated translator → react

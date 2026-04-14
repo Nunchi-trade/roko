@@ -6,18 +6,24 @@
 //! runs, plans, and operations.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, RwLock};
 use tokio::task::JoinHandle;
 
-use bardo_runtime::cancel::CancelToken;
-use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
-use roko_core::{Signal, Substrate};
+use roko_core::obs::LogScrubber;
+use roko_core::{Engram, Substrate};
+use roko_daimon::{DaimonState, StrategySpaceDefinition};
+use roko_learn::latency::LatencyRegistry;
+use roko_learn::provider_health::ProviderHealthTracker;
+use roko_runtime::cancel::CancelToken;
+use roko_runtime::process::ProcessSupervisor;
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
@@ -29,6 +35,10 @@ use roko_fs::layout::RokoLayout;
 
 use crate::events::ServerEvent;
 use crate::templates::TemplateRegistry;
+
+fn affect_state_path(layout_root: &Path) -> PathBuf {
+    layout_root.join("daimon").join("affect.json")
+}
 
 // ---------------------------------------------------------------------------
 // Handle types for tracked async work
@@ -120,14 +130,22 @@ pub struct AppState {
     pub metrics: Arc<MetricRegistry>,
     /// Process lifecycle manager.
     pub supervisor: Arc<ProcessSupervisor>,
+    /// Affect engine used to stamp PAD vectors onto persisted episodes.
+    pub affect_engine: Mutex<DaimonState>,
     /// Event bus for streaming server events to clients.
     pub event_bus: EventBus<ServerEvent>,
+    /// Unified state hub for dashboard snapshot + event streaming.
+    pub state_hub: roko_core::SharedStateHub,
     /// Event subscriptions loaded at startup.
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
     pub runtime: Arc<dyn CliRuntime>,
-    /// Full `roko.toml` schema configuration.
-    pub roko_config: RwLock<RokoConfig>,
+    /// Full `roko.toml` schema configuration with lock-free reads.
+    pub roko_config: ArcSwap<RokoConfig>,
+    /// In-memory provider health tracker exposed via serve APIs.
+    pub provider_health: ProviderHealthTracker,
+    /// In-memory provider latency stats exposed via serve APIs.
+    pub latency_registry: LatencyRegistry,
     /// Active one-shot runs.
     pub active_runs: RwLock<HashMap<String, RunHandle>>,
     /// Active plan executions.
@@ -142,6 +160,8 @@ pub struct AppState {
     pub deployments: RwLock<HashMap<String, Deployment>>,
     /// Recent template run outcomes keyed by template name.
     pub template_runs: RwLock<HashMap<String, Vec<TemplateRunRecord>>>,
+    /// Secret scrubber for redacting API-key / token patterns from responses.
+    pub scrubber: Arc<LogScrubber>,
 }
 
 impl AppState {
@@ -152,11 +172,31 @@ impl AppState {
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
     ) -> Self {
+        Self::new_with_daimon_strategy(
+            workdir,
+            runtime,
+            roko_config,
+            deploy_backend,
+            StrategySpaceDefinition::default(),
+        )
+    }
+
+    /// Construct a new `AppState` with an explicit Daimon strategy-space definition.
+    pub fn new_with_daimon_strategy(
+        workdir: PathBuf,
+        runtime: Arc<dyn CliRuntime>,
+        roko_config: RokoConfig,
+        deploy_backend: Arc<dyn DeployBackend>,
+        strategy_space: StrategySpaceDefinition,
+    ) -> Self {
         let layout = RokoLayout::for_project(&workdir);
         let signal_root = layout.root().to_path_buf();
+        let affect_path = affect_state_path(layout.root());
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
+        let mut affect_engine = DaimonState::load_or_new(&affect_path);
+        affect_engine.configure_strategy_space(strategy_space);
 
         let mut template_registry = TemplateRegistry::new(workdir.clone());
         template_registry.scan();
@@ -169,10 +209,14 @@ impl AppState {
             started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
+            affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(1024),
+            state_hub: roko_core::shared_state_hub(),
             subscriptions,
             runtime,
-            roko_config: RwLock::new(roko_config),
+            roko_config: ArcSwap::from_pointee(roko_config),
+            provider_health: ProviderHealthTracker::new(),
+            latency_registry: LatencyRegistry::new(),
             active_runs: RwLock::new(HashMap::new()),
             active_plans: RwLock::new(HashMap::new()),
             operations: RwLock::new(HashMap::new()),
@@ -180,7 +224,19 @@ impl AppState {
             deploy_backend,
             deployments: RwLock::new(HashMap::new()),
             template_runs: RwLock::new(HashMap::new()),
+            scrubber: Arc::new(LogScrubber::new()),
         }
+    }
+
+    /// Load the current config snapshot.
+    #[must_use]
+    pub fn load_roko_config(&self) -> Arc<RokoConfig> {
+        self.roko_config.load_full()
+    }
+
+    /// Atomically swap in a new config snapshot.
+    pub fn store_roko_config(&self, roko_config: RokoConfig) {
+        self.roko_config.store(Arc::new(roko_config));
     }
 
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
@@ -219,9 +275,57 @@ impl SignalStore {
     }
 
     /// Persist a signal through the normal file-backed substrate path.
-    pub async fn put(&self, signal: Signal) -> anyhow::Result<()> {
+    pub async fn put(&self, signal: Engram) -> anyhow::Result<()> {
         let substrate = self.substrate().await?;
         substrate.put(signal).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::tempdir;
+    use tokio::task::JoinSet;
+
+    use crate::deploy::manual::ManualBackend;
+    use crate::runtime::NoOpRuntime;
+
+    #[tokio::test]
+    async fn arcswap_config_supports_concurrent_reads_during_swap() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut initial = RokoConfig::default();
+        initial.server.port = 4000;
+
+        let state = Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            initial,
+            Arc::new(ManualBackend::default()),
+        ));
+
+        let mut readers = JoinSet::new();
+        for _ in 0..8 {
+            let state = Arc::clone(&state);
+            readers.spawn(async move {
+                for _ in 0..256 {
+                    let config = state.load_roko_config();
+                    let port = config.server.port;
+                    assert!(port == 4000 || port == 5000);
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+
+        let mut updated = state.load_roko_config().as_ref().clone();
+        updated.server.port = 5000;
+        state.store_roko_config(updated);
+
+        while let Some(result) = readers.join_next().await {
+            result.expect("reader task");
+        }
+
+        assert_eq!(state.load_roko_config().server.port, 5000);
     }
 }

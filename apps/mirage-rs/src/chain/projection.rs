@@ -21,10 +21,10 @@
 //! from a float vector is: XOR each row's bit with sign(input[i]), majority-vote
 //! the result. No `f32` multiply-accumulate.
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
 
-/// Bit width of the HDC hypervector (matches `bardo_primitives::HdcVector`).
+/// Bit width of the HDC hypervector (matches `roko_primitives::HdcVector`).
 pub const HDC_BITS: usize = 10_240;
 
 /// Default input dimensionality for the projection matrix (bge-small-en-v1.5).

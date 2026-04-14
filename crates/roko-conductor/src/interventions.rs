@@ -5,7 +5,7 @@
 //! [`InterventionPolicy`] trait that watcher outputs are mapped through
 //! to produce a final [`ConductorDecision`].
 
-use roko_core::{ConductorDecision, Context, Signal};
+use roko_core::{ConductorDecision, Context, Engram};
 use serde::{Deserialize, Serialize};
 
 // ─── Severity classification ────────────────────────────────────────────
@@ -121,7 +121,7 @@ impl InterventionPolicy for WorstSeverityPolicy {
 }
 
 /// Convenience: convert a batch of `WatcherOutput`s into signals for emission.
-pub fn outputs_to_signals(outputs: &[WatcherOutput]) -> Vec<Signal> {
+pub fn outputs_to_signals(outputs: &[WatcherOutput]) -> Vec<Engram> {
     outputs
         .iter()
         .filter_map(|o| {
@@ -130,7 +130,7 @@ pub fn outputs_to_signals(outputs: &[WatcherOutput]) -> Vec<Signal> {
             }
             let body = roko_core::Body::from_json(o).ok()?;
             Some(
-                Signal::builder(roko_core::Kind::Custom(format!(
+                Engram::builder(roko_core::Kind::Custom(format!(
                     "conductor:alert:{}",
                     o.watcher
                 )))

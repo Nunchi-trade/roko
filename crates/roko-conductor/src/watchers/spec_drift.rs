@@ -5,7 +5,7 @@
 //! it actually changed. Fires when the drift exceeds
 //! [`MAX_SPEC_DRIFT_RATIO`].
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 use serde::Deserialize;
 
 /// Maximum acceptable spec drift ratio (0.0 to 1.0).
@@ -99,7 +99,7 @@ impl SpecDriftWatcher {
 }
 
 impl Policy for SpecDriftWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Find the most recent spec-drift metric.
         let latest = stream
             .iter()
@@ -136,7 +136,7 @@ impl Policy for SpecDriftWatcher {
                 .map_or(0, |event| event.changed_files.len());
             let write_count = details.as_ref().map_or(0, |event| event.write_files.len());
             vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
                         "spec drift {drift:.1}% exceeds threshold {:.0}% (plan={plan_id}, task={task_id}, changed={changed_count}, write_files={write_count}, unexpected={unexpected_count})",
                         self.max_drift * 100.0,
@@ -165,16 +165,16 @@ impl Policy for SpecDriftWatcher {
 mod tests {
     use super::*;
 
-    fn drift_signal(value: f64) -> Signal {
-        Signal::builder(Kind::Metric)
+    fn drift_signal(value: f64) -> Engram {
+        Engram::builder(Kind::Metric)
             .body(Body::text("spec drift reading"))
             .tag(METRIC_NAME_TAG, SPEC_DRIFT_METRIC)
             .tag(METRIC_VALUE_TAG, &format!("{value}"))
             .build()
     }
 
-    fn unrelated_metric() -> Signal {
-        Signal::builder(Kind::Metric)
+    fn unrelated_metric() -> Engram {
+        Engram::builder(Kind::Metric)
             .body(Body::text("other metric"))
             .tag(METRIC_NAME_TAG, "cpu_usage")
             .tag(METRIC_VALUE_TAG, "0.99")
@@ -239,7 +239,7 @@ mod tests {
     fn detailed_file_drift_fires_on_unexpected_changes() {
         let w = SpecDriftWatcher::default();
         let stream = vec![
-            Signal::builder(Kind::Metric)
+            Engram::builder(Kind::Metric)
                 .body(
                     Body::from_json(&serde_json::json!({
                         "plan_id": "plan-1",

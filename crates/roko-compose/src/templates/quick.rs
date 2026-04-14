@@ -70,7 +70,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
         sections.push(
             PromptSection::new("agents_instructions", &input.agents_md)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -78,7 +78,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
         sections.push(
             PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
                 .with_hard_cap(50_000),
         );
@@ -87,7 +87,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
         sections.push(
             PromptSection::new("workspace_map", truncate(&input.workspace_map, 6_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(6_000),
         );
@@ -96,7 +96,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
         sections.push(
             PromptSection::new("brief", truncate(&input.brief, 4_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(4_000),
         );
@@ -108,7 +108,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
                 sections.push(
                     PromptSection::new("prior_review", formatted)
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Dynamic)
+                        .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::End)
                         .with_hard_cap(3_000),
                 );
@@ -120,7 +120,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
         sections.push(
             PromptSection::new("verdict_instructions", verdict)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::End),
         );
 
@@ -177,7 +177,7 @@ impl RolePromptTemplate for QuickFixTemplate {
         sections.push(
             PromptSection::new("fix_directive", directive)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::Start),
         );
 
@@ -191,7 +191,7 @@ impl RolePromptTemplate for QuickFixTemplate {
         sections.push(
             PromptSection::new("selfcheck_instructions", selfcheck)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::End),
         );
 
@@ -252,10 +252,10 @@ mod tests {
         assert_eq!(sections[5].priority, SectionPriority::Critical);
 
         // Cache layers
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[4].cache_layer, CacheLayer::Dynamic);
-        assert_eq!(sections[5].cache_layer, CacheLayer::System);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[4].cache_layer, CacheLayer::Volatile);
+        assert_eq!(sections[5].cache_layer, CacheLayer::Role);
 
         // Hard caps — quick reviewer uses tight budgets
         assert_eq!(sections[1].hard_cap, Some(50_000));
@@ -370,7 +370,7 @@ mod tests {
 
         // fix_directive is Critical (must not be dropped)
         assert_eq!(sections[0].priority, SectionPriority::Critical);
-        assert_eq!(sections[0].cache_layer, CacheLayer::Task);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Plan);
 
         // Contains the feedback
         assert!(sections[0].content.contains("compute_rate"));

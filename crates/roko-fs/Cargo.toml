@@ -10,9 +10,15 @@ description = "Filesystem-backed Substrate for Roko: JSONL-append-only persisten
 [lints]
 workspace = true
 
+[features]
+default = []
+hdc = ["dep:roko-primitives", "dep:base64"]
+
 [dependencies]
 roko-core = { path = "../roko-core" }
+roko-primitives = { path = "../roko-primitives", optional = true }
 async-trait = "0.1"
+base64 = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "sync", "io-util", "rt", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -2,7 +2,7 @@
 //! mirage's fork and returns a `Verdict` telling the agent whether the tx would
 //! succeed.
 //!
-//! # Signal shape
+//! # Engram shape
 //!
 //! Input signal body must be a JSON object matching the `TransactionRequest`
 //! shape defined in mirage-rs (`from`, `to`, `gas`, `value`, `data`, ...).
@@ -24,7 +24,7 @@
 //!   - `detail`: JSON summary with gas_used and hex-encoded output
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Signal, traits::Gate, verdict::Verdict};
+use roko_core::{Body, Context, Engram, traits::Gate, verdict::Verdict};
 use serde::Deserialize;
 
 use crate::{
@@ -85,7 +85,7 @@ impl SimulationGate {
         }
     }
 
-    fn parse_request(&self, signal: &Signal) -> Result<ParsedRequest, String> {
+    fn parse_request(&self, signal: &Engram) -> Result<ParsedRequest, String> {
         let tx: TransactionRequest = match &signal.body {
             Body::Json(v) => serde_json::from_value(v.clone())
                 .map_err(|e| format!("body json does not match TransactionRequest: {e}"))?,
@@ -120,7 +120,7 @@ struct ParsedRequest {
 
 #[async_trait]
 impl Gate for SimulationGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
         let parsed = match self.parse_request(signal) {
             Ok(r) => r,
@@ -221,7 +221,7 @@ mod tests {
         resources::{MirageMode, Profile, ResourceModel},
     };
     use alloy_primitives::address;
-    use roko_core::{Body, Context, Kind, Provenance, Signal};
+    use roko_core::{Body, Context, Engram, Kind, Provenance};
     use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
     fn build_test_fork() -> MirageFork {
@@ -235,8 +235,8 @@ mod tests {
         )
     }
 
-    fn tx_signal(tx: serde_json::Value) -> Signal {
-        Signal::builder(Kind::Transaction)
+    fn tx_signal(tx: serde_json::Value) -> Engram {
+        Engram::builder(Kind::Transaction)
             .body(Body::Json(tx))
             .provenance(Provenance::agent("alice"))
             .build()
@@ -286,7 +286,7 @@ mod tests {
     async fn rejects_empty_body() {
         let mirage = build_test_fork();
         let gate = SimulationGate::new(mirage);
-        let signal = Signal::builder(Kind::Transaction)
+        let signal = Engram::builder(Kind::Transaction)
             .body(Body::Empty)
             .provenance(Provenance::agent("alice"))
             .build();
@@ -307,7 +307,7 @@ mod tests {
                 U256::from(1_000_000_000_000_000_000u64),
             );
         }
-        let signal = Signal::builder(Kind::Transaction)
+        let signal = Engram::builder(Kind::Transaction)
             .body(Body::text(
                 r#"{"from":"0x1100000000000000000000000000000000000011","to":"0x2200000000000000000000000000000000000022","gas":"0x5208","data":"0x"}"#,
             ))

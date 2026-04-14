@@ -13,12 +13,14 @@ use crate::state::AppState;
 pub fn start_watchers(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let watchers = {
-            let config = state.roko_config.read().await;
+            let config = state.load_roko_config();
             if config.watcher.is_empty() {
                 Vec::new()
             } else {
-                vec![Box::new(FileWatchEventSource::from_config(config.watcher.clone()))
-                    as Box<dyn EventSource>]
+                vec![
+                    Box::new(FileWatchEventSource::from_config(config.watcher.clone()))
+                        as Box<dyn EventSource>,
+                ]
             }
         };
 

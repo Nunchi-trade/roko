@@ -15,6 +15,7 @@
 //! Thread-safe: all read/write access is lock-protected.
 
 use parking_lot::RwLock;
+use roko_agent::Usage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -111,6 +112,355 @@ impl CostSummary {
             avg_duration_ms: total_duration / n,
             success_rate: successes as f64 / n,
         }
+    }
+}
+
+// ─── CostTable ──────────────────────────────────────────────────────────────
+
+/// Per-model pricing data stored in the default cost table.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPricing {
+    /// Input token cost per 1M tokens, in USD.
+    pub input_per_m: f64,
+    /// Output token cost per 1M tokens, in USD.
+    pub output_per_m: f64,
+    /// Input token cost per 1M tokens for requests above 200K input tokens, in USD.
+    pub input_per_m_high: Option<f64>,
+    /// Output token cost per 1M tokens for requests above 200K input tokens, in USD.
+    pub output_per_m_high: Option<f64>,
+    /// Cached input token cost per 1M tokens, in USD.
+    pub cache_read_per_m: Option<f64>,
+    /// Cache write cost per 1M tokens, in USD.
+    pub cache_write_per_m: Option<f64>,
+    /// Flat per-request fee, in USD (e.g. Perplexity search fee).
+    pub per_request: Option<f64>,
+}
+
+impl ModelPricing {
+    /// Estimate total cost for a request given token counts.
+    ///
+    /// Adds per-request fee (if any) on top of token-based costs.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn estimate_total(&self, input_tokens: u64, output_tokens: u64) -> f64 {
+        let input_rate = if input_tokens > 200_000 {
+            self.input_per_m_high.unwrap_or(self.input_per_m)
+        } else {
+            self.input_per_m
+        };
+        let output_rate = if input_tokens > 200_000 {
+            self.output_per_m_high.unwrap_or(self.output_per_m)
+        } else {
+            self.output_per_m
+        };
+        let token_cost = (input_tokens as f64 / 1_000_000.0) * input_rate
+            + (output_tokens as f64 / 1_000_000.0) * output_rate;
+        token_cost + self.per_request.unwrap_or(0.0)
+    }
+}
+
+/// Default pricing table keyed by model slug.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostTable {
+    /// Pricing records keyed by model slug.
+    pub models: HashMap<String, ModelPricing>,
+}
+
+impl CostTable {
+    /// Look up the pricing entry for a model slug.
+    #[must_use]
+    pub fn lookup(&self, model: &str) -> Option<&ModelPricing> {
+        self.models.get(model)
+    }
+
+    /// Build the default cost table with the GLM, OpenRouter, and Perplexity pricing rows.
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        let mut models = HashMap::new();
+        models.insert(
+            "kimi-k2.5".to_string(),
+            ModelPricing {
+                input_per_m: 0.60,
+                output_per_m: 3.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: Some(0.10),
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "moonshotai/kimi-k2.5".to_string(),
+            ModelPricing {
+                input_per_m: 0.38,
+                output_per_m: 1.72,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: Some(0.10),
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "kimi-k2-thinking".to_string(),
+            ModelPricing {
+                input_per_m: 0.60,
+                output_per_m: 2.50,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: Some(0.15),
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "glm-5.1".to_string(),
+            ModelPricing {
+                input_per_m: 1.40,
+                output_per_m: 4.40,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: Some(0.26),
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "z-ai/glm-5.1".to_string(),
+            ModelPricing {
+                input_per_m: 1.26,
+                output_per_m: 3.96,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: Some(0.26),
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "glm-5".to_string(),
+            ModelPricing {
+                input_per_m: 1.00,
+                output_per_m: 3.20,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "glm-4.7".to_string(),
+            ModelPricing {
+                input_per_m: 0.60,
+                output_per_m: 2.20,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "anthropic/claude-opus-4-6".to_string(),
+            ModelPricing {
+                input_per_m: 15.00,
+                output_per_m: 75.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-2.5-pro".to_string(),
+            ModelPricing {
+                input_per_m: 1.25,
+                output_per_m: 10.00,
+                input_per_m_high: Some(2.50),
+                output_per_m_high: Some(15.00),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-2.5-flash".to_string(),
+            ModelPricing {
+                input_per_m: 0.30,
+                output_per_m: 2.50,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-2.5-flash-lite".to_string(),
+            ModelPricing {
+                input_per_m: 0.10,
+                output_per_m: 0.40,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-3.1-pro-preview".to_string(),
+            ModelPricing {
+                input_per_m: 2.00,
+                output_per_m: 12.00,
+                input_per_m_high: Some(4.00),
+                output_per_m_high: Some(18.00),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-3-flash-preview".to_string(),
+            ModelPricing {
+                input_per_m: 0.50,
+                output_per_m: 3.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+        models.insert(
+            "gemini-3.1-flash-lite-preview".to_string(),
+            ModelPricing {
+                input_per_m: 0.25,
+                output_per_m: 1.50,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: None,
+            },
+        );
+
+        // Perplexity Sonar models — include per-request search fee.
+        models.insert(
+            "sonar".to_string(),
+            ModelPricing {
+                input_per_m: 1.00,
+                output_per_m: 1.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.005),
+            },
+        );
+        models.insert(
+            "sonar-pro".to_string(),
+            ModelPricing {
+                input_per_m: 3.00,
+                output_per_m: 15.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.014),
+            },
+        );
+        models.insert(
+            "sonar-reasoning".to_string(),
+            ModelPricing {
+                input_per_m: 1.00,
+                output_per_m: 5.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.005),
+            },
+        );
+        models.insert(
+            "sonar-reasoning-pro".to_string(),
+            ModelPricing {
+                input_per_m: 2.00,
+                output_per_m: 8.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.008),
+            },
+        );
+        models.insert(
+            "sonar-deep-research".to_string(),
+            ModelPricing {
+                input_per_m: 2.00,
+                output_per_m: 8.00,
+                input_per_m_high: None,
+                output_per_m_high: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                per_request: Some(0.005),
+            },
+        );
+        // Bare Anthropic direct API slugs (used by cascade router).
+        models.insert(
+            "claude-opus-4-6".to_string(),
+            ModelPricing {
+                input_per_m: 15.00,
+                output_per_m: 75.00,
+                cache_read_per_m: None,
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "claude-sonnet-4-5".to_string(),
+            ModelPricing {
+                input_per_m: 3.00,
+                output_per_m: 15.00,
+                cache_read_per_m: None,
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "claude-sonnet-4-6".to_string(),
+            ModelPricing {
+                input_per_m: 3.00,
+                output_per_m: 15.00,
+                cache_read_per_m: None,
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "claude-haiku-4-5".to_string(),
+            ModelPricing {
+                input_per_m: 0.80,
+                output_per_m: 4.00,
+                cache_read_per_m: None,
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "claude-haiku-3-5".to_string(),
+            ModelPricing {
+                input_per_m: 0.25,
+                output_per_m: 1.25,
+                cache_read_per_m: None,
+                ..Default::default()
+            },
+        );
+
+        Self { models }
+    }
+}
+
+impl Default for CostTable {
+    fn default() -> Self {
+        Self::with_defaults()
     }
 }
 
@@ -315,6 +665,49 @@ impl Default for CostsDb {
     }
 }
 
+// ─── Record construction ───────────────────────────────────────────────────
+
+/// Create a [`CostRecord`], falling back to token-based pricing when the
+/// agent did not self-report a cost.
+#[must_use]
+pub fn create_cost_record(
+    timestamp: String,
+    model: &str,
+    provider: &str,
+    role: &str,
+    plan_id: &str,
+    task_id: &str,
+    complexity_band: &str,
+    usage: &Usage,
+    cost_table: &crate::cost_table::CostTable,
+    duration_ms: u64,
+    success: bool,
+    session_id: &str,
+) -> CostRecord {
+    let cost_usd = if usage.cost_usd > 0.0 {
+        f64::from(usage.cost_usd)
+    } else {
+        cost_table.calculate(model, usage)
+    };
+
+    CostRecord {
+        timestamp,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        role: role.to_string(),
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        complexity_band: complexity_band.to_string(),
+        input_tokens: u64::from(usage.input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
+        cached_tokens: u64::from(usage.cache_read_tokens),
+        cost_usd,
+        duration_ms,
+        success,
+        session_id: session_id.to_string(),
+    }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Create a test fixture [`CostRecord`].
@@ -350,6 +743,140 @@ fn make_test_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_agent::Usage;
+    use std::collections::HashMap;
+
+    #[test]
+    fn glm_cost_table() {
+        let table = CostTable::default();
+
+        let glm_5_1 = table.lookup("glm-5.1").expect("glm-5.1 pricing");
+        assert!((glm_5_1.input_per_m - 1.40).abs() < 1e-9);
+        assert!((glm_5_1.output_per_m - 4.40).abs() < 1e-9);
+        assert_eq!(glm_5_1.cache_read_per_m, Some(0.26));
+
+        let glm_5 = table.lookup("glm-5").expect("glm-5 pricing");
+        assert!((glm_5.input_per_m - 1.00).abs() < 1e-9);
+        assert!((glm_5.output_per_m - 3.20).abs() < 1e-9);
+        assert_eq!(glm_5.cache_read_per_m, None);
+
+        let glm_4_7 = table.lookup("glm-4.7").expect("glm-4.7 pricing");
+        assert!((glm_4_7.input_per_m - 0.60).abs() < 1e-9);
+        assert!((glm_4_7.output_per_m - 2.20).abs() < 1e-9);
+        assert_eq!(glm_4_7.cache_read_per_m, None);
+    }
+
+    #[test]
+    fn kimi_cost_table() {
+        let table = CostTable::default();
+
+        let kimi_k2_5 = table.lookup("kimi-k2.5").expect("kimi-k2.5 pricing");
+        assert!((kimi_k2_5.input_per_m - 0.60).abs() < 1e-9);
+        assert!((kimi_k2_5.output_per_m - 3.00).abs() < 1e-9);
+        assert_eq!(kimi_k2_5.cache_read_per_m, Some(0.10));
+
+        let kimi_k2_thinking = table
+            .lookup("kimi-k2-thinking")
+            .expect("kimi-k2-thinking pricing");
+        assert!((kimi_k2_thinking.input_per_m - 0.60).abs() < 1e-9);
+        assert!((kimi_k2_thinking.output_per_m - 2.50).abs() < 1e-9);
+        assert_eq!(kimi_k2_thinking.cache_read_per_m, Some(0.15));
+    }
+
+    #[test]
+    fn openrouter_cost_table() {
+        let table = CostTable::default();
+
+        let glm_5_1 = table.lookup("z-ai/glm-5.1").expect("z-ai/glm-5.1 pricing");
+        assert!((glm_5_1.input_per_m - 1.26).abs() < 1e-9);
+        assert!((glm_5_1.output_per_m - 3.96).abs() < 1e-9);
+
+        let kimi_k2_5 = table
+            .lookup("moonshotai/kimi-k2.5")
+            .expect("moonshotai/kimi-k2.5 pricing");
+        assert!((kimi_k2_5.input_per_m - 0.38).abs() < 1e-9);
+        assert!((kimi_k2_5.output_per_m - 1.72).abs() < 1e-9);
+
+        let claude_opus = table
+            .lookup("anthropic/claude-opus-4-6")
+            .expect("anthropic/claude-opus-4-6 pricing");
+        assert!((claude_opus.input_per_m - 15.00).abs() < 1e-9);
+        assert!((claude_opus.output_per_m - 75.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_record_calculation() {
+        let cost_table = crate::cost_table::CostTable {
+            models: HashMap::new(),
+        }
+        .with_defaults();
+
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            cache_read_tokens: 100,
+            cache_create_tokens: 50,
+            cost_usd: 0.0,
+            wall_ms: 1_234,
+        };
+
+        let calculated = create_cost_record(
+            "2026-04-06T12:00:00Z".to_string(),
+            "glm-5.1",
+            "zai",
+            "Implementer",
+            "plan-1",
+            "t1",
+            "standard",
+            &usage,
+            &cost_table,
+            1_234,
+            true,
+            "session-1",
+        );
+        assert!((calculated.cost_usd - 0.002_393_5).abs() < 1e-12);
+
+        let reported_usage = Usage {
+            cost_usd: 0.123,
+            ..usage
+        };
+        let reported = create_cost_record(
+            "2026-04-06T12:00:00Z".to_string(),
+            "glm-5.1",
+            "zai",
+            "Implementer",
+            "plan-1",
+            "t1",
+            "standard",
+            &reported_usage,
+            &cost_table,
+            1_234,
+            true,
+            "session-1",
+        );
+        assert_eq!(reported.cost_usd, f64::from(reported_usage.cost_usd));
+    }
+
+    #[test]
+    fn gemini_cost_table() {
+        let table = CostTable::default();
+
+        let gemini_pro = table
+            .lookup("gemini-2.5-pro")
+            .expect("gemini-2.5-pro pricing");
+        assert!((gemini_pro.input_per_m - 1.25).abs() < 1e-9);
+        assert!((gemini_pro.output_per_m - 10.00).abs() < 1e-9);
+        assert_eq!(gemini_pro.input_per_m_high, Some(2.50));
+        assert_eq!(gemini_pro.output_per_m_high, Some(15.00));
+
+        let gemini_flash = table
+            .lookup("gemini-2.5-flash")
+            .expect("gemini-2.5-flash pricing");
+        assert!((gemini_flash.input_per_m - 0.30).abs() < 1e-9);
+        assert!((gemini_flash.output_per_m - 2.50).abs() < 1e-9);
+        assert_eq!(gemini_flash.input_per_m_high, None);
+        assert_eq!(gemini_flash.output_per_m_high, None);
+    }
 
     #[test]
     fn costs_db_insert_and_len() {
@@ -604,6 +1131,78 @@ mod tests {
         let json = serde_json::to_string(&r).expect("serialize");
         let r2: CostRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn perplexity_costs() {
+        let table = CostTable::default();
+
+        // sonar: $1.00/M in, $1.00/M out, $0.005 per-request
+        let sonar = table.lookup("sonar").expect("sonar pricing");
+        assert!((sonar.input_per_m - 1.00).abs() < 1e-9);
+        assert!((sonar.output_per_m - 1.00).abs() < 1e-9);
+        assert_eq!(sonar.per_request, Some(0.005));
+
+        // sonar-pro: $3.00/M in, $15.00/M out, $0.014 per-request
+        let sonar_pro = table.lookup("sonar-pro").expect("sonar-pro pricing");
+        assert!((sonar_pro.input_per_m - 3.00).abs() < 1e-9);
+        assert!((sonar_pro.output_per_m - 15.00).abs() < 1e-9);
+        assert_eq!(sonar_pro.per_request, Some(0.014));
+
+        // sonar-reasoning: $1.00/M in, $5.00/M out, $0.005 per-request
+        let sonar_r = table
+            .lookup("sonar-reasoning")
+            .expect("sonar-reasoning pricing");
+        assert!((sonar_r.input_per_m - 1.00).abs() < 1e-9);
+        assert!((sonar_r.output_per_m - 5.00).abs() < 1e-9);
+        assert_eq!(sonar_r.per_request, Some(0.005));
+
+        // sonar-reasoning-pro: $2.00/M in, $8.00/M out, $0.008 per-request
+        let sonar_rp = table
+            .lookup("sonar-reasoning-pro")
+            .expect("sonar-reasoning-pro pricing");
+        assert!((sonar_rp.input_per_m - 2.00).abs() < 1e-9);
+        assert!((sonar_rp.output_per_m - 8.00).abs() < 1e-9);
+        assert_eq!(sonar_rp.per_request, Some(0.008));
+
+        // sonar-deep-research: $2.00/M in, $8.00/M out, $0.005 per-request
+        let sonar_dr = table
+            .lookup("sonar-deep-research")
+            .expect("sonar-deep-research pricing");
+        assert!((sonar_dr.input_per_m - 2.00).abs() < 1e-9);
+        assert!((sonar_dr.output_per_m - 8.00).abs() < 1e-9);
+        assert_eq!(sonar_dr.per_request, Some(0.005));
+
+        // estimate_total includes the per-request fee.
+        // 1M input + 1M output on sonar = $1.00 + $1.00 + $0.005 = $2.005
+        let total = sonar.estimate_total(1_000_000, 1_000_000);
+        assert!((total - 2.005).abs() < 1e-9);
+
+        // 500k input + 200k output on sonar-pro:
+        // token = 0.5 * $3.00 + 0.2 * $15.00 = $1.50 + $3.00 = $4.50
+        // + $0.014 per-request = $4.514
+        let total_pro = sonar_pro.estimate_total(500_000, 200_000);
+        assert!((total_pro - 4.514).abs() < 1e-9);
+
+        // Non-Perplexity model has no per-request fee.
+        let glm_5 = table.lookup("glm-5").expect("glm-5 pricing");
+        assert_eq!(glm_5.per_request, None);
+        let glm_total = glm_5.estimate_total(1_000_000, 1_000_000);
+        assert!((glm_total - 4.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gemini_tiered_cost() {
+        let table = CostTable::default();
+        let gemini_pro = table
+            .lookup("gemini-2.5-pro")
+            .expect("gemini-2.5-pro pricing");
+
+        let low_tier_total = gemini_pro.estimate_total(200_000, 50_000);
+        assert!((low_tier_total - 0.75).abs() < 1e-9);
+
+        let high_tier_total = gemini_pro.estimate_total(300_000, 50_000);
+        assert!((high_tier_total - 1.50).abs() < 1e-9);
     }
 
     #[test]

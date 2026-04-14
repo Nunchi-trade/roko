@@ -24,6 +24,9 @@ pub struct PromptVariant {
     pub section_name: String,
     /// The actual prompt text content.
     pub content: String,
+    /// Optional model slug when the experiment is selecting among models.
+    #[serde(default)]
+    pub slug: Option<String>,
     /// Whether this variant is still eligible for selection.
     pub active: bool,
 }
@@ -96,6 +99,9 @@ pub struct PromptExperiment {
     pub experiment_id: String,
     /// The prompt section under test.
     pub section_name: String,
+    /// Optional agent role label when the experiment is selecting a role model.
+    #[serde(default)]
+    pub role: Option<String>,
     /// Available variants.
     pub variants: Vec<PromptVariant>,
     /// Per-variant statistics, keyed by variant id.
@@ -127,6 +133,7 @@ impl PromptExperiment {
         Self {
             experiment_id: experiment_id.into(),
             section_name: section_name.into(),
+            role: None,
             variants,
             stats,
             metric_stats: HashMap::new(),
@@ -381,6 +388,7 @@ mod tests {
                 name: "Variant A".into(),
                 section_name: section.into(),
                 content: "Be concise.".into(),
+                slug: None,
                 active: true,
             },
             PromptVariant {
@@ -388,6 +396,7 @@ mod tests {
                 name: "Variant B".into(),
                 section_name: section.into(),
                 content: "Be verbose and thorough.".into(),
+                slug: None,
                 active: true,
             },
         ]

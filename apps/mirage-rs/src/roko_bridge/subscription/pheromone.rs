@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bardo_primitives::HdcVector;
 use parking_lot::RwLock;
+use roko_primitives::HdcVector;
 
 use super::{
     SubscriptionId,

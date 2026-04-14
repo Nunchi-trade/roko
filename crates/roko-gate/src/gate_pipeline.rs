@@ -24,7 +24,7 @@
 //! *independent* pipelines is a concern one level up.
 
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, TestCount, Verdict};
+use roko_core::{Context, Engram, Gate, TestCount, Verdict};
 use std::fmt;
 use std::time::Instant;
 
@@ -143,7 +143,7 @@ fn render_step_line(index: usize, inner: &Verdict) -> String {
 
 #[async_trait]
 impl Gate for GatePipeline {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         // Empty pipeline trivially passes.
@@ -232,7 +232,7 @@ impl Gate for GatePipeline {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Gate, Kind, Signal, TestCount, Verdict};
+    use roko_core::{Body, Context, Engram, Gate, Kind, TestCount, Verdict};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -286,7 +286,7 @@ mod tests {
 
     #[async_trait]
     impl Gate for MockGate {
-        async fn verify(&self, _signal: &Signal, _ctx: &Context) -> Verdict {
+        async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut v = if self.pass {
                 Verdict::pass(&self.name)
@@ -305,8 +305,8 @@ mod tests {
         }
     }
 
-    fn signal() -> Signal {
-        Signal::builder(Kind::Task).body(Body::empty()).build()
+    fn signal() -> Engram {
+        Engram::builder(Kind::Task).body(Body::empty()).build()
     }
 
     fn ctx() -> Context {
@@ -427,7 +427,7 @@ mod tests {
 
     #[async_trait]
     impl Gate for OrderedGate {
-        async fn verify(&self, _s: &Signal, _c: &Context) -> Verdict {
+        async fn verify(&self, _s: &Engram, _c: &Context) -> Verdict {
             let position = self.counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 position, self.expected_position,

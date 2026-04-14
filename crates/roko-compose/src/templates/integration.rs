@@ -58,7 +58,7 @@ impl RolePromptTemplate for IntegrationTemplate {
         sections.push(
             PromptSection::new("agents_instructions", &input.agents_md)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -78,7 +78,7 @@ impl RolePromptTemplate for IntegrationTemplate {
         sections.push(
             PromptSection::new("integration_context", context_text)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start),
         );
 
@@ -87,7 +87,7 @@ impl RolePromptTemplate for IntegrationTemplate {
             sections.push(
                 PromptSection::new("integration_memo", truncate(memo, 4_000))
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(4_000),
             );
@@ -98,7 +98,7 @@ impl RolePromptTemplate for IntegrationTemplate {
             sections.push(
                 PromptSection::new("fixture_manifest", truncate(fixtures, 2_000))
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(2_000),
             );
@@ -109,7 +109,7 @@ impl RolePromptTemplate for IntegrationTemplate {
             sections.push(
                 PromptSection::new("dependency_manifest", truncate(deps, 2_000))
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(2_000),
             );
@@ -119,7 +119,7 @@ impl RolePromptTemplate for IntegrationTemplate {
         sections.push(
             PromptSection::new("instructions", INTEGRATION_INSTRUCTIONS)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::End),
         );
 
@@ -197,10 +197,10 @@ mod tests {
         assert_eq!(sections[5].priority, SectionPriority::Critical);
 
         // Cache layers
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[2].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[5].cache_layer, CacheLayer::System);
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[2].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[5].cache_layer, CacheLayer::Role);
 
         // Hard caps
         assert_eq!(sections[2].hard_cap, Some(4_000)); // integration_memo

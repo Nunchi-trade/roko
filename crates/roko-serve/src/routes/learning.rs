@@ -800,6 +800,7 @@ struct RungThresholdSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::OperatingFrequency;
     use std::sync::Arc;
 
     use axum::extract::State;
@@ -810,46 +811,44 @@ mod tests {
     use crate::state::AppState;
 
     fn make_experiment() -> PromptExperiment {
-        PromptExperiment {
-            experiment_id: "exp-1".into(),
-            section_name: "system_prompt".into(),
-            variants: vec![
-                roko_learn::prompt_experiment::PromptVariant {
-                    id: "baseline".into(),
-                    name: "Baseline".into(),
-                    section_name: "system_prompt".into(),
-                    content: "v1".into(),
-                    active: true,
+        let variants = vec![
+            roko_learn::prompt_experiment::PromptVariant {
+                id: "baseline".into(),
+                name: "Baseline".into(),
+                section_name: "system_prompt".into(),
+                content: "v1".into(),
+                slug: None,
+                active: true,
+            },
+            roko_learn::prompt_experiment::PromptVariant {
+                id: "verbose".into(),
+                name: "Verbose".into(),
+                section_name: "system_prompt".into(),
+                content: "v2".into(),
+                slug: None,
+                active: true,
+            },
+        ];
+        let mut exp = PromptExperiment::new("exp-1", "system_prompt", variants);
+        exp.stats = HashMap::from([
+            (
+                "baseline".into(),
+                roko_learn::prompt_experiment::VariantStats {
+                    trials: 10,
+                    successes: 8,
                 },
-                roko_learn::prompt_experiment::PromptVariant {
-                    id: "verbose".into(),
-                    name: "Verbose".into(),
-                    section_name: "system_prompt".into(),
-                    content: "v2".into(),
-                    active: true,
+            ),
+            (
+                "verbose".into(),
+                roko_learn::prompt_experiment::VariantStats {
+                    trials: 10,
+                    successes: 5,
                 },
-            ],
-            stats: HashMap::from([
-                (
-                    "baseline".into(),
-                    roko_learn::prompt_experiment::VariantStats {
-                        trials: 10,
-                        successes: 8,
-                    },
-                ),
-                (
-                    "verbose".into(),
-                    roko_learn::prompt_experiment::VariantStats {
-                        trials: 10,
-                        successes: 5,
-                    },
-                ),
-            ]),
-            status: ExperimentStatus::Running,
-            winner_id: None,
-            min_trials_per_variant: 5,
-            min_effect_size: 0.1,
-        }
+            ),
+        ]);
+        exp.min_trials_per_variant = 5;
+        exp.min_effect_size = 0.1;
+        exp
     }
 
     fn snapshot() -> CascadeSnapshotData {
@@ -966,6 +965,7 @@ mod tests {
             task_id: task_id.into(),
             input_tokens,
             output_tokens,
+            reasoning_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd,
@@ -985,6 +985,7 @@ mod tests {
             outcome: "success".into(),
             gate_errors: Vec::new(),
             model_used: "claude-sonnet-4-5".into(),
+            frequency: OperatingFrequency::Theta,
             strategy_attempted: "none".into(),
             timestamp: timestamp.into(),
         }
@@ -1089,13 +1090,17 @@ mod tests {
         assert_eq!(response.rungs[0].rung, 1);
         assert_eq!(response.rungs[0].total_observations, 3);
         assert_eq!(response.rungs[0].consecutive_passes, 0);
-        assert_eq!(response.rungs[0].suggested_max_retries, 5);
+        // With only 3 observations (< 5), suggested_max_retries returns the
+        // "not enough data" default of 3.
+        assert_eq!(response.rungs[0].suggested_max_retries, 3);
         assert!((response.rungs[0].ema_pass_rate - 0.0).abs() < 1e-9);
         assert_eq!(response.rungs[1].rung, 2);
         assert_eq!(response.rungs[1].total_observations, 5);
         assert_eq!(response.rungs[1].consecutive_passes, 5);
         assert_eq!(response.rungs[1].suggested_max_retries, 1);
         assert!((response.rungs[1].ema_pass_rate - 1.0).abs() < 1e-9);
-        assert!(response.rungs[1].should_skip_rung);
+        // should_skip_rung requires SKIP_STREAK_THRESHOLD (20) consecutive
+        // passes; 5 passes is not enough.
+        assert!(!response.rungs[1].should_skip_rung);
     }
 }

@@ -2,7 +2,7 @@
 //! before an agent signs a tx.
 //!
 //! These gates close the loop between planning and execution: an agent produces
-//! a `Signal` describing a planned transaction, and the gate answers "is this
+//! a `Engram` describing a planned transaction, and the gate answers "is this
 //! safe to sign?". Two complementary checks live here:
 //!
 //! * [`WalletGate`] — balance / nonce / optional-allowance checks against a
@@ -12,7 +12,7 @@
 //!   [`TxSimulator`] (mirage fork, alloy `eth_call`, or a mock) and returns a
 //!   verdict on revert / gas overrun.
 //!
-//! # Signal contract
+//! # Engram contract
 //!
 //! Both gates read the signal body as a JSON-encoded [`TxRequest`](crate::TxRequest).
 //! Accepted body shapes:

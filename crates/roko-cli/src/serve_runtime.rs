@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
-use roko_serve::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
+use roko_serve::runtime::{CliRuntime, DashboardInfo, RepoInfo, RunResult, SessionStatusInfo};
 
 use crate::config::{Config, RepoRegistry};
 use crate::run::run_once;
@@ -70,5 +70,17 @@ impl CliRuntime for RokoCliRuntime {
         self.repo_registry
             .get(repo_name)
             .and_then(|entry| entry.roko_config.clone())
+    }
+
+    fn list_repos(&self) -> Vec<RepoInfo> {
+        self.repo_registry
+            .repos()
+            .iter()
+            .map(|entry| RepoInfo {
+                name: entry.config.name.clone(),
+                path: entry.root.clone(),
+                branch: entry.config.branch.clone(),
+            })
+            .collect()
     }
 }

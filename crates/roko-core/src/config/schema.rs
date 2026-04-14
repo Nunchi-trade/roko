@@ -1,14 +1,17 @@
 //! Unified `RokoConfig` schema with hierarchical sections.
 //!
 //! Every section is a separate struct so callers can destructure just the
-//! slice they need. All fields carry serde defaults so a bare `schema_version = 2`
-//! produces a fully-populated config.
+//! slice they need. All fields carry serde defaults so a bare config still
+//! produces a fully-populated `RokoConfig`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use crate::agent::{AgentBackend, ProviderKind};
+use crate::tool::{ToolFormat, profile_for_model};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -18,6 +21,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Root configuration for the Roko runtime.
 ///
 /// ```toml
+/// config_version = 2
 /// schema_version = 2
 ///
 /// [project]
@@ -29,9 +33,15 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// [agent.roles.implementer]
 /// model = "claude-opus-4-6"
 /// ```
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
 #[allow(clippy::derive_partial_eq_without_eq)] // contains f32 via BudgetConfig
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RokoConfig {
+    /// Config layout version for migration tooling.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
+
     /// Schema version for migration tooling.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -48,6 +58,14 @@ pub struct RokoConfig {
     #[serde(default)]
     pub agent: AgentConfig,
 
+    /// Provider registry keyed by provider name.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+
+    /// Model registry keyed by model name.
+    #[serde(default)]
+    pub models: HashMap<String, ModelProfile>,
+
     /// Verification gates.
     #[serde(default)]
     pub gates: GatesConfig,
@@ -55,6 +73,10 @@ pub struct RokoConfig {
     /// Model routing configuration.
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// Complexity-to-pipeline mapping for orchestration stages.
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 
     /// Spend / token budgets.
     #[serde(default)]
@@ -99,21 +121,37 @@ pub struct RokoConfig {
     /// Cloud deployment settings (Railway, etc.).
     #[serde(default)]
     pub deploy: DeployConfig,
+
+    /// Perplexity-specific settings (search recency, domain filters, etc.).
+    #[serde(default)]
+    pub perplexity: PerplexityConfig,
+
+    /// Gemini-specific settings (model defaults, thinking, safety, caching).
+    #[serde(default)]
+    pub gemini: GeminiConfig,
 }
 
 const fn default_schema_version() -> u32 {
     CURRENT_SCHEMA_VERSION
 }
 
+const fn default_config_version() -> u32 {
+    1
+}
+
 impl Default for RokoConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             schema_version: CURRENT_SCHEMA_VERSION,
             project: ProjectConfig::default(),
             prd: PrdConfig::default(),
             agent: AgentConfig::default(),
+            providers: HashMap::new(),
+            models: HashMap::new(),
             gates: GatesConfig::default(),
             routing: RoutingConfig::default(),
+            pipeline: PipelineConfig::default(),
             budget: BudgetConfig::default(),
             conductor: ConductorConfig::default(),
             watcher: WatcherConfig::default(),
@@ -125,6 +163,8 @@ impl Default for RokoConfig {
             subscriptions: Vec::new(),
             server: ServerConfig::default(),
             deploy: DeployConfig::default(),
+            perplexity: PerplexityConfig::default(),
+            gemini: GeminiConfig::default(),
         }
     }
 }
@@ -139,6 +179,7 @@ impl RokoConfig {
             out,
             "# Delete any section you don't need; defaults apply.\n"
         );
+        let _ = writeln!(out, "config_version = {CURRENT_CONFIG_VERSION}");
         let _ = writeln!(out, "schema_version = {CURRENT_SCHEMA_VERSION}\n");
     }
 
@@ -188,6 +229,8 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- Model routing --");
         let _ = writeln!(out, "[routing]");
         let _ = writeln!(out, "mode = \"{}\"", cfg.routing.mode);
+        let _ = writeln!(out, "algorithm = \"{}\"", cfg.routing.algorithm.label());
+        let _ = writeln!(out, "discount_factor = {}", cfg.routing.discount_factor);
         let _ = writeln!(out, "fast_task_model = \"{}\"", cfg.routing.fast_task_model);
         let _ = writeln!(
             out,
@@ -199,6 +242,59 @@ impl RokoConfig {
             "complex_task_model = \"{}\"\n",
             cfg.routing.complex_task_model
         );
+        let _ = writeln!(out, "[routing.weights]");
+        let _ = writeln!(out, "quality = {}", cfg.routing.weights.default.quality);
+        let _ = writeln!(out, "cost = {}", cfg.routing.weights.default.cost);
+        let _ = writeln!(out, "latency = {}\n", cfg.routing.weights.default.latency);
+        let mechanical = cfg.routing.weights.for_tier("mechanical");
+        let _ = writeln!(out, "[routing.weights.mechanical]");
+        let _ = writeln!(out, "quality = {}", mechanical.quality);
+        let _ = writeln!(out, "cost = {}", mechanical.cost);
+        let _ = writeln!(out, "latency = {}\n", mechanical.latency);
+    }
+
+    fn write_example_pipeline(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Complexity-to-pipeline mapping --");
+
+        let mechanical = cfg.pipeline.mechanical;
+        let _ = writeln!(out, "[pipeline.mechanical]");
+        let _ = writeln!(out, "strategist = {}", mechanical.strategist);
+        let _ = writeln!(out, "reviewers = {}", mechanical.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            mechanical.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", mechanical.max_iterations);
+
+        let focused = cfg.pipeline.focused;
+        let _ = writeln!(out, "[pipeline.focused]");
+        let _ = writeln!(out, "strategist = {}", focused.strategist);
+        let _ = writeln!(out, "reviewers = {}", focused.reviewers);
+        let _ = writeln!(out, "reviewer_mode = \"{}\"", focused.reviewer_mode.label());
+        let _ = writeln!(out, "max_iterations = {}\n", focused.max_iterations);
+
+        let integrative = cfg.pipeline.integrative;
+        let _ = writeln!(out, "[pipeline.integrative]");
+        let _ = writeln!(out, "strategist = {}", integrative.strategist);
+        let _ = writeln!(out, "reviewers = {}", integrative.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            integrative.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", integrative.max_iterations);
+
+        let architectural = cfg.pipeline.architectural;
+        let _ = writeln!(out, "[pipeline.architectural]");
+        let _ = writeln!(out, "strategist = {}", architectural.strategist);
+        let _ = writeln!(out, "reviewers = {}", architectural.reviewers);
+        let _ = writeln!(
+            out,
+            "reviewer_mode = \"{}\"",
+            architectural.reviewer_mode.label()
+        );
+        let _ = writeln!(out, "max_iterations = {}\n", architectural.max_iterations);
     }
 
     fn write_example_budget(out: &mut String, cfg: &Self) {
@@ -276,6 +372,19 @@ impl RokoConfig {
         let _ = writeln!(out, "[server]");
         let _ = writeln!(out, "bind = \"{}\"", cfg.server.bind);
         let _ = writeln!(out, "port = {}", cfg.server.port);
+
+        let _ = writeln!(out, "\n# -- Cloud deployment --");
+        let _ = writeln!(out, "[serve.deploy]");
+        let _ = writeln!(out, "provider = \"{}\"", cfg.serve.deploy.provider);
+        let _ = writeln!(out, "environment = {:?}", cfg.serve.deploy.environment);
+        let _ = writeln!(out, "\n[[serve.deploy.webhooks]]");
+        let _ = writeln!(out, "provider = \"github\"");
+        let _ = writeln!(out, "owner = \"nunchi\"");
+        let _ = writeln!(out, "repo = \"roko\"");
+        let _ = writeln!(out, "\n[[serve.deploy.webhooks]]");
+        let _ = writeln!(out, "provider = \"github\"");
+        let _ = writeln!(out, "owner = \"nunchi\"");
+        let _ = writeln!(out, "repo = \"collaboration\"");
     }
 
     fn write_example_scheduler(out: &mut String, _cfg: &Self) {
@@ -309,7 +418,13 @@ impl RokoConfig {
 
     /// Parse from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
+        let config: Self = toml::from_str(s)?;
+        if config.config_version == 1 {
+            tracing::warn!(
+                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+            );
+        }
+        Ok(config)
     }
 
     /// Render to a TOML string.
@@ -328,12 +443,160 @@ impl RokoConfig {
         self.schema_version < CURRENT_SCHEMA_VERSION
     }
 
+    /// Return the provider registry that should be used at runtime.
+    ///
+    /// New-style configs use `[providers.*]` directly. Older configs only had
+    /// a legacy `[agent]` section, so we synthesize the minimum provider
+    /// registry needed for backwards compatibility.
+    #[must_use]
+    pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
+        if !self.providers.is_empty() {
+            return self.providers.clone();
+        }
+
+        let mut providers = HashMap::new();
+
+        let claude_command = self
+            .agent
+            .command
+            .clone()
+            .unwrap_or_else(|| "claude".to_string());
+
+        providers.insert(
+            "claude_cli".into(),
+            ProviderConfig {
+                kind: ProviderKind::ClaudeCli,
+                base_url: None,
+                api_key_env: None,
+                command: Some(claude_command),
+                args: self.agent.args.clone(),
+                timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
+                ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                connect_timeout_ms: default_provider_connect_timeout_ms(),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+
+        if let Some(base_url) = self.agent_env_value("ANTHROPIC_BASE_URL") {
+            providers.insert(
+                "anthropic".into(),
+                ProviderConfig {
+                    kind: ProviderKind::AnthropicApi,
+                    base_url: Some(base_url.to_owned()),
+                    api_key_env: self
+                        .agent_env_value("ANTHROPIC_API_KEY")
+                        .map(|_| "ANTHROPIC_API_KEY".to_string()),
+                    command: None,
+                    args: None,
+                    timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
+                    ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                    connect_timeout_ms: default_provider_connect_timeout_ms(),
+                    extra_headers: None,
+                    max_concurrent: None,
+                },
+            );
+        }
+
+        providers
+    }
+
+    /// Return the model registry that should be used at runtime.
+    ///
+    /// New-style configs use `[models.*]` directly. Older configs only had
+    /// `[agent.tier_models]` and a default model, so we synthesize the
+    /// minimum model registry needed for backwards compatibility.
+    #[must_use]
+    pub fn effective_models(&self) -> HashMap<String, ModelProfile> {
+        let mut models = HashMap::new();
+
+        for slug in self.agent.tier_models.values() {
+            let slug = slug.trim();
+            if slug.is_empty() {
+                continue;
+            }
+
+            models
+                .entry(slug.to_owned())
+                .or_insert_with(|| self.synthesized_model_profile(slug));
+        }
+
+        let default_model = self.agent.default_model.trim();
+        if !default_model.is_empty() {
+            models
+                .entry(default_model.to_owned())
+                .or_insert_with(|| self.synthesized_model_profile(default_model));
+        }
+
+        for (model_key, profile) in &self.models {
+            models.insert(model_key.clone(), profile.clone());
+        }
+
+        models
+    }
+
+    fn synthesized_model_profile(&self, slug: &str) -> ModelProfile {
+        let tool_profile = profile_for_model(slug);
+        let backend = AgentBackend::from_model(slug);
+        let provider = match backend {
+            AgentBackend::Claude => ProviderKind::ClaudeCli.label(),
+            AgentBackend::Cursor => ProviderKind::CursorAcp.label(),
+            AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
+                ProviderKind::OpenAiCompat.label()
+            }
+            AgentBackend::Perplexity => ProviderKind::PerplexityApi.label(),
+        };
+
+        let context_window = match tool_profile.preferred {
+            ToolFormat::AnthropicBlocks => 200_000,
+            _ => default_context_window(),
+        };
+
+        ModelProfile {
+            provider: provider.to_owned(),
+            slug: slug.to_owned(),
+            context_window,
+            max_output: None,
+            supports_tools: tool_profile.supports_tools,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: tool_profile.preferred.as_str().to_owned(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: Some(u32::from(tool_profile.max_tools_before_degrade)),
+            tokenizer_ratio: None,
+            ..Default::default()
+        }
+    }
+
+    fn agent_env_value(&self, key: &str) -> Option<&str> {
+        self.agent.env.as_ref().and_then(|entries| {
+            entries.iter().find_map(|(entry_key, entry_value)| {
+                (entry_key == key).then_some(entry_value.as_str())
+            })
+        })
+    }
+
     /// Apply environment variable overrides.
     ///
     /// Recognized variables:
     /// - `ROKO_MODEL` -- sets `agent.default_model`
     /// - `ROKO_BACKEND` -- sets `agent.default_backend`
     /// - `ROKO_EFFORT` -- sets `agent.default_effort`
+    /// - `ROKO_PROVIDER` -- overrides the provider for `agent.default_model`
+    /// - `ROKO_MODEL_SLUG` -- overrides the slug sent to the API
     /// - `ROKO_CONTEXT_LIMIT_K` -- sets `agent.context_limit_k`
     /// - `ROKO_MAX_AGENTS` -- sets `conductor.max_agents`
     /// - `ROKO_BUDGET_USD` -- sets `budget.max_plan_usd`
@@ -342,6 +605,9 @@ impl RokoConfig {
     /// - `ROKO_SKIP_TESTS` -- sets `gates.skip_tests`
     /// - `ROKO_CLIPPY` -- sets `gates.clippy_enabled`
     pub fn apply_env(&mut self, env_fn: &dyn Fn(&str) -> Option<String>) {
+        let provider_override = env_fn("ROKO_PROVIDER");
+        let model_slug_override = env_fn("ROKO_MODEL_SLUG");
+
         if let Some(v) = env_fn("ROKO_MODEL") {
             self.agent.default_model = v;
         }
@@ -378,6 +644,24 @@ impl RokoConfig {
         if let Some(v) = env_fn("ROKO_CLIPPY") {
             self.gates.clippy_enabled = parse_bool_env(&v);
         }
+
+        if provider_override.is_some() || model_slug_override.is_some() {
+            let default_model = self.agent.default_model.trim();
+            if !default_model.is_empty() {
+                let synthesized = self.synthesized_model_profile(default_model);
+                let entry = self
+                    .models
+                    .entry(default_model.to_owned())
+                    .or_insert(synthesized);
+
+                if let Some(v) = provider_override {
+                    entry.provider = v;
+                }
+                if let Some(v) = model_slug_override {
+                    entry.slug = v;
+                }
+            }
+        }
     }
 
     /// Convenience: apply overrides from the real process environment.
@@ -397,6 +681,7 @@ impl RokoConfig {
         Self::write_example_agent(&mut out, &cfg);
         Self::write_example_gates(&mut out, &cfg);
         Self::write_example_routing(&mut out, &cfg);
+        Self::write_example_pipeline(&mut out, &cfg);
         Self::write_example_budget(&mut out, &cfg);
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
@@ -409,11 +694,193 @@ impl RokoConfig {
     }
 }
 
+/// Non-fatal config warnings emitted by semantic reference validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationWarning {
+    /// A model points at a provider key that does not exist.
+    UnknownProvider {
+        /// Model registry key that contains the bad reference.
+        model: String,
+        /// Unknown provider reference from the model profile.
+        provider: String,
+        /// Closest matching provider key, if one is close enough to suggest.
+        similar: Option<String>,
+    },
+    /// A field points at a model key that does not exist.
+    UnknownModel {
+        /// Fully-qualified config field name.
+        field: String,
+        /// Unknown model key referenced by that field.
+        model: String,
+    },
+}
+
+impl fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownProvider {
+                model,
+                provider,
+                similar,
+            } => {
+                write!(
+                    f,
+                    "Model '{model}' references missing provider '{provider}'"
+                )?;
+                if let Some(similar) = similar {
+                    write!(f, " (did you mean '{similar}'?)")?;
+                }
+                Ok(())
+            }
+            Self::UnknownModel { field, model } => {
+                write!(f, "{field} references missing model '{model}'")
+            }
+        }
+    }
+}
+
+/// Validate cross-reference integrity for provider and model keys.
+#[must_use]
+pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
+    let providers = config.effective_providers();
+    let provider_keys = providers.keys().map(String::as_str).collect::<HashSet<_>>();
+
+    let mut warnings = Vec::new();
+
+    let mut model_entries = config.models.iter().collect::<Vec<_>>();
+    model_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (model_key, profile) in model_entries {
+        let provider = profile.provider.trim();
+        if !provider_keys.contains(provider) {
+            warnings.push(ValidationWarning::UnknownProvider {
+                model: model_key.clone(),
+                provider: profile.provider.clone(),
+                similar: find_similar(provider, provider_keys.iter().copied()),
+            });
+        }
+    }
+
+    let explicit_model_keys = config
+        .models
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let effective_models = config.effective_models();
+
+    if let Some(fallback_model) = config
+        .agent
+        .fallback_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|fallback_model| !fallback_model.is_empty())
+    {
+        let model_exists = if explicit_model_keys.is_empty() {
+            effective_models.contains_key(fallback_model)
+        } else {
+            explicit_model_keys.contains(fallback_model)
+        };
+        if !model_exists {
+            warnings.push(ValidationWarning::UnknownModel {
+                field: "agent.fallback_model".to_string(),
+                model: fallback_model.to_string(),
+            });
+        }
+    }
+
+    if !explicit_model_keys.is_empty() {
+        let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
+        tier_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        for (tier, model_key) in tier_entries {
+            let model_key = model_key.trim();
+            if model_key.is_empty() || explicit_model_keys.contains(model_key) {
+                continue;
+            }
+            warnings.push(ValidationWarning::UnknownModel {
+                field: format!("agent.tier_models.{tier}"),
+                model: model_key.to_string(),
+            });
+        }
+    }
+
+    warnings
+}
+
 fn parse_bool_env(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn find_similar<'a>(needle: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return None;
+    }
+
+    let mut best_match = None;
+    let mut best_distance = usize::MAX;
+
+    for candidate in candidates {
+        let distance = edit_distance(needle, candidate);
+        if distance < best_distance {
+            best_distance = distance;
+            best_match = Some(candidate);
+        }
+    }
+
+    (best_distance <= 3).then(|| best_match.expect("distance implies candidate").to_string())
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    if left == right {
+        return 0;
+    }
+    if left.is_empty() {
+        return right.chars().count();
+    }
+    if right.is_empty() {
+        return left.chars().count();
+    }
+
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
+
+    for (left_idx, left_ch) in left.chars().enumerate() {
+        let mut previous_diagonal = costs[0];
+        costs[0] = left_idx + 1;
+
+        for (right_idx, right_ch) in right_chars.iter().copied().enumerate() {
+            let insertion = costs[right_idx + 1] + 1;
+            let deletion = costs[right_idx] + 1;
+            let substitution = previous_diagonal + usize::from(left_ch != right_ch);
+            previous_diagonal = costs[right_idx + 1];
+            costs[right_idx + 1] = insertion.min(deletion).min(substitution);
+        }
+    }
+
+    *costs.last().unwrap_or(&0)
+}
+
+#[cfg(test)]
+fn run_resolve_api_key_child(test_name: &str, api_key_env: &str, expected: Option<&str>) {
+    let exe = std::env::current_exe().expect("current exe");
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(test_name)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("ROKO_RESOLVE_API_KEY_CHILD", "1")
+        .env("ROKO_API_KEY_ENV_NAME", api_key_env);
+
+    if let Some(value) = expected {
+        cmd.env(api_key_env, value)
+            .env("ROKO_EXPECT_API_KEY", value);
+    } else {
+        cmd.env_remove(api_key_env);
+    }
+
+    let status = cmd.status().expect("spawn child test");
+    assert!(status.success(), "child test {test_name} failed");
 }
 
 fn deserialize_glob_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -462,6 +929,274 @@ where
 }
 
 // ---- [project] -----------------------------------------------------------
+
+/// Provider registry entry for `[providers.<name>]`.
+///
+/// A provider describes where requests go and how the runtime talks to that
+/// endpoint. Use it to capture auth, transport, and provider-specific limits
+/// without hardcoding them into Rust.
+///
+/// Fields and defaults:
+/// - `kind` (required): protocol family, such as `anthropic_api`,
+///   `claude_cli`, `openai_compat`, or `cursor_acp`
+/// - `base_url`: optional HTTP endpoint for HTTP-based providers
+/// - `api_key_env`: optional environment variable name that holds the API key
+/// - `command`: optional CLI binary name for subprocess providers
+/// - `args`: optional CLI arguments for subprocess providers
+/// - `timeout_ms`: optional hard request or subprocess timeout
+/// - `ttft_timeout_ms`: optional time-to-first-token timeout
+/// - `connect_timeout_ms`: optional TCP connection timeout
+/// - `extra_headers`: optional HTTP headers to inject on outbound requests
+/// - `max_concurrent`: optional concurrency limit for this provider
+///
+/// Defaults:
+/// - `kind`: no default, must be set explicitly
+/// - `base_url`: `None`
+/// - `api_key_env`: `None`
+/// - `command`: `None`
+/// - `args`: `None`
+/// - `timeout_ms`: `120_000`
+/// - `ttft_timeout_ms`: `15_000`
+/// - `connect_timeout_ms`: `5_000`
+/// - `extra_headers`: `None`
+/// - `max_concurrent`: `None`
+///
+/// Examples:
+/// ```toml
+/// [providers.anthropic]
+/// kind = "anthropic_api"
+/// base_url = "https://api.anthropic.com"
+/// api_key_env = "ANTHROPIC_API_KEY"
+/// timeout_ms = 120000
+/// ttft_timeout_ms = 15000
+/// connect_timeout_ms = 5000
+///
+/// [providers.claude_cli]
+/// kind = "claude_cli"
+/// command = "claude"
+/// args = ["--print", "--output-format", "stream-json"]
+/// ```
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Protocol family used to talk to the provider.
+    pub kind: ProviderKind,
+    /// Base URL for HTTP providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Environment variable name holding the API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Command to spawn for CLI providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Arguments passed to the CLI command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Hard request or subprocess timeout in milliseconds.
+    #[serde(
+        default = "default_provider_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout_ms: Option<u64>,
+    /// Time-to-first-token timeout in milliseconds.
+    #[serde(
+        default = "default_provider_ttft_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ttft_timeout_ms: Option<u64>,
+    /// TCP connection timeout in milliseconds.
+    #[serde(
+        default = "default_provider_connect_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connect_timeout_ms: Option<u64>,
+    /// Extra headers to inject on outbound requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<HashMap<String, String>>,
+    /// Maximum concurrent requests allowed for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+}
+
+const fn default_provider_timeout_ms() -> Option<u64> {
+    Some(120_000)
+}
+
+const fn default_provider_ttft_timeout_ms() -> Option<u64> {
+    Some(15_000)
+}
+
+const fn default_provider_connect_timeout_ms() -> Option<u64> {
+    Some(5_000)
+}
+
+impl ProviderConfig {
+    /// Resolve the API key from the environment variable named in `api_key_env`.
+    #[must_use]
+    pub fn resolve_api_key(&self) -> Option<String> {
+        self.api_key_env
+            .as_ref()
+            .and_then(|env_name| std::env::var(env_name).ok())
+    }
+}
+
+/// Model registry entry for `[models.<name>]`.
+///
+/// A model binds a logical model name to a provider entry and the concrete
+/// API slug that gets sent on the wire. This is the layer that carries model
+/// capabilities and cost metadata, while `provider` points to the transport.
+///
+/// Fields and defaults:
+/// - `provider` (required): key into `[providers.*]`
+/// - `slug` (required): model ID sent to the provider API
+/// - `context_window`: token window size, defaults to `128_000`
+/// - `max_output`: optional output-token cap
+/// - `supports_tools`: defaults to `true`
+/// - `supports_thinking`: defaults to `false`
+/// - `supports_vision`: defaults to `false`
+/// - `supports_web_search`: defaults to `false`
+/// - `supports_mcp_tools`: defaults to `false`
+/// - `supports_partial`: defaults to `false`
+/// - `tool_format`: tool wire format, defaults to `"openai_json"`
+/// - `cost_input_per_m`: optional input-token cost per million tokens
+/// - `cost_output_per_m`: optional output-token cost per million tokens
+/// - `cost_cache_read_per_m`: optional cache-read cost per million tokens
+/// - `cost_cache_write_per_m`: optional cache-write cost per million tokens
+/// - `max_tools`: optional cap before tool behavior degrades
+/// - `tokenizer_ratio`: optional ratio versus OpenAI `o200k_base`
+///
+/// Examples:
+/// ```toml
+/// [models.glm-5-1]
+/// provider = "zai"
+/// slug = "glm-5.1"
+/// context_window = 200000
+/// max_output = 131072
+/// supports_thinking = true
+/// supports_web_search = true
+/// tool_format = "openai_json"
+/// cost_input_per_m = 1.40
+/// cost_output_per_m = 4.40
+///
+/// [models.claude-opus]
+/// provider = "anthropic"
+/// slug = "claude-opus-4-6"
+/// context_window = 200000
+/// supports_tools = true
+/// tool_format = "anthropic_blocks"
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRouting {
+    /// OpenRouter sort mode (`price`, `throughput`, `latency`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// Explicit provider order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    /// Whether OpenRouter may fall back to alternate providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    /// Maximum cost per token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<f64>,
+    /// Required provider parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<Vec<String>>,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelProfile {
+    /// Key into the `[providers.*]` table.
+    pub provider: String,
+    /// Model ID sent to the API.
+    pub slug: String,
+    /// Context window in tokens.
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    /// Maximum output tokens, if the provider/model sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+    /// Whether the model supports tool calls.
+    #[serde(default = "default_true")]
+    pub supports_tools: bool,
+    /// Whether the model supports thinking/reasoning output.
+    #[serde(default)]
+    pub supports_thinking: bool,
+    /// Whether the model supports vision inputs.
+    #[serde(default)]
+    pub supports_vision: bool,
+    /// Whether the model supports web search.
+    #[serde(default)]
+    pub supports_web_search: bool,
+    /// Whether the model supports MCP tools.
+    #[serde(default)]
+    pub supports_mcp_tools: bool,
+    /// Whether the model supports partial continuation.
+    #[serde(default)]
+    pub supports_partial: bool,
+    /// Whether the model supports Google Search grounding.
+    #[serde(default)]
+    pub supports_grounding: bool,
+    /// Whether the model supports built-in code execution.
+    #[serde(default)]
+    pub supports_code_execution: bool,
+    /// Whether the model supports provider-side context caching.
+    #[serde(default)]
+    pub supports_caching: bool,
+    /// OpenRouter-specific routing overrides for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routing: Option<ProviderRouting>,
+    /// Wire format used for tools.
+    #[serde(default = "default_tool_format")]
+    pub tool_format: String,
+    /// Input token cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m: Option<f64>,
+    /// Output token cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m: Option<f64>,
+    /// Input token cost per million tokens for the high-context pricing tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_per_m_high: Option<f64>,
+    /// Output token cost per million tokens for the high-context pricing tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_per_m_high: Option<f64>,
+    /// Cache read cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_per_m: Option<f64>,
+    /// Cache write cost per million tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_write_per_m: Option<f64>,
+    /// Provider-specific reasoning depth label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+    /// Maximum number of tools before behavior degrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tools: Option<u32>,
+    /// Tokenizer ratio vs OpenAI `o200k_base`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_ratio: Option<f64>,
+    /// Whether the model supports web-grounded search (Perplexity Sonar).
+    #[serde(default)]
+    pub supports_search: bool,
+    /// Whether the model returns citations in responses (Perplexity Sonar).
+    #[serde(default)]
+    pub supports_citations: bool,
+    /// Whether the model supports the async job API (Perplexity deep research).
+    #[serde(default)]
+    pub supports_async: bool,
+    /// Whether this is an embedding model rather than a chat model.
+    #[serde(default)]
+    pub is_embedding_model: bool,
+    /// Search context size hint: "low", "medium", or "high" (Perplexity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_context_size: Option<String>,
+    /// Per-request fee in USD on top of token costs (Perplexity pricing model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_request: Option<f64>,
+}
 
 /// PRD lifecycle settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,13 +1255,13 @@ impl Default for ProjectConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Default model slug (e.g. `"claude-sonnet-4-6"`).
-    #[serde(default = "default_model")]
+    #[serde(default = "default_model", alias = "model")]
     pub default_model: String,
     /// Default backend (e.g. `"claude"`, `"codex"`, `"cursor"`).
     #[serde(default = "default_backend")]
     pub default_backend: String,
     /// Default reasoning effort (`"low"`, `"medium"`, `"high"`, `"max"`).
-    #[serde(default = "default_effort")]
+    #[serde(default = "default_effort", alias = "effort")]
     pub default_effort: String,
     /// Context window limit in thousands of tokens.
     #[serde(default = "default_context_limit_k")]
@@ -534,6 +1269,21 @@ pub struct AgentConfig {
     /// When true, agents use `--bare` (skip built-in system prompt).
     #[serde(default = "default_true")]
     pub bare_mode: bool,
+    /// Legacy agent command used when no provider registry is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Legacy CLI args used for the Claude subprocess path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Legacy subprocess timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Legacy subprocess environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<(String, String)>>,
+    /// Legacy per-tier model mapping used before `[models.*]` existed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tier_models: HashMap<String, String>,
     /// Global fallback model: if an agent spawn fails, retry with this.
     #[serde(default)]
     pub fallback_model: Option<String>,
@@ -558,8 +1308,16 @@ const fn default_context_limit_k() -> u32 {
     200
 }
 
+const fn default_context_window() -> u64 {
+    128_000
+}
+
 const fn default_true() -> bool {
     true
+}
+
+fn default_tool_format() -> String {
+    "openai_json".into()
 }
 
 impl Default for AgentConfig {
@@ -570,6 +1328,11 @@ impl Default for AgentConfig {
             default_effort: default_effort(),
             context_limit_k: default_context_limit_k(),
             bare_mode: default_true(),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            env: None,
+            tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
         }
@@ -629,14 +1392,365 @@ impl Default for GatesConfig {
     }
 }
 
+// ---- [pipeline] ---------------------------------------------------------
+
+/// Reviewer composition for a pipeline band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineReviewerMode {
+    /// Single quick-pass reviewer.
+    Quick,
+    /// Full review suite (architect, auditor, scribe).
+    Full,
+}
+
+impl PipelineReviewerMode {
+    /// Stable config label used in TOML.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl Default for PipelineReviewerMode {
+    fn default() -> Self {
+        Self::Quick
+    }
+}
+
+/// Effective pipeline settings for one complexity band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineBandConfig {
+    /// Whether the strategist stage runs before implementation.
+    #[serde(default)]
+    pub strategist: bool,
+    /// Whether reviewer agents run after implementation.
+    #[serde(default)]
+    pub reviewers: bool,
+    /// Which reviewer composition to use when reviewers are enabled.
+    #[serde(default)]
+    pub reviewer_mode: PipelineReviewerMode,
+    /// Maximum implementation-review iterations before stopping.
+    #[serde(default = "default_pipeline_band_iterations")]
+    pub max_iterations: u32,
+}
+
+const fn default_pipeline_band_iterations() -> u32 {
+    1
+}
+
+impl PipelineBandConfig {
+    /// Defaults for the `mechanical` tier.
+    #[must_use]
+    pub const fn mechanical() -> Self {
+        Self {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 1,
+        }
+    }
+
+    /// Defaults for the `focused` tier.
+    #[must_use]
+    pub const fn focused() -> Self {
+        Self {
+            strategist: false,
+            reviewers: false,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 2,
+        }
+    }
+
+    /// Defaults for the `integrative` tier.
+    #[must_use]
+    pub const fn integrative() -> Self {
+        Self {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: PipelineReviewerMode::Quick,
+            max_iterations: 2,
+        }
+    }
+
+    /// Defaults for the `architectural` tier.
+    #[must_use]
+    pub const fn architectural() -> Self {
+        Self {
+            strategist: true,
+            reviewers: true,
+            reviewer_mode: PipelineReviewerMode::Full,
+            max_iterations: 3,
+        }
+    }
+}
+
+impl Default for PipelineBandConfig {
+    fn default() -> Self {
+        Self::mechanical()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+struct PipelineBandConfigOverride {
+    #[serde(default)]
+    strategist: Option<bool>,
+    #[serde(default)]
+    reviewers: Option<bool>,
+    #[serde(default)]
+    reviewer_mode: Option<PipelineReviewerMode>,
+    #[serde(default)]
+    max_iterations: Option<u32>,
+}
+
+impl PipelineBandConfigOverride {
+    fn resolve(self, defaults: PipelineBandConfig) -> PipelineBandConfig {
+        PipelineBandConfig {
+            strategist: self.strategist.unwrap_or(defaults.strategist),
+            reviewers: self.reviewers.unwrap_or(defaults.reviewers),
+            reviewer_mode: self.reviewer_mode.unwrap_or(defaults.reviewer_mode),
+            max_iterations: self.max_iterations.unwrap_or(defaults.max_iterations),
+        }
+    }
+}
+
+fn deserialize_pipeline_band_with_defaults<'de, D>(
+    deserializer: D,
+    defaults: PipelineBandConfig,
+) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let override_cfg = PipelineBandConfigOverride::deserialize(deserializer)?;
+    Ok(override_cfg.resolve(defaults))
+}
+
+fn default_mechanical_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::mechanical()
+}
+
+fn deserialize_mechanical_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::mechanical())
+}
+
+fn default_focused_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::focused()
+}
+
+fn deserialize_focused_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::focused())
+}
+
+fn default_integrative_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::integrative()
+}
+
+fn deserialize_integrative_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::integrative())
+}
+
+fn default_architectural_pipeline() -> PipelineBandConfig {
+    PipelineBandConfig::architectural()
+}
+
+fn deserialize_architectural_pipeline<'de, D>(
+    deserializer: D,
+) -> Result<PipelineBandConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_pipeline_band_with_defaults(deserializer, PipelineBandConfig::architectural())
+}
+
+/// Complexity-to-pipeline mapping.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Mechanical tasks: skip strategist and reviewers.
+    #[serde(
+        default = "default_mechanical_pipeline",
+        deserialize_with = "deserialize_mechanical_pipeline"
+    )]
+    pub mechanical: PipelineBandConfig,
+    /// Focused tasks: implement directly, allow one extra loop.
+    #[serde(
+        default = "default_focused_pipeline",
+        deserialize_with = "deserialize_focused_pipeline"
+    )]
+    pub focused: PipelineBandConfig,
+    /// Integrative tasks: strategist plus a quick reviewer.
+    #[serde(
+        default = "default_integrative_pipeline",
+        deserialize_with = "deserialize_integrative_pipeline"
+    )]
+    pub integrative: PipelineBandConfig,
+    /// Architectural tasks: strategist plus the full reviewer suite.
+    #[serde(
+        default = "default_architectural_pipeline",
+        deserialize_with = "deserialize_architectural_pipeline"
+    )]
+    pub architectural: PipelineBandConfig,
+}
+
+impl PipelineConfig {
+    /// Resolve the pipeline settings for a named complexity tier.
+    #[must_use]
+    pub fn for_tier(&self, tier: &str) -> PipelineBandConfig {
+        match tier {
+            "mechanical" => self.mechanical,
+            "focused" => self.focused,
+            "integrative" => self.integrative,
+            "architectural" => self.architectural,
+            _ => self.focused,
+        }
+    }
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            mechanical: PipelineBandConfig::mechanical(),
+            focused: PipelineBandConfig::focused(),
+            integrative: PipelineBandConfig::integrative(),
+            architectural: PipelineBandConfig::architectural(),
+        }
+    }
+}
+
 // ---- [routing] -----------------------------------------------------------
 
+/// Routing algorithm for model selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingAlgorithm {
+    /// Contextual bandit using upper-confidence bounds.
+    LinUcb,
+    /// Discounted Thompson sampling for non-stationary routing.
+    Thompson,
+}
+
+impl RoutingAlgorithm {
+    /// Stable config label used in TOML.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LinUcb => "linucb",
+            Self::Thompson => "thompson",
+        }
+    }
+}
+
+impl Default for RoutingAlgorithm {
+    fn default() -> Self {
+        Self::LinUcb
+    }
+}
+
+/// Reward weights used to scalarize quality, cost, and latency signals.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RewardWeights {
+    /// Relative weight for quality / success.
+    #[serde(default = "default_reward_weight_quality")]
+    pub quality: f64,
+    /// Relative weight for low cost.
+    #[serde(default = "default_reward_weight_cost")]
+    pub cost: f64,
+    /// Relative weight for low latency.
+    #[serde(default = "default_reward_weight_latency")]
+    pub latency: f64,
+}
+
+const fn default_reward_weight_quality() -> f64 {
+    0.5
+}
+
+const fn default_reward_weight_cost() -> f64 {
+    0.3
+}
+
+const fn default_reward_weight_latency() -> f64 {
+    0.2
+}
+
+impl Default for RewardWeights {
+    fn default() -> Self {
+        Self {
+            quality: default_reward_weight_quality(),
+            cost: default_reward_weight_cost(),
+            latency: default_reward_weight_latency(),
+        }
+    }
+}
+
+/// Per-tier reward-weight overrides for routing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingRewardWeightsConfig {
+    /// Default weights used when a tier has no explicit override.
+    #[serde(flatten)]
+    pub default: RewardWeights,
+    /// Optional override for mechanical tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical: Option<RewardWeights>,
+    /// Optional override for focused tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<RewardWeights>,
+    /// Optional override for integrative tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrative: Option<RewardWeights>,
+    /// Optional override for architectural tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architectural: Option<RewardWeights>,
+}
+
+impl RoutingRewardWeightsConfig {
+    /// Resolve the effective weights for a task tier.
+    #[must_use]
+    pub fn for_tier(&self, tier: &str) -> RewardWeights {
+        match tier {
+            "mechanical" => self.mechanical.unwrap_or(self.default),
+            "focused" => self.focused.unwrap_or(self.default),
+            "integrative" => self.integrative.unwrap_or(self.default),
+            "architectural" => self.architectural.unwrap_or(self.default),
+            _ => self.default,
+        }
+    }
+}
+
+impl Default for RoutingRewardWeightsConfig {
+    fn default() -> Self {
+        Self {
+            default: RewardWeights::default(),
+            mechanical: None,
+            focused: None,
+            integrative: None,
+            architectural: None,
+        }
+    }
+}
+
 /// Model routing configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoutingConfig {
     /// Routing mode (`"auto_override"`).
     #[serde(default = "default_routing_mode")]
     pub mode: String,
+    /// Online learning algorithm used by the router.
+    #[serde(default)]
+    pub algorithm: RoutingAlgorithm,
+    /// Discount factor for Thompson sampling in non-stationary environments.
+    #[serde(default = "default_routing_discount_factor")]
+    pub discount_factor: f64,
     /// Model for low-complexity tasks.
     #[serde(default = "default_fast_model")]
     pub fast_task_model: String,
@@ -646,6 +1760,9 @@ pub struct RoutingConfig {
     /// Model for high-complexity / retry tasks.
     #[serde(default = "default_complex_model")]
     pub complex_task_model: String,
+    /// Reward scalarization weights with optional per-tier overrides.
+    #[serde(default)]
+    pub weights: RoutingRewardWeightsConfig,
     /// Context strategy (`"mcp_first"`, `"hybrid"`, `"inline_heavy"`).
     #[serde(default = "default_context_strategy")]
     pub context_strategy: String,
@@ -671,13 +1788,20 @@ fn default_context_strategy() -> String {
     "mcp_first".into()
 }
 
+const fn default_routing_discount_factor() -> f64 {
+    0.99
+}
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             mode: default_routing_mode(),
+            algorithm: RoutingAlgorithm::default(),
+            discount_factor: default_routing_discount_factor(),
             fast_task_model: default_fast_model(),
             standard_task_model: default_standard_model(),
             complex_task_model: default_complex_model(),
+            weights: RoutingRewardWeightsConfig::default(),
             context_strategy: default_context_strategy(),
         }
     }
@@ -923,12 +2047,16 @@ pub struct ServeConfig {
     /// Authentication settings for `/api/*`.
     #[serde(default)]
     pub auth: ServeAuthConfig,
+    /// Cloud deployment settings.
+    #[serde(default)]
+    pub deploy: ServeDeployConfig,
 }
 
 impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             auth: ServeAuthConfig::default(),
+            deploy: ServeDeployConfig::default(),
         }
     }
 }
@@ -962,7 +2090,7 @@ pub struct SchedulerCronConfig {
     pub name: String,
     /// Standard cron expression.
     pub expression: String,
-    /// Signal kind emitted when the schedule fires.
+    /// Engram kind emitted when the schedule fires.
     pub signal_kind: String,
     /// Extra structured metadata included in the emitted signal body.
     #[serde(default)]
@@ -1017,7 +2145,7 @@ impl Default for GithubWebhookConfig {
 pub struct SubscriptionConfig {
     /// Agent template name associated with this subscription.
     pub template: String,
-    /// Signal kind glob used to match webhook signals.
+    /// Engram kind glob used to match webhook signals.
     pub trigger: String,
     /// Optional repo / branch / path filters.
     #[serde(default, skip_serializing_if = "SubscriptionFilterConfig::is_empty")]
@@ -1185,6 +2313,71 @@ impl Default for ServeAuthConfig {
     }
 }
 
+/// Cloud deployment settings attached to the API server configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeDeployConfig {
+    /// Deployment provider, e.g. `"railway"` or `"fly"`.
+    #[serde(default = "default_serve_deploy_provider")]
+    pub provider: String,
+    /// Environment variables that must be present for deployment.
+    #[serde(default = "default_serve_deploy_environment")]
+    pub environment: Vec<String>,
+    /// Webhooks that should be registered after deploy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<ServeDeployWebhookConfig>,
+}
+
+fn default_serve_deploy_provider() -> String {
+    "railway".into()
+}
+
+fn default_serve_deploy_environment() -> Vec<String> {
+    vec![
+        "GITHUB_TOKEN".into(),
+        "GITHUB_WEBHOOK_SECRET".into(),
+        "SLACK_BOT_TOKEN".into(),
+        "SLACK_SIGNING_SECRET".into(),
+    ]
+}
+
+impl Default for ServeDeployConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_serve_deploy_provider(),
+            environment: default_serve_deploy_environment(),
+            webhooks: Vec::new(),
+        }
+    }
+}
+
+/// A webhook registration entry to run after deployment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeDeployWebhookConfig {
+    /// Webhook provider.
+    #[serde(default = "default_serve_deploy_webhook_provider")]
+    pub provider: String,
+    /// Repository owner.
+    #[serde(default)]
+    pub owner: String,
+    /// Repository name.
+    #[serde(default)]
+    pub repo: String,
+}
+
+fn default_serve_deploy_webhook_provider() -> String {
+    "github".into()
+}
+
+impl Default for ServeDeployWebhookConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_serve_deploy_webhook_provider(),
+            owner: String::new(),
+            repo: String::new(),
+        }
+    }
+}
+
 // ---- [server] ------------------------------------------------------------
 
 /// HTTP server / gateway settings.
@@ -1280,11 +2473,181 @@ impl Default for DeployConfig {
     }
 }
 
+// ---- Gemini config -------------------------------------------------------
+
+fn default_thinking_medium() -> String {
+    "medium".to_string()
+}
+
+/// Gemini-specific model and request settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiConfig {
+    /// Default model for standard Gemini chat requests.
+    pub default_model: Option<String>,
+    /// Default model for Gemini grounding requests.
+    pub grounding_model: Option<String>,
+    /// Default model for Gemini code execution requests.
+    pub code_exec_model: Option<String>,
+    /// Default Gemini embedding model.
+    pub embed_model: Option<String>,
+    /// Prefer the standard-tier free models when available.
+    #[serde(default)]
+    pub use_free_tier: bool,
+    /// Gemini native thinking depth: "minimal", "low", "medium", or "high".
+    #[serde(default = "default_thinking_medium")]
+    pub thinking_level: String,
+    /// Enable provider-side context caching when supported.
+    #[serde(default)]
+    pub enable_context_caching: bool,
+    /// Per-category Gemini safety thresholds.
+    #[serde(default)]
+    pub safety_settings: Vec<SafetySetting>,
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            default_model: None,
+            grounding_model: None,
+            code_exec_model: None,
+            embed_model: None,
+            use_free_tier: false,
+            thinking_level: default_thinking_medium(),
+            enable_context_caching: false,
+            safety_settings: Vec::new(),
+        }
+    }
+}
+
+/// Gemini native safety configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafetySetting {
+    /// Gemini harm category, e.g. `HARM_CATEGORY_HATE_SPEECH`.
+    pub category: String,
+    /// Gemini blocking threshold, e.g. `BLOCK_NONE`.
+    pub threshold: String,
+}
+
+// ---- Perplexity config ---------------------------------------------------
+
+fn default_recency() -> String {
+    "year".to_string()
+}
+
+/// Perplexity-specific search and model settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerplexityConfig {
+    /// Default model for search-grounded queries.
+    pub default_search_model: Option<String>,
+    /// Default model for deep research tasks.
+    pub default_research_model: Option<String>,
+    /// Default model for reasoning tasks.
+    pub default_reasoning_model: Option<String>,
+    /// Default model for embeddings.
+    pub default_embed_model: Option<String>,
+    /// Recency filter applied to web search: "hour"/"day"/"week"/"month"/"year".
+    #[serde(default = "default_recency")]
+    pub search_recency_filter: String,
+    /// Restrict results to academic sources.
+    #[serde(default)]
+    pub academic_mode: bool,
+    /// Global domain allowlist for web search.
+    #[serde(default)]
+    pub search_domain_filter: Vec<String>,
+    /// Include images in search results.
+    #[serde(default)]
+    pub return_images: bool,
+    /// Include related questions in search results.
+    #[serde(default = "default_true")]
+    pub return_related_questions: bool,
+}
+
+impl Default for PerplexityConfig {
+    fn default() -> Self {
+        Self {
+            default_search_model: None,
+            default_research_model: None,
+            default_reasoning_model: None,
+            default_embed_model: None,
+            search_recency_filter: default_recency(),
+            academic_mode: false,
+            search_domain_filter: Vec::new(),
+            return_images: false,
+            return_related_questions: true,
+        }
+    }
+}
+
 // ---- tests ---------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedLogWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedLogBuffer {
+        fn into_string(self) -> String {
+            String::from_utf8(self.inner.lock().expect("lock log buffer").clone())
+                .expect("log output should be utf-8")
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("lock log writer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_warn_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let value = tracing::dispatcher::with_default(&dispatch, f);
+        (value, buffer.into_string())
+    }
+
+    fn assert_error_contains(err: toml::de::Error, expected: &[&str]) {
+        let message = err.to_string();
+        for needle in expected {
+            assert!(
+                message.contains(needle),
+                "expected error `{message}` to contain `{needle}`"
+            );
+        }
+    }
 
     #[test]
     fn default_roundtrips_through_toml() {
@@ -1297,7 +2660,71 @@ mod tests {
     #[test]
     fn empty_toml_uses_all_defaults() {
         let cfg = RokoConfig::from_toml("").expect("parse empty");
-        assert_eq!(cfg, RokoConfig::default());
+        let expected = RokoConfig {
+            config_version: 1,
+            ..RokoConfig::default()
+        };
+        assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn config_version_defaults_to_legacy() {
+        let cfg = RokoConfig::from_toml("").expect("parse");
+        assert_eq!(cfg.config_version, 1);
+    }
+
+    #[test]
+    fn default_config_uses_current_config_version() {
+        let cfg = RokoConfig::default();
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn config_version_detection_warns_for_legacy_configs() {
+        let (cfg, logs) = capture_warn_logs(|| {
+            RokoConfig::from_toml(
+                r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#,
+            )
+            .expect("parse")
+        });
+
+        assert_eq!(cfg.config_version, 1);
+        assert!(logs.contains("roko.toml uses config version 1 (no [providers] section)"));
+        assert!(logs.contains("hint: run `roko config migrate` to upgrade"));
+    }
+
+    #[test]
+    fn config_version_detection_is_silent_for_current_configs() {
+        let (cfg, logs) = capture_warn_logs(|| {
+            RokoConfig::from_toml(
+                r#"
+config_version = 2
+schema_version = 2
+
+[agent]
+default_model = "glm-5-1"
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+"#,
+            )
+            .expect("parse")
+        });
+
+        assert_eq!(cfg.config_version, 2);
+        assert!(
+            logs.trim().is_empty(),
+            "expected no deprecation warning, got `{logs}`"
+        );
     }
 
     #[test]
@@ -1331,6 +2758,538 @@ fresh_base_branch = "develop"
         assert_eq!(cfg.project.name, "my-dapp");
         assert_eq!(cfg.project.root, "/home/user/code");
         assert_eq!(cfg.project.fresh_base_branch, "develop");
+    }
+
+    #[test]
+    fn config_load() {
+        let toml = r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn config_deser_full_config_with_providers_and_models() {
+        let toml = r#"
+schema_version = 2
+
+[agent]
+default_model = "glm-5-1"
+fallback_model = "kimi-k2-5"
+bare_mode = true
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 180000
+extra_headers = { "HTTP-Referer" = "roko-agent" }
+
+[providers.moonshot]
+kind = "openai_compat"
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 200000
+max_output = 131072
+supports_tools = true
+supports_thinking = true
+supports_web_search = true
+supports_mcp_tools = true
+tool_format = "openai_json"
+cost_input_per_m = 1.40
+cost_output_per_m = 4.40
+
+[models.kimi-k2-5]
+provider = "moonshot"
+slug = "kimi-k2.5"
+context_window = 256000
+max_output = 65535
+supports_tools = true
+supports_thinking = true
+supports_vision = true
+supports_partial = true
+tool_format = "openai_json"
+cost_input_per_m = 0.60
+cost_output_per_m = 3.00
+cost_cache_read_per_m = 0.10
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(cfg.agent.default_model, "glm-5-1");
+        assert_eq!(cfg.agent.fallback_model.as_deref(), Some("kimi-k2-5"));
+        assert!(cfg.agent.bare_mode);
+
+        let zai = cfg.providers.get("zai").expect("zai provider");
+        assert_eq!(zai.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            zai.base_url.as_deref(),
+            Some("https://api.z.ai/api/paas/v4")
+        );
+        assert_eq!(zai.api_key_env.as_deref(), Some("ZAI_API_KEY"));
+        assert_eq!(zai.timeout_ms, Some(180_000));
+        assert_eq!(zai.ttft_timeout_ms, Some(15_000));
+        assert_eq!(zai.connect_timeout_ms, Some(5_000));
+        assert_eq!(
+            zai.extra_headers
+                .as_ref()
+                .expect("extra headers")
+                .get("HTTP-Referer")
+                .map(String::as_str),
+            Some("roko-agent")
+        );
+
+        let moonshot = cfg.providers.get("moonshot").expect("moonshot provider");
+        assert_eq!(moonshot.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            moonshot.base_url.as_deref(),
+            Some("https://api.moonshot.ai/v1")
+        );
+        assert_eq!(moonshot.api_key_env.as_deref(), Some("MOONSHOT_API_KEY"));
+        assert_eq!(moonshot.timeout_ms, Some(120_000));
+        assert_eq!(moonshot.ttft_timeout_ms, Some(15_000));
+        assert_eq!(moonshot.connect_timeout_ms, Some(5_000));
+
+        let glm = cfg.models.get("glm-5-1").expect("glm model");
+        assert_eq!(glm.provider, "zai");
+        assert_eq!(glm.slug, "glm-5.1");
+        assert_eq!(glm.context_window, 200_000);
+        assert_eq!(glm.max_output, Some(131_072));
+        assert!(glm.supports_tools);
+        assert!(glm.supports_thinking);
+        assert!(glm.supports_web_search);
+        assert!(glm.supports_mcp_tools);
+        assert_eq!(glm.tool_format, "openai_json");
+        assert_eq!(glm.cost_input_per_m, Some(1.40));
+        assert_eq!(glm.cost_output_per_m, Some(4.40));
+
+        let kimi = cfg.models.get("kimi-k2-5").expect("kimi model");
+        assert_eq!(kimi.provider, "moonshot");
+        assert_eq!(kimi.slug, "kimi-k2.5");
+        assert_eq!(kimi.context_window, 256_000);
+        assert_eq!(kimi.max_output, Some(65_535));
+        assert!(kimi.supports_tools);
+        assert!(kimi.supports_thinking);
+        assert!(kimi.supports_vision);
+        assert!(kimi.supports_partial);
+        assert_eq!(kimi.tool_format, "openai_json");
+        assert_eq!(kimi.cost_input_per_m, Some(0.60));
+        assert_eq!(kimi.cost_output_per_m, Some(3.00));
+        assert_eq!(kimi.cost_cache_read_per_m, Some(0.10));
+    }
+
+    #[test]
+    fn config_deser_minimal_config_only_agent_section() {
+        let toml = r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn config_deser_mixed_config_with_providers_but_no_models() {
+        let toml = r#"
+[agent]
+default_model = "claude-sonnet-4-6"
+
+[providers.claude]
+kind = "claude_cli"
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+timeout_ms = 120000
+
+[providers.ollama]
+kind = "openai_compat"
+base_url = "http://localhost:11434"
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-6");
+        assert_eq!(cfg.providers.len(), 2);
+        assert!(cfg.models.is_empty());
+
+        let claude = cfg.providers.get("claude").expect("claude provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+        assert_eq!(
+            claude.args.as_ref().expect("claude args"),
+            &vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]
+        );
+        assert_eq!(claude.timeout_ms, Some(120_000));
+        assert_eq!(claude.ttft_timeout_ms, Some(15_000));
+        assert_eq!(claude.connect_timeout_ms, Some(5_000));
+
+        let ollama = cfg.providers.get("ollama").expect("ollama provider");
+        assert_eq!(ollama.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(ollama.base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(ollama.timeout_ms, Some(120_000));
+        assert_eq!(ollama.ttft_timeout_ms, Some(15_000));
+        assert_eq!(ollama.connect_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn config_deser_invalid_provider_kind_is_descriptive() {
+        let toml = r#"
+[providers.bad]
+kind = "not_a_real_kind"
+"#;
+        let err = toml::from_str::<RokoConfig>(toml).expect_err("should fail");
+        assert_error_contains(
+            err,
+            &[
+                "kind",
+                "unknown variant",
+                "not_a_real_kind",
+                "anthropic_api",
+                "claude_cli",
+                "openai_compat",
+                "cursor_acp",
+            ],
+        );
+    }
+
+    #[test]
+    fn config_deser_missing_required_fields_is_descriptive() {
+        let toml = r#"
+[providers.zai]
+base_url = "https://api.z.ai/api/paas/v4"
+"#;
+        let err = toml::from_str::<RokoConfig>(toml).expect_err("should fail");
+        assert_error_contains(err, &["providers.zai", "kind", "missing field"]);
+    }
+
+    #[test]
+    fn config_deser_api_key_env_is_parsed_as_string_reference() {
+        let toml = r#"
+[providers.zai]
+kind = "openai_compat"
+api_key_env = "ZAI_API_KEY"
+"#;
+        let cfg = toml::from_str::<RokoConfig>(toml).expect("parse");
+        let provider = cfg.providers.get("zai").expect("provider");
+        assert_eq!(provider.api_key_env.as_deref(), Some("ZAI_API_KEY"));
+    }
+
+    #[test]
+    fn effective_providers_backwards_compat() {
+        // When roko.toml has explicit [providers.*] entries, effective_providers
+        // returns them directly rather than synthesizing from [agent].
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roko.toml");
+        let text = std::fs::read_to_string(path).expect("read roko.toml");
+        let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
+        let providers = cfg.effective_providers();
+
+        let claude = providers.get("claude_cli").expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn effective_providers_synthesized_from_agent_section() {
+        // When no explicit [providers] exist, effective_providers synthesizes
+        // from the legacy [agent] section.
+        let toml = r#"
+[agent]
+command = "claude"
+args = ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"]
+timeout_ms = 300000
+env = [
+  ["ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"],
+  ["ANTHROPIC_API_KEY", "mori-local-gateway"],
+]
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        let providers = cfg.effective_providers();
+
+        let claude = providers.get("claude_cli").expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+        assert_eq!(
+            claude.args.as_ref().expect("claude args"),
+            &vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ]
+        );
+        assert_eq!(claude.timeout_ms, Some(300_000));
+        assert_eq!(claude.ttft_timeout_ms, Some(15_000));
+        assert_eq!(claude.connect_timeout_ms, Some(5_000));
+
+        let anthropic = providers.get("anthropic").expect("anthropic provider");
+        assert_eq!(anthropic.kind, ProviderKind::AnthropicApi);
+        assert_eq!(anthropic.base_url.as_deref(), Some("http://127.0.0.1:4000"));
+        assert_eq!(anthropic.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(anthropic.timeout_ms, Some(300_000));
+        assert_eq!(anthropic.ttft_timeout_ms, Some(15_000));
+        assert_eq!(anthropic.connect_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn config_providers() {
+        let toml = r#"
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+supports_thinking = true
+tool_format = "openai_json"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        let provider = cfg.providers.get("zai").expect("provider");
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://api.z.ai/api/paas/v4")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("ZAI_API_KEY"));
+
+        let model = cfg.models.get("glm-5-1").expect("model");
+        assert_eq!(model.provider, "zai");
+        assert_eq!(model.slug, "glm-5.1");
+        assert!(model.supports_thinking);
+        assert_eq!(model.tool_format, "openai_json");
+    }
+
+    #[test]
+    fn effective_models_backwards_compat() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roko.toml");
+        let text = std::fs::read_to_string(path).expect("read roko.toml");
+        let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
+        let models = cfg.effective_models();
+
+        let mechanical = models.get("claude-haiku-4-5").expect("mechanical model");
+        assert_eq!(mechanical.provider, "claude_cli");
+        assert_eq!(mechanical.slug, "claude-haiku-4-5");
+        assert!(mechanical.supports_tools);
+        assert_eq!(mechanical.tool_format, "anthropic_blocks");
+
+        let default_model = models.get("claude-sonnet-4-6").expect("default model");
+        assert_eq!(default_model.provider, "claude_cli");
+        assert_eq!(default_model.slug, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn provider_config_parses_and_roundtrips() {
+        let toml = r#"
+kind = "openai_compat"
+base_url = "https://api.example.com"
+api_key_env = "EXAMPLE_API_KEY"
+command = "claude"
+args = ["--print", "--output-format", "stream-json"]
+timeout_ms = 120000
+ttft_timeout_ms = 15000
+connect_timeout_ms = 5000
+extra_headers = { "HTTP-Referer" = "roko-agent" }
+max_concurrent = 4
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+        assert_eq!(cfg.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(cfg.base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(cfg.api_key_env.as_deref(), Some("EXAMPLE_API_KEY"));
+        assert_eq!(cfg.command.as_deref(), Some("claude"));
+        assert_eq!(
+            cfg.args.as_ref().expect("args"),
+            &vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string()
+            ]
+        );
+        assert_eq!(cfg.timeout_ms, Some(120000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(15000));
+        assert_eq!(cfg.connect_timeout_ms, Some(5000));
+        assert_eq!(
+            cfg.extra_headers
+                .as_ref()
+                .expect("extra_headers")
+                .get("HTTP-Referer")
+                .map(String::as_str),
+            Some("roko-agent")
+        );
+        assert_eq!(cfg.max_concurrent, Some(4));
+
+        let text = toml::to_string(&cfg).expect("serialize");
+        let back = toml::from_str::<ProviderConfig>(&text).expect("reparse");
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn resolve_api_key_returns_env_value() {
+        run_resolve_api_key_child(
+            "resolve_api_key_child_present",
+            "ZAI_API_KEY",
+            Some("test123"),
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_returns_none_when_env_missing() {
+        run_resolve_api_key_child("resolve_api_key_child_missing", "ZAI_API_KEY", None);
+    }
+
+    #[test]
+    fn resolve_api_key_child_present() {
+        if std::env::var_os("ROKO_RESOLVE_API_KEY_CHILD").is_none() {
+            return;
+        }
+
+        let api_key_env = std::env::var("ROKO_API_KEY_ENV_NAME").expect("api key env name");
+        let expected = std::env::var("ROKO_EXPECT_API_KEY").expect("expected api key");
+        let cfg = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: None,
+            api_key_env: Some(api_key_env),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+
+        assert_eq!(cfg.resolve_api_key().as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn resolve_api_key_child_missing() {
+        if std::env::var_os("ROKO_RESOLVE_API_KEY_CHILD").is_none() {
+            return;
+        }
+
+        let api_key_env = std::env::var("ROKO_API_KEY_ENV_NAME").expect("api key env name");
+        let cfg = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: None,
+            api_key_env: Some(api_key_env),
+            command: None,
+            args: None,
+            timeout_ms: None,
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+
+        assert_eq!(cfg.resolve_api_key(), None);
+    }
+
+    #[test]
+    fn provider_timeouts_default_when_omitted() {
+        let toml = r#"
+kind = "openai_compat"
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.timeout_ms, Some(120_000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(15_000));
+        assert_eq!(cfg.connect_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn provider_timeouts_allow_per_provider_overrides() {
+        let toml = r#"
+kind = "openai_compat"
+timeout_ms = 240000
+ttft_timeout_ms = 25000
+connect_timeout_ms = 8000
+"#;
+        let cfg = toml::from_str::<ProviderConfig>(toml).expect("parse");
+
+        assert_eq!(cfg.timeout_ms, Some(240_000));
+        assert_eq!(cfg.ttft_timeout_ms, Some(25_000));
+        assert_eq!(cfg.connect_timeout_ms, Some(8_000));
+    }
+
+    #[test]
+    fn model_profile_parses_with_defaults() {
+        let toml = r#"
+provider = "anthropic"
+slug = "claude-opus-4-6"
+"#;
+        let cfg = toml::from_str::<ModelProfile>(toml).expect("parse");
+        assert_eq!(cfg.provider, "anthropic");
+        assert_eq!(cfg.slug, "claude-opus-4-6");
+        assert_eq!(cfg.context_window, 128_000);
+        assert_eq!(cfg.max_output, None);
+        assert!(cfg.supports_tools);
+        assert!(!cfg.supports_thinking);
+        assert!(!cfg.supports_vision);
+        assert!(!cfg.supports_web_search);
+        assert!(!cfg.supports_mcp_tools);
+        assert!(!cfg.supports_partial);
+        assert!(!cfg.supports_grounding);
+        assert!(!cfg.supports_code_execution);
+        assert!(!cfg.supports_caching);
+        assert_eq!(cfg.tool_format, "openai_json");
+        assert_eq!(cfg.cost_input_per_m, None);
+        assert_eq!(cfg.cost_output_per_m, None);
+        assert_eq!(cfg.cost_input_per_m_high, None);
+        assert_eq!(cfg.cost_output_per_m_high, None);
+        assert_eq!(cfg.cost_cache_read_per_m, None);
+        assert_eq!(cfg.cost_cache_write_per_m, None);
+        assert_eq!(cfg.thinking_level, None);
+        assert_eq!(cfg.max_tools, None);
+        assert_eq!(cfg.tokenizer_ratio, None);
+        assert_eq!(cfg.provider_routing, None);
+
+        let text = toml::to_string(&cfg).expect("serialize");
+        let back = toml::from_str::<ModelProfile>(&text).expect("reparse");
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn provider_routing_serializes_to_expected_json() {
+        let routing = ProviderRouting {
+            sort: Some("price".to_string()),
+            order: Some(vec!["anthropic".to_string(), "openai".to_string()]),
+            allow_fallbacks: Some(true),
+            max_price: Some(0.42),
+            require_parameters: Some(vec!["thinking".to_string()]),
+        };
+
+        let json = serde_json::to_value(&routing).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "sort": "price",
+                "order": ["anthropic", "openai"],
+                "allow_fallbacks": true,
+                "max_price": 0.42,
+                "require_parameters": ["thinking"]
+            })
+        );
+
+        let sparse = ProviderRouting {
+            sort: Some("latency".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&sparse).expect("serialize sparse");
+        assert_eq!(json, serde_json::json!({ "sort": "latency" }));
     }
 
     #[test]
@@ -1440,6 +3399,158 @@ context_strategy = "inline_heavy"
     }
 
     #[test]
+    fn routing_algorithm_config() {
+        let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
+        assert_eq!(default_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
+        assert!((default_cfg.routing.discount_factor - 0.99).abs() < f64::EPSILON);
+        assert_eq!(
+            default_cfg.routing.weights.default,
+            RewardWeights::default()
+        );
+
+        let thompson_toml = r#"
+[routing]
+algorithm = "thompson"
+discount_factor = 0.95
+"#;
+        let thompson_cfg = RokoConfig::from_toml(thompson_toml).expect("parse");
+        assert_eq!(thompson_cfg.routing.algorithm, RoutingAlgorithm::Thompson);
+        assert!((thompson_cfg.routing.discount_factor - 0.95).abs() < f64::EPSILON);
+
+        let linucb_toml = r#"
+[routing]
+algorithm = "linucb"
+"#;
+        let linucb_cfg = RokoConfig::from_toml(linucb_toml).expect("parse");
+        assert_eq!(linucb_cfg.routing.algorithm, RoutingAlgorithm::LinUcb);
+    }
+
+    #[test]
+    fn pipeline_config_parses_complexity_mapping() {
+        let default_cfg = RokoConfig::from_toml("").expect("parse defaults");
+        assert_eq!(
+            default_cfg.pipeline.mechanical,
+            PipelineBandConfig::mechanical()
+        );
+        assert_eq!(default_cfg.pipeline.focused, PipelineBandConfig::focused());
+        assert_eq!(
+            default_cfg.pipeline.integrative,
+            PipelineBandConfig::integrative()
+        );
+        assert_eq!(
+            default_cfg.pipeline.architectural,
+            PipelineBandConfig::architectural()
+        );
+
+        let toml = r#"
+[pipeline.mechanical]
+strategist = false
+reviewers = false
+max_iterations = 1
+
+[pipeline.focused]
+strategist = false
+reviewers = false
+max_iterations = 2
+
+[pipeline.integrative]
+strategist = true
+reviewers = true
+reviewer_mode = "quick"
+max_iterations = 2
+
+[pipeline.architectural]
+strategist = true
+reviewers = true
+reviewer_mode = "full"
+max_iterations = 3
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(cfg.pipeline.mechanical, PipelineBandConfig::mechanical());
+        assert_eq!(cfg.pipeline.focused, PipelineBandConfig::focused());
+        assert_eq!(cfg.pipeline.integrative, PipelineBandConfig::integrative());
+        assert_eq!(
+            cfg.pipeline.architectural,
+            PipelineBandConfig::architectural()
+        );
+
+        let mechanical = cfg.pipeline.for_tier("mechanical");
+        assert!(!mechanical.strategist);
+        assert!(!mechanical.reviewers);
+        assert_eq!(mechanical.max_iterations, 1);
+    }
+
+    #[test]
+    fn pipeline_config_partial_override_keeps_band_defaults() {
+        let toml = r#"
+[pipeline.architectural]
+max_iterations = 4
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.pipeline.architectural,
+            PipelineBandConfig {
+                strategist: true,
+                reviewers: true,
+                reviewer_mode: PipelineReviewerMode::Full,
+                max_iterations: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn routing_reward_weights_config() {
+        let toml = r#"
+[routing.weights]
+quality = 0.5
+cost = 0.3
+latency = 0.2
+
+[routing.weights.mechanical]
+quality = 0.3
+cost = 0.6
+latency = 0.1
+
+[routing.weights.architectural]
+quality = 0.8
+cost = 0.1
+latency = 0.1
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.routing.weights.default,
+            RewardWeights {
+                quality: 0.5,
+                cost: 0.3,
+                latency: 0.2,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("mechanical"),
+            RewardWeights {
+                quality: 0.3,
+                cost: 0.6,
+                latency: 0.1,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("architectural"),
+            RewardWeights {
+                quality: 0.8,
+                cost: 0.1,
+                latency: 0.1,
+            }
+        );
+        assert_eq!(
+            cfg.routing.weights.for_tier("focused"),
+            RewardWeights::default()
+        );
+    }
+
+    #[test]
     fn budget_section_parses() {
         let toml = r#"
 [budget]
@@ -1525,6 +3636,30 @@ api_key = "secret"
     }
 
     #[test]
+    fn serve_deploy_section_parses() {
+        let toml = r#"
+[serve.deploy]
+provider = "fly"
+environment = ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"]
+
+[[serve.deploy.webhooks]]
+provider = "github"
+owner = "nunchi"
+repo = "roko"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(cfg.serve.deploy.provider, "fly");
+        assert_eq!(
+            cfg.serve.deploy.environment,
+            vec!["GITHUB_TOKEN".to_string(), "SLACK_BOT_TOKEN".to_string()]
+        );
+        assert_eq!(cfg.serve.deploy.webhooks.len(), 1);
+        assert_eq!(cfg.serve.deploy.webhooks[0].provider, "github");
+        assert_eq!(cfg.serve.deploy.webhooks[0].owner, "nunchi");
+        assert_eq!(cfg.serve.deploy.webhooks[0].repo, "roko");
+    }
+
+    #[test]
     fn env_overrides_apply() {
         let mut cfg = RokoConfig::default();
         let env = |key: &str| -> Option<String> {
@@ -1553,6 +3688,24 @@ api_key = "secret"
         assert!(cfg.conductor.express_mode);
         assert!(cfg.gates.skip_tests);
         assert!(!cfg.gates.clippy_enabled);
+    }
+
+    #[test]
+    fn env_override_provider() {
+        let mut cfg = RokoConfig::default();
+        let env = |key: &str| -> Option<String> {
+            match key {
+                "ROKO_PROVIDER" => Some("openrouter".into()),
+                "ROKO_MODEL_SLUG" => Some("z-ai/glm-5.1".into()),
+                _ => None,
+            }
+        };
+        cfg.apply_env(&env);
+
+        let models = cfg.effective_models();
+        let default_model = models.get(&cfg.agent.default_model).expect("default model");
+        assert_eq!(default_model.provider, "openrouter");
+        assert_eq!(default_model.slug, "z-ai/glm-5.1");
     }
 
     #[test]
@@ -1627,11 +3780,14 @@ port = 3000
         assert!(example.contains("[agent]"));
         assert!(example.contains("[gates]"));
         assert!(example.contains("[routing]"));
+        assert!(example.contains("[pipeline.mechanical]"));
         assert!(example.contains("[budget]"));
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[serve.auth]"));
+        assert!(example.contains("[serve.deploy]"));
+        assert!(example.contains("[[serve.deploy.webhooks]]"));
         assert!(example.contains("[server]"));
     }
 
@@ -1641,6 +3797,163 @@ port = 3000
         // Strip comment-only lines and parse.
         let cfg = RokoConfig::from_toml(&example).expect("example should parse as valid TOML");
         assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn kimi_config_parse() {
+        let example = include_str!("../../../../examples/roko-kimi.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-kimi example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let model = cfg.models.get("kimi-k2-5").expect("kimi model profile");
+        assert_eq!(model.provider, "moonshot");
+        assert_eq!(model.slug, "kimi-k2.5");
+        assert_eq!(model.max_tools, Some(128));
+    }
+
+    #[test]
+    fn openrouter_config() {
+        let example = include_str!("../../../../examples/roko-openrouter.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-openrouter example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let provider = cfg
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider");
+        assert_eq!(provider.kind, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(
+            provider
+                .extra_headers
+                .as_ref()
+                .expect("extra headers")
+                .get("HTTP-Referer")
+                .map(String::as_str),
+            Some("https://github.com/nunchi/roko")
+        );
+
+        for model_key in ["glm-5-1-or", "kimi-k2-5-or", "claude-opus-or"] {
+            let model = cfg.models.get(model_key).expect("openrouter model");
+            assert_eq!(model.provider, "openrouter");
+        }
+    }
+
+    #[test]
+    fn validate_references_warns_on_unknown_provider_with_suggestion() {
+        let mut cfg = RokoConfig::default();
+        cfg.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        cfg.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "openruoter".to_string(),
+                slug: "z-ai/glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                ..Default::default()
+            },
+        );
+
+        let warnings = validate_references(&cfg);
+
+        assert_eq!(
+            warnings,
+            vec![ValidationWarning::UnknownProvider {
+                model: "glm-5-1".to_string(),
+                provider: "openruoter".to_string(),
+                similar: Some("openrouter".to_string()),
+            }]
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "Model 'glm-5-1' references missing provider 'openruoter' (did you mean 'openrouter'?)"
+        );
+    }
+
+    #[test]
+    fn validate_references_warns_on_unknown_fallback_model() {
+        let mut cfg = RokoConfig::default();
+        cfg.models.insert(
+            "glm-5-1".to_string(),
+            ModelProfile {
+                provider: "claude_cli".to_string(),
+                slug: "glm-5.1".to_string(),
+                context_window: 200_000,
+                max_output: None,
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                ..Default::default()
+            },
+        );
+        cfg.agent.fallback_model = Some("missing-model".to_string());
+
+        let warnings = validate_references(&cfg);
+
+        assert!(warnings.contains(&ValidationWarning::UnknownModel {
+            field: "agent.fallback_model".to_string(),
+            model: "missing-model".to_string(),
+        }));
+    }
+
+    #[test]
+    fn validate_references_allows_legacy_fallback_model() {
+        let mut cfg = RokoConfig::default();
+        cfg.agent.default_model = "claude-sonnet-4-6".to_string();
+        cfg.agent
+            .tier_models
+            .insert("mechanical".to_string(), "claude-haiku-4-5".to_string());
+        cfg.agent.fallback_model = Some("claude-haiku-4-5".to_string());
+
+        let warnings = validate_references(&cfg);
+
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
     }
 
     #[test]
@@ -1656,6 +3969,400 @@ model = "opus"
         assert!(imp.backend.is_none());
         assert!(imp.context_limit_k.is_none());
         assert!(imp.turn_budget_usd.is_none());
+    }
+
+    #[test]
+    fn perplexity_config_defaults() {
+        let cfg = RokoConfig::from_toml("").expect("parse empty");
+        assert_eq!(cfg.perplexity.search_recency_filter, "year");
+        assert!(!cfg.perplexity.academic_mode);
+        assert!(cfg.perplexity.search_domain_filter.is_empty());
+        assert!(!cfg.perplexity.return_images);
+        assert!(cfg.perplexity.return_related_questions);
+        assert!(cfg.perplexity.default_search_model.is_none());
+    }
+
+    #[test]
+    fn perplexity_config_section_parses() {
+        let toml = r#"
+[perplexity]
+default_search_model = "sonar"
+default_research_model = "sonar-deep-research"
+search_recency_filter = "week"
+academic_mode = true
+search_domain_filter = ["arxiv.org", "nature.com"]
+return_images = true
+return_related_questions = false
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-deep-research")
+        );
+        assert_eq!(cfg.perplexity.search_recency_filter, "week");
+        assert!(cfg.perplexity.academic_mode);
+        assert_eq!(
+            cfg.perplexity.search_domain_filter,
+            vec!["arxiv.org", "nature.com"]
+        );
+        assert!(cfg.perplexity.return_images);
+        assert!(!cfg.perplexity.return_related_questions);
+    }
+
+    #[test]
+    fn perplexity_example_config() {
+        let example = include_str!("../../../../examples/roko-perplexity.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-perplexity example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        // Perplexity provider
+        let pplx = cfg
+            .providers
+            .get("perplexity")
+            .expect("perplexity provider");
+        assert_eq!(pplx.kind, ProviderKind::PerplexityApi);
+        assert_eq!(pplx.base_url.as_deref(), Some("https://api.perplexity.ai"));
+        assert_eq!(pplx.api_key_env.as_deref(), Some("PERPLEXITY_API_KEY"));
+
+        // Claude CLI provider
+        let claude = cfg
+            .providers
+            .get("claude_cli")
+            .expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+
+        // Sonar models resolve to the perplexity provider
+        for model_key in ["sonar", "sonar-pro", "sonar-deep-research"] {
+            let model = cfg.models.get(model_key).expect(model_key);
+            assert_eq!(
+                model.provider, "perplexity",
+                "{model_key} should use perplexity provider"
+            );
+            assert!(model.supports_search, "{model_key} should support search");
+            assert!(
+                model.supports_citations,
+                "{model_key} should support citations"
+            );
+        }
+
+        // Claude Opus resolves to claude_cli provider
+        let claude_opus = cfg.models.get("claude-opus").expect("claude-opus model");
+        assert_eq!(claude_opus.provider, "claude_cli");
+        assert_eq!(claude_opus.slug, "claude-opus-4-6");
+        assert!(claude_opus.supports_tools);
+
+        // sonar-deep-research has async support
+        let deep = cfg
+            .models
+            .get("sonar-deep-research")
+            .expect("sonar-deep-research");
+        assert!(deep.supports_async);
+
+        // Perplexity search config
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-pro")
+        );
+        assert!(cfg.perplexity.academic_mode);
+        assert_eq!(cfg.perplexity.search_recency_filter, "year");
+        assert!(cfg.perplexity.return_related_questions);
+
+        // Role overrides
+        let researcher = cfg.agent.roles.get("researcher").expect("researcher role");
+        assert_eq!(researcher.model.as_deref(), Some("sonar-pro"));
+        let fact_checker = cfg
+            .agent
+            .roles
+            .get("fact_checker")
+            .expect("fact_checker role");
+        assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+    }
+
+    #[test]
+    fn gemini_config_defaults() {
+        let cfg = RokoConfig::from_toml("").expect("parse empty");
+        assert!(cfg.gemini.default_model.is_none());
+        assert!(cfg.gemini.grounding_model.is_none());
+        assert!(cfg.gemini.code_exec_model.is_none());
+        assert!(cfg.gemini.embed_model.is_none());
+        assert!(!cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(!cfg.gemini.enable_context_caching);
+        assert!(cfg.gemini.safety_settings.is_empty());
+    }
+
+    #[test]
+    fn gemini_config_section_parses() {
+        let toml = r#"
+[gemini]
+default_model = "gemini-2.5-flash"
+grounding_model = "gemini-3-flash-preview"
+code_exec_model = "gemini-2.5-pro"
+embed_model = "gemini-embedding-2-preview"
+use_free_tier = true
+thinking_level = "high"
+enable_context_caching = true
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HATE_SPEECH"
+threshold = "BLOCK_NONE"
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HARASSMENT"
+threshold = "BLOCK_LOW_AND_ABOVE"
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-3-flash-preview")
+        );
+        assert_eq!(
+            cfg.gemini.code_exec_model.as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            cfg.gemini.embed_model.as_deref(),
+            Some("gemini-embedding-2-preview")
+        );
+        assert!(cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "high");
+        assert!(cfg.gemini.enable_context_caching);
+        assert_eq!(cfg.gemini.safety_settings.len(), 2);
+        assert_eq!(
+            cfg.gemini.safety_settings[0],
+            SafetySetting {
+                category: "HARM_CATEGORY_HATE_SPEECH".to_string(),
+                threshold: "BLOCK_NONE".to_string(),
+            }
+        );
+        assert_eq!(
+            cfg.gemini.safety_settings[1],
+            SafetySetting {
+                category: "HARM_CATEGORY_HARASSMENT".to_string(),
+                threshold: "BLOCK_LOW_AND_ABOVE".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn gemini_example_config() {
+        let example = include_str!("../../../../examples/roko-gemini.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-gemini example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let provider = cfg.providers.get("gemini").expect("gemini provider");
+        assert_eq!(provider.kind, ProviderKind::GeminiApi);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("GEMINI_API_KEY"));
+
+        assert_eq!(cfg.agent.default_model, "gemini-2-5-flash");
+        assert_eq!(
+            cfg.agent.tier_models.get("mechanical").map(String::as_str),
+            Some("gemini-2-5-flash-lite")
+        );
+        assert_eq!(
+            cfg.agent
+                .tier_models
+                .get("architectural")
+                .map(String::as_str),
+            Some("gemini-3-1-pro")
+        );
+
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-3-flash")
+        );
+        assert_eq!(
+            cfg.gemini.code_exec_model.as_deref(),
+            Some("gemini-2-5-pro")
+        );
+        assert_eq!(
+            cfg.gemini.embed_model.as_deref(),
+            Some("gemini-embedding-2")
+        );
+        assert!(cfg.gemini.use_free_tier);
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(cfg.gemini.enable_context_caching);
+        assert_eq!(cfg.gemini.safety_settings.len(), 2);
+
+        let expected = [
+            ("gemini-2-5-flash-lite", "gemini-2.5-flash-lite"),
+            ("gemini-2-5-flash", "gemini-2.5-flash"),
+            ("gemini-2-5-pro", "gemini-2.5-pro"),
+            ("gemini-3-1-pro", "gemini-3.1-pro-preview"),
+            ("gemini-3-flash", "gemini-3-flash-preview"),
+            ("gemini-3-1-flash-lite", "gemini-3.1-flash-lite-preview"),
+            ("gemini-embedding-2", "gemini-embedding-2-preview"),
+        ];
+
+        for (model_key, slug) in expected {
+            let model = cfg.models.get(model_key).expect(model_key);
+            assert_eq!(model.provider, "gemini");
+            assert_eq!(model.slug, slug);
+
+            let resolved = crate::agent::resolve_model(&cfg, model_key);
+            assert_eq!(resolved.model_key, model_key);
+            assert_eq!(resolved.slug, slug);
+            assert_eq!(resolved.provider_kind, ProviderKind::GeminiApi);
+            assert!(resolved.provider_config.is_some());
+            assert!(resolved.profile.is_some());
+        }
+
+        let flash_lite = cfg
+            .models
+            .get("gemini-2-5-flash-lite")
+            .expect("flash-lite model");
+        assert_eq!(flash_lite.tool_format, "openai_json");
+        assert!(flash_lite.supports_caching);
+        assert!(!flash_lite.supports_grounding);
+        assert!(!flash_lite.supports_code_execution);
+
+        let pro = cfg.models.get("gemini-2-5-pro").expect("pro model");
+        assert_eq!(pro.tool_format, "gemini_native");
+        assert!(pro.supports_grounding);
+        assert!(pro.supports_code_execution);
+        assert_eq!(pro.cost_input_per_m_high, Some(2.50));
+        assert_eq!(pro.cost_output_per_m_high, Some(15.00));
+
+        let pro_31 = cfg.models.get("gemini-3-1-pro").expect("3.1 pro model");
+        assert_eq!(pro_31.thinking_level.as_deref(), Some("dynamic"));
+
+        let embed = cfg
+            .models
+            .get("gemini-embedding-2")
+            .expect("embedding model");
+        assert!(embed.is_embedding_model);
+        assert!(!embed.supports_tools);
+    }
+
+    #[test]
+    fn multi_provider_config() {
+        let example = include_str!("../../../../examples/roko-multi-provider.toml");
+        let cfg = RokoConfig::from_toml(example).expect("roko-multi-provider example should parse");
+        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let claude = cfg
+            .providers
+            .get("claude_cli")
+            .expect("claude_cli provider");
+        assert_eq!(claude.kind, ProviderKind::ClaudeCli);
+        assert_eq!(claude.command.as_deref(), Some("claude"));
+
+        let gemini = cfg.providers.get("gemini").expect("gemini provider");
+        assert_eq!(gemini.kind, ProviderKind::GeminiApi);
+        assert_eq!(
+            gemini.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(gemini.api_key_env.as_deref(), Some("GEMINI_API_KEY"));
+
+        let perplexity = cfg
+            .providers
+            .get("perplexity")
+            .expect("perplexity provider");
+        assert_eq!(perplexity.kind, ProviderKind::PerplexityApi);
+        assert_eq!(
+            perplexity.base_url.as_deref(),
+            Some("https://api.perplexity.ai")
+        );
+        assert_eq!(
+            perplexity.api_key_env.as_deref(),
+            Some("PERPLEXITY_API_KEY")
+        );
+
+        assert_eq!(cfg.agent.default_model, "claude-opus");
+        assert_eq!(
+            cfg.agent.tier_models.get("mechanical").map(String::as_str),
+            Some("gemini-2-5-flash-lite")
+        );
+        assert_eq!(
+            cfg.agent.tier_models.get("focused").map(String::as_str),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.agent.tier_models.get("integrative").map(String::as_str),
+            Some("claude-opus")
+        );
+        assert_eq!(
+            cfg.agent
+                .tier_models
+                .get("architectural")
+                .map(String::as_str),
+            Some("claude-opus")
+        );
+
+        let researcher = cfg.agent.roles.get("researcher").expect("researcher role");
+        assert_eq!(researcher.model.as_deref(), Some("sonar-pro"));
+        let fact_checker = cfg
+            .agent
+            .roles
+            .get("fact_checker")
+            .expect("fact_checker role");
+        assert_eq!(fact_checker.model.as_deref(), Some("sonar"));
+
+        let expected = [
+            ("claude-opus", ProviderKind::ClaudeCli, "claude-opus-4-6"),
+            (
+                "gemini-2-5-flash-lite",
+                ProviderKind::GeminiApi,
+                "gemini-2.5-flash-lite",
+            ),
+            (
+                "gemini-2-5-flash",
+                ProviderKind::GeminiApi,
+                "gemini-2.5-flash",
+            ),
+            ("sonar-pro", ProviderKind::PerplexityApi, "sonar-pro"),
+            ("sonar", ProviderKind::PerplexityApi, "sonar"),
+        ];
+
+        for (model_key, provider_kind, slug) in expected {
+            let resolved = crate::agent::resolve_model(&cfg, model_key);
+            assert_eq!(resolved.model_key, model_key);
+            assert_eq!(resolved.slug, slug);
+            assert_eq!(resolved.provider_kind, provider_kind);
+            assert!(resolved.provider_config.is_some());
+            assert!(resolved.profile.is_some());
+        }
+
+        assert_eq!(
+            cfg.gemini.default_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(
+            cfg.gemini.grounding_model.as_deref(),
+            Some("gemini-2-5-flash")
+        );
+        assert_eq!(cfg.gemini.thinking_level, "medium");
+        assert!(cfg.gemini.use_free_tier);
+
+        assert_eq!(
+            cfg.perplexity.default_search_model.as_deref(),
+            Some("sonar")
+        );
+        assert_eq!(
+            cfg.perplexity.default_research_model.as_deref(),
+            Some("sonar-pro")
+        );
     }
 
     #[test]

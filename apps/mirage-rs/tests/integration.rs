@@ -37,7 +37,7 @@ fn reserve_free_local_port() -> u16 {
 
 #[tokio::test]
 async fn integration_spawn_and_ready() {
-    let port = 18_545_u16;
+    let port = reserve_free_local_port();
     let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
@@ -57,7 +57,7 @@ async fn integration_spawn_and_ready() {
 /// `18545` (`integration_spawn_and_ready` holds the default-local URL contract there).
 #[tokio::test]
 async fn test_local_tx_event_sequence() {
-    let port = 18_562_u16;
+    let port = reserve_free_local_port();
     let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
@@ -191,7 +191,7 @@ async fn integration_unknown_method_returns_32601_and_status_matches_server() {
 /// Plan V2: HTTP JSON-RPC `POST` for a nonexistent method returns `-32601` / "Method not found".
 #[tokio::test]
 async fn test_jsonrpc_unknown_method_returns_32601() {
-    let port = 18_561_u16;
+    let port = reserve_free_local_port();
     let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
@@ -211,7 +211,7 @@ async fn test_jsonrpc_unknown_method_returns_32601() {
 /// Plan V2: `MirageClient::mirage_status` matches `GET /health` for the fields clients rely on.
 #[tokio::test]
 async fn test_mirage_client_status_matches_server() {
-    let port = 18_560_u16;
+    let port = reserve_free_local_port();
     let status_path = PathBuf::from(format!("/tmp/mirage-{port}-status.json"));
     let _ = tokio::fs::remove_file(&status_path).await;
 
@@ -243,8 +243,8 @@ async fn test_mirage_client_status_matches_server() {
 
 #[tokio::test]
 async fn test_pool_slot0_matches_expected_price() {
-    // Dedicated port: keep distinct from the unknown-method/status coverage.
-    let mut instance = spawn_mirage_serial(None, Some(18_553))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())
@@ -290,7 +290,8 @@ async fn test_pool_slot0_matches_expected_price() {
 
 #[tokio::test]
 async fn integration_eth_get_block_by_number_falls_back_to_upstream_view() {
-    let mut instance = spawn_mirage_serial(None, Some(18_549))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())
@@ -317,7 +318,8 @@ async fn integration_eth_get_block_by_number_falls_back_to_upstream_view() {
 
 #[tokio::test]
 async fn integration_mirage_mint_erc20_returns_success_and_marks_dirty_slots() {
-    let mut instance = spawn_mirage_serial(None, Some(18_550))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())
@@ -363,7 +365,8 @@ async fn integration_mirage_mint_erc20_returns_success_and_marks_dirty_slots() {
 
 #[tokio::test]
 async fn integration_mirage_mint_erc20_supports_arbitrary_token_balance_overrides() {
-    let mut instance = spawn_mirage_serial(None, Some(18_551))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())
@@ -413,7 +416,8 @@ async fn integration_mirage_mint_erc20_supports_arbitrary_token_balance_override
 
 #[tokio::test]
 async fn integration_eth_transfer_state_diff() {
-    let mut instance = spawn_mirage_serial(None, Some(18_548))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())
@@ -516,7 +520,8 @@ async fn integration_eth_transfer_state_diff() {
 
 #[tokio::test]
 async fn integration_snapshot_revert() {
-    let mut instance = spawn_mirage_serial(None, Some(18_546))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())
@@ -570,7 +575,8 @@ async fn integration_snapshot_revert() {
 
 #[tokio::test]
 async fn integration_scenario_runner_cow_isolation() {
-    let mut instance = spawn_mirage_serial(None, Some(18_547))
+    let port = reserve_free_local_port();
+    let mut instance = spawn_mirage_serial(None, Some(port))
         .await
         .expect("spawn test instance");
     let client = MirageClient::new(instance.config())

@@ -9,7 +9,6 @@
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use bardo_runtime::event_bus::EventBus;
 use clap::Parser;
 use mirage_rs::{
     ClassificationConfig, DiffClassifier, MirageError,
@@ -20,11 +19,12 @@ use mirage_rs::{
     resources::{MirageMode, Profile, ResourceModel},
     rpc::start_rpc_server,
 };
+use roko_runtime::event_bus::EventBus;
 use tokio::sync::broadcast;
 
 /// Default telemetry `EventBus` capacity.
 ///
-/// `bardo_runtime::event_bus::EventBus` uses a bounded broadcast + replay ring; producers never
+/// `roko_runtime::event_bus::EventBus` uses a bounded broadcast + replay ring; producers never
 /// block: the replay ring drops the oldest event when full, and live `broadcast::send` errors are
 /// ignored when no subscribers are connected (mirage does not back-pressure JSON-RPC on overflow).
 const TELEMETRY_BUS_CAPACITY: usize = 10_000;

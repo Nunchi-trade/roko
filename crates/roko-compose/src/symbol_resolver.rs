@@ -477,7 +477,7 @@ mod tests {
             "build_prompt"
         ));
         assert!(matches_fn_definition(
-            "    pub async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {",
+            "    pub async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {",
             "run"
         ));
         assert!(matches_fn_definition(

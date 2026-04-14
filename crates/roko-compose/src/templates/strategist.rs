@@ -74,7 +74,7 @@ impl RolePromptTemplate for StrategistTemplate {
         sections.push(
             PromptSection::new("agents_instructions", &input.agents_md)
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
         );
 
@@ -82,7 +82,7 @@ impl RolePromptTemplate for StrategistTemplate {
         sections.push(
             PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
                 .with_priority(SectionPriority::Critical)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
                 .with_hard_cap(50_000),
         );
@@ -92,7 +92,7 @@ impl RolePromptTemplate for StrategistTemplate {
         sections.push(
             PromptSection::new("workspace_map", truncate(&input.workspace_map, 12_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(12_000),
         );
@@ -101,7 +101,7 @@ impl RolePromptTemplate for StrategistTemplate {
         sections.push(
             PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 8_000))
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(8_000),
         );
@@ -113,7 +113,7 @@ impl RolePromptTemplate for StrategistTemplate {
                 truncate(&input.cross_plan_context, 4_000),
             )
             .with_priority(SectionPriority::Normal)
-            .with_cache_layer(CacheLayer::Session)
+            .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
             .with_hard_cap(4_000),
         );
@@ -123,7 +123,7 @@ impl RolePromptTemplate for StrategistTemplate {
             sections.push(
                 PromptSection::new("decomposition", truncate(decomp, 12_000))
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(12_000),
             );
@@ -134,7 +134,7 @@ impl RolePromptTemplate for StrategistTemplate {
             sections.push(
                 PromptSection::new("preflight", truncate(pf, 5_000))
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(5_000),
             );
@@ -145,7 +145,7 @@ impl RolePromptTemplate for StrategistTemplate {
             sections.push(
                 PromptSection::new("ignored_tests", truncate(tests, 3_000))
                     .with_priority(SectionPriority::Low)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(3_000),
             );
@@ -157,7 +157,7 @@ impl RolePromptTemplate for StrategistTemplate {
                 sections.push(
                     PromptSection::new("prior_reviews", truncate(reviews, 10_000))
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Dynamic)
+                        .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::End)
                         .with_hard_cap(10_000),
                 );
@@ -170,7 +170,7 @@ impl RolePromptTemplate for StrategistTemplate {
         sections.push(
             PromptSection::new("output_paths", output_text)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::System)
+                .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::End),
         );
 
@@ -296,10 +296,10 @@ mod tests {
         assert_eq!(sections[1].priority, SectionPriority::Critical);
 
         // Cache layers
-        assert_eq!(sections[0].cache_layer, CacheLayer::System);
-        assert_eq!(sections[1].cache_layer, CacheLayer::Session);
-        assert_eq!(sections[8].cache_layer, CacheLayer::Dynamic); // prior_reviews
-        assert_eq!(sections[9].cache_layer, CacheLayer::System); // output_paths
+        assert_eq!(sections[0].cache_layer, CacheLayer::Role);
+        assert_eq!(sections[1].cache_layer, CacheLayer::Workspace);
+        assert_eq!(sections[8].cache_layer, CacheLayer::Volatile); // prior_reviews
+        assert_eq!(sections[9].cache_layer, CacheLayer::Role); // output_paths
 
         // Hard caps — strategist gets generous budgets
         assert_eq!(sections[1].hard_cap, Some(50_000)); // plan_spec

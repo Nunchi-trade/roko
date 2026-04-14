@@ -1,0 +1,29 @@
+[package]
+name = "roko-dreams"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Dreams subsystem for Roko."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+roko-neuro = { path = "../roko-neuro" }
+roko-learn = { path = "../roko-learn" }
+roko-agent = { path = "../roko-agent" }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+roko-primitives = { path = "../roko-primitives" }
+
+[dev-dependencies]
+tempfile = "3"

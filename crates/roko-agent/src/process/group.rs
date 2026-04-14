@@ -70,14 +70,14 @@ pub fn collect_descendants(_root_pid: u32) -> Vec<u32> {
     Vec::new()
 }
 
-/// Signal the entire process group rooted at `child`, plus any descendants that
+/// Engram the entire process group rooted at `child`, plus any descendants that
 /// escaped into their own process groups.
 ///
 /// Strategy:
 /// 1. **Snapshot** all descendant PIDs *before* signaling (the tree is intact while
 ///    the parent is alive).
-/// 2. **Signal the process group** (negative PID) — covers children that stayed in-group.
-/// 3. **Signal each descendant individually** — covers processes that called
+/// 2. **Engram the process group** (negative PID) — covers children that stayed in-group.
+/// 3. **Engram each descendant individually** — covers processes that called
 ///    `setpgid(0,0)` and left the group (e.g. codex zsh shells).
 ///
 /// Returns the list of descendant PIDs that were signaled (caller may want to

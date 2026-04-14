@@ -20,6 +20,54 @@
 //! inference) and the per-role budget table in `mori-agents/03`.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::fmt;
+
+use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+
+// ─── ProviderKind (which protocol family to use) ─────────────────────────
+
+/// Which protocol family a provider belongs to.
+///
+/// This is the primary dispatch key for the provider registry layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Anthropic Messages API over HTTP.
+    AnthropicApi,
+    /// `claude` CLI subprocess protocol.
+    ClaudeCli,
+    /// OpenAI chat completions-compatible HTTP APIs.
+    #[serde(rename = "openai_compat", alias = "open_ai_compat")]
+    OpenAiCompat,
+    /// Cursor Agent Client Protocol.
+    CursorAcp,
+    /// Perplexity Sonar HTTP API (OpenAI-compatible base, Sonar extensions).
+    PerplexityApi,
+    /// Google Gemini API.
+    GeminiApi,
+}
+
+impl ProviderKind {
+    /// Canonical snake_case label for logs, config, and display.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::AnthropicApi => "anthropic_api",
+            Self::ClaudeCli => "claude_cli",
+            Self::OpenAiCompat => "openai_compat",
+            Self::CursorAcp => "cursor_acp",
+            Self::PerplexityApi => "perplexity_api",
+            Self::GeminiApi => "gemini_api",
+        }
+    }
+}
+
+impl fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 // ─── AgentBackend (which CLI to spawn) ────────────────────────────────────
 
@@ -41,6 +89,8 @@ pub enum AgentBackend {
     Ollama,
     /// Raw `OpenAI` HTTP API (no CLI).
     OpenAi,
+    /// Perplexity Sonar HTTP API.
+    Perplexity,
 }
 
 impl AgentBackend {
@@ -53,6 +103,7 @@ impl AgentBackend {
             Self::Cursor => "cx",
             Self::Ollama => "ol",
             Self::OpenAi => "oa",
+            Self::Perplexity => "px",
         }
     }
 
@@ -61,8 +112,9 @@ impl AgentBackend {
     /// Rules (derived from `apps/mori/src/agent/roles.rs::from_model`):
     /// - `claude-*` → Claude
     /// - `composer-*`, `cursor-*`, `sonnet-*`, `opus-*`, `haiku-*`,
-    ///   `gemini-*`, `kimi-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
+    ///   `gemini-*`, `auto`, `*-high`, `*-xhigh-fast` → Cursor
     /// - `ollama/*` or `llama*` → Ollama
+    /// - `sonar*` or `perplexity/*` → Perplexity
     /// - everything else → Codex (default GPT routing)
     #[must_use]
     pub fn from_model(slug: &str) -> Self {
@@ -71,10 +123,24 @@ impl AgentBackend {
             Self::Claude
         } else if slug.starts_with("ollama/") || slug.starts_with("llama") {
             Self::Ollama
+        } else if slug.starts_with("sonar") || slug.starts_with("perplexity/") {
+            Self::Perplexity
         } else if is_cursor_slug(slug) {
             Self::Cursor
         } else {
             Self::Codex
+        }
+    }
+}
+
+impl From<AgentBackend> for ProviderKind {
+    fn from(backend: AgentBackend) -> Self {
+        match backend {
+            AgentBackend::Claude => ProviderKind::ClaudeCli,
+            AgentBackend::Codex | AgentBackend::OpenAi => ProviderKind::OpenAiCompat,
+            AgentBackend::Cursor => ProviderKind::CursorAcp,
+            AgentBackend::Ollama => ProviderKind::OpenAiCompat,
+            AgentBackend::Perplexity => ProviderKind::PerplexityApi,
         }
     }
 }
@@ -87,10 +153,13 @@ fn is_cursor_slug(slug: &str) -> bool {
         || slug.starts_with("opus-")
         || slug.starts_with("haiku-")
         || slug.starts_with("gemini-")
-        || slug.starts_with("kimi-")
         || slug == "gpt-5.2"
         || slug.ends_with("-high")
         || slug.ends_with("-xhigh-fast")
+}
+
+fn provider_kind_from_backend(backend: AgentBackend) -> ProviderKind {
+    backend.into()
 }
 
 // ─── ModelSpec (slug + inferred backend) ──────────────────────────────────
@@ -158,6 +227,206 @@ impl ModelSpec {
             .replace("claude-", "cl-")
             .replace("gpt-", "")
     }
+}
+
+/// Fully resolved model lookup result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedModel {
+    /// The key used to resolve the model.
+    pub model_key: String,
+    /// The API model ID sent to the backend.
+    pub slug: String,
+    /// Protocol family for the resolved provider.
+    pub provider_kind: ProviderKind,
+    /// Provider-specific config, if the config registry has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_config: Option<ProviderConfig>,
+    /// Model-specific config, if the config registry has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ModelProfile>,
+    /// Legacy backend inference for backwards compatibility.
+    pub backend: AgentBackend,
+}
+
+/// Resolve a model key against config, falling back to the legacy slug heuristic.
+#[must_use]
+pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
+    if let Some(profile) = config.models.get(model_key) {
+        let provider_config = config.providers.get(&profile.provider).cloned();
+        let backend = AgentBackend::from_model(&profile.slug);
+        let provider_kind = provider_config
+            .as_ref()
+            .map(|provider| provider.kind)
+            .unwrap_or_else(|| provider_kind_from_backend(backend));
+
+        return ResolvedModel {
+            model_key: model_key.to_owned(),
+            slug: profile.slug.clone(),
+            provider_kind,
+            provider_config,
+            profile: Some(profile.clone()),
+            backend,
+        };
+    }
+
+    let backend = AgentBackend::from_model(model_key);
+    ResolvedModel {
+        model_key: model_key.to_owned(),
+        slug: model_key.trim().to_owned(),
+        provider_kind: provider_kind_from_backend(backend),
+        provider_config: None,
+        profile: None,
+        backend,
+    }
+}
+
+/// Task requirements that inform automatic provider/model selection.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskRequirements {
+    /// Does the task need web search / grounded retrieval?
+    pub needs_web_search: bool,
+    /// Does the task need provider-native code execution?
+    pub needs_code_execution: bool,
+    /// Does the task benefit from extended thinking / deep reasoning?
+    pub needs_thinking: bool,
+    /// Does the task need vision / image analysis?
+    pub needs_vision: bool,
+    /// Does the task need structured output support?
+    pub needs_structured_output: bool,
+    /// Minimum context window required in tokens.
+    pub min_context_window: u64,
+    /// Maximum acceptable cost per million output tokens.
+    pub max_cost_output_per_m: Option<f64>,
+    /// Maximum acceptable latency in milliseconds.
+    pub max_latency_ms: Option<u64>,
+}
+
+/// Score a model profile against task requirements.
+///
+/// Returns `None` if the profile fails any hard requirement.
+#[must_use]
+pub fn score_model_for_task(
+    profile: &ModelProfile,
+    requirements: &TaskRequirements,
+) -> Option<f64> {
+    let supports_web_search =
+        profile.supports_web_search || profile.supports_search || profile.supports_grounding;
+    let supports_structured = profile.supports_tools || profile.supports_partial;
+
+    if requirements.needs_web_search && !supports_web_search {
+        return None;
+    }
+    if requirements.needs_code_execution && !profile.supports_code_execution {
+        return None;
+    }
+    if requirements.needs_thinking && !profile.supports_thinking {
+        return None;
+    }
+    if requirements.needs_vision && !profile.supports_vision {
+        return None;
+    }
+    if requirements.needs_structured_output && !supports_structured {
+        return None;
+    }
+    if profile.context_window < requirements.min_context_window {
+        return None;
+    }
+    if let (Some(max_cost), Some(model_cost)) = (
+        requirements.max_cost_output_per_m,
+        profile.cost_output_per_m,
+    ) {
+        if model_cost > max_cost {
+            return None;
+        }
+    }
+
+    let mut score = 1.0;
+    if requirements.needs_web_search && supports_web_search {
+        score += 0.2;
+    }
+    if requirements.needs_code_execution && profile.supports_code_execution {
+        score += 0.15;
+    }
+    if requirements.needs_thinking && profile.supports_thinking {
+        score += 0.2;
+    }
+    if requirements.needs_vision && profile.supports_vision {
+        score += 0.15;
+    }
+    if requirements.needs_structured_output && supports_structured {
+        score += 0.1;
+    }
+    if profile.supports_caching {
+        score += 0.05;
+    }
+
+    if requirements.min_context_window > 0 {
+        let ratio = profile.context_window as f64 / requirements.min_context_window as f64;
+        score += (ratio.min(2.0) - 1.0).max(0.0) * 0.15;
+    }
+
+    match (requirements.max_cost_output_per_m, profile.cost_output_per_m) {
+        (Some(max_cost), Some(model_cost)) if max_cost > 0.0 => {
+            score += ((max_cost - model_cost) / max_cost).max(0.0) * 0.35;
+        }
+        (None, Some(model_cost)) => {
+            score += (1.0 / (1.0 + model_cost)).min(0.2);
+        }
+        _ => {}
+    }
+
+    if let Some(max_latency_ms) = requirements.max_latency_ms {
+        if max_latency_ms <= 5_000 && !profile.supports_thinking {
+            score += 0.1;
+        }
+    }
+
+    Some(score)
+}
+
+/// Select the best model for a task from the configured model registry.
+#[must_use]
+pub fn select_model_for_task(
+    config: &RokoConfig,
+    requirements: &TaskRequirements,
+) -> Option<String> {
+    select_model_for_task_with_bonus(config, requirements, |_| 0.0)
+}
+
+/// Select the best model for a task, with an additional learned bonus per model.
+#[must_use]
+pub fn select_model_for_task_with_bonus<F>(
+    config: &RokoConfig,
+    requirements: &TaskRequirements,
+    mut learned_bonus: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> f64,
+{
+    let mut candidates: Vec<(String, f64, u64, f64)> = config
+        .effective_models()
+        .into_iter()
+        .filter_map(|(key, profile)| {
+            let score = score_model_for_task(&profile, requirements)?;
+            Some((
+                key.clone(),
+                score + learned_bonus(&key) * 0.5,
+                profile.context_window,
+                profile.cost_output_per_m.unwrap_or(f64::MAX),
+            ))
+        })
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then(right.2.cmp(&left.2))
+            .then_with(|| left.3.partial_cmp(&right.3).unwrap_or(Ordering::Equal))
+            .then(left.0.cmp(&right.0))
+    });
+    candidates.into_iter().next().map(|(key, _, _, _)| key)
 }
 
 // ─── ModelTier (capability class) ─────────────────────────────────────────
@@ -681,6 +950,7 @@ impl std::fmt::Display for AgentRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 
     #[test]
     fn backend_from_claude_slug() {
@@ -711,6 +981,63 @@ mod tests {
     fn backend_from_codex_slug() {
         assert_eq!(AgentBackend::from_model("gpt-5"), AgentBackend::Codex);
         assert_eq!(AgentBackend::from_model("o3-mini"), AgentBackend::Codex);
+    }
+
+    #[test]
+    fn kimi_not_cursor() {
+        assert!(!is_cursor_slug("kimi-k2.5"));
+        assert_eq!(AgentBackend::from_model("kimi-k2.5"), AgentBackend::Codex);
+        assert!(!is_cursor_slug("glm-5.1"));
+        assert_eq!(AgentBackend::from_model("glm-5.1"), AgentBackend::Codex);
+    }
+
+    #[test]
+    fn backend_to_provider_kind() {
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Claude),
+            ProviderKind::ClaudeCli
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Codex),
+            ProviderKind::OpenAiCompat
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::OpenAi),
+            ProviderKind::OpenAiCompat
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Cursor),
+            ProviderKind::CursorAcp
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Ollama),
+            ProviderKind::OpenAiCompat
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Perplexity),
+            ProviderKind::PerplexityApi
+        );
+    }
+
+    #[test]
+    fn provider_kind_labels_and_display() {
+        let kinds = [
+            (ProviderKind::AnthropicApi, "anthropic_api"),
+            (ProviderKind::ClaudeCli, "claude_cli"),
+            (ProviderKind::OpenAiCompat, "openai_compat"),
+            (ProviderKind::CursorAcp, "cursor_acp"),
+            (ProviderKind::PerplexityApi, "perplexity_api"),
+            (ProviderKind::GeminiApi, "gemini_api"),
+        ];
+
+        for (kind, label) in kinds {
+            assert_eq!(kind.label(), label);
+            assert_eq!(kind.to_string(), label);
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{label}\""));
+            let decoded: ProviderKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, kind);
+        }
     }
 
     #[test]
@@ -805,6 +1132,7 @@ mod tests {
             AgentBackend::Cursor,
             AgentBackend::Ollama,
             AgentBackend::OpenAi,
+            AgentBackend::Perplexity,
         ] {
             assert_eq!(b.short().len(), 2);
         }
@@ -831,6 +1159,205 @@ mod tests {
         );
         assert_eq!(ModelSpec::from_slug("composer-1").short(), "cx-1");
         assert_eq!(ModelSpec::from_slug("gpt-5-high").short(), "5-high");
+    }
+
+    #[test]
+    fn resolve_model_uses_config_lookup() {
+        let mut config = RokoConfig::default();
+        config.providers.insert(
+            "zai".to_owned(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("https://api.z.ai/api/paas/v4".to_owned()),
+                api_key_env: Some("ZAI_API_KEY".to_owned()),
+                command: None,
+                args: None,
+                timeout_ms: Some(120_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: Some(8),
+            },
+        );
+        config.models.insert(
+            "glm-5-1".to_owned(),
+            ModelProfile {
+                provider: "zai".to_owned(),
+                slug: "glm-5.1".to_owned(),
+                context_window: 200_000,
+                max_output: Some(131_072),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: true,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_owned(),
+                cost_input_per_m: Some(1.4),
+                cost_output_per_m: Some(4.4),
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                ..Default::default()
+            },
+        );
+
+        let resolved = resolve_model(&config, "glm-5-1");
+        assert_eq!(resolved.model_key, "glm-5-1");
+        assert_eq!(resolved.slug, "glm-5.1");
+        assert_eq!(resolved.provider_kind, ProviderKind::OpenAiCompat);
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert!(resolved.provider_config.is_some());
+        assert!(resolved.profile.is_some());
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_legacy_backend() {
+        let config = RokoConfig::default();
+
+        let resolved = resolve_model(&config, "claude-sonnet-4-6");
+        assert_eq!(resolved.model_key, "claude-sonnet-4-6");
+        assert_eq!(resolved.slug, "claude-sonnet-4-6");
+        assert_eq!(resolved.provider_kind, ProviderKind::ClaudeCli);
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert!(resolved.provider_config.is_none());
+        assert!(resolved.profile.is_none());
+    }
+
+    #[test]
+    fn score_model_for_task_disqualifies_missing_hard_requirements() {
+        let profile = ModelProfile {
+            provider: "openai".to_owned(),
+            slug: "gpt-5-mini".to_owned(),
+            context_window: 128_000,
+            max_output: Some(8_192),
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_owned(),
+            cost_input_per_m: None,
+            cost_output_per_m: Some(2.0),
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
+        };
+
+        let requirements = TaskRequirements {
+            needs_thinking: true,
+            ..TaskRequirements::default()
+        };
+        assert!(score_model_for_task(&profile, &requirements).is_none());
+    }
+
+    #[test]
+    fn select_model_for_task_prefers_matching_capabilities_and_cost() {
+        let mut config = RokoConfig::default();
+        config.models.insert(
+            "cheap".to_owned(),
+            ModelProfile {
+                provider: "openai".to_owned(),
+                slug: "gpt-5-mini".to_owned(),
+                context_window: 128_000,
+                max_output: Some(8_192),
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_owned(),
+                cost_input_per_m: None,
+                cost_output_per_m: Some(2.0),
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: false,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+        config.models.insert(
+            "capable".to_owned(),
+            ModelProfile {
+                provider: "gemini".to_owned(),
+                slug: "gemini-2.5-pro".to_owned(),
+                context_window: 1_048_576,
+                max_output: Some(65_536),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: true,
+                supports_web_search: true,
+                supports_mcp_tools: true,
+                supports_partial: true,
+                supports_grounding: true,
+                supports_code_execution: true,
+                supports_caching: true,
+                provider_routing: None,
+                tool_format: "openai_json".to_owned(),
+                cost_input_per_m: None,
+                cost_output_per_m: Some(8.0),
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: true,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+        let requirements = TaskRequirements {
+            needs_web_search: true,
+            needs_code_execution: true,
+            needs_thinking: true,
+            min_context_window: 150_000,
+            max_cost_output_per_m: Some(15.0),
+            ..TaskRequirements::default()
+        };
+
+        let selected = select_model_for_task(&config, &requirements).expect("selected model");
+        assert_eq!(selected, "capable");
     }
 
     #[test]

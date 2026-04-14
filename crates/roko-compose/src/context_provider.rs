@@ -19,9 +19,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
+use roko_core::OperatingFrequency;
+pub use roko_neuro::{ContextSource, ReadFileSpec, TaskInput, VerifySpec};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -67,6 +69,26 @@ impl ContextTier {
     }
 }
 
+impl From<OperatingFrequency> for ContextTier {
+    fn from(value: OperatingFrequency) -> Self {
+        match value {
+            OperatingFrequency::Gamma => Self::Surgical,
+            OperatingFrequency::Theta => Self::Focused,
+            OperatingFrequency::Delta => Self::Full,
+        }
+    }
+}
+
+impl From<ContextTier> for OperatingFrequency {
+    fn from(value: ContextTier) -> Self {
+        match value {
+            ContextTier::Surgical => Self::Gamma,
+            ContextTier::Focused => Self::Theta,
+            ContextTier::Full => Self::Delta,
+        }
+    }
+}
+
 /// Check if a model slug refers to a local model (Ollama, Gemma, Llama, etc.)
 #[must_use]
 pub fn is_local_model(slug: &str) -> bool {
@@ -85,52 +107,6 @@ pub fn is_local_model(slug: &str) -> bool {
             && !lower.starts_with("gpt")
             && !lower.starts_with("composer")
             && !lower.starts_with("cursor")
-}
-
-// ─── Context source tracking ───────────────────────────────────────────────
-
-/// Where a context section came from — used for attribution and feedback learning.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ContextSource {
-    /// Inlined file content (from `read_files` in tasks.toml).
-    InlineFile {
-        /// File path relative to workdir.
-        path: String,
-        /// Optional line range (e.g. "40-80").
-        lines: Option<String>,
-    },
-    /// Resolved symbol signature (struct/fn/trait/enum definition).
-    SymbolSignature {
-        /// Symbol name that was searched for.
-        symbol: String,
-        /// File where it was found.
-        file: String,
-    },
-    /// Anti-pattern directive.
-    AntiPattern,
-    /// Verification command listing.
-    Verification,
-    /// Per-task brief (What/Why/How).
-    TaskBrief,
-    /// Output from a completed dependency task.
-    PriorTaskOutput {
-        /// Comma-separated list of dependency task IDs.
-        task_id: String,
-    },
-    /// Plan-level brief (from plan dir brief.md).
-    PlanBrief,
-    /// Research memo (from plan dir research.md).
-    ResearchMemo,
-    /// Invariants/rubric (from plan dir rubric.md).
-    Invariants,
-    /// Cross-plan context (from plan dir context.md or cross-plan references).
-    CrossPlanContext,
-    /// PRD extract (from plan dir prd-extract.md).
-    PrdExtract,
-    /// Decomposition (from plan dir decomposition.md).
-    Decomposition,
-    /// Sibling task titles (from tasks.toml, just IDs + titles of tasks in same plan).
-    SiblingTasks,
 }
 
 // ─── Rolling average context utility ───────────────────────────────────────
@@ -219,18 +195,30 @@ pub struct ResolvedContext {
 impl ResolvedContext {
     /// Convert resolved sections into `PromptSection`s for the composer.
     /// Sections are sorted by cache layer (for prefix-cache alignment),
-    /// then by placement, then by priority (highest first).
+    /// then their placements are reshaped with an attention U-curve so the
+    /// highest-value chunks land at the start and end of the final prompt.
     #[must_use]
     pub fn into_prompt_sections(mut self) -> Vec<PromptSection> {
         // Sort: cache layer ascending (stable layers first), then placement, then priority desc
         self.sections.sort_by(|a, b| {
-            let ca = a.section.cache_layer as u8;
-            let cb = b.section.cache_layer as u8;
-            ca.cmp(&cb)
+            a.section
+                .cache_layer
+                .cmp(&b.section.cache_layer)
                 .then(placement_ord(a.section.placement).cmp(&placement_ord(b.section.placement)))
                 .then((b.section.priority as u8).cmp(&(a.section.priority as u8)))
         });
-        self.sections.into_iter().map(|cs| cs.section).collect()
+
+        apply_attention_curve_placements(&mut self.sections);
+
+        self.sections
+            .into_iter()
+            .map(|mut cs| {
+                cs.section = cs
+                    .section
+                    .with_bidder(bidder_for_context_source(&cs.source));
+                cs.section
+            })
+            .collect()
     }
 
     /// Get source attribution for all included sections.
@@ -246,6 +234,59 @@ const fn placement_ord(p: Placement) -> u8 {
         Placement::Middle => 1,
         Placement::End => 2,
     }
+}
+
+const fn bidder_for_context_source(source: &ContextSource) -> AttentionBidder {
+    match source {
+        ContextSource::KnowledgeEntry { .. } => AttentionBidder::Neuro,
+        ContextSource::Episode { .. } | ContextSource::PriorTaskOutput { .. } => {
+            AttentionBidder::IterationMemory
+        }
+        ContextSource::InlineFile { .. } | ContextSource::SymbolSignature { .. } => {
+            AttentionBidder::CodeIntelligence
+        }
+        ContextSource::ResearchMemo => AttentionBidder::Research,
+        ContextSource::RecentSignal { .. } => AttentionBidder::Oracles,
+        ContextSource::AntiPattern
+        | ContextSource::Verification
+        | ContextSource::TaskBrief
+        | ContextSource::PlanBrief
+        | ContextSource::Invariants
+        | ContextSource::CrossPlanContext
+        | ContextSource::PrdExtract
+        | ContextSource::Decomposition
+        | ContextSource::SiblingTasks => AttentionBidder::TaskContext,
+    }
+}
+
+fn apply_attention_curve_placements(sections: &mut [ContextSection]) {
+    if sections.len() <= 1 {
+        return;
+    }
+
+    let mut ranked_indices: Vec<usize> = (0..sections.len()).collect();
+    ranked_indices.sort_by(|&a, &b| attention_rank_cmp(&sections[a], &sections[b]));
+
+    let edge_slots = ranked_indices.len().div_ceil(2);
+    for (rank, idx) in ranked_indices.into_iter().enumerate() {
+        sections[idx].section.placement = if rank < edge_slots {
+            if rank % 2 == 0 {
+                Placement::Start
+            } else {
+                Placement::End
+            }
+        } else {
+            Placement::Middle
+        };
+    }
+}
+
+fn attention_rank_cmp(a: &ContextSection, b: &ContextSection) -> std::cmp::Ordering {
+    (b.section.priority as u8)
+        .cmp(&(a.section.priority as u8))
+        .then(b.section.cache_layer.cmp(&a.section.cache_layer))
+        .then(a.estimated_tokens().cmp(&b.estimated_tokens()))
+        .then_with(|| a.section.name.cmp(&b.section.name))
 }
 
 // ─── Context provider config ───────────────────────────────────────────────
@@ -281,60 +322,21 @@ impl ContextBudgets {
             ContextTier::Full => self.full,
         }
     }
-}
 
-// ─── Task input ────────────────────────────────────────────────────────────
-
-/// Everything the context provider needs to know about a task.
-/// This is a view into `TaskDef` — we don't depend on the CLI crate.
-#[derive(Clone, Debug)]
-pub struct TaskInput {
-    /// Task ID (e.g. "T1").
-    pub id: String,
-    /// Human-readable task title.
-    pub title: String,
-    /// Complexity tier: mechanical, focused, integrative, architectural.
-    pub tier: String,
-    /// Files this task modifies.
-    pub files: Vec<String>,
-    /// Files to read as context, with optional line ranges and reasons.
-    pub read_files: Vec<ReadFileSpec>,
-    /// Symbol names to resolve to their signatures.
-    pub symbols: Vec<String>,
-    /// Anti-patterns — things the agent must NOT do.
-    pub anti_patterns: Vec<String>,
-    /// Context from prior failed attempts at this task.
-    pub prior_failures: Vec<String>,
-    /// Verification commands that must pass after changes.
-    pub verify_commands: Vec<VerifySpec>,
-    /// Acceptance criteria (legacy string format).
-    pub acceptance: Vec<String>,
-    /// IDs of tasks this task depends on.
-    pub depends_on: Vec<String>,
-    /// Maximum lines of change allowed.
-    pub max_loc: Option<u32>,
-}
-
-/// A file to read as context.
-#[derive(Clone, Debug)]
-pub struct ReadFileSpec {
-    /// File path relative to workdir.
-    pub path: String,
-    /// Optional line range (e.g. "40-80").
-    pub lines: Option<String>,
-    /// Why this file is relevant.
-    pub why: String,
-}
-
-/// A verification command.
-#[derive(Clone, Debug)]
-pub struct VerifySpec {
-    /// Phase: structural, compile, test, integration.
-    pub phase: String,
-    /// Shell command to run.
-    pub command: String,
-    /// Message to show on failure.
-    pub fail_msg: Option<String>,
+    /// Get the budget for a given operating frequency.
+    ///
+    /// This wires the 3-speed policy directly into context assembly:
+    /// - `Gamma` is reactive and gets no assembled context.
+    /// - `Theta` uses the standard deliberative budget.
+    /// - `Delta` is reflective and keeps all assembled context.
+    #[must_use]
+    pub const fn for_frequency(&self, frequency: OperatingFrequency) -> usize {
+        match frequency {
+            OperatingFrequency::Gamma => 0,
+            OperatingFrequency::Theta => self.focused,
+            OperatingFrequency::Delta => usize::MAX,
+        }
+    }
 }
 
 // ─── Plan context (artifacts on disk) ──────────────────────────────────────
@@ -477,12 +479,13 @@ impl ContextProvider {
         self
     }
 
-    /// Resolve context for a task at the given tier.
+    /// Resolve context for a task at the given operating frequency.
     ///
     /// This is the main entry point — called from `dispatch_agent` in
     /// orchestrate.rs between task parsing and prompt composition.
     pub fn resolve(
         &self,
+        frequency: OperatingFrequency,
         task: &TaskInput,
         model_slug: &str,
         plan_artifacts: &PlanArtifacts,
@@ -490,7 +493,16 @@ impl ContextProvider {
         prior_outputs: &[PriorTaskOutput],
     ) -> ResolvedContext {
         let tier = ContextTier::from_task_and_model(&task.tier, model_slug);
-        let budget = self.budgets.for_tier(tier);
+        let budget = self.budgets.for_frequency(frequency);
+
+        if budget == 0 {
+            return ResolvedContext {
+                sections: Vec::new(),
+                tier,
+                total_tokens_estimate: 0,
+                budget_tokens: budget,
+            };
+        }
 
         let mut sections = Vec::new();
 
@@ -616,7 +628,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new(&label, &formatted)
                     .with_priority(SectionPriority::High)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle),
                 source: ContextSource::InlineFile {
                     path: rf.path.clone(),
@@ -645,7 +657,7 @@ impl ContextProvider {
                 sections.push(ContextSection {
                     section: PromptSection::new("symbols", &content)
                         .with_priority(SectionPriority::High)
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::Middle),
                     source: ContextSource::SymbolSignature {
                         symbol: task.symbols.join(", "),
@@ -671,7 +683,7 @@ fn add_anti_patterns(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("anti_patterns", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
             source: ContextSource::AntiPattern,
         });
@@ -693,7 +705,7 @@ fn add_prior_failures(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("prior_failures", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Dynamic)
+                .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::End),
             source: ContextSource::AntiPattern, // reusing for failures
         });
@@ -718,7 +730,7 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("verification", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
             source: ContextSource::Verification,
         });
@@ -734,7 +746,7 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         sections.push(ContextSection {
             section: PromptSection::new("acceptance", &formatted)
                 .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Task)
+                .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
             source: ContextSource::Verification,
         });
@@ -762,7 +774,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new("task_brief", &brief)
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Task)
+                    .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(3_000),
                 source: ContextSource::TaskBrief,
@@ -795,7 +807,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new("siblings", &formatted)
                     .with_priority(SectionPriority::Low)
-                    .with_cache_layer(CacheLayer::Session)
+                    .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(1_500),
                 source: ContextSource::SiblingTasks,
@@ -818,7 +830,7 @@ impl ContextProvider {
             sections.push(ContextSection {
                 section: PromptSection::new("prior_outputs", &formatted)
                     .with_priority(SectionPriority::Normal)
-                    .with_cache_layer(CacheLayer::Dynamic)
+                    .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(4_000),
                 source: ContextSource::PriorTaskOutput {
@@ -838,7 +850,7 @@ impl ContextProvider {
                 sections.push(ContextSection {
                     section: PromptSection::new("prd_extract", format!("## PRD context\n{scoped}"))
                         .with_priority(SectionPriority::Low)
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle)
                         .with_hard_cap(2_000),
                     source: ContextSource::PrdExtract,
@@ -913,7 +925,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("plan_brief", format!("## Plan brief\n{brief}"))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(6_000),
             source: ContextSource::PlanBrief,
@@ -925,7 +937,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("research", format!("## Research memo\n{research}"))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(4_000),
             source: ContextSource::ResearchMemo,
@@ -937,7 +949,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("invariants", format!("## Invariants & rubric\n{rubric}"))
                 .with_priority(SectionPriority::Normal)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
             source: ContextSource::Invariants,
@@ -949,7 +961,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("cross_plan", format!("## Cross-plan context\n{cross}"))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
             source: ContextSource::CrossPlanContext,
@@ -961,7 +973,7 @@ fn add_full_context(
         sections.push(ContextSection {
             section: PromptSection::new("decomposition", format!("## Decomposition\n{decomp}"))
                 .with_priority(SectionPriority::Low)
-                .with_cache_layer(CacheLayer::Session)
+                .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
             source: ContextSource::Decomposition,
@@ -972,7 +984,10 @@ fn add_full_context(
 /// Convert a context source into the stable source-type key used by learning data.
 const fn context_source_type(source: &ContextSource) -> &'static str {
     match source {
+        ContextSource::KnowledgeEntry { .. } => "knowledge",
+        ContextSource::Episode { .. } => "episode",
         ContextSource::InlineFile { .. } => "file",
+        ContextSource::RecentSignal { .. } => "signal",
         ContextSource::SymbolSignature { .. } => "symbol",
         ContextSource::AntiPattern => "anti_pattern",
         ContextSource::Verification => "verification",
@@ -1057,6 +1072,7 @@ fn scope_text_to_files(text: &str, files: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::OperatingFrequency;
 
     #[test]
     fn context_tier_from_task_and_model() {
@@ -1107,6 +1123,34 @@ mod tests {
     }
 
     #[test]
+    fn operating_frequency_maps_to_context_tier() {
+        assert_eq!(
+            ContextTier::from(OperatingFrequency::Gamma),
+            ContextTier::Surgical
+        );
+        assert_eq!(
+            ContextTier::from(OperatingFrequency::Theta),
+            ContextTier::Focused
+        );
+        assert_eq!(
+            ContextTier::from(OperatingFrequency::Delta),
+            ContextTier::Full
+        );
+        assert_eq!(
+            OperatingFrequency::from(ContextTier::Surgical),
+            OperatingFrequency::Gamma
+        );
+        assert_eq!(
+            OperatingFrequency::from(ContextTier::Focused),
+            OperatingFrequency::Theta
+        );
+        assert_eq!(
+            OperatingFrequency::from(ContextTier::Full),
+            OperatingFrequency::Delta
+        );
+    }
+
+    #[test]
     fn is_local_model_detects_ollama_patterns() {
         assert!(is_local_model("ollama/gemma4:12b"));
         assert!(is_local_model("llama3.1:8b"));
@@ -1133,6 +1177,9 @@ mod tests {
         assert_eq!(budgets.surgical, 4_000);
         assert_eq!(budgets.focused, 12_000);
         assert_eq!(budgets.full, 24_000);
+        assert_eq!(budgets.for_frequency(OperatingFrequency::Gamma), 0);
+        assert_eq!(budgets.for_frequency(OperatingFrequency::Theta), 12_000);
+        assert_eq!(budgets.for_frequency(OperatingFrequency::Delta), usize::MAX);
     }
 
     #[test]
@@ -1258,19 +1305,19 @@ mod tests {
             sections: vec![
                 ContextSection {
                     section: PromptSection::new("task", "task content")
-                        .with_cache_layer(CacheLayer::Task)
+                        .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
                     source: ContextSource::Verification,
                 },
                 ContextSection {
                     section: PromptSection::new("session", "session content")
-                        .with_cache_layer(CacheLayer::Session)
+                        .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
                     source: ContextSource::PlanBrief,
                 },
                 ContextSection {
                     section: PromptSection::new("system", "system content")
-                        .with_cache_layer(CacheLayer::System)
+                        .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
                     source: ContextSource::AntiPattern,
                 },
@@ -1284,5 +1331,120 @@ mod tests {
         assert_eq!(prompt_sections[0].name, "system");
         assert_eq!(prompt_sections[1].name, "session");
         assert_eq!(prompt_sections[2].name, "task");
+        assert_eq!(prompt_sections[0].bidder, AttentionBidder::TaskContext);
+        assert_eq!(prompt_sections[1].bidder, AttentionBidder::TaskContext);
+        assert_eq!(prompt_sections[2].bidder, AttentionBidder::TaskContext);
+    }
+
+    #[test]
+    fn resolved_context_maps_sources_to_attention_bidders() {
+        let resolved = ResolvedContext {
+            sections: vec![
+                ContextSection {
+                    section: PromptSection::new("knowledge", "knowledge"),
+                    source: ContextSource::KnowledgeEntry {
+                        entry_id: "k1".into(),
+                        kind: "heuristic".into(),
+                        source: Some("neuro".into()),
+                    },
+                },
+                ContextSection {
+                    section: PromptSection::new("file", "file"),
+                    source: ContextSource::InlineFile {
+                        path: "src/lib.rs".into(),
+                        lines: None,
+                    },
+                },
+                ContextSection {
+                    section: PromptSection::new("research", "research"),
+                    source: ContextSource::ResearchMemo,
+                },
+            ],
+            tier: ContextTier::Focused,
+            total_tokens_estimate: 12,
+            budget_tokens: 12_000,
+        };
+
+        let prompt_sections = resolved.into_prompt_sections();
+        assert!(
+            prompt_sections
+                .iter()
+                .any(|section| section.bidder == AttentionBidder::Neuro)
+        );
+        assert!(
+            prompt_sections
+                .iter()
+                .any(|section| section.bidder == AttentionBidder::CodeIntelligence)
+        );
+        assert!(
+            prompt_sections
+                .iter()
+                .any(|section| section.bidder == AttentionBidder::Research)
+        );
+    }
+
+    #[test]
+    fn resolved_context_attention_curve_positions_high_value_at_edges() {
+        let resolved = ResolvedContext {
+            sections: vec![
+                ContextSection {
+                    section: PromptSection::new("critical", "critical context")
+                        .with_priority(SectionPriority::Critical)
+                        .with_cache_layer(CacheLayer::Plan)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::Verification,
+                },
+                ContextSection {
+                    section: PromptSection::new("high", "high value")
+                        .with_priority(SectionPriority::High)
+                        .with_cache_layer(CacheLayer::Volatile)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::PriorTaskOutput {
+                        task_id: "T1".into(),
+                    },
+                },
+                ContextSection {
+                    section: PromptSection::new("normal", "normal value")
+                        .with_priority(SectionPriority::Normal)
+                        .with_cache_layer(CacheLayer::Workspace)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::PlanBrief,
+                },
+                ContextSection {
+                    section: PromptSection::new("low", "low value")
+                        .with_priority(SectionPriority::Low)
+                        .with_cache_layer(CacheLayer::Role)
+                        .with_placement(Placement::Middle),
+                    source: ContextSource::ResearchMemo,
+                },
+            ],
+            tier: ContextTier::Full,
+            total_tokens_estimate: 12,
+            budget_tokens: 24_000,
+        };
+
+        let prompt_sections = resolved.into_prompt_sections();
+
+        let critical = prompt_sections
+            .iter()
+            .find(|s| s.name == "critical")
+            .expect("critical section present");
+        let high = prompt_sections
+            .iter()
+            .find(|s| s.name == "high")
+            .expect("high section present");
+        let normal = prompt_sections
+            .iter()
+            .find(|s| s.name == "normal")
+            .expect("normal section present");
+        let low = prompt_sections
+            .iter()
+            .find(|s| s.name == "low")
+            .expect("low section present");
+
+        assert_eq!(critical.placement, Placement::Start);
+        assert_eq!(high.placement, Placement::End);
+        assert_eq!(normal.placement, Placement::Middle);
+        assert_eq!(low.placement, Placement::Middle);
     }
 }

@@ -1,0 +1,177 @@
+schema_version = 2
+
+[project]
+name = "roko-gemini"
+root = "."
+fresh_base_branch = "main"
+
+[agent]
+default_model = "gemini-2-5-flash"
+effort = "medium"
+bare_mode = true
+timeout_ms = 300000
+
+[agent.tier_models]
+mechanical = "gemini-2-5-flash-lite"
+focused = "gemini-2-5-flash"
+integrative = "gemini-2-5-pro"
+architectural = "gemini-3-1-pro"
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+# ── Provider ────────────────────────────────────────────────────────────────
+
+# Gemini as the primary backend: 1M context, free-tier exploration, and the
+# cheapest reasoning/coding path in the current provider registry.
+[providers.gemini]
+kind = "gemini_api"
+base_url = "https://generativelanguage.googleapis.com"
+api_key_env = "GEMINI_API_KEY"
+timeout_ms = 120000
+
+# ── Models ──────────────────────────────────────────────────────────────────
+
+# Cheapest option for mechanical tasks; uses the OpenAI-compatible path.
+[models.gemini-2-5-flash-lite]
+provider = "gemini"
+slug = "gemini-2.5-flash-lite"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_caching = true
+tool_format = "openai_json"
+cost_input_per_m = 0.10
+cost_output_per_m = 0.40
+
+# Balanced default for coding and day-to-day reasoning.
+[models.gemini-2-5-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = true
+supports_grounding = true
+supports_code_execution = true
+supports_vision = true
+supports_caching = true
+tool_format = "gemini_native"
+cost_input_per_m = 0.30
+cost_output_per_m = 2.50
+cost_cache_read_per_m = 0.0375
+
+# Higher-quality reasoning with native grounding, code execution, and 1M context.
+[models.gemini-2-5-pro]
+provider = "gemini"
+slug = "gemini-2.5-pro"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = true
+supports_grounding = true
+supports_code_execution = true
+supports_vision = true
+supports_caching = true
+tool_format = "gemini_native"
+cost_input_per_m = 1.25
+cost_output_per_m = 10.00
+cost_input_per_m_high = 2.50
+cost_output_per_m_high = 15.00
+cost_cache_read_per_m = 0.125
+cost_cache_write_per_m = 0.375
+
+# Frontier preview model with dynamic native thinking and built-in tools.
+[models.gemini-3-1-pro]
+provider = "gemini"
+slug = "gemini-3.1-pro-preview"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = true
+supports_grounding = true
+supports_code_execution = true
+supports_vision = true
+supports_caching = true
+tool_format = "gemini_native"
+thinking_level = "dynamic"
+cost_input_per_m = 2.00
+cost_output_per_m = 12.00
+cost_input_per_m_high = 4.00
+cost_output_per_m_high = 18.00
+
+# Research-leaning preview model with Google Search grounding.
+[models.gemini-3-flash]
+provider = "gemini"
+slug = "gemini-3-flash-preview"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = true
+supports_grounding = true
+supports_code_execution = true
+supports_vision = true
+supports_caching = true
+tool_format = "gemini_native"
+thinking_level = "dynamic"
+cost_input_per_m = 0.50
+cost_output_per_m = 3.00
+
+# Cheapest Gemini 3 preview model for wide router exploration.
+[models.gemini-3-1-flash-lite]
+provider = "gemini"
+slug = "gemini-3.1-flash-lite-preview"
+context_window = 1048576
+max_output = 65536
+supports_tools = true
+supports_thinking = true
+supports_grounding = true
+supports_code_execution = true
+supports_vision = true
+supports_caching = true
+tool_format = "gemini_native"
+thinking_level = "dynamic"
+cost_input_per_m = 0.25
+cost_output_per_m = 1.50
+
+# Native Gemini embeddings for semantic search and retrieval.
+[models.gemini-embedding-2]
+provider = "gemini"
+slug = "gemini-embedding-2-preview"
+context_window = 32768
+supports_tools = false
+is_embedding_model = true
+cost_input_per_m = 0.00
+
+# ── Gemini provider settings ───────────────────────────────────────────────
+
+[gemini]
+default_model = "gemini-2-5-flash"
+grounding_model = "gemini-3-flash"
+code_exec_model = "gemini-2-5-pro"
+embed_model = "gemini-embedding-2"
+use_free_tier = true
+thinking_level = "medium"
+enable_context_caching = true
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HATE_SPEECH"
+threshold = "BLOCK_NONE"
+
+[[gemini.safety_settings]]
+category = "HARM_CATEGORY_HARASSMENT"
+threshold = "BLOCK_LOW_AND_ABOVE"
+
+# ── Notes ───────────────────────────────────────────────────────────────────
+#
+# Tier intent with this config:
+#   - mechanical    -> gemini-2-5-flash-lite   (cheapest)
+#   - focused       -> gemini-2-5-flash        (default)
+#   - integrative   -> gemini-2-5-pro          (deep reasoning + code exec)
+#   - architectural -> gemini-3-1-pro          (frontier preview)
+#
+# Useful commands:
+#   GEMINI_API_KEY=... cargo run -p roko-cli -- run
+#   GEMINI_API_KEY=... cargo test -p roko-core -- gemini_example_config
