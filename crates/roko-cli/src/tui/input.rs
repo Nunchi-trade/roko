@@ -473,6 +473,10 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ResetPlanState)
         }
+        // Ctrl-g: reconcile git state (confirm)
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::RequestConfirm(ConfirmAction::GitReconcile))
+        }
         // F8 / u: queue overview
         KeyCode::F(8) | KeyCode::Char('u') => Some(TuiAction::ShowQueueOverview),
         KeyCode::Tab => Some(TuiAction::FocusNext),
@@ -559,6 +563,14 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('/') => TuiAction::StartFilter,
 
         // Plan operations (Mori parity)
+        KeyCode::Char('d') => TuiAction::RequestConfirm(ConfirmAction::DiagnosePlan(String::new())),
+        KeyCode::Char('m') => TuiAction::RequestConfirm(ConfirmAction::MergePlan {
+            plan_id: String::new(),
+            branch: String::new(),
+        }),
+        KeyCode::Char('M') => TuiAction::RequestConfirm(ConfirmAction::MergeAllDone {
+            branches: Vec::new(),
+        }),
         KeyCode::Char('s') => TuiAction::RestartPlan, // soft retry
         KeyCode::Char('z') => TuiAction::ReverifyPlan, // diagnose
         KeyCode::Char('S') => TuiAction::ResetPlanState, // repair preserve
@@ -801,5 +813,64 @@ mod tests {
             &modals(),
         );
         assert_eq!(action, TuiAction::ScrollDiffDown);
+    }
+
+    #[test]
+    fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
+        let action = handle_key(
+            key(KeyCode::Char('d')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::DiagnosePlan(String::new()))
+        );
+
+        let action = handle_key(
+            key(KeyCode::Char('m')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::MergePlan {
+                plan_id: String::new(),
+                branch: String::new(),
+            })
+        );
+
+        let action = handle_key(
+            key(KeyCode::Char('M')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::MergeAllDone {
+                branches: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn ctrl_g_requests_git_reconcile_confirmation() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(
+            action,
+            TuiAction::RequestConfirm(ConfirmAction::GitReconcile)
+        );
     }
 }

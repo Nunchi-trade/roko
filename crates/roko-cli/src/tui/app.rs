@@ -784,15 +784,7 @@ impl App {
                 self.tui_state.filter_active = false;
             }
             TuiAction::RequestConfirm(action) => {
-                self.tui_state.input_mode = InputMode::Confirm;
-                self.tui_state.pending_confirm = Some(action.clone());
-                // Convert input::ConfirmAction to modals::ConfirmAction for the modal renderer
-                let modal_action = modals::ConfirmAction::Custom {
-                    message: action.to_string(),
-                };
-                self.active_modal = Some(ModalState::Confirm {
-                    action: modal_action,
-                });
+                self.open_confirm_modal(self.resolve_confirm_action(action));
             }
             TuiAction::ConfirmYes => {
                 self.tui_state.input_mode = InputMode::Normal;
@@ -1184,6 +1176,76 @@ impl App {
         }
     }
 
+    fn open_confirm_modal(&mut self, action: ConfirmAction) {
+        self.tui_state.input_mode = InputMode::Confirm;
+        self.tui_state.pending_confirm = Some(action.clone());
+        let modal_action = modals::ConfirmAction::Custom {
+            message: action.to_string(),
+        };
+        self.active_modal = Some(ModalState::Confirm {
+            action: modal_action,
+        });
+    }
+
+    fn resolve_confirm_action(&self, action: ConfirmAction) -> ConfirmAction {
+        match action {
+            ConfirmAction::DiagnosePlan(plan_id) if plan_id.is_empty() => {
+                ConfirmAction::DiagnosePlan(self.selected_plan_id().unwrap_or_default())
+            }
+            ConfirmAction::MergePlan { plan_id, branch }
+                if plan_id.is_empty() || branch.is_empty() =>
+            {
+                ConfirmAction::MergePlan {
+                    plan_id: if plan_id.is_empty() {
+                        self.selected_plan_id().unwrap_or_default()
+                    } else {
+                        plan_id
+                    },
+                    branch: if branch.is_empty() {
+                        self.current_git_branch()
+                    } else {
+                        branch
+                    },
+                }
+            }
+            ConfirmAction::MergeAllDone { branches } if branches.is_empty() => {
+                ConfirmAction::MergeAllDone {
+                    branches: self.completed_plan_branches(),
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn selected_plan_id(&self) -> Option<String> {
+        self.tui_state
+            .plans
+            .get(self.tui_state.selected_plan_idx)
+            .map(|plan| plan.id.clone())
+    }
+
+    fn current_git_branch(&self) -> String {
+        if !self.tui_state.git_branch.is_empty() {
+            return self.tui_state.git_branch.clone();
+        }
+
+        self.tui_state
+            .git_view_data
+            .as_ref()
+            .map(|git| git.current_branch.clone())
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_default()
+    }
+
+    fn completed_plan_branches(&self) -> Vec<String> {
+        self.tui_state
+            .plans
+            .iter()
+            .filter(|plan| !plan.active && plan.phase != "failed" && plan.status != "failed")
+            .map(|plan| plan.id.clone())
+            .collect()
+    }
+
     fn scroll_focused(&mut self, delta: i32) {
         match self.tui_state.focus {
             FocusZone::PlanTree => {
@@ -1432,7 +1494,9 @@ impl App {
         self.tui_state
             .git_view_data
             .as_ref()
-            .map_or(self.tui_state.git_branch_tree.len(), |data| data.branches.len())
+            .map_or(self.tui_state.git_branch_tree.len(), |data| {
+                data.branches.len()
+            })
     }
 
     // `update_sys_metrics` removed -- see `collect_sys_metrics_bg()` standalone
@@ -2206,5 +2270,56 @@ mod tests {
         app.dispatch_action(TuiAction::DrillOut);
         assert_eq!(app.tui_state.git_branch_cursor, 0);
         assert!(!app.tui_state.plans[0].expanded);
+    }
+
+    #[test]
+    fn request_confirm_resolves_plan_and_git_context() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plans = vec![super::super::state::PlanEntry {
+            id: "plan-7".to_string(),
+            phase: "done".to_string(),
+            status: "done".to_string(),
+            active: false,
+            ..Default::default()
+        }];
+        app.tui_state.git_branch = "feature/plan-7".to_string();
+
+        app.dispatch_action(TuiAction::RequestConfirm(ConfirmAction::DiagnosePlan(
+            String::new(),
+        )));
+        assert_eq!(app.tui_state.input_mode, InputMode::Confirm);
+        assert_eq!(
+            app.tui_state.pending_confirm,
+            Some(ConfirmAction::DiagnosePlan("plan-7".to_string()))
+        );
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::Confirm {
+                action: modals::ConfirmAction::Custom { .. }
+            })
+        ));
+
+        app.dispatch_action(TuiAction::RequestConfirm(ConfirmAction::MergePlan {
+            plan_id: String::new(),
+            branch: String::new(),
+        }));
+        assert_eq!(
+            app.tui_state.pending_confirm,
+            Some(ConfirmAction::MergePlan {
+                plan_id: "plan-7".to_string(),
+                branch: "feature/plan-7".to_string(),
+            })
+        );
+
+        app.dispatch_action(TuiAction::RequestConfirm(ConfirmAction::MergeAllDone {
+            branches: Vec::new(),
+        }));
+        assert_eq!(
+            app.tui_state.pending_confirm,
+            Some(ConfirmAction::MergeAllDone {
+                branches: vec!["plan-7".to_string()],
+            })
+        );
     }
 }
