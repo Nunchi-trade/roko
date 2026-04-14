@@ -856,6 +856,8 @@ pub struct TaskSummary {
     pub iteration: u32,
     #[serde(default)]
     pub assigned_agents: Vec<String>,
+    #[serde(default)]
+    pub latest_gate: Option<String>,
 }
 
 /// Summary of an agent tracked by the process supervisor.
@@ -1649,10 +1651,7 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
     let mut tasks = Vec::new();
     for (plan_id, plan_state) in plan_states {
         let status = current_phase_label(plan_state).unwrap_or_else(|| "unknown".to_string());
-        if matches!(
-            status.to_ascii_lowercase().as_str(),
-            "complete" | "done" | "failed" | "skipped"
-        ) {
+        if matches!(status.to_ascii_lowercase().as_str(), "complete" | "skipped") {
             continue;
         }
         let task_id = plan_state
@@ -1676,6 +1675,13 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
                     .collect()
             })
             .unwrap_or_default();
+        let latest_gate = plan_state
+            .get("gate_results")
+            .and_then(Value::as_array)
+            .and_then(|results| results.last())
+            .and_then(|result| result.get("gate_name"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
 
         tasks.push(TaskSummary {
             plan_id: plan_id.clone(),
@@ -1683,6 +1689,7 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
             status,
             iteration,
             assigned_agents,
+            latest_gate,
         });
     }
 
