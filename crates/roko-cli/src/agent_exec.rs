@@ -8,8 +8,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use roko_agent::provider::AgentOptions;
-use roko_agent::{create_agent_for_model, with_scoped_safety_layer};
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, ContentHash, Context, Engram, Kind};
@@ -122,29 +121,26 @@ async fn run_agent_capture_impl(
         extra_args.push("--resume".to_string());
         extra_args.push(session_id.to_string());
     }
-    let agent = with_scoped_safety_layer(|| {
-        create_agent_for_model(
-            &routing_config,
-            &model,
-            AgentOptions {
-                command: routing_config.agent.command.clone(),
-                timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
-                system_prompt: opts.system_prompt.map(str::to_string),
-                cached_content: None,
-                tools: None,
-                mcp_config: None,
-                working_dir: Some(opts.workdir.to_path_buf()),
-                provider_semaphores: None,
-                env: opts.env_vars.to_vec(),
-                extra_args,
-                effort: Some(opts.effort.unwrap_or("medium").to_string()),
-                bare_mode: true,
-                dangerously_skip_permissions: true,
-                name: format!("{}:{model}", resolved.provider_kind.label()),
-            },
-        )
-        .with_context(|| format!("create agent for model {model}"))
-    })?;
+    let agent = spawn_agent_scoped(
+        &routing_config,
+        SpawnAgentSpec {
+            model: model.clone(),
+            command: routing_config.agent.command.clone(),
+            timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
+            system_prompt: opts.system_prompt.map(str::to_string),
+            cached_content: None,
+            tools: None,
+            mcp_config: None,
+            working_dir: Some(opts.workdir.to_path_buf()),
+            env: opts.env_vars.to_vec(),
+            extra_args,
+            effort: Some(opts.effort.unwrap_or("medium").to_string()),
+            bare_mode: true,
+            dangerously_skip_permissions: true,
+            name: format!("{}:{model}", resolved.provider_kind.label()),
+        },
+        format!("create agent for model {model}"),
+    )?;
 
     let prompt = Engram::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))

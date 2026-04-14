@@ -33,7 +33,7 @@ pub fn synthesize_subprocess_config(command: &str) -> RokoConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        synthesize_claude_cli_config, synthesize_known_protocol_config,
+        RokoConfig, synthesize_claude_cli_config, synthesize_known_protocol_config,
         synthesize_subprocess_config,
     };
 
@@ -57,7 +57,11 @@ mod tests {
     fn synthesize_subprocess_config_only_sets_command() {
         let config = synthesize_subprocess_config("cursor-agent");
         assert_eq!(config.agent.command.as_deref(), Some("cursor-agent"));
-        assert!(config.agent.default_model.is_empty());
-        assert!(config.agent.default_backend.is_empty());
+        let defaults = RokoConfig::default();
+        assert_eq!(config.agent.default_model, defaults.agent.default_model);
+        assert_eq!(
+            config.agent.default_backend,
+            defaults.agent.default_backend
+        );
     }
 }

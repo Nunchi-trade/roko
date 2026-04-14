@@ -20,9 +20,7 @@ use roko_agent::chat_types::FinishReason;
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
-use roko_agent::provider::{
-    AgentOptions, create_agent_for_model, is_known_protocol_command, with_safety_layer,
-};
+use roko_agent::provider::is_known_protocol_command;
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
@@ -30,9 +28,7 @@ use roko_agent::task_runner::{
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{
-    Agent, AgentResult, SafetyLayer,
-};
+use roko_agent::{Agent, AgentResult, SafetyLayer};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
     PromptSection, SectionPriority, SectionScorer, TaskContext, budget_for,
@@ -118,6 +114,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::agent_config::{
     synthesize_claude_cli_config, synthesize_known_protocol_config,
     synthesize_subprocess_config,
@@ -1165,10 +1162,11 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             extra_args.push(resume_session);
         }
 
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &routing_config,
-            &cfg.model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: cfg.model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: Some(cfg.system_prompt.clone()),
@@ -1176,7 +1174,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: Some(cfg.allowed_tools_csv.clone()),
                 mcp_config: cfg.mcp_config.clone(),
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars.clone(),
                 extra_args,
                 effort: Some(cfg.effort.clone()),
@@ -1184,6 +1181,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
             },
+            format!("create prepared agent for {}", cfg.model),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -1212,10 +1210,11 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             extra_args.push(resume_session);
         }
 
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &synthesized_config,
-            &cfg.model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: cfg.model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: Some(cfg.system_prompt),
@@ -1223,7 +1222,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: Some(cfg.allowed_tools_csv),
                 mcp_config: cfg.mcp_config,
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars,
                 extra_args,
                 effort: Some(cfg.effort),
@@ -1231,6 +1229,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
             },
+            format!("create synthesized claude agent for {}", cfg.model),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -1248,10 +1247,11 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
     } else if is_known_protocol_command(&cfg.command) {
         let fallback_config = synthesize_known_protocol_config(&cfg.command, &cfg.model);
 
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &fallback_config,
-            &cfg.model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: cfg.model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: None,
@@ -1259,7 +1259,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: None,
                 mcp_config: None,
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars,
                 extra_args: cfg.extra_args,
                 effort: None,
@@ -1267,6 +1266,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: false,
                 name: String::new(),
             },
+            format!("create known-protocol subprocess agent for {}", cfg.command),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -1284,10 +1284,11 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
     } else {
         let model = cfg.model.clone();
         let fallback_config = synthesize_subprocess_config(&cfg.command);
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &fallback_config,
-            &model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: Some(cfg.system_prompt),
@@ -1295,7 +1296,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: Some(cfg.allowed_tools_csv),
                 mcp_config: cfg.mcp_config,
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars,
                 extra_args: cfg.extra_args,
                 effort: Some(cfg.effort),
@@ -1303,6 +1303,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
             },
+            format!("create generic subprocess agent for {}", cfg.command),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -9936,29 +9937,27 @@ impl PlanRunner {
                 extra_args.push(resume.clone());
             }
 
-            let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
-                create_agent_for_model(
-                    &roko_config,
-                    &selected_model,
-                    AgentOptions {
-                        command: Some(self.config.agent.command.clone()),
-                        timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
-                        system_prompt: Some(role_instruction.clone()),
-                        cached_content,
-                        tools: Some(task_allowed_tools_csv.clone()),
-                        mcp_config,
-                        working_dir: Some(exec_dir.clone()),
-                        provider_semaphores: None,
-                        env: self.config.agent.env.clone(),
-                        extra_args,
-                        effort: Some(dispatch_effort.clone()),
-                        bare_mode: self.config.agent.bare_mode,
-                        dangerously_skip_permissions: claude_skip_permissions_for_role(role),
-                        name: String::new(),
-                    },
-                )
-                .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))
-            })?;
+            let agent = spawn_agent_with_layer(
+                &roko_config,
+                Some(self.safety_layer.clone()),
+                SpawnAgentSpec {
+                    model: selected_model.clone(),
+                    command: Some(self.config.agent.command.clone()),
+                    timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+                    system_prompt: Some(role_instruction.clone()),
+                    cached_content,
+                    tools: Some(task_allowed_tools_csv.clone()),
+                    mcp_config,
+                    working_dir: Some(exec_dir.clone()),
+                    env: self.config.agent.env.clone(),
+                    extra_args,
+                    effort: Some(dispatch_effort.clone()),
+                    bare_mode: self.config.agent.bare_mode,
+                    dangerously_skip_permissions: claude_skip_permissions_for_role(role),
+                    name: String::new(),
+                },
+                format!("create agent for model {selected_model}"),
+            )?;
             let resolved = resolve_model(&roko_config, &selected_model);
             let cost_table = task_runner_cost_table(&resolved);
             let mut runner_budget = RunnerBudgetGuardrail::new(
@@ -10019,65 +10018,57 @@ impl PlanRunner {
             let agent: Box<dyn Agent> = if is_known_protocol_command(&self.config.agent.command) {
                 let fallback_config =
                     synthesize_known_protocol_config(&self.config.agent.command, &selected_model);
-                let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
-                    create_agent_for_model(
-                        &fallback_config,
-                        &selected_model,
-                        AgentOptions {
-                            command: Some(self.config.agent.command.clone()),
-                            timeout_ms: Some(self.config.agent.timeout_ms),
-                            system_prompt: None,
-                            cached_content: None,
-                            tools: None,
-                            mcp_config: None,
-                            working_dir: Some(exec_dir.clone()),
-                            provider_semaphores: None,
-                            env: self.config.agent.env.clone(),
-                            extra_args: self.config.agent.args.clone(),
-                            effort: None,
-                            bare_mode: self.config.agent.bare_mode,
-                            dangerously_skip_permissions: false,
-                            name: String::new(),
-                        },
-                    )
-                    .map_err(|e| {
-                        anyhow!(
-                            "create known-protocol subprocess agent for {}: {e}",
-                            self.config.agent.command
-                        )
-                    })
-                })?;
+                let agent = spawn_agent_with_layer(
+                    &fallback_config,
+                    Some(self.safety_layer.clone()),
+                    SpawnAgentSpec {
+                        model: selected_model.clone(),
+                        command: Some(self.config.agent.command.clone()),
+                        timeout_ms: Some(self.config.agent.timeout_ms),
+                        system_prompt: None,
+                        cached_content: None,
+                        tools: None,
+                        mcp_config: None,
+                        working_dir: Some(exec_dir.clone()),
+                        env: self.config.agent.env.clone(),
+                        extra_args: self.config.agent.args.clone(),
+                        effort: None,
+                        bare_mode: self.config.agent.bare_mode,
+                        dangerously_skip_permissions: false,
+                        name: String::new(),
+                    },
+                    format!(
+                        "create known-protocol subprocess agent for {}",
+                        self.config.agent.command
+                    ),
+                )?;
                 agent
             } else {
                 let fallback_config = synthesize_subprocess_config(&self.config.agent.command);
-                let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
-                    create_agent_for_model(
-                        &fallback_config,
-                        &selected_model,
-                        AgentOptions {
-                            command: Some(self.config.agent.command.clone()),
-                            timeout_ms: Some(self.config.agent.timeout_ms),
-                            system_prompt: None,
-                            cached_content: None,
-                            tools: None,
-                            mcp_config: None,
-                            working_dir: Some(exec_dir.clone()),
-                            provider_semaphores: None,
-                            env: self.config.agent.env.clone(),
-                            extra_args: self.config.agent.args.clone(),
-                            effort: None,
-                            bare_mode: self.config.agent.bare_mode,
-                            dangerously_skip_permissions: false,
-                            name: String::new(),
-                        },
-                    )
-                    .map_err(|e| {
-                        anyhow!(
-                            "create generic subprocess agent for {}: {e}",
-                            self.config.agent.command
-                        )
-                    })
-                })?;
+                let agent = spawn_agent_with_layer(
+                    &fallback_config,
+                    Some(self.safety_layer.clone()),
+                    SpawnAgentSpec {
+                        model: selected_model.clone(),
+                        command: Some(self.config.agent.command.clone()),
+                        timeout_ms: Some(self.config.agent.timeout_ms),
+                        system_prompt: None,
+                        cached_content: None,
+                        tools: None,
+                        mcp_config: None,
+                        working_dir: Some(exec_dir.clone()),
+                        env: self.config.agent.env.clone(),
+                        extra_args: self.config.agent.args.clone(),
+                        effort: None,
+                        bare_mode: self.config.agent.bare_mode,
+                        dangerously_skip_permissions: false,
+                        name: String::new(),
+                    },
+                    format!(
+                        "create generic subprocess agent for {}",
+                        self.config.agent.command
+                    ),
+                )?;
                 agent
             };
             let mut runner_budget = RunnerBudgetGuardrail::new(

@@ -30,6 +30,7 @@ pub mod plan_generate;
 pub mod prd;
 pub mod prd_prompt;
 pub mod prompting;
+pub mod agent_spawn;
 pub mod repl;
 pub mod research;
 pub mod run;
