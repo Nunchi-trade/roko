@@ -69,6 +69,15 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
             .fg(MoriTheme::ROSE_DIM)
             .bg(MoriTheme::BG_SECONDARY),
     ));
+    if state.pipeline_run_state == "paused" {
+        spans.push(Span::styled(
+            " PAUSED ",
+            Style::default()
+                .fg(MoriTheme::WARNING)
+                .bg(MoriTheme::BG_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     // ── 3. Plan progress + health summary ─────────────────────────────
     let progress_text = if all_done && !has_failures {
