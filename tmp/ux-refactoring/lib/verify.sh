@@ -31,20 +31,24 @@ verify_batch() {
   local worktree="$3"
   local log_file
   log_file=$(run_log_file "$run_id" "$batch")
+  local attempt="${4:-?}"
 
   while IFS= read -r cmd; do
     [[ -z "$cmd" ]] && continue
+    record_status "$run_id" "$batch" "$attempt" "verify_running" "$cmd"
     echo "[verify] $cmd" >> "$log_file"
     if ! (
       cd "$worktree" &&
       env CARGO_TARGET_DIR="$worktree/.cargo-target" bash -lc "$cmd"
     ) >> "$log_file" 2>&1; then
+      record_status "$run_id" "$batch" "$attempt" "verify_failed" "$cmd"
       log_err "$batch" "Verify failed: $cmd"
       write_failure_summary "$batch" "$run_id" "Verification failed for command: $cmd"
       return 1
     fi
   done < <(batch_verify_commands "$batch")
 
+  record_status "$run_id" "$batch" "$attempt" "verify_succeeded" "all verification commands passed"
   log_ok "$batch" "Verification passed"
   return 0
 }
@@ -52,11 +56,16 @@ verify_batch() {
 commit_batch_if_needed() {
   local batch="$1"
   local worktree="$2"
+  local run_id="${3:-}"
+  local attempt="${4:-?}"
   local title
   title=$(batch_title "$batch")
 
   git -C "$worktree" add -A
   if git -C "$worktree" diff --cached --quiet; then
+    if [[ -n "$run_id" ]]; then
+      record_status "$run_id" "$batch" "$attempt" "commit_noop" "no staged changes after verify"
+    fi
     log_warn "$batch" "No changes staged after successful verification"
     return 10
   fi
@@ -67,6 +76,9 @@ ux-refactoring(${batch}): ${title}
 Automated implementation via tmp/ux-refactoring/run-ux-refactoring.sh
 EOF
 )" >/dev/null
+  if [[ -n "$run_id" ]]; then
+    record_status "$run_id" "$batch" "$attempt" "commit_succeeded" "$(git -C "$worktree" rev-parse --short HEAD)"
+  fi
   log_ok "$batch" "Committed: $(git -C "$worktree" log --oneline -1)"
   return 0
 }

@@ -123,6 +123,9 @@ create_run() {
   BRANCH="codex/ux-refactoring-$RUN_ID"
 
   ensure_dir "$LOG_ROOT/$RUN_ID"
+  ensure_dir "$(run_prompts_dir "$RUN_ID")"
+  : > "$(run_status_file "$RUN_ID")"
+  ln -sfn "$LOG_ROOT/$RUN_ID" "$LOG_ROOT/latest"
   git -C "$ROKO_ROOT" worktree add -b "$BRANCH" "$WORKTREE" "$UX_BASE_REF" >/dev/null
 
   cat > "$(run_manifest_file "$RUN_ID")" <<EOF
@@ -143,6 +146,9 @@ create_dry_run() {
   WORKTREE="$WORKTREE_ROOT/ux-refactoring-$RUN_ID"
   BRANCH="(not-created)"
   ensure_dir "$LOG_ROOT/$RUN_ID"
+  ensure_dir "$(run_prompts_dir "$RUN_ID")"
+  : > "$(run_status_file "$RUN_ID")"
+  ln -sfn "$LOG_ROOT/$RUN_ID" "$LOG_ROOT/latest"
   cat > "$(run_manifest_file "$RUN_ID")" <<EOF
 RUN_ID='$RUN_ID'
 WORKTREE='$WORKTREE'
@@ -225,6 +231,8 @@ run_one_batch() {
   fi
 
   if (( DRY_RUN == 1 )); then
+    compose_prompt_snapshot "$batch" "$RUN_ID" "dry-run" "$failure_file" >/dev/null
+    record_status "$RUN_ID" "$batch" "dry-run" "dry_run" "batch preview only"
     log_info "$batch" "[DRY RUN] $(batch_title "$batch")"
     log_info "$batch" "Prompt: $(batch_prompt_file "$batch")"
     log_info "$batch" "Verify commands:"
@@ -245,34 +253,43 @@ run_one_batch() {
   local attempt spawn_rc commit_rc
   : > "$failure_file"
   for attempt in $(seq 1 "$UX_MAX_RETRIES"); do
+    set_current_batch "$RUN_ID" "$batch" "$attempt"
+    record_status "$RUN_ID" "$batch" "$attempt" "attempt_started" "$(batch_title "$batch")"
     log_header "$batch ATTEMPT $attempt/$UX_MAX_RETRIES"
     reset_runner_worktree "$WORKTREE"
 
     spawn_rc=0
     if spawn_batch "$batch" "$RUN_ID" "$WORKTREE" "$attempt" "$failure_file"; then
-      if verify_batch "$batch" "$RUN_ID" "$WORKTREE"; then
+      if verify_batch "$batch" "$RUN_ID" "$WORKTREE" "$attempt"; then
         commit_rc=0
-        if commit_batch_if_needed "$batch" "$WORKTREE"; then
+        if commit_batch_if_needed "$batch" "$WORKTREE" "$RUN_ID" "$attempt"; then
           echo "success" > "$result_file"
+          record_status "$RUN_ID" "$batch" "$attempt" "attempt_succeeded" "verified and committed"
         else
           commit_rc=$?
           if [[ "$commit_rc" -eq 10 ]]; then
             echo "success_noop" > "$result_file"
+            record_status "$RUN_ID" "$batch" "$attempt" "attempt_succeeded" "verified with no new changes"
           else
             echo "verify_failed" > "$result_file"
+            record_status "$RUN_ID" "$batch" "$attempt" "attempt_failed" "commit step failed"
             write_failure_summary "$batch" "$RUN_ID" "Commit step failed."
           fi
         fi
+        clear_current_batch "$RUN_ID"
         return 0
       fi
       echo "verify_failed" > "$result_file"
+      record_status "$RUN_ID" "$batch" "$attempt" "attempt_failed" "verification failed"
     else
       spawn_rc=$?
       if [[ "$spawn_rc" -eq 124 ]]; then
         echo "timeout" > "$result_file"
+        record_status "$RUN_ID" "$batch" "$attempt" "attempt_failed" "codex timed out"
         write_failure_summary "$batch" "$RUN_ID" "Codex timed out."
       else
         echo "spawn_failed" > "$result_file"
+        record_status "$RUN_ID" "$batch" "$attempt" "attempt_failed" "codex exited unsuccessfully"
         write_failure_summary "$batch" "$RUN_ID" "Codex exited unsuccessfully."
       fi
     fi
@@ -281,6 +298,8 @@ run_one_batch() {
       log_warn "$batch" "Retrying after failure"
     fi
   done
+
+  clear_current_batch "$RUN_ID"
 
   return 1
 }
@@ -331,7 +350,7 @@ else
 fi
 
 log_info "runner" "Model: $UX_MODEL (reasoning: $UX_REASONING)"
-log_info "runner" "Selected batches: ${SELECTED[*]}"
+log_info "runner" "Selected batches: $(printf '%s,' "${SELECTED[@]}" | sed 's/,$//')"
 
 batch_failed=0
 for batch in "${SELECTED[@]}"; do

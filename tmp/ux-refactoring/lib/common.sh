@@ -92,10 +92,43 @@ latest_run_id() {
 run_manifest_file() { echo "$LOG_ROOT/$1/manifest.env"; }
 run_result_file() { echo "$LOG_ROOT/$1/$2.result"; }
 run_log_file() { echo "$LOG_ROOT/$1/$2.log"; }
-run_prompt_snapshot() { echo "$LOG_ROOT/$1/$2.prompt.md"; }
+run_prompts_dir() { echo "$LOG_ROOT/$1/prompts"; }
+run_prompt_snapshot() { echo "$(run_prompts_dir "$1")/$2.prompt.md"; }
 run_last_message_file() { echo "$LOG_ROOT/$1/$2.last.txt"; }
 run_failure_file() { echo "$LOG_ROOT/$1/$2.failure.txt"; }
+run_status_file() { echo "$LOG_ROOT/$1/status.tsv"; }
+run_current_batch_file() { echo "$LOG_ROOT/$1/current-batch.env"; }
 batch_prompt_file() { echo "$PROMPTS_DIR/$1.prompt.md"; }
+
+record_status() {
+  local run_id="$1"
+  local batch="$2"
+  local attempt="$3"
+  local status="$4"
+  local note="${5:-}"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -Iseconds)" \
+    "$batch" \
+    "$attempt" \
+    "$status" \
+    "$note" >> "$(run_status_file "$run_id")"
+}
+
+set_current_batch() {
+  local run_id="$1"
+  local batch="$2"
+  local attempt="$3"
+  cat > "$(run_current_batch_file "$run_id")" <<EOF
+BATCH='$batch'
+ATTEMPT='$attempt'
+UPDATED_AT='$(date -Iseconds)'
+EOF
+}
+
+clear_current_batch() {
+  local run_id="$1"
+  rm -f "$(run_current_batch_file "$run_id")"
+}
 
 batch_title() {
   case "$1" in

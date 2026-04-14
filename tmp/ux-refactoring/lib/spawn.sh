@@ -25,6 +25,7 @@ compose_prompt_snapshot() {
   local failure_file="$4"
   local out
   out="$(run_prompt_snapshot "$run_id" "$batch")"
+  ensure_dir "$(dirname "$out")"
 
   {
     echo "# UX Refactoring Batch $batch"
@@ -61,6 +62,7 @@ spawn_batch() {
   log_file=$(run_log_file "$run_id" "$batch")
   local last_message_file
   last_message_file=$(run_last_message_file "$run_id" "$batch")
+  : > "$last_message_file"
 
   local start_ts
   start_ts=$(date +%s)
@@ -76,6 +78,8 @@ spawn_batch() {
     echo "=== Prompt snapshot: $prompt_snapshot ==="
     echo
   } > "$log_file"
+
+  record_status "$run_id" "$batch" "$attempt" "spawn_started" "codex exec started"
 
   do_timeout "$UX_TIMEOUT" \
     env CARGO_TARGET_DIR="$worktree/.cargo-target" \
@@ -101,15 +105,18 @@ spawn_batch() {
   } >> "$log_file"
 
   if [[ "$exit_code" -eq 0 ]]; then
+    record_status "$run_id" "$batch" "$attempt" "spawn_succeeded" "codex exec completed"
     log_ok "$batch" "Codex completed in $(fmt_duration "$elapsed")"
     return 0
   fi
 
   if [[ "$exit_code" -eq 124 ]]; then
+    record_status "$run_id" "$batch" "$attempt" "spawn_timed_out" "codex exec timed out"
     log_err "$batch" "Timed out after $(fmt_duration "$UX_TIMEOUT")"
     return 124
   fi
 
+  record_status "$run_id" "$batch" "$attempt" "spawn_failed" "codex exec exited with $exit_code"
   log_err "$batch" "Codex exited with code $exit_code"
   return "$exit_code"
 }
