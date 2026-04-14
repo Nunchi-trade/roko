@@ -7,6 +7,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
+
 use super::atmosphere::Atmosphere;
 use super::dashboard::DashboardData;
 use super::input::{ConfirmAction, FocusZone, InputMode, ModalVisibility};
@@ -830,6 +832,8 @@ impl TuiState {
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.token_total = data.efficiency.total_input_tokens + data.efficiency.total_output_tokens;
+        self.token_history = build_token_history(&data.efficiency_events);
+        self.token_rate = compute_token_rate(&data.efficiency_events);
         self.gate_results = data
             .gate_results
             .iter()
@@ -1207,9 +1211,84 @@ fn episode_to_phase_name(episode: &roko_learn::episode_logger::Episode) -> Strin
     String::new()
 }
 
+fn build_token_history(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+) -> HashMap<String, VecDeque<u64>> {
+    let mut history = HashMap::new();
+
+    for event in events {
+        let series = history
+            .entry(event.role.clone())
+            .or_insert_with(VecDeque::new);
+        if series.len() >= 60 {
+            series.pop_front();
+        }
+        series.push_back(event.total_tokens());
+    }
+
+    history
+}
+
+fn compute_token_rate(events: &[roko_learn::efficiency::AgentEfficiencyEvent]) -> f64 {
+    let mut first_seen: Option<DateTime<Utc>> = None;
+    let mut last_seen: Option<DateTime<Utc>> = None;
+    let mut total_tokens = 0_u64;
+
+    for event in events {
+        let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
+            continue;
+        };
+        first_seen = Some(match first_seen {
+            Some(current) => current.min(timestamp),
+            None => timestamp,
+        });
+        last_seen = Some(match last_seen {
+            Some(current) => current.max(timestamp),
+            None => timestamp,
+        });
+        total_tokens = total_tokens.saturating_add(event.total_tokens());
+    }
+
+    let Some(first_seen) = first_seen else {
+        return 0.0;
+    };
+    let Some(last_seen) = last_seen else {
+        return 0.0;
+    };
+
+    let elapsed_seconds = last_seen.signed_duration_since(first_seen).num_seconds();
+    if elapsed_seconds <= 0 {
+        return 0.0;
+    }
+
+    total_tokens as f64 / (elapsed_seconds as f64 / 60.0)
+}
+
+fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_learn::efficiency::AgentEfficiencyEvent;
+
+    fn efficiency_event(
+        role: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        timestamp: &str,
+    ) -> AgentEfficiencyEvent {
+        AgentEfficiencyEvent {
+            role: role.to_string(),
+            input_tokens,
+            output_tokens,
+            timestamp: timestamp.to_string(),
+            ..AgentEfficiencyEvent::default()
+        }
+    }
 
     #[test]
     fn default_state_is_idle_dashboard() {
@@ -1371,5 +1450,48 @@ mod tests {
         assert_eq!(state.selected_agent, 0);
         assert_eq!(state.output_scroll, 0);
         assert_eq!(state.plan_scroll, 0);
+    }
+
+    #[test]
+    fn update_from_snapshot_populates_token_history_and_rate() {
+        let mut data = DashboardData::default();
+        data.efficiency_events = vec![
+            efficiency_event("impl", 100, 50, "2026-04-14T12:00:00Z"),
+            efficiency_event("review", 20, 10, "2026-04-14T12:05:00Z"),
+            efficiency_event("impl", 40, 10, "2026-04-14T12:10:00Z"),
+        ];
+
+        let mut state = TuiState::default();
+        state.update_from_snapshot(&data);
+
+        assert_eq!(
+            state.token_history.get("impl").cloned().unwrap_or_default(),
+            VecDeque::from([150, 50])
+        );
+        assert_eq!(
+            state
+                .token_history
+                .get("review")
+                .cloned()
+                .unwrap_or_default(),
+            VecDeque::from([30])
+        );
+        assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_from_snapshot_caps_token_history_at_sixty_samples() {
+        let mut data = DashboardData::default();
+        data.efficiency_events = (0..61)
+            .map(|i| efficiency_event("impl", i, 1, &format!("2026-04-14T12:{:02}:00Z", i % 60)))
+            .collect();
+
+        let mut state = TuiState::default();
+        state.update_from_snapshot(&data);
+
+        let history = state.token_history.get("impl").cloned().unwrap_or_default();
+        assert_eq!(history.len(), 60);
+        assert_eq!(history.front().copied(), Some(2));
+        assert_eq!(history.back().copied(), Some(61));
     }
 }

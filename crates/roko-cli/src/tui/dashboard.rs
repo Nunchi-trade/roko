@@ -3016,7 +3016,11 @@ impl DashboardSnapshot {
         let _ = writeln!(out, "{} ({})", page.title, page.id.slug());
         let _ = writeln!(out, "group: {}", page.id.group());
         let _ = writeln!(out, "intent: {}", page.intent);
-        let _ = writeln!(out, "source: {}", resolve_episodes_path(&self.root).display());
+        let _ = writeln!(
+            out,
+            "source: {}",
+            resolve_episodes_path(&self.root).display()
+        );
         let _ = writeln!(out, "episodes: {}", self.episode_count);
         let _ = writeln!(
             out,
