@@ -27,7 +27,7 @@
 //! ```
 
 use parking_lot::Mutex;
-use roko_core::{ContentHash, Signal};
+use roko_core::{ContentHash, Engram};
 use std::collections::HashMap;
 
 /// Why a particular [`ContentHash`] is considered tainted.
@@ -150,12 +150,12 @@ impl TaintTracker {
         })
     }
 
-    /// Inspect a [`Signal`] and, if its provenance is tainted, mark it in
+    /// Inspect a [`Engram`] and, if its provenance is tainted, mark it in
     /// the tracker with an `"external"` reason naming the signal's author.
     ///
     /// Returns `true` if the signal was (or already was) tainted, `false`
     /// if the signal's provenance is clean.
-    pub fn observe_signal(&self, signal: &Signal) -> bool {
+    pub fn observe_signal(&self, signal: &Engram) -> bool {
         if signal.provenance.tainted {
             let reason =
                 TaintReason::external(format!("signal author {}", signal.provenance.author));
@@ -358,13 +358,13 @@ mod tests {
 
     #[test]
     fn observe_signal_marks_tainted_provenance() {
-        use roko_core::{Body, Kind, Signal};
+        use roko_core::{Body, Engram, Kind};
 
-        let tainted_signal = Signal::builder(Kind::AgentOutput)
+        let tainted_signal = Engram::builder(Kind::AgentOutput)
             .body(Body::text("external payload"))
             .provenance(roko_core::Provenance::external("webhook"))
             .build();
-        let clean_signal = Signal::builder(Kind::AgentOutput)
+        let clean_signal = Engram::builder(Kind::AgentOutput)
             .body(Body::text("internal payload"))
             .provenance(roko_core::Provenance::trusted("orchestrator"))
             .build();

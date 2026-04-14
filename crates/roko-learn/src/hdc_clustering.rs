@@ -19,7 +19,7 @@
 //! # Example
 //!
 //! ```
-//! use bardo_primitives::HdcVector;
+//! use roko_primitives::HdcVector;
 //! use roko_learn::hdc_clustering::{k_medoids, KMedoidsConfig};
 //!
 //! // Three well-separated seed vectors.
@@ -31,7 +31,7 @@
 //! assert_eq!(result.clusters.len(), 3);
 //! ```
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 
 /// Configuration for k-medoids clustering.
 #[derive(Debug, Clone)]
@@ -262,7 +262,7 @@ fn find_best_medoid(dist: &[f32], assignments: &[usize], cluster_id: usize) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bardo_primitives::HdcVector;
+    use roko_primitives::HdcVector;
 
     #[test]
     fn empty_input_returns_empty() {

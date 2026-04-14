@@ -76,19 +76,20 @@ pub fn render_phase_timeline(
         let content = if col.height >= 3 {
             vec![
                 Line::from(Span::styled(phase.name.clone(), style)),
-                Line::from(Span::styled(elapsed_label, Style::default().fg(theme.muted))),
+                Line::from(Span::styled(
+                    elapsed_label,
+                    Style::default().fg(theme.muted),
+                )),
             ]
         } else {
             vec![Line::from(Span::styled(phase.name.clone(), style))]
         };
 
-        let paragraph = Paragraph::new(content)
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
-            );
+        let paragraph = Paragraph::new(content).alignment(Alignment::Center).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        );
 
         frame.render_widget(paragraph, *col);
     }

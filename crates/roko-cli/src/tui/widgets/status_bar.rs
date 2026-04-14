@@ -9,9 +9,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::rosedust::MoriTheme;
 use super::super::state::TuiState;
 use super::super::tabs::Tab;
+use super::rosedust::MoriTheme;
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", ".", "\u{25cf}"];
 

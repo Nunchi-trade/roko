@@ -136,7 +136,14 @@ pub fn all_fields() -> Vec<ConfigFieldMeta> {
             key: "agent.default_backend",
             label: "Default Backend",
             description: "Backend used to spawn agents (claude, codex, cursor, ollama)",
-            kind: ConfigFieldKind::Enum(vec!["claude", "codex", "cursor", "openai", "ollama", "perplexity"]),
+            kind: ConfigFieldKind::Enum(vec![
+                "claude",
+                "codex",
+                "cursor",
+                "openai",
+                "ollama",
+                "perplexity",
+            ]),
             group: "Agent",
         },
         ConfigFieldMeta {
@@ -652,10 +659,7 @@ fn determine_source(
 
 /// Build the flattened display list from metadata + current config + pending edits.
 #[allow(clippy::implicit_hasher)]
-pub fn build_flat_items(
-    root: &Path,
-    pending: &HashMap<String, String>,
-) -> Vec<ConfigItem> {
+pub fn build_flat_items(root: &Path, pending: &HashMap<String, String>) -> Vec<ConfigItem> {
     let fields = all_fields();
     let env_overrides = active_env_overrides();
 
@@ -700,12 +704,7 @@ pub fn build_flat_items(
                 // Pending edit -- treat as file-sourced (will be saved)
                 ConfigSource::File
             } else {
-                determine_source(
-                    meta.key,
-                    &value,
-                    default_str.as_deref(),
-                    &env_overrides,
-                )
+                determine_source(meta.key, &value, default_str.as_deref(), &env_overrides)
             };
 
             items.push(ConfigItem::Field {
@@ -754,17 +753,14 @@ pub fn format_toml_value(value: &toml::Value) -> String {
 /// and writes the result back. Uses the `toml` crate (already a dependency)
 /// rather than `toml_edit` to avoid adding a new dep.
 #[allow(clippy::implicit_hasher)]
-pub fn save_pending_edits(
-    root: &Path,
-    pending: &HashMap<String, String>,
-) -> Result<(), String> {
+pub fn save_pending_edits(root: &Path, pending: &HashMap<String, String>) -> Result<(), String> {
     if pending.is_empty() {
         return Ok(());
     }
 
     let config_path = root.join("roko.toml");
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("read roko.toml: {e}"))?;
+    let content =
+        std::fs::read_to_string(&config_path).map_err(|e| format!("read roko.toml: {e}"))?;
 
     let mut root_val: toml::Value = content
         .parse()
@@ -779,11 +775,10 @@ pub fn save_pending_edits(
     }
 
     // Re-serialize via RokoConfig for consistent formatting
-    let toml_str = toml::to_string_pretty(&root_val)
-        .map_err(|e| format!("serialize roko.toml: {e}"))?;
+    let toml_str =
+        toml::to_string_pretty(&root_val).map_err(|e| format!("serialize roko.toml: {e}"))?;
 
-    std::fs::write(&config_path, toml_str)
-        .map_err(|e| format!("write roko.toml: {e}"))?;
+    std::fs::write(&config_path, toml_str).map_err(|e| format!("write roko.toml: {e}"))?;
 
     Ok(())
 }
@@ -792,23 +787,21 @@ pub fn save_pending_edits(
 fn coerce_to_toml(value: &str, kind: Option<&ConfigFieldKind>) -> toml::Value {
     match kind {
         Some(ConfigFieldKind::Bool) => toml::Value::Boolean(value == "true"),
-        Some(ConfigFieldKind::Int { .. }) => value
-            .parse::<i64>()
-            .map_or_else(|_| toml::Value::String(value.to_string()), toml::Value::Integer),
-        Some(ConfigFieldKind::Float { .. }) => value
-            .parse::<f64>()
-            .map_or_else(|_| toml::Value::String(value.to_string()), toml::Value::Float),
+        Some(ConfigFieldKind::Int { .. }) => value.parse::<i64>().map_or_else(
+            |_| toml::Value::String(value.to_string()),
+            toml::Value::Integer,
+        ),
+        Some(ConfigFieldKind::Float { .. }) => value.parse::<f64>().map_or_else(
+            |_| toml::Value::String(value.to_string()),
+            toml::Value::Float,
+        ),
         _ => toml::Value::String(value.to_string()),
     }
 }
 
 /// Set a dotted key path in a TOML value tree, creating intermediate tables
 /// as needed.
-fn set_toml_path(
-    root: &mut toml::Value,
-    key: &str,
-    val: toml::Value,
-) -> Result<(), String> {
+fn set_toml_path(root: &mut toml::Value, key: &str, val: toml::Value) -> Result<(), String> {
     let parts: Vec<&str> = key.split('.').collect();
     let mut current = root;
 
@@ -822,15 +815,9 @@ fn set_toml_path(
             return Err(format!("path '{key}': parent is not a table"));
         }
         // Intermediate: ensure table exists and descend
-        if !current
-            .as_table()
-            .is_some_and(|t| t.contains_key(*part))
-        {
+        if !current.as_table().is_some_and(|t| t.contains_key(*part)) {
             if let Some(table) = current.as_table_mut() {
-                table.insert(
-                    part.to_string(),
-                    toml::Value::Table(toml::map::Map::new()),
-                );
+                table.insert(part.to_string(), toml::Value::Table(toml::map::Map::new()));
             }
         }
         current = current
@@ -844,11 +831,17 @@ fn set_toml_path(
 
 /// Truncate a string to `max` chars, appending `...` if needed.
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
     }
+    if max <= 3 {
+        return ".".repeat(max);
+    }
+
+    let keep = max - 3;
+    let truncated = s.chars().take(keep).collect::<String>();
+    format!("{truncated}...")
 }
 
 /// Format a token count with K/M suffix.
@@ -860,5 +853,22 @@ pub fn format_count(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_preserves_unicode_boundaries() {
+        let input = "── Agent ─────────────────────────────────────────────────────────────────────────────────";
+        assert_eq!(truncate(input, 12), "── Agent ...");
+    }
+
+    #[test]
+    fn truncate_handles_tiny_widths() {
+        assert_eq!(truncate("abcdef", 3), "...");
+        assert_eq!(truncate("abcdef", 2), "..");
     }
 }

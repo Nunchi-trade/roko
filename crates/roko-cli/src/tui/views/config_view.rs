@@ -5,11 +5,11 @@
 //! save button. Runtime data (efficiency, cascade router, etc.) is shown
 //! as read-only sections at the bottom.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::config_meta::{
@@ -59,7 +59,8 @@ pub fn render(
 
     // Scroll to keep cursor visible
     let cursor_top = line_offsets.get(cursor).copied().unwrap_or(0);
-    let cursor_bottom = cursor_top + item_height(items.get(cursor).unwrap_or(&ConfigItem::SaveButton), true);
+    let cursor_bottom =
+        cursor_top + item_height(items.get(cursor).unwrap_or(&ConfigItem::SaveButton), true);
     let mut scroll = tui_state.config_scroll_offset;
     if cursor_top < scroll {
         scroll = cursor_top;
@@ -112,7 +113,12 @@ pub fn render(
                 }
             }
             ConfigItem::SaveButton => {
-                lines.push(render_save_button(is_selected, has_pending, inner.width, theme));
+                lines.push(render_save_button(
+                    is_selected,
+                    has_pending,
+                    inner.width,
+                    theme,
+                ));
             }
         }
     }
@@ -264,10 +270,7 @@ fn render_field_line<'a>(
 }
 
 fn render_description<'a>(desc: &str, _width: u16, theme: &Theme) -> Line<'a> {
-    Line::from(Span::styled(
-        format!("      {desc}"),
-        theme.muted(),
-    ))
+    Line::from(Span::styled(format!("      {desc}"), theme.muted()))
 }
 
 fn render_save_button<'a>(
@@ -288,7 +291,9 @@ fn render_save_button<'a>(
     let padded = format!("{}{label}", " ".repeat(pad));
 
     let style = if selected {
-        theme.accent().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        theme
+            .accent()
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else if has_pending {
         theme.accent().add_modifier(Modifier::BOLD)
     } else {
@@ -320,7 +325,10 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
         for (key, value) in [
             ("total_cost_usd", format!("${:.4}", eff.total_cost_usd)),
             ("event_count", eff.event_count.to_string()),
-            ("avg_wall_time_ms", format!("{:.0}", eff.average_wall_time_ms)),
+            (
+                "avg_wall_time_ms",
+                format!("{:.0}", eff.average_wall_time_ms),
+            ),
             ("total_input_tokens", format_count(eff.total_input_tokens)),
             ("total_output_tokens", format_count(eff.total_output_tokens)),
             ("pass_rate", pass_rate),

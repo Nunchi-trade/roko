@@ -25,11 +25,11 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use roko_agent::provider::ProviderError;
 use roko_agent::{AgentResult, gemini::GeminiMetadata};
-use roko_core::{BehavioralState, DaimonPolicy};
 use roko_core::OperatingFrequency;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::{BehavioralState, DaimonPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -2459,8 +2459,7 @@ impl CascadeRouter {
 
     fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
         let stats = self.confidence_stats.lock();
-        let low_confidence =
-            ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
+        let low_confidence = ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
 
         let mut scores: Vec<(String, f64)> = candidates
             .iter()

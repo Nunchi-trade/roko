@@ -7,11 +7,11 @@
 //! Renders hierarchical wave groups with gradient progress bars, status
 //! icons, phase indicators, and timing matching the Mori Plans screen (F2).
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -22,7 +22,10 @@ use crate::tui::state::TuiState;
 // ---------------------------------------------------------------------------
 
 /// Fractional block characters for smooth progress bars.
-const BLOCKS: &[char] = &[' ', '\u{2591}', '\u{258F}', '\u{258E}', '\u{258D}', '\u{258C}', '\u{258B}', '\u{258A}', '\u{2589}', '\u{2588}'];
+const BLOCKS: &[char] = &[
+    ' ', '\u{2591}', '\u{258F}', '\u{258E}', '\u{258D}', '\u{258C}', '\u{258B}', '\u{258A}',
+    '\u{2589}', '\u{2588}',
+];
 
 // ---------------------------------------------------------------------------
 // Public render
@@ -58,7 +61,7 @@ fn render_left_panel(
 ) {
     let sections = Layout::vertical([
         Constraint::Length(3), // Pipeline header
-        Constraint::Min(0),   // Wave/plan tree
+        Constraint::Min(0),    // Wave/plan tree
     ])
     .split(area);
 
@@ -107,9 +110,7 @@ fn render_pipeline_header(
 
     let mut title_spans = vec![Span::styled(
         format!(" {completed}/{total_plans}"),
-        Style::default()
-            .fg(bar_color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
     )];
     title_spans.extend(health_parts);
 
@@ -117,9 +118,7 @@ fn render_pipeline_header(
         Span::raw(" "),
         Span::styled(
             format!("{completed}/{total_plans}"),
-            Style::default()
-                .fg(bar_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(bar, Style::default().fg(bar_color)),
@@ -343,11 +342,16 @@ fn render_wave_tree(
                     format!("({wave_done}/{wave_total}) "),
                     Style::default().fg(theme.muted),
                 ),
-                Span::styled(wave_bar, Style::default().fg(
-                    if all_done { theme.success }
-                    else if any_active { theme.accent }
-                    else { theme.muted }
-                )),
+                Span::styled(
+                    wave_bar,
+                    Style::default().fg(if all_done {
+                        theme.success
+                    } else if any_active {
+                        theme.accent
+                    } else {
+                        theme.muted
+                    }),
+                ),
             ];
 
             if wave_failed > 0 {
@@ -376,7 +380,14 @@ fn render_wave_tree(
             for i in start..end {
                 if let Some(plan) = data.plans.get(i) {
                     render_plan_line(
-                        &mut lines, plan, i, view_state, tui_state, theme, content_width, true,
+                        &mut lines,
+                        plan,
+                        i,
+                        view_state,
+                        tui_state,
+                        theme,
+                        content_width,
+                        true,
                     );
                 }
             }
@@ -385,7 +396,14 @@ fn render_wave_tree(
         // Flat list
         for (i, plan) in data.plans.iter().enumerate() {
             render_plan_line(
-                &mut lines, plan, i, view_state, tui_state, theme, content_width, false,
+                &mut lines,
+                plan,
+                i,
+                view_state,
+                tui_state,
+                theme,
+                content_width,
+                false,
             );
         }
     }
@@ -393,7 +411,8 @@ fn render_wave_tree(
     // Scroll
     let visible_height = inner.height as usize;
     let total_lines = lines.len();
-    let scroll_offset = (view_state.scroll as usize).min(total_lines.saturating_sub(visible_height));
+    let scroll_offset =
+        (view_state.scroll as usize).min(total_lines.saturating_sub(visible_height));
     let visible: Vec<Line<'_>> = lines
         .into_iter()
         .skip(scroll_offset)
@@ -405,7 +424,14 @@ fn render_wave_tree(
 
     // Scrollbar
     if total_lines > visible_height {
-        render_scrollbar(frame, inner, total_lines, visible_height, scroll_offset, theme);
+        render_scrollbar(
+            frame,
+            inner,
+            total_lines,
+            visible_height,
+            scroll_offset,
+            theme,
+        );
     }
 }
 
@@ -566,10 +592,7 @@ fn render_plan_line(
 
     // Selected plan detail row
     if is_selected {
-        let mut detail_spans = vec![Span::styled(
-            format!("{indent}  "),
-            Style::default().bg(bg),
-        )];
+        let mut detail_spans = vec![Span::styled(format!("{indent}  "), Style::default().bg(bg))];
 
         // Mini progress bar
         if task_total > 0 {
@@ -581,9 +604,7 @@ fn render_plan_line(
                     "\u{2588}".repeat(mini_filled.min(8)),
                     "\u{2500}".repeat(mini_empty)
                 ),
-                Style::default()
-                    .fg(semantic_color(fill_pct, theme))
-                    .bg(bg),
+                Style::default().fg(semantic_color(fill_pct, theme)).bg(bg),
             ));
             detail_spans.push(Span::styled("  ", Style::default().bg(bg)));
         }
@@ -691,8 +712,8 @@ fn render_right_panel(
         let sections = Layout::vertical([
             Constraint::Length(error_height), // Error banner (if any)
             Constraint::Length(5),            // Plan header + progress
-            Constraint::Min(0),              // Task table
-            Constraint::Length(6),           // Gate results
+            Constraint::Min(0),               // Task table
+            Constraint::Length(6),            // Gate results
         ])
         .split(inner);
 
@@ -705,10 +726,7 @@ fn render_right_panel(
                         .fg(theme.danger)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    truncate(err, 70),
-                    Style::default().fg(theme.danger),
-                ),
+                Span::styled(truncate(err, 70), Style::default().fg(theme.danger)),
             ]);
             frame.render_widget(Paragraph::new(vec![err_line, Line::from("")]), sections[0]);
         }
@@ -786,9 +804,7 @@ fn render_execution_header(
             Span::styled(bar, Style::default().fg(bar_color)),
             Span::styled(
                 format!(" {:.0}%", pct * 100.0),
-                Style::default()
-                    .fg(bar_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(Span::styled(
@@ -905,12 +921,7 @@ fn render_execution_tasks(
 // Gate results summary
 // ---------------------------------------------------------------------------
 
-fn render_gate_summary(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
+fn render_gate_summary(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::TOP)
         .title(Span::styled(
@@ -968,10 +979,7 @@ fn render_gate_summary(
                         format!("{:.0}%", row.pass_rate * 100.0),
                         Style::default().fg(rate_color),
                     )),
-                    Cell::from(Span::styled(
-                        mini_bar,
-                        Style::default().fg(rate_color),
-                    )),
+                    Cell::from(Span::styled(mini_bar, Style::default().fg(rate_color))),
                     Cell::from(Span::styled(
                         format!("{:.0}ms", row.avg_duration_ms),
                         Style::default().fg(theme.muted),
@@ -1027,9 +1035,7 @@ fn render_gate_summary(
             Span::styled(" ", Style::default()),
             Span::styled(
                 format!("{passed}/{total_gates}"),
-                Style::default()
-                    .fg(color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" gates passed ", Style::default().fg(theme.muted)),
             Span::styled(
@@ -1040,10 +1046,7 @@ fn render_gate_summary(
                 ),
                 Style::default().fg(color),
             ),
-            Span::styled(
-                format!(" {pct}%"),
-                Style::default().fg(color),
-            ),
+            Span::styled(format!(" {pct}%"), Style::default().fg(color)),
         ]));
         frame.render_widget(summary, inner);
     }
@@ -1062,9 +1065,13 @@ fn render_plan_summary(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let header_height = if plan.last_error.is_some() { 8u16 } else { 7u16 };
+    let header_height = if plan.last_error.is_some() {
+        8u16
+    } else {
+        7u16
+    };
     let sections = Layout::vertical([
-        Constraint::Length(header_height),  // Header (extra line for error)
+        Constraint::Length(header_height), // Header (extra line for error)
         Constraint::Min(0),                // Tasks
     ])
     .split(area);
@@ -1278,7 +1285,7 @@ fn render_scrollbar(
         let y = area.y + i as u16;
         let in_thumb = i >= thumb_top && i < thumb_top + thumb_height;
         let (ch, color) = if in_thumb {
-            ('\u{2588}', theme.accent)  // filled block
+            ('\u{2588}', theme.accent) // filled block
         } else {
             ('\u{2502}', Color::Rgb(40, 35, 42)) // thin line
         };
@@ -1316,13 +1323,23 @@ fn build_progress_bar(progress: f64, width: usize) -> String {
 }
 
 /// Build a compact mini-bar for wave headers.
-fn build_mini_bar(width: usize, fill_pct: f64, done: bool, _active: bool, _theme: &Theme) -> String {
+fn build_mini_bar(
+    width: usize,
+    fill_pct: f64,
+    done: bool,
+    _active: bool,
+    _theme: &Theme,
+) -> String {
     let filled = (fill_pct.clamp(0.0, 1.0) * width as f64).round() as usize;
     let empty = width.saturating_sub(filled);
     format!(
         "[{}{}]",
         "\u{2588}".repeat(filled.min(width)),
-        if done { "\u{2588}" } else { "\u{2500}" }.repeat(empty).chars().take(empty).collect::<String>()
+        if done { "\u{2588}" } else { "\u{2500}" }
+            .repeat(empty)
+            .chars()
+            .take(empty)
+            .collect::<String>()
     )
 }
 

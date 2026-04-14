@@ -1,6 +1,6 @@
 //! `roko inject` subcommand — sends signals to a running session.
 //!
-//! Signal injection allows external tools (CI, IDEs, monitoring) to push
+//! Engram injection allows external tools (CI, IDEs, monitoring) to push
 //! directives into an active roko session. Injected signals are appended
 //! to the substrate and can influence the agent's next compose cycle.
 

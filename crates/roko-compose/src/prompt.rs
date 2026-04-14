@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use roko_core::{
-    Body, Budget, Composer, Context, Kind, Provenance, Scorer, Signal,
+    Body, Budget, Composer, Context, Engram, Kind, Provenance, Scorer,
     error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};
@@ -168,14 +168,14 @@ impl PromptSection {
         self
     }
 
-    /// Wrap this section in a `Signal<Kind::PromptSection>`.
+    /// Wrap this section in a `Engram<Kind::PromptSection>`.
     ///
     /// # Errors
     ///
     /// Returns an error if the section cannot be serialized to JSON.
-    pub fn into_signal(self) -> Result<Signal> {
+    pub fn into_signal(self) -> Result<Engram> {
         let body = Body::from_json(&self)?;
-        Ok(Signal::builder(Kind::PromptSection)
+        Ok(Engram::builder(Kind::PromptSection)
             .body(body)
             .provenance(Provenance::trusted("prompt_section"))
             .tag("name", &self.name)
@@ -189,7 +189,7 @@ impl PromptSection {
     /// # Errors
     ///
     /// Returns an error if the signal body isn't a `PromptSection` JSON value.
-    pub fn from_signal(signal: &Signal) -> Result<Self> {
+    pub fn from_signal(signal: &Engram) -> Result<Self> {
         signal.body.as_json()
     }
 }
@@ -214,7 +214,7 @@ const fn cache_tag(l: CacheLayer) -> &'static str {
 
 // ─── Composer ──────────────────────────────────────────────────────────────
 
-/// Assembles `Signal<PromptSection>` inputs into a final `Signal<Prompt>`
+/// Assembles `Engram<PromptSection>` inputs into a final `Engram<Prompt>`
 /// under a token budget.
 ///
 /// # Algorithm
@@ -226,7 +226,7 @@ const fn cache_tag(l: CacheLayer) -> &'static str {
 ///    `Critical` priority sections (that's a contract violation).
 /// 5. Order the kept sections by placement (Start → Middle → End), ties
 ///    broken by `cache_layer` order.
-/// 6. Concatenate with section headers, wrap in a `Signal<Kind::Prompt>`.
+/// 6. Concatenate with section headers, wrap in a `Engram<Kind::Prompt>`.
 ///
 /// # Budget
 ///
@@ -273,11 +273,11 @@ impl PromptComposer {
 impl Composer for PromptComposer {
     fn compose(
         &self,
-        signals: &[Signal],
+        signals: &[Engram],
         budget: &Budget,
         _scorer: &dyn Scorer,
         _ctx: &Context,
-    ) -> Result<Signal> {
+    ) -> Result<Engram> {
         // Decode sections; skip anything that doesn't parse. Enforce any
         // per-section hard cap at decode time so downstream accounting
         // reflects the actual bytes that will land in the prompt.
@@ -316,7 +316,7 @@ impl Composer for PromptComposer {
             .max_signals
             .map_or(usize::MAX, |m| m.saturating_sub(critical.len()));
 
-        let mut kept: Vec<(PromptSection, &Signal)> = critical;
+        let mut kept: Vec<(PromptSection, &Engram)> = critical;
         let mut token_total = critical_tokens;
 
         for (section, source_signal) in optional {
@@ -346,7 +346,7 @@ impl Composer for PromptComposer {
 
         // Build the output signal. Lineage = all source signal ids.
         let lineage: Vec<_> = kept.iter().map(|(_, s)| s.id).collect();
-        let sig = Signal::builder(Kind::Prompt)
+        let sig = Engram::builder(Kind::Prompt)
             .body(Body::text(prompt_text))
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
@@ -451,7 +451,7 @@ impl PromptBuild {
     }
 }
 
-fn critical_count(kept: &[(PromptSection, &Signal)]) -> usize {
+fn critical_count(kept: &[(PromptSection, &Engram)]) -> usize {
     kept.iter()
         .filter(|(p, _)| p.priority == SectionPriority::Critical)
         .count()
@@ -465,7 +465,7 @@ const fn placement_order(p: Placement) -> u8 {
     }
 }
 
-fn render_sections(kept: &[(PromptSection, &Signal)], headers: bool) -> String {
+fn render_sections(kept: &[(PromptSection, &Engram)], headers: bool) -> String {
     let mut out = String::new();
     for (section, _) in kept {
         if headers {
@@ -489,7 +489,7 @@ mod tests {
     use super::*;
     use roko_std::NoOpScorer;
 
-    fn section(name: &str, content: &str, pri: SectionPriority) -> Signal {
+    fn section(name: &str, content: &str, pri: SectionPriority) -> Engram {
         PromptSection::new(name, content)
             .with_priority(pri)
             .into_signal()
@@ -667,7 +667,7 @@ mod tests {
     fn composer_ignores_non_section_signals() {
         let composer = PromptComposer::new();
         let real_section = section("task", "implement X", SectionPriority::High);
-        let fake = Signal::builder(Kind::Task)
+        let fake = Engram::builder(Kind::Task)
             .body(Body::text("this is not a section"))
             .build();
         let out = composer

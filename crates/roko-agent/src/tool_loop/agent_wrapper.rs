@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use roko_core::tool::{ToolContext, ToolDef};
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 use roko_fs::RokoLayout;
 
 use crate::agent::{Agent, AgentResult};
@@ -64,8 +64,8 @@ impl ToolLoopAgent {
         self
     }
 
-    fn output_signal(text: &str, stop_reason: &str, iterations: usize) -> Signal {
-        Signal::builder(Kind::AgentOutput)
+    fn output_signal(text: &str, stop_reason: &str, iterations: usize) -> Engram {
+        Engram::builder(Kind::AgentOutput)
             .body(Body::text(text))
             .tag("stop_reason", stop_reason)
             .tag("iterations", iterations.to_string())
@@ -89,7 +89,7 @@ impl ToolLoopAgent {
 
 #[async_trait]
 impl Agent for ToolLoopAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
         let prompt = input.body.as_text().unwrap_or_default();
         let tool_ctx = ToolContext::testing(&self.worktree_path);
         let tool_loop = match self.checkpoint_path(ctx) {
@@ -312,7 +312,7 @@ mod tests {
             .with_system_prompt("system prompt")
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
-        let input = Signal::builder(Kind::Prompt)
+        let input = Engram::builder(Kind::Prompt)
             .body(Body::text("call the tool"))
             .build();
 
@@ -334,7 +334,7 @@ mod tests {
         let agent = ToolLoopAgent::new(make_tool_loop(Arc::new(ErrorBackend)))
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
-        let input = Signal::builder(Kind::Prompt)
+        let input = Engram::builder(Kind::Prompt)
             .body(Body::text("fail"))
             .build();
 

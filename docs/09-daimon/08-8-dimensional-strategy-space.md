@@ -563,9 +563,11 @@ compute_coords(action, context)        // raw 8D coordinates
 
 **Specified**: Full dimension definitions for coding and chain domains in `refactoring-prd/09-innovations.md` §XIX.F. Domain registration via configuration. Cross-domain transfer via structural analogy.
 
-**Not implemented**: No `StrategySpaceComputer` trait or implementation exists in any crate. Dimension computation functions are not written. The `roko.toml` configuration section for strategy space is not parsed.
+**Implemented**: `roko-daimon` now owns both the persisted `StrategySpaceDefinition` and the coordinate projection layer. `roko.toml` parses `[daimon.strategy_space]`, `DaimonState` persists the selected definition, and a real `StrategySpaceComputer` abstraction now projects normalized task / episode observations into the 8D space. The built-in coding extractor is used for live orchestration and dream replay, while custom domains can already register labels and remain operational through the shared normalized projection path.
 
-**Dependency**: The strategy space is required by the somatic landscape (see [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)), which is itself not yet implemented.
+**Still missing**: Dedicated non-coding extractors such as a chain-native `StrategySpaceComputer`, richer cross-domain mapping logic, and tighter coupling between strategy-space computation and the cross-subsystem VCG market.
+
+**Dependency**: The strategy space is now consumed by the implemented somatic landscape (see [06-somatic-markers-damasio.md](./06-somatic-markers-damasio.md)); the remaining work is on richer extractors and integration depth, not on basic availability.
 
 ---
 

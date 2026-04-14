@@ -224,8 +224,8 @@ benchmarked. False positive threshold derivation (Z-score 5.26, Bonferroni for 1
 
 **Critical gaps:**
 - Tier field / PRD-native types have landed, directional causal encoding is now implemented, and the remaining lag is mostly in higher-order retrieval/runtime features plus status docs
-- `ContextAssembler` base retrieval is implemented and now uses an internal auction-style allocator; cross-subsystem allocation and direct somatic retrieval fusion remain open
-- Somatic integration is now partial rather than absent: `roko-daimon` has a real 8D k-d-tree-backed somatic landscape wired into routing, while `ContextAssembler` already provides PAD-biased retrieval plus a contrarian slice; the remaining work is direct fusion into knowledge ranking plus dream-managed emotional maintenance
+- `ContextAssembler` base retrieval is implemented and now uses an internal auction-style allocator; the remaining gap is cross-subsystem allocation rather than the local retrieval path itself
+- Somatic integration is now partial rather than absent: `roko-daimon` has a real 8D k-d-tree-backed somatic landscape wired into routing, runtime events, dream maintenance, and centralized strategy-space projection, while `ContextAssembler` already provides PAD-biased retrieval, direct somatic re-ranking, and a contrarian slice; the remaining work is dedicated non-coding extractors plus cross-subsystem bidding
 - Cross-domain HDC transfer entirely unimplemented
 - Half-life constants now match the PRD for CausalLink (60d) and StrategyFragment (14d)
 
@@ -290,8 +290,8 @@ elegantly designed.
 
 **Critical gaps:**
 - Two parallel implementations (roko-daimon 569 LOC + roko-golem/daimon.rs 972 LOC) need consolidation
-- Somatic landscape (k-d tree over 8D strategy space) not implemented
-- CascadeRouter now reads live Daimon behavioral state and biases model-tier selection; the remaining affect gaps are somatic landscape and VCG-style bidding
+- Somatic landscape is now partially implemented: `roko-daimon` has the 8D k-d-tree-backed store, runtime events, and dream-time consolidation/depotentiation; domain-extensible axis sets are still missing
+- CascadeRouter now reads live Daimon behavioral state and biases model-tier selection; the remaining affect gaps are domain-extensible strategy spaces and VCG-style bidding
 - VCG context allocation not implemented
 
 **Crate reality:** Code split across roko-golem (scaffold) and roko-core affect types.

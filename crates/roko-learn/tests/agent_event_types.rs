@@ -70,12 +70,18 @@ fn agent_event_types_construct_all_variants() {
             stage: "primary".into(),
             score: 0.91,
         },
+        AgentEvent::SomaticMarkerFired {
+            task_id: "task-2k20".into(),
+            valence: -0.62,
+            intensity: 0.74,
+            source_episode_count: 2,
+        },
         AgentEvent::StreamChunk {
             chunk: StreamChunk::Done(FinishReason::Stop),
         },
     ];
 
-    assert_eq!(events.len(), 11);
+    assert_eq!(events.len(), 12);
     assert!(matches!(
         events.last(),
         Some(AgentEvent::StreamChunk {

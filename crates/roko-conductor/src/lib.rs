@@ -11,7 +11,7 @@
 //!
 //! # Architecture
 //!
-//! Every watcher is a pure function: `&[Signal] -> Vec<Signal>`. Watchers
+//! Every watcher is a pure function: `&[Engram] -> Vec<Engram>`. Watchers
 //! have no side effects. The conductor collects watcher outputs, maps them
 //! through an [`InterventionPolicy`](interventions::InterventionPolicy),
 //! and produces a single [`ConductorDecision`](roko_core::ConductorDecision).

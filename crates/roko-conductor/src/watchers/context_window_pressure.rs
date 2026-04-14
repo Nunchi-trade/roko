@@ -3,7 +3,7 @@
 //! Monitors `TokenUsage` signals derived from agent efficiency events and
 //! fires when usage exceeds [`MAX_CONTEXT_USAGE_RATIO`].
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 
 /// Maximum context window utilization ratio (0.0 to 1.0) before firing.
@@ -50,7 +50,7 @@ impl ContextWindowPressureWatcher {
 }
 
 impl Policy for ContextWindowPressureWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Find the most recent TokenUsage signal.
         let latest = stream.iter().rev().find(|s| s.kind == Kind::TokenUsage);
 
@@ -70,7 +70,7 @@ impl Policy for ContextWindowPressureWatcher {
 
         if ratio > self.max_ratio {
             vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
                         "context window {:.0}% full ({used:.0}/{total:.0} tokens)",
                         ratio * 100.0
@@ -90,7 +90,7 @@ impl Policy for ContextWindowPressureWatcher {
     }
 }
 
-fn extract_usage(signal: &Signal) -> Option<(f64, f64)> {
+fn extract_usage(signal: &Engram) -> Option<(f64, f64)> {
     if let Ok(event) = signal.body.as_json::<AgentEfficiencyEvent>() {
         if let Some(total) = context_window_tokens(&event.model) {
             return Some((event.total_prompt_tokens as f64, total as f64));
@@ -130,7 +130,7 @@ mod tests {
     use roko_core::OperatingFrequency;
     use roko_learn::efficiency::AgentEfficiencyEvent;
 
-    fn efficiency_event_signal(model: &str, prompt_tokens: u64) -> Signal {
+    fn efficiency_event_signal(model: &str, prompt_tokens: u64) -> Engram {
         let event = AgentEfficiencyEvent {
             agent_id: "agent-1".into(),
             role: "Implementer".into(),
@@ -165,7 +165,7 @@ mod tests {
             timestamp: "2026-04-09T00:00:00Z".into(),
         };
 
-        Signal::builder(Kind::TokenUsage)
+        Engram::builder(Kind::TokenUsage)
             .body(Body::from_json(&event).expect("serialize event"))
             .build()
     }
@@ -213,7 +213,7 @@ mod tests {
     fn zero_total_no_fire() {
         let w = ContextWindowPressureWatcher::default();
         let stream = vec![
-            Signal::builder(Kind::TokenUsage)
+            Engram::builder(Kind::TokenUsage)
                 .body(Body::text("usage"))
                 .tag(TOKENS_USED_TAG, "0")
                 .tag(MODEL_TAG, "unknown-model")

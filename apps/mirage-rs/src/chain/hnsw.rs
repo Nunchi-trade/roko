@@ -22,7 +22,7 @@ use std::{
     collections::{BinaryHeap, HashMap, HashSet},
 };
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 
 use super::{hdc_index::Hit, insight::InsightId};
 

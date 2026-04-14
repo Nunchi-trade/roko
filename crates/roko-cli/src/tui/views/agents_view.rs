@@ -6,11 +6,11 @@
 //! Renders rich gradient progress bars, context gauges, role-colored
 //! tabs, and status chips matching the Mori Agents screen (F3).
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -71,9 +71,9 @@ fn render_left_panel(
     let sparkline_height = if has_token_data { 6u16 } else { 0u16 };
 
     let sections = Layout::vertical([
-        Constraint::Min(4),                        // agent roster (flexible)
-        Constraint::Length(2),                      // summary line
-        Constraint::Length(sparkline_height),       // token sparkline
+        Constraint::Min(4),                   // agent roster (flexible)
+        Constraint::Length(2),                // summary line
+        Constraint::Length(sparkline_height), // token sparkline
     ])
     .split(area);
 
@@ -223,11 +223,9 @@ fn render_agent_roster(
         let role_label = truncate_middle(&agent.label, role_w);
 
         // Activity data
-        let activity_row = activity.as_ref().and_then(|snap| {
-            snap.active_agents
-                .iter()
-                .find(|r| r.agent_id == agent.id)
-        });
+        let activity_row = activity
+            .as_ref()
+            .and_then(|snap| snap.active_agents.iter().find(|r| r.agent_id == agent.id));
 
         let tokens_str = activity_row
             .map(|r| format_tokens(r.tokens_used))
@@ -461,7 +459,10 @@ fn render_token_sparkline(
             buckets.clone()
         };
 
-        let spark_chars = [' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+        let spark_chars = [
+            ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
+            '\u{2587}', '\u{2588}',
+        ];
 
         let label_w = total_str.len() + 2;
         let bar_w = inner_w.saturating_sub(label_w);
@@ -649,18 +650,15 @@ fn render_output_body(
         " PINNED"
     };
 
-    let (border_style, title_style) = if selected_agent.map_or(false, |a| {
-        a.status == "running" || a.status == "active"
-    }) {
-        (
-            Style::default().fg(accent),
-            Style::default()
-                .fg(accent)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (theme.muted(), theme.muted())
-    };
+    let (border_style, title_style) =
+        if selected_agent.map_or(false, |a| a.status == "running" || a.status == "active") {
+            (
+                Style::default().fg(accent),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (theme.muted(), theme.muted())
+        };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -703,10 +701,7 @@ fn render_output_body(
                     agent_state.output_lines.clone()
                 } else if let Some(task_id) = &agent_state.task_id {
                     // 3. Task outputs for agent's current task.
-                    data.task_outputs
-                        .get(task_id)
-                        .cloned()
-                        .unwrap_or_default()
+                    data.task_outputs.get(task_id).cloned().unwrap_or_default()
                 } else {
                     Vec::new()
                 }
@@ -735,8 +730,7 @@ fn render_output_body(
                     ] {
                         if let Some(text) = episode.extra.get(key).and_then(|v| v.as_str()) {
                             if !text.trim().is_empty() {
-                                episode_output =
-                                    text.lines().map(String::from).collect();
+                                episode_output = text.lines().map(String::from).collect();
                                 break;
                             }
                         }

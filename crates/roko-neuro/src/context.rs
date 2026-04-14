@@ -151,6 +151,10 @@ pub struct PadState {
     pub arousal: f64,
     /// Dominance dimension. Reserved for future modulation.
     pub dominance: f64,
+    /// Situation-specific somatic valence in `[-1.0, 1.0]`.
+    pub somatic_valence: f64,
+    /// Strength of the somatic signal in `[0.0, 1.0]`.
+    pub somatic_intensity: f64,
 }
 
 impl PadState {
@@ -161,7 +165,17 @@ impl PadState {
             pleasure,
             arousal,
             dominance,
+            somatic_valence: 0.0,
+            somatic_intensity: 0.0,
         }
+    }
+
+    /// Attach an optional somatic hint from Daimon's strategy-space retrieval.
+    #[must_use]
+    pub fn with_somatic_hint(mut self, somatic_valence: f64, somatic_intensity: f64) -> Self {
+        self.somatic_valence = somatic_valence.clamp(-1.0, 1.0);
+        self.somatic_intensity = somatic_intensity.clamp(0.0, 1.0);
+        self
     }
 }
 
@@ -1159,6 +1173,9 @@ fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadStat
     let low_pleasure = (1.0 - affect.pleasure.clamp(0.0, 1.0)).clamp(0.0, 1.0);
     let action = action_orientation(chunk);
     let caution = caution_orientation(chunk);
+    let somatic_intensity = affect.somatic_intensity.clamp(0.0, 1.0);
+    let negative_somatic = (-affect.somatic_valence).clamp(0.0, 1.0) * somatic_intensity;
+    let positive_somatic = affect.somatic_valence.clamp(0.0, 1.0) * somatic_intensity;
     let emotional_congruence = chunk
         .emotional_tag
         .as_ref()
@@ -1171,8 +1188,10 @@ fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadStat
 
     let arousal_bias = arousal * (0.30 * recency + 0.35 * action);
     let pleasure_bias = low_pleasure * (1.00 * caution - 0.30 * action);
+    let somatic_bias = negative_somatic * (0.90 * caution - 0.20 * action)
+        + positive_somatic * (0.75 * action - 0.08 * caution);
 
-    arousal_bias + pleasure_bias + emotional_congruence
+    arousal_bias + pleasure_bias + emotional_congruence + somatic_bias
 }
 
 fn action_orientation(chunk: &ContextChunk) -> f64 {
@@ -1814,6 +1833,73 @@ mod tests {
         assert!(
             score_chunk(task_text, &congruent, Some(&struggling))
                 > score_chunk(task_text, &incongruent, Some(&struggling))
+        );
+    }
+
+    #[test]
+    fn somatic_bias_prefers_cautionary_chunks_even_with_neutral_pad() {
+        let task_text = "decide how to handle the risky rollout";
+        let caution = ContextChunk {
+            content: "### Knowledge Warning\nConfidence: 0.90\nTags: deploy, rollback\n```\nCheck rollback health before attempting the rollout.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "warning-somatic".into(),
+                kind: "Warning".into(),
+                source: None,
+            },
+            relevance: 0.8,
+            track_record: Some(0.8),
+            confidence: Some(0.9),
+            recency: Some(0.6),
+            emotional_tag: None,
+        };
+        let action = ContextChunk {
+            content: "### Knowledge StrategyFragment\nConfidence: 0.90\nTags: deploy, rollout\n```\nReuse the standard rollout command sequence.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "strategy-somatic".into(),
+                kind: "StrategyFragment".into(),
+                source: None,
+            },
+            relevance: 0.8,
+            track_record: Some(0.8),
+            confidence: Some(0.9),
+            recency: Some(0.6),
+            emotional_tag: None,
+        };
+
+        let negative_somatic = PadState::new(0.5, 0.2, 0.5).with_somatic_hint(-0.9, 0.8);
+
+        assert!(
+            score_chunk(task_text, &caution, Some(&negative_somatic))
+                > score_chunk(task_text, &action, Some(&negative_somatic))
+        );
+    }
+
+    #[test]
+    fn positive_somatic_bias_boosts_actionable_chunks_from_neutral_baseline() {
+        let task_text = "resume the familiar rollout";
+        let action = ContextChunk {
+            content: "### Knowledge StrategyFragment\nConfidence: 0.90\nTags: deploy, rollout\n```\nUse the standard rollout command sequence.\n```"
+                .into(),
+            source: ContextSource::KnowledgeEntry {
+                entry_id: "strategy-positive-somatic".into(),
+                kind: "StrategyFragment".into(),
+                source: None,
+            },
+            relevance: 0.8,
+            track_record: Some(0.8),
+            confidence: Some(0.9),
+            recency: Some(0.6),
+            emotional_tag: None,
+        };
+
+        let neutral = PadState::new(0.5, 0.2, 0.5);
+        let positive_somatic = neutral.with_somatic_hint(0.9, 0.8);
+
+        assert!(
+            score_chunk(task_text, &action, Some(&positive_somatic))
+                > score_chunk(task_text, &action, Some(&neutral))
         );
     }
 

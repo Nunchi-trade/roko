@@ -13,7 +13,7 @@ use crate::process::{
 };
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, OperatingFrequency, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, OperatingFrequency, Provenance};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -244,7 +244,7 @@ impl ClaudeCliAgent {
         self
     }
 
-    fn failure(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+    fn failure(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -289,7 +289,7 @@ impl ClaudeCliAgent {
         }
     }
 
-    fn prompt_text_from_input(input: &Signal) -> Result<String, String> {
+    fn prompt_text_from_input(input: &Engram) -> Result<String, String> {
         input.body.as_text().map(str::to_string).or_else(|_| {
             serde_json::to_string(&input.body)
                 .map_err(|e| format!("input body not readable as text or json: {e}"))
@@ -368,13 +368,13 @@ impl ClaudeCliAgent {
         )
     }
 
-    fn stderr_trace(&self, stderr: &str) -> Vec<Signal> {
+    fn stderr_trace(&self, stderr: &str) -> Vec<Engram> {
         stderr
             .lines()
             .filter(|line| !line.trim().is_empty())
             .filter(|line| !self.warn_and_filter_benign(line))
             .map(|line| {
-                Signal::builder(Kind::AgentMessage)
+                Engram::builder(Kind::AgentMessage)
                     .body(Body::text(line))
                     .provenance(Provenance::agent(&self.name))
                     .tag("stream", "stderr")
@@ -396,7 +396,7 @@ impl ClaudeCliAgent {
 
 #[async_trait]
 impl Agent for ClaudeCliAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match Self::prompt_text_from_input(input) {
@@ -556,8 +556,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[test]

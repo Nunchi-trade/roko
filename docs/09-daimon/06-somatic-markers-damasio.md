@@ -549,7 +549,7 @@ The weak valence (+0.11) signals that this region of strategy space has produced
 
 **Implemented**: `roko-daimon` now has a persisted `SomaticLandscape` backed by `kiddo`, with `SomaticMarker`, `SomaticSignal`, nearest-neighbor queries, marker merging, contrarian blending, persistence/restore, and live routing modulation through `DaimonState::modulate_with_strategy(...)`. `roko-cli` projects coding tasks into the 8D strategy space and records task outcomes into the landscape.
 
-**Still missing**: Dream-created marker consolidation, emotional depotentiation, explicit `SomaticMarkerFired` event emission, externally configurable domain axis sets, and direct fusion of somatic scores into Neuro knowledge retrieval rather than only dispatch modulation.
+**Still missing**: externally configurable domain axis sets and broader cross-subsystem use of somatic scores beyond the current dispatch/prompt/retrieval path.
 
 **Dependencies**: The live coding-domain path no longer depends on Dreams to exist, but fuller PRD parity still requires the 8-dimensional strategy-space definitions to become domain-extensible and the Dreams subsystem to maintain markers over time.
 

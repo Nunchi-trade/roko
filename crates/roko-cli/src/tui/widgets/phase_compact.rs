@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::atmosphere::Atmosphere;
-use super::rosedust::MoriTheme;
 use super::super::state::{PhaseStatus, TuiState};
+use super::rosedust::MoriTheme;
 
 // ---------------------------------------------------------------------------
 // Phase labels
@@ -181,10 +181,7 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
 // ---------------------------------------------------------------------------
 
 /// Build the active-phase detail line: icon + name + pct + elapsed + ETA.
-fn build_active_detail(
-    step: &super::super::state::PhaseStep,
-    atm: &Atmosphere,
-) -> Line<'static> {
+fn build_active_detail(step: &super::super::state::PhaseStep, atm: &Atmosphere) -> Line<'static> {
     let pulse_color = pulse_active(atm.heartbeat());
     let icon = atm.spinner_ethereal().to_string();
 

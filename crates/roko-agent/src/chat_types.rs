@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use roko_core::tool::ToolCall;
 use roko_core::{
-    Body, ChatMessage, Kind, MessageContent, Signal, ToolCallFunction, ToolCallMessage, ToolDef,
+    Body, ChatMessage, Engram, Kind, MessageContent, ToolCallFunction, ToolCallMessage, ToolDef,
 };
 
 use crate::usage::Usage;
@@ -28,7 +28,7 @@ impl ChatRequest {
     /// Build a canonical chat request from the orchestrator's signal format.
     #[must_use]
     pub fn from_signal(
-        signal: &Signal,
+        signal: &Engram,
         model_slug: &str,
         system_prompt: Option<&str>,
         tools: Vec<ToolDef>,
@@ -163,8 +163,8 @@ impl ChatResponse {
 
     /// Convert the canonical chat response back into the orchestrator's signal format.
     #[must_use]
-    pub fn to_signal(&self) -> Signal {
-        Signal::builder(Kind::AgentOutput)
+    pub fn to_signal(&self) -> Engram {
+        Engram::builder(Kind::AgentOutput)
             .body(Body::text(&self.content))
             .tag(
                 "model",

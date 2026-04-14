@@ -433,7 +433,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
 mod tests {
     use super::*;
     use crate::http::{HttpPostError, HttpPoster};
-    use roko_core::{Body, Context, Kind, Signal};
+    use roko_core::{Body, Context, Engram, Kind};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -441,8 +441,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn spawn_chat_server(

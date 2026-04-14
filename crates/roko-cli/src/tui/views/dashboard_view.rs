@@ -7,11 +7,11 @@
 //!
 //! Delegates to compiled widgets for all panels.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
 
@@ -80,8 +80,16 @@ fn render_left_panel(
         let plan_lines = (plan_count + 3).min(20) as u16; // header + plans + padding
         let task_lines = (task_count + 3).min(15) as u16;
         let total = plan_lines + task_lines;
-        let plan_frac = if total > 0 { plan_lines * 100 / total } else { 50 };
-        (plan_frac.max(30).min(70), 4u16, (100 - plan_frac.max(30).min(70)))
+        let plan_frac = if total > 0 {
+            plan_lines * 100 / total
+        } else {
+            50
+        };
+        (
+            plan_frac.max(30).min(70),
+            4u16,
+            (100 - plan_frac.max(30).min(70)),
+        )
     } else {
         // Idle: compact layout — give more room to plan tree for column headers
         (45, 4, 51)
@@ -115,14 +123,32 @@ fn render_right_panel(
     theme: &Theme,
 ) {
     let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-    let sub = view_state.sub_tab.min(SUB_TAB_LABELS.len().saturating_sub(1));
+    let sub = view_state
+        .sub_tab
+        .min(SUB_TAB_LABELS.len().saturating_sub(1));
     render_sub_tab_bar(frame, sections[0], sub, theme);
 
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
 
     match sub {
-        0 => render_sub_agents(frame, sections[1], data, tui_state, view_state, focused, theme),
-        1 => render_output_panel(frame, sections[1], data, tui_state, view_state, focused, theme),
+        0 => render_sub_agents(
+            frame,
+            sections[1],
+            data,
+            tui_state,
+            view_state,
+            focused,
+            theme,
+        ),
+        1 => render_output_panel(
+            frame,
+            sections[1],
+            data,
+            tui_state,
+            view_state,
+            focused,
+            theme,
+        ),
         2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
         3 => render_sub_errors(frame, sections[1], data, theme),
         4 => render_sub_git(frame, sections[1], tui_state, theme),
@@ -146,7 +172,10 @@ fn render_sub_tab_bar(frame: &mut Frame<'_>, area: Rect, active: usize, theme: &
         };
         spans.push(Span::styled(format!(" {key}:{label} "), style));
         if i + 1 < SUB_TAB_LABELS.len() {
-            spans.push(Span::styled("\u{2502}", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                "\u{2502}",
+                Style::default().fg(Color::DarkGray),
+            ));
         }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -165,8 +194,8 @@ fn render_sub_agents(
     focused: bool,
     theme: &Theme,
 ) {
-    let sections = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
+    let sections =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
     // Build pool entries once.
     let activity =
@@ -176,9 +205,9 @@ fn render_sub_agents(
         .agents
         .iter()
         .map(|agent| {
-            let row = activity.as_ref().and_then(|s| {
-                s.active_agents.iter().find(|r| r.agent_id == agent.id)
-            });
+            let row = activity
+                .as_ref()
+                .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
             let state = match agent.status.as_str() {
                 "running" | "active" => widgets::parallel_pool::AgentRunState::Active,
                 "done" | "completed" => widgets::parallel_pool::AgentRunState::Done,
@@ -186,7 +215,13 @@ fn render_sub_agents(
                 _ => widgets::parallel_pool::AgentRunState::Idle,
             };
             let used = row.map_or(0, |r| r.tokens_used);
-            let total = row.map_or(200_000, |r| if r.tokens_used > 0 { r.tokens_used * 2 } else { 200_000 });
+            let total = row.map_or(200_000, |r| {
+                if r.tokens_used > 0 {
+                    r.tokens_used * 2
+                } else {
+                    200_000
+                }
+            });
             widgets::parallel_pool::ParallelAgentState {
                 role: agent.label.clone(),
                 model: row.map_or_else(|| "-".to_string(), |r| r.model.clone()),
@@ -194,13 +229,31 @@ fn render_sub_agents(
                 tokens_used: used,
                 tokens_total: total,
                 state,
-                context_pct: if total > 0 { used as f64 / total as f64 } else { 0.0 },
+                context_pct: if total > 0 {
+                    used as f64 / total as f64
+                } else {
+                    0.0
+                },
             }
         })
         .collect();
 
-    widgets::parallel_pool::render_parallel_pool(frame, sections[0], &pool, view_state.selected, theme);
-    render_output_panel(frame, sections[1], data, tui_state, view_state, focused, theme);
+    widgets::parallel_pool::render_parallel_pool(
+        frame,
+        sections[0],
+        &pool,
+        view_state.selected,
+        theme,
+    );
+    render_output_panel(
+        frame,
+        sections[1],
+        data,
+        tui_state,
+        view_state,
+        focused,
+        theme,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +269,11 @@ fn render_output_panel(
     focused: bool,
     theme: &Theme,
 ) {
-    let border = if focused { theme.accent() } else { theme.muted() };
+    let border = if focused {
+        theme.accent()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Output ")
@@ -328,7 +385,10 @@ fn gather_diff_text(data: &DashboardData, tui_state: &TuiState) -> String {
             .iter()
             .map(String::as_str)
             .filter(|l| {
-                l.starts_with('+') || l.starts_with('-') || l.starts_with("@@") || l.starts_with("diff ")
+                l.starts_with('+')
+                    || l.starts_with('-')
+                    || l.starts_with("@@")
+                    || l.starts_with("diff ")
             })
             .collect();
         if !diff_lines.is_empty() {
@@ -404,10 +464,7 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme
         .map(|s| Line::from(Span::styled(s.as_str(), theme.text())))
         .collect();
 
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Collect git summary data as plain strings.
@@ -426,12 +483,23 @@ pub fn collect_git_summary() -> Vec<String> {
     }
 
     if let Some(status) = git_cmd(&["status", "--short"]) {
-        let modified = status.lines().filter(|l| l.starts_with(" M") || l.starts_with("M ")).count();
-        let added = status.lines().filter(|l| l.starts_with("A ") || l.starts_with("??")).count();
-        let deleted = status.lines().filter(|l| l.starts_with(" D") || l.starts_with("D ")).count();
+        let modified = status
+            .lines()
+            .filter(|l| l.starts_with(" M") || l.starts_with("M "))
+            .count();
+        let added = status
+            .lines()
+            .filter(|l| l.starts_with("A ") || l.starts_with("??"))
+            .count();
+        let deleted = status
+            .lines()
+            .filter(|l| l.starts_with(" D") || l.starts_with("D "))
+            .count();
         let total = status.lines().filter(|l| !l.is_empty()).count();
         if total > 0 {
-            lines.push(format!(" status: {total} changed  M:{modified} A:{added} D:{deleted}"));
+            lines.push(format!(
+                " status: {total} changed  M:{modified} A:{added} D:{deleted}"
+            ));
         } else {
             lines.push(" status: clean".to_string());
         }
@@ -522,11 +590,15 @@ fn render_sub_processes(
     focused: bool,
     theme: &Theme,
 ) {
-    let sections = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
+    let sections =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
     // Process table.
-    let border = if focused { theme.accent() } else { theme.muted() };
+    let border = if focused {
+        theme.accent()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Processes ")
@@ -604,12 +676,19 @@ fn render_sub_processes(
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("agents:  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{active} active / {} total", data.agents.len()), theme.text()),
+                Span::styled(
+                    format!("{active} active / {} total", data.agents.len()),
+                    theme.text(),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("tokens:  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{}in + {}out", fmt_count(eff.total_input_tokens), fmt_count(eff.total_output_tokens)),
+                    format!(
+                        "{}in + {}out",
+                        fmt_count(eff.total_input_tokens),
+                        fmt_count(eff.total_output_tokens)
+                    ),
                     theme.text(),
                 ),
             ]),

@@ -65,6 +65,12 @@ pub enum AgentEvent {
         stage: String,
         score: f64,
     },
+    SomaticMarkerFired {
+        task_id: String,
+        valence: f64,
+        intensity: f64,
+        source_episode_count: usize,
+    },
     StreamChunk {
         chunk: StreamChunk,
     },

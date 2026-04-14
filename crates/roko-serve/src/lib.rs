@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use roko_core::Signal;
+use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
@@ -239,7 +239,7 @@ pub(crate) fn start_event_source_group(
         cancel_for_shutdown.cancel();
     });
 
-    let (signal_tx, signal_rx) = mpsc::channel::<Signal>(256);
+    let (signal_tx, signal_rx) = mpsc::channel::<Engram>(256);
     tokio::spawn(signal_ingest_loop(
         Arc::clone(&state),
         signal_rx,
@@ -291,7 +291,7 @@ fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
 
 async fn signal_ingest_loop(
     state: Arc<AppState>,
-    mut receiver: mpsc::Receiver<Signal>,
+    mut receiver: mpsc::Receiver<Engram>,
     cancel: CancellationToken,
 ) {
     loop {

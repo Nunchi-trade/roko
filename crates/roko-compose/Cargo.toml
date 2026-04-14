@@ -15,7 +15,7 @@ roko-agent = { path = "../roko-agent" }
 roko-core = { path = "../roko-core" }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
-bardo-primitives = { path = "../bardo-primitives", optional = true }
+roko-primitives = { path = "../roko-primitives", optional = true }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -27,7 +27,7 @@ tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-
 
 [features]
 default = []
-hdc = ["dep:bardo-primitives", "roko-neuro/hdc"]
+hdc = ["dep:roko-primitives", "roko-neuro/hdc"]
 
 [dev-dependencies]
 roko-std = { path = "../roko-std" }

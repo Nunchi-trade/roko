@@ -3,7 +3,7 @@
 use crate::agent::{Agent, AgentResult};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 
 /// An agent that returns a canned response. Deterministic; used in tests.
 ///
@@ -55,7 +55,7 @@ impl MockAgent {
 
 #[async_trait]
 impl Agent for MockAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let output = input
             .derive(Kind::AgentOutput, Body::text(&self.reply))
             .provenance(Provenance::agent(&self.name))
@@ -81,8 +81,8 @@ impl Agent for MockAgent {
 mod tests {
     use super::*;
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]

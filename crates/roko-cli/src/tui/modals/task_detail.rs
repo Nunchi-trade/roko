@@ -153,10 +153,7 @@ pub fn render_task_detail_modal(
             )));
 
             for line in output {
-                lines.push(Line::from(Span::styled(
-                    format!("  {line}"),
-                    theme.text(),
-                )));
+                lines.push(Line::from(Span::styled(format!("  {line}"), theme.text())));
             }
         }
     }

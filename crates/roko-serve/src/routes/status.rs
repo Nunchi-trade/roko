@@ -1510,7 +1510,7 @@ mod tests {
     use crate::deploy::create_backend;
     use crate::runtime::NoOpRuntime;
     use crate::state::{AppState, OperationStatus, PlanHandle};
-    use roko_core::{Body, Kind, Provenance, Signal, Verdict};
+    use roko_core::{Body, Engram, Kind, Provenance, Verdict};
 
     fn gate_signal(gate: &str, passed: bool, duration_ms: u64) -> Value {
         let mut verdict = if passed {
@@ -1520,7 +1520,7 @@ mod tests {
         };
         verdict.duration_ms = duration_ms;
 
-        let signal = Signal::builder(Kind::GateVerdict)
+        let signal = Engram::builder(Kind::GateVerdict)
             .body(Body::from_json(&verdict).unwrap())
             .provenance(Provenance::trusted("test"))
             .tag("gate", gate)

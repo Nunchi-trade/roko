@@ -276,7 +276,7 @@ pub fn decide(
     // Rule 4b: diversity challenge — if an insight has ≥3 confirmations from the
     // same source (author equals our watcher_id), and we've re-observed it many
     // times, that's suspicious. Challenge it to test resilience.
-    // (Signal is subtle but creates the "consensus → skepticism" arc visually.)
+    // (Engram is subtle but creates the "consensus → skepticism" arc visually.)
     for i in insights {
         if i.confirmations >= 5 && i.challenges == 0 && i.similarity >= 0.65 {
             // Only one watcher should challenge; use id hash modulo to spread

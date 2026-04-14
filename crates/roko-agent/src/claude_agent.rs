@@ -18,7 +18,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::translate::claude::{inject_cache_markers, inject_cache_markers_into_content};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -323,7 +323,7 @@ impl ClaudeAgent {
         Ok(body)
     }
 
-    fn fail(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+    fn fail(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -341,7 +341,7 @@ impl ClaudeAgent {
 #[async_trait]
 impl Agent for ClaudeAgent {
     #[allow(clippy::too_many_lines)]
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -414,7 +414,7 @@ impl Agent for ClaudeAgent {
                     let input_json =
                         serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
                     trace.push(
-                        Signal::builder(Kind::AgentMessage)
+                        Engram::builder(Kind::AgentMessage)
                             .body(Body::text(format!(
                                 "tool_use id={id} name={name} input={input_json}"
                             )))
@@ -547,8 +547,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Arc<dyn HttpPoster>) -> ClaudeAgent {

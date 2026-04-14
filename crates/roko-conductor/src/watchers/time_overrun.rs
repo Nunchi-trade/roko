@@ -3,7 +3,7 @@
 //! Monitors task completion signals emitted by the orchestrator and compares
 //! the elapsed runtime against the task's declared `timeout_secs`.
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 use serde::Deserialize;
 
 /// Tag key marking signals from this watcher.
@@ -35,11 +35,11 @@ impl TimeOverrunWatcher {
     }
 }
 
-fn task_is_timing_event(signal: &Signal) -> bool {
+fn task_is_timing_event(signal: &Engram) -> bool {
     matches!(signal.kind, Kind::Custom(ref kind) if kind == TASK_OUTPUT_KIND)
 }
 
-fn extract_timing_event(signal: &Signal) -> Option<TaskTimingEvent> {
+fn extract_timing_event(signal: &Engram) -> Option<TaskTimingEvent> {
     if !task_is_timing_event(signal) {
         return None;
     }
@@ -57,7 +57,7 @@ fn exceeds_threshold(duration_ms: u64, timeout_secs: u64) -> bool {
 }
 
 impl Policy for TimeOverrunWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(signal) = stream
             .iter()
             .rev()
@@ -82,7 +82,7 @@ impl Policy for TimeOverrunWatcher {
         };
 
         vec![
-            Signal::builder(Kind::Custom("conductor.intervention".into()))
+            Engram::builder(Kind::Custom("conductor.intervention".into()))
                 .body(Body::text(format!(
                     "task {} exceeded 80% of timeout: {}ms of {}ms",
                     event.task, event.duration_ms, timeout_ms
@@ -108,7 +108,7 @@ impl Policy for TimeOverrunWatcher {
 mod tests {
     use super::*;
 
-    fn task_signal(task: &str, duration_ms: u64, timeout_secs: u64) -> Signal {
+    fn task_signal(task: &str, duration_ms: u64, timeout_secs: u64) -> Engram {
         let event = TaskTimingEvent {
             plan_id: "plan-1".into(),
             task: task.into(),
@@ -116,7 +116,7 @@ mod tests {
             timeout_secs,
         };
 
-        Signal::builder(Kind::Custom(TASK_OUTPUT_KIND.into()))
+        Engram::builder(Kind::Custom(TASK_OUTPUT_KIND.into()))
             .body(Body::from_json(&event).expect("serialize timing event"))
             .build()
     }
@@ -172,7 +172,7 @@ mod tests {
     fn non_task_signal_ignored() {
         let w = TimeOverrunWatcher::new();
         let stream = vec![
-            Signal::builder(Kind::AgentOutput)
+            Engram::builder(Kind::AgentOutput)
                 .body(Body::text("task finished"))
                 .build(),
         ];

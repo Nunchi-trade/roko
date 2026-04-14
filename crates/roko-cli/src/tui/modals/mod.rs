@@ -19,19 +19,19 @@ pub mod task_detail;
 pub mod task_picker;
 pub mod wave_overview;
 
-pub use agent_pool_modal::{render_agent_pool, AgentPoolRow};
+pub use agent_pool_modal::{AgentPoolRow, render_agent_pool};
 pub use approval::render_approval;
-pub use batch_review::{render_batch_review, BatchTaskResult};
-pub use confirm::{render_confirm, ConfirmAction};
+pub use batch_review::{BatchTaskResult, render_batch_review};
+pub use confirm::{ConfirmAction, render_confirm};
 pub use inject::render_inject;
-pub use notification::{render_notifications, Notification, NotificationLevel};
-pub use queue_overview::{render_queue_overview, Milestone, QueueTask};
+pub use notification::{Notification, NotificationLevel, render_notifications};
+pub use queue_overview::{Milestone, QueueTask, render_queue_overview};
 pub use quit::render_quit;
-pub use task_picker::{render_task_picker, TaskPickerRow};
-pub use wave_overview::{render_wave_overview, WaveInfo, WavePlanEntry};
+pub use task_picker::{TaskPickerRow, render_task_picker};
+pub use wave_overview::{WaveInfo, WavePlanEntry, render_wave_overview};
 
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
 use super::dashboard::Theme;
 
@@ -45,15 +45,10 @@ pub enum ModalState {
     Quit,
 
     /// Agent command approval.
-    Approval {
-        role: String,
-        command: String,
-    },
+    Approval { role: String, command: String },
 
     /// Destructive action confirmation.
-    Confirm {
-        action: ConfirmAction,
-    },
+    Confirm { action: ConfirmAction },
 
     /// Free-text injection to an agent.
     Inject {
@@ -101,12 +96,7 @@ pub enum ModalState {
 /// Call this after rendering the main dashboard content so the modal
 /// draws on top. Notifications are rendered independently since they can
 /// coexist with other modals.
-pub fn render_modal(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    modal: &ModalState,
-    theme: &Theme,
-) {
+pub fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState, theme: &Theme) {
     match modal {
         ModalState::Quit => {
             render_quit(frame, area, theme);
@@ -135,7 +125,14 @@ pub fn render_modal(
             selected_index,
             scroll_offset,
         } => {
-            render_queue_overview(frame, area, milestones, *selected_index, *scroll_offset, theme);
+            render_queue_overview(
+                frame,
+                area,
+                milestones,
+                *selected_index,
+                *scroll_offset,
+                theme,
+            );
         }
         ModalState::AgentPool {
             agents,

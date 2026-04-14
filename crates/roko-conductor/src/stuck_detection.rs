@@ -22,7 +22,7 @@
 //! assert_eq!(signal.unwrap().kind, StuckKind::OutputLoop);
 //! ```
 
-use roko_core::{Body, Kind, OperatingFrequency, Signal};
+use roko_core::{Body, Engram, Kind, OperatingFrequency};
 use serde::{Deserialize, Serialize};
 
 // ---- StuckKind --------------------------------------------------------------
@@ -521,11 +521,11 @@ pub struct MetaCognitionAssessment {
 impl MetaCognitionAssessment {
     /// Convert the assessment into a structured signal when action is needed.
     #[must_use]
-    pub fn to_signal(&self) -> Option<Signal> {
+    pub fn to_signal(&self) -> Option<Engram> {
         match self.action {
             MetaCognitionAction::Continue => None,
             _ => Some(
-                Signal::builder(Kind::Custom("roko.meta_cognition".into()))
+                Engram::builder(Kind::Custom("roko.meta_cognition".into()))
                     .body(
                         Body::from_json(self)
                             .expect("meta-cognition assessment should serialize to JSON"),

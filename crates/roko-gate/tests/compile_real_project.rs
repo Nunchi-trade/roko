@@ -5,7 +5,7 @@
 //! the failure path works too.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Gate, Kind, Signal, Substrate};
+use roko_core::{Body, Context, Engram, Gate, Kind, Substrate};
 use roko_gate::{BuildSystem, CompileGate, GatePayload};
 use roko_std::MemorySubstrate;
 use std::path::Path;
@@ -30,9 +30,9 @@ path = "src/lib.rs"
     fs::write(root.join("src/lib.rs"), lib_rs).await.unwrap();
 }
 
-fn payload_signal(working_dir: &Path) -> Signal {
+fn payload_signal(working_dir: &Path) -> Engram {
     let payload = GatePayload::in_dir(working_dir).with_label("test-fixture");
-    Signal::builder(Kind::Task)
+    Engram::builder(Kind::Task)
         .body(Body::from_json(&payload).unwrap())
         .build()
 }
@@ -84,7 +84,7 @@ async fn compile_gate_fails_on_syntax_error() {
 async fn compile_gate_fails_on_missing_dir() {
     let gate = CompileGate::new(BuildSystem::Cargo).with_timeout_ms(10_000);
     let payload = GatePayload::in_dir("/nonexistent/path/xyz");
-    let signal = Signal::builder(Kind::Task)
+    let signal = Engram::builder(Kind::Task)
         .body(Body::from_json(&payload).unwrap())
         .build();
 
@@ -96,7 +96,7 @@ async fn compile_gate_fails_on_missing_dir() {
 async fn compile_gate_rejects_malformed_payload() {
     let gate = CompileGate::new(BuildSystem::Cargo);
     // A signal with no body, or a non-GatePayload body, should be rejected.
-    let signal = Signal::builder(Kind::Task)
+    let signal = Engram::builder(Kind::Task)
         .body(Body::text("not a payload"))
         .build();
 
@@ -105,7 +105,7 @@ async fn compile_gate_rejects_malformed_payload() {
     assert!(verdict.reason.contains("not a GatePayload"));
 }
 
-/// End-to-end: gate → verdict → persist as Signal → re-query.
+/// End-to-end: gate → verdict → persist as Engram → re-query.
 ///
 /// This demonstrates the architectural flow: a gate's verdict becomes a
 /// signal that lives in a substrate, ready to be consumed by policies.
@@ -156,7 +156,7 @@ struct PersistingGate<G: Gate> {
 
 #[async_trait]
 impl<G: Gate> Gate for PersistingGate<G> {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> roko_core::Verdict {
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> roko_core::Verdict {
         let verdict = self.inner.verify(signal, ctx).await;
         let verdict_signal = signal
             .derive(

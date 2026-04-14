@@ -2,7 +2,7 @@
 //! operations. These flow through the shared event bus and are streamed to
 //! connected SSE / WebSocket clients.
 
-use roko_core::Signal;
+use roko_core::{ContentHash, Engram};
 use serde::{Deserialize, Serialize};
 
 /// Progress emitted by the execution loop as plans move through phases,
@@ -131,6 +131,16 @@ pub enum ServerEvent {
         value: f64,
     },
 
+    /// A strong somatic marker fired for the current task situation.
+    SomaticMarkerFired {
+        plan_id: String,
+        task_id: String,
+        valence: f64,
+        intensity: f64,
+        source_episodes: Vec<ContentHash>,
+        strategy_param: String,
+    },
+
     /// A one-shot run was started.
     RunStarted { run_id: String, prompt: String },
 
@@ -179,7 +189,7 @@ pub enum ServerEvent {
     Error { message: String },
 
     /// A webhook signal was accepted and published for downstream processing.
-    WebhookReceived { signal: Signal },
+    WebhookReceived { signal: Engram },
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@
 //! gates can verify.
 
 use async_trait::async_trait;
-use roko_core::{Context, Signal, traits::Gate, verdict::Verdict};
+use roko_core::{Context, Engram, traits::Gate, verdict::Verdict};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -145,7 +145,7 @@ impl TxSimGate {
 
 #[async_trait]
 impl Gate for TxSimGate {
-    async fn verify(&self, input: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, input: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         let tx = match parse_tx_from_signal(input) {
@@ -251,10 +251,10 @@ impl TxSimulator for FailingSimulator {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Context, Kind, Provenance, Signal};
+    use roko_core::{Body, Context, Engram, Kind, Provenance};
 
-    fn tx_signal_json(v: serde_json::Value) -> Signal {
-        Signal::builder(Kind::Transaction)
+    fn tx_signal_json(v: serde_json::Value) -> Engram {
+        Engram::builder(Kind::Transaction)
             .body(Body::Json(v))
             .provenance(Provenance::agent("alice"))
             .build()
@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn verify_fail_on_non_json_body() {
         let gate = sim_gate(SimulationOutcome::ok(1), TxSimGateConfig::default());
-        let signal = Signal::builder(Kind::Transaction)
+        let signal = Engram::builder(Kind::Transaction)
             .body(Body::Bytes(vec![1, 2, 3]))
             .provenance(Provenance::agent("alice"))
             .build();

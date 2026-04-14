@@ -38,7 +38,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
 
 use crate::episode_logger::Episode;

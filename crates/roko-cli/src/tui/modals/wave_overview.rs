@@ -1,9 +1,9 @@
 //! Wave progress popup showing execution wave details.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -67,10 +67,7 @@ pub fn render_wave_overview(
                 .unwrap_or_default();
 
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("Wave {} ", wave.wave_index),
-                    theme.accent_bold(),
-                ),
+                Span::styled(format!("Wave {} ", wave.wave_index), theme.accent_bold()),
                 Span::styled(format!("[{duration_str}]"), theme.muted()),
                 Span::styled(format!("  {eta_str}"), theme.info()),
             ]));
@@ -92,10 +89,7 @@ pub fn render_wave_overview(
 
                 lines.push(Line::from(vec![
                     Span::styled("  ", theme.text()),
-                    Span::styled(
-                        format!("{:<20}", plan.plan_id),
-                        theme.text(),
-                    ),
+                    Span::styled(format!("{:<20}", plan.plan_id), theme.text()),
                     Span::styled(format!("{:<10}", plan.status), status_style),
                     Span::styled(dur, theme.muted()),
                 ]));

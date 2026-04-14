@@ -4,7 +4,7 @@
 //! against the budget set via `name=plan_budget`. Fires when cost
 //! exceeds budget.
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "cost-overrun";
@@ -48,7 +48,7 @@ impl CostOverrunWatcher {
 }
 
 /// Find the most recent metric value by name.
-fn latest_metric(stream: &[Signal], name: &str) -> Option<f64> {
+fn latest_metric(stream: &[Engram], name: &str) -> Option<f64> {
     stream
         .iter()
         .rev()
@@ -58,7 +58,7 @@ fn latest_metric(stream: &[Signal], name: &str) -> Option<f64> {
 }
 
 impl Policy for CostOverrunWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(cost) = latest_metric(stream, PLAN_COST_METRIC) else {
             return Vec::new();
         };
@@ -71,7 +71,7 @@ impl Policy for CostOverrunWatcher {
 
         if cost > budget {
             vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
                         "plan cost ${cost:.2} exceeds budget ${budget:.2}"
                     )))
@@ -95,16 +95,16 @@ impl Policy for CostOverrunWatcher {
 mod tests {
     use super::*;
 
-    fn cost_signal(cost: f64) -> Signal {
-        Signal::builder(Kind::Metric)
+    fn cost_signal(cost: f64) -> Engram {
+        Engram::builder(Kind::Metric)
             .body(Body::text("cost"))
             .tag(METRIC_NAME_TAG, PLAN_COST_METRIC)
             .tag(METRIC_VALUE_TAG, &format!("{cost}"))
             .build()
     }
 
-    fn budget_signal(budget: f64) -> Signal {
-        Signal::builder(Kind::Metric)
+    fn budget_signal(budget: f64) -> Engram {
+        Engram::builder(Kind::Metric)
             .body(Body::text("budget"))
             .tag(METRIC_NAME_TAG, PLAN_BUDGET_METRIC)
             .tag(METRIC_VALUE_TAG, &format!("{budget}"))

@@ -445,7 +445,9 @@ impl SystemPromptBuilder {
         }
 
         if affect.pleasure <= -0.25 {
-            guidance.push("Prefer proven approaches, verify early, and surface uncertainty explicitly.");
+            guidance.push(
+                "Prefer proven approaches, verify early, and surface uncertainty explicitly.",
+            );
         } else if affect.pleasure >= 0.35 {
             guidance.push("Keep the solution lean and avoid over-engineering.");
         }
@@ -454,6 +456,18 @@ impl SystemPromptBuilder {
             guidance.push("Reduce scope until the next concrete checkpoint is clear.");
         } else if affect.dominance >= 0.30 {
             guidance.push("Execute decisively, but keep claims grounded in evidence.");
+        }
+
+        if affect.somatic_intensity >= 0.25 {
+            if affect.somatic_valence <= -0.25 {
+                guidance.push(
+                    "This task resembles prior failure territory; favor conservative validation and known-safe sequences.",
+                );
+            } else if affect.somatic_valence >= 0.25 {
+                guidance.push(
+                    "This task resembles prior success territory; reuse known-good patterns, but keep verification intact.",
+                );
+            }
         }
 
         if guidance.is_empty() {
@@ -929,6 +943,18 @@ mod tests {
             .build();
         assert!(!neutral.contains("time pressure"));
         assert!(!neutral.contains("explore thoroughly"));
+    }
+
+    #[test]
+    fn affect_guidance_mentions_negative_somatic_signal() {
+        let prompt = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(
+                PadState::new(0.0, 0.0, 0.0).with_somatic_hint(-0.8, 0.7),
+            ))
+            .build();
+
+        assert!(prompt.contains("prior failure territory"));
+        assert!(prompt.contains("known-safe sequences"));
     }
 
     #[test]

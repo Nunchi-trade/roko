@@ -83,9 +83,7 @@ pub fn render_parallel_pool(
     sorted.sort_by(|(_, a), (_, b)| {
         let a_active = a.state == AgentRunState::Active;
         let b_active = b.state == AgentRunState::Active;
-        b_active
-            .cmp(&a_active)
-            .then_with(|| a.role.cmp(&b.role))
+        b_active.cmp(&a_active).then_with(|| a.role.cmp(&b.role))
     });
 
     let rows: Vec<Row<'_>> = sorted

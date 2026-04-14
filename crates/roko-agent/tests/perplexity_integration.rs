@@ -14,11 +14,11 @@ use roko_agent::perplexity::embed::PerplexityEmbedAgent;
 use roko_agent::perplexity::search::{PerplexitySearchClient, SearchQuery};
 use roko_agent::perplexity::types::{PerplexityMetadata, SearchOptions};
 use roko_agent::provider::{ProviderAdapter, ProviderError};
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 use serde_json::{Value, json};
 
-fn prompt(text: &str) -> Signal {
-    Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+fn prompt(text: &str) -> Engram {
+    Engram::builder(Kind::Prompt).body(Body::text(text)).build()
 }
 
 #[derive(Debug, Clone)]

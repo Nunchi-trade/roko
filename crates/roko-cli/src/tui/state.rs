@@ -760,8 +760,7 @@ impl TuiState {
         self.agents.clear();
         self.agents_by_id.clear();
         for agent in &data.agents {
-            let is_active =
-                agent.status == "active" || agent.status == "running";
+            let is_active = agent.status == "active" || agent.status == "running";
             self.agents.push(AgentRow {
                 id: agent.id.clone(),
                 active: is_active,
@@ -830,8 +829,7 @@ impl TuiState {
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
         self.cost_dollars = data.efficiency.total_cost_usd;
-        self.token_total =
-            data.efficiency.total_input_tokens + data.efficiency.total_output_tokens;
+        self.token_total = data.efficiency.total_input_tokens + data.efficiency.total_output_tokens;
 
         // Build phase_pipeline from canonical phases + active_tasks
         self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
@@ -924,15 +922,11 @@ impl TuiState {
 // ---------------------------------------------------------------------------
 
 /// Build the canonical 9-phase pipeline, inferring status from active tasks.
-fn build_phase_pipeline(
-    active_tasks: &[super::dashboard::TaskSummary],
-) -> Vec<PhaseStep> {
+fn build_phase_pipeline(active_tasks: &[super::dashboard::TaskSummary]) -> Vec<PhaseStep> {
     // Determine which phase is currently active based on task statuses
     let active_statuses: Vec<&str> = active_tasks
         .iter()
-        .filter(|t| {
-            t.status == "running" || t.status == "active" || t.status == "executing"
-        })
+        .filter(|t| t.status == "running" || t.status == "active" || t.status == "executing")
         .map(|t| t.status.as_str())
         .collect();
 
@@ -1047,11 +1041,7 @@ fn extract_episode_output(episode: &roko_learn::episode_logger::Episode) -> Stri
             }
         }
     }
-    episode
-        .failure_reason
-        .as_deref()
-        .unwrap_or("")
-        .to_string()
+    episode.failure_reason.as_deref().unwrap_or("").to_string()
 }
 
 /// Build the task checklist using plan execution + task-tracker data (Task 3).
@@ -1059,9 +1049,7 @@ fn extract_episode_output(episode: &roko_learn::episode_logger::Episode) -> Stri
 /// If a `PlanExecutionSnapshot` is available, uses its task rows which
 /// already reflect task-tracker completed/failed status. Falls back to
 /// `active_tasks` when no execution snapshot exists.
-fn build_task_checklist_from_execution(
-    data: &super::dashboard::DashboardData,
-) -> Vec<TaskRow> {
+fn build_task_checklist_from_execution(data: &super::dashboard::DashboardData) -> Vec<TaskRow> {
     // Prefer the PlanExecutionSnapshot which already incorporates tracker data
     if let Some(exec) = &data.current_plan_execution {
         return exec
@@ -1071,10 +1059,13 @@ fn build_task_checklist_from_execution(
                 let status = match t.phase.to_ascii_lowercase().as_str() {
                     "done" => TaskRowStatus::Done,
                     "failed" => TaskRowStatus::Failed,
-                    "implementing" | "gating" | "verifying" | "reviewing"
-                    | "doc revision" | "auto fixing" | "regenerating verify" => {
-                        TaskRowStatus::Active
-                    }
+                    "implementing"
+                    | "gating"
+                    | "verifying"
+                    | "reviewing"
+                    | "doc revision"
+                    | "auto fixing"
+                    | "regenerating verify" => TaskRowStatus::Active,
                     "queued" => TaskRowStatus::Pending,
                     _ if t.is_current => TaskRowStatus::Active,
                     _ => TaskRowStatus::Pending,
@@ -1170,7 +1161,7 @@ fn episode_to_phase_name(episode: &roko_learn::episode_logger::Episode) -> Strin
         "compile" | "compile-gate" | "compile_gate" => return "compile-gate".to_string(),
         "test" | "test-gate" | "test_gate" => return "test-gate".to_string(),
         "review" | "reviewing" | "critic-review" | "critic_review" => {
-            return "reviewing".to_string()
+            return "reviewing".to_string();
         }
         "verdict" => return "verdict".to_string(),
         "commit" | "committing" => return "committing".to_string(),

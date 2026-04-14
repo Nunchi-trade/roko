@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use octocrab::{Octocrab, Page};
 use reqwest::Client;
 use roko_core::tool::ExternalAction;
-use roko_core::{Body, Kind, Provenance, Signal};
+use roko_core::{Body, Engram, Kind, Provenance};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::prompt_experiment::ExperimentStore;
 use serde_json::{Value, json};
@@ -251,7 +251,7 @@ async fn persist_feedback_result(
     observation: FeedbackObservation,
 ) -> Result<()> {
     let feedback_kind = feedback_signal_kind(&action.service, &action.action_type);
-    let signal = Signal::builder(feedback_kind)
+    let signal = Engram::builder(feedback_kind)
         .body(Body::from_json(&json!({
             "episode_id": episode.episode_id,
             "episode_hash": episode.id,

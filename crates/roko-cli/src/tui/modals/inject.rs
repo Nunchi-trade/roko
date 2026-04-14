@@ -1,9 +1,9 @@
 //! Free-text message injection modal for steering agents.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -75,10 +75,7 @@ pub fn render_inject(
         Span::styled("[Esc]", theme.accent_bold()),
         Span::styled(" cancel", theme.muted()),
     ]);
-    frame.render_widget(
-        Paragraph::new(hints).alignment(Alignment::Right),
-        chunks[2],
-    );
+    frame.render_widget(Paragraph::new(hints).alignment(Alignment::Right), chunks[2]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

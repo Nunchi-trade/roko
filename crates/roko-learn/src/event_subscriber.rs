@@ -200,6 +200,7 @@ pub async fn run_learning_subscriber(
             | AgentEvent::ExperimentAssigned { .. }
             | AgentEvent::SessionEstablished { .. }
             | AgentEvent::ModelSelected { .. }
+            | AgentEvent::SomaticMarkerFired { .. }
             | AgentEvent::StreamChunk { .. } => {}
         }
     }

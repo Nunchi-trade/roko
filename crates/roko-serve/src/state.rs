@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, RwLock};
 use tokio::task::JoinHandle;
 
-use bardo_runtime::cancel::CancelToken;
-use bardo_runtime::process::ProcessSupervisor;
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
-use roko_core::{Signal, Substrate};
-use roko_daimon::DaimonState;
+use roko_core::{Engram, Substrate};
+use roko_daimon::{DaimonState, StrategySpaceDefinition};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::provider_health::ProviderHealthTracker;
+use roko_runtime::cancel::CancelToken;
+use roko_runtime::process::ProcessSupervisor;
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
@@ -172,12 +172,31 @@ impl AppState {
         roko_config: RokoConfig,
         deploy_backend: Arc<dyn DeployBackend>,
     ) -> Self {
+        Self::new_with_daimon_strategy(
+            workdir,
+            runtime,
+            roko_config,
+            deploy_backend,
+            StrategySpaceDefinition::default(),
+        )
+    }
+
+    /// Construct a new `AppState` with an explicit Daimon strategy-space definition.
+    pub fn new_with_daimon_strategy(
+        workdir: PathBuf,
+        runtime: Arc<dyn CliRuntime>,
+        roko_config: RokoConfig,
+        deploy_backend: Arc<dyn DeployBackend>,
+        strategy_space: StrategySpaceDefinition,
+    ) -> Self {
         let layout = RokoLayout::for_project(&workdir);
         let signal_root = layout.root().to_path_buf();
         let affect_path = affect_state_path(layout.root());
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
+        let mut affect_engine = DaimonState::load_or_new(&affect_path);
+        affect_engine.configure_strategy_space(strategy_space);
 
         let mut template_registry = TemplateRegistry::new(workdir.clone());
         template_registry.scan();
@@ -190,7 +209,7 @@ impl AppState {
             started_at: Instant::now(),
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
-            affect_engine: Mutex::new(DaimonState::load_or_new(&affect_path)),
+            affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(1024),
             state_hub: roko_core::shared_state_hub(),
             subscriptions,
@@ -256,7 +275,7 @@ impl SignalStore {
     }
 
     /// Persist a signal through the normal file-backed substrate path.
-    pub async fn put(&self, signal: Signal) -> anyhow::Result<()> {
+    pub async fn put(&self, signal: Engram) -> anyhow::Result<()> {
         let substrate = self.substrate().await?;
         substrate.put(signal).await?;
         Ok(())

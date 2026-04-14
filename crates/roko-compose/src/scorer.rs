@@ -1,13 +1,13 @@
 //! Scorers for prompt sections.
 //!
-//! `SectionScorer` ranks `Signal<PromptSection>` inputs by priority, recency,
+//! `SectionScorer` ranks `Engram<PromptSection>` inputs by priority, recency,
 //! and cache-layer fit. The `HighestScoreRouter` can use this scorer to pick
 //! the most important section when the composer's budget is tight.
 
 use crate::prompt::{PromptSection, SectionPriority};
-use roko_core::{Context, Score, Scorer, Signal};
+use roko_core::{Context, Engram, Score, Scorer};
 
-/// Ranks `Signal<PromptSection>` inputs by importance.
+/// Ranks `Engram<PromptSection>` inputs by importance.
 ///
 /// Score breakdown:
 /// - **confidence**: priority mapped to `[0.2, 0.4, 0.8, 1.0]`
@@ -39,7 +39,7 @@ impl SectionScorer {
 }
 
 impl Scorer for SectionScorer {
-    fn score(&self, signal: &Signal, ctx: &Context) -> Score {
+    fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         let Ok(section) = PromptSection::from_signal(signal) else {
             return Score::ZERO;
         };
@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use crate::prompt::{CacheLayer, Placement};
 
-    fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Signal {
+    fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Engram {
         PromptSection::new("x", content)
             .with_priority(priority)
             .with_cache_layer(CacheLayer::Plan)
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn non_section_signals_get_zero_score() {
         let scorer = SectionScorer::new();
-        let not_a_section = Signal::builder(roko_core::Kind::Task)
+        let not_a_section = Engram::builder(roko_core::Kind::Task)
             .body(roko_core::Body::text("not a section"))
             .build();
         let score = scorer.score(&not_a_section, &Context::at(0));

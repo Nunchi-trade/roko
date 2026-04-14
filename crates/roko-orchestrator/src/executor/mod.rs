@@ -64,6 +64,9 @@ pub struct ExecutorConfig {
     /// Whether to auto-replan after repeated gate failures.
     #[serde(default = "ExecutorConfig::default_auto_replan")]
     pub auto_replan: bool,
+    /// Whether task execution should use isolated git worktrees.
+    #[serde(default = "ExecutorConfig::default_use_worktrees")]
+    pub use_worktrees: bool,
 }
 
 impl Default for ExecutorConfig {
@@ -76,6 +79,7 @@ impl Default for ExecutorConfig {
             task_timeout_secs: Self::default_task_timeout_secs(),
             budget_usd: None,
             auto_replan: Self::default_auto_replan(),
+            use_worktrees: Self::default_use_worktrees(),
         }
     }
 }
@@ -91,6 +95,10 @@ impl ExecutorConfig {
 
     const fn default_auto_replan() -> bool {
         true
+    }
+
+    const fn default_use_worktrees() -> bool {
+        false
     }
 }
 
@@ -421,6 +429,11 @@ mod tests {
         assert!(ex.active_plans().is_empty());
         assert!(ex.completed_plans().is_empty());
         assert!(ex.tick().is_empty());
+    }
+
+    #[test]
+    fn executor_config_disables_worktrees_by_default() {
+        assert!(!ExecutorConfig::default().use_worktrees);
     }
 
     // ── add_plan ──

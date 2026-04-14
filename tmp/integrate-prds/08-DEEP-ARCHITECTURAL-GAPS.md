@@ -149,7 +149,8 @@ KnowledgeEntry now has a `tier` field:
 - `roko-daimon` now persists a real `SomaticLandscape` backed by a `kiddo` k-d tree over the coding-domain 8D strategy space `(complexity, risk, novelty, confidence, time_pressure, scope, reversibility, dependency_depth)`
 - `SomaticMarker` and `SomaticSignal` are implemented, with live task outcomes recorded from `roko-cli` and queried pre-dispatch through `DaimonState::modulate_with_strategy(...)`
 - The query path already blends a mandatory contrarian slice and preserves episode provenance, so Daimon now has a real "gut feeling" fast path instead of PAD-only modulation
-- Remaining gaps are the richer PRD surfaces: domain-configurable axis sets beyond coding, dream-time marker consolidation / depotentiation, explicit somatic-fired events, and direct fusion of somatic scores into Neuro retrieval rather than only routing
+- Dream feedback now also applies dream-time depotentiation to both PAD arousal and high-intensity somatic markers, synthesizes consolidated markers from replayed emotionally tagged episodes/clusters, and strong matches emit explicit `SomaticMarkerFired` runtime events
+- Remaining gaps are the richer PRD surfaces: dedicated non-coding strategy-space extractors beyond the centralized config/computation path, plus broader multi-surface use of somatic signals beyond the current dispatch/prompt/retrieval path
 
 ### Behavioral State Classification — IMPLEMENTED
 - Shared `BehavioralState` now lives in `roko-core` with explicit `classify(pad, confidence)` logic
@@ -160,8 +161,8 @@ KnowledgeEntry now has a `tier` field:
 ### Mood-Congruent Retrieval — PARTIAL
 - `ContextAssembler` now biases retrieval with `PadState`, scores chunk-level emotional congruence from `EmotionalTag`, and reserves a contrarian slice of knowledge entries so negative mood does not collapse into pure caution and positive mood does not collapse into pure optimism
 - `Engram` now supports optional `EmotionalTag` metadata, and Neuro persists derived `EmotionalProvenance` metadata on consolidated knowledge
-- `roko-daimon` now also has an 8D somatic marker space and k-d-tree query path that modulates dispatch before work begins
-- The remaining gap is deeper fusion: somatic signals do not yet directly re-rank Neuro knowledge retrieval, and dream-managed emotional depotentiation is still missing
+- `roko-daimon` now also has an 8D somatic marker space and k-d-tree query path that modulates dispatch before work begins, and `roko-neuro::ContextAssembler` now consumes that somatic hint directly when ranking chunks
+- The remaining gap is broader coordination: dedicated non-coding strategy-space extractors and the cross-subsystem VCG market are still missing
 
 ### EmotionalTag on Engrams — PARTIAL
 ```rust

@@ -224,14 +224,16 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     let cli_config = load_layered(&workdir)?.config;
     let dream_settings = cli_config.dreams.clone();
     let agent_settings = cli_config.agent.clone();
+    let daimon_strategy_space = cli_config.daimon.strategy_space.clone();
     let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
     let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::new_with_daimon_strategy(
         workdir.clone(),
         runtime,
         core_config,
         deploy_backend,
+        daimon_strategy_space,
     ));
 
     let dream_config = dreams::DreamLoopConfig {

@@ -211,7 +211,8 @@ mod tests {
 
         let table = CostTable { models };
         let blended = table.blended_cost_per_m("glm-5.1");
-        assert!((blended - 1.995).abs() < 1e-12);
+        let expected = ((3.0 * 1.40 + 4.40) / 4.0) * 1.05;
+        assert!((blended - expected).abs() < 1e-12);
     }
 
     #[test]

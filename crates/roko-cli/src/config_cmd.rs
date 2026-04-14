@@ -112,6 +112,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         }),
         auto_plan: None,
         dreams: None,
+        daimon: None,
         tools: Some(ToolsLayer {
             prefer_mcp: Some(false),
             global_denied: Some(Vec::new()),
@@ -174,6 +175,7 @@ fn default_executor_layer() -> ExecutorLayer {
         task_timeout_secs: Some(defaults.task_timeout_secs),
         budget_usd: defaults.budget_usd,
         auto_replan: Some(defaults.auto_replan),
+        use_worktrees: Some(defaults.use_worktrees),
     }
 }
 

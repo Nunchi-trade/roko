@@ -35,10 +35,10 @@ use roko_compose::{
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
+use roko_core::DaimonPolicy;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
-use roko_core::DaimonPolicy;
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
 use roko_core::tool::TraceId;
@@ -49,7 +49,8 @@ use roko_core::{
     OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, Verdict,
 };
 use roko_daimon::{
-    AffectEngine as _, AffectEvent, DaimonState, DispatchParams, StrategyCoordinates,
+    AffectEngine as _, AffectEvent, DaimonState, DispatchParams, SomaticSignal,
+    StrategyCoordinates, TaskStrategyObservation,
 };
 use roko_dreams::{DreamAgentConfig, DreamLoopConfig, DreamRunner};
 use roko_fs::FileSubstrate;
@@ -1691,51 +1692,25 @@ fn coding_strategy_coordinates(
         .unwrap_or(0.0);
     let is_current_impl_task =
         tracker.and_then(|tracker| tracker.last_impl_task_id.as_deref()) == Some(task_id);
-
-    let complexity = match task_def.map(|task| task.tier.as_str()).unwrap_or("focused") {
-        "mechanical" | "fast" => 0.15,
-        "focused" | "standard" => 0.35,
-        "integrative" => 0.60,
-        "architectural" | "complex" => 0.85,
-        "premium" => 0.95,
-        _ => 0.50,
+    let observation = TaskStrategyObservation {
+        task_tier: task_def
+            .map(|task| task.tier.clone())
+            .unwrap_or_else(|| "focused".to_string()),
+        file_count: task_def.map_or(0, |task| task.files.len()),
+        verification_count: task_def.map_or(0, |task| task.verify.len()),
+        dependency_count: task_def.map_or(0, |task| task.depends_on.len()),
+        max_loc: task_def.and_then(|task| task.max_loc).unwrap_or(50),
+        familiarity,
+        confidence: affect.confidence,
+        failure_pressure: gate_failure_pressure,
+        urgency_pressure: f64::from(is_current_impl_task),
     };
-    let file_count = task_def.map_or(0.0, |task| task.files.len() as f64);
-    let verify_count = task_def.map_or(0.0, |task| task.verify.len() as f64);
-    let dependency_count = task_def.map_or(0.0, |task| task.depends_on.len() as f64);
-    let max_loc = task_def
-        .and_then(|task| task.max_loc)
-        .map(f64::from)
-        .unwrap_or(50.0);
 
-    let scope = (0.55 * complexity
-        + 0.30 * (file_count / 8.0).min(1.0)
-        + 0.15 * (max_loc / 400.0).min(1.0))
-    .clamp(0.0, 1.0);
-    let novelty = (1.0 - familiarity).clamp(0.0, 1.0);
-    let risk = (0.40 * complexity
-        + 0.25 * novelty
-        + 0.20 * (verify_count / 4.0).min(1.0)
-        + 0.15 * gate_failure_pressure)
-        .clamp(0.0, 1.0);
-    let time_pressure =
-        (0.70 * gate_failure_pressure + 0.30 * f64::from(is_current_impl_task)).clamp(0.0, 1.0);
-    let reversibility = (1.0
-        - (0.60 * scope + 0.20 * (dependency_count / 6.0).min(1.0) + 0.20 * gate_failure_pressure))
-        .clamp(0.0, 1.0);
-    let dependency_depth =
-        (0.60 * (dependency_count / 6.0).min(1.0) + 0.40 * complexity).clamp(0.0, 1.0);
-
-    StrategyCoordinates::new(
-        complexity,
-        risk,
-        novelty,
-        affect.confidence,
-        time_pressure,
-        scope,
-        reversibility,
-        dependency_depth,
-    )
+    runner
+        .daimon
+        .strategy_space()
+        .computer()
+        .task_coords(&observation)
 }
 
 fn somatic_episode_hash(
@@ -2541,7 +2516,8 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
-        let daimon = DaimonState::load_or_new(daimon_state_path(workdir));
+        let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
+        daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -2665,7 +2641,8 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
-        let daimon = DaimonState::load_or_new(daimon_state_path(workdir));
+        let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
+        daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -2787,7 +2764,8 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
-        let daimon = DaimonState::load_or_new(daimon_state_path(workdir));
+        let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
+        daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
@@ -5474,7 +5452,7 @@ impl PlanRunner {
     /// task metric data derived from the agent result context.
     fn enrich_completed_run(
         &self,
-        ep: Episode,
+        mut ep: Episode,
         plan_id: &str,
         task_id: &str,
         role: &str,
@@ -5482,6 +5460,25 @@ impl PlanRunner {
         gate_passed: Option<bool>,
         iteration: u32,
     ) -> CompletedRunInput {
+        if ep.agent_template.trim().is_empty() {
+            ep.agent_template = role.to_string();
+        }
+        if ep.model.trim().is_empty() {
+            ep.model = model.to_string();
+        }
+        ep.extra
+            .entry("plan_id".to_string())
+            .or_insert_with(|| serde_json::json!(plan_id));
+        ep.extra
+            .entry("role".to_string())
+            .or_insert_with(|| serde_json::json!(role));
+        ep.extra
+            .entry("model".to_string())
+            .or_insert_with(|| serde_json::json!(model));
+        ep.extra
+            .entry("task_category".to_string())
+            .or_insert_with(|| serde_json::json!(default_task_category(role)));
+
         let provider = self.provider_id_for_model(model);
         let cost = CostRecord {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -6157,19 +6154,8 @@ impl PlanRunner {
             ep.episode_id = ep.id.clone();
         }
         let success_episode_id = ep.episode_id.clone();
-        if let Some(task_def) = task_def.as_ref() {
-            ep.extra.insert(
-                "files".to_string(),
-                serde_json::json!(task_def.files.clone()),
-            );
-        }
-        ep.extra.insert(
-            "crate_familiarity".to_string(),
-            serde_json::json!(
-                self.crate_familiarity_tracker
-                    .score_for_task(task_def.as_ref())
-            ),
-        );
+        let task_strategy =
+            self.stamp_task_strategy_metadata(&mut ep, plan_id, task_id, task_def.as_ref());
         ep.usage = Usage {
             wall_ms,
             cost_usd: f64::from(result.usage.cost_usd),
@@ -6250,7 +6236,7 @@ impl PlanRunner {
             succeeded: true,
         });
         self.daimon.record_somatic_outcome(
-            coding_strategy_coordinates(self, plan_id, task_id, task_def.as_ref()),
+            task_strategy,
             somatic_episode_hash(plan_id, task_id, "success", &success_episode_id),
         );
 
@@ -7489,19 +7475,8 @@ impl PlanRunner {
             "task_failure",
             result.as_ref().map(|agent_result| &agent_result.output),
         );
-        if let Some(task_def) = task_def.as_ref() {
-            ep.extra.insert(
-                "files".to_string(),
-                serde_json::json!(task_def.files.clone()),
-            );
-        }
-        ep.extra.insert(
-            "crate_familiarity".to_string(),
-            serde_json::json!(
-                self.crate_familiarity_tracker
-                    .score_for_task(task_def.as_ref())
-            ),
-        );
+        let task_strategy =
+            self.stamp_task_strategy_metadata(&mut ep, plan_id, task_id, task_def.as_ref());
         ep.usage = match result {
             Some(result) => Usage {
                 wall_ms,
@@ -7575,7 +7550,7 @@ impl PlanRunner {
             succeeded: false,
         });
         self.daimon.record_somatic_outcome(
-            coding_strategy_coordinates(self, plan_id, task_id, task_def.as_ref()),
+            task_strategy,
             somatic_episode_hash(plan_id, task_id, "failure", &error.to_string()),
         );
 
@@ -8699,14 +8674,16 @@ impl PlanRunner {
             selected_model
         };
 
+        let task_strategy = self.current_task_strategy(plan_id, task, task_def.as_ref());
+        let somatic_signal = self.daimon.query_somatic(task_strategy);
+        self.emit_somatic_marker_fired_event(plan_id, task, &somatic_signal, "dispatch");
+
         let pre_daimon_model = selected_model.clone();
         let mut dispatch_params =
             DispatchParams::new(selected_model.clone(), frequency.turn_limit());
         dispatch_params.effort = self.config.agent.effort.clone();
-        self.daimon.modulate_with_strategy(
-            &mut dispatch_params,
-            coding_strategy_coordinates(self, plan_id, task, task_def.as_ref()),
-        );
+        self.daimon
+            .modulate_with_strategy(&mut dispatch_params, task_strategy);
         let selected_model = dispatch_params.model;
         let dispatch_turn_limit = dispatch_params.turn_limit;
         let dispatch_effort = dispatch_params.effort.clone();
@@ -8907,13 +8884,16 @@ impl PlanRunner {
         } else {
             let relevant_context = build_relevant_context_layer(&context_sections);
             let context_window_tokens = effective_context_window_tokens(&self.config);
+            let task_affect_state = self
+                .current_pad_state()
+                .with_somatic_hint(somatic_signal.valence, somatic_signal.intensity);
             build_system_prompt_with_context_validated(
                 role,
                 plan_id,
                 task,
                 &task_allowed_tools_csv,
                 relevant_context.as_deref(),
-                Some(self.current_pad_state()),
+                Some(task_affect_state),
                 context_window_tokens,
             )?
         };
@@ -10978,6 +10958,99 @@ impl PlanRunner {
         PadState::from(self.daimon.query().pad)
     }
 
+    fn current_task_strategy(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+    ) -> StrategyCoordinates {
+        coding_strategy_coordinates(self, plan_id, task_id, task_def)
+    }
+
+    fn stamp_task_strategy_metadata(
+        &self,
+        episode: &mut Episode,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+    ) -> StrategyCoordinates {
+        let strategy = self.current_task_strategy(plan_id, task_id, task_def);
+        episode.extra.insert(
+            "strategy_coordinates".to_string(),
+            serde_json::to_value(strategy)
+                .expect("strategy coordinates serialization should not fail"),
+        );
+        episode.extra.insert(
+            "strategy_space_domain".to_string(),
+            serde_json::json!(self.daimon.strategy_space().domain.clone()),
+        );
+        episode.extra.insert(
+            "strategy_space_dimensions".to_string(),
+            serde_json::to_value(self.daimon.strategy_space().labels())
+                .expect("strategy space labels serialization should not fail"),
+        );
+        episode.extra.insert(
+            "crate_familiarity".to_string(),
+            serde_json::json!(self.crate_familiarity_tracker.score_for_task(task_def)),
+        );
+        if let Some(task_def) = task_def {
+            episode.extra.insert(
+                "task_tier".to_string(),
+                serde_json::json!(task_def.tier.clone()),
+            );
+            episode.extra.insert(
+                "file_count".to_string(),
+                serde_json::json!(task_def.files.len()),
+            );
+            episode.extra.insert(
+                "verify_count".to_string(),
+                serde_json::json!(task_def.verify.len()),
+            );
+            episode.extra.insert(
+                "dependency_count".to_string(),
+                serde_json::json!(task_def.depends_on.len()),
+            );
+            if let Some(max_loc) = task_def.max_loc {
+                episode
+                    .extra
+                    .insert("max_loc".to_string(), serde_json::json!(max_loc));
+            }
+            episode.extra.insert(
+                "files".to_string(),
+                serde_json::json!(task_def.files.clone()),
+            );
+        }
+        strategy
+    }
+
+    fn emit_somatic_marker_fired_event(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        signal: &SomaticSignal,
+        strategy_param: &str,
+    ) {
+        if !signal.should_emit_event() {
+            return;
+        }
+
+        self.learning_event_bus
+            .publish(AgentEvent::SomaticMarkerFired {
+                task_id: task_id.to_string(),
+                valence: signal.valence,
+                intensity: signal.intensity,
+                source_episode_count: signal.source_episodes.len(),
+            });
+        self.emit_server_event(crate::serve::events::ServerEvent::SomaticMarkerFired {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            valence: signal.valence,
+            intensity: signal.intensity,
+            source_episodes: signal.source_episodes.clone(),
+            strategy_param: strategy_param.to_string(),
+        });
+    }
+
     fn stamp_episode_affect(&self, episode: &mut Episode, trigger: &str, output: Option<&Engram>) {
         if episode.emotional_tag.is_some() {
             return;
@@ -11050,6 +11123,20 @@ impl PlanRunner {
             "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.",
         )
         .build()
+    }
+}
+
+fn default_task_category(role: &str) -> &'static str {
+    if role.eq_ignore_ascii_case("Implementer") || role.eq_ignore_ascii_case("AutoFixer") {
+        "implementation"
+    } else if role.eq_ignore_ascii_case("Strategist") {
+        "planning"
+    } else if role.eq_ignore_ascii_case("Auditor") {
+        "review"
+    } else if role.eq_ignore_ascii_case("Scribe") {
+        "documentation"
+    } else {
+        "implementation"
     }
 }
 
@@ -12430,6 +12517,8 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                 created_at: chrono::Utc::now(),
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Persistent,
+                emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .unwrap();
@@ -12455,6 +12544,8 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                 created_at: chrono::Utc::now(),
                 half_life_days: 90.0,
                 tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .unwrap();
@@ -12510,6 +12601,8 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                 created_at: chrono::Utc::now(),
                 half_life_days: 30.0,
                 tier: KnowledgeTier::Persistent,
+                emotional_tag: None,
+                emotional_provenance: None,
                 hdc_vector: None,
             })
             .unwrap();

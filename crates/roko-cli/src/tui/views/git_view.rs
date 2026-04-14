@@ -8,11 +8,11 @@
 
 use std::process::Command;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -174,12 +174,7 @@ fn render_branch_tree(
 }
 
 /// Worktree list: simple table with path, branch, status.
-fn render_worktree_list(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    git_data: &GitViewData,
-    theme: &Theme,
-) {
+fn render_worktree_list(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Worktrees ({}) ", git_data.worktrees.len()))
@@ -207,7 +202,11 @@ fn render_worktree_list(
         })
         .collect();
 
-    let widths = [Constraint::Min(16), Constraint::Min(12), Constraint::Length(10)];
+    let widths = [
+        Constraint::Min(16),
+        Constraint::Min(12),
+        Constraint::Length(10),
+    ];
     let table = Table::new(rows, widths)
         .header(
             Row::new(["path", "branch", "status"])
@@ -218,12 +217,7 @@ fn render_worktree_list(
 }
 
 /// Status panel: git status summary.
-fn render_status(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    git_data: &GitViewData,
-    theme: &Theme,
-) {
+fn render_status(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Status ")
@@ -257,7 +251,10 @@ fn render_status(
         })
         .collect();
 
-    let remaining = git_data.status_lines.len().saturating_sub(inner.height as usize);
+    let remaining = git_data
+        .status_lines
+        .len()
+        .saturating_sub(inner.height as usize);
     let mut all_lines = lines;
     if remaining > 0 {
         all_lines.push(Line::from(Span::styled(
@@ -314,15 +311,9 @@ fn render_commit_graph(
         .map(|commit| {
             Line::from(vec![
                 Span::styled(&commit.graph_prefix, theme.muted()),
-                Span::styled(
-                    format!(" {} ", commit.hash_short),
-                    theme.warning(),
-                ),
+                Span::styled(format!(" {} ", commit.hash_short), theme.warning()),
                 Span::styled(&commit.subject, theme.text()),
-                Span::styled(
-                    format!("  ({})", commit.author),
-                    theme.muted(),
-                ),
+                Span::styled(format!("  ({})", commit.author), theme.muted()),
             ])
         })
         .collect();
@@ -334,12 +325,7 @@ fn render_commit_graph(
 }
 
 /// Branch info: current branch, remote tracking, ahead/behind.
-fn render_branch_info(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    git_data: &GitViewData,
-    theme: &Theme,
-) {
+fn render_branch_info(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Branch Info ")
@@ -443,10 +429,7 @@ pub fn collect_git_data() -> GitViewData {
 
 /// Run a git command and return stdout as a string.
 fn run_git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .output()
-        .ok()?;
+    let output = Command::new("git").args(args).output().ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -475,7 +458,10 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
         }
         let parts: Vec<&str> = line.split('\t').collect();
         let name = parts.first().map_or("", |s| s.trim()).to_string();
-        let tracking = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let tracking = parts
+            .get(1)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let track_info = parts.get(2).map_or("", |s| s.trim());
         let (ahead, behind) = parse_ahead_behind(track_info);

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-authors = ["Roko <engineering@bardo.run>"]
+authors = ["Roko <engineering@roko.dev>"]
 description = "HTTP server crate for the roko API."
 
 [lints]
@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 default = []
-hdc = ["dep:bardo-primitives"]
+hdc = ["dep:roko-primitives"]
 
 [dependencies]
 roko-core = { path = "../roko-core" }
@@ -27,10 +27,9 @@ roko-std = { path = "../roko-std" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
-roko-golem = { path = "../roko-golem", features = ["scaffold"] }
 roko-daimon = { path = "../roko-daimon" }
-bardo-runtime = { path = "../bardo-runtime" }
-bardo-primitives = { path = "../bardo-primitives", optional = true }
+roko-runtime = { path = "../roko-runtime" }
+roko-primitives = { path = "../roko-primitives", optional = true }
 
 anyhow = { workspace = true }
 arc-swap = "1"

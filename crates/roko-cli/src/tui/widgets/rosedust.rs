@@ -94,9 +94,7 @@ impl MoriTheme {
 
     /// Tab inactive style.
     pub fn tab_inactive_style() -> Style {
-        Style::default()
-            .fg(Self::TEXT_DIM)
-            .bg(Self::BG_SECONDARY)
+        Style::default().fg(Self::TEXT_DIM).bg(Self::BG_SECONDARY)
     }
 
     /// Error style (EMBER, bold).
@@ -108,9 +106,7 @@ impl MoriTheme {
 
     /// Success style (SAGE, bold).
     pub fn success_style() -> Style {
-        Style::default()
-            .fg(Self::SAGE)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Self::SAGE).add_modifier(Modifier::BOLD)
     }
 
     // -- Semantic helpers ----------------------------------------------------

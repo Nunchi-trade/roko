@@ -12,8 +12,8 @@ pub mod git_view;
 pub mod logs_view;
 pub mod plans_view;
 
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
 use super::dashboard::{DashboardData, Theme};
 use super::state::TuiState;

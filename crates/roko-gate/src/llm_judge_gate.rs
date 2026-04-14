@@ -13,7 +13,7 @@
 //! minimal [`JudgeOracle`] trait that callers implement — typically with a
 //! thin wrapper around an `Agent`. Tests use a mock oracle.
 //!
-//! # Signal body contract
+//! # Engram body contract
 //!
 //! The gate reads a [`JudgePayload`] from the signal body. Supported shapes:
 //!
@@ -28,7 +28,7 @@
 //! - oracle errors under `non_blocking` → pass with `detail` explaining why
 
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -137,7 +137,7 @@ impl LlmJudgeGate {
     ///
     /// Returns `None` when the body is empty OR both fields are empty
     /// after decoding.
-    fn extract_payload(signal: &Signal) -> Option<JudgePayload> {
+    fn extract_payload(signal: &Engram) -> Option<JudgePayload> {
         // Prefer a structured JudgePayload if present.
         if let Ok(payload) = signal.body.as_json::<JudgePayload>() {
             return Some(payload);
@@ -192,7 +192,7 @@ impl LlmJudgeGate {
 
 #[async_trait]
 impl Gate for LlmJudgeGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let elapsed = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -310,17 +310,17 @@ mod tests {
         }
     }
 
-    fn payload_signal(task: &str, diff: &str) -> Signal {
+    fn payload_signal(task: &str, diff: &str) -> Engram {
         let body = Body::from_json(&JudgePayload {
             task_description: task.to_string(),
             diff: diff.to_string(),
         })
         .expect("serialize JudgePayload");
-        Signal::builder(Kind::Task).body(body).build()
+        Engram::builder(Kind::Task).body(body).build()
     }
 
-    fn empty_signal() -> Signal {
-        Signal::builder(Kind::Task).body(Body::empty()).build()
+    fn empty_signal() -> Engram {
+        Engram::builder(Kind::Task).body(Body::empty()).build()
     }
 
     #[tokio::test]
@@ -427,7 +427,7 @@ mod tests {
     async fn text_body_treated_as_diff() {
         let oracle = RecordingOracle::new(0.9);
         let gate = LlmJudgeGate::new(oracle.clone(), 0.5);
-        let signal = Signal::builder(Kind::Task)
+        let signal = Engram::builder(Kind::Task)
             .body(Body::text("+added line\n-removed line"))
             .build();
         let v = gate.verify(&signal, &Context::at(0)).await;

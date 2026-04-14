@@ -19,7 +19,7 @@ use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -35,7 +35,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 ///
 /// ```ignore
 /// let agent = OllamaAgent::new("llama3.1:8b");
-/// let prompt = Signal::builder(Kind::Prompt).body(Body::text("Hi")).build();
+/// let prompt = Engram::builder(Kind::Prompt).body(Body::text("Hi")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// ```
 pub struct OllamaAgent {
@@ -94,7 +94,7 @@ impl OllamaAgent {
 
     /// Execute one chat turn against the given poster. Shared by the real
     /// `Agent::run` and the unit tests.
-    async fn run_with_poster(&self, poster: &dyn HttpPoster, input: &Signal) -> AgentResult {
+    async fn run_with_poster(&self, poster: &dyn HttpPoster, input: &Engram) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -178,7 +178,7 @@ impl OllamaAgent {
         AgentResult::ok(output).with_usage(usage)
     }
 
-    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+    fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -196,7 +196,7 @@ impl OllamaAgent {
 
 #[async_trait]
 impl Agent for OllamaAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let poster = ReqwestPoster::new();
         self.run_with_poster(&poster, input).await
     }
@@ -307,8 +307,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn canned_ok_response() -> String {

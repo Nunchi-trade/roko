@@ -1,7 +1,7 @@
 //! `EpisodePolicy` — emits an Episode signal that ties a prompt, an agent
 //! output, and a set of gate verdicts together into one replayable record.
 
-use roko_core::{Body, Context, Decay, Kind, Policy, Provenance, Signal};
+use roko_core::{Body, Context, Decay, Engram, Kind, Policy, Provenance};
 
 /// A policy that wraps a full run (prompt → agent → gates) in one Episode signal.
 ///
@@ -34,12 +34,12 @@ impl EpisodePolicy {
     #[must_use]
     pub fn record_run(
         &self,
-        prompt: &Signal,
-        agent_output: &Signal,
+        prompt: &Engram,
+        agent_output: &Engram,
         agent_success: bool,
-        verdicts: &[Signal],
+        verdicts: &[Engram],
         ctx: &Context,
-    ) -> Signal {
+    ) -> Engram {
         let passed = verdicts
             .iter()
             .filter(|v| v.tag("passed") == Some("true"))
@@ -63,7 +63,7 @@ impl EpisodePolicy {
 
         let overall_pass = agent_success && failed == 0;
 
-        Signal::builder(Kind::Episode)
+        Engram::builder(Kind::Episode)
             .body(Body::from_json(&summary).unwrap_or_else(|_| Body::empty()))
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
@@ -76,7 +76,7 @@ impl EpisodePolicy {
 }
 
 impl Policy for EpisodePolicy {
-    fn decide(&self, _stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // The CLI drives `record_run` directly; the streaming Policy API is
         // unused here but implemented so `EpisodePolicy` still satisfies the
         // trait contract for composition with future runtimes.
@@ -93,8 +93,8 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind, Verdict};
 
-    fn verdict_sig(gate: &str, passed: bool) -> Signal {
-        Signal::builder(Kind::GateVerdict)
+    fn verdict_sig(gate: &str, passed: bool) -> Engram {
+        Engram::builder(Kind::GateVerdict)
             .body(Body::from_json(&Verdict::pass(gate)).unwrap_or(Body::empty()))
             .tag("passed", if passed { "true" } else { "false" })
             .tag("gate", gate)
@@ -104,8 +104,8 @@ mod tests {
     #[test]
     fn record_run_summarises_verdicts() {
         let policy = EpisodePolicy::new();
-        let prompt = Signal::builder(Kind::Prompt).body(Body::text("p")).build();
-        let out = Signal::builder(Kind::AgentOutput)
+        let prompt = Engram::builder(Kind::Prompt).body(Body::text("p")).build();
+        let out = Engram::builder(Kind::AgentOutput)
             .body(Body::text("o"))
             .build();
         let v1 = verdict_sig("g1", true);
@@ -130,8 +130,8 @@ mod tests {
     #[test]
     fn overall_pass_when_agent_succeeds_and_no_gate_failures() {
         let policy = EpisodePolicy::new();
-        let prompt = Signal::builder(Kind::Prompt).body(Body::text("p")).build();
-        let out = Signal::builder(Kind::AgentOutput)
+        let prompt = Engram::builder(Kind::Prompt).body(Body::text("p")).build();
+        let out = Engram::builder(Kind::AgentOutput)
             .body(Body::text("o"))
             .build();
         let ep = policy.record_run(

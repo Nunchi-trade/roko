@@ -15,7 +15,7 @@ use crate::watchers::{
     IterationLoopWatcher, ReviewLoopWatcher, SpecDriftWatcher, StuckPatternWatcher,
     TestFailureBudgetWatcher, TimeOverrunWatcher,
 };
-use roko_core::{Body, ConductorDecision, Context, Kind, Policy, Signal};
+use roko_core::{Body, ConductorDecision, Context, Engram, Kind, Policy};
 
 /// Tag key on intervention signals for the plan ID.
 pub const PLAN_ID_TAG: &str = "plan_id";
@@ -89,7 +89,7 @@ impl Conductor {
     /// Uses the current context and returns the intervention signals
     /// produced by the conductor for the supplied signal stream.
     #[must_use]
-    pub fn check_all(&self, stream: &[Signal]) -> Vec<Signal> {
+    pub fn check_all(&self, stream: &[Engram]) -> Vec<Engram> {
         self.decide(stream, &Context::now())
     }
 
@@ -129,7 +129,7 @@ impl Conductor {
     /// intervention signals, converts them to `WatcherOutput`s, and
     /// applies the escalation policy.
     #[must_use]
-    pub fn evaluate(&self, stream: &[Signal], ctx: &Context) -> ConductorDecision {
+    pub fn evaluate(&self, stream: &[Engram], ctx: &Context) -> ConductorDecision {
         // Check circuit breaker first.
         if let Some(plan_id) = extract_plan_id(stream) {
             if self.circuit_breaker.is_tripped(&plan_id) {
@@ -162,7 +162,7 @@ impl Conductor {
 }
 
 /// Extract the plan ID from the signal stream (most recent `PlanPhase` tag).
-fn extract_plan_id(stream: &[Signal]) -> Option<String> {
+fn extract_plan_id(stream: &[Engram]) -> Option<String> {
     stream
         .iter()
         .rev()
@@ -174,7 +174,7 @@ fn extract_plan_id(stream: &[Signal]) -> Option<String> {
 /// Run all watchers and collect their outputs as `WatcherOutput` values.
 fn collect_watcher_outputs(
     watchers: &[Box<dyn Policy>],
-    stream: &[Signal],
+    stream: &[Engram],
     ctx: &Context,
 ) -> Vec<WatcherOutput> {
     let mut outputs = Vec::new();
@@ -198,7 +198,7 @@ fn collect_watcher_outputs(
 }
 
 impl Policy for Conductor {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         // Run all watchers and collect outputs.
         let watcher_outputs = collect_watcher_outputs(&self.watchers, stream, ctx);
 
@@ -210,7 +210,7 @@ impl Policy for Conductor {
         if !decision.is_continue() {
             if let Ok(body) = Body::from_json(&decision) {
                 result.push(
-                    Signal::builder(Kind::Custom("conductor.decision".into()))
+                    Engram::builder(Kind::Custom("conductor.decision".into()))
                         .body(body)
                         .tag("decision", decision.label())
                         .build(),
@@ -231,8 +231,8 @@ impl Policy for Conductor {
 mod tests {
     use super::*;
 
-    fn ghost_turn_signal(cost_usd: f64) -> Signal {
-        Signal::builder(Kind::Custom(
+    fn ghost_turn_signal(cost_usd: f64) -> Engram {
+        Engram::builder(Kind::Custom(
             crate::watchers::ghost_turn::TURN_SIGNAL_KIND.into(),
         ))
         .body(
@@ -254,26 +254,26 @@ mod tests {
         .build()
     }
 
-    fn ghost_stream(count: usize) -> Vec<Signal> {
+    fn ghost_stream(count: usize) -> Vec<Engram> {
         (0..count)
             .map(|i| ghost_turn_signal(1.0 - (i as f64 * 0.1)))
             .collect()
     }
 
-    fn healthy_stream() -> Vec<Signal> {
+    fn healthy_stream() -> Vec<Engram> {
         vec![
-            Signal::builder(Kind::AgentOutput)
+            Engram::builder(Kind::AgentOutput)
                 .body(Body::text("implementing feature X"))
                 .build(),
-            Signal::builder(Kind::AgentOutput)
+            Engram::builder(Kind::AgentOutput)
                 .body(Body::text("running tests"))
                 .build(),
         ]
     }
 
-    fn plan_phase_stream(plan_id: &str) -> Vec<Signal> {
+    fn plan_phase_stream(plan_id: &str) -> Vec<Engram> {
         vec![
-            Signal::builder(Kind::PlanPhase)
+            Engram::builder(Kind::PlanPhase)
                 .body(Body::text("implementing"))
                 .tag(PLAN_ID_TAG, plan_id)
                 .tag("phase", "implementing")
@@ -348,10 +348,10 @@ mod tests {
     #[test]
     fn multiple_watchers_worst_wins() {
         // Stream that triggers both ghost-turn (warning) and iteration-loop (critical).
-        let mut stream: Vec<Signal> = ghost_stream(3);
+        let mut stream: Vec<Engram> = ghost_stream(3);
         for _ in 0..3 {
             stream.push(
-                Signal::builder(Kind::GateVerdict)
+                Engram::builder(Kind::GateVerdict)
                     .body(Body::Json(serde_json::json!({
                         "plan_id": "plan-1",
                         "gate": "compile",
@@ -361,7 +361,7 @@ mod tests {
                     .build(),
             );
             stream.push(
-                Signal::builder(Kind::PlanPhase)
+                Engram::builder(Kind::PlanPhase)
                     .body(Body::Json(serde_json::json!({
                         "plan_id": "plan-1",
                         "event": "GateFailed",

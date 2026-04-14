@@ -37,7 +37,6 @@ use super::state::TuiState;
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
-
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
 /// Supports two rendering paths:
@@ -384,10 +383,10 @@ impl App {
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),              // Mori-style header bar
+                Constraint::Length(1),               // Mori-style header bar
                 Constraint::Length(wave_row_height), // Wave indicator row (hidden when idle)
-                Constraint::Min(0),                 // Content area
-                Constraint::Length(1),              // Status footer
+                Constraint::Min(0),                  // Content area
+                Constraint::Length(1),               // Status footer
             ])
             .split(content_area);
 
@@ -617,22 +616,30 @@ impl App {
                 self.active_modal = None;
             }
             TuiAction::ExpandCollapse => {
-                if let Some(plan) = self.tui_state.plans.get_mut(self.tui_state.selected_plan_idx) {
+                if let Some(plan) = self
+                    .tui_state
+                    .plans
+                    .get_mut(self.tui_state.selected_plan_idx)
+                {
                     plan.expanded = !plan.expanded;
                 }
             }
             TuiAction::CollapseExpand => {
-                if let Some(plan) = self.tui_state.plans.get_mut(self.tui_state.selected_plan_idx) {
+                if let Some(plan) = self
+                    .tui_state
+                    .plans
+                    .get_mut(self.tui_state.selected_plan_idx)
+                {
                     plan.expanded = !plan.expanded;
                 }
             }
             TuiAction::TogglePause => {
-                self.tui_state.pipeline_run_state =
-                    if self.tui_state.pipeline_run_state == "paused" {
-                        "running".to_string()
-                    } else {
-                        "paused".to_string()
-                    };
+                self.tui_state.pipeline_run_state = if self.tui_state.pipeline_run_state == "paused"
+                {
+                    "running".to_string()
+                } else {
+                    "paused".to_string()
+                };
             }
             TuiAction::SwitchAgentTab(idx) => {
                 if idx == usize::MAX {
@@ -685,9 +692,11 @@ impl App {
                         use std::io::Write;
                         let _ = writeln!(f, "{}", entry);
                     }
-                    self.notifications.push(super::modals::Notification::info(
-                        format!("Injected: {}", truncate_str(&msg, 40)),
-                    ));
+                    self.notifications
+                        .push(super::modals::Notification::info(format!(
+                            "Injected: {}",
+                            truncate_str(&msg, 40)
+                        )));
                 }
             }
             TuiAction::CancelInject => {
@@ -732,7 +741,9 @@ impl App {
                 let modal_action = modals::ConfirmAction::Custom {
                     message: action.to_string(),
                 };
-                self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                self.active_modal = Some(ModalState::Confirm {
+                    action: modal_action,
+                });
             }
             TuiAction::ConfirmYes => {
                 self.tui_state.input_mode = InputMode::Normal;
@@ -758,9 +769,11 @@ impl App {
                         use std::io::Write;
                         let _ = writeln!(f, "{}", entry);
                     }
-                    self.notifications.push(super::modals::Notification::info(
-                        format!("Confirmed: {}", truncate_str(&action_str, 40)),
-                    ));
+                    self.notifications
+                        .push(super::modals::Notification::info(format!(
+                            "Confirmed: {}",
+                            truncate_str(&action_str, 40)
+                        )));
                 }
                 self.tui_state.pending_confirm = None;
                 self.active_modal = None;
@@ -779,12 +792,20 @@ impl App {
                 self.tui_state.agent_pane_group = (self.tui_state.agent_pane_group + 1) % 2;
             }
             TuiAction::DrillIn => {
-                if let Some(plan) = self.tui_state.plans.get_mut(self.tui_state.selected_plan_idx) {
+                if let Some(plan) = self
+                    .tui_state
+                    .plans
+                    .get_mut(self.tui_state.selected_plan_idx)
+                {
                     plan.expanded = true;
                 }
             }
             TuiAction::DrillOut => {
-                if let Some(plan) = self.tui_state.plans.get_mut(self.tui_state.selected_plan_idx) {
+                if let Some(plan) = self
+                    .tui_state
+                    .plans
+                    .get_mut(self.tui_state.selected_plan_idx)
+                {
                     plan.expanded = false;
                 }
             }
@@ -794,8 +815,11 @@ impl App {
             }
             TuiAction::WavePrev => {
                 let max = self.tui_state.plans.len().max(1);
-                self.tui_state.selected_wave_idx =
-                    self.tui_state.selected_wave_idx.checked_sub(1).unwrap_or(max - 1);
+                self.tui_state.selected_wave_idx = self
+                    .tui_state
+                    .selected_wave_idx
+                    .checked_sub(1)
+                    .unwrap_or(max - 1);
             }
             TuiAction::RestartPhase => {
                 self.tui_state.input_mode = InputMode::Confirm;
@@ -803,7 +827,9 @@ impl App {
                 let modal_action = modals::ConfirmAction::Custom {
                     message: "Restart current phase?".to_string(),
                 };
-                self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                self.active_modal = Some(ModalState::Confirm {
+                    action: modal_action,
+                });
             }
             TuiAction::RestartPlan => {
                 if let Some(plan) = self.tui_state.plans.get(self.tui_state.selected_plan_idx) {
@@ -814,7 +840,9 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Restart plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                    self.active_modal = Some(ModalState::Confirm {
+                        action: modal_action,
+                    });
                 }
             }
             TuiAction::ForceAdvance => {
@@ -826,7 +854,9 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Force-advance plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                    self.active_modal = Some(ModalState::Confirm {
+                        action: modal_action,
+                    });
                 }
             }
             TuiAction::ResetPlanState => {
@@ -838,7 +868,9 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Reset state for plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                    self.active_modal = Some(ModalState::Confirm {
+                        action: modal_action,
+                    });
                 }
             }
             TuiAction::ReverifyPlan => {
@@ -850,28 +882,41 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Re-verify plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm { action: modal_action });
+                    self.active_modal = Some(ModalState::Confirm {
+                        action: modal_action,
+                    });
                 }
             }
             TuiAction::ConfigUp => {
                 self.tui_state.config_cursor = self.tui_state.config_cursor.saturating_sub(1);
                 // Skip headers when navigating up
-                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                let items = super::config_meta::build_flat_items(
+                    &self.workdir,
+                    &self.tui_state.config_pending,
+                );
                 while self.tui_state.config_cursor > 0 {
-                    if let Some(super::config_meta::ConfigItem::Header(_)) = items.get(self.tui_state.config_cursor) {
-                        self.tui_state.config_cursor = self.tui_state.config_cursor.saturating_sub(1);
+                    if let Some(super::config_meta::ConfigItem::Header(_)) =
+                        items.get(self.tui_state.config_cursor)
+                    {
+                        self.tui_state.config_cursor =
+                            self.tui_state.config_cursor.saturating_sub(1);
                     } else {
                         break;
                     }
                 }
             }
             TuiAction::ConfigDown => {
-                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                let items = super::config_meta::build_flat_items(
+                    &self.workdir,
+                    &self.tui_state.config_pending,
+                );
                 let max_idx = items.len().saturating_sub(1);
                 self.tui_state.config_cursor = (self.tui_state.config_cursor + 1).min(max_idx);
                 // Skip headers when navigating down
                 while self.tui_state.config_cursor < max_idx {
-                    if let Some(super::config_meta::ConfigItem::Header(_)) = items.get(self.tui_state.config_cursor) {
+                    if let Some(super::config_meta::ConfigItem::Header(_)) =
+                        items.get(self.tui_state.config_cursor)
+                    {
                         self.tui_state.config_cursor += 1;
                     } else {
                         break;
@@ -879,22 +924,34 @@ impl App {
                 }
             }
             TuiAction::ConfigToggle => {
-                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
+                let items = super::config_meta::build_flat_items(
+                    &self.workdir,
+                    &self.tui_state.config_pending,
+                );
                 if let Some(item) = items.get(self.tui_state.config_cursor) {
                     match item {
-                        super::config_meta::ConfigItem::Field { meta, value, source } => {
+                        super::config_meta::ConfigItem::Field {
+                            meta,
+                            value,
+                            source,
+                        } => {
                             match &meta.kind {
                                 super::config_meta::ConfigFieldKind::Bool => {
                                     let new_val = if value == "true" { "false" } else { "true" };
-                                    self.tui_state.config_pending.insert(meta.key.to_string(), new_val.to_string());
+                                    self.tui_state
+                                        .config_pending
+                                        .insert(meta.key.to_string(), new_val.to_string());
                                 }
                                 super::config_meta::ConfigFieldKind::ReadOnly => {}
                                 super::config_meta::ConfigFieldKind::Enum(_)
                                 | super::config_meta::ConfigFieldKind::Int { .. } => {
                                     // For enums/presets, Enter cycles right
                                     if *source != super::config_meta::ConfigSource::Env {
-                                        if let Some(new_val) = cycle_field_value(meta, value, true) {
-                                            self.tui_state.config_pending.insert(meta.key.to_string(), new_val);
+                                        if let Some(new_val) = cycle_field_value(meta, value, true)
+                                        {
+                                            self.tui_state
+                                                .config_pending
+                                                .insert(meta.key.to_string(), new_val);
                                         }
                                     }
                                 }
@@ -928,9 +985,11 @@ impl App {
                                         ));
                                     }
                                     Err(e) => {
-                                        self.notifications.push(super::modals::Notification::error(
-                                            &format!("Save failed: {e}"),
-                                        ));
+                                        self.notifications.push(
+                                            super::modals::Notification::error(&format!(
+                                                "Save failed: {e}"
+                                            )),
+                                        );
                                     }
                                 }
                             }
@@ -940,24 +999,38 @@ impl App {
                 }
             }
             TuiAction::ConfigCycleLeft | TuiAction::ConfigCycleRight => {
-                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
-                if let Some(super::config_meta::ConfigItem::Field { meta, value, source }) =
-                    items.get(self.tui_state.config_cursor)
+                let items = super::config_meta::build_flat_items(
+                    &self.workdir,
+                    &self.tui_state.config_pending,
+                );
+                if let Some(super::config_meta::ConfigItem::Field {
+                    meta,
+                    value,
+                    source,
+                }) = items.get(self.tui_state.config_cursor)
                 {
                     if *source == super::config_meta::ConfigSource::Env {
                         // Env-overridden: not editable
                     } else {
                         let direction = matches!(action, TuiAction::ConfigCycleRight);
                         if let Some(new_val) = cycle_field_value(meta, value, direction) {
-                            self.tui_state.config_pending.insert(meta.key.to_string(), new_val);
+                            self.tui_state
+                                .config_pending
+                                .insert(meta.key.to_string(), new_val);
                         }
                     }
                 }
             }
             TuiAction::ConfigStartEdit => {
-                let items = super::config_meta::build_flat_items(&self.workdir, &self.tui_state.config_pending);
-                if let Some(super::config_meta::ConfigItem::Field { meta, value, source }) =
-                    items.get(self.tui_state.config_cursor)
+                let items = super::config_meta::build_flat_items(
+                    &self.workdir,
+                    &self.tui_state.config_pending,
+                );
+                if let Some(super::config_meta::ConfigItem::Field {
+                    meta,
+                    value,
+                    source,
+                }) = items.get(self.tui_state.config_cursor)
                 {
                     if *source != super::config_meta::ConfigSource::Env
                         && !matches!(meta.kind, super::config_meta::ConfigFieldKind::ReadOnly)
@@ -999,14 +1072,16 @@ impl App {
                         Ok(()) => {
                             let count = self.tui_state.config_pending.len();
                             self.tui_state.config_pending.clear();
-                            self.notifications.push(super::modals::Notification::info(
-                                &format!("Config saved ({count} changes written to roko.toml)"),
-                            ));
+                            self.notifications
+                                .push(super::modals::Notification::info(&format!(
+                                    "Config saved ({count} changes written to roko.toml)"
+                                )));
                         }
                         Err(e) => {
-                            self.notifications.push(super::modals::Notification::error(
-                                &format!("Save failed: {e}"),
-                            ));
+                            self.notifications
+                                .push(super::modals::Notification::error(&format!(
+                                    "Save failed: {e}"
+                                )));
                         }
                     }
                 }
@@ -1015,9 +1090,7 @@ impl App {
                 // Use hit_test to determine zone
                 let zones = super::hit_test::HitZones::compute(
                     super::layout::responsive_outer_margin(Rect::new(
-                        0,
-                        0,
-                        80, // approximate; real values come from terminal size
+                        0, 0, 80, // approximate; real values come from terminal size
                         24,
                     )),
                     self.tui_state.active_tab as usize,
@@ -1048,8 +1121,7 @@ impl App {
         match self.tui_state.focus {
             FocusZone::PlanTree => {
                 let current = self.tui_state.plan_scroll_offset as i32;
-                self.tui_state.plan_scroll_offset =
-                    (current + delta).max(0) as usize;
+                self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
             }
             FocusZone::TaskProgress => {
                 let current = self.tui_state.task_scroll as i32;
@@ -1061,8 +1133,7 @@ impl App {
             }
             FocusZone::CommandOutput => {
                 let current = self.tui_state.command_output_scroll as i32;
-                self.tui_state.command_output_scroll =
-                    (current + delta).max(0) as usize;
+                self.tui_state.command_output_scroll = (current + delta).max(0) as usize;
             }
             FocusZone::RightPanel => {
                 let current = self.tui_state.diff_scroll as i32;
@@ -1073,12 +1144,10 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let action = match mouse.kind {
-            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                TuiAction::MouseClick {
-                    x: mouse.column,
-                    y: mouse.row,
-                }
-            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => TuiAction::MouseClick {
+                x: mouse.column,
+                y: mouse.row,
+            },
             MouseEventKind::ScrollUp => TuiAction::MouseScrollUp {
                 x: mouse.column,
                 y: mouse.row,
@@ -1581,10 +1650,8 @@ fn collect_sys_metrics_bg() -> super::state::SysMetrics {
 
                 for line in text.lines() {
                     if line.starts_with("CPU usage:") {
-                        if let Some(idle) = line
-                            .split(',')
-                            .find(|s| s.contains("idle"))
-                            .and_then(|s| {
+                        if let Some(idle) =
+                            line.split(',').find(|s| s.contains("idle")).and_then(|s| {
                                 s.trim()
                                     .split('%')
                                     .next()
@@ -1759,10 +1826,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("Esc        close overlay / drill out"),
         Line::from("q          close overlay or quit"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Dashboard Sub-Tabs (F1)",
-            theme.accent_bold(),
-        )),
+        Line::from(Span::styled("Dashboard Sub-Tabs (F1)", theme.accent_bold())),
         Line::from("a          Agents panel"),
         Line::from("o          Output panel"),
         Line::from("d          Diff panel"),

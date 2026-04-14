@@ -28,7 +28,7 @@ use mirage_rs::{
     roko_bridge::{ChainSubstrate, HdcSubstrate, SimulationGate},
 };
 use roko_core::{
-    Body, Context, Kind, Provenance, Query, Score, Signal,
+    Body, Context, Engram, Kind, Provenance, Query, Score,
     traits::{Gate, Substrate},
 };
 
@@ -61,7 +61,7 @@ async fn full_golem_loop_plans_simulates_posts_retrieves() {
     let chain = ChainSubstrate::new("chain-e2e");
 
     // 2. Golem A plans a transaction.
-    let planned_tx = Signal::builder(Kind::Transaction)
+    let planned_tx = Engram::builder(Kind::Transaction)
         .body(Body::Json(serde_json::json!({
             "from": "0xaaaa000000000000000000000000000000000001",
             "to":   "0xbbbb000000000000000000000000000000000002",
@@ -82,7 +82,7 @@ async fn full_golem_loop_plans_simulates_posts_retrieves() {
     assert_eq!(verdict.gate, "simulation_gate");
 
     // 4. Golem A learned something. Post an Insight documenting it.
-    let insight = Signal::builder(Kind::Insight)
+    let insight = Engram::builder(Kind::Insight)
         .body(Body::text(
             "value transfers to cold accounts cost ~21k gas on mainnet fork",
         ))
@@ -138,7 +138,7 @@ async fn hdc_substrate_finds_most_similar_signal() {
         "aave v3 liquidation bonus is 5% on healthy collateral",
     ] {
         sub.put(
-            Signal::builder(Kind::Insight)
+            Engram::builder(Kind::Insight)
                 .body(Body::text(text))
                 .provenance(Provenance::agent("seed"))
                 .score(Score::NEUTRAL)
@@ -173,7 +173,7 @@ async fn failed_simulation_does_not_reach_chain() {
     let chain = ChainSubstrate::new("chain-e2e-fail");
 
     // Malformed tx: missing 'to'.
-    let bad_tx = Signal::builder(Kind::Transaction)
+    let bad_tx = Engram::builder(Kind::Transaction)
         .body(Body::Json(serde_json::json!({
             "from": "0xaaaa000000000000000000000000000000000001",
             "gas":  "0x5208",

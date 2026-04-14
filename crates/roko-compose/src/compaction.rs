@@ -10,7 +10,7 @@
 //! `tool_outcomes`.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -254,7 +254,7 @@ async fn summarize_region(
     }
 
     let prompt = build_summary_prompt(compactable, summary_budget_tokens);
-    let input = Signal::builder(Kind::Prompt)
+    let input = Engram::builder(Kind::Prompt)
         .body(Body::text(prompt))
         .build();
     let result = summarizer.run(&input, &Context::at(0)).await;
@@ -288,7 +288,7 @@ Do not restate raw gate results or tool outputs; those are preserved separately.
     )
 }
 
-fn extract_summary_text(signal: &Signal) -> Option<String> {
+fn extract_summary_text(signal: &Engram) -> Option<String> {
     match &signal.body {
         Body::Text(text) => Some(text.clone()),
         Body::Json(value) => value

@@ -1,9 +1,9 @@
 //! Batch-pause review modal for reviewing completed batch results.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -47,7 +47,7 @@ pub fn render_batch_review(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // summary
-            Constraint::Min(1),   // results
+            Constraint::Min(1),    // results
             Constraint::Length(2), // actions
         ])
         .split(inner);
@@ -63,7 +63,14 @@ pub fn render_batch_review(
             ),
             Span::styled(format!("{passed} passed"), theme.success()),
             Span::styled("  ", theme.text()),
-            Span::styled(format!("{failed} failed"), if failed > 0 { theme.danger() } else { theme.muted() }),
+            Span::styled(
+                format!("{failed} failed"),
+                if failed > 0 {
+                    theme.danger()
+                } else {
+                    theme.muted()
+                },
+            ),
         ]),
         Line::from(""),
     ];

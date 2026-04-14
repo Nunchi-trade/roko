@@ -72,10 +72,7 @@ pub fn render_plan_list(
         };
 
         let pct = (plan.progress * 100.0).round() as u64;
-        let status = format!(
-            " [{}/{}] {pct}%",
-            plan.tasks_done, plan.tasks_total
-        );
+        let status = format!(" [{}/{}] {pct}%", plan.tasks_done, plan.tasks_total);
 
         lines.push(Line::from(vec![
             Span::styled(plan.name.clone(), name_style),

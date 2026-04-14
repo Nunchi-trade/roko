@@ -51,10 +51,10 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 
 # roko-native event bus (replaces golem-core::EventFabric)
-bardo-runtime = { path = "../../crates/bardo-runtime" }
+roko-runtime = { path = "../../crates/roko-runtime" }
 
 # Opt-in: HDC vectors for the `chain` feature
-bardo-primitives = { path = "../../crates/bardo-primitives", optional = true }
+roko-primitives = { path = "../../crates/roko-primitives", optional = true }
 
 # Opt-in: roko-core trait impls (Gate, Substrate) for `roko` feature
 roko-core = { path = "../../crates/roko-core", optional = true }
@@ -100,8 +100,8 @@ sim-gas = []
 
 # Chain extensions: HDC index, InsightEntry knowledge layer, stigmergy pheromones.
 # Adds chain_* JSON-RPC methods and --enable-hdc / --enable-knowledge /
-# --enable-stigmergy CLI flags. Pulls in bardo-primitives for HDC vectors.
-chain = ["dep:bardo-primitives"]
+# --enable-stigmergy CLI flags. Pulls in roko-primitives for HDC vectors.
+chain = ["dep:roko-primitives"]
 
 # Roko bridge: implements roko-core traits (Gate, Substrate) over mirage internals.
 # Turns mirage-rs into a drop-in simulation + knowledge substrate for roko golems.

@@ -4,7 +4,7 @@
 //! [`MAX_IDENTICAL_ACTIONS`] consecutive times, the agent is stuck in a
 //! loop. This watcher fires a warning to trigger restart.
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 
 /// Maximum consecutive identical actions before firing.
 pub const MAX_IDENTICAL_ACTIONS: usize = 4;
@@ -43,12 +43,12 @@ impl StuckPatternWatcher {
 }
 
 /// Check if a signal's kind is an "action" kind.
-fn is_action(signal: &Signal) -> bool {
+fn is_action(signal: &Engram) -> bool {
     ACTION_KINDS.contains(&signal.kind)
 }
 
 /// Extract a body fingerprint for comparison.
-fn body_fingerprint(signal: &Signal) -> Option<String> {
+fn body_fingerprint(signal: &Engram) -> Option<String> {
     match &signal.body {
         Body::Text(s) => {
             let trimmed = s.trim();
@@ -72,7 +72,7 @@ fn body_fingerprint(signal: &Signal) -> Option<String> {
 }
 
 impl Policy for StuckPatternWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Walk backwards through action signals, counting consecutive identical ones.
         let mut consecutive = 0usize;
         let mut last_fingerprint: Option<String> = None;
@@ -101,7 +101,7 @@ impl Policy for StuckPatternWatcher {
         if consecutive >= self.max_actions {
             let desc = last_fingerprint.unwrap_or_default();
             vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(format!(
                         "{consecutive} consecutive identical actions: {}",
                         truncate(&desc, 80)
@@ -136,20 +136,20 @@ fn truncate(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
-    fn action_signal(text: &str) -> Signal {
-        Signal::builder(Kind::AgentOutput)
+    fn action_signal(text: &str) -> Engram {
+        Engram::builder(Kind::AgentOutput)
             .body(Body::text(text))
             .build()
     }
 
-    fn message_signal(text: &str) -> Signal {
-        Signal::builder(Kind::AgentMessage)
+    fn message_signal(text: &str) -> Engram {
+        Engram::builder(Kind::AgentMessage)
             .body(Body::text(text))
             .build()
     }
 
-    fn gate_signal() -> Signal {
-        Signal::builder(Kind::GateVerdict)
+    fn gate_signal() -> Engram {
+        Engram::builder(Kind::GateVerdict)
             .body(Body::text("pass"))
             .build()
     }

@@ -4,7 +4,7 @@
 //! burning tokens without progress. After [`MAX_GHOST_TURNS`] consecutive
 //! ghost turns, this watcher fires a restart signal.
 
-use roko_core::{Body, Context, Kind, Policy, Signal};
+use roko_core::{Body, Context, Engram, Kind, Policy};
 use serde::Deserialize;
 
 /// Maximum consecutive wasted turns before firing.
@@ -58,11 +58,11 @@ impl GhostTurnWatcher {
     }
 }
 
-fn is_ghost_turn_signal(signal: &Signal) -> bool {
+fn is_ghost_turn_signal(signal: &Engram) -> bool {
     matches!(signal.kind, Kind::Custom(ref kind) if kind == TURN_SIGNAL_KIND)
 }
 
-fn extract_ghost_turn_event(signal: &Signal) -> Option<GhostTurnEvent> {
+fn extract_ghost_turn_event(signal: &Engram) -> Option<GhostTurnEvent> {
     if !is_ghost_turn_signal(signal) {
         return None;
     }
@@ -81,7 +81,7 @@ fn extract_ghost_turn_event(signal: &Signal) -> Option<GhostTurnEvent> {
 }
 
 impl Policy for GhostTurnWatcher {
-    fn decide(&self, stream: &[Signal], _ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Count consecutive wasted turns from the end of the stream.
         let mut consecutive = 0usize;
         let mut last_event: Option<GhostTurnEvent> = None;
@@ -118,7 +118,7 @@ impl Policy for GhostTurnWatcher {
                 consecutive
             );
             vec![
-                Signal::builder(Kind::Custom("conductor.intervention".into()))
+                Engram::builder(Kind::Custom("conductor.intervention".into()))
                     .body(Body::text(reason))
                     .tag("watcher", WATCHER_NAME)
                     .tag("severity", "warning")
@@ -148,7 +148,7 @@ impl Policy for GhostTurnWatcher {
 mod tests {
     use super::*;
 
-    fn ghost_turn_signal(cost_usd: f64, changed_files: Vec<&str>) -> Signal {
+    fn ghost_turn_signal(cost_usd: f64, changed_files: Vec<&str>) -> Engram {
         let changed_files_before = changed_files.clone();
         let changed_files_after = changed_files;
         let body = Body::from_json(&serde_json::json!({
@@ -165,12 +165,12 @@ mod tests {
             "wasted_cost": true,
         }))
         .expect("serialize ghost turn event");
-        Signal::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
+        Engram::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
             .body(body)
             .build()
     }
 
-    fn non_ghost_turn_signal() -> Signal {
+    fn non_ghost_turn_signal() -> Engram {
         let body = Body::from_json(&serde_json::json!({
             "plan_id": "plan-1",
             "task": "task-1",
@@ -185,7 +185,7 @@ mod tests {
             "wasted_cost": false,
         }))
         .expect("serialize non-ghost turn event");
-        Signal::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
+        Engram::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
             .body(body)
             .build()
     }
@@ -261,7 +261,7 @@ mod tests {
         let stream = vec![
             ghost_turn_signal(0.5, vec![]),
             ghost_turn_signal(0.4, vec![]),
-            Signal::builder(Kind::GateVerdict)
+            Engram::builder(Kind::GateVerdict)
                 .body(Body::empty())
                 .build(),
             ghost_turn_signal(0.3, vec![]),
@@ -275,7 +275,7 @@ mod tests {
     fn changed_files_prevent_fire() {
         let w = GhostTurnWatcher::new(1);
         let stream = vec![
-            Signal::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
+            Engram::builder(Kind::Custom(TURN_SIGNAL_KIND.into()))
                 .body(
                     Body::from_json(&serde_json::json!({
                         "plan_id": "plan-1",

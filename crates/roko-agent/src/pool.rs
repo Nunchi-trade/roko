@@ -107,7 +107,7 @@ pub struct AgentTask {
     /// Unique identifier for this task's agent instance.
     pub id: AgentInstanceId,
     /// The input signal to run the agent against.
-    pub input: roko_core::Signal,
+    pub input: roko_core::Engram,
     /// The context for the agent run.
     pub ctx: roko_core::Context,
 }
@@ -117,7 +117,7 @@ impl AgentTask {
     #[must_use]
     pub const fn new(
         id: AgentInstanceId,
-        input: roko_core::Signal,
+        input: roko_core::Engram,
         ctx: roko_core::Context,
     ) -> Self {
         Self { id, input, ctx }
@@ -363,11 +363,11 @@ impl AgentPool {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Kind, Signal};
+    use roko_core::{Body, Context, Engram, Kind};
     use std::sync::Arc;
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn ctx() -> Context {

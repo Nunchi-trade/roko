@@ -36,11 +36,11 @@
 //! compile and behave identically (except that the new impl is more
 //! careful about non-existent leaves and char-boundary preservation).
 //!
-//! [`read_file`]: https://github.com/wpank/bardo
-//! [`write_file`]: https://github.com/wpank/bardo
-//! [`edit_file`]: https://github.com/wpank/bardo
-//! [`glob`]: https://github.com/wpank/bardo
-//! [`grep`]: https://github.com/wpank/bardo
+//! [`read_file`]: https://github.com/nunchi/roko
+//! [`write_file`]: https://github.com/nunchi/roko
+//! [`edit_file`]: https://github.com/nunchi/roko
+//! [`glob`]: https://github.com/nunchi/roko
+//! [`grep`]: https://github.com/nunchi/roko
 
 use std::path::{Path, PathBuf};
 

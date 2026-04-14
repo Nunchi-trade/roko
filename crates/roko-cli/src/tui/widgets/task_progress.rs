@@ -24,8 +24,8 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use super::rosedust::MoriTheme;
 use super::super::state::{TaskRowStatus, TuiState};
+use super::rosedust::MoriTheme;
 
 // ---------------------------------------------------------------------------
 // Public render entry-point

@@ -41,7 +41,7 @@ use crate::chain::{
     HnswConfig, KnowledgeKind, KnowledgeStore, PheromoneField, PheromoneKind, PostOutcome,
     insight::InsightId, projection::project_tokens,
 };
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 
 #[cfg(feature = "roko")]
 use crate::roko_bridge::{InsightBus, InsightEvent, PheromoneBus};
@@ -2005,7 +2005,7 @@ mod tests {
             let event = crate::roko_bridge::PheromoneEvent::new(
                 7,
                 PheromoneKind::Opportunity,
-                bardo_primitives::HdcVector::from_seed(b"q"),
+                roko_primitives::HdcVector::from_seed(b"q"),
                 0.42,
                 1_700_000_000,
             );

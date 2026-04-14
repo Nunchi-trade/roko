@@ -106,8 +106,7 @@ pub fn bloom(area: Rect, buf: &mut Buffer, threshold: u8, radius: u16, intensity
                         let c_start = (dx as i32 - radius as i32).max(0) as usize;
                         let c_end = ((dx as i32 + radius as i32 + 1) as usize).min(w);
 
-                        let kernel_area =
-                            ((r_end - r_start) * (c_end - c_start)).max(1) as f64;
+                        let kernel_area = ((r_end - r_start) * (c_end - c_start)).max(1) as f64;
                         let contrib = intensity / kernel_area;
 
                         for ny in r_start..r_end {
@@ -167,17 +166,24 @@ pub fn vignette(area: Rect, buf: &mut Buffer, intensity: f64) {
 
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            let dist =
-                ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
+            let dist = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
             let factor = 1.0 - intensity * (dist / max_dist).powi(2);
             let factor = factor.clamp(0.0, 1.0);
 
             if let Some(cell) = buf.cell_mut((x, y)) {
                 if let Some((r, g, b)) = cell_fg_rgb(cell) {
-                    cell.set_fg(Color::Rgb(scale(r, factor), scale(g, factor), scale(b, factor)));
+                    cell.set_fg(Color::Rgb(
+                        scale(r, factor),
+                        scale(g, factor),
+                        scale(b, factor),
+                    ));
                 }
                 if let Some((r, g, b)) = cell_bg_rgb(cell) {
-                    cell.set_bg(Color::Rgb(scale(r, factor), scale(g, factor), scale(b, factor)));
+                    cell.set_bg(Color::Rgb(
+                        scale(r, factor),
+                        scale(g, factor),
+                        scale(b, factor),
+                    ));
                 }
             }
         }
@@ -192,10 +198,18 @@ pub fn dim_overlay(area: Rect, buf: &mut Buffer, factor: f64) {
         for x in area.left()..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 if let Some((r, g, b)) = cell_fg_rgb(cell) {
-                    cell.set_fg(Color::Rgb(scale(r, factor), scale(g, factor), scale(b, factor)));
+                    cell.set_fg(Color::Rgb(
+                        scale(r, factor),
+                        scale(g, factor),
+                        scale(b, factor),
+                    ));
                 }
                 if let Some((r, g, b)) = cell_bg_rgb(cell) {
-                    cell.set_bg(Color::Rgb(scale(r, factor), scale(g, factor), scale(b, factor)));
+                    cell.set_bg(Color::Rgb(
+                        scale(r, factor),
+                        scale(g, factor),
+                        scale(b, factor),
+                    ));
                 }
             }
         }
@@ -303,11 +317,7 @@ pub fn ambient_orbs(area: Rect, buf: &mut Buffer, elapsed: f64, count: usize, br
                     continue;
                 }
 
-                let dist_factor = if dx == 0 && dy == 0 {
-                    1.0
-                } else {
-                    0.4
-                };
+                let dist_factor = if dx == 0 && dy == 0 { 1.0 } else { 0.4 };
                 let amount = (b as f64 * dist_factor).min(255.0) as u8;
 
                 if let Some(cell) = buf.cell_mut((px as u16, py as u16)) {

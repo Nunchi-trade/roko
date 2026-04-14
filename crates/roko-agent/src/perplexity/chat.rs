@@ -12,7 +12,7 @@ use crate::perplexity::types::{Annotation, PerplexityMetadata, SearchOptions, Se
 use crate::translate::openai::parse_usage;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -163,7 +163,7 @@ impl PerplexityChatAgent {
         }
     }
 
-    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
+    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -180,7 +180,7 @@ impl PerplexityChatAgent {
 
 #[async_trait]
 impl Agent for PerplexityChatAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -353,8 +353,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(poster: Box<dyn HttpPoster>) -> PerplexityChatAgent {

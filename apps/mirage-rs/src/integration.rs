@@ -59,6 +59,8 @@ pub(crate) const MIRAGE_SHUTDOWN_METHOD: &str = "mirage_shutdown";
 
 /// Poll interval for [`MirageClient::wait_ready`] between `mirage_status` calls (plan decomposition Step 17).
 const WAIT_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Startup timeout for test-sidecar artifact publication.
+const STARTUP_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl MirageConfig {
     /// Returns the default local development config.
@@ -441,6 +443,8 @@ pub async fn spawn_mirage_test_instance(
     let port = port.unwrap_or(18_545);
     let pid_file = PathBuf::from(format!("/tmp/mirage-{port}.pid"));
     let status_file = PathBuf::from(format!("/tmp/mirage-{port}-status.json"));
+    let _ = tokio::fs::remove_file(&pid_file).await;
+    let _ = tokio::fs::remove_file(&status_file).await;
     let executable = match std::env::var("CARGO_BIN_EXE_mirage-rs") {
         Ok(path) => path,
         Err(_) => {
@@ -474,9 +478,67 @@ pub async fn spawn_mirage_test_instance(
         pid_file,
         status_file,
     };
+    let mut instance = instance;
+    wait_for_startup_artifacts(&mut instance, STARTUP_ARTIFACT_TIMEOUT).await?;
     let client = MirageClient::new(instance.config()).await?;
-    client.wait_ready(Duration::from_secs(10)).await?;
+    if let Err(error) = client.wait_ready(Duration::from_secs(10)).await {
+        let _ = instance.shutdown().await;
+        return Err(error);
+    }
     Ok(instance)
+}
+
+async fn wait_for_startup_artifacts(
+    instance: &mut MirageTestInstance,
+    timeout: Duration,
+) -> Result<()> {
+    let expected_pid = instance.process.id().ok_or_else(|| {
+        MirageError::Unsupported("spawned mirage process did not expose an OS pid".to_owned())
+    })?;
+    let expected_pid = expected_pid.to_string();
+    let started = Instant::now();
+
+    loop {
+        if let Some(status) = instance.process.try_wait()? {
+            let error = MirageError::Unsupported(format!(
+                "mirage process exited before publishing startup artifacts on port {}: {status}",
+                instance.port
+            ));
+            let _ = instance.shutdown().await;
+            return Err(error);
+        }
+
+        let pid_matches = match tokio::fs::read_to_string(&instance.pid_file).await {
+            Ok(pid) => pid.trim() == expected_pid,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                let _ = instance.shutdown().await;
+                return Err(error.into());
+            }
+        };
+        let status_exists = match tokio::fs::try_exists(&instance.status_file).await {
+            Ok(exists) => exists,
+            Err(error) => {
+                let _ = instance.shutdown().await;
+                return Err(error.into());
+            }
+        };
+
+        if pid_matches && status_exists {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timeout {
+            let error = MirageError::Timeout(format!(
+                "mirage startup artifacts not published for port {}",
+                instance.port
+            ));
+            let _ = instance.shutdown().await;
+            return Err(error);
+        }
+
+        sleep(WAIT_READY_POLL_INTERVAL).await;
+    }
 }
 
 fn parse_hex_u64(value: &str) -> Result<u64> {

@@ -10,7 +10,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, TestCount, Verdict};
+use roko_core::{Context, Engram, Gate, TestCount, Verdict};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -89,7 +89,7 @@ impl TestGate {
 
 #[async_trait]
 impl Gate for TestGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,

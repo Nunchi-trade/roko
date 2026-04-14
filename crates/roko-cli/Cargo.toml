@@ -28,7 +28,7 @@ roko-daimon = { path = "../roko-daimon" }
 roko-neuro = { path = "../roko-neuro" }
 roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
-bardo-runtime = { path = "../bardo-runtime" }
+roko-runtime = { path = "../roko-runtime" }
 roko-serve = { path = "../roko-serve" }
 
 clap = { workspace = true, features = ["derive"] }

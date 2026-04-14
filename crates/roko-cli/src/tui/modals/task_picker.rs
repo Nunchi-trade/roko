@@ -1,9 +1,9 @@
 //! Scrollable, searchable task picker modal.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -46,27 +46,21 @@ pub fn render_task_picker(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // header + separator
-            Constraint::Min(1),   // task list
+            Constraint::Min(1),    // task list
             Constraint::Length(1), // hints
         ])
         .split(inner);
 
     // Header
     let header = Line::from(Span::styled(
-        format!(
-            " {:<6} {:<12} {:<10} {}",
-            "PLAN", "TASK", "STATUS", "TITLE"
-        ),
+        format!(" {:<6} {:<12} {:<10} {}", "PLAN", "TASK", "STATUS", "TITLE"),
         theme.accent_bold(),
     ));
     let separator = Line::from(Span::styled(
         " ".to_string() + &"-".repeat(chunks[0].width.saturating_sub(2) as usize),
         theme.muted(),
     ));
-    frame.render_widget(
-        Paragraph::new(vec![header, separator]),
-        chunks[0],
-    );
+    frame.render_widget(Paragraph::new(vec![header, separator]), chunks[0]);
 
     // Task list
     let mut lines: Vec<Line<'_>> = Vec::new();
@@ -96,10 +90,7 @@ pub fn render_task_picker(
 
             let prefix = if is_selected { "> " } else { "  " };
 
-            let title_max = chunks[1]
-                .width
-                .saturating_sub(34)
-                .max(4) as usize;
+            let title_max = chunks[1].width.saturating_sub(34).max(4) as usize;
             let title = if task.title.len() > title_max {
                 format!("{}...", &task.title[..title_max.saturating_sub(3)])
             } else {

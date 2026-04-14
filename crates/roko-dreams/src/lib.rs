@@ -1,15 +1,74 @@
 //! Dreams subsystem crate.
 //!
-//! This crate re-exports the scaffolded dreams engine from `roko-golem` so
-//! the workspace can depend on a dedicated dreams package without duplicating
-//! the placeholder implementation.
+//! This package owns the dream-cycle runtime plus the remaining placeholder
+//! subsystem types that still live in the dreams domain.
 
 pub mod cycle;
+pub mod hypnagogia;
 pub mod runner;
 
 pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
-pub use roko_golem::{DreamsEngine, GolemSubsystemId, GolemSubsystemSummary, ScaffoldEngine};
+pub use hypnagogia::HypnagogiaEngine;
 pub use runner::{
     DreamAgentConfig, DreamConfig, DreamEngine, DreamLoopConfig, DreamReport, DreamRunner, Episode,
     Insight,
 };
+
+/// Stable subsystem identifiers still surfaced by the dreams crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DreamsSubsystemId {
+    /// Replay and imagination loop.
+    Dreams,
+    /// Liminal interrupt / handoff state.
+    Hypnagogia,
+}
+
+/// Summary metadata for one dreams subsystem placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DreamsSubsystemSummary {
+    /// Stable subsystem identifier.
+    pub id: DreamsSubsystemId,
+    /// Human-readable label.
+    pub label: &'static str,
+    /// Static marker string describing placeholder behavior.
+    pub marker: &'static str,
+}
+
+impl DreamsSubsystemSummary {
+    /// Construct a subsystem summary.
+    #[must_use]
+    pub const fn new(id: DreamsSubsystemId, label: &'static str, marker: &'static str) -> Self {
+        Self { id, label, marker }
+    }
+}
+
+/// Placeholder dreams engine while the full orchestration surface converges.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DreamsEngine;
+
+impl DreamsEngine {
+    /// Stable subsystem id.
+    pub const ID: DreamsSubsystemId = DreamsSubsystemId::Dreams;
+    /// Human-readable subsystem label.
+    pub const LABEL: &'static str = "Dreams";
+    /// Static placeholder marker string.
+    pub const MARKER: &'static str = "roko-dreams subsystem: dreams";
+
+    /// Construct a placeholder dreams engine.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Summary metadata for this subsystem placeholder.
+    #[must_use]
+    pub const fn summary(self) -> DreamsSubsystemSummary {
+        DreamsSubsystemSummary::new(Self::ID, Self::LABEL, Self::MARKER)
+    }
+
+    /// Returns a static marker describing placeholder behavior.
+    #[must_use]
+    pub const fn replay(self) -> &'static str {
+        Self::MARKER
+    }
+}

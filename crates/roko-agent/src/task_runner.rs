@@ -5,7 +5,7 @@
 //! and cost accounting across task iterations.
 
 use crate::{Agent, Usage, chat_types::FinishReason};
-use roko_core::{Context, Signal};
+use roko_core::{Context, Engram};
 use std::collections::{HashMap, VecDeque};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -40,7 +40,7 @@ pub struct TaskRunner {
 #[derive(Debug, Clone)]
 pub struct TaskResult {
     /// Final output signal emitted by the agent pipeline.
-    pub output: Signal,
+    pub output: Engram,
     /// Total usage accumulated across all iterations.
     pub total_usage: Usage,
     /// Total cost accumulated across all iterations.
@@ -437,7 +437,7 @@ impl TaskRunner {
     /// Run the full task pipeline until success, abort, escalation, or a hard stop.
     pub async fn run_task(
         &mut self,
-        task_signal: &Signal,
+        task_signal: &Engram,
         ctx: &Context,
     ) -> Result<TaskResult, TaskRunnerError> {
         let mut iterations = 0;
@@ -557,7 +557,7 @@ impl TaskRunner {
     }
 }
 
-fn prompt_hash_u64(signal: &Signal) -> u64 {
+fn prompt_hash_u64(signal: &Engram) -> u64 {
     let hash = signal.content_hash();
     let bytes: [u8; 8] = hash.0[..8].try_into().expect("content hash prefix");
     u64::from_be_bytes(bytes)
@@ -579,7 +579,7 @@ fn event_timestamp_ms(ctx: &Context) -> i64 {
     }
 }
 
-fn classify_error_pattern(output: &Signal) -> ErrorPattern {
+fn classify_error_pattern(output: &Engram) -> ErrorPattern {
     let Ok(text) = output.body.as_text() else {
         return ErrorPattern::Unknown;
     };
@@ -636,7 +636,7 @@ mod tests {
 
     #[async_trait]
     impl Agent for SequenceAgent {
-        async fn run(&self, _input: &Signal, _ctx: &Context) -> AgentResult {
+        async fn run(&self, _input: &Engram, _ctx: &Context) -> AgentResult {
             self.run_count.fetch_add(1, Ordering::SeqCst);
             self.results
                 .lock()
@@ -650,12 +650,12 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_result(text: &str, success: bool, usage: Usage) -> AgentResult {
-        let output = Signal::builder(Kind::AgentOutput)
+        let output = Engram::builder(Kind::AgentOutput)
             .body(Body::text(text))
             .provenance(Provenance::agent("sequence"))
             .build();

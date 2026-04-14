@@ -33,7 +33,7 @@
 //! ```
 
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -200,7 +200,7 @@ impl SymbolGate {
 
 #[async_trait]
 impl Gate for SymbolGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let manifest: SymbolManifest = match signal.body.as_json() {
             Ok(m) => m,
@@ -571,9 +571,9 @@ mod tests {
     use roko_core::{Body, Kind};
     use tempfile::TempDir;
 
-    fn manifest_signal(manifest: &SymbolManifest) -> Signal {
+    fn manifest_signal(manifest: &SymbolManifest) -> Engram {
         let body = Body::from_json(manifest).expect("manifest serializes");
-        Signal::builder(Kind::Task).body(body).build()
+        Engram::builder(Kind::Task).body(body).build()
     }
 
     fn write_file(dir: &Path, rel: &str, body: &str) {
@@ -885,7 +885,7 @@ mod tests {
     async fn bad_body_returns_fail_verdict() {
         let gate = SymbolGate::new(vec![]);
         // Body::Text is not valid JSON deserialization for SymbolManifest.
-        let sig = Signal::builder(Kind::Task).body(Body::text("nope")).build();
+        let sig = Engram::builder(Kind::Task).body(Body::text("nope")).build();
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
         assert!(v.reason.contains("not a SymbolManifest"));

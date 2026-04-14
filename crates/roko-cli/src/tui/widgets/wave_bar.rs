@@ -32,12 +32,7 @@ impl WaveProgress {
 /// Render a compact 1-line wave progress bar.
 ///
 /// Shows: wave number, progress bar, plan count, task count, and ETA.
-pub fn render_wave_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    wave: &WaveProgress,
-    theme: &Theme,
-) {
+pub fn render_wave_bar(frame: &mut Frame<'_>, area: Rect, wave: &WaveProgress, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }

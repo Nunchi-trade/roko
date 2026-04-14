@@ -1,9 +1,9 @@
 //! Full agent roster modal showing all agent details in a scrollable table.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -46,15 +46,13 @@ pub fn render_agent_pool(
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Header row
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(
-                " {:<12} {:<14} {:<16} {:>8} {:>8} {:<10} {:>4}",
-                "ROLE", "MODEL", "TASK", "TOKENS", "COST", "STATE", "CTX%"
-            ),
-            theme.accent_bold(),
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            " {:<12} {:<14} {:<16} {:>8} {:>8} {:<10} {:>4}",
+            "ROLE", "MODEL", "TASK", "TOKENS", "COST", "STATE", "CTX%"
         ),
-    ]));
+        theme.accent_bold(),
+    )]));
     // Separator
     lines.push(Line::from(Span::styled(
         " ".to_string() + &"-".repeat(inner.width.saturating_sub(2) as usize),
@@ -94,11 +92,11 @@ pub fn render_agent_pool(
                 Span::styled(format!(" {:<12}", agent.role), theme.text()),
                 Span::styled(format!(" {:<14}", agent.model), theme.muted()),
                 Span::styled(format!(" {:<16}", task_short), theme.text()),
-                Span::styled(format!(" {:>8}", format_tokens(agent.tokens)), theme.muted()),
                 Span::styled(
-                    format!(" ${:>7.2}", agent.cost_usd),
+                    format!(" {:>8}", format_tokens(agent.tokens)),
                     theme.muted(),
                 ),
+                Span::styled(format!(" ${:>7.2}", agent.cost_usd), theme.muted()),
                 Span::styled(format!(" {:<10}", agent.state), state_style),
                 Span::styled(format!(" {:>3}%", agent.context_pct), ctx_style),
             ]));

@@ -8,8 +8,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use super::rosedust::MoriTheme;
 use super::super::state::TuiState;
+use super::rosedust::MoriTheme;
 
 // ---------------------------------------------------------------------------
 // Role tab labels

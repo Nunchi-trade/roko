@@ -91,21 +91,10 @@ pub enum ConfirmAction {
     RepairPlanClean(String),
     SoftRetryPlan(String),
     GitReconcile,
-    IngestTask {
-        plan_num: usize,
-        task_id: String,
-    },
-    MergeBatchToMain {
-        plan_id: String,
-        branch: String,
-    },
-    MergePlan {
-        plan_id: String,
-        branch: String,
-    },
-    MergeAllDone {
-        branches: Vec<String>,
-    },
+    IngestTask { plan_num: usize, task_id: String },
+    MergeBatchToMain { plan_id: String, branch: String },
+    MergePlan { plan_id: String, branch: String },
+    MergeAllDone { branches: Vec<String> },
 }
 
 impl std::fmt::Display for ConfirmAction {
@@ -293,7 +282,13 @@ pub enum TuiAction {
 /// 4. Confirm dialog
 /// 5. Inject / filter text input
 /// 6. Normal per-tab navigation
-pub fn handle_key(key: KeyEvent, mode: InputMode, active_tab: Tab, focus: FocusZone, modals: &ModalVisibility) -> TuiAction {
+pub fn handle_key(
+    key: KeyEvent,
+    mode: InputMode,
+    active_tab: Tab,
+    focus: FocusZone,
+    modals: &ModalVisibility,
+) -> TuiAction {
     // Modal intercepts (highest priority first)
     if modals.show_task_picker {
         return handle_task_picker_key(key);
@@ -533,11 +528,11 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('/') => TuiAction::StartFilter,
 
         // Plan operations (Mori parity)
-        KeyCode::Char('s') => TuiAction::RestartPlan,     // soft retry
-        KeyCode::Char('z') => TuiAction::ReverifyPlan,    // diagnose
-        KeyCode::Char('S') => TuiAction::ResetPlanState,  // repair preserve
-        KeyCode::Char('R') => TuiAction::RestartPhase,    // repair clean
-        KeyCode::Char('c') => TuiAction::ReverifyPlan,    // reverify
+        KeyCode::Char('s') => TuiAction::RestartPlan, // soft retry
+        KeyCode::Char('z') => TuiAction::ReverifyPlan, // diagnose
+        KeyCode::Char('S') => TuiAction::ResetPlanState, // repair preserve
+        KeyCode::Char('R') => TuiAction::RestartPhase, // repair clean
+        KeyCode::Char('c') => TuiAction::ReverifyPlan, // reverify
         KeyCode::Char('F') => TuiAction::ForceAdvance,
         KeyCode::Char('V') => TuiAction::ReverifyPlan,
         _ => TuiAction::None,

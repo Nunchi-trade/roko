@@ -10,11 +10,11 @@
 
 use std::collections::BTreeMap;
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -82,8 +82,7 @@ pub fn render_with_entries(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let sections =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
+    let sections = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
 
     // Status bar with source counts
     let signal_count = data.recent_signals.len();
@@ -98,10 +97,7 @@ pub fn render_with_entries(
         "SCROLL"
     };
     let status_line1 = Line::from(vec![
-        Span::styled(
-            format!(" {} entries ", entries.len()),
-            theme.muted(),
-        ),
+        Span::styled(format!(" {} entries ", entries.len()), theme.muted()),
         Span::styled(format!("[{tail_label}]"), theme.accent()),
         Span::styled("  |  ", theme.muted()),
         Span::styled(format!("signals:{signal_count}"), theme.info()),
@@ -141,10 +137,7 @@ pub fn render_with_entries(
             Line::from(vec![
                 Span::styled(&entry.timestamp, theme.muted()),
                 Span::raw(" "),
-                Span::styled(
-                    format!("[{}]", entry.level.label()),
-                    level_style,
-                ),
+                Span::styled(format!("[{}]", entry.level.label()), level_style),
                 Span::raw(" "),
                 Span::styled(&entry.source, source_style),
                 Span::raw(": "),

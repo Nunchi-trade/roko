@@ -47,7 +47,7 @@ graph TD
     classDef data fill:#16213e,stroke:#0f3460,color:#eee,stroke-width:1px
     classDef action fill:#0f3460,stroke:#533483,color:#eee,stroke-width:1px
 
-    A[Signal Input] --> B[Scorer]
+    A[Engram Input] --> B[Scorer]
     B --> C{Router}
     C -->|high confidence| D[Direct Execute]
     C -->|low confidence| E[LLM Deliberation]

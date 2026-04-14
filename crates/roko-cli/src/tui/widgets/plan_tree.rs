@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::rosedust::{MoriTheme, gradient_ocean};
 use super::super::state::{PlanEntry, TuiState};
+use super::rosedust::{MoriTheme, gradient_ocean};
 
 // ---------------------------------------------------------------------------
 // Fixed column widths (chars)

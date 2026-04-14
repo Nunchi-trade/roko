@@ -73,12 +73,7 @@ impl StatusBadge {
 /// Render a compact colored status badge.
 ///
 /// Renders as colored text with an icon prefix in a single line.
-pub fn render_status_badge(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    status: StatusBadge,
-    theme: &Theme,
-) {
+pub fn render_status_badge(frame: &mut Frame<'_>, area: Rect, status: StatusBadge, theme: &Theme) {
     let color = status.color(theme);
     let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
     if status.should_pulse() {
@@ -98,8 +93,5 @@ pub fn render_status_badge(
 pub fn status_badge_span(status: StatusBadge, theme: &Theme) -> Span<'static> {
     let color = status.color(theme);
     let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-    Span::styled(
-        format!("{}{}", status.icon(), status.label()),
-        style,
-    )
+    Span::styled(format!("{}{}", status.icon(), status.label()), style)
 }

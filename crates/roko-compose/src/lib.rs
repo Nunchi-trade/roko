@@ -10,7 +10,7 @@
 //! # Design principle
 //!
 //! Composers do not read files. The app layer reads files, converts them
-//! into `Signal<PromptSection>`s, and passes them to the composer. This is
+//! into `Engram<PromptSection>`s, and passes them to the composer. This is
 //! the strict I/O boundary from `02-anti-patterns.md` (rule #8).
 
 #![allow(clippy::module_name_repetitions)]

@@ -21,7 +21,7 @@ Antonio Damasio's somatic marker hypothesis (1994) proposes that emotions provid
 
 Roko implements this as a **Somatic Landscape** — a k-d tree over an 8-dimensional strategy space where each point carries an emotional valence derived from past outcomes. Before acting, the agent queries the landscape: "What does this region of strategy space *feel like*?" Nearby positive markers signal confidence (use cheaper models, move faster). Nearby negative markers signal caution (escalate to stronger models, slow down, request review).
 
-The integration between the Somatic Landscape and Neuro's knowledge retrieval is now split across two layers: `roko-daimon` owns the situation-specific somatic landscape and uses it to bias dispatch before work begins, while `roko-neuro::ContextAssembler` applies PAD-biased retrieval, arousal-shaped scope, and a mandatory contrarian slice when selecting knowledge. The architecture is affective end-to-end, but the final direct fusion of somatic scores into Neuro's knowledge ranking is still pending.
+The integration between the Somatic Landscape and Neuro's knowledge retrieval is now split across two layers: `roko-daimon` owns the situation-specific somatic landscape and uses it to bias dispatch before work begins, while `roko-neuro::ContextAssembler` applies PAD-biased retrieval, direct somatic re-ranking, arousal-shaped scope, and a mandatory contrarian slice when selecting knowledge. Dream feedback now also consolidates replayed emotionally charged episodes back into the somatic landscape instead of only cooling existing markers. The architecture is affective end-to-end; the remaining gaps are domain-extensible strategy spaces and the still-missing cross-subsystem VCG auction.
 
 ---
 
@@ -173,15 +173,14 @@ The Walker & van der Helm (2009) SFSR (Sleep to Forget, Sleep to Remember) model
 **Implemented**:
 - `roko-daimon` now has a persisted `SomaticLandscape` backed by `kiddo`, with `SomaticMarker` and `SomaticSignal` types over the coding-domain 8D strategy space
 - `roko-cli` projects task execution context into `StrategyCoordinates`, records live task outcomes into the somatic landscape, and queries that landscape before dispatch
-- `roko-neuro::ContextAssembler` applies mood-congruent retrieval bias, a mandatory contrarian slice, and arousal-shaped allocation pressure during context assembly
+- `roko-neuro::ContextAssembler` applies mood-congruent retrieval bias, a mandatory contrarian slice, arousal-shaped allocation pressure, and direct somatic re-ranking during context assembly
 - `KnowledgeEntry` has `hdc_vector` and emotional provenance fields for similarity-based and affect-aware retrieval
 - Behavioral states are defined and fed into routing and prompting
+- Dream feedback now depotentiates PAD arousal and high-intensity somatic markers, synthesizes consolidated markers from replayed emotionally charged episodes, and strong somatic matches emit explicit runtime events
 
 **Still missing**:
-- Domain-configurable 8D axis definitions beyond the current coding-task projection
-- Direct use of somatic scores inside Neuro knowledge ranking rather than only Daimon routing
+- Dedicated non-coding strategy-space extractors beyond the centralized coding/default projection now owned by `roko-daimon`
 - Emotional decay (3-day half-life) separate from knowledge decay
-- SFSR emotional depotentiation during Dreams (Walker & van der Helm 2009)
 - Flashbulb memory encoding for high-arousal events
 - Emotional contagion between agents in a collective (0.3 attenuation factor per hop)
 - Integration between somatic markers and the VCG attention auction bidding

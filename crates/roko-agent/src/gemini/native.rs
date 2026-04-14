@@ -13,7 +13,7 @@ use crate::{Agent, AgentResult};
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
 use roko_core::tool::{ToolCall, ToolDef};
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 
 use super::types::{
@@ -109,7 +109,7 @@ impl GeminiNativeAgent {
         ]
     }
 
-    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
+    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -336,7 +336,7 @@ impl GeminiNativeAgent {
 
 #[async_trait]
 impl Agent for GeminiNativeAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         let prompt_text = match input.body.as_text() {
@@ -508,8 +508,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[test]

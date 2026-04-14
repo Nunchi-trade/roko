@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -130,9 +130,8 @@ pub fn render_with_context_data(
 
     render_health_summary(frame, sections[0], data, theme);
 
-    let mid_panels =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(sections[1]);
+    let mid_panels = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sections[1]);
     render_token_burn_by_role(frame, mid_panels[0], data, view_state, theme);
     render_cost_by_model(frame, mid_panels[1], data, theme);
 
@@ -144,12 +143,7 @@ pub fn render_with_context_data(
 }
 
 /// Top section: system health summary with C-Factor and key metrics.
-fn render_health_summary(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
+fn render_health_summary(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" System Health ")
@@ -184,7 +178,10 @@ fn render_health_summary(
             Span::styled(format!("{:.0}ms", eff.average_wall_time_ms), theme.info()),
         ]),
     ];
-    frame.render_widget(Paragraph::new(token_lines).wrap(Wrap { trim: false }), cols[0]);
+    frame.render_widget(
+        Paragraph::new(token_lines).wrap(Wrap { trim: false }),
+        cols[0],
+    );
 
     // Middle column: pass rate and event counts
     let pass_rate = if eff.event_count > 0 {
@@ -218,7 +215,10 @@ fn render_health_summary(
             Span::raw(data.plans.len().to_string()),
         ]),
     ];
-    frame.render_widget(Paragraph::new(rate_lines).wrap(Wrap { trim: false }), cols[1]);
+    frame.render_widget(
+        Paragraph::new(rate_lines).wrap(Wrap { trim: false }),
+        cols[1],
+    );
 
     // Right column: C-Factor or cascade router summary
     let right_lines = if let Some(ref cf) = data.cfactor {
@@ -274,7 +274,10 @@ fn render_health_summary(
             ]),
         ]
     };
-    frame.render_widget(Paragraph::new(right_lines).wrap(Wrap { trim: false }), cols[2]);
+    frame.render_widget(
+        Paragraph::new(right_lines).wrap(Wrap { trim: false }),
+        cols[2],
+    );
 }
 
 /// Token burn per role from efficiency events.
@@ -358,10 +361,7 @@ fn render_token_burn_by_role(
         Row::new(vec![
             Cell::from(Span::styled("TOTAL", theme.accent_bold())),
             Cell::from(Span::styled(format_count(total_tokens), theme.accent())),
-            Cell::from(Span::styled(
-                format!("${:.3}", total_cost),
-                theme.warning(),
-            )),
+            Cell::from(Span::styled(format!("${:.3}", total_cost), theme.warning())),
             Cell::from(Span::styled(total_turns.to_string(), theme.accent())),
             Cell::from(total_cache_pct),
         ])
@@ -385,12 +385,7 @@ fn render_token_burn_by_role(
 }
 
 /// Cost breakdown per model from efficiency events.
-fn render_cost_by_model(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    theme: &Theme,
-) {
+fn render_cost_by_model(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Cost by Model ")
@@ -447,10 +442,7 @@ fn render_cost_by_model(
             };
             Row::new(vec![
                 Cell::from(truncate(model, 20)),
-                Cell::from(Span::styled(
-                    format!("${:.4}", agg.cost_usd),
-                    cost_style,
-                )),
+                Cell::from(Span::styled(format!("${:.4}", agg.cost_usd), cost_style)),
                 Cell::from(format_count(agg.input_tokens)),
                 Cell::from(format_count(agg.output_tokens)),
                 Cell::from(avg_time),
@@ -490,8 +482,7 @@ fn render_cascade_router(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let sections =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(inner);
+    let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(inner);
 
     // Router model stats
     if data.cascade_router.model_slugs.is_empty() && ctx_data.token_burns.is_empty() {
@@ -590,16 +581,14 @@ fn render_cascade_router(
         "-".to_string()
     };
 
-    let summary = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("models: ", theme.muted()),
-            Span::raw(data.cascade_router.model_slugs.len().to_string()),
-            Span::styled("  trials: ", theme.muted()),
-            Span::raw(total_trials.to_string()),
-            Span::styled("  success: ", theme.muted()),
-            Span::raw(overall_rate),
-        ]),
-    ])
+    let summary = Paragraph::new(vec![Line::from(vec![
+        Span::styled("models: ", theme.muted()),
+        Span::raw(data.cascade_router.model_slugs.len().to_string()),
+        Span::styled("  trials: ", theme.muted()),
+        Span::raw(total_trials.to_string()),
+        Span::styled("  success: ", theme.muted()),
+        Span::raw(overall_rate),
+    ])])
     .wrap(Wrap { trim: false });
     frame.render_widget(summary, sections[1]);
 }

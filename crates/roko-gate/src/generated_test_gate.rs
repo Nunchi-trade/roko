@@ -34,7 +34,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, TestCount, Verdict};
+use roko_core::{Context, Engram, Gate, TestCount, Verdict};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -237,7 +237,7 @@ impl GeneratedTestGate {
 
 #[async_trait]
 impl Gate for GeneratedTestGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
 
         // 1. Resolve plan id.
@@ -364,7 +364,7 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn resolve_plan_id(signal: &Signal) -> Option<String> {
+fn resolve_plan_id(signal: &Engram) -> Option<String> {
     if let Some(v) = signal.tag(PLAN_TAG_KEY) {
         return Some(v.to_string());
     }
@@ -497,8 +497,8 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
-    fn signal_with_plan(plan: &str, payload: &GatePayload) -> Signal {
-        Signal::builder(Kind::Task)
+    fn signal_with_plan(plan: &str, payload: &GatePayload) -> Engram {
+        Engram::builder(Kind::Task)
             .tag("plan", plan)
             .body(Body::from_json(payload).unwrap())
             .build()
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn resolve_plan_id_prefers_tag() {
         let payload = GatePayload::in_dir("/nowhere");
-        let sig = Signal::builder(Kind::Task)
+        let sig = Engram::builder(Kind::Task)
             .tag("plan", "plan-42")
             .body(Body::from_json(&payload).unwrap())
             .build();
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn resolve_plan_id_falls_back_to_body() {
-        let sig = Signal::builder(Kind::Task)
+        let sig = Engram::builder(Kind::Task)
             .body(Body::from_json(&serde_json::json!({ "plan": "from-body" })).unwrap())
             .build();
         assert_eq!(resolve_plan_id(&sig).as_deref(), Some("from-body"));
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn resolve_plan_id_none_when_missing() {
-        let sig = Signal::builder(Kind::Task).body(Body::empty()).build();
+        let sig = Engram::builder(Kind::Task).body(Body::empty()).build();
         assert!(resolve_plan_id(&sig).is_none());
     }
 
@@ -736,7 +736,7 @@ mod tests {
     async fn missing_plan_id_fails_cleanly() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = GatePayload::in_dir(tmp.path());
-        let sig = Signal::builder(Kind::Task)
+        let sig = Engram::builder(Kind::Task)
             .body(Body::from_json(&payload).unwrap())
             .build();
         let gate = GeneratedTestGate::new(store());
@@ -747,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_body_fails_cleanly() {
-        let sig = Signal::builder(Kind::Task)
+        let sig = Engram::builder(Kind::Task)
             .tag("plan", "p")
             .body(Body::text("not json"))
             .build();

@@ -13,7 +13,7 @@ use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, Provide
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::{Context, Signal};
+use roko_core::{Context, Engram};
 use serde_json::Value;
 
 /// Default Perplexity API base URL.
@@ -42,7 +42,7 @@ impl PerplexityEmbedAgent {
 
 #[async_trait]
 impl Agent for PerplexityEmbedAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }
 
@@ -90,7 +90,7 @@ impl PerplexityDeepResearchAgent {
 
 #[async_trait]
 impl Agent for PerplexityDeepResearchAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }
 

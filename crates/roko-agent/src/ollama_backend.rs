@@ -324,8 +324,14 @@ mod tests {
         let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
 
-        let first = backend.send_turn(&msgs, &tools, &SessionState::default()).await.unwrap();
-        let second = backend.send_turn(&msgs, &tools, &SessionState::default()).await.unwrap();
+        let first = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await
+            .unwrap();
+        let second = backend
+            .send_turn(&msgs, &tools, &SessionState::default())
+            .await
+            .unwrap();
 
         assert!(matches!(first, BackendResponse::Json(_)));
         assert!(matches!(second, BackendResponse::Json(_)));

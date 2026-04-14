@@ -1,9 +1,9 @@
 //! Quit confirmation modal.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -26,10 +26,7 @@ pub fn render_quit(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(
-            "Are you sure you want to quit?",
-            theme.text(),
-        )),
+        Line::from(Span::styled("Are you sure you want to quit?", theme.text())),
         Line::from(""),
         Line::from(vec![
             Span::styled("[y]", theme.accent_bold()),

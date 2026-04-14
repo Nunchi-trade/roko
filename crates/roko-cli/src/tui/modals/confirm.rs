@@ -1,9 +1,9 @@
 //! Generic destructive action confirmation modal.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::super::dashboard::Theme;
 
@@ -44,12 +44,7 @@ impl ConfirmAction {
 ///
 /// Centered ~50x15 rectangle. Shows action-specific messaging with
 /// `[y/Enter]` confirm / `[n/Esc]` cancel hints.
-pub fn render_confirm(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    action: &ConfirmAction,
-    theme: &Theme,
-) {
+pub fn render_confirm(frame: &mut Frame<'_>, area: Rect, action: &ConfirmAction, theme: &Theme) {
     let popup = centered_rect(50, 30, area);
     frame.render_widget(Clear, popup);
 
@@ -80,10 +75,7 @@ fn build_confirm_lines<'a>(action: &'a ConfirmAction, theme: &Theme) -> Vec<Line
             target,
             feasible,
         } => {
-            lines.push(Line::from(Span::styled(
-                "Branch merge:",
-                theme.text(),
-            )));
+            lines.push(Line::from(Span::styled("Branch merge:", theme.text())));
             lines.push(Line::from(""));
             // Branch flow graphic
             lines.push(Line::from(vec![
@@ -139,10 +131,7 @@ fn build_confirm_lines<'a>(action: &'a ConfirmAction, theme: &Theme) -> Vec<Line
             )));
         }
         ConfirmAction::Custom { message } => {
-            lines.push(Line::from(Span::styled(
-                message.as_str(),
-                theme.text(),
-            )));
+            lines.push(Line::from(Span::styled(message.as_str(), theme.text())));
         }
     }
 

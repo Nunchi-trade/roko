@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
-use roko_core::{Context as RokoContext, Signal};
+use roko_core::{Context as RokoContext, Engram};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
 use roko_neuro::{
     KnowledgeStore,
@@ -302,7 +302,7 @@ enum DreamReviewAgent {
 
 #[async_trait]
 impl Agent for DreamReviewAgent {
-    async fn run(&self, input: &Signal, ctx: &RokoContext) -> AgentResult {
+    async fn run(&self, input: &Engram, ctx: &RokoContext) -> AgentResult {
         match self {
             Self::Claude(agent) => agent.run(input, ctx).await,
             Self::Exec(agent) => agent.run(input, ctx).await,

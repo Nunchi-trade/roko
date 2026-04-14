@@ -14,7 +14,7 @@
 //! For larger segments, callers should route to the HNSW index
 //! ([`crate::chain::hnsw::HnswBinaryIndex`]).
 
-use bardo_primitives::HdcVector;
+use roko_primitives::HdcVector;
 
 use super::insight::InsightId;
 

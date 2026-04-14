@@ -8,11 +8,11 @@ use roko_agent::http::{HttpPostError, HttpPoster};
 use roko_agent::translate::ChatResponse;
 use roko_agent::translate::openai::parse_glm_metadata;
 use roko_core::config::schema::ProviderRouting;
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 use serde_json::{Map, Value};
 
-fn prompt(text: &str) -> Signal {
-    Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+fn prompt(text: &str) -> Engram {
+    Engram::builder(Kind::Prompt).body(Body::text(text)).build()
 }
 
 #[derive(Debug, Clone)]

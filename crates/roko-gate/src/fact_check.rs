@@ -32,7 +32,7 @@
 //!   with a reason of the form `"Fact check: 2/4 claims verified (50%)"`
 
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -157,7 +157,7 @@ impl FactCheckGate {
 
 #[async_trait]
 impl Gate for FactCheckGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let elapsed_ms = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -307,14 +307,14 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    fn text_signal(text: &str) -> Signal {
-        Signal::builder(Kind::AgentOutput)
+    fn text_signal(text: &str) -> Engram {
+        Engram::builder(Kind::AgentOutput)
             .body(Body::text(text))
             .build()
     }
 
-    fn empty_signal() -> Signal {
-        Signal::builder(Kind::AgentOutput)
+    fn empty_signal() -> Engram {
+        Engram::builder(Kind::AgentOutput)
             .body(Body::empty())
             .build()
     }

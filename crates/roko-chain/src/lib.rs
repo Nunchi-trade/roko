@@ -14,6 +14,7 @@ pub mod gate;
 pub mod mock;
 pub mod types;
 pub mod wallet;
+pub mod witness;
 
 pub use client::ChainClient;
 pub use gate::{
@@ -26,3 +27,4 @@ pub use types::{
     TxRequest,
 };
 pub use wallet::ChainWallet;
+pub use witness::ChainWitnessEngine;

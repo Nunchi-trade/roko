@@ -13,14 +13,14 @@
 //!   knowledge-layer: signals posted here are promoted to `InsightEntry`s with
 //!   a decay lifecycle, confirmations, and challenges.
 //!
-//! Signal lineage is preserved: the original `Signal` is stored verbatim and
+//! Engram lineage is preserved: the original `Engram` is stored verbatim and
 //! returned by `get(content_hash)` byte-for-byte equal to the put input.
 //!
 //! # Conversion rules
 //!
-//! - `Signal` → HDC vector: `project_tokens(body.as_text())` if the body is
+//! - `Engram` → HDC vector: `project_tokens(body.as_text())` if the body is
 //!   text/JSON, otherwise `project_bytes(body.canonical_bytes())`.
-//! - `Signal` → `KnowledgeKind`: inferred from `Signal.kind`, defaulting to
+//! - `Engram` → `KnowledgeKind`: inferred from `Engram.kind`, defaulting to
 //!   `KnowledgeKind::Insight`. See [`map_kind`] for the table.
 //!
 //! # Concurrency

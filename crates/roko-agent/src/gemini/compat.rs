@@ -5,7 +5,7 @@ use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
 use crate::provider::AgentOptions;
 use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
-use roko_core::{Context, Signal};
+use roko_core::{Context, Engram};
 use serde_json::{Map, Value};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -70,7 +70,7 @@ impl GeminiCompatAgent {
 
 #[async_trait]
 impl Agent for GeminiCompatAgent {
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
         self.inner.run(input, ctx).await
     }
 
@@ -216,7 +216,7 @@ mod tests {
             base_model(),
             &AgentOptions::default(),
         );
-        let input = Signal::builder(Kind::Prompt)
+        let input = Engram::builder(Kind::Prompt)
             .body(Body::text("Say hi"))
             .build();
 
@@ -259,7 +259,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let input = Signal::builder(Kind::Prompt)
+        let input = Engram::builder(Kind::Prompt)
             .body(Body::text("Say hi"))
             .build();
 

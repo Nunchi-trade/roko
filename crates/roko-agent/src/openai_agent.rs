@@ -22,7 +22,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::translate::openai::parse_usage;
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -39,7 +39,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 ///
 /// ```ignore
 /// let agent = OpenAiAgent::new("sk-test-key", "gpt-4o-mini");
-/// let prompt = Signal::builder(Kind::Prompt)
+/// let prompt = Engram::builder(Kind::Prompt)
 ///     .body(Body::text("Say hi"))
 ///     .build();
 /// let result = agent.run(&prompt, &Context::now()).await;
@@ -119,7 +119,7 @@ impl OpenAiAgent {
         headers
     }
 
-    fn failure(&self, input: &Signal, reason: String, started: &Instant) -> AgentResult {
+    fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -136,7 +136,7 @@ impl OpenAiAgent {
 
 #[async_trait]
 impl Agent for OpenAiAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
 
         // Extract prompt text (JSON fallback for non-text bodies).
@@ -323,8 +323,8 @@ mod tests {
         }
     }
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn agent_with(api_key: &str, model: &str, poster: Box<dyn HttpPoster>) -> OpenAiAgent {

@@ -10,7 +10,7 @@ use crate::process::{
 };
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Body, Context, Kind, Provenance, Signal};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -25,7 +25,7 @@ use tokio::time::timeout;
 /// ```ignore
 /// // Echo the prompt back (degenerate but demonstrates flow):
 /// let agent = ExecAgent::new("cat", vec![]);
-/// let prompt = Signal::builder(Kind::Prompt).body(Body::text("ping")).build();
+/// let prompt = Engram::builder(Kind::Prompt).body(Body::text("ping")).build();
 /// let result = agent.run(&prompt, &Context::now()).await;
 /// assert_eq!(result.output.body.as_text().unwrap().trim(), "ping");
 /// ```
@@ -91,7 +91,7 @@ impl ExecAgent {
 #[async_trait]
 #[allow(clippy::too_many_lines)]
 impl Agent for ExecAgent {
-    async fn run(&self, input: &Signal, _ctx: &Context) -> AgentResult {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
         let started = Instant::now();
         let prompt_text = match input.body.as_text() {
             Ok(s) => s.to_string(),
@@ -229,7 +229,7 @@ impl Agent for ExecAgent {
 }
 
 impl ExecAgent {
-    fn failure_signal(&self, input: &Signal, reason: &str, started: Instant) -> AgentResult {
+    fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let output = input
             .derive(Kind::AgentOutput, Body::text(reason))
@@ -262,13 +262,13 @@ fn maybe_warn_and_filter_benign(name: &str, line: &str) -> bool {
     false
 }
 
-fn stderr_trace(name: &str, stderr: &str) -> Vec<Signal> {
+fn stderr_trace(name: &str, stderr: &str) -> Vec<Engram> {
     stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .filter(|line| !maybe_warn_and_filter_benign(name, line))
         .map(|line| {
-            Signal::builder(Kind::AgentMessage)
+            Engram::builder(Kind::AgentMessage)
                 .body(Body::text(line))
                 .provenance(Provenance::agent(name))
                 .tag("stream", "stderr")
@@ -295,8 +295,8 @@ where
 mod tests {
     use super::*;
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     #[tokio::test]

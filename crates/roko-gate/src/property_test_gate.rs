@@ -17,7 +17,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, TestCount, Verdict};
+use roko_core::{Context, Engram, Gate, TestCount, Verdict};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -159,7 +159,7 @@ impl PropertyTestGate {
 
 #[async_trait]
 impl Gate for PropertyTestGate {
-    async fn verify(&self, signal: &Signal, _ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
             Ok(p) => p,
@@ -423,12 +423,12 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
-    fn empty_signal() -> Signal {
-        Signal::builder(Kind::Task).body(Body::empty()).build()
+    fn empty_signal() -> Engram {
+        Engram::builder(Kind::Task).body(Body::empty()).build()
     }
 
-    fn payload_signal(payload: &GatePayload) -> Signal {
-        Signal::builder(Kind::Task)
+    fn payload_signal(payload: &GatePayload) -> Engram {
+        Engram::builder(Kind::Task)
             .body(Body::from_json(payload).expect("json body"))
             .build()
     }

@@ -40,9 +40,9 @@ use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
 use roko_core::ConductorDecision;
+use roko_core::DaimonPolicy;
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::DaimonPolicy;
 use roko_daimon::{AffectEngine as _, AffectEvent, DaimonState, queue_wait_arousal};
 
 type EpisodeCompletionHook = Arc<dyn Fn(Episode) + Send + Sync>;

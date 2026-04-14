@@ -39,8 +39,8 @@
 //! In both cases, the goal is the same: keep provider-specific wiring out of
 //! the call sites and centralize it in this module.
 
-use crate::{Agent, ExecAgent};
 use crate::gemini::GeminiAdapter;
+use crate::{Agent, ExecAgent};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
@@ -100,17 +100,16 @@ pub fn create_agent_for_model(
     let profile = resolved
         .profile
         .or_else(|| config.effective_models().get(model_key).cloned());
-    let provider_config = profile
-        .as_ref()
-        .and_then(|profile| {
-            resolved.provider_config.clone().or_else(|| {
-                config
-                    .effective_providers()
-                    .get(&profile.provider)
-                    .cloned()
-            })
-        });
-    let legacy_command = options.command.as_deref().or(config.agent.command.as_deref());
+    let provider_config = profile.as_ref().and_then(|profile| {
+        resolved
+            .provider_config
+            .clone()
+            .or_else(|| config.effective_providers().get(&profile.provider).cloned())
+    });
+    let legacy_command = options
+        .command
+        .as_deref()
+        .or(config.agent.command.as_deref());
 
     let Some(provider_config) = provider_config else {
         if is_known_protocol_command(legacy_command) {
@@ -123,11 +122,8 @@ pub fn create_agent_for_model(
             "no provider found — falling back to ExecAgent (no tool support)"
         );
 
-        let mut agent = ExecAgent::new(
-            legacy_command.unwrap_or("cat"),
-            options.extra_args.clone(),
-        )
-        .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+        let mut agent = ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
+            .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
         if !options.name.is_empty() {
             agent = agent.with_name(options.name.clone());
         }
@@ -165,7 +161,10 @@ fn is_known_protocol_command(command: Option<&str>) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or(command);
 
-    matches!(executable, "claude" | "codex" | "cursor-agent" | "cursor_agent")
+    matches!(
+        executable,
+        "claude" | "codex" | "cursor-agent" | "cursor_agent"
+    )
 }
 
 /// Shared semaphores that cap in-flight requests per provider.
@@ -326,7 +325,7 @@ pub enum AgentCreationError {
 mod tests {
     use super::*;
     use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
-    use roko_core::{Body, Context, Kind, Signal};
+    use roko_core::{Body, Context, Engram, Kind};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -334,8 +333,8 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    fn prompt(text: &str) -> Signal {
-        Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+    fn prompt(text: &str) -> Engram {
+        Engram::builder(Kind::Prompt).body(Body::text(text)).build()
     }
 
     fn spawn_chat_server(

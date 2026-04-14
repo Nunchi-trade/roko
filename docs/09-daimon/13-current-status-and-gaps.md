@@ -13,7 +13,7 @@
 
 ## Abstract
 
-The Daimon affect engine has moved the shared emotional vocabulary into `roko-core`, while `roko-daimon` now owns the live PAD state, explicit behavioral-state classification, baseline behavioral modulation, and a real somatic landscape for coding-task routing. The largest remaining gaps are no longer the existence of a fast affective path, but the richer PRD control surfaces layered on top of it: dream-maintained marker consolidation, collective contagion, VCG bidding integration, and several frontier appraisal triggers. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
+The Daimon affect engine has moved the shared emotional vocabulary into `roko-core`, while `roko-daimon` now owns the live PAD state, explicit behavioral-state classification, baseline behavioral modulation, and a real somatic landscape for coding-task routing. The largest remaining gaps are no longer the existence of a fast affective path, but the richer PRD control surfaces layered on top of it: collective contagion, VCG bidding integration, domain-extensible strategy spaces, and several frontier appraisal triggers. This document catalogs the exact state of each component, references the implementation priority tiers, and lists the legacy source files that were deliberately skipped during migration.
 
 ---
 
@@ -34,8 +34,8 @@ The Daimon affect engine has moved the shared emotional vocabulary into `roko-co
 | Temporal decay | **Complete** | Exponential decay: `factor = 0.5 ^ (elapsed_hours / half_life_hours)` |
 | Behavioral state classification | **Complete** | Explicit `BehavioralState::classify(pad, confidence)` stored on affect state |
 | Behavioral modulation | **Complete** | Model promotion/demotion (haiku↔sonnet↔opus), turn limit adjustment, strategy selection keyed off behavioral state |
-| `SomaticLandscape` | **Partial** | Persisted `SomaticMarker` store backed by a `kiddo` k-d tree over the 8D coding strategy space |
-| Somatic query + modulation | **Partial** | `query_somatic()` and `modulate_with_strategy()` blend nearby and contrarian markers to bias dispatch before task execution |
+| `SomaticLandscape` | **Partial** | Persisted `SomaticMarker` store backed by a `kiddo` k-d tree over the 8D coding strategy space, plus dream-time depotentiation of high-intensity markers |
+| Somatic query + modulation | **Partial** | `query_somatic()` and `modulate_with_strategy()` blend nearby and contrarian markers to bias dispatch before task execution; strong matches now emit explicit runtime events |
 | Somatic persistence / restore | **Complete** | Marker payloads persist with Daimon state, and `load_or_new()` rebuilds the in-memory index |
 | Persistence | **Complete** | Atomic file write (write to .tmp, rename) with auto-save on appraise |
 | Load/restore | **Complete** | `load_or_new()` loads from disk or creates fresh neutral state |
@@ -82,11 +82,9 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 ### Unimplemented Features by Category
 
 **Somatic Landscape**:
-- Dream-time marker consolidation and emotional depotentiation
-- `SomaticMarkerFired` event emission
 - Strategy-space abstractions beyond the current coding-task coordinate projection
 - External configuration for alternate domain axis sets
-- Direct use of somatic scores inside Neuro retrieval and context bidding, not just dispatch modulation
+- Direct use of somatic scores inside cross-subsystem context bidding, not just the current dispatch/prompt/retrieval surfaces
 
 **Emotional Memory Integration**:
 - Retrieval-time use of `EmotionalTag` is now partially implemented in `ContextAssembler`
@@ -156,14 +154,14 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 | **2D** | Daimon PAD tracking (F1-F5, F9) — core appraisal and modulation | **Complete** |
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
 | **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; routing now has an explicit `DaimonPolicy`, and the remaining gap is somatic-landscape-backed retrieval plus broader cross-subsystem weighting |
-| **2G** | Somatic landscape, 8D strategy space, k-d tree | Partial |
+| **2G** | Somatic landscape, 8D strategy space, k-d tree | Partial; persisted axis registration plus a shared `StrategySpaceComputer` are now in place, but dedicated non-coding extractors and VCG coupling are still missing |
 | **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Partial |
 | **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |
 | **2M** | Collective contagion, somatic field, C-Factor | Not started |
 
 ### Recommended Next Steps
 
-1. **Deepen somatic-landscape semantics**: add dream-driven consolidation / depotentiation, explicit events, and domain-extensible coordinate strategies on top of the now-working routing path.
+1. **Deepen somatic-landscape semantics**: add dedicated non-coding coordinate extractors and tighter cross-subsystem use of the now-centralized strategy-space computer.
 
 2. **Finish emotional-memory scoring**: retrieval weighting now uses emotional provenance and emotional diversity in Neuro; the remaining work is direct somatic-landscape-backed knowledge selection and consolidation priority.
 

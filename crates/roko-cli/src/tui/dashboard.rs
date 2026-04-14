@@ -107,15 +107,15 @@ impl Theme {
     #[must_use]
     pub const fn dark() -> Self {
         Self {
-            foreground: Color::Rgb(165, 142, 158),       // #A58E9E — rose-tinted text
-            muted: Color::Rgb(110, 85, 105),             // #6E5569 — ghost text
-            background: Color::Rgb(0, 0, 0),             // #000000 — void
-            accent: Color::Rgb(185, 120, 148),           // #B97894 — primary rose
-            accent_foreground: Color::Rgb(0, 0, 0),      // #000000 — contrast on rose
-            success: Color::Rgb(125, 158, 140),          // #7D9E8C — sage green
-            warning: Color::Rgb(195, 155, 95),           // #C39B5F — amber caution
-            danger: Color::Rgb(195, 110, 85),            // #C36E55 — ember red
-            info: Color::Rgb(120, 115, 165),             // #7873A5 — dream indigo
+            foreground: Color::Rgb(165, 142, 158), // #A58E9E — rose-tinted text
+            muted: Color::Rgb(110, 85, 105),       // #6E5569 — ghost text
+            background: Color::Rgb(0, 0, 0),       // #000000 — void
+            accent: Color::Rgb(185, 120, 148),     // #B97894 — primary rose
+            accent_foreground: Color::Rgb(0, 0, 0), // #000000 — contrast on rose
+            success: Color::Rgb(125, 158, 140),    // #7D9E8C — sage green
+            warning: Color::Rgb(195, 155, 95),     // #C39B5F — amber caution
+            danger: Color::Rgb(195, 110, 85),      // #C36E55 — ember red
+            info: Color::Rgb(120, 115, 165),       // #7873A5 — dream indigo
             selection_background: Color::Rgb(34, 28, 36), // #221C24 — highlight
             selection_foreground: Color::Rgb(215, 198, 158), // #D7C69E — bone bright
         }
@@ -552,19 +552,13 @@ impl DashboardData {
         let task_outputs = load_task_outputs(&task_outputs_dir);
         let task_outputs_stamp = file_stamp(&task_outputs_dir);
 
-        let current_plan_execution = load_current_plan_execution(
-            &root,
-            &state,
-            &episodes,
-            &task_outputs,
-        );
+        let current_plan_execution =
+            load_current_plan_execution(&root, &state, &episodes, &task_outputs);
         let efficiency_stamp = file_stamp(&efficiency_path);
 
         // Backfill agent_output_tail from task-outputs if episode didn't provide it
-        let current_plan_execution = backfill_agent_output_tail(
-            current_plan_execution,
-            &task_outputs,
-        );
+        let current_plan_execution =
+            backfill_agent_output_tail(current_plan_execution, &task_outputs);
 
         // Load event log from .roko/state/events.json
         let events_path = roko_dir.join("state").join("events.json");
@@ -2876,9 +2870,7 @@ impl DashboardSnapshot {
                 &provider_health_path,
             ),
             provider_health_stamp: file_stamp(&provider_health_path),
-            latency_stats: load_json_opt::<LatencyStatsData>(
-                &learn_dir.join(LATENCY_STATS_FILE),
-            ),
+            latency_stats: load_json_opt::<LatencyStatsData>(&learn_dir.join(LATENCY_STATS_FILE)),
             knowledge_store: load_knowledge_store_snapshot(&root),
         };
 

@@ -13,7 +13,7 @@
 //!
 //! # Script resolution
 //!
-//! The path to the script is read from the input [`Signal`]:
+//! The path to the script is read from the input [`Engram`]:
 //!
 //! 1. If `signal.tag("verify_script")` is set, that path is used.
 //! 2. Otherwise the gate treats it as "no script for this signal" and
@@ -38,14 +38,14 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
-/// Tag key the gate reads from [`Signal::tag`] to find the verify script.
+/// Tag key the gate reads from [`Engram::tag`] to find the verify script.
 pub const VERIFY_SCRIPT_TAG: &str = "verify_script";
 
 /// Maximum number of bytes of combined stdout/stderr retained in
@@ -139,7 +139,7 @@ impl VerifyChainGate {
     }
 
     /// Resolve the script path from the signal + payload, or return `None`.
-    fn resolve_script(signal: &Signal, payload: Option<&GatePayload>) -> Option<PathBuf> {
+    fn resolve_script(signal: &Engram, payload: Option<&GatePayload>) -> Option<PathBuf> {
         let raw = signal.tag(VERIFY_SCRIPT_TAG)?;
         let p = Path::new(raw);
         if p.is_absolute() {
@@ -175,7 +175,7 @@ impl VerifyChainGate {
 
 #[async_trait]
 impl Gate for VerifyChainGate {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = Instant::now();
         // GatePayload is optional: some callers may rely on absolute
         // script paths and the current process's cwd.
@@ -518,19 +518,19 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
-    fn signal_with_script(dir: &std::path::Path, script: &str) -> Signal {
+    fn signal_with_script(dir: &std::path::Path, script: &str) -> Engram {
         let payload = GatePayload::in_dir(dir);
         let body = Body::from_json(&payload).expect("serialize payload");
-        Signal::builder(Kind::Task)
+        Engram::builder(Kind::Task)
             .body(body)
             .tag(VERIFY_SCRIPT_TAG, script)
             .build()
     }
 
-    fn signal_without_tag(dir: &std::path::Path) -> Signal {
+    fn signal_without_tag(dir: &std::path::Path) -> Engram {
         let payload = GatePayload::in_dir(dir);
         let body = Body::from_json(&payload).expect("serialize payload");
-        Signal::builder(Kind::Task).body(body).build()
+        Engram::builder(Kind::Task).body(body).build()
     }
 
     fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
@@ -860,7 +860,7 @@ mod tests {
         struct FakeCycle;
         #[async_trait]
         impl Gate for FakeCycle {
-            async fn verify(&self, _: &Signal, _: &Context) -> Verdict {
+            async fn verify(&self, _: &Engram, _: &Context) -> Verdict {
                 Verdict::pass("verify_chain")
             }
             #[allow(clippy::unnecessary_literal_bound)]

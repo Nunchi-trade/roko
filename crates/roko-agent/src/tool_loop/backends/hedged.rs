@@ -123,7 +123,11 @@ mod tests {
         let messages = [serde_json::json!({"role": "user", "content": "ping"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
 
-        let call = tokio::spawn(async move { backend.send_turn(&messages, &tools, &SessionState::default()).await });
+        let call = tokio::spawn(async move {
+            backend
+                .send_turn(&messages, &tools, &SessionState::default())
+                .await
+        });
 
         primary.wait_until_called().await;
         tokio::task::yield_now().await;
@@ -146,7 +150,11 @@ mod tests {
         let messages = [serde_json::json!({"role": "user", "content": "ping"})];
         let tools = RenderedTools::JsonArray(serde_json::json!([]));
 
-        let call = tokio::spawn(async move { backend.send_turn(&messages, &tools, &SessionState::default()).await });
+        let call = tokio::spawn(async move {
+            backend
+                .send_turn(&messages, &tools, &SessionState::default())
+                .await
+        });
 
         primary.wait_until_called().await;
         tokio::task::yield_now().await;

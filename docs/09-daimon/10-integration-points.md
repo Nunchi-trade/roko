@@ -238,7 +238,7 @@ When the PAD state changes significantly (Euclidean delta > 0.15 from last emitt
 |---|---|---|
 | `MoodUpdate` | PAD Euclidean delta > 0.15 | TUI, episode logger, connected clients |
 | `DaimonAppraisal` | Every appraisal completes | TUI, episode logger, metrics |
-| `SomaticMarkerFired` | Somatic marker matches current situation | TUI (particle effect), episode logger |
+| `SomaticMarkerFired` | Strong somatic marker match ( \|valence\| > 0.3 and intensity > 0.5 ) | WebSocket / server event consumers now receive it directly; TUI / episode-log consumers can subscribe |
 | `EmotionalShift` | Dominant Plutchik emotion changes | TUI, notification system |
 
 The 0.15 threshold prevents event flooding. A shift from Relaxed to Anxious (PAD distance ~1.2) always emits. Micro-fluctuations within the same octant (distance ~0.05) do not.

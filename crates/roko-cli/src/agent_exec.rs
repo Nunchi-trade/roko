@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 
 /// Options for agent execution.
 pub struct AgentExecOpts<'a> {
@@ -88,7 +88,7 @@ pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)>
     )
     .with_context(|| format!("create agent for model {model}"))?;
 
-    let prompt = Signal::builder(Kind::Prompt)
+    let prompt = Engram::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))
         .build();
     let result = agent.run(&prompt, &Context::now()).await;

@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::rosedust::{MoriTheme, gradient_fire};
 use super::super::state::TuiState;
+use super::rosedust::{MoriTheme, gradient_fire};
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", "\u{2219}", "\u{25cf}"];
 

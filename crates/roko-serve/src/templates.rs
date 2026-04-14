@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use roko_agent::mcp::find_mcp_config;
-use roko_core::{Body, Signal};
+use roko_core::{Body, Engram};
 
 /// The expected output shape for an agent template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,7 +384,7 @@ impl TemplateRegistry {
     pub fn render_prompt_with_signal(
         template: &AgentTemplate,
         params: &HashMap<String, String>,
-        signal: Option<&Signal>,
+        signal: Option<&Engram>,
     ) -> String {
         let mut values = params.clone();
         let variant = values.remove("variant").unwrap_or_default();
@@ -424,7 +424,7 @@ impl TemplateRegistry {
     }
 }
 
-fn signal_json_string(signal: &Signal, path: &[&str]) -> Option<String> {
+fn signal_json_string(signal: &Engram, path: &[&str]) -> Option<String> {
     let Body::Json(value) = &signal.body else {
         return None;
     };
@@ -639,7 +639,7 @@ mcp_servers = ["github", "missing-server"]
             experiment: None,
         };
 
-        let signal = roko_core::Signal::builder(roko_core::Kind::Task)
+        let signal = roko_core::Engram::builder(roko_core::Kind::Task)
             .body(
                 roko_core::Body::from_json(&serde_json::json!({
                     "pull_request": { "number": 42 },

@@ -14,6 +14,7 @@ use roko_core::config::schema::{
     ModelProfile, ProviderConfig, ProviderRouting, RokoConfig, SubscriptionConfig,
 };
 use roko_core::config::{ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig};
+use roko_daimon::StrategySpaceDefinition;
 use roko_orchestrator::ExecutorConfig;
 
 /// The top-level `roko.toml` document.
@@ -27,6 +28,9 @@ pub struct Config {
     /// Automatic dream-cycle settings for daemon mode.
     #[serde(default)]
     pub dreams: DreamsConfig,
+    /// Daimon affect-engine configuration.
+    #[serde(default)]
+    pub daimon: DaimonConfig,
     /// Tool registry preferences.
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -71,6 +75,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             auto_plan: false,
             dreams: DreamsConfig::default(),
+            daimon: DaimonConfig::default(),
             tools: ToolsConfig::default(),
             prompt: PromptConfig::default(),
             repos: Vec::new(),
@@ -255,6 +260,22 @@ impl Default for DreamsConfig {
             auto_dream: Self::default_auto_dream(),
             idle_threshold_mins: Self::default_idle_threshold_mins(),
             min_episodes_for_dream: Self::default_min_episodes_for_dream(),
+        }
+    }
+}
+
+/// Daimon affect-engine configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DaimonConfig {
+    /// Domain-specific strategy-space registration for somatic markers.
+    #[serde(default)]
+    pub strategy_space: StrategySpaceDefinition,
+}
+
+impl Default for DaimonConfig {
+    fn default() -> Self {
+        Self {
+            strategy_space: StrategySpaceDefinition::default(),
         }
     }
 }
@@ -548,6 +569,79 @@ impl DreamsLayer {
     }
 }
 
+/// Partial `DaimonConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DaimonLayer {
+    /// Domain-specific strategy-space registration for somatic markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_space: Option<StrategySpaceLayer>,
+}
+
+impl DaimonLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            strategy_space: match (self.strategy_space, overlay.strategy_space) {
+                (Some(base), Some(overlay)) => Some(base.merge(overlay)),
+                (None, Some(overlay)) => Some(overlay),
+                (Some(base), None) => Some(base),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// Resolve into a concrete [`DaimonConfig`] value.
+    pub fn resolve(self) -> Result<DaimonConfig> {
+        let defaults = DaimonConfig::default();
+        Ok(DaimonConfig {
+            strategy_space: match self.strategy_space {
+                Some(strategy_space) => strategy_space.resolve()?,
+                None => defaults.strategy_space,
+            },
+        })
+    }
+}
+
+/// Partial strategy-space registration config.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct StrategySpaceLayer {
+    /// Domain identifier for this strategy-space mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Human-readable labels for the fixed 8 dimensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<Vec<String>>,
+}
+
+impl StrategySpaceLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            domain: overlay.domain.or(self.domain),
+            dimensions: overlay.dimensions.or(self.dimensions),
+        }
+    }
+
+    /// Resolve into a validated [`StrategySpaceDefinition`].
+    pub fn resolve(self) -> Result<StrategySpaceDefinition> {
+        let defaults = StrategySpaceDefinition::default();
+        let domain = self.domain.unwrap_or(defaults.domain);
+        let dimensions_vec = self
+            .dimensions
+            .unwrap_or_else(|| defaults.dimensions.into_iter().collect());
+        let dimensions: [String; 8] =
+            dimensions_vec.try_into().map_err(|values: Vec<String>| {
+                anyhow!(
+                    "daimon.strategy_space.dimensions must contain exactly 8 entries, got {}",
+                    values.len()
+                )
+            })?;
+        StrategySpaceDefinition { domain, dimensions }.validate()
+    }
+}
+
 /// Per-repository configuration inside `roko.toml`.
 ///
 /// Repo-specific subscriptions are additive: they sit alongside the global
@@ -805,6 +899,9 @@ pub struct ConfigLayer {
     /// Automatic dream-cycle overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dreams: Option<DreamsLayer>,
+    /// Daimon configuration overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daimon: Option<DaimonLayer>,
     /// Tool registry preference overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsLayer>,
@@ -861,6 +958,12 @@ impl ConfigLayer {
             self.dreams = Some(match self.dreams {
                 Some(base) => base.merge(dreams),
                 None => dreams,
+            });
+        }
+        if let Some(daimon) = overlay.daimon {
+            self.daimon = Some(match self.daimon {
+                Some(base) => base.merge(daimon),
+                None => daimon,
             });
         }
         if let Some(t) = overlay.tools {
@@ -922,6 +1025,7 @@ impl ConfigLayer {
         self.agent.is_none()
             && self.auto_plan.is_none()
             && self.dreams.is_none()
+            && self.daimon.is_none()
             && self.tools.is_none()
             && self.prompt.is_none()
             && self.gates.is_none()
@@ -970,6 +1074,10 @@ impl ConfigLayer {
             Some(dreams) => dreams.resolve(),
             None => DreamsConfig::default(),
         };
+        let daimon = match self.daimon {
+            Some(daimon) => daimon.resolve()?,
+            None => DaimonConfig::default(),
+        };
         let prompt = match self.prompt {
             Some(p) => {
                 let defaults = PromptConfig::default();
@@ -1001,6 +1109,7 @@ impl ConfigLayer {
                     task_timeout_secs: e.task_timeout_secs.unwrap_or(defaults.task_timeout_secs),
                     budget_usd: e.budget_usd.or(defaults.budget_usd),
                     auto_replan: e.auto_replan.unwrap_or(defaults.auto_replan),
+                    use_worktrees: e.use_worktrees.unwrap_or(defaults.use_worktrees),
                 }
             }
             None => ExecutorConfig::default(),
@@ -1049,6 +1158,7 @@ impl ConfigLayer {
             agent,
             auto_plan,
             dreams,
+            daimon,
             tools,
             prompt,
             repos: self.repos.unwrap_or_default(),
@@ -1395,6 +1505,23 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
                     .context("parse min_episodes_for_dream as usize")?,
             );
         }
+        ["daimon", "strategy_space", "domain"] => {
+            let daimon = layer.daimon.get_or_insert_with(DaimonLayer::default);
+            let strategy_space = daimon
+                .strategy_space
+                .get_or_insert_with(StrategySpaceLayer::default);
+            strategy_space.domain = Some(value.into());
+        }
+        ["daimon", "strategy_space", "dimensions"] => {
+            let daimon = layer.daimon.get_or_insert_with(DaimonLayer::default);
+            let strategy_space = daimon
+                .strategy_space
+                .get_or_insert_with(StrategySpaceLayer::default);
+            strategy_space.dimensions = Some(parse_string_list(
+                value,
+                "parse JSON array for daimon.strategy_space.dimensions",
+            )?);
+        }
         ["tools", "prefer_mcp"] => {
             let tools = layer.tools.get_or_insert_with(ToolsLayer::default);
             tools.prefer_mcp = Some(value.parse::<bool>().context("parse prefer_mcp as bool")?);
@@ -1479,6 +1606,14 @@ pub(crate) fn apply_layer_value(layer: &mut ConfigLayer, key: &str, value: &str)
             let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
             executor.auto_replan =
                 Some(value.parse::<bool>().context("parse auto_replan as bool")?);
+        }
+        ["executor", "use_worktrees"] => {
+            let executor = layer.executor.get_or_insert_with(ExecutorLayer::default);
+            executor.use_worktrees = Some(
+                value
+                    .parse::<bool>()
+                    .context("parse use_worktrees as bool")?,
+            );
         }
         ["providers", name, "kind"] => {
             let provider = provider_layer_mut(layer, name);
@@ -2087,6 +2222,9 @@ pub struct ExecutorLayer {
     /// Whether to auto-replan after repeated gate failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_replan: Option<bool>,
+    /// Whether to use isolated git worktrees for plan and task execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_worktrees: Option<bool>,
 }
 
 /// Partial `ServeConfig` — every field optional.
@@ -2235,6 +2373,7 @@ impl ExecutorLayer {
             task_timeout_secs: overlay.task_timeout_secs.or(self.task_timeout_secs),
             budget_usd: overlay.budget_usd.or(self.budget_usd),
             auto_replan: overlay.auto_replan.or(self.auto_replan),
+            use_worktrees: overlay.use_worktrees.or(self.use_worktrees),
         }
     }
 }
@@ -2744,6 +2883,7 @@ max_merge_attempts = 4
 task_timeout_secs = 42
 budget_usd = 1.5
 auto_replan = false
+use_worktrees = true
 "#;
         let cfg = Config::parse_toml(toml).unwrap();
         assert_eq!(cfg.executor.max_concurrent_plans, 8);
@@ -2753,6 +2893,7 @@ auto_replan = false
         assert_eq!(cfg.executor.task_timeout_secs, 42);
         assert_eq!(cfg.executor.budget_usd, Some(1.5));
         assert!(!cfg.executor.auto_replan);
+        assert!(cfg.executor.use_worktrees);
         assert!(!cfg.tools.prefer_mcp);
         assert_eq!(cfg.tools.global_denied, vec!["bash".to_string()]);
         assert_eq!(cfg.tools.mcp_timeout_secs, 15);
@@ -2845,6 +2986,7 @@ command = "${ROKO_TEST_MISSING_SECRET_9B1C}"
 max_concurrent_plans = 6
 task_timeout_secs = 900
 auto_replan = false
+use_worktrees = true
 "#,
         )
         .unwrap();
@@ -2857,6 +2999,7 @@ auto_replan = false
         );
         assert_eq!(cfg.executor.task_timeout_secs, 900);
         assert!(!cfg.executor.auto_replan);
+        assert!(cfg.executor.use_worktrees);
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
         assert_eq!(cfg.serve.deploy.provider, "railway");
@@ -3120,6 +3263,8 @@ base_url = "https://api.z.ai/api/paas/v4"
         assert!(cfg.dreams.auto_dream);
         assert_eq!(cfg.dreams.idle_threshold_mins, 15);
         assert_eq!(cfg.dreams.min_episodes_for_dream, 5);
+        assert_eq!(cfg.daimon.strategy_space.domain, "coding");
+        assert_eq!(cfg.daimon.strategy_space.dimensions[0], "complexity");
         assert!(cfg.gates.is_empty());
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
@@ -3141,6 +3286,53 @@ min_episodes_for_dream = 9
         assert!(!cfg.dreams.auto_dream);
         assert_eq!(cfg.dreams.idle_threshold_mins, 22);
         assert_eq!(cfg.dreams.min_episodes_for_dream, 9);
+    }
+
+    #[test]
+    fn layer_resolve_uses_daimon_strategy_space_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[daimon.strategy_space]
+domain = "chain"
+dimensions = [
+  "volatility",
+  "liquidity",
+  "correlation",
+  "leverage",
+  "time_horizon",
+  "concentration",
+  "counterparty_risk",
+  "regulatory_exposure",
+]
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert_eq!(cfg.daimon.strategy_space.domain, "chain");
+        assert_eq!(cfg.daimon.strategy_space.dimensions[0], "volatility");
+        assert_eq!(
+            cfg.daimon.strategy_space.dimensions[7],
+            "regulatory_exposure"
+        );
+    }
+
+    #[test]
+    fn layer_resolve_rejects_non_8d_strategy_space() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[daimon.strategy_space]
+domain = "chain"
+dimensions = ["volatility", "liquidity"]
+"#,
+        )
+        .unwrap();
+
+        let err = layer.resolve().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("daimon.strategy_space.dimensions must contain exactly 8 entries")
+        );
     }
 
     #[test]
@@ -3215,6 +3407,35 @@ base_url = "https://file.example"
             Some("https://env.example")
         );
         assert_eq!(sources.providers, Source::Env);
+    }
+
+    #[test]
+    fn env_override_layer_applies_daimon_strategy_space() {
+        let (env_layer, _) = collect_env_override_layer_from(vec![
+            (
+                "ROKO__DAIMON__STRATEGY_SPACE__DOMAIN".to_string(),
+                "chain".to_string(),
+            ),
+            (
+                "ROKO__DAIMON__STRATEGY_SPACE__DIMENSIONS".to_string(),
+                serde_json::json!([
+                    "volatility",
+                    "liquidity",
+                    "correlation",
+                    "leverage",
+                    "time_horizon",
+                    "concentration",
+                    "counterparty_risk",
+                    "regulatory_exposure"
+                ])
+                .to_string(),
+            ),
+        ])
+        .unwrap();
+
+        let resolved = ConfigLayer::default().merge(env_layer).resolve().unwrap();
+        assert_eq!(resolved.daimon.strategy_space.domain, "chain");
+        assert_eq!(resolved.daimon.strategy_space.dimensions[3], "leverage");
     }
 
     #[test]

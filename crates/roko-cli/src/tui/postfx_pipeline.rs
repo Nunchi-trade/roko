@@ -67,7 +67,8 @@ pub fn self_glow(area: Rect, buf: &mut Buffer, threshold: u8, intensity: f64) {
                 if let Some(Color::Rgb(r, g, b)) = cell.style().fg {
                     let lum = luminance(r, g, b);
                     if lum > threshold {
-                        let boost = intensity * ((lum - threshold) as f64 / (255 - threshold) as f64);
+                        let boost =
+                            intensity * ((lum - threshold) as f64 / (255 - threshold) as f64);
                         let nr = add_bright(r, boost);
                         let ng = add_bright(g, boost);
                         let nb = add_bright(b, boost);

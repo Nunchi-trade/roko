@@ -13,12 +13,12 @@ use roko_agent::translate::{BackendResponse, GeminiTranslator, RenderedResults, 
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::tool::ToolResult;
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 use roko_learn::costs_db::CostTable;
 use serde_json::{Value, json};
 
-fn prompt(text: &str) -> Signal {
-    Signal::builder(Kind::Prompt).body(Body::text(text)).build()
+fn prompt(text: &str) -> Engram {
+    Engram::builder(Kind::Prompt).body(Body::text(text)).build()
 }
 
 #[derive(Debug, Clone)]

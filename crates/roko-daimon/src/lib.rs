@@ -8,16 +8,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use kiddo::{KdTree, SquaredEuclidean};
 use roko_core::{BehavioralState, ContentHash, EmotionalTag, OperatingFrequencyAffect, PadVector};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 const STRATEGY_DIMENSIONS: usize = 8;
 const DEFAULT_SOMATIC_NEIGHBORS: usize = 5;
 const CONTRARIAN_FRACTION: f64 = 0.15;
 const SOMATIC_MERGE_DISTANCE_SQUARED: f64 = 0.25;
+const SOMATIC_EVENT_VALENCE_THRESHOLD: f64 = 0.30;
+const SOMATIC_EVENT_INTENSITY_THRESHOLD: f64 = 0.50;
+const DEPOTENTIATION_DELTA_MIN: f64 = 0.30;
+const DEPOTENTIATION_DELTA_MAX: f64 = 0.50;
+const DEPOTENTIATION_FLOOR: f64 = 0.05;
 
 type SomaticTree = KdTree<f64, STRATEGY_DIMENSIONS>;
 
@@ -214,6 +220,391 @@ impl StrategyCoordinates {
     }
 }
 
+/// Persisted strategy-space definition for the somatic landscape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrategySpaceDefinition {
+    /// Domain identifier for this strategy-space mapping.
+    #[serde(default = "StrategySpaceDefinition::default_domain")]
+    pub domain: String,
+    /// Human-readable labels for each of the fixed 8 dimensions.
+    #[serde(default = "StrategySpaceDefinition::default_dimensions")]
+    pub dimensions: [String; STRATEGY_DIMENSIONS],
+}
+
+impl StrategySpaceDefinition {
+    fn default_domain() -> String {
+        "coding".to_string()
+    }
+
+    fn default_dimensions() -> [String; STRATEGY_DIMENSIONS] {
+        [
+            "complexity".to_string(),
+            "risk".to_string(),
+            "novelty".to_string(),
+            "confidence".to_string(),
+            "time_pressure".to_string(),
+            "scope".to_string(),
+            "reversibility".to_string(),
+            "dependency_depth".to_string(),
+        ]
+    }
+
+    /// Coding-domain default strategy-space definition.
+    #[must_use]
+    pub fn coding() -> Self {
+        Self::default()
+    }
+
+    /// Construct and validate a strategy-space definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain or any dimension name is empty, or
+    /// when dimension names are duplicated.
+    pub fn validate(self) -> Result<Self> {
+        if self.domain.trim().is_empty() {
+            return Err(anyhow!("daimon.strategy_space.domain must not be empty"));
+        }
+
+        let mut seen = HashSet::with_capacity(STRATEGY_DIMENSIONS);
+        for dimension in &self.dimensions {
+            let normalized = dimension.trim();
+            if normalized.is_empty() {
+                return Err(anyhow!(
+                    "daimon.strategy_space.dimensions must not contain empty names"
+                ));
+            }
+            if !seen.insert(normalized.to_ascii_lowercase()) {
+                return Err(anyhow!(
+                    "daimon.strategy_space.dimensions must be unique: duplicate `{normalized}`"
+                ));
+            }
+        }
+
+        Ok(Self {
+            domain: self.domain.trim().to_string(),
+            dimensions: self
+                .dimensions
+                .map(|dimension| dimension.trim().to_string()),
+        })
+    }
+
+    /// Borrow the axis labels.
+    #[must_use]
+    pub const fn labels(&self) -> &[String; STRATEGY_DIMENSIONS] {
+        &self.dimensions
+    }
+
+    /// Build the registered coordinate computer for this strategy space.
+    #[must_use]
+    pub fn computer(&self) -> RegisteredStrategySpaceComputer {
+        RegisteredStrategySpaceComputer::new(self.clone())
+    }
+}
+
+impl Default for StrategySpaceDefinition {
+    fn default() -> Self {
+        Self {
+            domain: Self::default_domain(),
+            dimensions: Self::default_dimensions(),
+        }
+    }
+}
+
+/// Normalized task signals used to project work into strategy space.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskStrategyObservation {
+    /// Task tier label (for example `mechanical` or `architectural`).
+    pub task_tier: String,
+    /// Number of files touched by the task.
+    pub file_count: usize,
+    /// Number of verification commands or checks attached to the task.
+    pub verification_count: usize,
+    /// Number of upstream task dependencies.
+    pub dependency_count: usize,
+    /// Maximum lines-of-code budget for the task.
+    pub max_loc: u32,
+    /// Familiarity with the affected area in `[0.0, 1.0]`.
+    pub familiarity: f64,
+    /// Daimon confidence in `[0.0, 1.0]`.
+    pub confidence: f64,
+    /// Failure / gate pressure in `[0.0, 1.0]`.
+    pub failure_pressure: f64,
+    /// Immediate urgency in `[0.0, 1.0]`.
+    pub urgency_pressure: f64,
+}
+
+impl Default for TaskStrategyObservation {
+    fn default() -> Self {
+        Self {
+            task_tier: "focused".to_string(),
+            file_count: 0,
+            verification_count: 0,
+            dependency_count: 0,
+            max_loc: 50,
+            familiarity: 0.5,
+            confidence: 0.5,
+            failure_pressure: 0.0,
+            urgency_pressure: 0.0,
+        }
+    }
+}
+
+/// Normalized episode signals used to reconstruct strategy-space placement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeStrategyObservation {
+    /// Task tier label captured on the original episode.
+    pub task_tier: String,
+    /// Number of files touched by the underlying task.
+    pub file_count: usize,
+    /// Number of verification commands or checks attached to the task.
+    pub verification_count: usize,
+    /// Number of upstream task dependencies.
+    pub dependency_count: usize,
+    /// Maximum lines-of-code budget for the task.
+    pub max_loc: u32,
+    /// Familiarity with the affected area in `[0.0, 1.0]`.
+    pub familiarity: f64,
+    /// Affect confidence in `[0.0, 1.0]`.
+    pub confidence: f64,
+    /// Failure / stress pressure in `[0.0, 1.0]`.
+    pub failure_pressure: f64,
+    /// Emotional intensity in `[0.0, 1.0]`.
+    pub emotional_intensity: f64,
+}
+
+impl Default for EpisodeStrategyObservation {
+    fn default() -> Self {
+        Self {
+            task_tier: "focused".to_string(),
+            file_count: 0,
+            verification_count: 0,
+            dependency_count: 0,
+            max_loc: 50,
+            familiarity: 0.5,
+            confidence: 0.5,
+            failure_pressure: 0.0,
+            emotional_intensity: 0.5,
+        }
+    }
+}
+
+/// Strategy-space projector for a particular observation type.
+pub trait StrategySpaceComputer<Observation> {
+    /// Strategy-space definition owned by this computer.
+    fn definition(&self) -> &StrategySpaceDefinition;
+
+    /// Compute normalized 8D coordinates.
+    fn compute_coords(&self, observation: &Observation) -> StrategyCoordinates;
+}
+
+/// Built-in coding-domain strategy-space computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingStrategySpace {
+    definition: StrategySpaceDefinition,
+}
+
+impl Default for CodingStrategySpace {
+    fn default() -> Self {
+        Self {
+            definition: StrategySpaceDefinition::coding(),
+        }
+    }
+}
+
+impl CodingStrategySpace {
+    fn complexity_from_tier(tier: &str) -> f64 {
+        match tier.trim().to_ascii_lowercase().as_str() {
+            "mechanical" | "fast" => 0.15,
+            "focused" | "standard" => 0.35,
+            "integrative" => 0.60,
+            "architectural" | "complex" => 0.85,
+            "premium" => 0.95,
+            _ => 0.50,
+        }
+    }
+
+    fn scope(complexity: f64, file_count: usize, max_loc: u32) -> f64 {
+        (0.55 * complexity
+            + 0.30 * (file_count as f64 / 8.0).min(1.0)
+            + 0.15 * (f64::from(max_loc) / 400.0).min(1.0))
+        .clamp(0.0, 1.0)
+    }
+
+    fn novelty(familiarity: f64) -> f64 {
+        (1.0 - familiarity).clamp(0.0, 1.0)
+    }
+
+    fn risk(
+        complexity: f64,
+        novelty: f64,
+        verification_count: usize,
+        failure_pressure: f64,
+    ) -> f64 {
+        (0.40 * complexity
+            + 0.25 * novelty
+            + 0.20 * (verification_count as f64 / 4.0).min(1.0)
+            + 0.15 * clamp_unit(failure_pressure))
+        .clamp(0.0, 1.0)
+    }
+
+    fn reversibility(scope: f64, dependency_count: usize, failure_pressure: f64) -> f64 {
+        (1.0 - (0.60 * scope
+            + 0.20 * (dependency_count as f64 / 6.0).min(1.0)
+            + 0.20 * clamp_unit(failure_pressure)))
+        .clamp(0.0, 1.0)
+    }
+
+    fn dependency_depth(complexity: f64, dependency_count: usize) -> f64 {
+        (0.60 * (dependency_count as f64 / 6.0).min(1.0) + 0.40 * complexity).clamp(0.0, 1.0)
+    }
+
+    fn task_time_pressure(failure_pressure: f64, urgency_pressure: f64) -> f64 {
+        (0.70 * clamp_unit(failure_pressure) + 0.30 * clamp_unit(urgency_pressure)).clamp(0.0, 1.0)
+    }
+
+    fn episode_time_pressure(failure_pressure: f64, emotional_intensity: f64) -> f64 {
+        (0.60 * clamp_unit(emotional_intensity) + 0.40 * clamp_unit(failure_pressure))
+            .clamp(0.0, 1.0)
+    }
+}
+
+impl StrategySpaceComputer<TaskStrategyObservation> for CodingStrategySpace {
+    fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    fn compute_coords(&self, observation: &TaskStrategyObservation) -> StrategyCoordinates {
+        let complexity = Self::complexity_from_tier(&observation.task_tier);
+        let scope = Self::scope(complexity, observation.file_count, observation.max_loc);
+        let novelty = Self::novelty(observation.familiarity);
+        let risk = Self::risk(
+            complexity,
+            novelty,
+            observation.verification_count,
+            observation.failure_pressure,
+        );
+        let time_pressure =
+            Self::task_time_pressure(observation.failure_pressure, observation.urgency_pressure);
+        let reversibility = Self::reversibility(
+            scope,
+            observation.dependency_count,
+            observation.failure_pressure,
+        );
+        let dependency_depth = Self::dependency_depth(complexity, observation.dependency_count);
+
+        StrategyCoordinates::new(
+            complexity,
+            risk,
+            novelty,
+            observation.confidence,
+            time_pressure,
+            scope,
+            reversibility,
+            dependency_depth,
+        )
+    }
+}
+
+impl StrategySpaceComputer<EpisodeStrategyObservation> for CodingStrategySpace {
+    fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    fn compute_coords(&self, observation: &EpisodeStrategyObservation) -> StrategyCoordinates {
+        let complexity = Self::complexity_from_tier(&observation.task_tier);
+        let scope = Self::scope(complexity, observation.file_count, observation.max_loc);
+        let novelty = Self::novelty(observation.familiarity);
+        let risk = Self::risk(
+            complexity,
+            novelty,
+            observation.verification_count,
+            observation.failure_pressure,
+        );
+        let time_pressure = Self::episode_time_pressure(
+            observation.failure_pressure,
+            observation.emotional_intensity,
+        );
+        let reversibility = Self::reversibility(
+            scope,
+            observation.dependency_count,
+            observation.failure_pressure,
+        );
+        let dependency_depth = Self::dependency_depth(complexity, observation.dependency_count);
+
+        StrategyCoordinates::new(
+            complexity,
+            risk,
+            novelty,
+            observation.confidence,
+            time_pressure,
+            scope,
+            reversibility,
+            dependency_depth,
+        )
+    }
+}
+
+/// Registered strategy-space computer. Built-in domains get specialized
+/// extraction; custom domains currently use the same normalized projection
+/// until they supply a dedicated extractor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredStrategySpaceComputer {
+    definition: StrategySpaceDefinition,
+}
+
+impl RegisteredStrategySpaceComputer {
+    /// Create a new registered strategy-space computer.
+    #[must_use]
+    pub fn new(definition: StrategySpaceDefinition) -> Self {
+        Self { definition }
+    }
+
+    /// Borrow the registered strategy-space definition.
+    #[must_use]
+    pub const fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    /// Whether this definition uses the built-in coding extractor.
+    #[must_use]
+    pub fn is_builtin_coding(&self) -> bool {
+        self.definition.domain.eq_ignore_ascii_case("coding")
+    }
+
+    /// Compute live task coordinates for this strategy-space definition.
+    #[must_use]
+    pub fn task_coords(&self, observation: &TaskStrategyObservation) -> StrategyCoordinates {
+        CodingStrategySpace::default().compute_coords(observation)
+    }
+
+    /// Compute dream / replay coordinates for this strategy-space definition.
+    #[must_use]
+    pub fn episode_coords(&self, observation: &EpisodeStrategyObservation) -> StrategyCoordinates {
+        CodingStrategySpace::default().compute_coords(observation)
+    }
+}
+
+impl StrategySpaceComputer<TaskStrategyObservation> for RegisteredStrategySpaceComputer {
+    fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    fn compute_coords(&self, observation: &TaskStrategyObservation) -> StrategyCoordinates {
+        self.task_coords(observation)
+    }
+}
+
+impl StrategySpaceComputer<EpisodeStrategyObservation> for RegisteredStrategySpaceComputer {
+    fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    fn compute_coords(&self, observation: &EpisodeStrategyObservation) -> StrategyCoordinates {
+        self.episode_coords(observation)
+    }
+}
+
 /// Situation-specific emotional memory stored in the somatic landscape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SomaticMarker {
@@ -271,6 +662,26 @@ impl SomaticSignal {
     pub fn is_actionable(&self) -> bool {
         self.intensity >= 0.15 && self.valence.abs() >= 0.10
     }
+
+    /// Whether the signal is strong enough to emit an explicit runtime event.
+    #[must_use]
+    pub fn should_emit_event(&self) -> bool {
+        self.intensity > SOMATIC_EVENT_INTENSITY_THRESHOLD
+            && self.valence.abs() > SOMATIC_EVENT_VALENCE_THRESHOLD
+    }
+}
+
+/// Summary of one dream-driven depotentiation pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DepotentiationReport {
+    /// PAD arousal before the dream pass.
+    pub pre_arousal: f64,
+    /// PAD arousal after the dream pass.
+    pub post_arousal: f64,
+    /// Number of somatic markers whose intensity was reduced.
+    pub cooled_markers: usize,
+    /// Aggregate reduction applied to somatic marker intensity.
+    pub total_marker_intensity_reduction: f64,
 }
 
 /// Mutable store of somatic markers indexed by a k-d tree.
@@ -470,6 +881,28 @@ impl SomaticLandscape {
             source_episodes: episodes,
         }
     }
+
+    /// Reduce the intensity of highly charged markers during dream processing.
+    pub fn apply_dream_depotentiation(&mut self) -> (usize, f64) {
+        let mut cooled_markers = 0_usize;
+        let mut total_reduction = 0.0;
+
+        for marker in &mut self.markers {
+            if marker.intensity <= 0.5 {
+                continue;
+            }
+
+            let before = marker.intensity;
+            let after = depotentiate_magnitude(before);
+            if after < before {
+                marker.intensity = after;
+                cooled_markers += 1;
+                total_reduction += before - after;
+            }
+        }
+
+        (cooled_markers, total_reduction)
+    }
 }
 
 /// Behavioral strategy selected by the affect engine.
@@ -591,6 +1024,9 @@ pub struct DaimonState {
     /// Situation-specific somatic markers.
     #[serde(default)]
     pub somatic_landscape: SomaticLandscape,
+    /// Active strategy-space definition for interpreting 8D coordinates.
+    #[serde(default)]
+    pub strategy_space: StrategySpaceDefinition,
     /// Optional persistence path for best-effort autosaves.
     #[serde(skip, default)]
     persistence_path: Option<PathBuf>,
@@ -610,6 +1046,7 @@ impl DaimonState {
             state: AffectState::default(),
             half_life_hours: default_half_life_hours(),
             somatic_landscape: SomaticLandscape::new(),
+            strategy_space: StrategySpaceDefinition::default(),
             persistence_path: None,
         }
     }
@@ -655,6 +1092,29 @@ impl DaimonState {
         self.state.emotional_tag(trigger)
     }
 
+    /// Borrow the active strategy-space definition.
+    #[must_use]
+    pub const fn strategy_space(&self) -> &StrategySpaceDefinition {
+        &self.strategy_space
+    }
+
+    /// Reconfigure the strategy-space definition used by the somatic landscape.
+    ///
+    /// When the definition changes, previously stored markers are discarded so
+    /// incompatible domains do not silently share the same coordinate system.
+    pub fn configure_strategy_space(&mut self, strategy_space: StrategySpaceDefinition) {
+        let strategy_space = strategy_space
+            .validate()
+            .expect("strategy space should be validated before configuring DaimonState");
+        if self.strategy_space == strategy_space {
+            return;
+        }
+
+        self.strategy_space = strategy_space;
+        self.somatic_landscape = SomaticLandscape::new();
+        self.autosave();
+    }
+
     /// Query the somatic landscape for a strategy region.
     #[must_use]
     pub fn query_somatic(&self, strategy_coords: StrategyCoordinates) -> SomaticSignal {
@@ -679,6 +1139,12 @@ impl DaimonState {
         self.autosave();
     }
 
+    /// Record a synthesized somatic marker directly into the landscape.
+    pub fn record_somatic_marker(&mut self, marker: SomaticMarker) {
+        self.somatic_landscape.record_marker(marker);
+        self.autosave();
+    }
+
     /// Modulate dispatch parameters using both the global affect state and the
     /// situation-specific somatic landscape.
     pub fn modulate_with_strategy(
@@ -690,6 +1156,24 @@ impl DaimonState {
         let state = self.query();
         let signal = self.query_somatic(strategy_coords);
         apply_somatic_bias(params, &state, &signal);
+    }
+
+    /// Apply dream-time emotional depotentiation to the live PAD state and the
+    /// persisted somatic landscape.
+    pub fn apply_dream_depotentiation(&mut self) -> DepotentiationReport {
+        let pre_arousal = self.state.pad.arousal;
+        self.state.pad.arousal = depotentiate_signed_charge(self.state.pad.arousal);
+        let (cooled_markers, total_marker_intensity_reduction) =
+            self.somatic_landscape.apply_dream_depotentiation();
+        self.state.refresh_behavioral_state();
+        self.state.updated_at = Utc::now();
+        self.autosave();
+        DepotentiationReport {
+            pre_arousal,
+            post_arousal: self.state.pad.arousal,
+            cooled_markers,
+            total_marker_intensity_reduction,
+        }
     }
 
     fn autosave(&self) {
@@ -992,6 +1476,34 @@ fn apply_somatic_bias(params: &mut DispatchParams, state: &AffectState, signal: 
     params.effort = params.strategy.effort_label().to_string();
 }
 
+fn depotentiation_delta(magnitude: f64) -> f64 {
+    (DEPOTENTIATION_DELTA_MIN
+        + (magnitude - 0.5).max(0.0) * (DEPOTENTIATION_DELTA_MAX - DEPOTENTIATION_DELTA_MIN) / 0.5)
+        .clamp(DEPOTENTIATION_DELTA_MIN, DEPOTENTIATION_DELTA_MAX)
+}
+
+fn depotentiate_magnitude(magnitude: f64) -> f64 {
+    let magnitude = clamp_unit(magnitude);
+    if magnitude <= DEPOTENTIATION_FLOOR {
+        return magnitude;
+    }
+
+    let reduced = magnitude - depotentiation_delta(magnitude);
+    reduced.max(DEPOTENTIATION_FLOOR).min(magnitude)
+}
+
+fn depotentiate_signed_charge(value: f64) -> f64 {
+    if value == 0.0 {
+        return 0.0;
+    }
+    let sign = value.signum();
+    let magnitude = value.abs().clamp(0.0, 1.0);
+    if magnitude <= DEPOTENTIATION_FLOOR {
+        return value.clamp(-1.0, 1.0);
+    }
+    sign * depotentiate_magnitude(magnitude)
+}
+
 /// Queue-wait arousal bump used by runtime feedback and dispatch heuristics.
 #[must_use]
 pub fn queue_wait_arousal(wait_hours: f64) -> f64 {
@@ -1225,5 +1737,169 @@ mod tests {
         assert_eq!(reloaded.somatic_landscape.markers.len(), 1);
         assert!(signal.valence > 0.5);
         assert!(signal.intensity > 0.5);
+    }
+
+    #[test]
+    fn dream_depotentiation_cools_arousal_and_high_intensity_markers() {
+        let mut state = DaimonState::new();
+        state.state.pad.arousal = 0.9;
+        state.somatic_landscape.record_outcome(
+            strategy(0.8, 0.7, 0.6),
+            -0.7,
+            0.8,
+            ContentHash::of(b"charged-marker"),
+            Utc::now(),
+        );
+        state.somatic_landscape.record_outcome(
+            strategy(0.2, 0.3, 0.4),
+            0.4,
+            0.4,
+            ContentHash::of(b"stable-marker"),
+            Utc::now(),
+        );
+
+        let report = state.apply_dream_depotentiation();
+
+        assert!(report.post_arousal < report.pre_arousal);
+        assert_eq!(report.cooled_markers, 1);
+        assert!(report.total_marker_intensity_reduction > 0.0);
+        assert!(state.somatic_landscape.markers[0].intensity < 0.8);
+        assert_eq!(state.somatic_landscape.markers[1].intensity, 0.4);
+    }
+
+    #[test]
+    fn strong_somatic_signal_emits_runtime_threshold() {
+        let strong = SomaticSignal {
+            valence: -0.6,
+            intensity: 0.7,
+            neighbor_count: 2,
+            contrarian_count: 1,
+            source_episodes: vec![ContentHash::of(b"episode")],
+        };
+        let weak = SomaticSignal {
+            valence: -0.2,
+            intensity: 0.7,
+            neighbor_count: 1,
+            contrarian_count: 0,
+            source_episodes: Vec::new(),
+        };
+
+        assert!(strong.should_emit_event());
+        assert!(!weak.should_emit_event());
+    }
+
+    #[test]
+    fn configure_strategy_space_clears_incompatible_markers() {
+        let mut state = DaimonState::new();
+        state.somatic_landscape.record_outcome(
+            strategy(0.3, 0.2, 0.4),
+            0.6,
+            0.7,
+            ContentHash::of(b"marker"),
+            Utc::now(),
+        );
+
+        state.configure_strategy_space(
+            StrategySpaceDefinition {
+                domain: "chain".to_string(),
+                dimensions: [
+                    "volatility".to_string(),
+                    "liquidity".to_string(),
+                    "correlation".to_string(),
+                    "leverage".to_string(),
+                    "time_horizon".to_string(),
+                    "concentration".to_string(),
+                    "counterparty_risk".to_string(),
+                    "regulatory_exposure".to_string(),
+                ],
+            }
+            .validate()
+            .unwrap(),
+        );
+
+        assert_eq!(state.strategy_space.domain, "chain");
+        assert!(state.somatic_landscape.markers.is_empty());
+    }
+
+    #[test]
+    fn strategy_space_validation_rejects_duplicates() {
+        let err = StrategySpaceDefinition {
+            domain: "coding".to_string(),
+            dimensions: [
+                "risk".to_string(),
+                "risk".to_string(),
+                "novelty".to_string(),
+                "confidence".to_string(),
+                "time_pressure".to_string(),
+                "scope".to_string(),
+                "reversibility".to_string(),
+                "dependency_depth".to_string(),
+            ],
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must be unique"));
+    }
+
+    #[test]
+    fn coding_strategy_space_projects_task_observations() {
+        let coords =
+            StrategySpaceDefinition::coding()
+                .computer()
+                .task_coords(&TaskStrategyObservation {
+                    task_tier: "architectural".to_string(),
+                    file_count: 6,
+                    verification_count: 3,
+                    dependency_count: 4,
+                    max_loc: 320,
+                    familiarity: 0.2,
+                    confidence: 0.65,
+                    failure_pressure: 0.6,
+                    urgency_pressure: 1.0,
+                });
+
+        assert!(coords.complexity > 0.8);
+        assert!(coords.risk > 0.7);
+        assert!(coords.scope > 0.7);
+        assert!(coords.reversibility < 0.4);
+        assert!(coords.time_pressure > 0.7);
+        assert_eq!(coords.confidence, 0.65);
+    }
+
+    #[test]
+    fn registered_strategy_space_preserves_custom_domain_metadata() {
+        let definition = StrategySpaceDefinition {
+            domain: "chain".to_string(),
+            dimensions: [
+                "volatility".to_string(),
+                "liquidity".to_string(),
+                "correlation".to_string(),
+                "leverage".to_string(),
+                "time_horizon".to_string(),
+                "concentration".to_string(),
+                "counterparty_risk".to_string(),
+                "regulatory_exposure".to_string(),
+            ],
+        }
+        .validate()
+        .unwrap();
+        let computer = definition.computer();
+        let coords = computer.task_coords(&TaskStrategyObservation {
+            task_tier: "focused".to_string(),
+            file_count: 2,
+            verification_count: 1,
+            dependency_count: 1,
+            max_loc: 80,
+            familiarity: 0.6,
+            confidence: 0.55,
+            failure_pressure: 0.1,
+            urgency_pressure: 0.2,
+        });
+
+        assert_eq!(computer.definition().domain, "chain");
+        assert!(!computer.is_builtin_coding());
+        assert!((0.0..=1.0).contains(&coords.complexity));
+        assert_eq!(computer.definition().labels()[0], "volatility");
     }
 }

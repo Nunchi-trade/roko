@@ -6,7 +6,7 @@
 //! the enrichment agent fails.
 
 use roko_agent::Agent;
-use roko_core::{Body, Context, Kind, Signal};
+use roko_core::{Body, Context, Engram, Kind};
 
 const RAW_ERROR_LIMIT: usize = 4_000;
 const TASK_CONTEXT_LIMIT: usize = 1_000;
@@ -30,7 +30,7 @@ pub async fn enrich_error_digest(raw_error: &str, agent: &dyn Agent, task_contex
         truncate_chars(task_context, TASK_CONTEXT_LIMIT),
     );
 
-    let input = Signal::builder(Kind::Prompt)
+    let input = Engram::builder(Kind::Prompt)
         .body(Body::text(prompt))
         .build();
     let result = agent.run(&input, &Context::now()).await;
