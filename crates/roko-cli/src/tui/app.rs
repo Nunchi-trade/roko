@@ -16,7 +16,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -94,6 +94,8 @@ pub struct App {
     frame_counter: u64,
     /// Last user input time for adaptive frame rate.
     last_input: Instant,
+    /// Last known terminal size used for hit-testing.
+    terminal_size: (u16, u16),
 }
 
 /// Bundle of git data collected by the background git thread.
@@ -147,7 +149,9 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
             match crossterm::event::read()? {
                 crossterm::event::Event::Key(key) => app.handle_key(key),
                 crossterm::event::Event::Mouse(mouse) => app.handle_mouse(mouse),
-                crossterm::event::Event::Resize(_, _) => {}
+                crossterm::event::Event::Resize(width, height) => {
+                    app.terminal_size = (width, height);
+                }
                 _ => {}
             }
         }
@@ -174,6 +178,7 @@ impl App {
     #[must_use]
     pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
         let workdir = root.as_ref().to_path_buf();
+        let terminal_size = size().unwrap_or((80, 24));
         let mut scaffold = DashboardScaffold::new_in(&workdir);
         if let Some(page) = initial_page {
             let _ = scaffold.set_active_page(page);
@@ -204,6 +209,7 @@ impl App {
             git_rx: None,
             frame_counter: 0,
             last_input: Instant::now(),
+            terminal_size,
         };
         // Populate git info synchronously on first load (fast enough for startup).
         app.populate_git_info();
@@ -345,7 +351,9 @@ impl App {
                     self.last_input = Instant::now();
                     self.handle_mouse(mouse);
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(width, height) => {
+                    self.terminal_size = (width, height);
+                }
                 Event::Tick => {
                     self.atmosphere.tick();
                     self.tui_state.atmosphere.tick();
@@ -1094,8 +1102,10 @@ impl App {
                 // Use hit_test to determine zone
                 let zones = super::hit_test::HitZones::compute(
                     super::layout::responsive_outer_margin(Rect::new(
-                        0, 0, 80, // approximate; real values come from terminal size
-                        24,
+                        0,
+                        0,
+                        self.terminal_size.0,
+                        self.terminal_size.1,
                     )),
                     self.tui_state.active_tab as usize,
                     Tab::ALL.len(),
