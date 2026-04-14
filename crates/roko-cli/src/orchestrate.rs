@@ -13067,6 +13067,58 @@ depends_on = []
         assert!(prompt.contains("crates/roko-cli/src/orchestrate.rs"));
     }
 
+    #[tokio::test]
+    async fn dispatch_refuses_tripped_circuit_breaker_before_launch() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan_states = HashMap::new();
+        plan_states.insert("plan-1".to_string(), PlanState::new("plan-1"));
+        let snapshot = ExecutorSnapshot {
+            plan_states,
+            queue_order: vec!["plan-1".to_string()],
+            timestamp_ms: 0,
+        };
+        let snapshot_json = snapshot.to_json().unwrap();
+        let mut runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            Config::default(),
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        runner
+            .conductor
+            .circuit_breaker()
+            .record_failure("plan-1", "err1", 1);
+        runner
+            .conductor
+            .circuit_breaker()
+            .record_failure("plan-1", "err2", 2);
+
+        let err = runner
+            .dispatch_agent_with(
+                "plan-1",
+                AgentRole::Implementer,
+                "task-1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("circuit breaker tripped"));
+        assert!(
+            runner
+                .executor
+                .plan_state("plan-1")
+                .is_some_and(|state| state.paused)
+        );
+    }
+
     #[test]
     fn normalize_resume_session_trims_and_drops_blank_values() {
         assert_eq!(normalize_resume_session(None), None);
