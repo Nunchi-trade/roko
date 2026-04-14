@@ -161,16 +161,18 @@ pub fn create_agent_for_model(
                 "no provider found — falling back to ExecAgent (no tool support)"
             );
 
-            let mut agent =
-                ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
-                    .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
-            if !options.name.is_empty() {
-                agent = agent.with_name(options.name.clone());
-            }
-            if !options.env.is_empty() {
-                agent = agent.with_env(options.env.clone());
-            }
-            return Ok(Box::new(agent));
+            return with_scoped_safety_layer(|| {
+                let mut agent =
+                    ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
+                        .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+                if !options.name.is_empty() {
+                    agent = agent.with_name(options.name.clone());
+                }
+                if !options.env.is_empty() {
+                    agent = agent.with_env(options.env.clone());
+                }
+                Ok(Box::new(agent) as Box<dyn Agent>)
+            });
         }
     };
 
@@ -889,6 +891,27 @@ mod tests {
         let result = agent.run(&prompt("fallback-ok"), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap_or(""), "fallback-ok");
+    }
+
+    #[test]
+    fn exec_agent_fallback_uses_scoped_safety_layer_when_active() {
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("cat".to_string());
+
+        let result = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+            create_agent_for_model(
+                &config,
+                "unknown-model",
+                AgentOptions {
+                    timeout_ms: Some(250),
+                    name: "fallback-agent".to_string(),
+                    ..Default::default()
+                },
+            )
+        });
+
+        let agent = result.expect("fallback exec agent");
+        assert_eq!(agent.name(), "fallback-agent");
     }
 
     #[test]
