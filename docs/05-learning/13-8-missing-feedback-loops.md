@@ -103,7 +103,7 @@ Section effectiveness tracker:
     → workspace_map may be HURTING pass rate. Lower its priority.
 ```
 
-**Status:** Data collection wired (efficiency events capture section metadata). The feedback path from section effectiveness to composer weights is defined in implementation plan 2J.07 but not yet wired.
+**Status:** Wired for the live orchestration path. Composed prompts now emit per-section inclusion/drop metadata into efficiency events, `LearningRuntime` persists a section-effectiveness registry, and the next prompt build/feedforward pass reweights section priorities from those learned lift signals. The remaining gap is broader coverage outside the current orchestrator path plus more expressive weighting than the current priority-step adjustments.
 
 **Impact:** This is the highest-leverage self-improvement loop. Adaptive context assembly can reduce prompt size by 30-50% while improving pass rates, because sections that waste the agent's attention budget are demoted.
 
@@ -243,7 +243,7 @@ All future tasks use the winning variant by default
 |---|------|--------|--------|--------|
 | 1 | Health → Routing | ProviderHealthRegistry | CascadeRouter candidate filter | **Wired** |
 | 2 | Conductor → Routing | Conductor load signals | CascadeRouter bias | Partial (via C-Factor) |
-| 3 | Section → Scaffold | PromptSectionMeta | Composer section weights | Data collection wired |
+| 3 | Section → Scaffold | PromptSectionMeta | Composer section weights | **Wired (live orchestration path)** |
 | 4 | Failure → Replanning | Gate failure patterns | Plan generator | Not wired |
 | 5 | Skills → Prompts | SkillLibrary | SystemPromptBuilder | Partial |
 | 6 | Cost → Routing | Budget guardrails | CascadeRouter model tier | Data collection wired |

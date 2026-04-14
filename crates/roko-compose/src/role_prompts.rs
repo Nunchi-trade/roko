@@ -21,6 +21,7 @@ use crate::templates::strategist::StrategistTemplate;
 use crate::templates::task_impl::TaskImplTemplate;
 use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context};
+use roko_learn::section_effect::SectionEffectivenessRegistry;
 use tracing::warn;
 
 /// Default conventions appended to every constructed system prompt.
@@ -215,14 +216,19 @@ impl RoleSystemPromptSpec {
         out
     }
 
-    /// Build the raw prompt text via [`SystemPromptBuilder`].
-    #[must_use]
-    pub fn build(&self) -> String {
+    fn builder_with_section_effectiveness(
+        &self,
+        section_effectiveness: Option<&SectionEffectivenessRegistry>,
+    ) -> SystemPromptBuilder {
         let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
             .with_conventions(self.conventions_text())
             .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
             .with_anti_patterns(self.anti_patterns())
             .with_affect_state(self.affect_state);
+
+        if let Some(registry) = section_effectiveness {
+            builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
+        }
 
         let domain = self.task_context.domain_layer();
         if !domain.is_empty() {
@@ -238,33 +244,39 @@ impl RoleSystemPromptSpec {
         if self.cache_markers {
             builder = builder.with_cache_markers();
         }
-        builder.build()
+        builder
+    }
+
+    /// Build the raw prompt text via [`SystemPromptBuilder`].
+    #[must_use]
+    pub fn build(&self) -> String {
+        self.builder_with_section_effectiveness(None).build()
+    }
+
+    /// Build the raw prompt text with learned section-effectiveness applied.
+    #[must_use]
+    pub fn build_with_section_effectiveness(
+        &self,
+        section_effectiveness: &SectionEffectivenessRegistry,
+    ) -> String {
+        self.builder_with_section_effectiveness(Some(section_effectiveness))
+            .build()
     }
 
     /// Build structured prompt sections via [`SystemPromptBuilder`].
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut builder = SystemPromptBuilder::new(role_identity_for(self.role))
-            .with_conventions(self.conventions_text())
-            .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
-            .with_anti_patterns(self.anti_patterns())
-            .with_affect_state(self.affect_state);
+        self.builder_with_section_effectiveness(None).build_sections()
+    }
 
-        let domain = self.task_context.domain_layer();
-        if !domain.is_empty() {
-            builder = builder.with_domain(domain);
-        }
-        if let Some(context) = self.task_context.context_layer() {
-            builder = builder.with_context(context);
-        }
-        let task = self.task_context.task_layer();
-        if !task.is_empty() {
-            builder = builder.with_task(task);
-        }
-        if self.cache_markers {
-            builder = builder.with_cache_markers();
-        }
-        builder.build_sections()
+    /// Build structured prompt sections with learned section-effectiveness applied.
+    #[must_use]
+    pub fn build_sections_with_section_effectiveness(
+        &self,
+        section_effectiveness: &SectionEffectivenessRegistry,
+    ) -> Vec<PromptSection> {
+        self.builder_with_section_effectiveness(Some(section_effectiveness))
+            .build_sections()
     }
 
     /// Compose the section form under a token budget using [`PromptComposer`].
@@ -292,7 +304,19 @@ impl RoleSystemPromptSpec {
     /// builder re-runs composition with a tighter budget to drop lower-value
     /// sections. If it exceeds 50% of the window, the prompt is rejected.
     pub fn build_with_context_window(&self, context_window_tokens: usize) -> Result<String> {
-        let prompt = self.build();
+        self.build_with_context_window_and_section_effectiveness(context_window_tokens, None)
+    }
+
+    /// Build the prompt and validate it against a model context window,
+    /// optionally applying learned section-effectiveness.
+    pub fn build_with_context_window_and_section_effectiveness(
+        &self,
+        context_window_tokens: usize,
+        section_effectiveness: Option<&SectionEffectivenessRegistry>,
+    ) -> Result<String> {
+        let prompt = self
+            .builder_with_section_effectiveness(section_effectiveness)
+            .build();
         let prompt_tokens = estimate_tokens(&prompt);
         let soft_limit = context_window_tokens.saturating_mul(3) / 10;
         let hard_limit = context_window_tokens / 2;
@@ -316,7 +340,22 @@ impl RoleSystemPromptSpec {
                 "system prompt exceeds the soft context-window budget; recomposing with tighter budget"
             );
 
-            let prompt = self.compose_with_budget(soft_limit)?;
+            let sections = if let Some(registry) = section_effectiveness {
+                self.build_sections_with_section_effectiveness(registry)
+            } else {
+                self.build_sections()
+            };
+            let signals = sections
+                .into_iter()
+                .map(PromptSection::into_signal)
+                .collect::<Result<Vec<_>>>()?;
+            let composed = PromptComposer::new().compose(
+                &signals,
+                &Budget::tokens(soft_limit),
+                &SectionScorer::new(),
+                &Context::now(),
+            )?;
+            let prompt = composed.body.as_text().map(str::to_string)?;
             let prompt_tokens = estimate_tokens(&prompt);
 
             if prompt_tokens > hard_limit {

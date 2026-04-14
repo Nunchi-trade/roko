@@ -38,6 +38,7 @@ use crate::playbook_rules::PlaybookRules;
 use crate::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
 use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
+use crate::section_effect::SectionEffectivenessRegistry;
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
 use roko_core::ConductorDecision;
 use roko_core::DaimonPolicy;
@@ -109,6 +110,8 @@ pub struct LearningPaths {
     pub gate_thresholds_json: PathBuf,
     /// Per-subsystem local reward functions JSON.
     pub local_rewards_json: PathBuf,
+    /// Learned prompt section effectiveness snapshot.
+    pub section_effects_json: PathBuf,
 }
 
 impl LearningPaths {
@@ -130,6 +133,7 @@ impl LearningPaths {
             experiments_json: root.join("experiments.json"),
             gate_thresholds_json: root.join("gate-thresholds.json"),
             local_rewards_json: root.join("local-rewards.json"),
+            section_effects_json: root.join("section-effects.json"),
             root,
         }
     }
@@ -336,6 +340,7 @@ pub struct LearningRuntime {
     context_pack_cache: ContextPackCache,
     experiment_store: parking_lot::Mutex<ExperimentStore>,
     local_rewards: parking_lot::Mutex<HashMap<String, LocalRewardFunction>>,
+    section_effectiveness: parking_lot::Mutex<SectionEffectivenessRegistry>,
     episode_completion_hook: Option<EpisodeCompletionHook>,
 }
 
@@ -377,6 +382,8 @@ impl LearningRuntime {
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
         let local_rewards = load_local_rewards(&paths.local_rewards_json);
+        let section_effectiveness =
+            SectionEffectivenessRegistry::load_or_new(&paths.section_effects_json);
 
         Ok(Self {
             paths,
@@ -398,6 +405,7 @@ impl LearningRuntime {
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
             local_rewards: parking_lot::Mutex::new(local_rewards),
+            section_effectiveness: parking_lot::Mutex::new(section_effectiveness),
             episode_completion_hook: None,
         })
     }
@@ -437,6 +445,8 @@ impl LearningRuntime {
         let context_pack_cache = ContextPackCache::new(256, paths.root.join("context-cache.json"));
         let experiment_store = ExperimentStore::load_or_new(&paths.experiments_json);
         let local_rewards = load_local_rewards(&paths.local_rewards_json);
+        let section_effectiveness =
+            SectionEffectivenessRegistry::load_or_new(&paths.section_effects_json);
 
         Ok(Self {
             paths,
@@ -458,6 +468,7 @@ impl LearningRuntime {
             context_pack_cache,
             experiment_store: parking_lot::Mutex::new(experiment_store),
             local_rewards: parking_lot::Mutex::new(local_rewards),
+            section_effectiveness: parking_lot::Mutex::new(section_effectiveness),
             episode_completion_hook: None,
         })
     }
@@ -581,6 +592,12 @@ impl LearningRuntime {
         &self.experiment_store
     }
 
+    /// Return a snapshot of the learned section-effectiveness registry.
+    #[must_use]
+    pub fn section_effectiveness_snapshot(&self) -> SectionEffectivenessRegistry {
+        self.section_effectiveness.lock().clone()
+    }
+
     /// Query the local reward score for a subsystem decision.
     ///
     /// Returns a value in `[0.0, 1.0]` estimating how strongly the given
@@ -641,6 +658,7 @@ impl LearningRuntime {
             .await?;
         f.write_all(line.as_bytes()).await?;
         self.record_latency_from_efficiency_event(event)?;
+        self.record_section_effectiveness_from_efficiency_event(event)?;
         Ok(())
     }
 
@@ -1113,6 +1131,27 @@ fn latency_total_ms(event: &AgentEfficiencyEvent) -> f64 {
 }
 
 impl LearningRuntime {
+    fn record_section_effectiveness_from_efficiency_event(
+        &self,
+        event: &AgentEfficiencyEvent,
+    ) -> Result<(), LearningRuntimeError> {
+        if event.role.trim().is_empty() || event.prompt_sections.is_empty() {
+            return Ok(());
+        }
+
+        let mut registry = self.section_effectiveness.lock();
+        for section in &event.prompt_sections {
+            registry.record_outcome(
+                section.name.clone(),
+                event.role.trim(),
+                !section.was_dropped,
+                event.gate_passed,
+            );
+        }
+        registry.save(&self.paths.section_effects_json)?;
+        Ok(())
+    }
+
     fn record_latency_from_efficiency_event(
         &self,
         event: &AgentEfficiencyEvent,
@@ -1790,6 +1829,49 @@ mod tests {
         assert!(pad.contains_key("pleasure"));
         assert!(pad.contains_key("arousal"));
         assert!(pad.contains_key("dominance"));
+    }
+
+    #[tokio::test]
+    async fn append_efficiency_event_updates_section_effectiveness_registry() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let event = AgentEfficiencyEvent {
+            role: "Implementer".to_string(),
+            gate_passed: true,
+            prompt_sections: vec![
+                crate::efficiency::PromptSectionMeta {
+                    name: "workspace_map".to_string(),
+                    tokens: 120,
+                    priority: 2,
+                    was_truncated: false,
+                    was_dropped: false,
+                },
+                crate::efficiency::PromptSectionMeta {
+                    name: "playbook".to_string(),
+                    tokens: 0,
+                    priority: 0,
+                    was_truncated: false,
+                    was_dropped: true,
+                },
+            ],
+            ..AgentEfficiencyEvent::default()
+        };
+
+        runtime.append_efficiency_event(&event).await.unwrap();
+
+        let snapshot = runtime.section_effectiveness_snapshot();
+        let included = snapshot
+            .get("workspace_map", "Implementer")
+            .expect("included section recorded");
+        assert_eq!(included.included_trials, 1);
+        assert_eq!(included.included_passes, 1);
+
+        let excluded = snapshot
+            .get("playbook", "Implementer")
+            .expect("dropped section recorded");
+        assert_eq!(excluded.excluded_trials, 1);
+        assert_eq!(excluded.excluded_passes, 1);
+        assert!(runtime.paths().section_effects_json.exists());
     }
 
     #[tokio::test]

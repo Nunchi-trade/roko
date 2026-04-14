@@ -67,12 +67,15 @@ use roko_learn::conductor::{
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
 };
 use roko_learn::costs_db::CostRecord;
-use roko_learn::efficiency::{AgentEfficiencyEvent, FleetCFactor, compute_fleet_cfactor};
+use roko_learn::efficiency::{
+    AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
+};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
+use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -1597,6 +1600,8 @@ struct TaskTracker {
     last_matched_rule_id: Option<String>,
     /// Prompt experiment variant assigned during the last dispatch.
     last_experiment_variant_id: Option<String>,
+    /// Prompt-section composition metadata for the most recent dispatch.
+    last_prompt_sections: Vec<PromptSectionMeta>,
     /// Pending skill extraction request for the most recent successful task.
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
@@ -1756,6 +1761,7 @@ impl TaskTracker {
             last_matched_skill_id: None,
             last_matched_rule_id: None,
             last_experiment_variant_id: None,
+            last_prompt_sections: Vec::new(),
             last_skill_request: None,
             gate_failure_count: 0,
         };
@@ -8881,6 +8887,8 @@ impl PlanRunner {
         let task_affect_state = self
             .current_pad_state()
             .with_somatic_hint(somatic_signal.valence, somatic_signal.intensity);
+        let role_key = format!("{role:?}");
+        let section_effectiveness = self.learning.section_effectiveness_snapshot();
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
             system_prompt
         } else {
@@ -8894,6 +8902,7 @@ impl PlanRunner {
                 relevant_context.as_deref(),
                 Some(task_affect_state),
                 context_window_tokens,
+                Some(&section_effectiveness),
             )?
         };
         let role_section = PromptSection::new("role", &role_instruction)
@@ -8913,14 +8922,19 @@ impl PlanRunner {
         let mut sections = vec![role_section];
         for cs in context_sections {
             sections.push(
-                cs.into_signal()
+                apply_section_effectiveness_to_prompt_section(cs, &role_key, &section_effectiveness)
+                    .into_signal()
                     .map_err(|e| anyhow!("context section: {e}"))?,
             );
         }
 
         if let Some((skill_section, skill_text_len)) = skill_context_section {
             sections.push(
-                skill_section
+                apply_section_effectiveness_to_prompt_section(
+                    skill_section,
+                    &role_key,
+                    &section_effectiveness,
+                )
                     .with_bidder(AttentionBidder::PlaybookRules)
                     .into_signal()
                     .map_err(|e| anyhow!("skill-library section: {e}"))?,
@@ -8933,7 +8947,11 @@ impl PlanRunner {
 
         if let Some((playbook_section, playbook_text_len)) = playbook_context_section {
             sections.push(
-                playbook_section
+                apply_section_effectiveness_to_prompt_section(
+                    playbook_section,
+                    &role_key,
+                    &section_effectiveness,
+                )
                     .with_bidder(AttentionBidder::PlaybookRules)
                     .into_signal()
                     .map_err(|e| anyhow!("playbook section: {e}"))?,
@@ -8953,11 +8971,15 @@ impl PlanRunner {
             &selected_model,
         );
         if !learned.text.is_empty() {
-            let learned_section = PromptSection::new("learned-context", &learned.text)
-                .with_priority(SectionPriority::Normal)
-                .with_placement(Placement::Middle)
-                .with_bidder(AttentionBidder::Neuro)
-                .into_signal()
+            let learned_section = apply_section_effectiveness_to_prompt_section(
+                PromptSection::new("learned-context", &learned.text)
+                    .with_priority(SectionPriority::Normal)
+                    .with_placement(Placement::Middle)
+                    .with_bidder(AttentionBidder::Neuro),
+                &role_key,
+                &section_effectiveness,
+            )
+            .into_signal()
                 .map_err(|e| anyhow!("learned-context section: {e}"))?;
             sections.push(learned_section);
             tracing::info!(
@@ -8976,7 +8998,11 @@ impl PlanRunner {
             build_daimon_context_section(task_affect_state, self.daimon.query().behavioral_state)
         {
             sections.push(
-                daimon_section
+                apply_section_effectiveness_to_prompt_section(
+                    daimon_section,
+                    &role_key,
+                    &section_effectiveness,
+                )
                     .into_signal()
                     .map_err(|e| anyhow!("daimon-state section: {e}"))?,
             );
@@ -8997,11 +9023,15 @@ impl PlanRunner {
                     .and_then(|task| task.denied_tools.as_deref()),
             );
             if !tool_manifest.is_empty() {
-                let tool_section = PromptSection::new("available-tools", &tool_manifest)
-                    .with_priority(SectionPriority::Normal)
-                    .with_placement(Placement::Middle)
-                    .with_bidder(AttentionBidder::TaskContext)
-                    .into_signal()
+                let tool_section = apply_section_effectiveness_to_prompt_section(
+                    PromptSection::new("available-tools", &tool_manifest)
+                        .with_priority(SectionPriority::Normal)
+                        .with_placement(Placement::Middle)
+                        .with_bidder(AttentionBidder::TaskContext),
+                    &role_key,
+                    &section_effectiveness,
+                )
+                .into_signal()
                     .map_err(|e| anyhow!("tool manifest section: {e}"))?;
                 sections.push(tool_section);
             }
@@ -9035,7 +9065,11 @@ impl PlanRunner {
                 &prompt_ctx,
             )
             .map_err(|e| anyhow!("compose: {e}"))?;
+        let prompt_sections = prompt_section_meta_from_sections(&sections, &prompt);
         let prompt = scrub_signal(&prompt, &self.safety_layer.scrub_policy);
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_prompt_sections = prompt_sections;
+        }
 
         // Persist the prompt.
         let substrate_dir = self.workdir.join(".roko");
@@ -10272,6 +10306,12 @@ impl PlanRunner {
         wall_ms: u64,
         success: bool,
     ) {
+        let prompt_sections = self
+            .task_trackers
+            .get(plan_id)
+            .filter(|tracker| tracker.last_impl_task_id.as_deref() == Some(task_id))
+            .map(|tracker| tracker.last_prompt_sections.clone())
+            .unwrap_or_default();
         let event = AgentEfficiencyEvent {
             agent_id: result.output.id.to_string(),
             role: role.to_string(),
@@ -10286,9 +10326,26 @@ impl PlanRunner {
             cache_write_tokens: u64::from(result.usage.cache_create_tokens),
             cost_usd: f64::from(result.usage.cost_usd),
             cost_usd_without_cache: f64::from(result.usage.cost_usd), // No cache discount info available.
-            prompt_sections: Vec::new(),
-            total_prompt_tokens: u64::from(result.usage.input_tokens),
-            system_prompt_tokens: 0, // Not tracked at this level.
+            total_prompt_tokens: prompt_sections.iter().map(|section| section.tokens).sum(),
+            system_prompt_tokens: prompt_sections
+                .iter()
+                .filter(|section| {
+                    matches!(
+                        section.name.as_str(),
+                        "role"
+                            | "role_identity"
+                            | "conventions"
+                            | "tool_instructions"
+                            | "anti_patterns"
+                            | "affect_guidance"
+                            | "domain_context"
+                            | "context_layer"
+                            | "task_context"
+                    )
+                })
+                .map(|section| section.tokens)
+                .sum(),
+            prompt_sections,
             tools_available: 0,
             tools_used: 0,
             tool_calls: Vec::new(),
@@ -10341,6 +10398,12 @@ impl PlanRunner {
         strategy_attempted: &str,
         iteration: u32,
     ) {
+        let prompt_sections = self
+            .task_trackers
+            .get(plan_id)
+            .filter(|tracker| tracker.last_impl_task_id.as_deref() == Some(task_id))
+            .map(|tracker| tracker.last_prompt_sections.clone())
+            .unwrap_or_default();
         let event = AgentEfficiencyEvent {
             agent_id: format!("{plan_id}:{task_id}:failure"),
             role: role.to_string(),
@@ -10355,9 +10418,26 @@ impl PlanRunner {
             cache_write_tokens: 0,
             cost_usd: 0.0,
             cost_usd_without_cache: 0.0,
-            prompt_sections: Vec::new(),
-            total_prompt_tokens: 0,
-            system_prompt_tokens: 0,
+            total_prompt_tokens: prompt_sections.iter().map(|section| section.tokens).sum(),
+            system_prompt_tokens: prompt_sections
+                .iter()
+                .filter(|section| {
+                    matches!(
+                        section.name.as_str(),
+                        "role"
+                            | "role_identity"
+                            | "conventions"
+                            | "tool_instructions"
+                            | "anti_patterns"
+                            | "affect_guidance"
+                            | "domain_context"
+                            | "context_layer"
+                            | "task_context"
+                    )
+                })
+                .map(|section| section.tokens)
+                .sum(),
+            prompt_sections,
             tools_available: 0,
             tools_used: 0,
             tool_calls: Vec::new(),
@@ -10956,6 +11036,7 @@ fn build_system_prompt_with_context_validated(
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
     context_window_tokens: usize,
+    section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -10965,7 +11046,10 @@ fn build_system_prompt_with_context_validated(
     }
     Ok(RoleSystemPromptSpec::new(role, task_context, tools_csv)
         .with_affect_state(affect_state)
-        .build_with_context_window(context_window_tokens)?)
+        .build_with_context_window_and_section_effectiveness(
+            context_window_tokens,
+            section_effectiveness,
+        )?)
 }
 
 fn effective_context_window_tokens(config: &Config) -> usize {
@@ -10985,6 +11069,63 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
     } else {
         Some(format!("## Relevant Context\n\n{content}"))
     }
+}
+
+fn adjust_priority_from_section_learning(
+    priority: SectionPriority,
+    section_name: &str,
+    role: &str,
+    registry: &SectionEffectivenessRegistry,
+) -> SectionPriority {
+    let next = match registry.recommend_priority_change(section_name, role) {
+        PriorityChange::Increase => (priority as u8).saturating_add(1),
+        PriorityChange::Decrease => (priority as u8).saturating_sub(1),
+        PriorityChange::NoChange | PriorityChange::InsufficientData => priority as u8,
+    };
+    match next {
+        0 => SectionPriority::Low,
+        1 => SectionPriority::Normal,
+        2 => SectionPriority::High,
+        _ => SectionPriority::Critical,
+    }
+}
+
+fn apply_section_effectiveness_to_prompt_section(
+    mut section: PromptSection,
+    role: &str,
+    registry: &SectionEffectivenessRegistry,
+) -> PromptSection {
+    section.priority =
+        adjust_priority_from_section_learning(section.priority, &section.name, role, registry);
+    section
+}
+
+fn prompt_section_meta_from_sections(
+    sections: &[Engram],
+    prompt: &Engram,
+) -> Vec<PromptSectionMeta> {
+    let included = prompt.lineage.iter().copied().collect::<HashSet<_>>();
+    sections
+        .iter()
+        .filter_map(|signal| PromptSection::from_signal(signal).ok().map(|section| (signal, section)))
+        .map(|(signal, original)| {
+            let rendered = original.clone().enforce_hard_cap();
+            let is_included = included.contains(&signal.id);
+            let was_truncated = rendered.content != original.content;
+            let tokens = if is_included {
+                rendered.estimated_tokens() as u64
+            } else {
+                0
+            };
+            PromptSectionMeta {
+                name: rendered.name,
+                tokens,
+                priority: rendered.priority as u8,
+                was_truncated: is_included && was_truncated,
+                was_dropped: !is_included,
+            }
+        })
+        .collect()
 }
 
 fn build_daimon_context_section(

@@ -41,7 +41,7 @@ These are the cybernetic wiring that makes the system self-improving:
 
 1. **Health → Routing**: Filter unhealthy providers from CascadeRouter
 2. **Conductor → Routing**: Penalize model that caused gate failure
-3. **Section → Scaffold**: Track which prompt sections correlate with task success
+3. **Section → Scaffold**: Track prompt section lift and feed it back into live prompt weighting
 4. **Failure → Replanning**: Re-plan on gate failures (not just retry)
 5. **Skills → Prompts**: Inject task-relevant skills from SkillLibrary
 6. **Cost → Routing**: Force cheaper tier on cost spikes

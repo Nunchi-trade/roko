@@ -198,8 +198,7 @@ trait impls. `GatePipeline`, `AdaptiveThresholds`, `GateFeedback` all wired.
 for all learning subsystems. Cascade router 3-stage progression (Static → Confidence → UCB) with observation
 thresholds is fully implementation-ready. 31.6× collective calibration derivation is mathematically grounded.
 
-**Gaps:** 8 missing feedback loops (doc 13) described as wiring recipes (~495 LOC) but none implemented.
-ADAS autocatalytic cycle (doc 17) is theoretical only.
+**Gaps:** The feedback-loop docs are stale: health→routing, section→scaffold, failure→replanning, skills→prompts, cost→routing, latency→reward, and experiments→static all have real code paths now, while conductor/load→routing is still only partial and some loops remain narrower than the PRD ideal. ADAS autocatalytic cycle (doc 17) is theoretical only.
 
 **Crate reality:** roko-learn is Wired (36 files, ~5,000 LOC, 348 tests). Cascade router persists to disk.
 Episode logger is append-only JSONL with HDC fingerprinting. Prompt experiments, adaptive gate thresholds,
