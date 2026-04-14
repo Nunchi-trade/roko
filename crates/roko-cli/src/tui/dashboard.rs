@@ -53,6 +53,15 @@ const NEURO_DIR: &str = ".roko/neuro";
 const KNOWLEDGE_FILE: &str = "knowledge.jsonl";
 const KNOWLEDGE_CONFIRMATIONS_FILE: &str = "knowledge-confirmations.jsonl";
 
+fn resolve_episodes_path(root: &Path) -> PathBuf {
+    let episodes_path = root.join(MEMORY_DIR).join(EPISODES_FILE);
+    if episodes_path.exists() {
+        episodes_path
+    } else {
+        root.join(".roko").join(EPISODES_FILE)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FileStamp {
     modified: Option<SystemTime>,
@@ -504,7 +513,7 @@ impl DashboardData {
         let learn_dir = roko_dir.join("learn");
         let state_path = roko_dir.join("state").join("executor.json");
         let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = roko_dir.join(MEMORY_DIR).join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&root);
         let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
         let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
         let gate_thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
@@ -617,7 +626,7 @@ impl DashboardData {
         let roko_dir = self.root.join(".roko");
         let state_path = roko_dir.join("state").join("executor.json");
         let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = roko_dir.join(MEMORY_DIR).join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&self.root);
         let efficiency_path = roko_dir.join("learn").join(EFFICIENCY_FILE);
         let experiments_path = roko_dir.join("learn").join(EXPERIMENTS_FILE);
         let gate_thresholds_path = roko_dir.join("learn").join(GATE_THRESHOLDS_FILE);
@@ -2835,7 +2844,7 @@ impl DashboardSnapshot {
         let root = resolve_snapshot_root(root.as_ref());
         let memory_dir = root.join(MEMORY_DIR);
         let learn_dir = root.join(LEARN_DIR);
-        let episodes_path = memory_dir.join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&root);
         let task_metrics_path = memory_dir.join(TASK_METRICS_FILE);
         let signals_path = root.join(".roko").join("signals.jsonl");
 
@@ -3007,12 +3016,7 @@ impl DashboardSnapshot {
         let _ = writeln!(out, "{} ({})", page.title, page.id.slug());
         let _ = writeln!(out, "group: {}", page.id.group());
         let _ = writeln!(out, "intent: {}", page.intent);
-        let _ = writeln!(
-            out,
-            "source: {}/{}",
-            self.root.join(MEMORY_DIR).display(),
-            EPISODES_FILE
-        );
+        let _ = writeln!(out, "source: {}", resolve_episodes_path(&self.root).display());
         let _ = writeln!(out, "episodes: {}", self.episode_count);
         let _ = writeln!(
             out,
@@ -3717,7 +3721,7 @@ impl DashboardSnapshot {
 
     fn render_log_view_page(&self, page: &PageScaffold) -> Option<String> {
         let signals_path = self.root.join(".roko").join("signals.jsonl");
-        let episodes_path = self.root.join(MEMORY_DIR).join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&self.root);
 
         let signals_exist = signals_path.exists();
         let episodes_exist = episodes_path.exists();
@@ -4714,7 +4718,7 @@ fn resolve_snapshot_root(start: &Path) -> PathBuf {
     let mut cursor = Some(start);
     while let Some(dir) = cursor {
         let memory_dir = dir.join(MEMORY_DIR);
-        if memory_dir.join(EPISODES_FILE).exists() || memory_dir.join(TASK_METRICS_FILE).exists() {
+        if resolve_episodes_path(dir).exists() || memory_dir.join(TASK_METRICS_FILE).exists() {
             return dir.to_path_buf();
         }
         cursor = dir.parent();
