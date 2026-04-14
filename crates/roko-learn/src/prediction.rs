@@ -170,9 +170,7 @@ impl CalibrationTracker {
     /// # Errors
     ///
     /// Returns an error only when the routing log itself cannot be read.
-    pub async fn load_from_routing_log(
-        path: impl AsRef<Path>,
-    ) -> Result<Self, io::Error> {
+    pub async fn load_from_routing_log(path: impl AsRef<Path>) -> Result<Self, io::Error> {
         let store = RoutingDecisionLogStore::at(path.as_ref()).without_fsync();
         let records = store.read_all().await?;
         Ok(Self::from_routing_logs(&records))
@@ -361,7 +359,9 @@ fn fallback_stage_probability(record: &RoutingDecisionLog) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CalibrationTracker, PredictionRecord, fallback_stage_probability, selected_probability};
+    use super::{
+        CalibrationTracker, PredictionRecord, fallback_stage_probability, selected_probability,
+    };
     use crate::routing_log::{CandidateEntry, RoutingDecisionLog};
 
     #[test]

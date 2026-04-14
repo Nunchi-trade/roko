@@ -166,13 +166,13 @@ pub fn create_agent_for_model(
                 ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
                     .with_safety_layer(safety_layer)
                     .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
-                if !options.name.is_empty() {
-                    agent = agent.with_name(options.name.clone());
-                }
-                if !options.env.is_empty() {
-                    agent = agent.with_env(options.env.clone());
-                }
-                return Ok(Box::new(agent) as Box<dyn Agent>);
+            if !options.name.is_empty() {
+                agent = agent.with_name(options.name.clone());
+            }
+            if !options.env.is_empty() {
+                agent = agent.with_env(options.env.clone());
+            }
+            return Ok(Box::new(agent) as Box<dyn Agent>);
         }
     };
 

@@ -7,10 +7,10 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 
 use crate::http::{HttpPostError, HttpPoster};
+use crate::provider::AgentCreationError;
 use crate::provider::openai_compat::{
     base_url_for_tool_loop, build_extra_body_params, max_tokens_for_model, resolve_api_key,
 };
-use crate::provider::AgentCreationError;
 use crate::tool_loop::LlmBackend;
 
 /// Tail-latency hedging for latency-sensitive requests.
@@ -77,7 +77,7 @@ pub fn create_backend(
 mod tests {
     use super::*;
     use crate::translate::{BackendResponse, RenderedTools, SessionState};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::sync::Mutex;
 

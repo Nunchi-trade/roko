@@ -382,8 +382,13 @@ impl Composer for PromptComposer {
             affect.as_ref(),
             None,
         );
-        let payment_summary =
-            vcg_payment_summary(&optional, &allocation.selected, remaining_tokens, remaining_signals, affect.as_ref());
+        let payment_summary = vcg_payment_summary(
+            &optional,
+            &allocation.selected,
+            remaining_tokens,
+            remaining_signals,
+            affect.as_ref(),
+        );
 
         for winner in &allocation.selected {
             let candidate = &optional[winner.candidate_index];
@@ -411,11 +416,38 @@ impl Composer for PromptComposer {
             .tag("tokens", token_total.to_string())
             .tag("distinct_bidders", bidder_count(&kept).to_string())
             .tag("auction_total_bid", format!("{:.4}", allocation.total_bid))
-            .tag("auction_total_payments", format!("{:.4}", payment_summary.total_payments))
-            .tag("auction_urgency", format!("{:.4}", affect.as_ref().map_or(1.0, AuctionAffectState::urgency_multiplier)))
-            .tag("auction_affect_weight", format!("{:.4}", affect.as_ref().map_or(1.0, AuctionAffectState::affect_weight_multiplier)))
-            .tag("highest_payment_section", payment_summary.highest_payment_section.unwrap_or_else(|| "none".to_string()))
-            .tag("highest_payment_value", format!("{:.4}", payment_summary.highest_payment_value))
+            .tag(
+                "auction_total_payments",
+                format!("{:.4}", payment_summary.total_payments),
+            )
+            .tag(
+                "auction_urgency",
+                format!(
+                    "{:.4}",
+                    affect
+                        .as_ref()
+                        .map_or(1.0, AuctionAffectState::urgency_multiplier)
+                ),
+            )
+            .tag(
+                "auction_affect_weight",
+                format!(
+                    "{:.4}",
+                    affect
+                        .as_ref()
+                        .map_or(1.0, AuctionAffectState::affect_weight_multiplier)
+                ),
+            )
+            .tag(
+                "highest_payment_section",
+                payment_summary
+                    .highest_payment_section
+                    .unwrap_or_else(|| "none".to_string()),
+            )
+            .tag(
+                "highest_payment_value",
+                format!("{:.4}", payment_summary.highest_payment_value),
+            )
             .build();
         Ok(sig)
     }
@@ -559,7 +591,10 @@ fn vcg_payment_summary(
     remaining_signals: usize,
     affect: Option<&AuctionAffectState>,
 ) -> PaymentSummary {
-    let actual_total = winners.iter().map(|winner| winner.adjusted_bid).sum::<f32>();
+    let actual_total = winners
+        .iter()
+        .map(|winner| winner.adjusted_bid)
+        .sum::<f32>();
     let mut summary = PaymentSummary::default();
 
     for winner in winners {
@@ -596,10 +631,7 @@ fn effective_candidate_bid(
     candidate.bid_density * diversity_boost * diminishing_returns * affect_multiplier
 }
 
-fn bidder_affect_multiplier(
-    section: &PromptSection,
-    affect: Option<&AuctionAffectState>,
-) -> f32 {
+fn bidder_affect_multiplier(section: &PromptSection, affect: Option<&AuctionAffectState>) -> f32 {
     let Some(affect) = affect else {
         return 1.0;
     };
@@ -615,31 +647,84 @@ fn bidder_affect_multiplier(
     );
     let warningish = keyword_weight(
         &text,
-        &["warning", "caution", "avoid", "risk", "failure", "regression", "blocker"],
+        &[
+            "warning",
+            "caution",
+            "avoid",
+            "risk",
+            "failure",
+            "regression",
+            "blocker",
+        ],
     );
     let exploratory = keyword_weight(
         &text,
-        &["explore", "novel", "research", "investigate", "hypothesis", "experiment"],
+        &[
+            "explore",
+            "novel",
+            "research",
+            "investigate",
+            "hypothesis",
+            "experiment",
+        ],
     );
     let proven = keyword_weight(
         &text,
-        &["playbook", "proven", "stable", "known good", "best practice", "repeatable"],
+        &[
+            "playbook",
+            "proven",
+            "stable",
+            "known good",
+            "best practice",
+            "repeatable",
+        ],
     );
     let conservative = keyword_weight(
         &text,
-        &["conservative", "safe", "warning", "avoid", "guardrail", "rollback"],
+        &[
+            "conservative",
+            "safe",
+            "warning",
+            "avoid",
+            "guardrail",
+            "rollback",
+        ],
     );
     let deadline = keyword_weight(
         &text,
-        &["deadline", "blocking", "critical", "must", "acceptance", "verify", "required"],
+        &[
+            "deadline",
+            "blocking",
+            "critical",
+            "must",
+            "acceptance",
+            "verify",
+            "required",
+        ],
     );
     let failure = keyword_weight(
         &text,
-        &["failure", "failed", "error", "retry", "regression", "incident", "blocker"],
+        &[
+            "failure",
+            "failed",
+            "error",
+            "retry",
+            "regression",
+            "incident",
+            "blocker",
+        ],
     );
     let prediction = keyword_weight(
         &text,
-        &["prediction", "forecast", "uncertain", "error", "warning", "confidence", "probe"],
+        &[
+            "prediction",
+            "forecast",
+            "uncertain",
+            "error",
+            "warning",
+            "confidence",
+            "probe",
+        ],
     );
 
     let subsystem_bias = match section.bidder {
@@ -669,7 +754,11 @@ fn bidder_affect_multiplier(
 }
 
 fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
-    keywords.iter().any(|keyword| text.contains(keyword)).then_some(1.0).unwrap_or(0.0)
+    keywords
+        .iter()
+        .any(|keyword| text.contains(keyword))
+        .then_some(1.0)
+        .unwrap_or(0.0)
 }
 
 fn candidate_bid_density(

@@ -7,10 +7,10 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result};
 use crate::agent_config::{command_from_config, model_from_config};
 use crate::agent_episode::build_capture_episode;
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
+use anyhow::{Context as _, Result};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, Context, Engram, Kind};

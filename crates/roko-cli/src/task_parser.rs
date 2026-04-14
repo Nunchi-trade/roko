@@ -1399,15 +1399,21 @@ depends_on = ["missing"]
         .unwrap();
 
         let issues = tasks.validate_structure();
-        assert!(issues
-            .iter()
-            .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. })));
-        assert!(issues
-            .iter()
-            .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. })));
-        assert!(issues
-            .iter()
-            .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode)));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode))
+        );
     }
 
     #[test]

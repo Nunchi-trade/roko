@@ -114,19 +114,18 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
-use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::agent_config::{
-    synthesize_claude_cli_config, synthesize_known_protocol_config,
-    synthesize_subprocess_config,
+    synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
 };
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::config::Config;
 use crate::plan::plans_dir;
 use crate::prompting::{
     PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
 };
-use crate::workspace_paths::find_prd_path;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::worker::cloud::CloudExecution;
+use crate::workspace_paths::find_prd_path;
 
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;

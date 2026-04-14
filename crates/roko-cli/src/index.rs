@@ -13,8 +13,8 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use crate::workspace_paths::{drafts_dir, ideas_path, plans_dir, prd_dir, published_dir, roko_dir};
+use anyhow::Result;
 
 // ─── Index paths ───────────────────────────────────────────────────
 

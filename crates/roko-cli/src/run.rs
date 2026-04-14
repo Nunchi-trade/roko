@@ -6,8 +6,7 @@
 //! each configured gate on the working directory, and emits an Episode.
 
 use crate::agent_config::{
-    synthesize_claude_cli_config, synthesize_known_protocol_config,
-    synthesize_subprocess_config,
+    synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
 };
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use crate::clean;
@@ -359,8 +358,7 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| "claude-opus-4-6".to_string());
-        let synthesized_config =
-            synthesize_claude_cli_config(&config.agent.command, &model);
+        let synthesized_config = synthesize_claude_cli_config(&config.agent.command, &model);
 
         let mut synthetic_extra_args = extra_args;
         if let Some(resume_session) = optional_resume {
@@ -454,7 +452,10 @@ async fn dispatch_agent(
                 dangerously_skip_permissions: false,
                 name: String::new(),
             },
-            format!("create generic subprocess agent for {}", config.agent.command),
+            format!(
+                "create generic subprocess agent for {}",
+                config.agent.command
+            ),
         )?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     }

@@ -298,10 +298,10 @@ mod tests {
         ToolResult, ToolSchema, VecToolRegistry,
     };
     use roko_core::{Body, Context, Engram, Kind};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
 
     fn echo_tool() -> ToolDef {
@@ -610,11 +610,15 @@ mod tests {
         assert_eq!(body["user_location"]["country"], "US");
         assert_eq!(body["tools"][0]["function"]["name"], "echo");
         let headers = &captured.headers;
-        assert!(headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer pplx-key"));
-        assert!(headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json"));
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer pplx-key")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json")
+        );
     }
 }

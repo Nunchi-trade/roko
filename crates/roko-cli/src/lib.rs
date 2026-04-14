@@ -12,9 +12,10 @@
 
 extern crate self as roko_cli;
 
-pub mod agent_exec;
 pub mod agent_config;
 pub mod agent_episode;
+pub mod agent_exec;
+pub mod agent_spawn;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
@@ -31,7 +32,6 @@ pub mod plan_generate;
 pub mod prd;
 pub mod prd_prompt;
 pub mod prompting;
-pub mod agent_spawn;
 pub mod repl;
 pub mod research;
 pub mod run;

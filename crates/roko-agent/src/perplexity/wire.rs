@@ -1,5 +1,5 @@
 use crate::perplexity::types::{Annotation, PerplexityMetadata, SearchOptions, SearchResult};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(crate) fn chat_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');

@@ -166,12 +166,16 @@ mod tests {
 
         let outputs = policy.decide(&[], &Context::now());
         assert_eq!(outputs.len(), 2);
-        assert!(outputs
-            .iter()
-            .any(|engram| engram.tag("alert_kind") == Some("regression")));
-        assert!(outputs
-            .iter()
-            .any(|engram| engram.tag("alert_kind") == Some("coordination")));
+        assert!(
+            outputs
+                .iter()
+                .any(|engram| engram.tag("alert_kind") == Some("regression"))
+        );
+        assert!(
+            outputs
+                .iter()
+                .any(|engram| engram.tag("alert_kind") == Some("coordination"))
+        );
     }
 
     #[test]

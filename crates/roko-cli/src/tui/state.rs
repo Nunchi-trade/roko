@@ -725,6 +725,11 @@ impl TuiState {
     /// This bridges the existing snapshot-based data model into the full
     /// TuiState. Fields not covered by `DashboardData` are left unchanged.
     pub fn update_from_snapshot(&mut self, data: &DashboardData) {
+        let executor_summary = data.executor_summary();
+        self.orchestrator_state = executor_summary.orchestrator_state;
+        self.current_iteration = executor_summary.current_iteration;
+        self.current_phase = executor_summary.current_phase;
+
         // Plans
         self.plans = data
             .plans
@@ -1199,7 +1204,10 @@ fn episode_to_phase_name(episode: &roko_learn::episode_logger::Episode) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn default_state_is_idle_dashboard() {
@@ -1340,6 +1348,42 @@ mod tests {
         assert_eq!(state.phase_pipeline.len(), 9);
         assert_eq!(state.phase_pipeline[0].name, "preflight");
         assert_eq!(state.phase_pipeline[8].name, "committing");
+    }
+
+    #[test]
+    fn from_dashboard_data_populates_orchestrator_fields_from_executor_state() {
+        let tmpdir = tempdir().expect("tempdir");
+        let state_dir = tmpdir.path().join(".roko/state");
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "gating" },
+                    "iteration": 3,
+                    "started_at_ms": 10,
+                    "paused": false
+                },
+                "plan-b": {
+                    "current_phase": { "kind": "implementing" },
+                    "iteration": 2,
+                    "started_at_ms": 20,
+                    "paused": false
+                }
+            }
+        });
+        fs::write(
+            state_dir.join("executor.json"),
+            serde_json::to_vec(&executor_state).expect("executor json"),
+        )
+        .expect("write executor state");
+
+        let data = DashboardData::load_best_effort(tmpdir.path());
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.orchestrator_state, "running");
+        assert_eq!(state.current_iteration, 2);
+        assert_eq!(state.current_phase, "implementing");
     }
 
     #[test]

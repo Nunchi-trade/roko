@@ -468,7 +468,10 @@ impl CanonicalStrategyProfile {
 fn classify_dimension_role(label: &str, index: usize) -> DimensionRole {
     let normalized = label.trim().to_ascii_lowercase();
 
-    if contains_role_keyword(&normalized, &["complex", "difficulty", "volatility", "unstable"]) {
+    if contains_role_keyword(
+        &normalized,
+        &["complex", "difficulty", "volatility", "unstable"],
+    ) {
         return DimensionRole::Difficulty;
     }
     if contains_role_keyword(
@@ -487,31 +490,60 @@ fn classify_dimension_role(label: &str, index: usize) -> DimensionRole {
     }
     if contains_role_keyword(
         &normalized,
-        &["novel", "familiar", "correlation", "similarity", "ambiguity"],
+        &[
+            "novel",
+            "familiar",
+            "correlation",
+            "similarity",
+            "ambiguity",
+        ],
     ) {
         return DimensionRole::Familiarity;
     }
     if contains_role_keyword(&normalized, &["confidence", "conviction", "certainty"]) {
         return DimensionRole::SelfAssessment;
     }
-    if contains_role_keyword(&normalized, &["time", "deadline", "horizon", "urgency", "latency"]) {
+    if contains_role_keyword(
+        &normalized,
+        &["time", "deadline", "horizon", "urgency", "latency"],
+    ) {
         return DimensionRole::Urgency;
     }
     if contains_role_keyword(
         &normalized,
-        &["scope", "breadth", "concentration", "liquidity", "surface", "coverage"],
+        &[
+            "scope",
+            "breadth",
+            "concentration",
+            "liquidity",
+            "surface",
+            "coverage",
+        ],
     ) {
         return DimensionRole::Breadth;
     }
     if contains_role_keyword(
         &normalized,
-        &["revers", "rollback", "recover", "counterparty", "exit", "undo"],
+        &[
+            "revers",
+            "rollback",
+            "recover",
+            "counterparty",
+            "exit",
+            "undo",
+        ],
     ) {
         return DimensionRole::Recoverability;
     }
     if contains_role_keyword(
         &normalized,
-        &["dependency", "coupling", "regulatory", "compliance", "integration"],
+        &[
+            "dependency",
+            "coupling",
+            "regulatory",
+            "compliance",
+            "integration",
+        ],
     ) {
         return DimensionRole::Coupling;
     }

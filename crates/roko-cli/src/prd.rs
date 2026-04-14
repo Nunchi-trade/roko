@@ -949,7 +949,11 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                 template_kind.max_task_count()
             );
         }
-        Ok((workspace_plans_dir(&workdir), task_count, estimated_complexity))
+        Ok((
+            workspace_plans_dir(&workdir),
+            task_count,
+            estimated_complexity,
+        ))
     }
     .await;
 
