@@ -100,7 +100,7 @@ use roko_learn::skill_library::{
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
 };
-use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
+use roko_orchestrator::worktree::{format_branch_name, WorktreeConfig, WorktreeManager};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
     GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanStrategy, discover_plans,
@@ -5035,6 +5035,7 @@ impl PlanRunner {
                                     &ExecutorEvent::MergeSucceeded,
                                     "transitioned",
                                 );
+                                self.cleanup_plan_worktree(&plan_id).await;
                             }
                             Ok(false) => {
                                 self.apply_event_and_emit(
@@ -5060,6 +5061,7 @@ impl PlanRunner {
                                     &ExecutorEvent::MergeSucceeded,
                                     "transitioned",
                                 );
+                                self.cleanup_plan_worktree(&plan_id).await;
                             }
                         }
                     }
@@ -5496,6 +5498,7 @@ impl PlanRunner {
         let mut retry_prompt_override: Option<String> = None;
         let mut pending_feedback: Option<(RetryConductorState, RetryConductorAction)> = None;
         let mut terminal_error: Option<anyhow::Error> = None;
+        let mut terminal_failure_handled = false;
         let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
             Ok(dir) => dir,
             Err(e) => {
@@ -5545,6 +5548,34 @@ impl PlanRunner {
                     if let Some((state, action)) = pending_feedback.take() {
                         self.retry_conductor.record_outcome(&state, action, true);
                         self.persist_retry_conductor();
+                    }
+                    if let Err(e) = self
+                        .finalize_successful_task_worktree(plan_id, task_id, &exec_dir)
+                        .await
+                    {
+                        tracing::error!(
+                            "[orchestrate] task worktree finalization failed for {plan_id}/{task_id}: {e}"
+                        );
+                        self.record_task_failure(
+                            plan_id,
+                            task_id,
+                            None,
+                            Some(retry_model.as_str()),
+                            &e,
+                            &started,
+                            Some(&result),
+                        )
+                        .await;
+                        self.apply_event_and_emit(
+                            plan_id,
+                            task_id,
+                            &ExecutorEvent::Fatal(format!(
+                                "task worktree finalization failed: {e}"
+                            )),
+                            "failed",
+                        );
+                        terminal_failure_handled = true;
+                        break;
                     }
                     match self
                         .record_task_success(plan_id, task_id, &result, &started)
@@ -5735,7 +5766,7 @@ impl PlanRunner {
             }
         }
 
-        if !succeeded && !budget_aborted {
+        if !succeeded && !budget_aborted && !terminal_failure_handled {
             tracing::error!("[orchestrate] task {task_id} failed after {max_retries} retries");
             self.apply_event_and_emit(
                 plan_id,
@@ -5968,6 +5999,26 @@ impl PlanRunner {
                 {
                     tracing::error!(
                         "[orchestrate] parallel task {tid} post-processing failed: {e}"
+                    );
+                    self.record_task_failure(
+                        plan_id,
+                        tid,
+                        Some(task_result.prompt_text.as_str()),
+                        Some(task_result.model.as_str()),
+                        &e,
+                        &started,
+                        Some(&task_result.result),
+                    )
+                    .await;
+                    any_fatal = true;
+                    continue;
+                }
+                if let Err(e) = self
+                    .finalize_successful_task_worktree(plan_id, tid, &task_result.exec_dir)
+                    .await
+                {
+                    tracing::error!(
+                        "[orchestrate] parallel task worktree finalization failed for {plan_id}/{tid}: {e}"
                     );
                     self.record_task_failure(
                         plan_id,
@@ -10542,19 +10593,43 @@ impl PlanRunner {
         let branch_name = self
             .worktrees
             .get(plan_id)
-            .map_or_else(|| format!("roko/{plan_id}"), |h| h.branch);
-        let output = tokio::process::Command::new("git")
-            .args(["merge", "--no-ff", &branch_name])
-            .current_dir(&self.workdir)
-            .output()
-            .await
-            .context("git merge")?;
+            .map_or_else(|| format_branch_name(plan_id), |h| h.branch);
+        git_merge_branch_into(&self.workdir, &branch_name).await
+    }
 
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow!("merge failed: {stderr}"))
+    async fn finalize_successful_task_worktree(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        exec_dir: &Path,
+    ) -> Result<()> {
+        if !self.worktrees_enabled() {
+            return Ok(());
+        }
+
+        self.clear_stale_worktree_locks().await;
+        let plan_handle = self
+            .worktrees
+            .ensure_for_plan(plan_id)
+            .await
+            .map_err(|e| anyhow!("ensure plan worktree {plan_id}: {e}"))?;
+        let commit_message = format!("task: {task_id}");
+        git_commit_all_if_needed(exec_dir, &commit_message).await?;
+        let task_branch = format!("roko/task/{plan_id}/{task_id}");
+        git_merge_branch_into(&plan_handle.path, &task_branch)
+            .await
+            .with_context(|| format!("merge task branch {task_branch} into plan {plan_id}"))?;
+        self.worktrees.touch(plan_id);
+        Ok(())
+    }
+
+    async fn cleanup_plan_worktree(&self, plan_id: &str) {
+        if !self.worktrees_enabled() || self.worktrees.get(plan_id).is_none() {
+            return;
+        }
+
+        if let Err(e) = self.worktrees.remove(plan_id).await {
+            tracing::error!("[orchestrate] plan worktree cleanup failed for {plan_id}: {e}");
         }
     }
 
@@ -11601,6 +11676,76 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed.sort();
     changed.dedup();
     changed
+}
+
+async fn git_commit_all_if_needed(workspace: &Path, message: &str) -> Result<bool> {
+    let add_output = tokio::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git add -A")?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        return Err(anyhow!("git add -A failed: {stderr}"));
+    }
+
+    let diff_output = tokio::process::Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git diff --cached")?;
+
+    if diff_output.status.success() {
+        return Ok(false);
+    }
+
+    if diff_output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&diff_output.stderr);
+        return Err(anyhow!("git diff --cached failed: {stderr}"));
+    }
+
+    let commit_output = tokio::process::Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "roko")
+        .env("GIT_AUTHOR_EMAIL", "roko@nunchi.dev")
+        .env("GIT_COMMITTER_NAME", "roko")
+        .env("GIT_COMMITTER_EMAIL", "roko@nunchi.dev")
+        .output()
+        .await
+        .context("spawn git commit")?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        return Err(anyhow!("git commit failed: {stderr}"));
+    }
+
+    Ok(true)
+}
+
+async fn git_merge_branch_into(workspace: &Path, branch: &str) -> Result<()> {
+    let output = tokio::process::Command::new("git")
+        .args(["merge", "--no-ff", "--no-edit", branch])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git merge")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if stderr.is_empty() { stdout } else { stderr };
+    Err(anyhow!("git merge failed: {details}"))
 }
 
 fn is_meaningful_output(output: &Engram) -> bool {
@@ -12741,7 +12886,61 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command;
     use tempfile::TempDir;
+
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_git_repo() -> Option<TempDir> {
+        if !git_available() {
+            return None;
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        run_git(tmp.path(), &["init"]);
+        run_git(tmp.path(), &["config", "user.name", "Test User"]);
+        run_git(tmp.path(), &["config", "user.email", "test@example.com"]);
+        std::fs::write(tmp.path().join("README.md"), "seed\n").expect("write seed");
+        run_git(tmp.path(), &["add", "README.md"]);
+        run_git(tmp.path(), &["commit", "-m", "seed"]);
+        Some(tmp)
+    }
+
+    async fn runner_for_repo(workdir: &Path, use_worktrees: bool) -> PlanRunner {
+        let snapshot_json = ExecutorSnapshot::new(0).to_json().expect("snapshot json");
+        let mut config = Config::default();
+        config.executor.use_worktrees = use_worktrees;
+        PlanRunner::from_snapshot(
+            &snapshot_json,
+            workdir,
+            config,
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .expect("plan runner")
+    }
 
     #[test]
     fn scrub_signal_redacts_text_and_rehashes_identity() {
@@ -13138,6 +13337,79 @@ depends_on = []
             manager.path_for("plan-1"),
             workdir.join(".roko").join("worktrees").join("plan-1")
         );
+    }
+
+    #[tokio::test]
+    async fn finalize_successful_task_worktree_merges_into_plan_branch() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let runner = runner_for_repo(tmp.path(), true).await;
+        let task_dir = runner
+            .task_exec_dir("plan-1", "T1")
+            .await
+            .expect("task worktree");
+
+        std::fs::write(task_dir.join("feature.txt"), "task change\n").expect("write change");
+
+        runner
+            .finalize_successful_task_worktree("plan-1", "T1", &task_dir)
+            .await
+            .expect("finalize task worktree");
+
+        let plan_handle = runner.worktrees.get("plan-1").expect("plan worktree");
+        assert_eq!(
+            std::fs::read_to_string(plan_handle.path.join("feature.txt")).expect("plan file"),
+            "task change\n"
+        );
+
+        runner
+            .merge_branch("plan-1")
+            .await
+            .expect("merge canonical plan branch");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("feature.txt")).expect("repo file"),
+            "task change\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_branch_falls_back_to_canonical_plan_branch_name() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let main_branch = run_git(tmp.path(), &["branch", "--show-current"]);
+        run_git(tmp.path(), &["checkout", "-b", "roko/plan/plan-1"]);
+        std::fs::write(tmp.path().join("branch.txt"), "plan branch\n").expect("write branch");
+        run_git(tmp.path(), &["add", "branch.txt"]);
+        run_git(tmp.path(), &["commit", "-m", "plan branch"]);
+        run_git(tmp.path(), &["checkout", &main_branch]);
+
+        let runner = runner_for_repo(tmp.path(), false).await;
+        runner
+            .merge_branch("plan-1")
+            .await
+            .expect("merge canonical fallback branch");
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("branch.txt")).expect("merged branch file"),
+            "plan branch\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_plan_worktree_removes_tracked_checkout() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        assert!(plan_dir.exists(), "plan worktree should exist");
+
+        runner.cleanup_plan_worktree("plan-1").await;
+
+        assert!(runner.worktrees.get("plan-1").is_none());
+        assert!(!plan_dir.exists(), "plan worktree should be removed");
     }
 
     #[test]
