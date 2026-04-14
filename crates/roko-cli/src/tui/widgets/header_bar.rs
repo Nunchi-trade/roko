@@ -305,6 +305,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         (" F4", MoriTheme::DREAM, "git", Tab::Git),
         (" F5", MoriTheme::DREAM, "logs", Tab::Logs),
         (" F6", MoriTheme::BONE_DIM, "cfg", Tab::Config),
+        (" F7", MoriTheme::BONE_DIM, "inspect", Tab::Inspect),
     ];
 
     let fkey_width: u16 = fkey_items
