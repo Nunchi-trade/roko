@@ -3278,9 +3278,9 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             })
         }
         PlanCmd::Generate { source, from_file } => {
+            use roko_cli::agent_config::{load_gateway_env, model_from_config};
             use roko_cli::agent_exec::{
-                AgentExecEpisode, AgentExecOpts, load_gateway_env, model_from_config,
-                run_agent_logged,
+                AgentExecEpisode, AgentExecOpts, run_agent_logged,
             };
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
@@ -3346,9 +3346,9 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             .await
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
+            use roko_cli::agent_config::{load_gateway_env, model_from_config};
             use roko_cli::agent_exec::{
-                AgentExecEpisode, AgentExecOpts, load_gateway_env, model_from_config,
-                run_agent_logged,
+                AgentExecEpisode, AgentExecOpts, run_agent_logged,
             };
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
@@ -3587,9 +3587,8 @@ fn with_perplexity_research_model(
 }
 
 async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{
-        AgentExecOpts, load_gateway_env, model_from_config, run_agent_capture_silent,
-    };
+    use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
+    use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
     use roko_cli::research::{
         ResearchMode, build_research_prompt, build_research_prompt_gemini,
         build_research_prompt_perplexity, grounding_to_citations, save_research_with_grounding,
@@ -3603,8 +3602,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     let effort = cli.effort.map(|effort| effort.to_string());
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
-    let agent_command =
-        roko_cli::agent_exec::command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
+    let agent_command = command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
     let config = load_roko_config(&workdir).unwrap_or_default();
 
     match cmd {
@@ -4809,9 +4807,8 @@ fn preserve_completed_task_status(
 }
 
 async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{
-        AgentExecOpts, load_gateway_env, model_from_config, run_agent_capture_silent,
-    };
+    use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
+    use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
 
     let workdir = resolve_workdir(cli);
     let gw = load_gateway_env(&workdir);
@@ -4820,8 +4817,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     let effort = cli.effort.map(|effort| effort.to_string());
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
-    let agent_command =
-        roko_cli::agent_exec::command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
+    let agent_command = command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
 
     match cmd {
         PrdCmd::Idea { text } => {
