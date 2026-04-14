@@ -179,6 +179,7 @@ pub enum TuiAction {
     // -- log scrolling --
     ScrollLogUp,
     ScrollLogDown,
+    ScrollLogEnd,
 
     // -- agent tab --
     SwitchAgentTab(usize),
@@ -625,7 +626,7 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::PageUp => TuiAction::ScrollLogUp,
         KeyCode::PageDown => TuiAction::ScrollLogDown,
         KeyCode::Home => TuiAction::ScrollLogUp,
-        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollAgentEnd,
+        KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollLogEnd,
         KeyCode::Char('/') => TuiAction::StartFilter,
         _ => TuiAction::None,
     }

@@ -577,6 +577,9 @@ impl App {
                 self.tui_state.log_scroll =
                     Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
             }
+            TuiAction::ScrollLogEnd => {
+                self.tui_state.log_scroll = usize::MAX; // Clamped during render
+            }
             TuiAction::ScrollAgentUp => {
                 let current = self.tui_state.agent_scroll.unwrap_or(0);
                 let delta = self.scroll_accel.push(-1);
