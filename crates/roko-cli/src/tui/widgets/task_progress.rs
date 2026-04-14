@@ -78,7 +78,8 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
 
     // Visible task slots
     let visible = area.height.saturating_sub(2 + header_rows) as usize;
-    let scroll = state.task_scroll.min(tasks.len().saturating_sub(1));
+    let max_scroll = tasks.len().saturating_sub(visible);
+    let scroll = state.task_scroll.min(max_scroll);
     let start = scroll;
     let end = (scroll + visible).min(tasks.len());
 
