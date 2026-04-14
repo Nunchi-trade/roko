@@ -9009,12 +9009,30 @@ impl PlanRunner {
 
         let composer = PromptComposer::new();
         let section_scorer = SectionScorer::new();
+        let prompt_ctx = ctx
+            .clone()
+            .with_attr(
+                "roko.daimon.pleasure",
+                format!("{:.4}", task_affect_state.pleasure),
+            )
+            .with_attr(
+                "roko.daimon.arousal",
+                format!("{:.4}", task_affect_state.arousal),
+            )
+            .with_attr(
+                "roko.daimon.dominance",
+                format!("{:.4}", task_affect_state.dominance),
+            )
+            .with_attr(
+                "roko.daimon.behavioral_state",
+                format!("{:?}", self.daimon.query().behavioral_state),
+            );
         let prompt = composer
             .compose(
                 &sections,
                 &Budget::tokens(self.config.prompt.token_budget),
                 &section_scorer,
-                &ctx,
+                &prompt_ctx,
             )
             .map_err(|e| anyhow!("compose: {e}"))?;
         let prompt = scrub_signal(&prompt, &self.safety_layer.scrub_policy);

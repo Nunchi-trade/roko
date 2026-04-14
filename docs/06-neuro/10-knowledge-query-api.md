@@ -227,7 +227,7 @@ See [12-4-tier-distillation-pipeline.md](./12-4-tier-distillation-pipeline.md) f
 
 **Implemented**: `NeuroStore` trait, `KnowledgeStore` JSONL backend, `KnowledgeConfirmationRecord`, `KnowledgeStats`, `MemoryIndex` (feature-gated), and the canonical `ContextAssembler` retrieval/ranking/compression pipeline, including cost-aware auction-style chunk allocation inside Neuro.
 
-**Missing**: Formal second-price VCG settlement and fuller bidder coverage. Richer combined retrieval scoring. Tier-aware query filtering. Within-domain vs. cross-domain threshold selection. Full somatic-state retrieval and resonance-driven selection.
+**Missing**: Exact welfare-maximizing VCG settlement and fuller bidder coverage. Richer combined retrieval scoring. Tier-aware query filtering. Within-domain vs. cross-domain threshold selection. Full somatic-state retrieval and resonance-driven selection.
 
 ---
 

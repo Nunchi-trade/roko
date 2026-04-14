@@ -107,7 +107,8 @@ These are fully specified in the legacy PRDs and/or `refactoring-prd` but have n
 **VCG Auction Integration**:
 - Urgency multiplier from arousal: `urgency = 1 + arousal × 0.5`
 - Affect weight from pleasure extremes: `affect_weight = 1 + 0.3 × abs(pleasure - 0.5)`
-- Per-subsystem bid modulation based on PAD state
+- Partially implemented end-to-end: orchestration now passes live PAD state into `PromptComposer`, and the shared prompt auction applies those multipliers plus per-bidder PAD modulation before selecting winners
+- Diagnostic externality payments are now emitted on the composed prompt as an approximate VCG accounting layer
 
 **Coding Agent Integration**:
 - Per-crate confidence aggregation
@@ -154,18 +155,18 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 | **2D** | Daimon PAD tracking (F1-F5, F9) — core appraisal and modulation | **Complete** |
 | **2E** | Behavioral modulation (F5) — behavioral states and dispatch strategy | **Complete** |
 | **2D+** | Affect on episodes (F6), affect→SystemPromptBuilder (F7), affect→CascadeRouter (F8) | Mostly complete; routing now has an explicit `DaimonPolicy`, and the remaining gap is somatic-landscape-backed retrieval plus broader cross-subsystem weighting |
-| **2G** | Somatic landscape, 8D strategy space, k-d tree | Partial; persisted axis registration plus a shared `StrategySpaceComputer` are now in place, but dedicated non-coding extractors and VCG coupling are still missing |
+| **2G** | Somatic landscape, 8D strategy space, k-d tree | Partial; persisted axis registration plus a shared `StrategySpaceComputer` are now in place, and non-coding domains use role-aware label projection, but true domain-native extractors and VCG coupling are still missing |
 | **2H** | Emotional memory integration (EmotionalTag, four-factor retrieval) | Partial |
-| **2I** | Dream-daimon bridge (emotional load, depotentiation) | Not started |
+| **2I** | Dream-daimon bridge (emotional load, depotentiation) | Partial; dream replay now depotentiates arousal/high-intensity markers and synthesizes somatic markers from replayed episodes, but richer emotional maintenance policy is still missing |
 | **2M** | Collective contagion, somatic field, C-Factor | Not started |
 
 ### Recommended Next Steps
 
-1. **Deepen somatic-landscape semantics**: add dedicated non-coding coordinate extractors and tighter cross-subsystem use of the now-centralized strategy-space computer.
+1. **Deepen somatic-landscape semantics**: add true domain-native coordinate extractors on top of the current role-aware projection and tighten cross-subsystem use of the now-centralized strategy-space computer.
 
 2. **Finish emotional-memory scoring**: retrieval weighting now uses emotional provenance and emotional diversity in Neuro; the remaining work is direct somatic-landscape-backed knowledge selection and consolidation priority.
 
-3. **Implement VCG affect bidding**: connect PAD urgency / affect-weight multipliers into the cross-subsystem context budget auction.
+3. **Deepen VCG affect bidding**: broaden bidder production beyond the currently populated runtime sections and add richer fairness / pricing policy on top of the PAD-modulated shared auction.
 
 4. **Layer in collective contagion and frontier appraisal triggers** once the single-agent affect path is fully exploited.
 

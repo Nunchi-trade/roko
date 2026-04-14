@@ -150,7 +150,7 @@ KnowledgeEntry now has a `tier` field:
 - `SomaticMarker` and `SomaticSignal` are implemented, with live task outcomes recorded from `roko-cli` and queried pre-dispatch through `DaimonState::modulate_with_strategy(...)`
 - The query path already blends a mandatory contrarian slice and preserves episode provenance, so Daimon now has a real "gut feeling" fast path instead of PAD-only modulation
 - Dream feedback now also applies dream-time depotentiation to both PAD arousal and high-intensity somatic markers, synthesizes consolidated markers from replayed emotionally tagged episodes/clusters, and strong matches emit explicit `SomaticMarkerFired` runtime events
-- Remaining gaps are the richer PRD surfaces: dedicated non-coding strategy-space extractors beyond the centralized config/computation path, plus broader multi-surface use of somatic signals beyond the current dispatch/prompt/retrieval path
+- Remaining gaps are the richer PRD surfaces: true non-coding/native strategy-space extractors beyond the centralized role-aware config/computation path, plus broader multi-surface use of somatic signals beyond the current dispatch/prompt/retrieval path
 
 ### Behavioral State Classification — IMPLEMENTED
 - Shared `BehavioralState` now lives in `roko-core` with explicit `classify(pad, confidence)` logic
@@ -162,7 +162,7 @@ KnowledgeEntry now has a `tier` field:
 - `ContextAssembler` now biases retrieval with `PadState`, scores chunk-level emotional congruence from `EmotionalTag`, and reserves a contrarian slice of knowledge entries so negative mood does not collapse into pure caution and positive mood does not collapse into pure optimism
 - `Engram` now supports optional `EmotionalTag` metadata, and Neuro persists derived `EmotionalProvenance` metadata on consolidated knowledge
 - `roko-daimon` now also has an 8D somatic marker space and k-d-tree query path that modulates dispatch before work begins, and `roko-neuro::ContextAssembler` now consumes that somatic hint directly when ranking chunks
-- The remaining gap is broader coordination: dedicated non-coding strategy-space extractors and the cross-subsystem VCG market are still missing
+- The remaining gap is broader coordination: true domain-native strategy-space extractors and the cross-subsystem VCG market are still missing
 
 ### EmotionalTag on Engrams — PARTIAL
 ```rust
@@ -184,7 +184,8 @@ pub struct EmotionalTag {
 - Inside Neuro, context chunks now compete via an auction-style allocator with token-cost awareness and a marginal-value stopping rule
 - `roko-compose::PromptComposer` now runs a shared bidder-aware auction across composed prompt sections, with explicit subsystem bidders (`Neuro`, `Daimon`, `IterationMemory`, `CodeIntelligence`, `PlaybookRules`, `Research`, `TaskContext`, `Oracles`) and diversity pressure so one subsystem does not monopolize the budget
 - `ContextProvider` now tags sections by bidder automatically, and orchestrator-built sections such as skills/playbooks, learned Neuro context, and live Daimon state now participate in that shared market
-- Remaining gap: this is still an approximation rather than a literal second-price VCG settlement, and several bidders such as Oracles / richer iteration memory are still sparsely populated in the runtime
+- The runtime now feeds PAD state into the shared market, so bids are modulated by the PRD urgency / affect-weight multipliers and emit diagnostic externality payments by rerunning the greedy allocation without each winner
+- Remaining gap: the market still uses a greedy allocator rather than an exact welfare-maximizing knapsack with fairness controls, and several bidders such as Oracles / richer iteration memory are still sparsely populated in the runtime
 
 ### Daimon → CascadeRouter Integration — PARTIAL
 - Affect state already modulates dispatch through `DispatchParams`, and routing now receives a first-class `RoutingContext.daimon_policy`

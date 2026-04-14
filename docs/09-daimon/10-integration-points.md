@@ -250,11 +250,13 @@ The 0.15 threshold prevents event flooding. A shift from Relaxed to Anxious (PAD
 **Implemented**:
 - Integration Point 1 (behavioral state): Fully implemented in `roko-daimon`, with shared `BehavioralState` in `roko-core` and live state persisted on `AffectState`.
 - Integration Point 2 (tier routing): Live Daimon PAD / behavioral state now feeds both `CascadeRouter` selection bias and `SystemPromptBuilder` affect guidance in the orchestration path.
+- Integration Point 3 (VCG auction): Partially implemented — orchestration now passes live PAD state into `PromptComposer`, and the shared prompt auction applies urgency / affect weighting plus per-bidder PAD modulation and diagnostic externality payments.
+- Integration Point 4 (somatic landscape): Partially implemented — `roko-daimon` owns the live 8D k-d-tree-backed landscape, task execution projects strategies into it, and the resulting somatic signal feeds routing, prompting, runtime events, and dream maintenance.
 - Signal emission: MoodUpdate events are emitted when PAD change exceeds threshold (roko-golem). Affect signals emitted to JSONL (roko-golem).
 
-**Not implemented**:
-- Integration Point 3 (VCG auction): The VCG auction is specified but no code exists.
-- Integration Point 4 (somatic landscape): The k-d tree and query protocol are specified but no code exists.
+**Still missing**:
+- Integration Point 3 (VCG auction): exact welfare-maximizing settlement, broader bidder production, and richer fairness policy.
+- Integration Point 4 (somatic landscape): true domain-native strategy extractors, collective contagion, and broader cross-surface coupling.
 - Full emotional-memory propagation: `EmotionalTag` now reaches live conductor engrams, episode logs, and Neuro distillation inputs, but retrieval weighting and consolidation policy are still incomplete.
 
 ---

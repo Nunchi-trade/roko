@@ -11,7 +11,7 @@
 
 ## Abstract
 
-This document provides a comprehensive accounting of what is built, what is scaffolded, and what remains to be implemented in the Roko composition layer. The `roko-compose` crate contains approximately 4,400 lines of Rust across 12 modules, with 47+ tests. The core prompt assembly pipeline is fully operational and wired into the orchestration loop. The advanced features — active inference scoring, VCG attention auction, predictive foraging, full HDC-based deduplication — remain as specified designs awaiting implementation.
+This document provides a comprehensive accounting of what is built, what is scaffolded, and what remains to be implemented in the Roko composition layer. The `roko-compose` crate contains approximately 4,400 lines of Rust across 12 modules, with 47+ tests. The core prompt assembly pipeline is fully operational and wired into the orchestration loop. The advanced features are now mixed: active inference scoring remains partial, the VCG attention auction is partially implemented in the live prompt path, and predictive foraging plus full HDC-based deduplication remain design-only.
 
 ---
 
@@ -112,7 +112,7 @@ Additional tests exist in context_provider.rs, context_assembler.rs, and enrichm
 
 | Feature | Sub-doc | Specification | Blocker |
 |---------|---------|-------------|---------|
-| VCG attention auction | [10](10-vcg-attention-auction.md) | Full spec with 8 bidding subsystems | Requires all subsystems to implement bid() |
+| VCG attention auction | [10](10-vcg-attention-auction.md) | Partially implemented in `PromptComposer`: shared bidder-aware auction, PAD-modulated bidding, diagnostic externality payments | Fuller bidder coverage + fairness/exact-settlement policy |
 | Predictive foraging MVT | [09](09-predictive-foraging-mvt.md) | Stopping rule + calibration spec | Requires search iteration tracking |
 | Contextual influence value | [11](11-distributed-context-engineering.md) §7 | Leave-one-out per-section measurement | Requires controlled evaluation framework |
 | DSPy-style prompt optimization | [03](03-role-templates.md) §10 | Learnable prompt parameters | Requires evaluation metric + compiler |

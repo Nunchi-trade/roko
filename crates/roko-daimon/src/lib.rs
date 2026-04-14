@@ -398,6 +398,146 @@ pub trait StrategySpaceComputer<Observation> {
     fn compute_coords(&self, observation: &Observation) -> StrategyCoordinates;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DimensionRole {
+    Difficulty,
+    Danger,
+    Familiarity,
+    SelfAssessment,
+    Urgency,
+    Breadth,
+    Recoverability,
+    Coupling,
+}
+
+impl DimensionRole {
+    const fn default_for_index(index: usize) -> Self {
+        match index {
+            0 => Self::Difficulty,
+            1 => Self::Danger,
+            2 => Self::Familiarity,
+            3 => Self::SelfAssessment,
+            4 => Self::Urgency,
+            5 => Self::Breadth,
+            6 => Self::Recoverability,
+            _ => Self::Coupling,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CanonicalStrategyProfile {
+    difficulty: f64,
+    danger: f64,
+    familiarity: f64,
+    self_assessment: f64,
+    urgency: f64,
+    breadth: f64,
+    recoverability: f64,
+    coupling: f64,
+}
+
+impl CanonicalStrategyProfile {
+    fn into_coords(self) -> StrategyCoordinates {
+        StrategyCoordinates::new(
+            self.difficulty,
+            self.danger,
+            self.familiarity,
+            self.self_assessment,
+            self.urgency,
+            self.breadth,
+            self.recoverability,
+            self.coupling,
+        )
+    }
+
+    fn value_for_role(self, role: DimensionRole) -> f64 {
+        match role {
+            DimensionRole::Difficulty => self.difficulty,
+            DimensionRole::Danger => self.danger,
+            DimensionRole::Familiarity => self.familiarity,
+            DimensionRole::SelfAssessment => self.self_assessment,
+            DimensionRole::Urgency => self.urgency,
+            DimensionRole::Breadth => self.breadth,
+            DimensionRole::Recoverability => self.recoverability,
+            DimensionRole::Coupling => self.coupling,
+        }
+    }
+}
+
+fn classify_dimension_role(label: &str, index: usize) -> DimensionRole {
+    let normalized = label.trim().to_ascii_lowercase();
+
+    if contains_role_keyword(&normalized, &["complex", "difficulty", "volatility", "unstable"]) {
+        return DimensionRole::Difficulty;
+    }
+    if contains_role_keyword(
+        &normalized,
+        &[
+            "risk",
+            "danger",
+            "exposure",
+            "leverage",
+            "slippage",
+            "counterparty",
+            "blast",
+        ],
+    ) {
+        return DimensionRole::Danger;
+    }
+    if contains_role_keyword(
+        &normalized,
+        &["novel", "familiar", "correlation", "similarity", "ambiguity"],
+    ) {
+        return DimensionRole::Familiarity;
+    }
+    if contains_role_keyword(&normalized, &["confidence", "conviction", "certainty"]) {
+        return DimensionRole::SelfAssessment;
+    }
+    if contains_role_keyword(&normalized, &["time", "deadline", "horizon", "urgency", "latency"]) {
+        return DimensionRole::Urgency;
+    }
+    if contains_role_keyword(
+        &normalized,
+        &["scope", "breadth", "concentration", "liquidity", "surface", "coverage"],
+    ) {
+        return DimensionRole::Breadth;
+    }
+    if contains_role_keyword(
+        &normalized,
+        &["revers", "rollback", "recover", "counterparty", "exit", "undo"],
+    ) {
+        return DimensionRole::Recoverability;
+    }
+    if contains_role_keyword(
+        &normalized,
+        &["dependency", "coupling", "regulatory", "compliance", "integration"],
+    ) {
+        return DimensionRole::Coupling;
+    }
+
+    DimensionRole::default_for_index(index)
+}
+
+fn contains_role_keyword(label: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|keyword| label.contains(keyword))
+}
+
+fn project_profile_for_definition(
+    definition: &StrategySpaceDefinition,
+    profile: CanonicalStrategyProfile,
+) -> StrategyCoordinates {
+    let mut values = [0.5_f64; STRATEGY_DIMENSIONS];
+    for (index, label) in definition.labels().iter().enumerate() {
+        let role = classify_dimension_role(label, index);
+        values[index] = profile.value_for_role(role);
+    }
+
+    StrategyCoordinates::new(
+        values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
+    )
+}
+
 /// Built-in coding-domain strategy-space computer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingStrategySpace {
@@ -467,14 +607,8 @@ impl CodingStrategySpace {
         (0.60 * clamp_unit(emotional_intensity) + 0.40 * clamp_unit(failure_pressure))
             .clamp(0.0, 1.0)
     }
-}
 
-impl StrategySpaceComputer<TaskStrategyObservation> for CodingStrategySpace {
-    fn definition(&self) -> &StrategySpaceDefinition {
-        &self.definition
-    }
-
-    fn compute_coords(&self, observation: &TaskStrategyObservation) -> StrategyCoordinates {
+    fn task_profile(observation: &TaskStrategyObservation) -> CanonicalStrategyProfile {
         let complexity = Self::complexity_from_tier(&observation.task_tier);
         let scope = Self::scope(complexity, observation.file_count, observation.max_loc);
         let novelty = Self::novelty(observation.familiarity);
@@ -493,25 +627,19 @@ impl StrategySpaceComputer<TaskStrategyObservation> for CodingStrategySpace {
         );
         let dependency_depth = Self::dependency_depth(complexity, observation.dependency_count);
 
-        StrategyCoordinates::new(
-            complexity,
-            risk,
-            novelty,
-            observation.confidence,
-            time_pressure,
-            scope,
-            reversibility,
-            dependency_depth,
-        )
-    }
-}
-
-impl StrategySpaceComputer<EpisodeStrategyObservation> for CodingStrategySpace {
-    fn definition(&self) -> &StrategySpaceDefinition {
-        &self.definition
+        CanonicalStrategyProfile {
+            difficulty: complexity,
+            danger: risk,
+            familiarity: novelty,
+            self_assessment: observation.confidence,
+            urgency: time_pressure,
+            breadth: scope,
+            recoverability: reversibility,
+            coupling: dependency_depth,
+        }
     }
 
-    fn compute_coords(&self, observation: &EpisodeStrategyObservation) -> StrategyCoordinates {
+    fn episode_profile(observation: &EpisodeStrategyObservation) -> CanonicalStrategyProfile {
         let complexity = Self::complexity_from_tier(&observation.task_tier);
         let scope = Self::scope(complexity, observation.file_count, observation.max_loc);
         let novelty = Self::novelty(observation.familiarity);
@@ -532,22 +660,42 @@ impl StrategySpaceComputer<EpisodeStrategyObservation> for CodingStrategySpace {
         );
         let dependency_depth = Self::dependency_depth(complexity, observation.dependency_count);
 
-        StrategyCoordinates::new(
-            complexity,
-            risk,
-            novelty,
-            observation.confidence,
-            time_pressure,
-            scope,
-            reversibility,
-            dependency_depth,
-        )
+        CanonicalStrategyProfile {
+            difficulty: complexity,
+            danger: risk,
+            familiarity: novelty,
+            self_assessment: observation.confidence,
+            urgency: time_pressure,
+            breadth: scope,
+            recoverability: reversibility,
+            coupling: dependency_depth,
+        }
+    }
+}
+
+impl StrategySpaceComputer<TaskStrategyObservation> for CodingStrategySpace {
+    fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    fn compute_coords(&self, observation: &TaskStrategyObservation) -> StrategyCoordinates {
+        Self::task_profile(observation).into_coords()
+    }
+}
+
+impl StrategySpaceComputer<EpisodeStrategyObservation> for CodingStrategySpace {
+    fn definition(&self) -> &StrategySpaceDefinition {
+        &self.definition
+    }
+
+    fn compute_coords(&self, observation: &EpisodeStrategyObservation) -> StrategyCoordinates {
+        Self::episode_profile(observation).into_coords()
     }
 }
 
 /// Registered strategy-space computer. Built-in domains get specialized
-/// extraction; custom domains currently use the same normalized projection
-/// until they supply a dedicated extractor.
+/// extraction; non-coding domains use a label/role-aware projection until
+/// they supply a dedicated extractor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredStrategySpaceComputer {
     definition: StrategySpaceDefinition,
@@ -575,13 +723,23 @@ impl RegisteredStrategySpaceComputer {
     /// Compute live task coordinates for this strategy-space definition.
     #[must_use]
     pub fn task_coords(&self, observation: &TaskStrategyObservation) -> StrategyCoordinates {
-        CodingStrategySpace::default().compute_coords(observation)
+        let profile = CodingStrategySpace::task_profile(observation);
+        if self.is_builtin_coding() {
+            profile.into_coords()
+        } else {
+            project_profile_for_definition(&self.definition, profile)
+        }
     }
 
     /// Compute dream / replay coordinates for this strategy-space definition.
     #[must_use]
     pub fn episode_coords(&self, observation: &EpisodeStrategyObservation) -> StrategyCoordinates {
-        CodingStrategySpace::default().compute_coords(observation)
+        let profile = CodingStrategySpace::episode_profile(observation);
+        if self.is_builtin_coding() {
+            profile.into_coords()
+        } else {
+            project_profile_for_definition(&self.definition, profile)
+        }
     }
 }
 
@@ -1873,9 +2031,9 @@ mod tests {
             domain: "chain".to_string(),
             dimensions: [
                 "volatility".to_string(),
-                "liquidity".to_string(),
+                "exposure".to_string(),
                 "correlation".to_string(),
-                "leverage".to_string(),
+                "confidence".to_string(),
                 "time_horizon".to_string(),
                 "concentration".to_string(),
                 "counterparty_risk".to_string(),
@@ -1901,5 +2059,49 @@ mod tests {
         assert!(!computer.is_builtin_coding());
         assert!((0.0..=1.0).contains(&coords.complexity));
         assert_eq!(computer.definition().labels()[0], "volatility");
+    }
+
+    #[test]
+    fn registered_strategy_space_reorders_non_coding_dimensions_by_role() {
+        let observation = TaskStrategyObservation {
+            task_tier: "architectural".to_string(),
+            file_count: 6,
+            verification_count: 3,
+            dependency_count: 4,
+            max_loc: 320,
+            familiarity: 0.2,
+            confidence: 0.65,
+            failure_pressure: 0.6,
+            urgency_pressure: 1.0,
+        };
+        let baseline = StrategySpaceDefinition::coding()
+            .computer()
+            .task_coords(&observation);
+        let custom = StrategySpaceDefinition {
+            domain: "research".to_string(),
+            dimensions: [
+                "confidence".to_string(),
+                "time_horizon".to_string(),
+                "complexity".to_string(),
+                "risk".to_string(),
+                "novelty".to_string(),
+                "scope".to_string(),
+                "reversibility".to_string(),
+                "dependency_depth".to_string(),
+            ],
+        }
+        .validate()
+        .unwrap()
+        .computer()
+        .task_coords(&observation);
+
+        assert_eq!(custom.complexity, baseline.confidence);
+        assert_eq!(custom.risk, baseline.time_pressure);
+        assert_eq!(custom.novelty, baseline.complexity);
+        assert_eq!(custom.confidence, baseline.risk);
+        assert_eq!(custom.time_pressure, baseline.novelty);
+        assert_eq!(custom.scope, baseline.scope);
+        assert_eq!(custom.reversibility, baseline.reversibility);
+        assert_eq!(custom.dependency_depth, baseline.dependency_depth);
     }
 }

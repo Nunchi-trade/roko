@@ -183,7 +183,7 @@ The Walker & van der Helm (2009) SFSR (Sleep to Forget, Sleep to Remember) model
 - Emotional decay (3-day half-life) separate from knowledge decay
 - Flashbulb memory encoding for high-arousal events
 - Emotional contagion between agents in a collective (0.3 attenuation factor per hop)
-- Integration between somatic markers and the VCG attention auction bidding
+- Broader somatic-market coupling beyond the current PAD-fed prompt auction and retrieval-time somatic re-ranking
 
 ---
 
