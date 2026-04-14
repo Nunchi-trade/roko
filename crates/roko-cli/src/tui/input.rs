@@ -293,6 +293,10 @@ pub fn handle_key(
     focus: FocusZone,
     modals: &ModalVisibility,
 ) -> TuiAction {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return TuiAction::Quit;
+    }
+
     // Modal intercepts (highest priority first)
     if modals.show_help {
         return handle_help_key(key);
@@ -448,11 +452,6 @@ fn handle_filter_key(key: KeyEvent) -> TuiAction {
 // ---------------------------------------------------------------------------
 
 fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
-    // Ctrl-C always quits
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Some(TuiAction::Quit);
-    }
-
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
