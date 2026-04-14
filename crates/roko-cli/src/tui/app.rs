@@ -112,6 +112,55 @@ struct GitBgData {
     age: String,
 }
 
+fn collect_git_age(workdir: &Path) -> String {
+    std::process::Command::new("git")
+        .args(["log", "-1", "--format=%cr"])
+        .current_dir(workdir)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn convert_git_branch_tree(
+    branches: &[super::views::git_view::GitBranchNode],
+) -> Vec<super::state::GitBranchNode> {
+    branches
+        .iter()
+        .map(|branch| super::state::GitBranchNode {
+            name: branch.name.clone(),
+            is_current: branch.is_current,
+            ahead: branch.ahead as usize,
+            behind: branch.behind as usize,
+            children: Vec::new(),
+        })
+        .collect()
+}
+
+fn convert_git_commit_graph(
+    commits: &[super::views::git_view::CommitEntry],
+) -> Vec<super::state::GitCommitEntry> {
+    commits
+        .iter()
+        .map(|commit| super::state::GitCommitEntry {
+            hash: commit.hash_short.clone(),
+            short_hash: commit.hash_short.clone(),
+            message: commit.subject.clone(),
+            author: commit.author.clone(),
+            timestamp_ms: 0,
+            branch: None,
+        })
+        .collect()
+}
+
+fn convert_git_worktree_list(worktrees: &[super::views::git_view::WorktreeEntry]) -> Vec<String> {
+    worktrees
+        .iter()
+        .map(|worktree| worktree.path.clone())
+        .collect()
+}
+
 // Manual Debug impl because mpsc::Receiver does not implement Debug.
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -296,6 +345,7 @@ impl App {
         // Spawn background git data collector thread
         // ---------------------------------------------------------------
         let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
+        let git_workdir = self.workdir.clone();
         std::thread::Builder::new()
             .name("tui-git-refresh".into())
             .spawn(move || {
@@ -308,7 +358,7 @@ impl App {
                         .first()
                         .map(|c| c.hash_short.clone())
                         .unwrap_or_default();
-                    let age = String::new(); // age comes from git log, already in summary
+                    let age = collect_git_age(&git_workdir);
                     let bg = GitBgData {
                         view_data,
                         summary_lines,
@@ -1424,6 +1474,10 @@ impl App {
         // -- git data --
         if let Some(rx) = &self.git_rx {
             while let Ok(bg) = rx.try_recv() {
+                self.tui_state.git_branch_tree = convert_git_branch_tree(&bg.view_data.branches);
+                self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
+                self.tui_state.git_worktree_list =
+                    convert_git_worktree_list(&bg.view_data.worktrees);
                 self.tui_state.git_view_data = Some(bg.view_data);
                 self.tui_state.git_summary_lines = bg.summary_lines;
                 if !bg.branch.is_empty() {
