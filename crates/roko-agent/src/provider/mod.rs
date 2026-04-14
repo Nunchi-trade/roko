@@ -105,6 +105,7 @@ pub fn create_agent_for_model(
     options: AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
     let mut options = options;
+    let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
     let resolved = resolve_model(config, model_key);
     let profile = resolved
         .profile
@@ -161,19 +162,17 @@ pub fn create_agent_for_model(
                 "no provider found — falling back to ExecAgent (no tool support)"
             );
 
-            return with_scoped_safety_layer(|| {
-                let mut agent =
-                    ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
-                        .with_current_safety()
-                        .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+            let mut agent =
+                ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
+                    .with_safety_layer(safety_layer)
+                    .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
                 if !options.name.is_empty() {
                     agent = agent.with_name(options.name.clone());
                 }
                 if !options.env.is_empty() {
                     agent = agent.with_env(options.env.clone());
                 }
-                Ok(Box::new(agent) as Box<dyn Agent>)
-            });
+                return Ok(Box::new(agent) as Box<dyn Agent>);
         }
     };
 
@@ -191,7 +190,9 @@ pub fn create_agent_for_model(
     }
 
     let adapter = adapter_for_kind(provider_config.kind);
-    adapter.create_agent(&provider_config, &profile, &options)
+    with_safety_layer(safety_layer, || {
+        adapter.create_agent(&provider_config, &profile, &options)
+    })
 }
 
 /// Run `f` with an optional safety layer attached to provider-backed agent construction.
@@ -892,6 +893,37 @@ mod tests {
         let result = agent.run(&prompt("fallback-ok"), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap_or(""), "fallback-ok");
+    }
+
+    #[test]
+    fn exec_agent_fallback_defaults_safety_layer_when_unscoped() {
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("sh".to_string());
+
+        let agent = create_agent_for_model(
+            &config,
+            "unknown-model",
+            AgentOptions {
+                timeout_ms: Some(250),
+                name: "fallback-agent".to_string(),
+                extra_args: vec!["-c".to_string(), "rm -rf /".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("fallback exec agent");
+        assert_eq!(agent.name(), "fallback-agent");
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(async { agent.run(&prompt(""), &Context::now()).await });
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("blocked by safety layer")
+        );
     }
 
     #[test]
