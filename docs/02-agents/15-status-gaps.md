@@ -20,7 +20,7 @@
 | Agent trait + AgentResult | **Stable** | 6 implementations, all tested |
 | ClaudeCliAgent | **Primary backend** | Used by orchestrate.rs for all plan execution |
 | Provider registry (TOML) | **Implemented** | ProviderConfig, ModelProfile, resolve_model |
-| Provider adapters (4) | **Implemented** | OpenAiCompat, ClaudeCli, AnthropicApi, CursorAcp |
+| Provider adapters (6) | **Implemented** | OpenAiCompat, ClaudeCli, AnthropicApi, CursorAcp, PerplexityApi, GeminiApi |
 | `create_agent_for_model` factory | **Implemented** | Integration test passes with mock HTTP server |
 | ToolLoop (multi-turn) | **Implemented** | 263 lines production + 500 lines tests |
 | ToolDispatcher (7-step) | **Implemented** | Full pipeline with audit signals |
@@ -44,9 +44,9 @@
 
 | Component | Gap | Impact |
 |---|---|---|
-| `create_agent_for_model` | Not called from orchestrate.rs | 8 creation sites use manual dispatch |
-| ToolDispatcher + SafetyLayer | Not called from orchestrate.rs | Safety bypassed for primary path |
-| ToolLoop | No LlmBackend impls for HTTP providers | HTTP agents can't use tool loop |
+| `create_agent_for_model` | Primary runtime paths now use it, and the remaining manual branches are known-protocol subprocess commands plus backend-specific paths | Consolidation is substantial, not complete |
+| ToolDispatcher + SafetyLayer | Reached on routed HTTP tool-loop paths, but not universal across all backends | Safety coverage is partial rather than absent |
+| ToolLoop | Not every execution family uses the shared backend path yet | OpenAI-compatible providers, Gemini compat models, Anthropic API, Perplexity search-grounded chat, and Gemini-native non-grounding tool-capable models are covered; Claude CLI, Gemini grounding/code-execution, and Perplexity deep-research still have dedicated paths |
 | MultiAgentPool | Not used by orchestrate.rs | Agents created on-demand, not pooled |
 | Temperament | Config field exists, not propagated | No behavioral dial connected |
 | ChatResponse | Lives in roko-agent, not roko-core | roko-compose can't use typed responses |
@@ -56,18 +56,20 @@
 
 ## Gap Analysis: Priority Order
 
-### Gap #1: ToolDispatcher Never Called from Orchestrate.rs
+### Gap #1: ToolDispatcher Is Not Yet Universal Across Runtime Paths
 
 **Severity:** Critical
 **Component:** Safety pipeline
 **Status:** SafetyLayer is wired into ToolDispatcher. ToolDispatcher is wired
-into ToolLoop. ToolLoop exists and works. But none of this code is reached
-from the primary execution path.
+into ToolLoop. ToolLoop exists and works, and the routed HTTP provider path now
+reaches it from the primary runtime. The remaining gap is that backend-specific
+families still own separate execution loops.
 
-**Why:** `orchestrate.rs` constructs `ClaudeCliAgent` directly, and Claude
-CLI drives its own internal tool loop. The `ToolDispatcher` + `SafetyLayer`
-+ `ToolLoop` pipeline is only reachable for agents that go through the
-ToolLoop (e.g., Ollama via `OllamaLlmBackend`).
+**Why:** Claude CLI still drives its own internal tool loop, Gemini-native
+grounding/code-execution models still use backend-specific request/response
+handling, and Perplexity's async deep-research endpoint remains adapter-specific. The shared
+`ToolDispatcher` + `SafetyLayer` + `ToolLoop` pipeline is therefore real but
+not yet universal across every runtime/backend family.
 
 **Fix:** Two complementary approaches:
 1. Wire HTTP backends through `create_agent_for_model` → adapter →
@@ -77,21 +79,28 @@ ToolLoop (e.g., Ollama via `OllamaLlmBackend`).
 
 **Reference:** Implementation plan `11-inconsistencies.md`, Gap #1.
 
-### Gap #2: Eight Creation Sites Not Consolidated
+### Gap #2: Remaining Specialized Creation Sites Not Consolidated
 
 **Severity:** High
 **Component:** Agent construction
-**Status:** `create_agent_for_model` exists and works. The 6 production call
-sites still use manual dispatch.
+**Status:** `create_agent_for_model` exists and works and is now used by the
+main orchestrator, `roko run`, serve dispatch, provider probes, dream-cycle
+review, and generic no-routing subprocess execution. Remaining manual
+construction is concentrated in known-protocol no-config subprocess branches and
+backend-specific special cases.
 
 **Fix:** Migrate each call site to `create_agent_for_model` (see sub-doc 13).
 
-### Gap #3: LlmBackend Implementations for HTTP Providers
+### Gap #3: LlmBackend Coverage for All HTTP Provider Families
 
 **Severity:** High
 **Component:** ToolLoop integration
-**Status:** `LlmBackend` trait defined. `OllamaLlmBackend` implemented.
-No `OpenAiCompatBackend`, `AnthropicApiBackend`, or `GeminiBackend`.
+**Status:** `LlmBackend` trait defined. `OllamaLlmBackend` and
+`OpenAiCompatBackend` are implemented and in production use. Gemini's simple
+OpenAI-compatible models, Anthropic API, Perplexity search-grounded chat, and
+Gemini-native non-grounding tool-capable models now also flow through the same
+shared tool-loop construction. Gemini grounding/code-execution families and
+Perplexity deep-research still bypass that shared backend path.
 
 **Fix:** Implement `LlmBackend` for each HTTP provider, following the
 `OllamaLlmBackend` pattern. See sub-doc 07, "What Is Missing."
@@ -164,11 +173,11 @@ pipeline and routing logic.
 | Metric | Current value | Target |
 |---|---|---|
 | Agent backends | 6 (Claude CLI, Claude API, OpenAI, Ollama, Cursor, Exec) | 6 (stable) |
-| Provider adapters | 4 (OpenAiCompat, ClaudeCli, AnthropicApi, CursorAcp) | 4 (stable) |
+| Provider adapters | 6 (OpenAiCompat, ClaudeCli, AnthropicApi, CursorAcp, Perplexity, Gemini) | 6 (stable) |
 | Translators | 4 (OpenAI, Claude, Ollama, ReAct) | 4 (stable) |
-| LlmBackend impls | 1 (Ollama) | 4 (+ OpenAI, Anthropic, Gemini) |
-| Creation sites consolidated | 0 / 6 production sites | 6 / 6 |
-| Safety coverage | ~30% (only ToolLoop path) | 100% (all paths) |
+| LlmBackend impls | 2 production families (Ollama, OpenAI-compatible) | Universal across HTTP-capable families |
+| Creation sites consolidated | Primary runtime paths consolidated; specialized/manual paths remain | 100% of production paths |
+| Safety coverage | Partial and backend-dependent | 100% (all paths) |
 | Role prompt tokens | ~20 per role | ~2000 per role |
 | Provider integrations tested | 4 (Anthropic, Claude CLI, OpenAI, GLM) | 8+ |
 
@@ -202,10 +211,13 @@ Test patterns used:
 
 ### Missing test coverage
 
-- **No integration tests for Perplexity, Gemini, Kimi** — Config entries are
-  ready but no mock servers exercise the provider-specific response extensions.
-- **No end-to-end test from orchestrate.rs through ToolLoop** — The #1 gap
-  means this path is unreachable and therefore untested.
+- **No full integration tests for Perplexity deep-research, Gemini native, or
+  Kimi** — Config entries exist, but the specialty endpoints still lack mock
+  server coverage.
+- **No end-to-end test from orchestrate.rs through ToolLoop** — The routed
+  path now exists for OpenAI-compatible providers and the other covered HTTP
+  families, but there is still no full runtime integration test that exercises
+  every covered branch.
 - **No temperament propagation tests** — Temperament is not wired so there
   is nothing to test.
 - **No pool tests under concurrency** — MultiAgentPool tests exist but don't

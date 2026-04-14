@@ -224,7 +224,8 @@ across sections and consumed by other sections. This creates a compile-time depe
 | **Scorer** | 03-Composition | `RelevanceScorer` | Wired |
 | **Scorer** | 06-Neuro | `KnowledgeScorer` (multi-factor) | Missing |
 | **Scorer** | 09-Daimon | `AffectScorer` (PAD-modulated) | Missing |
-| **Scorer** | 20-Tech Analysis | `PredictiveScorer` | Missing |
+| **Scorer** | 20-Tech Analysis | `PredictiveScorer` | Wired in `roko-core` and prompt assembly |
+| **Scorer** | 16-Heartbeat | `CatalystScorer` | Wired in `roko-core` and prompt assembly |
 | **Gate** | 04-Verification | 11 gate implementations | Wired |
 | **Gate** | 08-Chain | `TxSimGate`, `WalletGate` | Scaffold |
 | **Gate** | 11-Safety | `SafetyGate` | Missing |
@@ -234,7 +235,9 @@ across sections and consumed by other sections. This creates a compile-time depe
 | **Composer** | 03-Composition | `SystemPromptBuilder` | Wired |
 | **Policy** | 05-Learning | `EpisodePolicy` | Wired |
 | **Policy** | 07-Conductor | `ConductorPolicy` | Wired |
-| **Policy** | 09-Daimon | `DaimonPolicy` | Missing |
+| **Policy** | 09-Daimon | `DaimonPolicy` | Wired |
+| **Policy** | 05-Learning | `PredictionPolicy` | Wired |
+| **Policy** | 13-Coordination | `CFactorPolicy` | Wired into prompt-time collective calibration guidance |
 | **Policy** | 10-Dreams | `DreamSchedulePolicy` | Missing |
 | **Policy** | 13-Coordination | `PheromonePolicy` | Missing |
 

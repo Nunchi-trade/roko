@@ -114,6 +114,10 @@ impl Config {
     /// Render the default `roko.toml` template used by `roko init`.
     pub fn default_toml_template(cloud: bool) -> Result<String> {
         let mut config = Self::default();
+        // Use "claude" as the default agent command for init — not the struct
+        // default ("cat") which is a safe no-op for tests.  Users running
+        // `roko init` expect a working config out of the box.
+        config.agent.command = "claude".into();
         if cloud {
             config.log_format = Some("json".to_string());
             config.bind = Some("0.0.0.0".to_string());

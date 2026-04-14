@@ -7,7 +7,7 @@
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Default embedding model.
 const DEFAULT_MODEL: &str = "pplx-embed-v1-4b";

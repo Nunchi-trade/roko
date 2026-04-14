@@ -18,6 +18,7 @@ use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
+use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
@@ -43,6 +44,7 @@ use roko_learn::latency::{LatencyRegistry, LatencyStats};
 use roko_learn::model_router::{RoutingContext, normalized_cost};
 use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::provider_health::{CircuitState, ProviderHealth};
+use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_learn::runtime_feedback::{read_efficiency_events, refresh_cfactor_snapshot};
 use roko_neuro::{DEFAULT_GC_MIN_CONFIDENCE, KnowledgeStore};
 use serde::Deserialize;
@@ -3464,8 +3466,105 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 // Existing subcommand handlers (init, run, status, replay)
 // -----------------------------------------------------------------------
 
+fn with_research_provider_model(
+    config: &RokoConfig,
+    provider_key: &str,
+    provider_config: ProviderConfig,
+    model_profile: ModelProfile,
+) -> RokoConfig {
+    let mut routing_config = config.clone();
+    routing_config
+        .providers
+        .entry(provider_key.to_string())
+        .or_insert(provider_config);
+    routing_config
+        .models
+        .entry(model_profile.slug.clone())
+        .or_insert(model_profile);
+    routing_config
+}
+
+fn with_perplexity_research_model(
+    config: &RokoConfig,
+    model_slug: &str,
+    supports_async: bool,
+) -> (RokoConfig, u64) {
+    let configured_profile = config.models.get(model_slug).cloned();
+    let provider_key = configured_profile
+        .as_ref()
+        .map(|profile| profile.provider.clone())
+        .unwrap_or_else(|| "perplexity".to_string());
+    let configured_provider = config
+        .providers
+        .get(&provider_key)
+        .cloned()
+        .or_else(|| config.providers.get("perplexity").cloned());
+    let timeout_ms = configured_provider
+        .as_ref()
+        .and_then(|provider| provider.timeout_ms)
+        .unwrap_or(300_000);
+
+    let mut model_profile = configured_profile.unwrap_or_else(|| ModelProfile {
+        provider: provider_key.clone(),
+        slug: model_slug.to_string(),
+        context_window: 127_072,
+        max_output: Some(8_192),
+        supports_tools: false,
+        supports_thinking: false,
+        supports_vision: false,
+        supports_web_search: true,
+        supports_mcp_tools: false,
+        supports_partial: false,
+        supports_grounding: false,
+        supports_code_execution: false,
+        supports_caching: false,
+        provider_routing: None,
+        tool_format: "openai_json".to_string(),
+        cost_input_per_m: None,
+        cost_output_per_m: None,
+        cost_input_per_m_high: None,
+        cost_output_per_m_high: None,
+        cost_cache_read_per_m: None,
+        cost_cache_write_per_m: None,
+        thinking_level: None,
+        max_tools: None,
+        tokenizer_ratio: None,
+        supports_search: true,
+        supports_citations: true,
+        supports_async,
+        is_embedding_model: false,
+        search_context_size: None,
+        cost_per_request: None,
+    });
+    model_profile.supports_search = true;
+    model_profile.supports_citations = true;
+    model_profile.supports_async |= supports_async;
+
+    let routing_config = with_research_provider_model(
+        config,
+        &provider_key,
+        configured_provider.unwrap_or(ProviderConfig {
+            kind: ProviderKind::PerplexityApi,
+            base_url: Some("https://api.perplexity.ai".to_string()),
+            api_key_env: Some("PERPLEXITY_API_KEY".to_string()),
+            command: None,
+            args: None,
+            timeout_ms: Some(timeout_ms),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
+            extra_headers: None,
+            max_concurrent: None,
+        }),
+        model_profile,
+    );
+
+    (routing_config, timeout_ms)
+}
+
 async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{AgentExecOpts, load_gateway_env, model_from_config, run_agent};
+    use roko_cli::agent_exec::{
+        AgentExecOpts, load_gateway_env, model_from_config, run_agent_capture_silent,
+    };
     use roko_cli::research::{
         ResearchMode, build_research_prompt, build_research_prompt_gemini,
         build_research_prompt_perplexity, grounding_to_citations, save_research_with_grounding,
@@ -3479,6 +3578,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     let effort = cli.effort.map(|effort| effort.to_string());
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
+    let agent_command =
+        roko_cli::agent_exec::command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
     let config = load_roko_config(&workdir).unwrap_or_default();
 
     match cmd {
@@ -3488,13 +3589,9 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
 
             // --deep: use PerplexityDeepResearchAgent (sonar-deep-research, async polling)
             if deep {
-                use roko_agent::agent::Agent as _;
-                use roko_agent::perplexity::PerplexityDeepResearchAgent;
                 use roko_agent::perplexity::types::PerplexityMetadata;
                 use roko_core::Body;
 
-                let api_key =
-                    std::env::var("PERPLEXITY_API_KEY").context("PERPLEXITY_API_KEY not set")?;
                 let model_slug = config
                     .perplexity
                     .default_research_model
@@ -3509,18 +3606,27 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                     &config.perplexity,
                 );
 
-                let agent = PerplexityDeepResearchAgent::new(
-                    api_key,
-                    "https://api.perplexity.ai",
+                let (routing_config, timeout_ms) =
+                    with_perplexity_research_model(&config, &model_slug, true);
+                let agent = create_agent_for_model(
+                    &routing_config,
                     &model_slug,
-                    format!("perplexity:{model_slug}"),
-                );
+                    AgentOptions {
+                        timeout_ms: Some(timeout_ms),
+                        working_dir: Some(workdir.clone()),
+                        ..Default::default()
+                    },
+                )
+                .with_context(|| {
+                    format!("create Perplexity deep research agent for model {model_slug}")
+                })?;
                 println!("⏳ Deep research submitted ({model_slug}). This takes 1-10 min...");
 
                 let input = roko_core::Engram::builder(Kind::Prompt)
                     .body(Body::text(&combined_prompt))
                     .build();
 
+                let started = Instant::now();
                 let mut handle =
                     tokio::spawn(async move { agent.run(&input, &Context::now()).await });
                 let poll_started = std::time::Instant::now();
@@ -3536,6 +3642,20 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
 
                 if !result.success {
                     let err_text = result.output.body.as_text().unwrap_or("unknown error");
+                    let output = result.output.body.as_text().unwrap_or_default().to_string();
+                    let _ = persist_capture_episode(
+                        &workdir,
+                        "perplexity",
+                        Some(&model_slug),
+                        "research-topic-deep",
+                        &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                        &combined_prompt,
+                        &output,
+                        false,
+                        started.elapsed().as_millis() as u64,
+                        resume_session,
+                    )
+                    .await;
                     anyhow::bail!("Deep research failed: {err_text}");
                 }
 
@@ -3574,16 +3694,26 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 if !citations.is_empty() {
                     println!("📚 {} citations", citations.len());
                 }
+                let _ = persist_capture_episode(
+                    &workdir,
+                    "perplexity",
+                    Some(&model_slug),
+                    "research-topic-deep",
+                    &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                    &combined_prompt,
+                    &output,
+                    true,
+                    started.elapsed().as_millis() as u64,
+                    resume_session,
+                )
+                .await;
                 return Ok(0);
             }
 
             // If Perplexity is configured, use PerplexityChatAgent for search-grounded research.
             if let Some(model_slug) = config.gemini.grounding_model.clone() {
-                use roko_agent::agent::Agent as _;
-                use roko_agent::gemini::{GeminiMetadata, GeminiNativeAgent};
-                use roko_agent::provider::AgentOptions;
+                use roko_agent::gemini::GeminiMetadata;
                 use roko_core::Body;
-                use roko_core::config::schema::ModelProfile;
 
                 let (combined_prompt, enable_grounding) = build_research_prompt_gemini(
                     &workdir,
@@ -3593,24 +3723,26 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 );
                 if enable_grounding {
                     let configured_profile = config.models.get(&model_slug).cloned();
-                    let provider = configured_profile
+                    let provider_key = configured_profile
                         .as_ref()
-                        .and_then(|profile| config.providers.get(&profile.provider))
-                        .or_else(|| config.providers.get("gemini"));
-                    let api_key_env = provider
-                        .and_then(|provider| provider.api_key_env.clone())
-                        .unwrap_or_else(|| "GEMINI_API_KEY".to_string());
-                    let api_key = std::env::var(&api_key_env)
-                        .with_context(|| format!("{api_key_env} not set"))?;
-                    let base_url = provider
+                        .map(|profile| profile.provider.clone())
+                        .unwrap_or_else(|| "gemini".to_string());
+                    let configured_provider = config
+                        .providers
+                        .get(&provider_key)
+                        .cloned()
+                        .or_else(|| config.providers.get("gemini").cloned());
+                    let base_url = configured_provider
+                        .as_ref()
                         .and_then(|provider| provider.base_url.clone())
                         .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
-                    let timeout_ms = provider
+                    let timeout_ms = configured_provider
+                        .as_ref()
                         .and_then(|provider| provider.timeout_ms)
                         .unwrap_or(300_000);
 
                     let mut model_profile = configured_profile.unwrap_or_else(|| ModelProfile {
-                        provider: "gemini".to_string(),
+                        provider: provider_key.clone(),
                         slug: model_slug.clone(),
                         context_window: 1_048_576,
                         max_output: Some(65_536),
@@ -3647,25 +3779,60 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                         model_profile.thinking_level = Some(config.gemini.thinking_level.clone());
                     }
 
-                    let agent = GeminiNativeAgent::new(
-                        api_key,
-                        base_url,
+                    let routing_config = with_research_provider_model(
+                        &config,
+                        &provider_key,
+                        configured_provider.unwrap_or(ProviderConfig {
+                            kind: ProviderKind::GeminiApi,
+                            base_url: Some(base_url),
+                            api_key_env: Some("GEMINI_API_KEY".to_string()),
+                            command: None,
+                            args: None,
+                            timeout_ms: Some(timeout_ms),
+                            ttft_timeout_ms: Some(15_000),
+                            connect_timeout_ms: Some(5_000),
+                            extra_headers: None,
+                            max_concurrent: None,
+                        }),
                         model_profile,
-                        &AgentOptions {
+                    );
+                    let agent = create_agent_for_model(
+                        &routing_config,
+                        &model_slug,
+                        AgentOptions {
                             timeout_ms: Some(timeout_ms),
                             effort: Some(config.gemini.thinking_level.clone()),
                             name: format!("gemini:{model_slug}"),
+                            working_dir: Some(workdir.clone()),
                             ..Default::default()
                         },
-                    );
+                    )
+                    .with_context(|| {
+                        format!("create Gemini research agent for model {model_slug}")
+                    })?;
 
                     let input = roko_core::Engram::builder(Kind::Prompt)
                         .body(Body::text(&combined_prompt))
                         .build();
+                    let started = Instant::now();
                     let result = agent.run(&input, &Context::now()).await;
 
                     if !result.success {
                         let err_text = result.output.body.as_text().unwrap_or("unknown error");
+                        let output = result.output.body.as_text().unwrap_or_default().to_string();
+                        let _ = persist_capture_episode(
+                            &workdir,
+                            "gemini",
+                            Some(&model_slug),
+                            "research-topic-gemini",
+                            &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                            &combined_prompt,
+                            &output,
+                            false,
+                            started.elapsed().as_millis() as u64,
+                            resume_session,
+                        )
+                        .await;
                         anyhow::bail!("Gemini research failed: {err_text}");
                     }
 
@@ -3701,18 +3868,27 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                             println!("📚 {} citations", citations.len());
                         }
                     }
+                    let _ = persist_capture_episode(
+                        &workdir,
+                        "gemini",
+                        Some(&model_slug),
+                        "research-topic-gemini",
+                        &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                        &combined_prompt,
+                        &content,
+                        true,
+                        started.elapsed().as_millis() as u64,
+                        resume_session,
+                    )
+                    .await;
                     return Ok(0);
                 }
             }
 
             if let Some(model_slug) = config.perplexity.default_search_model.clone() {
-                use roko_agent::agent::Agent as _;
-                use roko_agent::perplexity::PerplexityChatAgent;
                 use roko_agent::perplexity::types::PerplexityMetadata;
                 use roko_core::Body;
 
-                let api_key =
-                    std::env::var("PERPLEXITY_API_KEY").context("PERPLEXITY_API_KEY not set")?;
                 let (combined_prompt, search_opts) = build_research_prompt_perplexity(
                     &workdir,
                     &topic,
@@ -3720,22 +3896,44 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                     ResearchMode::Topic,
                     &config.perplexity,
                 );
-                let agent = PerplexityChatAgent::new(
-                    api_key,
-                    "https://api.perplexity.ai",
+                let (routing_config, timeout_ms) =
+                    with_perplexity_research_model(&config, &model_slug, false);
+                let agent = create_agent_for_model(
+                    &routing_config,
                     &model_slug,
-                    format!("perplexity:{model_slug}"),
-                    300_000,
+                    AgentOptions {
+                        timeout_ms: Some(timeout_ms),
+                        working_dir: Some(workdir.clone()),
+                        ..Default::default()
+                    }
+                    .with_perplexity_search_options(search_opts),
                 )
-                .with_search_options(search_opts);
+                .with_context(|| {
+                    format!("create Perplexity research agent for model {model_slug}")
+                })?;
 
                 let input = roko_core::Engram::builder(Kind::Prompt)
                     .body(Body::text(&combined_prompt))
                     .build();
+                let started = Instant::now();
                 let result = agent.run(&input, &Context::now()).await;
 
                 if !result.success {
                     let err_text = result.output.body.as_text().unwrap_or("unknown error");
+                    let output = result.output.body.as_text().unwrap_or_default().to_string();
+                    let _ = persist_capture_episode(
+                        &workdir,
+                        "perplexity",
+                        Some(&model_slug),
+                        "research-topic-perplexity",
+                        &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                        &combined_prompt,
+                        &output,
+                        false,
+                        started.elapsed().as_millis() as u64,
+                        resume_session,
+                    )
+                    .await;
                     anyhow::bail!("Perplexity research failed: {err_text}");
                 }
 
@@ -3772,6 +3970,19 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 if !citations.is_empty() {
                     println!("📚 {} citations", citations.len());
                 }
+                let _ = persist_capture_episode(
+                    &workdir,
+                    "perplexity",
+                    Some(&model_slug),
+                    "research-topic-perplexity",
+                    &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                    &combined_prompt,
+                    &output,
+                    true,
+                    started.elapsed().as_millis() as u64,
+                    resume_session,
+                )
+                .await;
                 return Ok(0);
             }
 
@@ -3783,7 +3994,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 slug = topic.to_lowercase().replace(' ', "-")
             );
             let system = build_research_prompt(&workdir, &topic, "", ResearchMode::Topic);
-            run_agent(AgentExecOpts {
+            let started = Instant::now();
+            let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -3792,7 +4004,24 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
             })
-            .await
+            .await?;
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            let _ = persist_capture_episode(
+                &workdir,
+                &agent_command,
+                model_ref,
+                "research-topic-claude",
+                &format!("research:topic:{}", topic.to_lowercase().replace(' ', "-")),
+                &task_prompt,
+                &output,
+                exit_code == 0,
+                started.elapsed().as_millis() as u64,
+                resume_session,
+            )
+            .await;
+            Ok(exit_code)
         }
         ResearchCmd::EnhancePrd { slug } => {
             let prd_path = find_prd(&workdir, &slug)?;
@@ -3809,7 +4038,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 path = prd_path.display()
             );
             let system = build_research_prompt(&workdir, &slug, &content, ResearchMode::EnhancePrd);
-            run_agent(AgentExecOpts {
+            let started = Instant::now();
+            let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -3818,7 +4048,24 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
             })
-            .await
+            .await?;
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            let _ = persist_capture_episode(
+                &workdir,
+                &agent_command,
+                model_ref,
+                "research-enhance-prd",
+                &format!("research:enhance-prd:{slug}"),
+                &task_prompt,
+                &output,
+                exit_code == 0,
+                started.elapsed().as_millis() as u64,
+                resume_session,
+            )
+            .await;
+            Ok(exit_code)
         }
         ResearchCmd::EnhancePlan { plan } => {
             let plan_dir = workdir.join("plans").join(&plan);
@@ -3845,7 +4092,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             }
             let system =
                 build_research_prompt(&workdir, &plan, &context, ResearchMode::EnhancePlan);
-            run_agent(AgentExecOpts {
+            let started = Instant::now();
+            let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -3854,7 +4102,24 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
             })
-            .await
+            .await?;
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            let _ = persist_capture_episode(
+                &workdir,
+                &agent_command,
+                model_ref,
+                "research-enhance-plan",
+                &format!("research:enhance-plan:{plan}"),
+                &task_prompt,
+                &output,
+                exit_code == 0,
+                started.elapsed().as_millis() as u64,
+                resume_session,
+            )
+            .await;
+            Ok(exit_code)
         }
         ResearchCmd::EnhanceTasks { plan } => {
             let tasks_path = workdir.join("plans").join(&plan).join("tasks.toml");
@@ -3874,7 +4139,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             );
             let system =
                 build_research_prompt(&workdir, &plan, &content, ResearchMode::EnhanceTasks);
-            run_agent(AgentExecOpts {
+            let started = Instant::now();
+            let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -3883,7 +4149,24 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
             })
-            .await
+            .await?;
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            let _ = persist_capture_episode(
+                &workdir,
+                &agent_command,
+                model_ref,
+                "research-enhance-tasks",
+                &format!("research:enhance-tasks:{plan}"),
+                &task_prompt,
+                &output,
+                exit_code == 0,
+                started.elapsed().as_millis() as u64,
+                resume_session,
+            )
+            .await;
+            Ok(exit_code)
         }
         ResearchCmd::Analyze => {
             let episodes_path = workdir.join(".roko/memory/episodes.jsonl");
@@ -3906,7 +4189,8 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 &context,
                 ResearchMode::AnalyzeExecution,
             );
-            run_agent(AgentExecOpts {
+            let started = Instant::now();
+            let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -3915,7 +4199,24 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
             })
-            .await
+            .await?;
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            let _ = persist_capture_episode(
+                &workdir,
+                &agent_command,
+                model_ref,
+                "research-analyze",
+                "research:analyze:execution",
+                &task_prompt,
+                &output,
+                exit_code == 0,
+                started.elapsed().as_millis() as u64,
+                resume_session,
+            )
+            .await;
+            Ok(exit_code)
         }
         ResearchCmd::List => {
             let files = roko_cli::research::list_research(&workdir)?;
@@ -4211,6 +4512,197 @@ fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
     anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
 }
 
+fn resolved_capture_model(agent_command: &str, model: Option<&str>) -> String {
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        return model.to_string();
+    }
+    if agent_command.eq_ignore_ascii_case("claude") {
+        "claude-opus-4-6".to_string()
+    } else {
+        "unknown-model".to_string()
+    }
+}
+
+fn capture_provider(agent_command: &str, resolved_model: &str) -> String {
+    let command = agent_command.trim();
+    let model = resolved_model.to_ascii_lowercase();
+    if command.eq_ignore_ascii_case("claude") || model.starts_with("claude") {
+        "anthropic".to_string()
+    } else if command.eq_ignore_ascii_case("codex")
+        || command.eq_ignore_ascii_case("openai")
+        || model.starts_with("gpt-")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+    {
+        "openai".to_string()
+    } else if command.eq_ignore_ascii_case("ollama") || model.starts_with("ollama/") {
+        "ollama".to_string()
+    } else {
+        command.to_string()
+    }
+}
+
+fn capture_role(task_kind: &str) -> &'static str {
+    if task_kind.starts_with("research-") {
+        "Researcher"
+    } else {
+        "Strategist"
+    }
+}
+
+fn capture_task_category(task_kind: &str) -> &'static str {
+    if task_kind.starts_with("research-") {
+        "research"
+    } else if task_kind.starts_with("prd-plan") {
+        "scaffolding"
+    } else {
+        "docs"
+    }
+}
+
+fn capture_complexity_band(task_kind: &str) -> &'static str {
+    if task_kind == "research-analyze" {
+        "standard"
+    } else if task_kind.starts_with("research-") {
+        "deep"
+    } else {
+        "standard"
+    }
+}
+
+fn capture_plan_id(task_id: &str) -> Option<&str> {
+    task_id
+        .rsplit(':')
+        .next()
+        .filter(|segment| !segment.is_empty())
+}
+
+fn build_capture_episode(
+    agent_command: &str,
+    model: Option<&str>,
+    task_kind: &str,
+    task_id: &str,
+    prompt: &str,
+    output: &str,
+    success: bool,
+    wall_time_ms: u64,
+    resume_session: Option<&str>,
+) -> (Episode, String) {
+    let resolved_model = resolved_capture_model(agent_command, model);
+    let provider = capture_provider(agent_command, &resolved_model);
+    let role = capture_role(task_kind);
+    let task_category = capture_task_category(task_kind);
+    let complexity_band = capture_complexity_band(task_kind);
+    let mut episode = Episode::new(agent_command.to_string(), task_id.to_string());
+    episode.kind = "agent_turn".to_string();
+    episode.trigger_kind = task_kind.to_string();
+    episode.agent_template = role.to_string();
+    episode.episode_id = episode.id.clone();
+    episode.model = resolved_model.clone();
+    episode.input_signal_hash = ContentHash::of(prompt.as_bytes()).to_hex();
+    episode.output_signal_hash = ContentHash::of(output.as_bytes()).to_hex();
+    episode.duration_secs = wall_time_ms as f64 / 1000.0;
+    episode.usage.wall_ms = wall_time_ms;
+    episode.success = success;
+    episode.turns = 1;
+    if !success {
+        episode.failure_reason = Some("agent returned non-zero exit code".to_string());
+    }
+    episode
+        .extra
+        .insert("role".to_string(), serde_json::json!(role));
+    episode
+        .extra
+        .insert("command".to_string(), serde_json::json!(agent_command));
+    episode
+        .extra
+        .insert("backend".to_string(), serde_json::json!(agent_command));
+    episode
+        .extra
+        .insert("task_kind".to_string(), serde_json::json!(task_kind));
+    episode
+        .extra
+        .insert("task_id".to_string(), serde_json::json!(task_id));
+    episode
+        .extra
+        .insert("model".to_string(), serde_json::json!(resolved_model));
+    episode
+        .extra
+        .insert("provider".to_string(), serde_json::json!(provider.clone()));
+    episode.extra.insert(
+        "task_category".to_string(),
+        serde_json::json!(task_category),
+    );
+    episode.extra.insert(
+        "complexity_band".to_string(),
+        serde_json::json!(complexity_band),
+    );
+    if let Some(plan_id) = capture_plan_id(task_id) {
+        episode
+            .extra
+            .insert("plan_id".to_string(), serde_json::json!(plan_id));
+    }
+    if let Some(session_id) = resume_session.filter(|value| !value.trim().is_empty()) {
+        episode
+            .extra
+            .insert("session_id".to_string(), serde_json::json!(session_id));
+    }
+    episode.extra.insert(
+        "prompt_chars".to_string(),
+        serde_json::json!(prompt.chars().count()),
+    );
+    episode.extra.insert(
+        "output_chars".to_string(),
+        serde_json::json!(output.chars().count()),
+    );
+    episode
+        .extra
+        .insert("success".to_string(), serde_json::json!(success));
+    (episode, provider)
+}
+
+async fn persist_capture_episode(
+    workdir: &Path,
+    agent_command: &str,
+    model: Option<&str>,
+    task_kind: &str,
+    task_id: &str,
+    prompt: &str,
+    output: &str,
+    success: bool,
+    wall_time_ms: u64,
+    resume_session: Option<&str>,
+) -> Result<()> {
+    let (episode, provider) = build_capture_episode(
+        agent_command,
+        model,
+        task_kind,
+        task_id,
+        prompt,
+        output,
+        success,
+        wall_time_ms,
+        resume_session,
+    );
+
+    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
+        .await
+        .map_err(|e| anyhow!("open learning runtime: {e}"))?;
+    let distillation_workdir = workdir.to_path_buf();
+    runtime.set_episode_completion_hook(move |episode| {
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+    });
+
+    let mut completed = CompletedRunInput::from_episode(episode);
+    completed.provider = Some(provider);
+    runtime
+        .record_completed_run(completed)
+        .await
+        .map_err(|e| anyhow!("record learning feedback: {e}"))?;
+    Ok(())
+}
+
 fn find_plan_source_document(plan_dir: &Path) -> Result<PathBuf> {
     for candidate in ["source-prd.md", "prd-extract.md", "plan.md"] {
         let path = plan_dir.join(candidate);
@@ -4290,7 +4782,9 @@ fn preserve_completed_task_status(
 }
 
 async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{AgentExecOpts, load_gateway_env, model_from_config, run_agent};
+    use roko_cli::agent_exec::{
+        AgentExecOpts, load_gateway_env, model_from_config, run_agent_capture_silent,
+    };
 
     let workdir = resolve_workdir(cli);
     let gw = load_gateway_env(&workdir);
@@ -4299,6 +4793,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     let effort = cli.effort.map(|effort| effort.to_string());
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
+    let agent_command =
+        roko_cli::agent_exec::command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
 
     match cmd {
         PrdCmd::Idea { text } => {
@@ -4378,7 +4874,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 // whether a CLI agent wrote the file directly.
                 let mtime_before = std::fs::metadata(&target).and_then(|m| m.modified()).ok();
 
-                let (exit_code, output) = roko_cli::agent_exec::run_agent_capture(AgentExecOpts {
+                let started = Instant::now();
+                let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                     prompt: &task_prompt,
                     workdir: &workdir,
                     model: model_ref,
@@ -4433,6 +4930,19 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                         target.display()
                     );
                 }
+                let _ = persist_capture_episode(
+                    &workdir,
+                    &agent_command,
+                    model_ref,
+                    "prd-draft-new",
+                    &format!("prd:draft:new:{slug}"),
+                    &task_prompt,
+                    &output,
+                    exit_code == 0,
+                    started.elapsed().as_millis() as u64,
+                    resume_session,
+                )
+                .await;
                 Ok(exit_code)
             }
             PrdDraftCmd::Edit { slug } => {
@@ -4459,7 +4969,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                      Search the codebase to verify claims. Update the file in place.",
                     path = draft.display()
                 );
-                run_agent(AgentExecOpts {
+                let started = Instant::now();
+                let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                     prompt: &task_prompt,
                     workdir: &workdir,
                     model: model_ref,
@@ -4468,7 +4979,24 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     resume_session,
                     env_vars: &gw.vars,
                 })
-                .await
+                .await?;
+                if !output.is_empty() {
+                    print!("{output}");
+                }
+                let _ = persist_capture_episode(
+                    &workdir,
+                    &agent_command,
+                    model_ref,
+                    "prd-draft-edit",
+                    &format!("prd:draft:edit:{slug}"),
+                    &task_prompt,
+                    &output,
+                    exit_code == 0,
+                    started.elapsed().as_millis() as u64,
+                    resume_session,
+                )
+                .await;
+                Ok(exit_code)
             }
             PrdDraftCmd::Promote { slug, auto_execute } => {
                 roko_cli::prd::cmd_promote(&workdir, &slug, auto_execute).await?;
@@ -4519,7 +5047,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                  PRDs:\n{all_context}\n\nIdeas:\n{ideas}"
             );
             let system = roko_cli::prd::prd_agent_prompt(&workdir, "Consolidate all PRDs");
-            run_agent(AgentExecOpts {
+            let started = Instant::now();
+            let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                 prompt: &task_prompt,
                 workdir: &workdir,
                 model: model_ref,
@@ -4528,7 +5057,24 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 resume_session,
                 env_vars: &gw.vars,
             })
-            .await
+            .await?;
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            let _ = persist_capture_episode(
+                &workdir,
+                &agent_command,
+                model_ref,
+                "prd-consolidate",
+                "prd:draft:consolidate",
+                &task_prompt,
+                &output,
+                exit_code == 0,
+                started.elapsed().as_millis() as u64,
+                resume_session,
+            )
+            .await;
+            Ok(exit_code)
         }
     }
 }
@@ -4568,6 +5114,10 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool) -> Result<()> {
     }
 
     println!("initialized roko workspace at {}", target.display());
+    println!(
+        "agent command set to \"claude\". \
+         Edit roko.toml [agent] command to use a different agent CLI."
+    );
     Ok(())
 }
 
@@ -5389,8 +5939,9 @@ fn resolve_config_for_workdir(cli: &Cli, workdir: &Path) -> Result<Config> {
         let fully_default = resolved.sources.agent_command == Source::Default
             && resolved.sources.prompt_token_budget == Source::Default;
         if fully_default && resolved.config.agent.command == "cat" && !cli.quiet {
-            println!(
-                "no config found — using built-in `cat` agent. run `roko config init` to set up a model."
+            eprintln!(
+                "warning: no config found — agent command is \"cat\" (test-only, echoes prompts back). \
+                 Run `roko init` or set [agent] command in roko.toml."
             );
         }
         (resolved.config, workdir)
@@ -5804,6 +6355,66 @@ mod tests {
     fn resolve_workdir_defaults_to_cwd() {
         let cli = Cli::try_parse_from(["roko"]).unwrap();
         assert_eq!(resolve_workdir(&cli), PathBuf::from("."));
+    }
+
+    #[tokio::test]
+    async fn persist_capture_episode_records_memory_episode() {
+        let dir = tempdir().unwrap();
+        let workdir = dir.path();
+
+        persist_capture_episode(
+            workdir,
+            "claude",
+            Some("claude-sonnet-4-6"),
+            "prd-draft-new",
+            "prd:draft:new:demo",
+            "draft a PRD",
+            "# demo prd",
+            true,
+            321,
+            Some("resume-123"),
+        )
+        .await
+        .unwrap();
+
+        let episodes_path = workdir.join(".roko").join("memory").join("episodes.jsonl");
+        let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
+        assert_eq!(episodes.len(), 1);
+
+        let episode = &episodes[0];
+        assert_eq!(episode.agent_id, "claude");
+        assert_eq!(episode.task_id, "prd:draft:new:demo");
+        assert_eq!(episode.kind, "agent_turn");
+        assert_eq!(episode.model, "claude-sonnet-4-6");
+        assert!(episode.success);
+        assert_eq!(
+            episode.extra.get("task_kind"),
+            Some(&serde_json::json!("prd-draft-new"))
+        );
+        assert_eq!(
+            episode.extra.get("provider"),
+            Some(&serde_json::json!("anthropic"))
+        );
+        assert_eq!(
+            episode.extra.get("role"),
+            Some(&serde_json::json!("Strategist"))
+        );
+        assert_eq!(
+            episode.extra.get("task_category"),
+            Some(&serde_json::json!("docs"))
+        );
+        assert_eq!(
+            episode.extra.get("complexity_band"),
+            Some(&serde_json::json!("standard"))
+        );
+        assert_eq!(
+            episode.extra.get("plan_id"),
+            Some(&serde_json::json!("demo"))
+        );
+        assert_eq!(
+            episode.extra.get("session_id"),
+            Some(&serde_json::json!("resume-123"))
+        );
     }
 
     #[test]

@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
 /// Default maximum number of polling attempts (120 × 5 s = 10 minutes).
 const DEFAULT_MAX_POLL_ATTEMPTS: u32 = 120;
+/// Default HTTP request timeout for submit/poll calls.
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// Async polling agent for Perplexity's `sonar-deep-research` model.
 ///
@@ -32,6 +34,7 @@ pub struct PerplexityDeepResearchAgent {
     model_slug: String,
     poll_interval_ms: u64,
     max_poll_attempts: u32,
+    request_timeout_ms: u64,
     name: String,
     poster: Box<dyn HttpPoster>,
 }
@@ -51,6 +54,7 @@ impl PerplexityDeepResearchAgent {
             model_slug: model_slug.into(),
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             max_poll_attempts: DEFAULT_MAX_POLL_ATTEMPTS,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             name: name.into(),
             poster: Box::new(ReqwestPoster::new()),
         }
@@ -67,6 +71,13 @@ impl PerplexityDeepResearchAgent {
     #[must_use]
     pub const fn with_max_poll_attempts(mut self, attempts: u32) -> Self {
         self.max_poll_attempts = attempts;
+        self
+    }
+
+    /// Override the HTTP request timeout for submit/poll calls.
+    #[must_use]
+    pub const fn with_request_timeout_ms(mut self, ms: u64) -> Self {
+        self.request_timeout_ms = ms;
         self
     }
 
@@ -106,7 +117,12 @@ impl PerplexityDeepResearchAgent {
 
         let response_text = self
             .poster
-            .post_json(&self.submit_url(), &self.headers(), &body_bytes, 30_000)
+            .post_json(
+                &self.submit_url(),
+                &self.headers(),
+                &body_bytes,
+                self.request_timeout_ms,
+            )
             .await
             .map_err(|e| format!("submit http error: {e}"))?;
 
@@ -135,7 +151,11 @@ impl PerplexityDeepResearchAgent {
     async fn poll(&self, request_id: &str) -> Result<Option<AgentResponse>, String> {
         let response_text = self
             .poster
-            .get_json(&self.poll_url(request_id), &self.headers(), 30_000)
+            .get_json(
+                &self.poll_url(request_id),
+                &self.headers(),
+                self.request_timeout_ms,
+            )
             .await
             .map_err(|e| format!("poll http error: {e}"))?;
 
@@ -288,6 +308,8 @@ mod tests {
     struct SequentialMock {
         post_responses: Arc<Mutex<VecDeque<Result<String, HttpPostError>>>>,
         get_responses: Arc<Mutex<VecDeque<Result<String, HttpPostError>>>>,
+        post_timeouts: Arc<Mutex<Vec<u64>>>,
+        get_timeouts: Arc<Mutex<Vec<u64>>>,
     }
 
     impl SequentialMock {
@@ -298,6 +320,8 @@ mod tests {
             Self {
                 post_responses: Arc::new(Mutex::new(post_responses.into_iter().collect())),
                 get_responses: Arc::new(Mutex::new(get_responses.into_iter().collect())),
+                post_timeouts: Arc::new(Mutex::new(Vec::new())),
+                get_timeouts: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -309,8 +333,9 @@ mod tests {
             _url: &str,
             _headers: &[(String, String)],
             _body: &[u8],
-            _timeout_ms: u64,
+            timeout_ms: u64,
         ) -> Result<String, HttpPostError> {
+            self.post_timeouts.lock().expect("lock").push(timeout_ms);
             self.post_responses
                 .lock()
                 .expect("lock")
@@ -322,8 +347,9 @@ mod tests {
             &self,
             _url: &str,
             _headers: &[(String, String)],
-            _timeout_ms: u64,
+            timeout_ms: u64,
         ) -> Result<String, HttpPostError> {
+            self.get_timeouts.lock().expect("lock").push(timeout_ms);
             self.get_responses
                 .lock()
                 .expect("lock")
@@ -517,6 +543,32 @@ mod tests {
                 .expect("valid JSON");
         assert_eq!(meta.citations.len(), 2);
         assert_eq!(meta.citations[0], "https://example.com/paper1");
+    }
+
+    #[tokio::test]
+    async fn deep_research_request_timeout_override_reaches_http_layer() {
+        let mock = SequentialMock::new(
+            vec![Ok(submit_ok("req-008"))],
+            vec![Ok(poll_completed("timeout-aware answer"))],
+        );
+        let post_timeouts = mock.post_timeouts.clone();
+        let get_timeouts = mock.get_timeouts.clone();
+
+        let result = PerplexityDeepResearchAgent::new(
+            "pplx-key",
+            "https://api.perplexity.ai",
+            "sonar-deep-research",
+            "perplexity:sonar-deep-research",
+        )
+        .with_poll_interval_ms(0)
+        .with_request_timeout_ms(12_345)
+        .with_poster(Box::new(mock))
+        .run(&prompt("q"), &Context::now())
+        .await;
+
+        assert!(result.success);
+        assert_eq!(*post_timeouts.lock().expect("lock"), vec![12_345]);
+        assert_eq!(*get_timeouts.lock().expect("lock"), vec![12_345]);
     }
 
     // ── Wire details ───────────────────────────────────────────────────────────

@@ -386,6 +386,31 @@ mod tests {
     }
 
     #[test]
+    fn missing_knowledge_tier_defaults_to_transient() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            entry: KnowledgeEntry,
+        }
+
+        let decoded: Wrapper = serde_json::from_str(
+            r#"{
+                "entry": {
+                    "kind": "insight",
+                    "content": "Keep the default tier small.",
+                    "confidence": 0.8,
+                    "source_episodes": ["ep-1"],
+                    "tags": ["memory"],
+                    "half_life_days": 12.0
+                }
+            }"#,
+        )
+        .expect("deserialize entry");
+
+        assert_eq!(decoded.entry.tier, KnowledgeTier::Transient);
+        assert!((decoded.entry.effective_half_life_days() - 1.2).abs() < 1e-6);
+    }
+
+    #[test]
     fn new_knowledge_kinds_have_expected_defaults() {
         assert_eq!(KnowledgeKind::Warning.default_half_life_days(), 7.0);
         assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 60.0);

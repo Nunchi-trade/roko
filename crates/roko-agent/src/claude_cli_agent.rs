@@ -17,6 +17,7 @@ use roko_core::{Body, Context, Engram, Kind, OperatingFrequency, Provenance};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -418,7 +419,7 @@ impl Agent for ClaudeCliAgent {
         {
             register_spawned_pid(pid);
         }
-        let mut stdout_pipe = child.stdout.take();
+        let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
         if let Some(mut stdin) = child.stdin.take() {
@@ -433,9 +434,102 @@ impl Agent for ClaudeCliAgent {
             }
         }
 
+        eprintln!("[{}] agent started (pid {}, timeout {}s)", self.name, pid.unwrap_or(0), self.timeout_ms / 1000);
+
+        // Track activity across stdout and stderr for heartbeat messages.
+        let has_activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Stream stdout in real time, parsing stream-json events for progress.
+        // Accumulate the raw output for final processing by output_text().
+        let stdout_name = self.name.clone();
+        let stdout_activity = has_activity.clone();
+        let stdout_handle = tokio::spawn(async move {
+            let Some(pipe) = stdout_pipe else {
+                return String::new();
+            };
+            let reader = BufReader::new(pipe);
+            let mut lines = reader.lines();
+            let mut collected = String::new();
+            let mut last_tool: Option<String> = None;
+            let mut text_bytes: usize = 0;
+            let mut tool_count: usize = 0;
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                collected.push_str(&line);
+                collected.push('\n');
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                stdout_activity.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                // Parse stream-json events for progress reporting.
+                // Non-JSON output (raw text from other agents) is fine — we
+                // just skip the progress parsing.
+                if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
+                    match event.get("type").and_then(Value::as_str) {
+                        Some("assistant") => {
+                            // New turn — check for tool_use in content
+                            if let Some(content) = event.get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(Value::as_array)
+                            {
+                                for block in content {
+                                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                                        let name = block.get("name")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("unknown");
+                                        tool_count += 1;
+                                        last_tool = Some(name.to_string());
+                                        eprintln!("[{stdout_name}] tool: {name}");
+                                    }
+                                }
+                            }
+                        }
+                        Some("content_block_start") => {
+                            if let Some(block) = event.get("content_block") {
+                                match block.get("type").and_then(Value::as_str) {
+                                    Some("tool_use") => {
+                                        let name = block.get("name")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("unknown");
+                                        tool_count += 1;
+                                        last_tool = Some(name.to_string());
+                                        eprintln!("[{stdout_name}] tool: {name}");
+                                    }
+                                    Some("text") => {
+                                        eprintln!("[{stdout_name}] generating text...");
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Some("content_block_delta") => {
+                            if let Some(delta) = event.get("delta") {
+                                if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                                    text_bytes += text.len();
+                                }
+                            }
+                        }
+                        Some("result") => {
+                            let summary = if tool_count > 0 {
+                                format!("{text_bytes} bytes text, {tool_count} tool calls")
+                            } else {
+                                format!("{text_bytes} bytes text")
+                            };
+                            eprintln!("[{stdout_name}] result received ({summary})");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            collected
+        });
+
         // Stream stderr to the terminal in real time for user feedback,
         // while accumulating lines for the trace.
         let agent_name = self.name.clone();
+        let stderr_activity = has_activity.clone();
         let stderr_handle = tokio::spawn(async move {
             let Some(pipe) = stderr_pipe else {
                 return String::new();
@@ -445,6 +539,7 @@ impl Agent for ClaudeCliAgent {
             let mut collected = String::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 if !line.trim().is_empty() {
+                    stderr_activity.store(true, std::sync::atomic::Ordering::Relaxed);
                     eprintln!("[{agent_name}] {line}");
                 }
                 collected.push_str(&line);
@@ -453,9 +548,28 @@ impl Agent for ClaudeCliAgent {
             collected
         });
 
+        // Heartbeat: print elapsed time every 15s when there's no other
+        // output, so the user knows the agent is still running.
+        let heartbeat_name = self.name.clone();
+        let heartbeat_started = started;
+        let heartbeat_activity = has_activity.clone();
+        let heartbeat_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                // Only print heartbeat when there's been no recent stdout/stderr activity.
+                if !heartbeat_activity.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    let elapsed = heartbeat_started.elapsed().as_secs();
+                    eprintln!("[{heartbeat_name}] waiting for response... ({elapsed}s elapsed)");
+                }
+            }
+        });
+
         let status = match timeout(Duration::from_millis(self.timeout_ms), child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
+                heartbeat_handle.abort();
                 if track_pids()
                     && let Some(pid) = pid
                 {
@@ -464,6 +578,7 @@ impl Agent for ClaudeCliAgent {
                 return self.failure(input, &format!("wait failed: {e}"), started);
             }
             Err(_) => {
+                heartbeat_handle.abort();
                 let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
                 if track_pids()
                     && let Some(pid) = pid
@@ -483,7 +598,10 @@ impl Agent for ClaudeCliAgent {
             unregister_pid(pid);
         }
 
-        let stdout = read_pipe_to_string(&mut stdout_pipe).await;
+        heartbeat_handle.abort();
+        let elapsed_secs = started.elapsed().as_secs();
+
+        let stdout = stdout_handle.await.unwrap_or_default();
         let stderr = stderr_handle.await.unwrap_or_default();
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -491,6 +609,7 @@ impl Agent for ClaudeCliAgent {
             let code = status
                 .code()
                 .map_or_else(|| "signal".to_string(), |c| c.to_string());
+            eprintln!("[{}] failed (exit {code}) after {elapsed_secs}s", self.name);
             return self.failure(
                 input,
                 &format!(
@@ -503,8 +622,11 @@ impl Agent for ClaudeCliAgent {
 
         let text = Self::output_text(&stdout);
         if text.trim().is_empty() {
+            eprintln!("[{}] finished after {elapsed_secs}s but produced empty output", self.name);
             return self.failure(input, "claude produced an empty response", started);
         }
+
+        eprintln!("[{}] completed successfully ({elapsed_secs}s, {} bytes)", self.name, text.len());
 
         let output_signal = input
             .derive(Kind::AgentOutput, Body::text(text))

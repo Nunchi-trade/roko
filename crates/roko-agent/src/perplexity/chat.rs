@@ -8,12 +8,15 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
-use crate::perplexity::types::{Annotation, PerplexityMetadata, SearchOptions, SearchResult};
+use crate::perplexity::types::SearchOptions;
+use crate::perplexity::wire::{
+    apply_search_options, base_chat_body, chat_endpoint, headers, parse_pplx_meta,
+};
 use crate::translate::openai::parse_usage;
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::Instant;
 
 /// Perplexity Sonar chat agent with search-grounded completions.
@@ -76,21 +79,6 @@ impl PerplexityChatAgent {
         self
     }
 
-    fn endpoint(&self) -> String {
-        let trimmed = self.base_url.trim_end_matches('/');
-        format!("{trimmed}/chat/completions")
-    }
-
-    fn headers(&self) -> Vec<(String, String)> {
-        vec![
-            (
-                "Authorization".to_string(),
-                format!("Bearer {}", self.api_key),
-            ),
-            ("Content-Type".to_string(), "application/json".to_string()),
-        ]
-    }
-
     /// Build the request body with Perplexity-specific search parameters.
     fn build_request(&self, prompt_text: &str) -> Value {
         let mut messages: Vec<Value> = Vec::new();
@@ -99,68 +87,13 @@ impl PerplexityChatAgent {
         }
         messages.push(json!({ "role": "user", "content": prompt_text }));
 
-        let mut body = json!({
-            "model": self.model_slug,
-            "messages": messages,
-        });
-
-        let opts = &self.search_options;
-        if let Some(ref filter) = opts.search_domain_filter {
-            body["search_domain_filter"] = json!(filter);
-        }
-        if let Some(ref recency) = opts.search_recency_filter {
-            body["search_recency_filter"] = json!(recency);
-        }
-        if let Some(ref mode) = opts.search_mode {
-            body["search_mode"] = json!(mode);
-        }
-        if let Some(images) = opts.return_images {
-            body["return_images"] = json!(images);
-        }
-        if let Some(related) = opts.return_related_questions {
-            body["return_related_questions"] = json!(related);
-        }
-        if let Some(ref size) = opts.search_context_size {
-            body["web_search_options"] = json!({ "search_context_size": size });
-        }
-        if let Some(ref after) = opts.search_after_date_filter {
-            body["search_after_date_filter"] = json!(after);
-        }
-        if let Some(ref before) = opts.search_before_date_filter {
-            body["search_before_date_filter"] = json!(before);
-        }
-
+        let mut body = base_chat_body(&self.model_slug, messages);
+        apply_search_options(
+            body.as_object_mut()
+                .expect("Perplexity chat request must be a JSON object"),
+            &self.search_options,
+        );
         body
-    }
-
-    /// Parse Perplexity extensions: citations, search_results, annotations.
-    fn parse_pplx_meta(&self, raw: &Value) -> PerplexityMetadata {
-        let citations: Vec<String> = raw
-            .get("citations")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let search_results: Vec<SearchResult> = raw
-            .get("search_results")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let annotations: Vec<Annotation> = raw
-            .pointer("/choices/0/message/annotations")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let related_questions: Vec<String> = raw
-            .get("related_questions")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        PerplexityMetadata {
-            citations,
-            search_results,
-            annotations,
-            related_questions,
-        }
     }
 
     fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
@@ -205,8 +138,8 @@ impl Agent for PerplexityChatAgent {
             }
         };
 
-        let url = self.endpoint();
-        let headers = self.headers();
+        let url = chat_endpoint(&self.base_url);
+        let headers = headers(&self.api_key);
 
         let response_text = match self
             .poster
@@ -252,7 +185,7 @@ impl Agent for PerplexityChatAgent {
             }
         };
 
-        let pplx_meta = self.parse_pplx_meta(&parsed);
+        let pplx_meta = parse_pplx_meta(&parsed);
         let meta_json = serde_json::to_string(&pplx_meta).unwrap_or_default();
 
         let usage = parse_usage(&parsed);
@@ -288,6 +221,7 @@ impl Agent for PerplexityChatAgent {
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use crate::PerplexityMetadata;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Default)]
@@ -637,14 +571,12 @@ mod tests {
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(
-            result
-                .output
-                .body
-                .as_text()
-                .expect("text")
-                .contains("model not found")
-        );
+        assert!(result
+            .output
+            .body
+            .as_text()
+            .expect("text")
+            .contains("model not found"));
     }
 
     #[tokio::test]
@@ -653,14 +585,12 @@ mod tests {
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(
-            result
-                .output
-                .body
-                .as_text()
-                .expect("text")
-                .contains("malformed")
-        );
+        assert!(result
+            .output
+            .body
+            .as_text()
+            .expect("text")
+            .contains("malformed"));
     }
 
     #[tokio::test]
@@ -670,14 +600,12 @@ mod tests {
         let agent = agent_with(Box::new(mock));
         let result = agent.run(&prompt("x"), &Context::now()).await;
         assert!(!result.success);
-        assert!(
-            result
-                .output
-                .body
-                .as_text()
-                .expect("text")
-                .contains("missing choices")
-        );
+        assert!(result
+            .output
+            .body
+            .as_text()
+            .expect("text")
+            .contains("missing choices"));
     }
 
     // ── Wire details ──────────────────────────────────────────────────────────

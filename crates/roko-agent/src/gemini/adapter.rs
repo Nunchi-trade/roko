@@ -7,12 +7,116 @@ use super::compat::GeminiCompatAgent;
 use super::embed::GeminiEmbedAgent;
 use super::native::GeminiNativeAgent;
 use crate::agent::Agent;
-use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::dispatcher::HandlerResolver;
+use crate::http::ReqwestPoster;
+use crate::provider::openai_compat::{max_tokens_for_model, tool_registry_for_options};
+use crate::provider::{
+    AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
+};
+use crate::tool_loop::backends::GeminiNativeBackend;
+use crate::tool_loop::{OpenAiCompatBackend, ToolLoop, ToolLoopAgent};
+use crate::translate::{GeminiTranslator, OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use serde_json::Value;
+use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
+
+fn gemini_tool_loop_base_url(base_url: &str) -> String {
+    format!("{}/v1beta/openai/v1", base_url.trim_end_matches('/'))
+}
+
+fn gemini_tool_loop_agent(
+    api_key: String,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+    options: &AgentOptions,
+) -> Result<Box<dyn Agent>, AgentCreationError> {
+    let (registry, tools) = tool_registry_for_options(options)?;
+    let resolver: Arc<dyn HandlerResolver> =
+        Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
+    let dispatcher = build_tool_dispatcher(registry, resolver);
+    let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
+    let timeout_ms = options.timeout_ms.unwrap_or(120_000);
+    let mut extra_body_params = serde_json::Map::new();
+    if let Some(cached_content) = options.cached_content.as_deref() {
+        extra_body_params.insert(
+            "cached_content".to_string(),
+            Value::String(cached_content.to_string()),
+        );
+    }
+
+    let backend = OpenAiCompatBackend::new(api_key, model.slug.clone())
+        .with_provider_id(model.provider.clone())
+        .with_base_url(gemini_tool_loop_base_url(
+            provider.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL),
+        ))
+        .with_timeout_ms(timeout_ms)
+        .with_max_tokens(max_tokens_for_model(model))
+        .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+        .with_extra_body_params(extra_body_params)
+        .with_poster(Box::new(ReqwestPoster::new()));
+
+    let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
+        .with_max_iterations(50)
+        .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
+        .with_model_profile(model.clone());
+
+    let name = if options.name.is_empty() {
+        format!("gemini-compat:{}", model.slug)
+    } else {
+        options.name.clone()
+    };
+
+    let mut agent = ToolLoopAgent::new(tool_loop)
+        .with_tools(tools)
+        .with_name(name);
+    if let Some(prompt) = &options.system_prompt {
+        agent = agent.with_system_prompt(prompt.clone());
+    }
+
+    Ok(Box::new(agent))
+}
+
+fn gemini_native_tool_loop_agent(
+    api_key: String,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+    options: &AgentOptions,
+) -> Result<Box<dyn Agent>, AgentCreationError> {
+    let (registry, tools) = tool_registry_for_options(options)?;
+    let resolver: Arc<dyn HandlerResolver> =
+        Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
+    let dispatcher = build_tool_dispatcher(registry, resolver);
+    let translator: Arc<dyn Translator> = Arc::new(GeminiTranslator);
+    let backend = GeminiNativeBackend::new(
+        api_key,
+        provider.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL),
+        model.clone(),
+        options,
+    );
+
+    let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
+        .with_max_iterations(50)
+        .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
+        .with_model_profile(model.clone());
+
+    let name = if options.name.is_empty() {
+        format!("gemini-native:{}", model.slug)
+    } else {
+        options.name.clone()
+    };
+
+    let mut agent = ToolLoopAgent::new(tool_loop)
+        .with_tools(tools)
+        .with_name(name);
+    if let Some(prompt) = &options.system_prompt {
+        agent = agent.with_system_prompt(prompt.clone());
+    }
+
+    Ok(Box::new(agent))
+}
 
 /// Provider adapter for Gemini.
 pub struct GeminiAdapter;
@@ -57,9 +161,7 @@ impl ProviderAdapter for GeminiAdapter {
             return Ok(Box::new(agent));
         }
 
-        let needs_native = model.supports_grounding
-            || model.supports_code_execution
-            || model.thinking_level.as_deref() == Some("dynamic");
+        let needs_native = model.supports_grounding || model.supports_code_execution;
 
         if needs_native {
             Ok(Box::new(GeminiNativeAgent::new(
@@ -68,6 +170,10 @@ impl ProviderAdapter for GeminiAdapter {
                 model.clone(),
                 &options,
             )))
+        } else if model.supports_tools && model.tool_format == "gemini_native" {
+            gemini_native_tool_loop_agent(api_key, provider, model, &options)
+        } else if model.supports_tools {
+            gemini_tool_loop_agent(api_key, provider, model, &options)
         } else {
             Ok(Box::new(GeminiCompatAgent::new(
                 api_key,
@@ -211,11 +317,12 @@ mod tests {
         let model = ModelProfile {
             slug: "gemini-3.1-pro-preview".to_string(),
             thinking_level: Some("dynamic".to_string()),
+            tool_format: "gemini_native".to_string(),
             ..base_model()
         };
         let agent = GeminiAdapter
             .create_agent(&gemini_provider(), &model, &named_options(""))
-            .expect("create native agent");
+            .expect("create native tool-loop agent");
         assert_eq!(agent.name(), "gemini-native:gemini-3.1-pro-preview");
     }
 

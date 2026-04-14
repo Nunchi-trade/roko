@@ -31,7 +31,10 @@ impl ProviderAdapter for ClaudeCliAdapter {
             .filter(|command| !command.is_empty())
             .ok_or_else(|| AgentCreationError::MissingConfig("providers.*.command".to_string()))?;
 
-        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let current_dir = options
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let timeout_ms = options
             .timeout_ms
             .or(provider.timeout_ms)
@@ -222,6 +225,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
             cached_content: None,
             tools: Some("Read,Edit".to_string()),
             mcp_config: Some(mcp_config_arg),
+            working_dir: None,
             provider_semaphores: None,
             env: vec![("CLAUDE_TEST_ENV".to_string(), "env-value".to_string())],
             extra_args: vec!["--option-flag".to_string(), "option-value".to_string()],
@@ -276,6 +280,72 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
         assert_eq!(prompt_text, "hello");
         let env_text = fs::read_to_string(&env_file).expect("read env");
         assert_eq!(env_text.trim(), "env-value");
+    }
+
+    #[tokio::test]
+    async fn claude_cli_adapter_uses_explicit_working_dir() {
+        let tmp = tempdir().expect("tempdir");
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir(&worktree).expect("create worktree");
+        let args_file = tmp.path().join("args.txt");
+        let cwd_file = tmp.path().join("cwd.txt");
+        let script = tmp.path().join("claude-fake.sh");
+        let script_body = format!(
+            r#"#!/bin/sh
+set -eu
+args_file="{args_file}"
+cwd_file="{cwd_file}"
+printf '%s\n' "$@" > "$args_file"
+pwd > "$cwd_file"
+cat >/dev/null
+printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"worktree-ok"}}}}'
+"#,
+            args_file = args_file.display(),
+            cwd_file = cwd_file.display(),
+        );
+        write_script(&script, &script_body);
+
+        let provider = ProviderConfig {
+            kind: ProviderKind::ClaudeCli,
+            base_url: None,
+            api_key_env: None,
+            command: Some(script.display().to_string()),
+            args: None,
+            timeout_ms: Some(1_000),
+            ttft_timeout_ms: Some(15_000),
+            connect_timeout_ms: Some(5_000),
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        let options = AgentOptions {
+            timeout_ms: Some(2_000),
+            working_dir: Some(worktree.clone()),
+            name: "claude-cli-worktree".to_string(),
+            ..Default::default()
+        };
+        let model = claude_model();
+
+        let adapter = ClaudeCliAdapter;
+        let agent = adapter
+            .create_agent(&provider, &model, &options)
+            .expect("create agent");
+
+        let result = agent.run(&prompt("x"), &Context::now()).await;
+        assert!(
+            result.success,
+            "{}",
+            result.output.body.as_text().unwrap_or("unknown")
+        );
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "worktree-ok");
+
+        let cwd_text = fs::read_to_string(&cwd_file).expect("read cwd");
+        let observed_cwd = fs::canonicalize(cwd_text.trim()).expect("canonicalize cwd");
+        let expected_cwd = fs::canonicalize(&worktree).expect("canonicalize worktree");
+        assert_eq!(observed_cwd, expected_cwd);
+
+        let args_text = fs::read_to_string(&args_file).expect("read args");
+        assert!(args_text.contains("--model"));
+        assert!(args_text.contains("claude-sonnet-4-6"));
     }
 
     #[tokio::test]

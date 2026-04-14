@@ -27,6 +27,9 @@ pub struct RoutingDecisionLog {
     pub role: String,
     /// Task complexity label used for routing.
     pub task_complexity: String,
+    /// Task category label used for routing and calibration.
+    #[serde(default)]
+    pub task_category: String,
     /// Final provider selected for dispatch.
     pub selected_provider: String,
     /// Final model selected for dispatch.
@@ -82,6 +85,8 @@ pub struct RoutingDecisionMeta {
     pub role: String,
     /// Task complexity label used for routing.
     pub task_complexity: String,
+    /// Task category label used for routing and calibration.
+    pub task_category: String,
     /// Routing stage responsible for the base decision.
     pub routing_stage: String,
     /// Human-readable machine-parsable reason for the final decision.
@@ -301,6 +306,7 @@ mod tests {
             requested_model: "kimi-k2.5".to_string(),
             role: "implementer".to_string(),
             task_complexity: "architectural".to_string(),
+            task_category: "implementation".to_string(),
             selected_provider: "zai".to_string(),
             selected_model: "glm-5.1".to_string(),
             routing_stage: "ucb".to_string(),

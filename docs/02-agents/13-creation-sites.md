@@ -13,16 +13,19 @@
 
 ## The Problem
 
-Agent construction is scattered across the codebase. Each call site manually
-selects a backend, configures timeouts, sets tools, and resolves models using
-ad-hoc logic. This means:
+Agent construction is still split between the shared factory and a handful of
+specialized fallbacks. The primary runtime entry points now use
+`create_agent_for_model`, and even no-routing subprocess fallbacks now flow
+through that factory. The remaining direct paths are concentrated in
+backend-specific adapters and a small set of intentional known-protocol
+subprocess branches. They still mean:
 
-1. **Inconsistent behavior** — Different call sites may use different defaults,
-   miss configuration options, or apply different safety settings.
-2. **Hard to add providers** — Adding a new provider requires updating every
-   call site, not just the provider registry.
-3. **No single point for routing** — The CascadeRouter can't intercept model
-   selection if agents are constructed directly.
+1. **Inconsistent behavior** — Direct fallback paths can still miss shared
+   defaults, options, or safety settings.
+2. **Hard to add providers** — The remaining manual paths still require
+   backend-aware handling outside the factory.
+3. **No single point for routing** — The CascadeRouter can only intercept model
+   selection on the factory path.
 
 The refactoring PRD §07-implementation-priorities identifies "8 creation sites"
 as a Tier 1 priority for consolidation.
@@ -56,8 +59,9 @@ if cfg.command == "claude" {
 }
 ```
 
-**Problem:** Manual if/else dispatch, no provider registry, no model profile
-lookup, no capability-aware translator selection.
+**Problem:** This branch is now mostly consolidated, but known protocol
+subprocess commands still stay manual when no routing config is present so their
+current behavior does not change.
 
 **Fix:** Replace with `create_agent_for_model(config, model_key, options)`.
 
@@ -77,7 +81,8 @@ check the model registry for capabilities.
 The `roko run "<prompt>"` command constructs an agent directly for one-shot
 execution.
 
-**Problem:** Uses the same manual dispatch as orchestrate.rs.
+**Problem:** Uses the same known-protocol subprocess fallback as
+`orchestrate.rs` when routing config is unavailable.
 
 **Fix:** Use `create_agent_for_model` with the default model from config.
 
@@ -95,9 +100,10 @@ orchestrator.
 
 The `roko research` commands construct agents for deep research tasks.
 
-**Problem:** Research agents may need different model profiles (e.g.,
-Perplexity Sonar for web search) but use the same construction path as
-coding agents.
+**Problem:** Research agents may need different model profiles and search
+options. The routed path now handles Gemini grounding and Perplexity
+search-grounded research through the shared factory, but specialty endpoints
+such as Perplexity deep research still diverge.
 
 **Fix:** Configure research-specific model entries and use
 `create_agent_for_model` with the research model key.
@@ -106,7 +112,8 @@ coding agents.
 
 Internal helper that constructs agents for background tasks.
 
-**Problem:** Duplicates the construction logic from orchestrate.rs.
+**Problem:** Still needs to stay aligned with the shared factory options, even
+though the actual construction already routes through `create_agent_for_model`.
 
 **Fix:** Consolidate into `create_agent_for_model`.
 
@@ -204,12 +211,12 @@ the model key based on task context.
 
 | Site | Status | Notes |
 |---|---|---|
-| orchestrate.rs run_prepared_agent | **Not migrated** | Uses manual ClaudeCliAgent dispatch |
-| orchestrate.rs model selection | **Not migrated** | Hardcoded fallback model |
-| run.rs | **Not migrated** | Direct agent construction |
+| orchestrate.rs run_prepared_agent | **Migrated for routed and no-routing paths** | Routed path and generic no-routing subprocesses use `create_agent_for_model`; only known protocol subprocess commands stay manual |
+| orchestrate.rs model selection | **Partially migrated** | Routing config now feeds the factory path; known-protocol no-config behavior still stays explicit |
+| run.rs | **Migrated for routed and no-routing paths** | Routed path and generic no-routing subprocesses use the shared factory; only known protocol subprocess commands stay manual |
 | prd.rs | **Not migrated** | Direct agent construction |
-| research.rs | **Not migrated** | Direct agent construction |
-| agent_exec.rs | **Not migrated** | Direct agent construction |
+| research.rs | **Partially migrated** | Gemini grounding and Perplexity search-grounded paths now use the shared factory; specialty endpoints still diverge |
+| agent_exec.rs | **Migrated** | Background task creation now goes through `create_agent_for_model` |
 | Tests | **N/A** | Direct construction is correct |
 | provider/mod.rs factory | **Implemented** | `create_agent_for_model` works |
 

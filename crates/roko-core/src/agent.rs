@@ -20,6 +20,7 @@
 //! inference) and the per-role budget table in `mori-agents/03`.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fmt;
 
 use crate::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
@@ -277,6 +278,155 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
         profile: None,
         backend,
     }
+}
+
+/// Task requirements that inform automatic provider/model selection.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskRequirements {
+    /// Does the task need web search / grounded retrieval?
+    pub needs_web_search: bool,
+    /// Does the task need provider-native code execution?
+    pub needs_code_execution: bool,
+    /// Does the task benefit from extended thinking / deep reasoning?
+    pub needs_thinking: bool,
+    /// Does the task need vision / image analysis?
+    pub needs_vision: bool,
+    /// Does the task need structured output support?
+    pub needs_structured_output: bool,
+    /// Minimum context window required in tokens.
+    pub min_context_window: u64,
+    /// Maximum acceptable cost per million output tokens.
+    pub max_cost_output_per_m: Option<f64>,
+    /// Maximum acceptable latency in milliseconds.
+    pub max_latency_ms: Option<u64>,
+}
+
+/// Score a model profile against task requirements.
+///
+/// Returns `None` if the profile fails any hard requirement.
+#[must_use]
+pub fn score_model_for_task(
+    profile: &ModelProfile,
+    requirements: &TaskRequirements,
+) -> Option<f64> {
+    let supports_web_search =
+        profile.supports_web_search || profile.supports_search || profile.supports_grounding;
+    let supports_structured = profile.supports_tools || profile.supports_partial;
+
+    if requirements.needs_web_search && !supports_web_search {
+        return None;
+    }
+    if requirements.needs_code_execution && !profile.supports_code_execution {
+        return None;
+    }
+    if requirements.needs_thinking && !profile.supports_thinking {
+        return None;
+    }
+    if requirements.needs_vision && !profile.supports_vision {
+        return None;
+    }
+    if requirements.needs_structured_output && !supports_structured {
+        return None;
+    }
+    if profile.context_window < requirements.min_context_window {
+        return None;
+    }
+    if let (Some(max_cost), Some(model_cost)) = (
+        requirements.max_cost_output_per_m,
+        profile.cost_output_per_m,
+    ) {
+        if model_cost > max_cost {
+            return None;
+        }
+    }
+
+    let mut score = 1.0;
+    if requirements.needs_web_search && supports_web_search {
+        score += 0.2;
+    }
+    if requirements.needs_code_execution && profile.supports_code_execution {
+        score += 0.15;
+    }
+    if requirements.needs_thinking && profile.supports_thinking {
+        score += 0.2;
+    }
+    if requirements.needs_vision && profile.supports_vision {
+        score += 0.15;
+    }
+    if requirements.needs_structured_output && supports_structured {
+        score += 0.1;
+    }
+    if profile.supports_caching {
+        score += 0.05;
+    }
+
+    if requirements.min_context_window > 0 {
+        let ratio = profile.context_window as f64 / requirements.min_context_window as f64;
+        score += (ratio.min(2.0) - 1.0).max(0.0) * 0.15;
+    }
+
+    match (requirements.max_cost_output_per_m, profile.cost_output_per_m) {
+        (Some(max_cost), Some(model_cost)) if max_cost > 0.0 => {
+            score += ((max_cost - model_cost) / max_cost).max(0.0) * 0.35;
+        }
+        (None, Some(model_cost)) => {
+            score += (1.0 / (1.0 + model_cost)).min(0.2);
+        }
+        _ => {}
+    }
+
+    if let Some(max_latency_ms) = requirements.max_latency_ms {
+        if max_latency_ms <= 5_000 && !profile.supports_thinking {
+            score += 0.1;
+        }
+    }
+
+    Some(score)
+}
+
+/// Select the best model for a task from the configured model registry.
+#[must_use]
+pub fn select_model_for_task(
+    config: &RokoConfig,
+    requirements: &TaskRequirements,
+) -> Option<String> {
+    select_model_for_task_with_bonus(config, requirements, |_| 0.0)
+}
+
+/// Select the best model for a task, with an additional learned bonus per model.
+#[must_use]
+pub fn select_model_for_task_with_bonus<F>(
+    config: &RokoConfig,
+    requirements: &TaskRequirements,
+    mut learned_bonus: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> f64,
+{
+    let mut candidates: Vec<(String, f64, u64, f64)> = config
+        .effective_models()
+        .into_iter()
+        .filter_map(|(key, profile)| {
+            let score = score_model_for_task(&profile, requirements)?;
+            Some((
+                key.clone(),
+                score + learned_bonus(&key) * 0.5,
+                profile.context_window,
+                profile.cost_output_per_m.unwrap_or(f64::MAX),
+            ))
+        })
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then(right.2.cmp(&left.2))
+            .then_with(|| left.3.partial_cmp(&right.3).unwrap_or(Ordering::Equal))
+            .then(left.0.cmp(&right.0))
+    });
+    candidates.into_iter().next().map(|(key, _, _, _)| key)
 }
 
 // ─── ModelTier (capability class) ─────────────────────────────────────────
@@ -1080,6 +1230,134 @@ mod tests {
         assert_eq!(resolved.backend, AgentBackend::Claude);
         assert!(resolved.provider_config.is_none());
         assert!(resolved.profile.is_none());
+    }
+
+    #[test]
+    fn score_model_for_task_disqualifies_missing_hard_requirements() {
+        let profile = ModelProfile {
+            provider: "openai".to_owned(),
+            slug: "gpt-5-mini".to_owned(),
+            context_window: 128_000,
+            max_output: Some(8_192),
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_owned(),
+            cost_input_per_m: None,
+            cost_output_per_m: Some(2.0),
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            supports_search: false,
+            supports_citations: false,
+            supports_async: false,
+            is_embedding_model: false,
+            search_context_size: None,
+            cost_per_request: None,
+        };
+
+        let requirements = TaskRequirements {
+            needs_thinking: true,
+            ..TaskRequirements::default()
+        };
+        assert!(score_model_for_task(&profile, &requirements).is_none());
+    }
+
+    #[test]
+    fn select_model_for_task_prefers_matching_capabilities_and_cost() {
+        let mut config = RokoConfig::default();
+        config.models.insert(
+            "cheap".to_owned(),
+            ModelProfile {
+                provider: "openai".to_owned(),
+                slug: "gpt-5-mini".to_owned(),
+                context_window: 128_000,
+                max_output: Some(8_192),
+                supports_tools: true,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: false,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_owned(),
+                cost_input_per_m: None,
+                cost_output_per_m: Some(2.0),
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: false,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+        config.models.insert(
+            "capable".to_owned(),
+            ModelProfile {
+                provider: "gemini".to_owned(),
+                slug: "gemini-2.5-pro".to_owned(),
+                context_window: 1_048_576,
+                max_output: Some(65_536),
+                supports_tools: true,
+                supports_thinking: true,
+                supports_vision: true,
+                supports_web_search: true,
+                supports_mcp_tools: true,
+                supports_partial: true,
+                supports_grounding: true,
+                supports_code_execution: true,
+                supports_caching: true,
+                provider_routing: None,
+                tool_format: "openai_json".to_owned(),
+                cost_input_per_m: None,
+                cost_output_per_m: Some(8.0),
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: true,
+                supports_citations: false,
+                supports_async: false,
+                is_embedding_model: false,
+                search_context_size: None,
+                cost_per_request: None,
+            },
+        );
+        let requirements = TaskRequirements {
+            needs_web_search: true,
+            needs_code_execution: true,
+            needs_thinking: true,
+            min_context_window: 150_000,
+            max_cost_output_per_m: Some(15.0),
+            ..TaskRequirements::default()
+        };
+
+        let selected = select_model_for_task(&config, &requirements).expect("selected model");
+        assert_eq!(selected, "capable");
     }
 
     #[test]

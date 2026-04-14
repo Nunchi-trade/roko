@@ -1967,6 +1967,7 @@ impl CascadeRouter {
             requested_model: meta.requested_model.clone(),
             role: meta.role.clone(),
             task_complexity: meta.task_complexity.clone(),
+            task_category: meta.task_category.clone(),
             selected_provider: log.provider_for_model(selected_model),
             selected_model: selected_model.to_string(),
             routing_stage: meta.routing_stage.clone(),
@@ -3174,6 +3175,7 @@ mod tests {
             requested_model: "claude-sonnet-4-5".to_string(),
             role: "implementer".to_string(),
             task_complexity: "standard".to_string(),
+            task_category: "implementation".to_string(),
             routing_stage: explanation.stage.label().to_string(),
             routing_reason: "role_default".to_string(),
         };

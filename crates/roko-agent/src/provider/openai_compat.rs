@@ -23,10 +23,12 @@ use std::sync::Arc;
 
 use crate::Agent;
 use crate::codex_agent::{CodexAgent, DEFAULT_MAX_TOKENS};
-use crate::dispatcher::{HandlerResolver, ToolDispatcher};
+use crate::dispatcher::HandlerResolver;
 use crate::http::ReqwestPoster;
 use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
-use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::provider::{
+    AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
+};
 use crate::tool_loop::backends::create_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
 use crate::translate::{OpenAiTranslator, Translator};
@@ -282,7 +284,7 @@ fn add_mcp_tools_to_registry(registry: &mut DynamicToolRegistry, mcp_tools: Vec<
     }
 }
 
-fn tool_registry_for_options(
+pub(crate) fn tool_registry_for_options(
     options: &AgentOptions,
 ) -> Result<(Arc<dyn ToolRegistry>, Vec<ToolDef>), AgentCreationError> {
     let base = StaticToolRegistry::new();
@@ -354,7 +356,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             let (registry, tools) = tool_registry_for_options(options)?;
             let resolver: Arc<dyn HandlerResolver> =
                 Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
-            let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+            let dispatcher = build_tool_dispatcher(registry, resolver);
             let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
             let mut tool_loop_provider = provider.clone();
             tool_loop_provider.timeout_ms = Some(timeout);
@@ -384,10 +386,6 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .with_extra_headers(extra_headers)
             .with_extra_body_params(extra_body_params)
             .with_name(agent_name);
-
-        if let Some(provider_semaphores) = options.provider_semaphores.clone() {
-            agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
-        }
 
         if let Some(provider_semaphores) = options.provider_semaphores.clone() {
             agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
@@ -833,6 +831,98 @@ mod tests {
                 "type": "enabled"
             })
         );
+
+        handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn adapter_uses_codex_fallback_for_non_tool_models() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "codex-fallback-ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18
+            }
+        })
+        .to_string();
+        let (base_url, captured, handle) = spawn_chat_server(response);
+
+        let provider = ProviderConfig {
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some(format!("{base_url}/v1")),
+            api_key_env: Some("PATH".to_string()),
+            command: None,
+            args: None,
+            timeout_ms: Some(1_500),
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
+            extra_headers: None,
+            max_concurrent: None,
+        };
+        let model = ModelProfile {
+            provider: "openai".to_string(),
+            slug: "gpt-4.1-mini".to_string(),
+            context_window: 128_000,
+            max_output: Some(2_048),
+            supports_tools: false,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            ..Default::default()
+        };
+        let options = AgentOptions {
+            timeout_ms: Some(2_500),
+            name: "codex-fallback-agent".to_string(),
+            ..Default::default()
+        };
+
+        let agent = OpenAiCompatAdapter
+            .create_agent(&provider, &model, &options)
+            .expect("create codex fallback agent");
+        assert_eq!(agent.name(), "codex-fallback-agent");
+
+        let result = agent.run(&prompt("hello"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(
+            result.output.body.as_text().unwrap_or(""),
+            "codex-fallback-ok"
+        );
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("captured request");
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+
+        let body = request.split("\r\n\r\n").nth(1).expect("request body");
+        let parsed: Value = serde_json::from_str(body).expect("json request body");
+        assert_eq!(parsed["model"], "gpt-4.1-mini");
+        assert_eq!(parsed["max_tokens"], 2048);
+        assert_eq!(parsed["messages"][0]["content"], "hello");
+        assert!(parsed.get("tools").is_none());
 
         handle.join().expect("server thread");
     }

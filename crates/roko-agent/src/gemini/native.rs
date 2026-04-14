@@ -21,6 +21,10 @@ use super::types::{
     GenerateContentRequest, GenerateContentResponse, GenerationConfig, Part, SafetySettingRequest,
     ThinkingConfig,
 };
+use super::wire::{
+    generate_content_endpoint, generate_content_headers, send_generate_content_request,
+    serialize_generate_content_request,
+};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
@@ -92,21 +96,6 @@ impl GeminiNativeAgent {
     fn with_http_poster(mut self, poster: Arc<dyn HttpPoster>) -> Self {
         self.poster = poster;
         self
-    }
-
-    fn endpoint(&self) -> String {
-        format!(
-            "{}/v1beta/models/{}:generateContent",
-            self.base_url.trim_end_matches('/'),
-            self.model.slug
-        )
-    }
-
-    fn headers(&self) -> Vec<(String, String)> {
-        vec![
-            ("x-goog-api-key".to_string(), self.api_key.clone()),
-            ("content-type".to_string(), "application/json".to_string()),
-        ]
     }
 
     fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
@@ -354,7 +343,7 @@ impl Agent for GeminiNativeAgent {
         };
 
         let request = self.build_request(&[ChatMessage::User(prompt_text)], &[]);
-        let body = match serde_json::to_vec(&request) {
+        let body = match serialize_generate_content_request(&request) {
             Ok(body) => body,
             Err(error) => {
                 return self.failure(
@@ -364,11 +353,14 @@ impl Agent for GeminiNativeAgent {
                 );
             }
         };
-
-        let response_text = match self
-            .poster
-            .post_json(&self.endpoint(), &self.headers(), &body, self.timeout_ms)
-            .await
+        let response_text = match send_generate_content_request(
+            &*self.poster,
+            &generate_content_endpoint(&self.base_url, &self.model.slug),
+            &generate_content_headers(&self.api_key),
+            &body,
+            self.timeout_ms,
+        )
+        .await
         {
             Ok(response) => response,
             Err(error) => {

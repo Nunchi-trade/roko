@@ -266,7 +266,7 @@ EFE(entry) = -E[utility_gain | entry_included] + E[H_reduction | entry_included]
 
 Entries with high expected utility gain (they help the agent achieve its goal) and high expected uncertainty reduction (they resolve an open question) are prioritized. Entries that would consume many tokens without reducing uncertainty or improving outcomes are deprioritized.
 
-This produces a principled alternative to top-k retrieval or manual priority ordering. The `PredictiveScorer` (target implementation in `roko-core`) computes this EFE approximation for each candidate Engram:
+This produces a principled alternative to top-k retrieval or manual priority ordering. The `PredictiveScorer` now lives in `roko-core` and is wired into `roko-cli` prompt-section ranking; broader subsystem adoption remains in progress. It computes this EFE approximation for each candidate Engram:
 
 ```rust
 /// Scores Engrams using an active inference EFE approximation.
@@ -543,8 +543,8 @@ impl LinUCBArm {
 
 ### Integration wiring
 
-1. `PredictiveScorer` is registered as the default `Scorer` implementation in `roko-core`.
-2. The `Composer` calls `PredictiveScorer::score()` when ranking Engrams for context assembly.
+1. `PredictiveScorer` is implemented in `roko-core`.
+2. The orchestration prompt path composes it with `SectionScorer` (and now `CatalystScorer`) when ranking prompt sections for context assembly.
 3. `CascadeRouter` (Stage 3) uses `LinUCBArm::score()` for model selection within a tier.
 4. `EFEEstimate` records are persisted to `.roko/learn/efe-estimates.jsonl` for post-hoc analysis.
 5. The `GenerativeModel` persists to `.roko/learn/generative-model.json` and is loaded on resume.
@@ -584,9 +584,9 @@ The active inference compute allocation is implemented in stages:
 
 The current implementation uses prediction error vs. adaptive threshold — a heuristic approximation of EFE. This is what [08-dual-process-t0-t1-t2.md](./08-dual-process-t0-t1-t2.md) describes.
 
-### Stage 2: PredictiveScorer (Near-term)
+### Stage 2: PredictiveScorer (Implemented)
 
-Add the `PredictiveScorer` to `roko-core` for EFE-based context selection. This doesn't change the tier gating — it improves context assembly within T1/T2.
+`PredictiveScorer` now provides EFE-style context ranking in `roko-core`, backed by routing-log calibration and used in the orchestration prompt path. This does not yet replace tier gating, but it does improve context assembly within T1/T2.
 
 ### Stage 3: ActiveInferenceRouter (Target)
 

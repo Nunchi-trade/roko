@@ -6,11 +6,11 @@ The docs specify far more than naming changes. This document captures every stru
 
 ## 1. CORE TYPE SYSTEM (roko-core)
 
-### Score: 4-axis → 7-axis
-- **Code has**: confidence, novelty, utility, reputation
-- **Docs add**: precision, salience, coherence (3 extended axes)
-- **Formula**: unchanged (`confidence × (1 + novelty) × (1 + utility) × reputation`)
-- **Impact**: Score struct extension, scorer implementations, anywhere Score is constructed
+### Score: 4-axis → 7-axis — IMPLEMENTED
+- **Code has**: confidence, novelty, utility, reputation, precision, salience, coherence
+- **Docs now match**: the expanded score model is already present in code and scorer implementations
+- **Formula**: unchanged for the base score, with salience/coherence modifiers already wired where needed
+- **Remaining gap**: none for score-axis expansion; follow-on work is elsewhere in the type system
 
 ### Signal/Engram: Attestation Integration Is Only Partially Closed
 - **Code now has**: `attestation: Option<Attestation>` in `roko-core::Engram`, plus core attestation types and serde support
@@ -92,16 +92,18 @@ Maps Erlang restart strategies to plan execution recovery.
 - `RoleProfile` — clarity, differentiation, alignment scores
 - Allowed transitions matrix to prevent unsafe role morphs
 
-### Provider: Automatic Selection — MISSING
-- `TaskRequirements` struct — what a task needs from a provider
-- `score_model_for_task()` — score provider-model pairs against requirements
-- `select_model_for_task()` — automatic selection based on capabilities + cost
-- Current: manual model selection via `model_hint` in tasks.toml
+### Provider: Automatic Selection — IMPLEMENTED / PARTIAL
+- `TaskRequirements` exists in `roko-core`
+- `score_model_for_task()` and `select_model_for_task()` exist and perform hard capability filtering plus cost/capability scoring
+- `roko-cli::orchestrate` now derives task requirements from tier / role / task text / tools and re-ranks healthy models with learned local reward bonuses
+- Remaining gap: other secondary runtimes still use narrower heuristics or fixed models, so provider-aware selection is real but not yet universal
 
-### LlmBackend: HTTP Implementations — MISSING
-- `LlmBackend` trait exists, only `OllamaLlmBackend` implements it
-- **Missing**: `OpenAiCompatBackend`, `AnthropicApiBackend`
-- These are needed for HTTP API providers to use the ToolLoop (tool-calling loop)
+### LlmBackend: HTTP Implementations — PARTIAL
+- `LlmBackend` now has production HTTP implementations for Ollama and OpenAI-compatible providers
+- `OpenAiCompatAdapter` already routes tool-capable HTTP models through `ToolLoop` + `ToolDispatcher`
+- Gemini's simple OpenAI-compatible models now also use that shared tool-loop path instead of a dedicated compat-agent branch
+- Anthropic API and Perplexity tool-capable chat models now also flow through shared backend-driven tool loops
+- Remaining gap: Gemini-native request families still use a dedicated path, while non-chat specialty endpoints (for example embeddings or async deep-research) remain adapter-specific by design
 
 ---
 
@@ -312,7 +314,7 @@ Four replay modes specified, not implemented:
 - ScrubPolicy: 9 regex patterns (API keys, JWTs, etc.)
 - RateLimiter: sliding-window per (role, tool)
 
-`ToolDispatcher` is imported in orchestrate.rs but never instantiated. Safety is completely dormant.
+`ToolDispatcher` is no longer completely dormant. Routed HTTP/tool-loop paths now reach it, but known-protocol subprocess branches and specialty endpoints still bypass it.
 
 ---
 
@@ -354,11 +356,11 @@ Four replay modes specified, not implemented:
 | Category | Items | Type |
 |----------|-------|------|
 | **Naming/Mechanical** | 5 | Crate renames, type renames, metadata updates |
-| **Type System Extensions** | 4 | 7-axis score, attestation, emotional tags, knowledge tiers |
+| **Type System Extensions** | 2 | attestation, emotional tags |
 | **Missing Algorithms** | 12 | CPM, task fusion, speculative exec, NREM replay, REM imagination, EWC, curriculum learning, etc. |
 | **Missing Subsystems** | 6 | Pheromone field, Agent Mesh, Morphogenetics, T0 Probes, Heartbeat Theta/Delta, Adaptive Clock |
 | **Missing Integrations** | 8 | Safety→orchestrator, Daimon→CascadeRouter, Neuro→Compose, Dreams→Heartbeat, etc. |
 | **Missing Agent Patterns** | 5 | Composition, introspection, metamorphosis, OCaps, supervision strategies |
 | **Missing Infrastructure** | 4 | HTTP LlmBackends, daemon mode, WASM, lifecycle management |
 
-Total: ~44 distinct implementation gaps beyond naming changes.
+Total: ~42 distinct implementation gaps beyond naming changes.

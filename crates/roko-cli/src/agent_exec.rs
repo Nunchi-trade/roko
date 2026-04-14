@@ -44,10 +44,37 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
 /// The Claude CLI adapter handles system prompt wiring, settings hooks,
 /// MCP discovery, resume session threading, and stderr filtering.
 pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
+    run_agent_capture_impl(opts, true).await
+}
+
+/// Drive `claude` with the given prompt and return `(exit_code, output_text)`
+/// without echoing the agent's rendered output to stdout.
+pub async fn run_agent_capture_silent(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
+    run_agent_capture_impl(opts, false).await
+}
+
+async fn run_agent_capture_impl(
+    opts: AgentExecOpts<'_>,
+    echo_output: bool,
+) -> Result<(i32, String)> {
     let mut routing_config = roko_core::config::load_config(opts.workdir)
         .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
     routing_config.apply_process_env();
     let routing_enabled = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
+
+    // Fail fast if the agent command is still the test-only default.
+    // `"cat"` just echoes the prompt back, producing garbage output.
+    if !routing_enabled {
+        let cmd = command_from_config(opts.workdir).unwrap_or_default();
+        if cmd == "cat" || cmd.is_empty() {
+            anyhow::bail!(
+                "agent command is {:?} (the test-only default). \
+                 Set `command = \"claude\"` (or another agent CLI) in roko.toml under [agent], \
+                 or re-run `roko init` to generate a working config.",
+                if cmd.is_empty() { "cat" } else { &cmd }
+            );
+        }
+    }
     let model = opts
         .model
         .map(str::to_string)
@@ -77,6 +104,7 @@ pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)>
             cached_content: None,
             tools: None,
             mcp_config: None,
+            working_dir: Some(opts.workdir.to_path_buf()),
             provider_semaphores: None,
             env: opts.env_vars.to_vec(),
             extra_args,
@@ -94,7 +122,7 @@ pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)>
     let result = agent.run(&prompt, &Context::now()).await;
 
     let rendered = result.output.body.as_text().unwrap_or("").to_string();
-    if !rendered.is_empty() {
+    if echo_output && !rendered.is_empty() {
         print!("{rendered}");
     }
 
@@ -112,6 +140,23 @@ pub fn model_from_config(workdir: &Path) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("model") {
+            let rest = rest.trim().strip_prefix('=')?;
+            let rest = rest.trim().trim_matches('"');
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read agent command from roko.toml config if available.
+pub fn command_from_config(workdir: &Path) -> Option<String> {
+    let config_path = workdir.join("roko.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("command") {
             let rest = rest.trim().strip_prefix('=')?;
             let rest = rest.trim().trim_matches('"');
             if !rest.is_empty() {

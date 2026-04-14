@@ -148,7 +148,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::dispatcher::{HandlerResolver, ToolDispatcher};
+    use crate::dispatcher::HandlerResolver;
+    use crate::provider::build_tool_dispatcher;
     use crate::tool_loop::{LlmBackend, LlmError, ToolLoop};
     use crate::translate::{
         BackendResponse, RenderedResults, RenderedTools, Translator, TranslatorError,
@@ -300,7 +301,7 @@ mod tests {
                     None
                 }
             });
-        let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
+        let dispatcher = build_tool_dispatcher(registry, resolver);
         let translator: Arc<dyn Translator> = Arc::new(MockTranslator);
         ToolLoop::new(translator, dispatcher, backend)
     }

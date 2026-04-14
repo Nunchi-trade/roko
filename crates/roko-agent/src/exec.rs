@@ -11,9 +11,12 @@ use crate::process::{
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -33,6 +36,7 @@ pub struct ExecAgent {
     program: String,
     args: Vec<String>,
     env: Vec<(String, String)>,
+    current_dir: Option<PathBuf>,
     timeout_ms: u64,
     name: String,
 }
@@ -47,6 +51,7 @@ impl ExecAgent {
             program,
             args,
             env: Vec::new(),
+            current_dir: None,
             timeout_ms: 120_000,
             name,
         }
@@ -86,6 +91,13 @@ impl ExecAgent {
         }
         self
     }
+
+    /// Run the subprocess from a specific working directory.
+    #[must_use]
+    pub fn with_current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(dir.into());
+        self
+    }
 }
 
 #[async_trait]
@@ -116,6 +128,9 @@ impl Agent for ExecAgent {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
+        if let Some(dir) = &self.current_dir {
+            cmd.current_dir(dir);
+        }
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -135,8 +150,8 @@ impl Agent for ExecAgent {
             register_spawned_pid(pid);
         }
 
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
         // Write prompt to stdin, then close it.
         if let Some(mut stdin) = child.stdin.take() {
@@ -152,10 +167,88 @@ impl Agent for ExecAgent {
             drop(stdin);
         }
 
+        eprintln!(
+            "[{}] agent started (pid {}, timeout {}s)",
+            self.name,
+            pid.unwrap_or(0),
+            self.timeout_ms / 1000
+        );
+
+        let has_activity = Arc::new(AtomicBool::new(false));
+
+        // Stream stdout in chunks, reporting progress without altering content.
+        let stdout_name = self.name.clone();
+        let stdout_activity = has_activity.clone();
+        let stdout_handle = tokio::spawn(async move {
+            let Some(mut pipe) = stdout_pipe else {
+                return String::new();
+            };
+            let mut buf = [0u8; 8192];
+            let mut collected = Vec::new();
+            let mut last_report: usize = 0;
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        collected.extend_from_slice(&buf[..n]);
+                        stdout_activity.store(true, Ordering::Relaxed);
+                        // Report progress every ~4KB.
+                        if collected.len() - last_report >= 4096 || last_report == 0 {
+                            eprintln!(
+                                "[{stdout_name}] receiving output... ({} bytes so far)",
+                                collected.len()
+                            );
+                            last_report = collected.len();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&collected).into_owned()
+        });
+
+        // Stream stderr in real time.
+        let stderr_name = self.name.clone();
+        let stderr_activity = has_activity.clone();
+        let stderr_handle = tokio::spawn(async move {
+            let Some(pipe) = stderr_pipe else {
+                return String::new();
+            };
+            let reader = BufReader::new(pipe);
+            let mut lines = reader.lines();
+            let mut collected = String::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    stderr_activity.store(true, Ordering::Relaxed);
+                    eprintln!("[{stderr_name}] {line}");
+                }
+                collected.push_str(&line);
+                collected.push('\n');
+            }
+            collected
+        });
+
+        // Heartbeat when no output activity.
+        let heartbeat_name = self.name.clone();
+        let heartbeat_started = started;
+        let heartbeat_activity = has_activity.clone();
+        let heartbeat_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if !heartbeat_activity.swap(false, Ordering::Relaxed) {
+                    let elapsed = heartbeat_started.elapsed().as_secs();
+                    eprintln!("[{heartbeat_name}] waiting for response... ({elapsed}s elapsed)");
+                }
+            }
+        });
+
         // Wait for exit with timeout.
         let status = match timeout(Duration::from_millis(self.timeout_ms), child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
+                heartbeat_handle.abort();
                 if track_pids()
                     && let Some(pid) = pid
                 {
@@ -164,6 +257,7 @@ impl Agent for ExecAgent {
                 return self.failure_signal(input, &format!("wait failed: {e}"), started);
             }
             Err(_) => {
+                heartbeat_handle.abort();
                 let _ = kill_tree(&mut child, Duration::from_millis(GRACE_STDIN_CLOSE_MS)).await;
                 if track_pids()
                     && let Some(pid) = pid
@@ -183,20 +277,30 @@ impl Agent for ExecAgent {
             unregister_pid(pid);
         }
 
-        let stdout = read_pipe_to_string(&mut stdout_pipe).await;
-        let stderr = read_pipe_to_string(&mut stderr_pipe).await;
+        heartbeat_handle.abort();
+        let elapsed_secs = started.elapsed().as_secs();
+
+        let stdout = stdout_handle.await.unwrap_or_default();
+        let stderr = stderr_handle.await.unwrap_or_default();
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         if !status.success() {
             let code = status
                 .code()
                 .map_or_else(|| "signal".into(), |c| c.to_string());
+            eprintln!("[{}] failed (exit {code}) after {elapsed_secs}s", self.name);
             return self.failure_signal(
                 input,
                 &format!("exit {code}: {}", first_line(&stderr)),
                 started,
             );
         }
+
+        eprintln!(
+            "[{}] completed successfully ({elapsed_secs}s, {} bytes)",
+            self.name,
+            stdout.len()
+        );
 
         let out_signal = input
             .derive(Kind::AgentOutput, Body::text(stdout.clone()))
@@ -316,6 +420,18 @@ mod tests {
         let result = agent.run(&prompt(""), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap().trim(), "alpha-beta");
+    }
+
+    #[tokio::test]
+    async fn current_dir_reaches_subprocess() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let agent = ExecAgent::new("pwd", vec![]).with_current_dir(temp.path());
+        let result = agent.run(&prompt(""), &Context::now()).await;
+        assert!(result.success);
+        let expected = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+        let actual = std::fs::canonicalize(result.output.body.as_text().unwrap().trim())
+            .expect("canonical subprocess pwd");
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]

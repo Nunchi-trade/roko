@@ -7,16 +7,18 @@ use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 
 use crate::http::{HttpPostError, HttpPoster};
-use crate::provider::AgentCreationError;
 use crate::provider::openai_compat::{
     base_url_for_tool_loop, build_extra_body_params, max_tokens_for_model, resolve_api_key,
 };
+use crate::provider::AgentCreationError;
 use crate::tool_loop::LlmBackend;
 
 /// Tail-latency hedging for latency-sensitive requests.
+pub mod gemini_native;
 pub mod hedged;
 pub mod openai_compat;
 
+pub use gemini_native::GeminiNativeBackend;
 pub use hedged::HedgedBackend;
 pub use openai_compat::OpenAiCompatBackend;
 
@@ -75,7 +77,7 @@ pub fn create_backend(
 mod tests {
     use super::*;
     use crate::translate::{BackendResponse, RenderedTools, SessionState};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::collections::HashMap;
     use std::sync::Mutex;
 

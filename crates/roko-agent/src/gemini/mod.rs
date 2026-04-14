@@ -5,6 +5,7 @@ pub mod cache;
 pub mod compat;
 pub mod embed;
 pub mod native;
+pub(crate) mod wire;
 pub mod types;
 
 pub use adapter::GeminiAdapter;

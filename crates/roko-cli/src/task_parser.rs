@@ -173,7 +173,7 @@ pub enum TaskValidationIssue {
         /// Missing field name.
         field: &'static str,
     },
-    /// A dependency points at a task that does not exist in the plan.
+    /// A dependency points at a task or plan that does not exist.
     UnknownDependency {
         /// Task identifier being validated.
         task_id: String,
@@ -235,7 +235,7 @@ impl std::fmt::Display for TaskValidationIssue {
                 task_id,
                 dependency,
             } => {
-                write!(f, "{task_id}: depends on unknown task `{dependency}`")
+                write!(f, "{task_id}: depends on unknown dependency `{dependency}`")
             }
             Self::CircularDependency { cycle } => {
                 write!(f, "circular dependency detected: {}", cycle.join(" -> "))
@@ -311,6 +311,24 @@ fn default_timeout_secs() -> u64 {
 
 fn default_max_retries() -> u32 {
     3
+}
+
+fn is_valid_plan_dependency_reference(dependency: &str, current_plan: &str) -> bool {
+    let dependency = dependency.trim();
+    if dependency.is_empty() || dependency == current_plan {
+        return false;
+    }
+    if dependency.starts_with('.') || dependency.starts_with('-') || dependency.contains("..") {
+        return false;
+    }
+
+    dependency.chars().all(|ch| {
+        !matches!(
+            ch,
+            '/' | '\\' | '\0' | '~' | '^' | ':' | '?' | '*' | '[' | '@'
+        ) && !ch.is_whitespace()
+            && !ch.is_control()
+    })
 }
 
 fn infer_operating_frequency(description: Option<&str>) -> OperatingFrequency {
@@ -727,6 +745,7 @@ impl TasksFile {
     pub fn validate_structure(&self) -> Vec<TaskValidationIssue> {
         let mut issues = Vec::new();
         let task_ids: HashSet<&str> = self.tasks.iter().map(|task| task.id.as_str()).collect();
+        let current_plan = self.meta.plan.trim();
 
         for task in &self.tasks {
             let tid = task.id.trim();
@@ -755,6 +774,15 @@ impl TasksFile {
 
             for dependency in &task.depends_on {
                 if !task_ids.contains(dependency.as_str()) {
+                    issues.push(TaskValidationIssue::UnknownDependency {
+                        task_id: task.id.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+
+            for dependency in &task.depends_on_plan {
+                if !is_valid_plan_dependency_reference(dependency, current_plan) {
                     issues.push(TaskValidationIssue::UnknownDependency {
                         task_id: task.id.clone(),
                         dependency: dependency.clone(),
@@ -1371,21 +1399,68 @@ depends_on = ["missing"]
         .unwrap();
 
         let issues = tasks.validate_structure();
-        assert!(
-            issues
-                .iter()
-                .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. }))
-        );
-        assert!(
-            issues
-                .iter()
-                .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. }))
-        );
-        assert!(
-            issues
-                .iter()
-                .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode))
-        );
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::UnknownDependency { .. })));
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::CircularDependency { .. })));
+        assert!(issues
+            .iter()
+            .any(|issue| matches!(issue, TaskValidationIssue::NoStartNode)));
+    }
+
+    #[test]
+    fn validate_structure_accepts_valid_plan_dependencies() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "consumer-plan"
+total = 1
+
+[[task]]
+id = "T1"
+title = "consume upstream work"
+description = "wait for upstream"
+depends_on = []
+depends_on_plan = ["upstream-core", "shared-utils"]
+"#,
+        )
+        .unwrap();
+
+        assert!(tasks.validate_structure().is_empty());
+    }
+
+    #[test]
+    fn validate_structure_reports_invalid_plan_dependencies() {
+        let tasks: TasksFile = toml::from_str(
+            r#"
+[meta]
+plan = "consumer-plan"
+total = 1
+
+[[task]]
+id = "T1"
+title = "consume upstream work"
+description = "wait for upstream"
+depends_on = []
+depends_on_plan = ["consumer-plan", "upstream:task"]
+"#,
+        )
+        .unwrap();
+
+        let issues = tasks.validate_structure();
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().any(|issue| matches!(
+            issue,
+            TaskValidationIssue::UnknownDependency { dependency, .. }
+                if dependency == "consumer-plan"
+        )));
+        assert!(issues.iter().any(|issue| matches!(
+            issue,
+            TaskValidationIssue::UnknownDependency { dependency, .. }
+                if dependency == "upstream:task"
+        )));
     }
 
     #[test]

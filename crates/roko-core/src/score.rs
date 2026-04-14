@@ -120,6 +120,7 @@ impl Score {
     /// - novelty and utility act as multipliers (additive bonuses to 1.0)
     /// - reputation directly scales the result
     /// - salience and coherence softly damp or boost the final ranking
+    /// - precision is tracked separately and does not affect the scalar score
     #[must_use]
     pub fn effective(&self) -> f32 {
         let salience_factor = if self.salience == 0.0 {
@@ -232,6 +233,27 @@ mod tests {
     fn zero_extended_axes_preserve_legacy_effective_score() {
         let s = Score::new_extended(0.5, 1.0, 1.0, 2.0, 0.0, 0.0, 0.0);
         assert!((s.effective() - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn serde_defaults_missing_extended_axes_to_zero() {
+        let json = r#"{
+            "confidence": 0.25,
+            "novelty": 0.5,
+            "utility": 1.0,
+            "reputation": 2.0
+        }"#;
+        let score: Score = serde_json::from_str(json).unwrap();
+        assert_eq!(score.precision, 0.0);
+        assert_eq!(score.salience, 0.0);
+        assert_eq!(score.coherence, 0.0);
+    }
+
+    #[test]
+    fn precision_does_not_change_effective_score() {
+        let low_precision = Score::new_extended(0.75, 0.25, 0.5, 1.5, 0.0, 0.5, 0.5);
+        let high_precision = Score::new_extended(0.75, 0.25, 0.5, 1.5, 1.0, 0.5, 0.5);
+        assert!((low_precision.effective() - high_precision.effective()).abs() < 1e-6);
     }
 
     #[test]

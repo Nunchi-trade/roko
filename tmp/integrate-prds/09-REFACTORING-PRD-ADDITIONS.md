@@ -60,8 +60,8 @@ The docs specify concrete Policy trait implementations not yet in code:
 | FailureRatePolicy | Circuit breaker | Built |
 | StuckLoopPolicy | Detect agent loops | Built |
 | **DaimonPolicy** | Affect-modulated decisions | Built (routing) |
-| **PredictionPolicy** | Falsifiable predictions as learning signal | NOT IMPLEMENTED |
-| **CFactorPolicy** | Collective intelligence metrics | NOT IMPLEMENTED |
+| **PredictionPolicy** | Falsifiable predictions as learning signal | Built and wired into prompt-time oracle sections from routing calibration |
+| **CFactorPolicy** | Collective intelligence metrics | Built and wired into prompt-time oracle sections from live C-Factor history |
 
 ## New Scorer Implementations Specified
 
@@ -69,9 +69,9 @@ The docs specify concrete Policy trait implementations not yet in code:
 |--------|---------|--------|
 | RecencyScorer | Weight by freshness | Scaffold |
 | ReputationScorer | Weight by source trust | Scaffold |
-| CatalystScorer | Weight by downstream impact | NOT IMPLEMENTED |
+| CatalystScorer | Weight by downstream impact | Built and wired into prompt assembly via learned section-effect lift |
 | CompositeScorer | Combine scorers | Built (SumScorer/MulScorer) |
-| **PredictiveScorer** | Weight by prediction accuracy | NOT IMPLEMENTED |
+| **PredictiveScorer** | Weight by prediction accuracy | Built and wired into prompt assembly from routing-log calibration |
 
 ## New Router Implementations Specified
 

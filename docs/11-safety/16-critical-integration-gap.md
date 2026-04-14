@@ -4,7 +4,7 @@
 >
 > **Crate**: `roko-agent` (SafetyLayer, ToolDispatcher) and `roko-cli` (orchestrate.rs)
 >
-> **Synapse traits**: All safety traits (Gate, Policy) are built but not invoked from the production code path
+> **Synapse traits**: All safety traits (Gate, Policy) are built, but not yet invoked from every production code path
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md)
 
@@ -15,9 +15,9 @@
 
 ## Overview
 
-This document describes the **#1 integration gap** in the Roko safety architecture: the SafetyLayer is fully built and wired to the ToolDispatcher, but the ToolDispatcher is never invoked from the CLI pipeline that actually runs agents. This means that in production use, none of the safety guards described in this documentation topic are active.
+This document describes the **#1 remaining integration gap** in the Roko safety architecture: the SafetyLayer is fully built and wired to the ToolDispatcher, but that pipeline is not yet universal across the CLI/runtime branches that actually run agents. Routed HTTP provider paths now reach the ToolDispatcher for OpenAI-compatible providers, Anthropic API, Gemini compat models, Gemini-native non-grounding tool-capable models, and Perplexity tool-capable chat, but known-protocol subprocess paths and native or specialty endpoints still bypass it.
 
-This is not a design gap — the components exist and are connected. It is a **wiring gap** — the connected components are not called from the code path that matters. The pattern is documented in the implementation plan at `tmp/implementation-plans/11-inconsistencies.md` and is the single most important item for the safety architecture to become effective.
+This is not a design gap — the components exist and are connected. It is a **wiring gap** — some of the connected components are still not called from important execution paths. The pattern is documented in the implementation plan at `tmp/implementation-plans/11-inconsistencies.md` and remains a top-priority item for making the safety architecture universally effective.
 
 ---
 
@@ -76,7 +76,7 @@ Each stage emits an audit Engram via `emit_audit()`.
 
 ### What Is Not Wired
 
-**orchestrate.rs** (`roko-cli/src/orchestrate.rs`) is the main execution loop. It drives the plan-execute-gate-persist workflow that is the production code path for Roko. Here is how it currently dispatches agents:
+The primary routed branch in **orchestrate.rs** (`roko-cli/src/orchestrate.rs`) now goes through provider resolution and can reach `ToolLoop` + `ToolDispatcher` for supported HTTP backends. The remaining non-wired branches are the intentional known-protocol subprocess paths and backend-specific special cases that still dispatch agents like this:
 
 ```rust
 // orchestrate.rs — agent creation (simplified)
@@ -88,7 +88,7 @@ let mut agent = ExecAgent::new(
 let result = agent.run(&prompt).await?;
 ```
 
-`ExecAgent` spawns a subprocess (Claude CLI or another agent command) and captures its output. It does **not** go through the ToolDispatcher. This means:
+`ExecAgent` spawns a subprocess (Claude CLI or another protocol command) and captures its output. It does **not** go through the ToolDispatcher. In those remaining subprocess branches this means:
 
 - **No BashPolicy** — the agent's bash commands are not checked against deny patterns
 - **No GitPolicy** — force pushes and hard resets are not blocked
@@ -98,7 +98,7 @@ let result = agent.run(&prompt).await?;
 - **No RateLimiter** — there are no per-role, per-tool rate limits
 - **No audit emissions** — tool calls are not logged to the audit chain
 
-The SafetyLayer is imported in orchestrate.rs (`use roko_agent::SafetyLayer;`), and the ToolDispatcher is imported (`use roko_agent::dispatcher::ToolDispatcher;`), but neither is constructed or called in the execution path.
+The SafetyLayer and ToolDispatcher are no longer completely unreachable from the CLI runtime, but they are still not constructed or called in every execution branch.
 
 ### Why This Happened
 

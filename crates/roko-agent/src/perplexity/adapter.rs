@@ -6,15 +6,25 @@
 //! - Standard chat models → [`PerplexityChatAgent`]
 
 use crate::agent::{Agent, AgentResult};
+use crate::dispatcher::HandlerResolver;
 use crate::openai_agent::OpenAiAgent;
+use crate::perplexity::PerplexityDeepResearchAgent;
 use crate::perplexity::chat::PerplexityChatAgent;
+use crate::perplexity::tool_loop::{PerplexityToolLoopAgent, PerplexityToolLoopBackend};
 use crate::perplexity::types::SearchOptions;
-use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};
+use crate::provider::openai_compat::tool_registry_for_options;
+use crate::provider::{
+    AgentCreationError, AgentOptions, PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX, ProviderAdapter,
+    ProviderError, build_tool_dispatcher,
+};
+use crate::tool_loop::ToolLoop;
+use crate::translate::{OpenAiTranslator, Translator};
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
 use roko_core::{Context, Engram};
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Default Perplexity API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
@@ -55,52 +65,99 @@ impl Agent for PerplexityEmbedAgent {
     }
 }
 
-// ─── PerplexityDeepResearchAgent ─────────────────────────────────────────────
-
-/// Async deep-research Perplexity agent.
-///
-/// Stub implementation — the Perplexity Agent/Responses async API will be
-/// wired in a follow-on task. For now this delegates to the synchronous chat
-/// completions surface so the adapter routing compiles and can be tested.
-pub struct PerplexityDeepResearchAgent {
-    inner: OpenAiAgent,
-    name: String,
-}
-
-impl PerplexityDeepResearchAgent {
-    #[must_use]
-    pub fn new(
-        api_key: String,
-        base_url: String,
-        model_slug: String,
-        options: &AgentOptions,
-    ) -> Self {
-        let name = if options.name.is_empty() {
-            format!("perplexity-deep:{model_slug}")
-        } else {
-            options.name.clone()
-        };
-        let timeout = options.timeout_ms.unwrap_or(300_000);
-        let inner = OpenAiAgent::new(api_key, &model_slug)
-            .with_base_url(base_url)
-            .with_timeout_ms(timeout);
-        Self { inner, name }
+fn agent_name(options: &AgentOptions, default: &str) -> String {
+    if options.name.is_empty() {
+        default.to_string()
+    } else {
+        options.name.clone()
     }
 }
 
-#[async_trait]
-impl Agent for PerplexityDeepResearchAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
-        self.inner.run(input, ctx).await
+fn merge_search_options(target: &mut SearchOptions, source: &SearchOptions) {
+    if source.search_domain_filter.is_some() {
+        target.search_domain_filter = source.search_domain_filter.clone();
+    }
+    if source.search_recency_filter.is_some() {
+        target.search_recency_filter = source.search_recency_filter.clone();
+    }
+    if source.search_after_date_filter.is_some() {
+        target.search_after_date_filter = source.search_after_date_filter.clone();
+    }
+    if source.search_before_date_filter.is_some() {
+        target.search_before_date_filter = source.search_before_date_filter.clone();
+    }
+    if source.last_updated_after_filter.is_some() {
+        target.last_updated_after_filter = source.last_updated_after_filter.clone();
+    }
+    if source.last_updated_before_filter.is_some() {
+        target.last_updated_before_filter = source.last_updated_before_filter.clone();
+    }
+    if source.search_context_size.is_some() {
+        target.search_context_size = source.search_context_size.clone();
+    }
+    if source.search_mode.is_some() {
+        target.search_mode = source.search_mode.clone();
+    }
+    if source.return_images.is_some() {
+        target.return_images = source.return_images;
+    }
+    if source.return_related_questions.is_some() {
+        target.return_related_questions = source.return_related_questions;
+    }
+    if source.user_location.is_some() {
+        target.user_location = source.user_location.clone();
+    }
+}
+
+fn perplexity_search_options(model: &ModelProfile, options: &AgentOptions) -> SearchOptions {
+    let mut search_options = SearchOptions {
+        search_context_size: model.search_context_size.clone(),
+        ..Default::default()
+    };
+    for extra_arg in &options.extra_args {
+        if let Some(payload) = extra_arg.strip_prefix(PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX) {
+            if let Ok(extra) = serde_json::from_str::<SearchOptions>(payload) {
+                merge_search_options(&mut search_options, &extra);
+            }
+        }
+    }
+    search_options
+}
+
+fn perplexity_tool_loop_agent(
+    api_key: String,
+    base_url: String,
+    model: &ModelProfile,
+    options: &AgentOptions,
+) -> Result<Box<dyn Agent>, AgentCreationError> {
+    let (registry, tools) = tool_registry_for_options(options)?;
+    let resolver: Arc<dyn HandlerResolver> =
+        Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
+    let dispatcher = build_tool_dispatcher(registry, resolver);
+    let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
+    let timeout_ms = options.timeout_ms.unwrap_or(120_000);
+    let backend = Arc::new(PerplexityToolLoopBackend::new(
+        api_key,
+        base_url,
+        model.slug.clone(),
+        perplexity_search_options(model, options),
+        timeout_ms,
+    ));
+
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend.clone())
+        .with_max_iterations(50)
+        .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
+        .with_model_profile(model.clone());
+
+    let name = agent_name(options, &format!("perplexity-tool-loop:{}", model.slug));
+    let mut agent = PerplexityToolLoopAgent::new(tool_loop, backend, model.slug.clone())
+        .with_tools(tools)
+        .with_name(name);
+    if let Some(prompt) = &options.system_prompt {
+        agent = agent.with_system_prompt(prompt.clone());
     }
 
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn supports_streaming(&self) -> bool {
-        false
-    }
+    Ok(Box::new(agent))
 }
 
 // ─── PerplexityAdapter ───────────────────────────────────────────────────────
@@ -142,28 +199,24 @@ impl ProviderAdapter for PerplexityAdapter {
         }
 
         if model.supports_async {
-            return Ok(Box::new(PerplexityDeepResearchAgent::new(
-                api_key,
-                base_url,
-                model.slug.clone(),
-                options,
-            )));
+            let name = agent_name(options, &format!("perplexity-deep:{}", model.slug));
+            let timeout_ms = options.timeout_ms.unwrap_or(30_000);
+            return Ok(Box::new(
+                PerplexityDeepResearchAgent::new(api_key, base_url, model.slug.clone(), name)
+                    .with_request_timeout_ms(timeout_ms),
+            ));
         }
 
-        let name = if options.name.is_empty() {
-            format!("perplexity:{}", model.slug)
-        } else {
-            options.name.clone()
-        };
+        if model.supports_tools {
+            return perplexity_tool_loop_agent(api_key, base_url, model, options);
+        }
+
+        let name = agent_name(options, &format!("perplexity:{}", model.slug));
         let timeout = options.timeout_ms.unwrap_or(120_000);
-        let search_options = SearchOptions {
-            search_context_size: model.search_context_size.clone(),
-            ..Default::default()
-        };
 
         Ok(Box::new(
             PerplexityChatAgent::new(api_key, base_url, model.slug.clone(), name, timeout)
-                .with_search_options(search_options),
+                .with_search_options(perplexity_search_options(model, options)),
         ))
     }
 
@@ -293,6 +346,60 @@ mod tests {
             .create_agent(&perplexity_provider(), &model, &named_options(""))
             .expect("create deep research agent");
         assert_eq!(agent.name(), "perplexity-deep:sonar-deep-research");
+    }
+
+    #[test]
+    fn perplexity_adapter_routes_tool_capable_model_to_tool_loop_agent() {
+        let model = ModelProfile {
+            supports_tools: true,
+            slug: "sonar-tools".to_string(),
+            ..base_model()
+        };
+        let agent = PerplexityAdapter
+            .create_agent(&perplexity_provider(), &model, &named_options(""))
+            .expect("create tool-loop agent");
+        assert_eq!(agent.name(), "perplexity-tool-loop:sonar-tools");
+    }
+
+    #[test]
+    fn perplexity_search_options_merge_model_defaults_and_agent_overrides() {
+        let model = base_model();
+        let options = AgentOptions::default().with_perplexity_search_options(SearchOptions {
+            search_domain_filter: Some(vec!["arxiv.org".to_string()]),
+            search_recency_filter: Some("week".to_string()),
+            search_context_size: Some("high".to_string()),
+            search_mode: Some("academic".to_string()),
+            return_images: Some(true),
+            ..Default::default()
+        });
+
+        let merged = perplexity_search_options(&model, &options);
+        assert_eq!(merged.search_context_size, Some("high".to_string()));
+        assert_eq!(
+            merged.search_domain_filter,
+            Some(vec!["arxiv.org".to_string()])
+        );
+        assert_eq!(merged.search_recency_filter, Some("week".to_string()));
+        assert_eq!(merged.search_mode, Some("academic".to_string()));
+        assert_eq!(merged.return_images, Some(true));
+    }
+
+    #[test]
+    fn perplexity_search_options_use_model_default_when_not_overridden() {
+        let model = base_model();
+        let options = AgentOptions::default().with_perplexity_search_options(SearchOptions {
+            search_domain_filter: Some(vec!["arxiv.org".to_string()]),
+            ..Default::default()
+        });
+
+        let merged = perplexity_search_options(&model, &options);
+        assert_eq!(merged.search_context_size, Some("medium".to_string()));
+        assert_eq!(
+            merged.search_domain_filter,
+            Some(vec!["arxiv.org".to_string()])
+        );
+        assert_eq!(merged.search_recency_filter, None);
+        assert_eq!(merged.search_mode, None);
     }
 
     #[test]

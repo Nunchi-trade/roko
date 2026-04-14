@@ -92,11 +92,12 @@ downstream consumers (the research agent, citation formatter, etc.).
 
 ### Use Case in Roko
 
-Perplexity Sonar is the ideal backend for the `Researcher` role. The
-`roko research topic "<topic>"` command should route through Sonar for
-web-grounded research with automatic citations. The `supports_citations`
-flag enables the research agent to include verified citations in its output
-without a separate verification step.
+Perplexity Sonar is the ideal backend for the `Researcher` role. The routed
+`roko research topic "<topic>"` path now uses the shared factory/tool-loop path
+for search-grounded chat and citations. The `supports_citations` flag enables
+the research agent to include verified citations in its output without a
+separate verification step. Perplexity's async deep-research and embeddings
+surfaces remain adapter-specific.
 
 ---
 
@@ -151,10 +152,11 @@ The 1M context window makes Gemini particularly suitable for:
 
 ### Grounding and Code Execution
 
-Gemini's grounding feature (verifying claims against Google Search) and
-code execution feature (running Python in a sandbox) are accessible through
-the native API but **not through the OpenAI-compatible endpoint**. Future
-integration may add a native Gemini adapter to expose these features.
+Gemini's grounding feature (verifying claims against Google Search) and code
+execution feature (running Python in a sandbox) are accessible through the
+native API but **not through the shared OpenAI-compatible factory/tool-loop
+path**. The simple OpenAI-compatible Gemini models now go through that shared
+path; the native Gemini request family still remains adapter-specific.
 
 ---
 
@@ -309,8 +311,8 @@ capabilities at startup and populate the `[models.*]` registry automatically.
 | Cursor (ACP) | Done | Done | Partial | Ready |
 | ZhipuAI (GLM) | Done | Done | Done | Integration test passes |
 | OpenRouter | Done | Done | Partial | Ready |
-| Perplexity | Config ready | Via OpenAiCompat | Not yet | Needs testing |
-| Gemini | Config ready | Via OpenAiCompat | Not yet | Needs testing |
+| Perplexity | Config ready | Via shared factory/tool-loop for chat/search | Partial | Deep research and embeddings stay adapter-specific |
+| Gemini | Config ready | Via shared factory/tool-loop for compat models | Partial | Native grounding/code execution stays adapter-specific |
 | Moonshot (Kimi) | Config ready | Via OpenAiCompat | Not yet | Needs testing |
 
 ---

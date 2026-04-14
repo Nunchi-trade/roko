@@ -125,13 +125,16 @@ unverified.
 | Specified | 00–03, 05–07, 09, 11, 13, 14 (11 files) |
 | Scaffold | 04, 08, 10, 12, 15 (5 files) |
 
-**Most honest gap analysis of any section.** Doc 15 explicitly lists: ToolDispatcher unreachable from
-orchestrate.rs, safety coverage 30%, role prompts ~20 tokens (vs ~2,000 target), creation sites not consolidated.
+**Most honest gap analysis of any section.** Doc 15 now correctly frames the agent gap as partial,
+not absolute: the shared ToolLoop/Safety path is live for OpenAI-compatible providers, Gemini compat
+models, Anthropic API, Perplexity search-grounded chat, and Gemini-native non-grounding tool-capable
+models, but it is not yet universal across every backend family; role prompts are still thin, and
+some known-protocol subprocess or specialty creation sites remain outside the factory path.
 
 **Critical gaps:**
-- ToolDispatcher never called from orchestrate.rs — the 7-step safety pipeline is dead code
+- ToolDispatcher is not yet universal across runtime paths — the 7-step safety pipeline exists and is live on routed HTTP provider families, but known-protocol subprocess paths and specialty endpoints still bypass it; the remaining no-config subprocess fallbacks are centralized in the factory instead of scattered across call sites
 - Role prompts average ~20 tokens; Meta-Harness research shows harness quality dominates model quality
-- LlmBackend HTTP implementations missing — only ClaudeCli is functional
+- LlmBackend coverage is incomplete — routed tool-loop support now also covers Gemini compat models, Anthropic API, Perplexity search-grounded chat, and Gemini-native non-grounding tool-capable models, but Gemini grounding/code-execution and Perplexity deep-research still use dedicated paths
 - Temperament system fully specified but not propagated to runtime
 
 **Crate reality:** roko-agent is Stable/Wired (97 files, ~9,500 LOC, 567 tests). Five LLM backends

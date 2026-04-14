@@ -39,12 +39,16 @@
 //! In both cases, the goal is the same: keep provider-specific wiring out of
 //! the call sites and centralize it in this module.
 
+use crate::SafetyLayer;
+use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::gemini::GeminiAdapter;
 use crate::{Agent, ExecAgent};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
+use roko_core::tool::ToolRegistry;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -63,7 +67,7 @@ pub use cursor_acp::CursorAcpAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 pub use openrouter_meta::fetch_model_metadata;
 
-use crate::perplexity::PerplexityAdapter;
+use crate::perplexity::{PerplexityAdapter, SearchOptions};
 
 static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
@@ -72,6 +76,11 @@ static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
 static PERPLEXITY_ADAPTER: PerplexityAdapter = PerplexityAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
 const DEFAULT_PROVIDER_MAX_CONCURRENT: usize = 10;
+pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
+
+thread_local! {
+    static ACTIVE_SAFETY_LAYER: RefCell<Option<SafetyLayer>> = const { RefCell::new(None) };
+}
 
 /// Return the static adapter for a provider kind.
 #[must_use]
@@ -111,33 +120,64 @@ pub fn create_agent_for_model(
         .as_deref()
         .or(config.agent.command.as_deref());
 
-    let Some(provider_config) = provider_config else {
-        if is_known_protocol_command(legacy_command) {
-            return Err(AgentCreationError::MissingConfig("provider".into()));
+    // When the command is a known protocol CLI (claude, codex, etc.) but no
+    // explicit provider/model config exists, synthesize sensible defaults so
+    // `roko init` + `roko prd draft new` works out of the box.
+    let (provider_config, profile) = match (provider_config, profile) {
+        (Some(pc), Some(mp)) => (pc, mp),
+        (pc, mp) if legacy_command.is_some_and(is_known_protocol_command) => {
+            let cmd = legacy_command.unwrap(); // safe: is_some_and passed
+            let kind =
+                provider_kind_for_known_protocol_command(cmd).unwrap_or(resolved.provider_kind);
+            let pc = pc.unwrap_or_else(|| ProviderConfig {
+                kind,
+                command: Some(cmd.to_string()),
+                timeout_ms: options.timeout_ms.or(Some(120_000)),
+                base_url: None,
+                api_key_env: None,
+                args: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            });
+            let mp = mp.unwrap_or_else(|| ModelProfile {
+                provider: format!("{kind}"),
+                slug: resolved.slug.clone(),
+                ..Default::default()
+            });
+            tracing::info!(
+                model_key = model_key,
+                slug = %resolved.slug,
+                command = cmd,
+                "no explicit provider config — using defaults for known CLI"
+            );
+            (pc, mp)
         }
+        _ => {
+            tracing::warn!(
+                model_key = model_key,
+                command = %legacy_command.unwrap_or("unknown"),
+                "no provider found — falling back to ExecAgent (no tool support)"
+            );
 
-        tracing::warn!(
-            model_key = model_key,
-            command = %legacy_command.unwrap_or("unknown"),
-            "no provider found — falling back to ExecAgent (no tool support)"
-        );
-
-        let mut agent = ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
-            .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
-        if !options.name.is_empty() {
-            agent = agent.with_name(options.name.clone());
+            let mut agent =
+                ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
+                    .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
+            if !options.name.is_empty() {
+                agent = agent.with_name(options.name.clone());
+            }
+            if !options.env.is_empty() {
+                agent = agent.with_env(options.env.clone());
+            }
+            return Ok(Box::new(agent));
         }
-        if !options.env.is_empty() {
-            agent = agent.with_env(options.env.clone());
-        }
-        return Ok(Box::new(agent));
     };
-    let profile = profile.ok_or_else(|| AgentCreationError::MissingConfig("model".into()))?;
 
     tracing::info!(
         model_key = model_key,
         slug = %resolved.slug,
-        provider = %resolved.provider_kind,
+        provider = %provider_config.kind,
         base_url = ?provider_config.base_url,
         "creating agent via provider adapter"
     );
@@ -147,24 +187,76 @@ pub fn create_agent_for_model(
         options.provider_semaphores = Some(Arc::new(ProviderSemaphores::new(&providers)));
     }
 
-    let adapter = adapter_for_kind(resolved.provider_kind);
+    let adapter = adapter_for_kind(provider_config.kind);
     adapter.create_agent(&provider_config, &profile, &options)
 }
 
-fn is_known_protocol_command(command: Option<&str>) -> bool {
-    let Some(command) = command else {
-        return false;
-    };
+/// Run `f` with an optional safety layer attached to provider-backed agent construction.
+///
+/// This is intentionally scoped to synchronous construction so the thread-local
+/// state cannot leak across async suspension points.
+#[must_use]
+pub fn with_safety_layer<R>(layer: Option<SafetyLayer>, f: impl FnOnce() -> R) -> R {
+    let scope = set_active_safety_layer(layer);
+    let result = f();
+    drop(scope);
+    result
+}
 
+/// Build a `ToolDispatcher` and attach the active safety layer if one is present.
+#[must_use]
+pub fn build_tool_dispatcher(
+    registry: Arc<dyn ToolRegistry>,
+    resolver: Arc<dyn HandlerResolver>,
+) -> Arc<ToolDispatcher> {
+    let dispatcher = ToolDispatcher::new(registry, resolver);
+    match current_safety_layer() {
+        Some(layer) => Arc::new(dispatcher.with_safety(layer)),
+        None => Arc::new(dispatcher),
+    }
+}
+
+/// Return the safety layer currently scoped to provider-backed construction, if any.
+#[must_use]
+pub fn current_safety_layer() -> Option<SafetyLayer> {
+    ACTIVE_SAFETY_LAYER.with(|slot| slot.borrow().clone())
+}
+
+struct SafetyLayerScope {
+    previous: Option<SafetyLayer>,
+}
+
+impl Drop for SafetyLayerScope {
+    fn drop(&mut self) {
+        ACTIVE_SAFETY_LAYER.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+fn set_active_safety_layer(layer: Option<SafetyLayer>) -> SafetyLayerScope {
+    let previous = ACTIVE_SAFETY_LAYER.with(|slot| slot.replace(layer));
+    SafetyLayerScope { previous }
+}
+
+#[must_use]
+pub fn is_known_protocol_command(command: &str) -> bool {
+    provider_kind_for_known_protocol_command(command).is_some()
+}
+
+#[must_use]
+fn provider_kind_for_known_protocol_command(command: &str) -> Option<ProviderKind> {
     let executable = Path::new(command)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(command);
 
-    matches!(
-        executable,
-        "claude" | "codex" | "cursor-agent" | "cursor_agent"
-    )
+    match executable {
+        "claude" => Some(ProviderKind::ClaudeCli),
+        "codex" => Some(ProviderKind::OpenAiCompat),
+        "cursor-agent" | "cursor_agent" => Some(ProviderKind::CursorAcp),
+        _ => None,
+    }
 }
 
 /// Shared semaphores that cap in-flight requests per provider.
@@ -231,6 +323,7 @@ pub struct AgentOptions {
     pub cached_content: Option<String>,
     pub tools: Option<String>,
     pub mcp_config: Option<PathBuf>,
+    pub working_dir: Option<PathBuf>,
     pub provider_semaphores: Option<Arc<ProviderSemaphores>>,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
@@ -238,6 +331,25 @@ pub struct AgentOptions {
     pub bare_mode: bool,
     pub dangerously_skip_permissions: bool,
     pub name: String,
+}
+
+impl AgentOptions {
+    /// Root the agent subprocess in the given working directory.
+    #[must_use]
+    pub fn with_working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(working_dir.into());
+        self
+    }
+
+    /// Append Perplexity search options as a structured `extra_args` payload.
+    #[must_use]
+    pub fn with_perplexity_search_options(mut self, search_options: SearchOptions) -> Self {
+        let encoded = serde_json::to_string(&search_options)
+            .expect("Perplexity search options must serialize");
+        self.extra_args
+            .push(format!("{PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX}{encoded}"));
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -326,15 +438,28 @@ mod tests {
     use super::*;
     use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
     use roko_core::{Body, Context, Engram, Kind};
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+    use tempfile::tempdir;
     use tokio::time::timeout;
 
     fn prompt(text: &str) -> Engram {
         Engram::builder(Kind::Prompt).body(Body::text(text)).build()
+    }
+
+    fn write_script(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).expect("script metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).expect("chmod script");
+        }
     }
 
     fn spawn_chat_server(
@@ -451,6 +576,65 @@ mod tests {
         config
     }
 
+    fn perplexity_config(
+        base_url: Option<String>,
+        model_slug: &str,
+        supports_async: bool,
+    ) -> RokoConfig {
+        let mut config = RokoConfig::default();
+        config.providers.insert(
+            "perplexity".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::PerplexityApi,
+                base_url,
+                api_key_env: Some("PATH".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: Some(300_000),
+                ttft_timeout_ms: Some(15_000),
+                connect_timeout_ms: Some(5_000),
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        config.models.insert(
+            model_slug.to_string(),
+            ModelProfile {
+                provider: "perplexity".to_string(),
+                slug: model_slug.to_string(),
+                context_window: 127_072,
+                max_output: Some(8_192),
+                supports_tools: false,
+                supports_thinking: false,
+                supports_vision: false,
+                supports_web_search: true,
+                supports_mcp_tools: false,
+                supports_partial: false,
+                supports_grounding: false,
+                supports_code_execution: false,
+                supports_caching: false,
+                provider_routing: None,
+                tool_format: "openai_json".to_string(),
+                cost_input_per_m: None,
+                cost_output_per_m: None,
+                cost_input_per_m_high: None,
+                cost_output_per_m_high: None,
+                cost_cache_read_per_m: None,
+                cost_cache_write_per_m: None,
+                thinking_level: None,
+                max_tools: None,
+                tokenizer_ratio: None,
+                supports_search: true,
+                supports_citations: true,
+                supports_async,
+                is_embedding_model: false,
+                search_context_size: Some("medium".to_string()),
+                cost_per_request: None,
+            },
+        );
+        config
+    }
+
     #[test]
     fn adapter_for_kind_returns_expected_adapter() {
         assert_eq!(
@@ -477,6 +661,23 @@ mod tests {
             adapter_for_kind(ProviderKind::GeminiApi).kind(),
             ProviderKind::GeminiApi
         );
+    }
+
+    #[test]
+    fn build_tool_dispatcher_attaches_scoped_safety_layer() {
+        fn no_handler(_: &str) -> Option<Arc<dyn roko_core::tool::ToolHandler>> {
+            None
+        }
+
+        let registry: Arc<dyn roko_core::tool::ToolRegistry> =
+            Arc::new(roko_core::tool::VecToolRegistry::from_tools(Vec::new()));
+        let resolver: Arc<dyn HandlerResolver> = Arc::new(no_handler);
+
+        let dispatcher = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+            build_tool_dispatcher(registry, resolver)
+        });
+
+        assert!(dispatcher.safety().is_some());
     }
 
     #[tokio::test]
@@ -532,6 +733,78 @@ mod tests {
         assert_eq!(parsed["messages"][1]["content"], "hello");
 
         handle.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn create_agent_for_model_routes_perplexity_search_grounded_chat() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-pplx",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "research-ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 21,
+                "completion_tokens": 9,
+                "total_tokens": 30
+            }
+        })
+        .to_string();
+        let (base_url, captured, handle) = spawn_chat_server(response);
+        let config = perplexity_config(Some(base_url.clone()), "sonar-pro", false);
+        let options = AgentOptions {
+            timeout_ms: Some(45_000),
+            name: "research-agent".to_string(),
+            ..Default::default()
+        }
+        .with_perplexity_search_options(SearchOptions {
+            search_domain_filter: Some(vec!["arxiv.org".to_string(), "nature.com".to_string()]),
+            search_recency_filter: Some("week".to_string()),
+            search_context_size: Some("high".to_string()),
+            search_mode: Some("academic".to_string()),
+            return_images: Some(false),
+            ..Default::default()
+        });
+
+        let agent = create_agent_for_model(&config, "sonar-pro", options)
+            .expect("create perplexity chat agent");
+        assert_eq!(agent.name(), "research-agent");
+
+        let result = agent.run(&prompt("research"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(result.output.body.as_text().unwrap_or(""), "research-ok");
+
+        let request = captured
+            .lock()
+            .expect("capture lock")
+            .take()
+            .expect("captured request");
+        assert!(request.starts_with("POST /chat/completions HTTP/1.1"));
+        let body = request.split("\r\n\r\n").nth(1).expect("request body");
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("json request body");
+        assert_eq!(parsed["search_domain_filter"][0], "arxiv.org");
+        assert_eq!(parsed["search_recency_filter"], "week");
+        assert_eq!(parsed["search_mode"], "academic");
+        assert_eq!(parsed["web_search_options"]["search_context_size"], "high");
+        assert_eq!(parsed["return_images"], false);
+
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn create_agent_for_model_routes_perplexity_async_models_to_deep_research() {
+        let config = perplexity_config(None, "sonar-deep-research", true);
+        let agent = create_agent_for_model(
+            &config,
+            "sonar-deep-research",
+            AgentOptions {
+                name: "deep-research-agent".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create deep research agent");
+        assert_eq!(agent.name(), "deep-research-agent");
     }
 
     #[test]
@@ -592,6 +865,54 @@ mod tests {
         let result = agent.run(&prompt("fallback-ok"), &Context::now()).await;
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap_or(""), "fallback-ok");
+    }
+
+    #[test]
+    fn known_protocol_command_detection_handles_paths() {
+        assert!(is_known_protocol_command("claude"));
+        assert!(is_known_protocol_command("/tmp/cursor-agent"));
+        assert!(is_known_protocol_command("bin/cursor_agent"));
+        assert!(is_known_protocol_command("/usr/local/bin/codex"));
+        assert!(!is_known_protocol_command("cat"));
+    }
+
+    #[tokio::test]
+    async fn create_agent_for_model_uses_command_kind_for_ambiguous_claude_model_key() {
+        let tmp = tempdir().expect("tempdir");
+        let script = tmp.path().join("claude");
+        let prompt_file = tmp.path().join("prompt.txt");
+        let response = r#"{"type":"content_block_delta","delta":{"text":"factory-claude-ok"}}"#;
+        let script_body = format!(
+            "#!/bin/sh\nset -eu\ncat > \"{}\"\nprintf '%s\\n' '{}'\n",
+            prompt_file.display(),
+            response,
+        );
+        write_script(&script, &script_body);
+
+        let agent = create_agent_for_model(
+            &RokoConfig::default(),
+            "claude",
+            AgentOptions {
+                command: Some(script.display().to_string()),
+                timeout_ms: Some(1_500),
+                name: "factory-claude".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create synthesized claude agent");
+
+        assert_eq!(agent.name(), "factory-claude");
+
+        let result = agent.run(&prompt("hello"), &Context::now()).await;
+        assert!(result.success);
+        assert_eq!(
+            result.output.body.as_text().unwrap_or(""),
+            "factory-claude-ok"
+        );
+        assert_eq!(
+            fs::read_to_string(prompt_file).expect("read prompt file"),
+            "hello"
+        );
     }
 
     #[tokio::test]

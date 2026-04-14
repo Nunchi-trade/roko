@@ -20,7 +20,9 @@ use roko_agent::chat_types::FinishReason;
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::provider::{
+    AgentOptions, create_agent_for_model, is_known_protocol_command, with_safety_layer,
+};
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
@@ -28,7 +30,7 @@ use roko_agent::task_runner::{
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, SafetyLayer};
+use roko_agent::{Agent, AgentResult, ExecAgent, SafetyLayer};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
     PromptSection, RoleSystemPromptSpec, SectionPriority, SectionScorer, TaskContext, budget_for,
@@ -36,6 +38,7 @@ use roko_compose::{
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::DaimonPolicy;
+use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
@@ -46,7 +49,12 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
-    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, Verdict,
+    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, TaskRequirements, Verdict,
+    score_model_for_task,
+};
+use roko_core::{
+    CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
+    CatalystSignalSource, PredictionPolicy, PredictiveScorer,
 };
 use roko_daimon::{
     AffectEngine as _, AffectEvent, DaimonState, DispatchParams, SomaticSignal,
@@ -62,6 +70,7 @@ use roko_gate::{
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
+use roko_learn::cfactor::{CFactor, detect_cfactor_regression};
 use roko_learn::conductor::{
     ConductorAction as RetryConductorAction, ConductorBandit,
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
@@ -75,7 +84,7 @@ use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
-use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
+use roko_learn::prediction::CalibrationTracker;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -83,6 +92,7 @@ use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
     refresh_cfactor_snapshot,
 };
+use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
@@ -98,6 +108,7 @@ use roko_orchestrator::{
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::ProcessSupervisor;
 use roko_std::StaticToolRegistry;
+use roko_std::SumScorer;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
@@ -140,6 +151,287 @@ fn routing_log_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("routing.jsonl")
+}
+
+fn cfactor_history_path(workdir: &Path) -> PathBuf {
+    RokoLayout::for_project(workdir)
+        .learn_dir()
+        .join("c-factor.jsonl")
+}
+
+#[derive(Clone)]
+struct SectionEffectCatalystSource {
+    registry: SectionEffectivenessRegistry,
+    role: String,
+}
+
+impl CatalystSignalSource for SectionEffectCatalystSource {
+    fn impact(&self, signal: &Engram, _ctx: &Context) -> CatalystImpactSummary {
+        let mut summary = CatalystImpactSummary {
+            reuse_count: parse_count_tag(signal, "reuse_count"),
+            confirmation_count: parse_count_tag(signal, "confirmation_count"),
+            confidence: if signal.lineage.is_empty() { 0.0 } else { 0.2 },
+            ..CatalystImpactSummary::default()
+        };
+
+        if let Ok(section) = PromptSection::from_signal(signal) {
+            if let Some(effect) = self.registry.get(&section.name, &self.role) {
+                let compared_trials = effect.included_trials.min(effect.excluded_trials) as f32;
+                summary.downstream_impact = effect.lift().clamp(0.0, 1.0) as f32;
+                summary.reuse_count = summary.reuse_count.max(effect.included_trials as usize);
+                summary.confirmation_count = summary
+                    .confirmation_count
+                    .max(effect.included_passes as usize);
+                summary.confidence = (compared_trials / 20.0).clamp(0.0, 1.0);
+            }
+        }
+
+        summary
+    }
+}
+
+#[derive(Clone)]
+struct StaticCFactorSource {
+    summary: Option<CFactorSummary>,
+}
+
+impl CFactorSource for StaticCFactorSource {
+    fn summary(&self) -> Option<CFactorSummary> {
+        self.summary.clone()
+    }
+}
+
+async fn load_predictive_calibration(workdir: &Path) -> Option<Arc<CalibrationTracker>> {
+    match CalibrationTracker::load_from_routing_log(routing_log_path(workdir)).await {
+        Ok(tracker) if !tracker.is_empty() => Some(Arc::new(tracker)),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::debug!(error = %err, "failed to load predictive calibration");
+            None
+        }
+    }
+}
+
+async fn load_cfactor_source(workdir: &Path) -> Option<Arc<StaticCFactorSource>> {
+    let contents = match tokio::fs::read_to_string(cfactor_history_path(workdir)).await {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::debug!(error = %err, "failed to load c-factor history");
+            return None;
+        }
+    };
+
+    let mut history = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_str::<CFactor>(line).ok())
+        .collect::<Vec<_>>();
+    history.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+    let current = history.last()?.clone();
+    let historical_average = if history.len() > 1 {
+        history[..history.len() - 1]
+            .iter()
+            .map(|snapshot| snapshot.overall)
+            .sum::<f64>()
+            / (history.len() - 1) as f64
+    } else {
+        current.overall
+    };
+    let trend = current.overall - historical_average;
+    let regression =
+        detect_cfactor_regression(&history, Duration::from_secs(7 * 24 * 60 * 60), 0.08);
+    let (top_positive_contributors, top_negative_contributors) = top_cfactor_contributors(&current);
+
+    Some(Arc::new(StaticCFactorSource {
+        summary: Some(CFactorSummary {
+            overall: current.overall,
+            trend,
+            regression_drop: regression.map_or(0.0, |entry| entry.drop_fraction),
+            gate_pass_rate: current.components.gate_pass_rate,
+            turn_taking_equality: current.components.turn_taking_equality,
+            social_sensitivity: current.components.social_sensitivity,
+            task_diversity_coverage: current.components.task_diversity_coverage,
+            episode_count: current.episode_count,
+            top_positive_contributors,
+            top_negative_contributors,
+        }),
+    }))
+}
+
+fn predictive_policy_sections(
+    calibration: Arc<CalibrationTracker>,
+    model_slug: &str,
+    task_category: &str,
+) -> Vec<PromptSection> {
+    let policy = PredictionPolicy::new(calibration).with_min_samples(6);
+    let seed = Engram::builder(Kind::Prediction)
+        .body(Body::text(format!(
+            "Predictive calibration seed for {model_slug}/{task_category}"
+        )))
+        .tag("model_slug", model_slug)
+        .tag("task_category", task_category)
+        .build();
+    policy
+        .decide(&[seed], &Context::now())
+        .into_iter()
+        .filter_map(|engram| {
+            let text = engram.body.as_text().ok()?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(
+                PromptSection::new("predictive-calibration", text)
+                    .with_priority(SectionPriority::Normal)
+                    .with_placement(Placement::Middle)
+                    .with_hard_cap(256)
+                    .with_bidder(AttentionBidder::Oracles),
+            )
+        })
+        .collect()
+}
+
+fn cfactor_policy_sections(source: Arc<dyn CFactorSource>) -> Vec<PromptSection> {
+    let policy = CFactorPolicy::new(source).with_min_episode_count(6);
+    policy
+        .decide(&[], &Context::now())
+        .into_iter()
+        .filter_map(|engram| {
+            let text = engram.body.as_text().ok()?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(
+                PromptSection::new("collective-calibration", text)
+                    .with_priority(SectionPriority::Normal)
+                    .with_placement(Placement::Middle)
+                    .with_hard_cap(256)
+                    .with_bidder(AttentionBidder::Oracles),
+            )
+        })
+        .collect()
+}
+
+fn parse_count_tag(signal: &Engram, key: &str) -> usize {
+    signal
+        .tag(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn top_cfactor_contributors(snapshot: &CFactor) -> (Vec<String>, Vec<String>) {
+    let mut positive = snapshot
+        .agent_contributions
+        .iter()
+        .filter(|contribution| contribution.contribution_score > 0.0)
+        .cloned()
+        .collect::<Vec<_>>();
+    positive.sort_by(|left, right| {
+        right
+            .contribution_score
+            .total_cmp(&left.contribution_score)
+            .then(left.agent_id.cmp(&right.agent_id))
+    });
+
+    let mut negative = snapshot
+        .agent_contributions
+        .iter()
+        .filter(|contribution| contribution.contribution_score < 0.0)
+        .cloned()
+        .collect::<Vec<_>>();
+    negative.sort_by(|left, right| {
+        left.contribution_score
+            .total_cmp(&right.contribution_score)
+            .then(left.agent_id.cmp(&right.agent_id))
+    });
+
+    (
+        positive
+            .into_iter()
+            .take(3)
+            .map(|contribution| {
+                format!(
+                    "{}={:+.3}",
+                    contribution.agent_id, contribution.contribution_score
+                )
+            })
+            .collect(),
+        negative
+            .into_iter()
+            .take(3)
+            .map(|contribution| {
+                format!(
+                    "{}={:+.3}",
+                    contribution.agent_id, contribution.contribution_score
+                )
+            })
+            .collect(),
+    )
+}
+
+fn task_requirements_for_routing(
+    task_def: Option<&crate::task_parser::TaskDef>,
+    role: AgentRole,
+    task_text: &str,
+    allowed_tools_csv: &str,
+    context_window_tokens: u64,
+) -> TaskRequirements {
+    let task_lower = task_text.to_ascii_lowercase();
+    let tools_lower = allowed_tools_csv.to_ascii_lowercase();
+    let tier = task_def.map(|task| task.tier.as_str()).unwrap_or("focused");
+    let min_context_window = match tier {
+        "mechanical" => 32_000,
+        "focused" => 64_000,
+        "integrative" => 128_000,
+        "architectural" => 200_000,
+        _ => 64_000,
+    }
+    .max(context_window_tokens.min(256_000));
+
+    let needs_web_search = task_def
+        .is_some_and(crate::task_parser::TaskDef::needs_external_context)
+        || matches!(role, AgentRole::Researcher | AgentRole::PatternExtractor)
+        || task_lower.contains("research")
+        || task_lower.contains("look up")
+        || tools_lower.contains("web");
+    let needs_code_execution =
+        tools_lower.contains("python") || tools_lower.contains("code_execution");
+    let needs_thinking = matches!(
+        role,
+        AgentRole::Strategist | AgentRole::Architect | AgentRole::Auditor
+    ) || matches!(tier, "integrative" | "architectural");
+    let needs_vision = task_lower.contains("image")
+        || task_lower.contains("screenshot")
+        || task_lower.contains("vision");
+    let needs_structured_output = matches!(
+        role,
+        AgentRole::Strategist | AgentRole::Auditor | AgentRole::Scribe
+    ) || task_lower.contains("json")
+        || task_lower.contains("yaml")
+        || task_lower.contains("toml")
+        || task_lower.contains("schema");
+    let max_cost_output_per_m = match tier {
+        "mechanical" => Some(10.0),
+        "focused" => Some(18.0),
+        _ => None,
+    };
+    let max_latency_ms = match tier {
+        "mechanical" => Some(3_000),
+        "focused" => Some(6_000),
+        _ => None,
+    };
+
+    TaskRequirements {
+        needs_web_search,
+        needs_code_execution,
+        needs_thinking,
+        needs_vision,
+        needs_structured_output,
+        min_context_window,
+        max_cost_output_per_m,
+        max_latency_ms,
+    }
 }
 
 fn conductor_policy_path(workdir: &Path) -> PathBuf {
@@ -831,42 +1123,167 @@ struct AgentRunConfig {
     skip_permissions: bool,
 }
 
+/// Result bundle returned from a parallel task execution.
+struct ParallelTaskResult {
+    task_id: String,
+    exec_dir: PathBuf,
+    prompt_text: String,
+    system_prompt: String,
+    model: String,
+    result: AgentResult,
+}
+
 /// Run a prepared agent configuration. No `PlanRunner` borrow required.
 async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
     let ctx = Context::now();
     let prompt_signal = Engram::builder(Kind::Task)
         .body(Body::Text(cfg.prompt.clone()))
         .build();
+    let mut routing_config = load_roko_config(&cfg.exec_dir).unwrap_or_default();
+    routing_config.apply_process_env();
+    let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
-    if cfg.command == "claude" {
-        let mut agent = ClaudeCliAgent::new(&cfg.command, &cfg.exec_dir, &cfg.model)
+    if has_routing {
+        let mut extra_args = cfg.read_args;
+        extra_args.extend(cfg.extra_args);
+        if let Some(fallback_model) = cfg.fallback_model.clone() {
+            extra_args.push("--fallback-model".to_string());
+            extra_args.push(fallback_model);
+        }
+        if let Some(resume_session) = cfg.resume_session.clone() {
+            extra_args.push("--resume".to_string());
+            extra_args.push(resume_session);
+        }
+
+        match create_agent_for_model(
+            &routing_config,
+            &cfg.model,
+            AgentOptions {
+                command: Some(cfg.command.clone()),
+                timeout_ms: Some(cfg.timeout_ms),
+                system_prompt: Some(cfg.system_prompt.clone()),
+                cached_content: None,
+                tools: Some(cfg.allowed_tools_csv.clone()),
+                mcp_config: cfg.mcp_config.clone(),
+                working_dir: Some(cfg.exec_dir.clone()),
+                provider_semaphores: None,
+                env: cfg.env_vars.clone(),
+                extra_args,
+                effort: Some(cfg.effort.clone()),
+                bare_mode: cfg.bare_mode,
+                dangerously_skip_permissions: cfg.skip_permissions,
+                name: String::new(),
+            },
+        ) {
+            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
+            Err(err) => AgentResult::fail(
+                prompt_signal
+                    .derive(
+                        Kind::AgentOutput,
+                        Body::text(format!(
+                            "create prepared agent for {} failed: {err}",
+                            cfg.model
+                        )),
+                    )
+                    .build(),
+            ),
+        }
+    } else if cfg.command == "claude" {
+        let mut synthesized_config = RokoConfig::default();
+        synthesized_config.agent.command = Some(cfg.command.clone());
+        synthesized_config.agent.default_model = cfg.model.clone();
+        synthesized_config.agent.default_backend = "claude".to_string();
+
+        let mut extra_args = cfg.read_args;
+        extra_args.extend(cfg.extra_args);
+        if let Some(fallback_model) = cfg.fallback_model.clone() {
+            extra_args.push("--fallback-model".to_string());
+            extra_args.push(fallback_model);
+        }
+        if let Some(resume_session) = cfg.resume_session.clone() {
+            extra_args.push("--resume".to_string());
+            extra_args.push(resume_session);
+        }
+
+        match create_agent_for_model(
+            &synthesized_config,
+            &cfg.model,
+            AgentOptions {
+                command: Some(cfg.command.clone()),
+                timeout_ms: Some(cfg.timeout_ms),
+                system_prompt: Some(cfg.system_prompt),
+                cached_content: None,
+                tools: Some(cfg.allowed_tools_csv),
+                mcp_config: cfg.mcp_config,
+                working_dir: Some(cfg.exec_dir.clone()),
+                provider_semaphores: None,
+                env: cfg.env_vars,
+                extra_args,
+                effort: Some(cfg.effort),
+                bare_mode: cfg.bare_mode,
+                dangerously_skip_permissions: cfg.skip_permissions,
+                name: String::new(),
+            },
+        ) {
+            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
+            Err(err) => AgentResult::fail(
+                prompt_signal
+                    .derive(
+                        Kind::AgentOutput,
+                        Body::text(format!(
+                            "create synthesized claude agent for {} failed: {err}",
+                            cfg.model
+                        )),
+                    )
+                    .build(),
+            ),
+        }
+    } else if is_known_protocol_command(&cfg.command) {
+        let mut agent = ExecAgent::new(&cfg.command, cfg.extra_args)
             .with_timeout_ms(cfg.timeout_ms)
-            .with_bare_mode(cfg.bare_mode)
-            .with_effort(cfg.effort)
-            .with_system_prompt(cfg.system_prompt)
-            .with_extra_args(cfg.read_args)
-            .with_tools(cfg.allowed_tools_csv)
-            .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
-            .with_dangerously_skip_permissions(cfg.skip_permissions)
-            .with_optional_resume(cfg.resume_session)
-            .with_extra_args(cfg.extra_args);
-        if let Some(mcp_path) = &cfg.mcp_config {
-            agent = agent.with_mcp_config(mcp_path);
-        }
-        if let Some(fallback) = &cfg.fallback_model {
-            agent = agent.with_fallback_model(fallback.clone());
-        }
+            .with_current_dir(cfg.exec_dir.clone());
         for (k, v) in &cfg.env_vars {
             agent = agent.with_env_var(k, v);
         }
         agent.run(&prompt_signal, &ctx).await
     } else {
-        let mut agent =
-            ExecAgent::new(&cfg.command, cfg.extra_args).with_timeout_ms(cfg.timeout_ms);
-        for (k, v) in &cfg.env_vars {
-            agent = agent.with_env_var(k, v);
+        let mut fallback_config = RokoConfig::default();
+        fallback_config.agent.command = Some(cfg.command.clone());
+
+        let model = cfg.model.clone();
+        match create_agent_for_model(
+            &fallback_config,
+            &model,
+            AgentOptions {
+                command: Some(cfg.command.clone()),
+                timeout_ms: Some(cfg.timeout_ms),
+                system_prompt: Some(cfg.system_prompt),
+                cached_content: None,
+                tools: Some(cfg.allowed_tools_csv),
+                mcp_config: cfg.mcp_config,
+                working_dir: Some(cfg.exec_dir.clone()),
+                provider_semaphores: None,
+                env: cfg.env_vars,
+                extra_args: cfg.extra_args,
+                effort: Some(cfg.effort),
+                bare_mode: cfg.bare_mode,
+                dangerously_skip_permissions: cfg.skip_permissions,
+                name: String::new(),
+            },
+        ) {
+            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
+            Err(err) => AgentResult::fail(
+                prompt_signal
+                    .derive(
+                        Kind::AgentOutput,
+                        Body::text(format!(
+                            "create generic subprocess agent for {} failed: {err}",
+                            cfg.command
+                        )),
+                    )
+                    .build(),
+            ),
         }
-        agent.run(&prompt_signal, &ctx).await
     }
 }
 
@@ -1184,35 +1601,6 @@ fn build_context_window_pressure_signal(text: &str) -> Option<Engram> {
     )
 }
 
-fn render_skill_context(skill: &Skill) -> String {
-    let mut parts = vec![
-        format!("Name: {}", skill.name),
-        format!(
-            "Success rate: {:.0}%",
-            (skill.success_rate.clamp(0.0, 1.0) * 100.0).round()
-        ),
-        format!("Summary: {}", skill.summary),
-    ];
-
-    if !skill.description.is_empty() {
-        parts.push(format!("Description: {}", skill.description));
-    }
-    if !skill.files.is_empty() {
-        parts.push(format!("Files: {}", skill.files.join(", ")));
-    }
-    if !skill.pattern.is_empty() {
-        parts.push(format!("Pattern:\n{}", skill.pattern));
-    }
-    if !skill.prompt_template.is_empty() {
-        parts.push(format!("Template:\n{}", skill.prompt_template));
-    }
-    if !skill.required_tools.is_empty() {
-        parts.push(format!("Tools: {}", skill.required_tools.join(", ")));
-    }
-
-    parts.join("\n\n")
-}
-
 /// Render up to 3 prior skills into a "## Prior Experience" context section.
 ///
 /// Follows the same pattern as `render_knowledge_context` — a markdown heading
@@ -1446,8 +1834,7 @@ async fn enrich_task_context_with_search(
         return None;
     }
 
-    let description = task.description.as_deref().unwrap_or(&task.title);
-    let query = format!("Rust {} {} best practices patterns", task.tier, description);
+    let query = search_query_for_task(task);
 
     let results = pplx_client.search(&query).await.ok()?;
 
@@ -1455,15 +1842,85 @@ async fn enrich_task_context_with_search(
         return None;
     }
 
-    let context = results
-        .results
-        .iter()
-        .take(3)
-        .map(|r| format!("### {}\n{}\nSource: {}", r.title, r.content, r.url))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    Some(render_search_context(
+        &query,
+        &results.results,
+        task.files.as_slice(),
+    ))
+}
 
-    Some(context)
+fn search_query_for_task(task: &crate::task_parser::TaskDef) -> String {
+    let description = task.description.as_deref().unwrap_or(&task.title).trim();
+    let mut query_parts = vec![
+        "Rust".to_string(),
+        task.tier.clone(),
+        description.to_string(),
+        "best practices".to_string(),
+    ];
+
+    if let Some(crate_name) = task_crate_name(Some(task)) {
+        query_parts.push(crate_name);
+    }
+
+    let file_hints = task
+        .files
+        .iter()
+        .take(2)
+        .filter_map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    if !file_hints.is_empty() {
+        query_parts.push(file_hints.join(" "));
+    }
+
+    query_parts
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn render_search_context(
+    query: &str,
+    results: &[roko_agent::perplexity::SearchResult],
+    files: &[String],
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut context = String::from(
+        "## External Research\n\nPre-dispatch search grounding for architecture/integration work.\n",
+    );
+    let _ = writeln!(context, "\nQuery: {query}");
+    if !files.is_empty() {
+        let _ = writeln!(context, "Files: {}", files.join(", "));
+    }
+
+    for (idx, result) in results.iter().take(3).enumerate() {
+        let snippet = truncate_doc_snippet(result.content.trim(), 420);
+        let _ = write!(
+            context,
+            "\n### {}. {}\n{}\nSource: {}",
+            idx + 1,
+            result.title.trim(),
+            snippet,
+            result.url
+        );
+        if let Some(date) = result
+            .last_updated
+            .as_deref()
+            .or(result.date.as_deref())
+            .filter(|date| !date.trim().is_empty())
+        {
+            let _ = write!(context, "\nDate: {date}");
+        }
+        context.push('\n');
+    }
+
+    context
 }
 
 // ─── PlanRunner ───────────────────────────────────────────────────────────
@@ -1677,10 +2134,7 @@ fn cascade_routing_context(
                 .iter()
                 .filter_map(|task_id| tracker.queue_wait_hours(task_id))
                 .fold(0.0, f64::max);
-            (
-                u32::try_from(ready_ids.len()).unwrap_or(u32::MAX),
-                max_wait,
-            )
+            (u32::try_from(ready_ids.len()).unwrap_or(u32::MAX), max_wait)
         })
         .unwrap_or((0, 0.0));
     let conductor_load = routing_load_pressure(0, ready_queue_depth, max_queue_wait_hours);
@@ -1711,7 +2165,11 @@ struct RoutingLoadSnapshot {
     max_queue_wait_hours: f64,
 }
 
-fn routing_load_pressure(active_agents: u32, ready_queue_depth: u32, max_queue_wait_hours: f64) -> f64 {
+fn routing_load_pressure(
+    active_agents: u32,
+    ready_queue_depth: u32,
+    max_queue_wait_hours: f64,
+) -> f64 {
     let active_pressure = (f64::from(active_agents) / 6.0).clamp(0.0, 1.0);
     let queue_pressure = (f64::from(ready_queue_depth) / 6.0).clamp(0.0, 1.0);
     let wait_pressure = (max_queue_wait_hours / 8.0).clamp(0.0, 1.0);
@@ -3224,11 +3682,7 @@ impl PlanRunner {
         }
 
         RoutingLoadSnapshot {
-            pressure: routing_load_pressure(
-                active_agents,
-                ready_queue_depth,
-                max_queue_wait_hours,
-            ),
+            pressure: routing_load_pressure(active_agents, ready_queue_depth, max_queue_wait_hours),
             active_agents,
             ready_queue_depth,
             max_queue_wait_hours,
@@ -5412,7 +5866,7 @@ impl PlanRunner {
             ));
         }
 
-        let mut results: Vec<(String, String, AgentResult)> = Vec::with_capacity(task_ids.len());
+        let mut results: Vec<ParallelTaskResult> = Vec::with_capacity(task_ids.len());
         let plan_id_owned = plan_id.to_owned();
         let mut pending = configs.into_iter();
         loop {
@@ -5435,9 +5889,20 @@ impl PlanRunner {
                         task_role = %role,
                         phase = %task_phase
                     );
+                    let task_id = tid;
+                    let exec_dir = cfg.exec_dir.clone();
+                    let prompt_text = cfg.prompt.clone();
+                    let system_prompt = cfg.system_prompt.clone();
                     let model = cfg.model.clone();
                     let result = run_prepared_agent(cfg).instrument(span).await;
-                    (tid, model, result)
+                    ParallelTaskResult {
+                        task_id,
+                        exec_dir,
+                        prompt_text,
+                        system_prompt,
+                        model,
+                        result,
+                    }
                 });
             }
 
@@ -5457,11 +5922,44 @@ impl PlanRunner {
 
         // ── Process results sequentially ─────────────────────────────
         let mut any_fatal = false;
-        for (tid, model, agent_result) in &results {
-            self.add_task_spend(plan_id, tid, f64::from(agent_result.usage.cost_usd));
-            if agent_result.success {
+        for task_result in &results {
+            let tid = &task_result.task_id;
+            self.add_task_spend(plan_id, tid, f64::from(task_result.result.usage.cost_usd));
+            if task_result.result.success {
+                let task_def = tasks_file
+                    .as_ref()
+                    .and_then(|tf| tf.tasks.iter().find(|task| task.id == *tid).cloned());
                 if let Err(e) = self
-                    .record_task_success(plan_id, tid, agent_result, &started)
+                    .finish_task_post_processing(
+                        plan_id,
+                        tid,
+                        task_def.as_ref(),
+                        &task_result.prompt_text,
+                        &task_result.system_prompt,
+                        &task_result.model,
+                        &task_result.result,
+                        &task_result.exec_dir,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "[orchestrate] parallel task {tid} post-processing failed: {e}"
+                    );
+                    self.record_task_failure(
+                        plan_id,
+                        tid,
+                        Some(task_result.prompt_text.as_str()),
+                        Some(task_result.model.as_str()),
+                        &e,
+                        &started,
+                        Some(&task_result.result),
+                    )
+                    .await;
+                    any_fatal = true;
+                    continue;
+                }
+                if let Err(e) = self
+                    .record_task_success(plan_id, tid, &task_result.result, &started)
                     .await
                 {
                     tracing::error!("[orchestrate] task {tid} aborted by plan budget: {e}");
@@ -5481,10 +5979,10 @@ impl PlanRunner {
                     plan_id,
                     tid,
                     None,
-                    Some(model.as_str()),
+                    Some(task_result.model.as_str()),
                     &err,
                     &started,
-                    Some(agent_result),
+                    Some(&task_result.result),
                 )
                 .await;
                 any_fatal = true;
@@ -8583,16 +9081,34 @@ impl PlanRunner {
                     .healthy_model_slugs(&all_model_slugs, |model_slug| {
                         provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
                     });
-            // Re-rank healthy models by local reward score so models that
-            // historically correlate with global task success float to the top.
+            let effective_models = roko_config.effective_models();
+            let task_requirements = task_requirements_for_routing(
+                Some(td),
+                role,
+                &task_text,
+                &td.allowed_tools.clone().unwrap_or_default().join(","),
+                effective_context_window_tokens(&self.config) as u64,
+            );
             let healthy_models = {
-                let mut ranked = healthy_models;
-                ranked.sort_by(|a, b| {
-                    let sa = self.learning.local_reward_score("router", a);
-                    let sb = self.learning.local_reward_score("router", b);
-                    sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                ranked
+                let mut ranked = healthy_models
+                    .iter()
+                    .filter_map(|slug| {
+                        let reward = self.learning.local_reward_score("router", slug);
+                        match effective_models.get(slug) {
+                            Some(profile) => score_model_for_task(profile, &task_requirements).map(
+                                |capability_score| (slug.clone(), capability_score + reward * 0.5),
+                            ),
+                            None => Some((slug.clone(), reward)),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if ranked.is_empty() {
+                    healthy_models
+                } else {
+                    ranked
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    ranked.into_iter().map(|(slug, _)| slug).collect()
+                }
             };
 
             routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
@@ -8725,6 +9241,26 @@ impl PlanRunner {
             }
         };
 
+        let search_context_section = if let (Some(task), Some(search_client)) =
+            (task_def.as_ref(), self.search_client.as_ref())
+        {
+            match enrich_task_context_with_search(task, search_client).await {
+                Some(search_text) => {
+                    let search_text_len = search_text.len();
+                    Some((
+                        PromptSection::new("external-research", search_text)
+                            .with_priority(SectionPriority::Low)
+                            .with_placement(Placement::Middle)
+                            .with_hard_cap(2_048),
+                        search_text_len,
+                    ))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         // ── Provider health check ────────────────────────────────────
         let selected_provider =
             provider_id_for_routing_model(&roko_config, &model_providers, &selected_model);
@@ -8809,6 +9345,7 @@ impl PlanRunner {
                     .then_some((model.clone(), "provider_unhealthy".to_string()))
             })
             .collect::<HashMap<_, _>>();
+        let task_category_label = TaskCategory::Implementation.label().to_string();
         let routing_meta = RoutingDecisionMeta {
             trace_id: Self::trace_id_for(plan_id, task).to_hex(),
             task_id: task.to_string(),
@@ -8818,6 +9355,7 @@ impl PlanRunner {
                 .as_ref()
                 .map(|td| td.tier.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
+            task_category: task_category_label.clone(),
             routing_stage: routing_stage.clone(),
             routing_reason: routing_reason.clone(),
         };
@@ -8994,9 +9532,13 @@ impl PlanRunner {
         let mut sections = vec![role_section];
         for cs in context_sections {
             sections.push(
-                apply_section_effectiveness_to_prompt_section(cs, &role_key, &section_effectiveness)
-                    .into_signal()
-                    .map_err(|e| anyhow!("context section: {e}"))?,
+                apply_section_effectiveness_to_prompt_section(
+                    cs,
+                    &role_key,
+                    &section_effectiveness,
+                )
+                .into_signal()
+                .map_err(|e| anyhow!("context section: {e}"))?,
             );
         }
 
@@ -9007,9 +9549,9 @@ impl PlanRunner {
                     &role_key,
                     &section_effectiveness,
                 )
-                    .with_bidder(AttentionBidder::PlaybookRules)
-                    .into_signal()
-                    .map_err(|e| anyhow!("skill-library section: {e}"))?,
+                .with_bidder(AttentionBidder::PlaybookRules)
+                .into_signal()
+                .map_err(|e| anyhow!("skill-library section: {e}"))?,
             );
             tracing::info!(
                 "[orchestrate] injected skill library context ({} chars)",
@@ -9024,13 +9566,30 @@ impl PlanRunner {
                     &role_key,
                     &section_effectiveness,
                 )
-                    .with_bidder(AttentionBidder::PlaybookRules)
-                    .into_signal()
-                    .map_err(|e| anyhow!("playbook section: {e}"))?,
+                .with_bidder(AttentionBidder::PlaybookRules)
+                .into_signal()
+                .map_err(|e| anyhow!("playbook section: {e}"))?,
             );
             tracing::info!(
                 "[orchestrate] injected playbook context ({} chars)",
                 playbook_text_len
+            );
+        }
+
+        if let Some((search_section, search_text_len)) = search_context_section {
+            sections.push(
+                apply_section_effectiveness_to_prompt_section(
+                    search_section,
+                    &role_key,
+                    &section_effectiveness,
+                )
+                .with_bidder(AttentionBidder::Research)
+                .into_signal()
+                .map_err(|e| anyhow!("external-research section: {e}"))?,
+            );
+            tracing::info!(
+                "[orchestrate] injected external research context ({} chars)",
+                search_text_len
             );
         }
 
@@ -9052,7 +9611,7 @@ impl PlanRunner {
                 &section_effectiveness,
             )
             .into_signal()
-                .map_err(|e| anyhow!("learned-context section: {e}"))?;
+            .map_err(|e| anyhow!("learned-context section: {e}"))?;
             sections.push(learned_section);
             tracing::info!(
                 "[orchestrate] injected learned context ({} chars)",
@@ -9075,8 +9634,8 @@ impl PlanRunner {
                     &role_key,
                     &section_effectiveness,
                 )
-                    .into_signal()
-                    .map_err(|e| anyhow!("daimon-state section: {e}"))?,
+                .into_signal()
+                .map_err(|e| anyhow!("daimon-state section: {e}"))?,
             );
         }
 
@@ -9104,15 +9663,69 @@ impl PlanRunner {
                     &section_effectiveness,
                 )
                 .into_signal()
-                    .map_err(|e| anyhow!("tool manifest section: {e}"))?;
+                .map_err(|e| anyhow!("tool manifest section: {e}"))?;
                 sections.push(tool_section);
             }
         }
 
+        let predictive_calibration = load_predictive_calibration(&self.workdir).await;
+        let cfactor_source = load_cfactor_source(&self.workdir).await;
+        if let Some(calibration) = predictive_calibration.as_ref() {
+            for policy_section in predictive_policy_sections(
+                calibration.clone(),
+                &selected_model,
+                &task_category_label,
+            ) {
+                sections.push(
+                    apply_section_effectiveness_to_prompt_section(
+                        policy_section,
+                        &role_key,
+                        &section_effectiveness,
+                    )
+                    .into_signal()
+                    .map_err(|e| anyhow!("predictive-calibration section: {e}"))?,
+                );
+            }
+        }
+        if let Some(source) = cfactor_source.as_ref() {
+            for policy_section in cfactor_policy_sections(source.clone()) {
+                sections.push(
+                    apply_section_effectiveness_to_prompt_section(
+                        policy_section,
+                        &role_key,
+                        &section_effectiveness,
+                    )
+                    .into_signal()
+                    .map_err(|e| anyhow!("collective-calibration section: {e}"))?,
+                );
+            }
+        }
+
         let composer = PromptComposer::new();
-        let section_scorer = SectionScorer::new();
+        let catalyst_source = Arc::new(SectionEffectCatalystSource {
+            registry: section_effectiveness.clone(),
+            role: role_key.clone(),
+        });
+        let mut scorers: Vec<Box<dyn roko_core::Scorer>> = vec![
+            Box::new(SectionScorer::new()),
+            Box::new(CatalystScorer::new(catalyst_source)),
+        ];
+        if let Some(calibration) = predictive_calibration.clone() {
+            scorers.push(Box::new(
+                PredictiveScorer::new(calibration).with_pragmatic_weight(match role {
+                    AgentRole::Strategist | AgentRole::Auditor => 0.8,
+                    AgentRole::Implementer | AgentRole::AutoFixer => 1.5,
+                    _ => 1.0,
+                }),
+            ));
+        }
+        let section_scorer: Box<dyn roko_core::Scorer> = Box::new(SumScorer::new(scorers));
         let prompt_ctx = ctx
             .clone()
+            .with_attr("roko.model_slug", &selected_model)
+            .with_attr("roko.role", &role_key)
+            .with_attr("roko.task_category", &task_category_label)
+            .with_attr("roko.task_text", &task_text)
             .with_attr(
                 "roko.daimon.pleasure",
                 format!("{:.4}", task_affect_state.pleasure),
@@ -9133,7 +9746,7 @@ impl PlanRunner {
             .compose(
                 &sections,
                 &Budget::tokens(self.config.prompt.token_budget),
-                &section_scorer,
+                section_scorer.as_ref(),
                 &prompt_ctx,
             )
             .map_err(|e| anyhow!("compose: {e}"))?;
@@ -9181,6 +9794,7 @@ impl PlanRunner {
             let cached_content = self
                 .ensure_plan_gemini_cache(plan_id, &roko_config, &selected_model)
                 .await?;
+            let mcp_config = self.resolve_mcp_config_path().await;
             let task_read_args = task_def
                 .as_ref()
                 .map(task_read_cli_args)
@@ -9198,26 +9812,29 @@ impl PlanRunner {
                 extra_args.push(resume.clone());
             }
 
-            let agent = create_agent_for_model(
-                &roko_config,
-                &selected_model,
-                AgentOptions {
-                    command: Some(self.config.agent.command.clone()),
-                    timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
-                    system_prompt: Some(role_instruction.clone()),
-                    cached_content,
-                    tools: Some(task_allowed_tools_csv.clone()),
-                    mcp_config: self.resolve_mcp_config_path().await,
-                    provider_semaphores: None,
-                    env: self.config.agent.env.clone(),
-                    extra_args,
-                    effort: Some(dispatch_effort.clone()),
-                    bare_mode: self.config.agent.bare_mode,
-                    dangerously_skip_permissions: claude_skip_permissions_for_role(role),
-                    name: String::new(),
-                },
-            )
-            .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))?;
+            let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
+                create_agent_for_model(
+                    &roko_config,
+                    &selected_model,
+                    AgentOptions {
+                        command: Some(self.config.agent.command.clone()),
+                        timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+                        system_prompt: Some(role_instruction.clone()),
+                        cached_content,
+                        tools: Some(task_allowed_tools_csv.clone()),
+                        mcp_config,
+                        working_dir: Some(exec_dir.clone()),
+                        provider_semaphores: None,
+                        env: self.config.agent.env.clone(),
+                        extra_args,
+                        effort: Some(dispatch_effort.clone()),
+                        bare_mode: self.config.agent.bare_mode,
+                        dangerously_skip_permissions: claude_skip_permissions_for_role(role),
+                        name: String::new(),
+                    },
+                )
+                .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))
+            })?;
             let resolved = resolve_model(&roko_config, &selected_model);
             let cost_table = task_runner_cost_table(&resolved);
             let mut runner_budget = RunnerBudgetGuardrail::new(
@@ -9275,12 +9892,48 @@ impl PlanRunner {
                 task_role = %task_role
             )
             .entered();
-            let mut agent =
-                ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
-                    .with_timeout_ms(self.config.agent.timeout_ms);
-            for (k, v) in &self.config.agent.env {
-                agent = agent.with_env_var(k, v);
-            }
+            let agent: Box<dyn Agent> = if is_known_protocol_command(&self.config.agent.command) {
+                let mut agent =
+                    ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
+                        .with_timeout_ms(self.config.agent.timeout_ms)
+                        .with_current_dir(exec_dir.clone());
+                for (k, v) in &self.config.agent.env {
+                    agent = agent.with_env_var(k, v);
+                }
+                Box::new(agent)
+            } else {
+                let mut fallback_config = RokoConfig::default();
+                fallback_config.agent.command = Some(self.config.agent.command.clone());
+                let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
+                    create_agent_for_model(
+                        &fallback_config,
+                        &selected_model,
+                        AgentOptions {
+                            command: Some(self.config.agent.command.clone()),
+                            timeout_ms: Some(self.config.agent.timeout_ms),
+                            system_prompt: None,
+                            cached_content: None,
+                            tools: None,
+                            mcp_config: None,
+                            working_dir: Some(exec_dir.clone()),
+                            provider_semaphores: None,
+                            env: self.config.agent.env.clone(),
+                            extra_args: self.config.agent.args.clone(),
+                            effort: None,
+                            bare_mode: self.config.agent.bare_mode,
+                            dangerously_skip_permissions: false,
+                            name: String::new(),
+                        },
+                    )
+                    .map_err(|e| {
+                        anyhow!(
+                            "create generic subprocess agent for {}: {e}",
+                            self.config.agent.command
+                        )
+                    })
+                })?;
+                agent
+            };
             let mut runner_budget = RunnerBudgetGuardrail::new(
                 self.config.budget.max_task_usd,
                 self.config.budget.max_session_usd,
@@ -9292,7 +9945,7 @@ impl PlanRunner {
             let _ = runner_budget.record_cost(self.plan_costs.values().sum::<f64>(), "session");
 
             let mut runner = TaskRunner {
-                agent: Box::new(agent),
+                agent,
                 event_bus: RunnerEventBus::new(16),
                 anomaly: RunnerAnomalyDetector::new(self.anomaly_detector.session_start_ms()),
                 budget: runner_budget,
@@ -9635,71 +10288,17 @@ impl PlanRunner {
                 }),
             );
 
-            // ── Run per-task verification pipeline ──────────────────────
-            if let Some(ref td) = task_def {
-                if let Err((task_id, phase, command, error_output)) =
-                    self.run_verify_steps(&td.id, &td.verify, &exec_dir).await
-                {
-                    let msg = td
-                        .verify
-                        .iter()
-                        .find(|s| s.command == command)
-                        .and_then(|s| s.fail_msg.as_deref())
-                        .unwrap_or("verification failed");
-                    let task_phase = task_def
-                        .as_ref()
-                        .map(|task| task.status.as_str())
-                        .unwrap_or("unknown");
-                    let output_tail = result
-                        .output
-                        .body
-                        .as_text()
-                        .ok()
-                        .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
-                    self.observe_cascade_router(plan_id, task, task_def.as_ref(), &selected_model, 0.0);
-                    let error = anyhow!(
-                        "verify failed for {task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
-                    );
-                    return Err(with_task_failure_context(
-                        error,
-                        &task_id,
-                        task_phase,
-                        &phase,
-                        output_tail.as_deref(),
-                    ));
-                }
-                self.verify_declared_write_files(plan_id, &td.id, &td.files, &exec_dir)
-                    .await?;
-
-                let mut task_files = Vec::new();
-                let mut seen_files = HashSet::new();
-                if let Ok(changed_files) = self.git_changed_files(&exec_dir).await {
-                    for file in changed_files {
-                        if seen_files.insert(file.clone()) {
-                            task_files.push(file);
-                        }
-                    }
-                }
-                for file in &td.files {
-                    if seen_files.insert(file.clone()) {
-                        task_files.push(file.clone());
-                    }
-                }
-
-                let symbols = extract_task_symbols(&task_text);
-                let prompt_hash = roko_core::ContentHash::of(role_instruction.as_bytes()).to_hex();
-                let request = SkillExtractionRequest::new(
-                    task_files,
-                    td.tier.clone(),
-                    symbols,
-                    selected_model.clone(),
-                    prompt_hash,
-                    Vec::new(),
-                );
-                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
-                    tracker.last_skill_request = Some(request);
-                }
-            }
+            self.finish_task_post_processing(
+                plan_id,
+                task,
+                task_def.as_ref(),
+                &task_text,
+                &role_instruction,
+                &selected_model,
+                &result,
+                &exec_dir,
+            )
+            .await?;
 
             Ok::<(), anyhow::Error>(())
         }
@@ -10677,6 +11276,84 @@ impl PlanRunner {
 
         Ok(())
     }
+
+    async fn finish_task_post_processing(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        task_text: &str,
+        role_instruction: &str,
+        selected_model: &str,
+        result: &AgentResult,
+        exec_dir: &Path,
+    ) -> Result<()> {
+        let Some(td) = task_def else {
+            return Ok(());
+        };
+
+        if let Err((failed_task_id, phase, command, error_output)) =
+            self.run_verify_steps(&td.id, &td.verify, exec_dir).await
+        {
+            let msg = td
+                .verify
+                .iter()
+                .find(|step| step.command == command)
+                .and_then(|step| step.fail_msg.as_deref())
+                .unwrap_or("verification failed");
+            let output_tail = result
+                .output
+                .body
+                .as_text()
+                .ok()
+                .map(|text| tail_output_lines(text, TASK_FAILURE_OUTPUT_TAIL_LINES));
+            self.observe_cascade_router(plan_id, task_id, task_def, selected_model, 0.0);
+            let error = anyhow!(
+                "verify failed for {failed_task_id}: {command} — {msg}; stderr/stdout:\n{error_output}"
+            );
+            return Err(with_task_failure_context(
+                error,
+                &failed_task_id,
+                td.status.as_str(),
+                &phase,
+                output_tail.as_deref(),
+            ));
+        }
+
+        self.verify_declared_write_files(plan_id, &td.id, &td.files, exec_dir)
+            .await?;
+
+        let mut task_files = Vec::new();
+        let mut seen_files = HashSet::new();
+        if let Ok(changed_files) = self.git_changed_files(exec_dir).await {
+            for file in changed_files {
+                if seen_files.insert(file.clone()) {
+                    task_files.push(file);
+                }
+            }
+        }
+        for file in &td.files {
+            if seen_files.insert(file.clone()) {
+                task_files.push(file.clone());
+            }
+        }
+
+        let symbols = extract_task_symbols(task_text);
+        let prompt_hash = roko_core::ContentHash::of(role_instruction.as_bytes()).to_hex();
+        let request = SkillExtractionRequest::new(
+            task_files,
+            td.tier.clone(),
+            symbols,
+            selected_model.to_string(),
+            prompt_hash,
+            Vec::new(),
+        );
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_skill_request = Some(request);
+        }
+
+        Ok(())
+    }
 }
 
 fn render_knowledge_context(entries: Vec<KnowledgeEntry>) -> String {
@@ -11179,7 +11856,11 @@ fn prompt_section_meta_from_sections(
     let included = prompt.lineage.iter().copied().collect::<HashSet<_>>();
     sections
         .iter()
-        .filter_map(|signal| PromptSection::from_signal(signal).ok().map(|section| (signal, section)))
+        .filter_map(|signal| {
+            PromptSection::from_signal(signal)
+                .ok()
+                .map(|section| (signal, section))
+        })
         .map(|(signal, original)| {
             let rendered = original.clone().enforce_hard_cap();
             let is_included = included.contains(&signal.id);
@@ -12538,6 +13219,55 @@ command = "cargo check -p roko-cli"
         let truncated = truncate_doc_snippet(&content, 8);
         assert!(truncated.starts_with("aaaaaaaa"));
         assert!(truncated.contains("[... truncated]"));
+    }
+
+    #[test]
+    fn search_query_for_task_includes_tier_context_and_crate_hints() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Integrate provider routing"
+description = "Wire adaptive provider selection into orchestration."
+status = "pending"
+tier = "integrative"
+files = ["crates/roko-cli/src/orchestrate.rs", "crates/roko-agent/src/provider/mod.rs"]
+depends_on = []
+depends_on_plan = []
+verify = []
+"#,
+        )
+        .unwrap();
+
+        let query = search_query_for_task(&task);
+        assert!(query.contains("Rust"));
+        assert!(query.contains("integrative"));
+        assert!(query.contains("adaptive provider selection"));
+        assert!(query.contains("roko-cli"));
+        assert!(query.contains("orchestrate.rs"));
+    }
+
+    #[test]
+    fn render_search_context_includes_sources_and_truncates_large_snippets() {
+        let results = vec![roko_agent::perplexity::SearchResult {
+            url: "https://example.com/routing".to_string(),
+            title: "Routing patterns".to_string(),
+            content: "a".repeat(600),
+            date: Some("2026-04-10".to_string()),
+            last_updated: None,
+        }];
+
+        let rendered = render_search_context(
+            "Rust integrative provider routing best practices",
+            &results,
+            &["crates/roko-cli/src/orchestrate.rs".to_string()],
+        );
+
+        assert!(rendered.contains("## External Research"));
+        assert!(rendered.contains("Query: Rust integrative provider routing best practices"));
+        assert!(rendered.contains("Routing patterns"));
+        assert!(rendered.contains("Source: https://example.com/routing"));
+        assert!(rendered.contains("Date: 2026-04-10"));
+        assert!(rendered.contains("[... truncated]"));
     }
 
     #[test]

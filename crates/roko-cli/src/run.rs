@@ -10,13 +10,14 @@ use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
+use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent, OllamaLlmBackend};
+use roko_agent::{Agent, AgentResult, ExecAgent, OllamaLlmBackend};
 use roko_compose::{
     Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
 };
 use roko_core::agent::resolve_model;
+use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
@@ -322,6 +323,7 @@ async fn dispatch_agent(
                 cached_content: None,
                 tools: Some(tools_csv),
                 mcp_config: config.agent.mcp_config.clone(),
+                working_dir: Some(workdir.to_path_buf()),
                 provider_semaphores: None,
                 env: config.agent.env.clone(),
                 extra_args: config.agent.args.clone(),
@@ -347,33 +349,84 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| "claude-opus-4-6".to_string());
-        let mut agent = ClaudeCliAgent::new(&config.agent.command, workdir, model.clone())
-            .with_timeout_ms(config.agent.timeout_ms)
-            .with_bare_mode(config.agent.bare_mode)
-            .with_effort(config.agent.effort.clone())
-            .with_system_prompt(system_prompt)
-            .with_tools(tools_csv)
-            .with_settings_json(roko_agent::claude_cli_agent::build_settings_json())
-            .with_extra_args(extra_args)
-            .with_dangerously_skip_permissions(role_allows_dangerous_skip_permissions(
-                &config.prompt.role,
-            ))
-            .with_optional_resume(optional_resume);
+        let mut synthesized_config = RokoConfig::default();
+        synthesized_config.agent.command = Some(config.agent.command.clone());
+        synthesized_config.agent.default_model = model.clone();
+        synthesized_config.agent.default_backend = "claude".to_string();
+
+        let mut synthetic_extra_args = extra_args;
+        if let Some(resume_session) = optional_resume {
+            synthetic_extra_args.push("--resume".to_string());
+            synthetic_extra_args.push(resume_session);
+        }
         if let Some(fallback_model) = &config.agent.fallback_model {
-            agent = agent.with_fallback_model(fallback_model.clone());
+            synthetic_extra_args.push("--fallback-model".to_string());
+            synthetic_extra_args.push(fallback_model.clone());
         }
-        for (k, v) in &config.agent.env {
-            agent = agent.with_env_var(k, v);
-        }
+
+        let agent = create_agent_for_model(
+            &synthesized_config,
+            &model,
+            AgentOptions {
+                command: Some(config.agent.command.clone()),
+                timeout_ms: Some(config.agent.timeout_ms),
+                system_prompt: Some(system_prompt),
+                cached_content: None,
+                tools: Some(tools_csv),
+                mcp_config: config.agent.mcp_config.clone(),
+                working_dir: Some(workdir.to_path_buf()),
+                provider_semaphores: None,
+                env: config.agent.env.clone(),
+                extra_args: synthetic_extra_args,
+                effort: Some(config.agent.effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: role_allows_dangerous_skip_permissions(
+                    &config.prompt.role,
+                ),
+                name: String::new(),
+            },
+        )
+        .with_context(|| format!("create synthesized claude agent for model {model}"))?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "ollama" {
         Ok(run_ollama_agentic_single(workdir, config, prompt_text).await)
-    } else {
+    } else if is_known_protocol_command(&config.agent.command) {
         let mut agent = ExecAgent::new(config.agent.command.clone(), config.agent.args.clone())
             .with_timeout_ms(config.agent.timeout_ms);
         for (key, value) in &config.agent.env {
             agent = agent.with_env_var(key.clone(), value.clone());
         }
+        Ok((agent.run(prompt, ctx).await, Vec::new()))
+    } else {
+        let mut fallback_config = RokoConfig::default();
+        fallback_config.agent.command = Some(config.agent.command.clone());
+
+        let model = config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| config.agent.command.clone());
+        let agent = create_agent_for_model(
+            &fallback_config,
+            &model,
+            AgentOptions {
+                command: Some(config.agent.command.clone()),
+                timeout_ms: Some(config.agent.timeout_ms),
+                system_prompt: None,
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(workdir.to_path_buf()),
+                provider_semaphores: None,
+                env: config.agent.env.clone(),
+                extra_args: config.agent.args.clone(),
+                effort: Some(config.agent.effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: false,
+                name: String::new(),
+            },
+        )
+        .with_context(|| format!("create generic subprocess agent for {}", config.agent.command))?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     }
 }

@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
-use roko_agent::{Agent, AgentResult, ClaudeCliAgent, ExecAgent};
+use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
+use roko_agent::{Agent, AgentResult, ExecAgent};
+use roko_core::config::schema::RokoConfig;
 use roko_core::{ContentHash, Context as RokoContext, Engram};
 use roko_daimon::{
     AffectEngine as _, AffectEvent, DaimonState, EpisodeStrategyObservation, SomaticMarker,
@@ -57,32 +59,122 @@ pub struct DreamAgentConfig {
 
 impl DreamAgentConfig {
     /// Build a dream review agent around the configured CLI backend.
-    #[must_use]
-    fn build_agent(&self, workdir: &Path) -> DreamReviewAgent {
-        if self.command == "claude" {
+    fn build_agent(&self, workdir: &Path) -> Result<DreamReviewAgent> {
+        let mut routing_config = roko_core::config::load_config(workdir)
+            .with_context(|| format!("load routing config from {}", workdir.display()))?;
+        routing_config.apply_process_env();
+        let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
+
+        if has_routing {
+            let model = self
+                .model
+                .clone()
+                .or_else(|| {
+                    (!routing_config.agent.default_model.trim().is_empty())
+                        .then(|| routing_config.agent.default_model.clone())
+                })
+                .ok_or_else(|| anyhow::anyhow!("dream review routing needs a configured model"))?;
+            let agent = create_agent_for_model(
+                &routing_config,
+                &model,
+                AgentOptions {
+                    command: Some(self.command.clone()),
+                    timeout_ms: Some(self.timeout_ms),
+                    system_prompt: None,
+                    cached_content: None,
+                    tools: None,
+                    mcp_config: None,
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: self.env.clone(),
+                    extra_args: self.args.clone(),
+                    effort: Some(self.effort.clone()),
+                    bare_mode: self.bare_mode,
+                    dangerously_skip_permissions: false,
+                    name: format!("dream-review:{model}"),
+                },
+            )
+            .with_context(|| format!("create dream review agent for model {model}"))?;
+            Ok(DreamReviewAgent { inner: agent })
+        } else if self.command == "claude" {
             let model = self
                 .model
                 .clone()
                 .unwrap_or_else(|| "claude-opus-4-6".to_string());
-            let mut agent = ClaudeCliAgent::new(&self.command, workdir, model)
-                .with_timeout_ms(self.timeout_ms)
-                .with_bare_mode(self.bare_mode)
-                .with_effort(self.effort.clone())
-                .with_extra_args(self.args.clone());
+            let mut synthesized_config = RokoConfig::default();
+            synthesized_config.agent.command = Some(self.command.clone());
+            synthesized_config.agent.default_model = model.clone();
+            synthesized_config.agent.default_backend = "claude".to_string();
+
+            let mut extra_args = self.args.clone();
             if let Some(fallback_model) = &self.fallback_model {
-                agent = agent.with_fallback_model(fallback_model.clone());
+                extra_args.push("--fallback-model".to_string());
+                extra_args.push(fallback_model.clone());
             }
-            for (key, value) in &self.env {
-                agent = agent.with_env_var(key, value);
-            }
-            DreamReviewAgent::Claude(agent)
-        } else {
+            let agent = create_agent_for_model(
+                &synthesized_config,
+                &model,
+                AgentOptions {
+                    command: Some(self.command.clone()),
+                    timeout_ms: Some(self.timeout_ms),
+                    system_prompt: None,
+                    cached_content: None,
+                    tools: None,
+                    mcp_config: None,
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: self.env.clone(),
+                    extra_args,
+                    effort: Some(self.effort.clone()),
+                    bare_mode: self.bare_mode,
+                    dangerously_skip_permissions: false,
+                    name: format!("dream-review:{model}"),
+                },
+            )
+            .with_context(|| format!("create synthesized dream review agent for model {model}"))?;
+            Ok(DreamReviewAgent {
+                inner: agent,
+            })
+        } else if is_known_protocol_command(&self.command) {
             let mut agent =
                 ExecAgent::new(&self.command, self.args.clone()).with_timeout_ms(self.timeout_ms);
             for (key, value) in &self.env {
                 agent = agent.with_env_var(key, value);
             }
-            DreamReviewAgent::Exec(agent)
+            Ok(DreamReviewAgent {
+                inner: Box::new(agent),
+            })
+        } else {
+            let model = self
+                .model
+                .clone()
+                .unwrap_or_else(|| self.command.clone());
+            let mut synthesized_config = RokoConfig::default();
+            synthesized_config.agent.command = Some(self.command.clone());
+            synthesized_config.agent.default_model = model.clone();
+
+            let agent = create_agent_for_model(
+                &synthesized_config,
+                &model,
+                AgentOptions {
+                    command: Some(self.command.clone()),
+                    timeout_ms: Some(self.timeout_ms),
+                    system_prompt: None,
+                    cached_content: None,
+                    tools: None,
+                    mcp_config: None,
+                    working_dir: Some(workdir.to_path_buf()),
+                    provider_semaphores: None,
+                    env: self.env.clone(),
+                    extra_args: self.args.clone(),
+                    effort: Some(self.effort.clone()),
+                    bare_mode: self.bare_mode,
+                    dangerously_skip_permissions: false,
+                    name: String::new(),
+                },
+            )
+            .with_context(|| format!("create dream review subprocess agent for model {model}"))?;
+            Ok(DreamReviewAgent { inner: agent })
         }
     }
 }
@@ -189,7 +281,7 @@ async fn build_dream_cycle(state: &AppState, config: &DreamLoopConfig) -> Result
     let knowledge = Arc::new(KnowledgeStore::for_layout(&state.layout));
     let playbooks_root = state.layout.root().join("learn").join("playbooks");
     let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
-    let dispatcher = Arc::new(config.agent.build_agent(&state.workdir));
+    let dispatcher = Arc::new(config.agent.build_agent(&state.workdir)?);
     Ok(DreamCycle::new(episodes, knowledge, playbooks, dispatcher))
 }
 
@@ -278,9 +370,8 @@ async fn maybe_run_dream_cycle(
     Ok(())
 }
 
-enum DreamReviewAgent {
-    Claude(ClaudeCliAgent),
-    Exec(ExecAgent),
+struct DreamReviewAgent {
+    inner: Box<dyn Agent>,
 }
 
 async fn apply_dream_affect_feedback(state: &AppState, report: &DreamCycleReport) {
@@ -604,24 +695,15 @@ fn nested_extra_array_len(episode: &Episode, object_key: &str, field_key: &str) 
 #[async_trait]
 impl Agent for DreamReviewAgent {
     async fn run(&self, input: &Engram, ctx: &RokoContext) -> AgentResult {
-        match self {
-            Self::Claude(agent) => agent.run(input, ctx).await,
-            Self::Exec(agent) => agent.run(input, ctx).await,
-        }
+        self.inner.run(input, ctx).await
     }
 
     fn name(&self) -> &str {
-        match self {
-            Self::Claude(agent) => agent.name(),
-            Self::Exec(agent) => agent.name(),
-        }
+        self.inner.name()
     }
 
     fn supports_streaming(&self) -> bool {
-        match self {
-            Self::Claude(agent) => agent.supports_streaming(),
-            Self::Exec(agent) => agent.supports_streaming(),
-        }
+        self.inner.supports_streaming()
     }
 }
 

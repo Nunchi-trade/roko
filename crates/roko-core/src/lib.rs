@@ -41,8 +41,10 @@ pub mod agent;
 pub mod attestation;
 pub mod body;
 pub mod build;
+pub mod catalyst;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;
+pub mod cfactor;
 pub mod conductor;
 pub mod config;
 pub mod context;
@@ -61,6 +63,7 @@ pub mod phase;
 pub mod polyglot;
 pub mod project;
 pub mod provenance;
+pub mod prediction;
 pub mod query;
 pub mod score;
 pub mod secrets;
@@ -74,15 +77,18 @@ pub mod verdict;
 
 pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
 pub use agent::{
-    AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, ToolPermissions,
-    TurnBudget,
+    AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, TaskRequirements,
+    ToolPermissions, TurnBudget, score_model_for_task, select_model_for_task,
+    select_model_for_task_with_bonus,
 };
 pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey};
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};
+pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
 pub use chat_types::{
     ChatMessage, ContentBlock, ImageUrl, MessageContent, ToolCallFunction, ToolCallMessage,
 };
+pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
@@ -104,6 +110,9 @@ pub use project::{
     detect_from_files_with_cargo_toml,
 };
 pub use provenance::Provenance;
+pub use prediction::{
+    PredictiveScorer, PredictionCalibrationSource, PredictionCalibrationSummary, PredictionPolicy,
+};
 pub use query::{Budget, Query};
 pub use score::Score;
 pub use signal_kinds::*;
