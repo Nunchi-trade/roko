@@ -341,6 +341,10 @@ impl App {
                         .context("TUI redraw after key")?;
                     continue;
                 }
+                Event::Mouse(mouse) => {
+                    self.last_input = Instant::now();
+                    self.handle_mouse(mouse);
+                }
                 Event::Resize(_, _) => {}
                 Event::Tick => {
                     self.atmosphere.tick();

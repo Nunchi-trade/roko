@@ -3,13 +3,15 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseEvent};
 
 /// High-level terminal events consumed by the TUI app loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// Keyboard input.
     Key(KeyEvent),
+    /// Mouse input.
+    Mouse(MouseEvent),
     /// Terminal resize.
     Resize(u16, u16),
     /// Tick fired when no input arrives before the configured timeout.
@@ -44,7 +46,7 @@ impl EventHandler {
         self.tick_rate = tick_rate;
     }
 
-    /// Wait for the next keyboard, resize, or tick event.
+    /// Wait for the next keyboard, mouse, resize, or tick event.
     pub fn next(&mut self) -> io::Result<Event> {
         loop {
             let elapsed = self.last_tick.elapsed();
@@ -60,6 +62,9 @@ impl EventHandler {
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                     {
                         return Ok(Event::Key(key));
+                    }
+                    CrosstermEvent::Mouse(mouse) => {
+                        return Ok(Event::Mouse(mouse));
                     }
                     CrosstermEvent::Resize(width, height) => {
                         return Ok(Event::Resize(width, height));
