@@ -60,6 +60,8 @@ pub struct App {
     active_modal: Option<ModalState>,
     /// Toast notifications.
     notifications: Vec<super::modals::Notification>,
+    /// Keyboard scroll acceleration state for held-key scrolling.
+    scroll_accel: super::scroll::ScrollAccel,
 
     // -- Legacy scaffold state (kept for text-mode compatibility) --
     /// Currently selected dashboard page (legacy path).
@@ -190,6 +192,7 @@ impl App {
             fx_config: EffectsConfig::default(),
             active_modal: None,
             notifications: Vec::new(),
+            scroll_accel: super::scroll::ScrollAccel::new(),
             current_page: scaffold.active_page(),
             data,
             scaffold,
@@ -562,30 +565,46 @@ impl App {
                     self.tui_state.selected_plan_idx += 1;
                 }
             }
-            TuiAction::ScrollFocusedUp => self.scroll_focused(-1),
-            TuiAction::ScrollFocusedDown => self.scroll_focused(1),
+            TuiAction::ScrollFocusedUp => {
+                let delta = i32::from(self.scroll_accel.push(-1));
+                self.scroll_focused(delta);
+            }
+            TuiAction::ScrollFocusedDown => {
+                let delta = i32::from(self.scroll_accel.push(1));
+                self.scroll_focused(delta);
+            }
             TuiAction::ScrollLogUp => {
-                self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_sub(1);
+                let delta = self.scroll_accel.push(-1);
+                self.tui_state.log_scroll =
+                    Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
             }
             TuiAction::ScrollLogDown => {
-                self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_add(1);
+                let delta = self.scroll_accel.push(1);
+                self.tui_state.log_scroll =
+                    Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
             }
             TuiAction::ScrollAgentUp => {
                 let current = self.tui_state.agent_scroll.unwrap_or(0);
-                self.tui_state.agent_scroll = Some(current.saturating_sub(1));
+                let delta = self.scroll_accel.push(-1);
+                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
             }
             TuiAction::ScrollAgentDown => {
                 let current = self.tui_state.agent_scroll.unwrap_or(0);
-                self.tui_state.agent_scroll = Some(current.saturating_add(1));
+                let delta = self.scroll_accel.push(1);
+                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
             }
             TuiAction::ScrollAgentEnd => {
                 self.tui_state.agent_scroll = None; // Resume auto-tail
             }
             TuiAction::ScrollDiffUp => {
-                self.tui_state.diff_scroll = self.tui_state.diff_scroll.saturating_sub(1);
+                let delta = self.scroll_accel.push(-1);
+                self.tui_state.diff_scroll =
+                    Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDiffDown => {
-                self.tui_state.diff_scroll = self.tui_state.diff_scroll.saturating_add(1);
+                let delta = self.scroll_accel.push(1);
+                self.tui_state.diff_scroll =
+                    Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDetailUp => {
                 self.tui_state.plan_detail_scroll =
@@ -1171,9 +1190,17 @@ impl App {
             FocusZone::RightPanel => {
                 let current = self.tui_state.diff_scroll as i32;
                 self.tui_state.diff_scroll = (current + delta).max(0) as usize;
-            }
         }
     }
+}
+
+fn apply_signed_scroll(current: usize, delta: i16) -> usize {
+    if delta < 0 {
+        current.saturating_sub(delta.saturating_abs() as usize)
+    } else {
+        current.saturating_add(delta as usize)
+    }
+}
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let action = match mouse.kind {

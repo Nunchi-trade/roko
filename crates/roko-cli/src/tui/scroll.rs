@@ -26,6 +26,11 @@ impl Default for ScrollAccel {
 }
 
 impl ScrollAccel {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Push a scroll event in the given direction (+1 or -1).
     /// Returns the accelerated scroll amount (signed).
     pub fn push(&mut self, direction: i16) -> i16 {
