@@ -4289,6 +4289,10 @@ impl PlanRunner {
             }
         }
 
+        if self.cancel.is_cancelled() || watcher_cancel.is_cancelled() {
+            self.cleanup_tracked_plan_worktrees().await;
+        }
+
         // Clean up worktrees after completion (§6).
         if self.worktrees_enabled()
             && let Err(e) = self.worktrees.reclaim_idle().await
@@ -4605,6 +4609,14 @@ impl PlanRunner {
         match outcome {
             RunExit::Completed(result) => result,
             RunExit::Signaled(result) => {
+                let plan_ids: Vec<String> = self
+                    .executor
+                    .snapshot(0)
+                    .plan_states
+                    .keys()
+                    .cloned()
+                    .collect();
+                self.cleanup_tracked_plan_worktrees().await;
                 self.save_state_to(&snapshot_path)?;
                 tracing::info!(
                     "[orchestrate] checkpoint saved to {}",
@@ -4615,6 +4627,14 @@ impl PlanRunner {
             }
             RunExit::SignalTimedOut => {
                 self.force_shutdown().await;
+                let plan_ids: Vec<String> = self
+                    .executor
+                    .snapshot(0)
+                    .plan_states
+                    .keys()
+                    .cloned()
+                    .collect();
+                self.cleanup_tracked_plan_worktrees().await;
                 self.save_state_to(&snapshot_path)?;
                 tracing::info!(
                     "[orchestrate] checkpoint saved to {}",
@@ -10660,6 +10680,16 @@ impl PlanRunner {
         }
     }
 
+    async fn cleanup_tracked_plan_worktrees(&self) {
+        if !self.worktrees_enabled() {
+            return;
+        }
+
+        if let Err(e) = self.worktrees.remove_all().await {
+            tracing::error!("[orchestrate] tracked plan worktree cleanup failed: {e}");
+        }
+    }
+
     async fn run_post_merge_follow_up(&self, plan_id: &str) -> Result<bool> {
         let payload =
             GatePayload::in_dir(&self.workdir).with_label(format!("{plan_id}:post-merge"));
@@ -13515,6 +13545,26 @@ depends_on = []
                 plan_id: "plan-1".to_string(),
             })
             .await;
+
+        assert!(runner.worktrees.get("plan-1").is_none());
+        assert!(!plan_dir.exists(), "plan worktree should be removed");
+    }
+
+    #[tokio::test]
+    async fn run_all_cleans_up_tracked_plan_worktree_on_cancel() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let mut runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        assert!(plan_dir.exists(), "plan worktree should exist");
+
+        runner.cancel.cancel();
+        let watcher_cancel = TokioCancellationToken::new();
+        let _ = runner
+            .run_all(&watcher_cancel)
+            .await
+            .expect("run_all should return after cancellation");
 
         assert!(runner.worktrees.get("plan-1").is_none());
         assert!(!plan_dir.exists(), "plan worktree should be removed");
