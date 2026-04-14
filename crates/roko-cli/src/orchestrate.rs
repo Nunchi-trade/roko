@@ -4609,13 +4609,6 @@ impl PlanRunner {
         match outcome {
             RunExit::Completed(result) => result,
             RunExit::Signaled(result) => {
-                let plan_ids: Vec<String> = self
-                    .executor
-                    .snapshot(0)
-                    .plan_states
-                    .keys()
-                    .cloned()
-                    .collect();
                 self.cleanup_tracked_plan_worktrees().await;
                 self.save_state_to(&snapshot_path)?;
                 tracing::info!(
@@ -4627,13 +4620,6 @@ impl PlanRunner {
             }
             RunExit::SignalTimedOut => {
                 self.force_shutdown().await;
-                let plan_ids: Vec<String> = self
-                    .executor
-                    .snapshot(0)
-                    .plan_states
-                    .keys()
-                    .cloned()
-                    .collect();
                 self.cleanup_tracked_plan_worktrees().await;
                 self.save_state_to(&snapshot_path)?;
                 tracing::info!(
@@ -10756,6 +10742,7 @@ impl PlanRunner {
             .map_err(|err| anyhow!("worktree unavailable for plan={plan_id}: {err}"))
     }
 
+    #[cfg(test)]
     async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
         match self.ensure_plan_exec_dir(plan_id).await {
             Ok(path) => path,
