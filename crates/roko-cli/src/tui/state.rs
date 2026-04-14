@@ -398,10 +398,8 @@ pub struct TuiState {
     pub plan_detail_scroll: usize,
     /// Plan summary scroll offset.
     pub plan_summary_scroll: usize,
-    /// Plan list scroll offset (for long plan lists).
-    pub plan_scroll_offset: usize,
     /// Plan tree scroll offset.
-    pub plan_scroll: usize,
+    pub plan_scroll_offset: usize,
     /// Log viewer scroll offset.
     pub log_scroll: usize,
     /// Task detail overlay scroll offset.
@@ -565,7 +563,6 @@ impl Default for TuiState {
             plan_detail_scroll: 0,
             plan_summary_scroll: 0,
             plan_scroll_offset: 0,
-            plan_scroll: 0,
             log_scroll: 0,
             task_detail_scroll: 0,
 
@@ -925,7 +922,6 @@ impl TuiState {
         self.plan_detail_scroll = 0;
         self.plan_summary_scroll = 0;
         self.plan_scroll_offset = 0;
-        self.plan_scroll = 0;
         self.log_scroll = 0;
         self.task_detail_scroll = 0;
     }
@@ -1449,7 +1445,7 @@ mod tests {
         assert_eq!(state.selected_plan, 0);
         assert_eq!(state.selected_agent, 0);
         assert_eq!(state.output_scroll, 0);
-        assert_eq!(state.plan_scroll, 0);
+        assert_eq!(state.plan_scroll_offset, 0);
     }
 
     #[test]

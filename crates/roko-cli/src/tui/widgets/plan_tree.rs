@@ -145,7 +145,7 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
 
     // Scroll to keep selected visible
     let scroll_offset = state
-        .plan_scroll
+        .plan_scroll_offset
         .min(total_lines.saturating_sub(visible_height));
     let visible: Vec<Line> = lines
         .into_iter()
