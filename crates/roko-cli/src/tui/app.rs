@@ -549,10 +549,10 @@ impl App {
                 }
             }
             TuiAction::FocusNext => {
-                self.tui_state.focus = self.tui_state.focus.next();
+                self.tui_state.focus = self.tui_state.focus.next(self.tui_state.active_tab);
             }
             TuiAction::FocusPrev => {
-                self.tui_state.focus = self.tui_state.focus.prev();
+                self.tui_state.focus = self.tui_state.focus.prev(self.tui_state.active_tab);
             }
             TuiAction::SelectPlanUp => {
                 if self.tui_state.selected_plan_idx > 0 {

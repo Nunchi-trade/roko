@@ -51,25 +51,55 @@ pub enum FocusZone {
 impl FocusZone {
     /// Cycle to the next focus zone.
     #[must_use]
-    pub const fn next(self) -> Self {
-        match self {
-            Self::PlanTree => Self::TaskProgress,
-            Self::TaskProgress => Self::AgentOutput,
-            Self::AgentOutput => Self::CommandOutput,
-            Self::CommandOutput => Self::RightPanel,
-            Self::RightPanel => Self::PlanTree,
+    pub const fn next(self, tab: Tab) -> Self {
+        match tab {
+            Tab::Dashboard => match self {
+                Self::PlanTree => Self::TaskProgress,
+                Self::TaskProgress => Self::AgentOutput,
+                Self::AgentOutput => Self::CommandOutput,
+                Self::CommandOutput => Self::RightPanel,
+                Self::RightPanel => Self::PlanTree,
+            },
+            Tab::Plans => match self {
+                Self::PlanTree | Self::TaskProgress | Self::AgentOutput | Self::CommandOutput => {
+                    Self::RightPanel
+                }
+                Self::RightPanel => Self::PlanTree,
+            },
+            Tab::Agents => match self {
+                Self::PlanTree | Self::TaskProgress | Self::CommandOutput | Self::RightPanel => {
+                    Self::AgentOutput
+                }
+                Self::AgentOutput => Self::RightPanel,
+            },
+            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => self,
         }
     }
 
     /// Cycle to the previous focus zone.
     #[must_use]
-    pub const fn prev(self) -> Self {
-        match self {
-            Self::PlanTree => Self::RightPanel,
-            Self::TaskProgress => Self::PlanTree,
-            Self::AgentOutput => Self::TaskProgress,
-            Self::CommandOutput => Self::AgentOutput,
-            Self::RightPanel => Self::CommandOutput,
+    pub const fn prev(self, tab: Tab) -> Self {
+        match tab {
+            Tab::Dashboard => match self {
+                Self::PlanTree => Self::RightPanel,
+                Self::TaskProgress => Self::PlanTree,
+                Self::AgentOutput => Self::TaskProgress,
+                Self::CommandOutput => Self::AgentOutput,
+                Self::RightPanel => Self::CommandOutput,
+            },
+            Tab::Plans => match self {
+                Self::PlanTree | Self::TaskProgress | Self::AgentOutput | Self::CommandOutput => {
+                    Self::RightPanel
+                }
+                Self::RightPanel => Self::PlanTree,
+            },
+            Tab::Agents => match self {
+                Self::PlanTree | Self::TaskProgress | Self::CommandOutput | Self::RightPanel => {
+                    Self::AgentOutput
+                }
+                Self::AgentOutput => Self::RightPanel,
+            },
+            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => self,
         }
     }
 }
