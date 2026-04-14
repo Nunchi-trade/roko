@@ -294,6 +294,15 @@ pub fn handle_key(
     modals: &ModalVisibility,
 ) -> TuiAction {
     // Modal intercepts (highest priority first)
+    if modals.show_help {
+        return handle_help_key(key);
+    }
+    if modals.show_wave_overview {
+        return handle_wave_overview_key(key);
+    }
+    if modals.show_plan_detail {
+        return handle_plan_detail_key(key);
+    }
     if modals.show_task_picker {
         return handle_task_picker_key(key);
     }
@@ -351,6 +360,31 @@ pub struct ModalVisibility {
 // ---------------------------------------------------------------------------
 // Modal key handlers
 // ---------------------------------------------------------------------------
+
+fn handle_help_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => TuiAction::ShowHelp,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_wave_overview_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('w') => TuiAction::ShowWaveOverview,
+        KeyCode::Up => TuiAction::ScrollFocusedUp,
+        KeyCode::Down => TuiAction::ScrollFocusedDown,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_plan_detail_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => TuiAction::ClosePlanDetail,
+        KeyCode::Up => TuiAction::ScrollDetailUp,
+        KeyCode::Down => TuiAction::ScrollDetailDown,
+        _ => TuiAction::None,
+    }
+}
 
 fn handle_task_picker_key(key: KeyEvent) -> TuiAction {
     match key.code {
