@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
 use crate::tui::state::TuiState;
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,7 @@ fn render_wave_tree(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let focused = matches!(tui_state.focus, FocusZone::PlanTree);
     let total_plans = data.plans.len();
     let completed = data.plans.iter().filter(|p| p.completed).count();
     let failed = tui_state
@@ -185,12 +187,12 @@ fn render_wave_tree(
 
     let title = format!(" Plans ({completed}/{total_plans}{health_suffix}) ");
 
-    let border_style = if active > 0 {
+    let border_style = if focused {
         Style::default().fg(theme.accent)
     } else {
         theme.muted()
     };
-    let title_style = if active > 0 {
+    let title_style = if focused || active > 0 {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
@@ -683,15 +685,23 @@ fn render_right_panel(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let border_style = if focused {
+        Style::default().fg(theme.accent)
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(
-            " Plan Detail ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::default().fg(theme.accent));
+        .title(Span::styled(" Plan Detail ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

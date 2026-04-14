@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
 use crate::tui::state::TuiState;
 
 // ---------------------------------------------------------------------------
@@ -637,6 +638,7 @@ fn render_output_body(
     let selected_agent = data.agents.get(view_state.selected);
     let selected_role = selected_agent.map(|a| a.label.as_str()).unwrap_or("");
     let accent = role_accent(selected_role, theme);
+    let focused = matches!(tui_state.focus, FocusZone::AgentOutput | FocusZone::RightPanel);
 
     let title_label = if selected_role.is_empty() {
         "Agent Output".to_string()
@@ -650,15 +652,18 @@ fn render_output_body(
         " PINNED"
     };
 
-    let (border_style, title_style) =
-        if selected_agent.map_or(false, |a| a.status == "running" || a.status == "active") {
-            (
-                Style::default().fg(accent),
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            (theme.muted(), theme.muted())
-        };
+    let border_style = if focused {
+        Style::default().fg(accent)
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused
+        || selected_agent.map_or(false, |a| a.status == "running" || a.status == "active")
+    {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        theme.muted()
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
