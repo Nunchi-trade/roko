@@ -134,22 +134,6 @@ pub struct TaskEntry {
     pub agent_id: Option<String>,
 }
 
-/// A notification message shown in the TUI.
-#[derive(Debug, Clone)]
-pub struct Notification {
-    pub message: String,
-    pub level: NotificationLevel,
-    pub timestamp_ms: i64,
-}
-
-/// Notification severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotificationLevel {
-    Info,
-    Warning,
-    Error,
-}
-
 /// A log entry for the log viewer.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -447,9 +431,6 @@ pub struct TuiState {
     /// Cached full git view data for F4 Git tab (populated by background thread).
     pub git_view_data: Option<super::views::git_view::GitViewData>,
 
-    // -- notifications --
-    /// Active notification messages.
-    pub notifications: Vec<Notification>,
     /// Log messages for the log viewer.
     pub log_messages: Vec<LogEntry>,
 
@@ -588,7 +569,6 @@ impl Default for TuiState {
             git_summary_lines: Vec::new(),
             git_view_data: None,
 
-            notifications: Vec::new(),
             log_messages: Vec::new(),
 
             plan_detail_content: String::new(),
@@ -828,6 +808,23 @@ impl TuiState {
                 }
             }
         }
+
+        self.parallel_agents = self
+            .agents
+            .iter()
+            .filter(|a| a.active)
+            .map(|a| ParallelAgentState {
+                agent_id: a.id.clone(),
+                plan_id: a.current_plan.clone(),
+                task_id: a.current_task.clone(),
+                status: if a.active {
+                    "running".to_string()
+                } else {
+                    "idle".to_string()
+                },
+                progress_pct: 0.0,
+            })
+            .collect();
 
         // Cost from efficiency summary
         self.cumulative_cost_usd = data.efficiency.total_cost_usd;
