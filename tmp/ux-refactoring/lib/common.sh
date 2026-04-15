@@ -101,6 +101,7 @@ run_last_message_file() { echo "$LOG_ROOT/$1/$2.last.txt"; }
 run_failure_file() { echo "$LOG_ROOT/$1/$2.failure.txt"; }
 run_status_file() { echo "$LOG_ROOT/$1/status.tsv"; }
 run_current_batch_file() { echo "$LOG_ROOT/$1/current-batch.env"; }
+run_backups_dir() { echo "$LOG_ROOT/$1/backups"; }
 batch_prompt_file() { echo "$PROMPTS_DIR/$1.prompt.md"; }
 tmp_target_root() { echo "${TMPDIR:-/tmp}/roko-ux-targets"; }
 batch_target_dir() { echo "$(tmp_target_root)/$1/$2/$3-attempt-$4"; }

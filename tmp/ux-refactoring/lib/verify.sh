@@ -19,6 +19,31 @@ write_failure_summary() {
   } > "$failure_file"
 }
 
+backup_worktree_state() {
+  local run_id="$1"
+  local batch="$2"
+  local attempt="$3"
+  local worktree="$4"
+  local label="$5"
+  local backup_dir prefix
+  backup_dir="$(run_backups_dir "$run_id")"
+  prefix="$backup_dir/${batch}-attempt-${attempt}-${label}"
+  ensure_dir "$backup_dir"
+
+  git -C "$worktree" status --short -- . ':(exclude).cargo-target' ':(exclude)target' \
+    > "${prefix}.status"
+  git -C "$worktree" diff -- . ':(exclude).cargo-target' ':(exclude)target' \
+    > "${prefix}.patch"
+  {
+    echo "run_id=$run_id"
+    echo "batch=$batch"
+    echo "attempt=$attempt"
+    echo "label=$label"
+    echo "captured_at=$(date -Iseconds)"
+    echo "worktree=$worktree"
+  } > "${prefix}.meta"
+}
+
 reset_runner_worktree() {
   local worktree="$1"
   git -C "$worktree" reset --hard HEAD >/dev/null 2>&1 || true

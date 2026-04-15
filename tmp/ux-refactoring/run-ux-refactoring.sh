@@ -264,6 +264,7 @@ run_one_batch() {
 
   local attempt spawn_rc commit_rc
   local preserve_dirty_resume=0
+  local preserve_failed_state=0
   local start_attempt=1
 
   if resume_preserved_batch "$batch"; then
@@ -279,7 +280,14 @@ run_one_batch() {
     if (( preserve_dirty_resume == 1 && attempt == start_attempt )); then
       record_status "$RUN_ID" "$batch" "$attempt" "attempt_resumed" "reusing dirty worktree state from interrupted run"
       log_info "$batch" "Keeping current worktree changes; skipping reset before restart"
+    elif (( preserve_failed_state == 1 && attempt == start_attempt + 1 )); then
+      record_status "$RUN_ID" "$batch" "$attempt" "attempt_preserved_retry" "reusing dirty worktree state from failed prior attempt"
+      log_info "$batch" "Keeping failed-attempt changes for retry; skipping reset"
     else
+      if worktree_dirty "$WORKTREE"; then
+        backup_worktree_state "$RUN_ID" "$batch" "$attempt" "$WORKTREE" "pre-reset"
+        record_status "$RUN_ID" "$batch" "$attempt" "attempt_backed_up" "saved dirty worktree before reset"
+      fi
       record_status "$RUN_ID" "$batch" "$attempt" "attempt_started" "$(batch_title "$batch")"
       reset_runner_worktree "$WORKTREE"
     fi
@@ -307,6 +315,11 @@ run_one_batch() {
       fi
       echo "verify_failed" > "$result_file"
       record_status "$RUN_ID" "$batch" "$attempt" "attempt_failed" "verification failed"
+      if (( attempt < UX_MAX_RETRIES )) && worktree_dirty "$WORKTREE"; then
+        backup_worktree_state "$RUN_ID" "$batch" "$attempt" "$WORKTREE" "verify-failed"
+        record_status "$RUN_ID" "$batch" "$attempt" "attempt_backed_up" "saved failed verify state for retry"
+        preserve_failed_state=1
+      fi
     else
       spawn_rc=$?
       if [[ "$spawn_rc" -eq 124 ]]; then
@@ -318,10 +331,19 @@ run_one_batch() {
         record_status "$RUN_ID" "$batch" "$attempt" "attempt_failed" "codex exited unsuccessfully"
         write_failure_summary "$batch" "$RUN_ID" "Codex exited unsuccessfully."
       fi
+      if (( attempt < UX_MAX_RETRIES )) && worktree_dirty "$WORKTREE"; then
+        backup_worktree_state "$RUN_ID" "$batch" "$attempt" "$WORKTREE" "spawn-failed"
+        record_status "$RUN_ID" "$batch" "$attempt" "attempt_backed_up" "saved failed spawn state for retry"
+        preserve_failed_state=1
+      fi
     fi
 
     if (( attempt < UX_MAX_RETRIES )); then
-      log_warn "$batch" "Retrying after failure"
+      if (( preserve_failed_state == 1 )); then
+        log_warn "$batch" "Retrying with preserved failed-attempt changes"
+      else
+        log_warn "$batch" "Retrying after failure"
+      fi
     fi
   done
 
