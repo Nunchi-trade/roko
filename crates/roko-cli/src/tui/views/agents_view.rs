@@ -678,7 +678,10 @@ fn render_output_body(
     let title_label = if selected_id.is_empty() {
         "Agent Output".to_string()
     } else {
-        format!("Output \u{00b7} {} \u{00b7} {}", selected_id, selected_status)
+        format!(
+            "Output \u{00b7} {} \u{00b7} {}",
+            selected_id, selected_status
+        )
     };
 
     let tail_indicator = if view_state.auto_tail {

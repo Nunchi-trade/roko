@@ -194,7 +194,9 @@ pub fn render_token_sparkline(
         let pct = count as f64 / event_count;
         let label = format!(" {:>2} {:<6} ", tier, tier_label(tier));
         let suffix = format!(" {} ({:.0}%)", count, pct * 100.0);
-        let bar_w = inner_width.saturating_sub(label.len() + suffix.len()).max(6);
+        let bar_w = inner_width
+            .saturating_sub(label.len() + suffix.len())
+            .max(6);
         let filled = (pct.clamp(0.0, 1.0) * bar_w as f64).round() as usize;
         let empty = bar_w.saturating_sub(filled);
         lines.push(Line::from(vec![

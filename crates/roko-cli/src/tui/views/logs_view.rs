@@ -241,10 +241,7 @@ pub fn render_with_entries(
             Span::styled(summary, theme.muted()),
         ])
     } else if filter_text.is_some() {
-        Line::from(Span::styled(
-            " focus: no matching entries",
-            theme.muted(),
-        ))
+        Line::from(Span::styled(" focus: no matching entries", theme.muted()))
     } else {
         Line::from(Span::styled(" focus: waiting for logs", theme.muted()))
     };
@@ -503,7 +500,10 @@ fn truncate_message(message: &str, max: usize) -> String {
     }
 }
 
-fn style_with_bg(style: ratatui::style::Style, bg: Option<ratatui::style::Color>) -> ratatui::style::Style {
+fn style_with_bg(
+    style: ratatui::style::Style,
+    bg: Option<ratatui::style::Color>,
+) -> ratatui::style::Style {
     if let Some(bg) = bg {
         style.bg(bg)
     } else {

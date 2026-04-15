@@ -5652,8 +5652,15 @@ dependencies = [
 name = "roko-index"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "regex",
  "roko-core",
+ "roko-lang-go",
+ "roko-lang-rust",
+ "roko-lang-typescript",
  "serde",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -5698,6 +5705,20 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "roko-mcp-code"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "roko-core",
+ "roko-index",
+ "roko-mcp-stdio",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

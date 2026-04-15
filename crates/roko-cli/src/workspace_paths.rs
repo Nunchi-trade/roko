@@ -11,6 +11,11 @@ pub fn roko_dir(workdir: &Path) -> PathBuf {
 /// Resolve the canonical plans directory.
 #[must_use]
 pub fn plans_dir(workdir: &Path) -> PathBuf {
+    let top_level = workdir.join("plans");
+    if top_level.is_dir() {
+        return top_level;
+    }
+
     workdir.join(relative_plans_dir())
 }
 

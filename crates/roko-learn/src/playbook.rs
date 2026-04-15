@@ -24,6 +24,7 @@
 //! # }
 //! ```
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -252,6 +253,69 @@ impl PlaybookStore {
         self.load(task_type).await
     }
 
+    /// Return up to `limit` playbooks ranked by textual relevance to `query`
+    /// and recency.
+    ///
+    /// Relevance considers the playbook id, name, goal, step descriptions,
+    /// action kinds, and expected signals. Recency uses `last_used_ms` when
+    /// available and falls back to `created_at_ms`.
+    ///
+    /// If the query yields no textual matches, the store falls back to the
+    /// most recently used playbooks so callers still get a best-effort prompt
+    /// injection candidate list.
+    pub async fn relevant(
+        &self,
+        query: impl AsRef<str>,
+        limit: usize,
+    ) -> io::Result<Vec<Playbook>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let query = normalize_query(query.as_ref());
+        let query_terms = tokenize(&query);
+        let now_ms = Utc::now().timestamp_millis();
+        let mut scored: Vec<(f64, f64, Playbook)> = self
+            .list()
+            .await?
+            .into_iter()
+            .map(|playbook| {
+                let recency = recency_score(&playbook, now_ms);
+                let relevance = if query.is_empty() {
+                    recency
+                } else {
+                    relevance_score(&playbook, &query, &query_terms)
+                };
+                (relevance, recency, playbook)
+            })
+            .collect();
+
+        let has_match = scored.iter().any(|(relevance, _, _)| *relevance > 0.0);
+        if !has_match && !query.is_empty() {
+            scored = scored
+                .into_iter()
+                .map(|(_, recency, playbook)| (recency, recency, playbook))
+                .collect();
+        } else {
+            scored.retain(|(relevance, _, _)| *relevance > 0.0);
+        }
+
+        scored.sort_by(|(relevance_a, recency_a, a), (relevance_b, recency_b, b)| {
+            relevance_b
+                .partial_cmp(relevance_a)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| recency_b.partial_cmp(recency_a).unwrap_or(Ordering::Equal))
+                .then_with(|| playbook_anchor_ms(b).cmp(&playbook_anchor_ms(a)))
+                .then_with(|| b.total_outcomes().cmp(&a.total_outcomes()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        scored.truncate(limit);
+        Ok(scored
+            .into_iter()
+            .map(|(_, _, playbook)| playbook)
+            .collect())
+    }
+
     /// List all playbooks in the store. Returns an empty vector if the
     /// directory does not yet exist.
     ///
@@ -343,6 +407,83 @@ impl PlaybookStore {
     }
 }
 
+fn normalize_query(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn relevance_score(playbook: &Playbook, query: &str, query_terms: &[String]) -> f64 {
+    let mut best = score_field(&playbook.id, query, query_terms) * 1.0;
+    best = best.max(score_field(&playbook.name, query, query_terms) * 0.95);
+    best = best.max(score_field(&playbook.goal, query, query_terms) * 0.9);
+    for step in &playbook.steps {
+        best = best.max(score_field(&step.description, query, query_terms) * 0.8);
+        best = best.max(score_field(&step.action_kind, query, query_terms) * 0.75);
+        for signal in &step.expected_signals {
+            best = best.max(score_field(signal, query, query_terms) * 0.7);
+        }
+    }
+    best
+}
+
+fn score_field(field: &str, query: &str, query_terms: &[String]) -> f64 {
+    let normalized = normalize_query(field);
+    if normalized.is_empty() || query.is_empty() {
+        return 0.0;
+    }
+
+    if normalized == query {
+        return 1.0;
+    }
+    if normalized.starts_with(query) || query.starts_with(&normalized) {
+        return 0.9;
+    }
+    if normalized.contains(query) || query.contains(&normalized) {
+        return 0.8;
+    }
+
+    let field_terms = tokenize(&normalized);
+    if field_terms.is_empty() || query_terms.is_empty() {
+        return 0.0;
+    }
+
+    let overlap = query_terms
+        .iter()
+        .filter(|term| field_terms.iter().any(|candidate| candidate == *term))
+        .count();
+    if overlap == 0 {
+        0.0
+    } else {
+        overlap as f64 / query_terms.len() as f64
+    }
+}
+
+fn playbook_anchor_ms(playbook: &Playbook) -> i64 {
+    playbook.last_used_ms.unwrap_or(playbook.created_at_ms)
+}
+
+fn recency_score(playbook: &Playbook, now_ms: i64) -> f64 {
+    let age_ms = now_ms.saturating_sub(playbook_anchor_ms(playbook)).max(0);
+    let age_days = age_ms as f64 / 86_400_000.0;
+    1.0 / (1.0 + age_days)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -432,6 +573,61 @@ mod tests {
         let store = PlaybookStore::new(tmp.path().join("never-created"));
         let listed = store.list().await.expect("list ok");
         assert!(listed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn relevant_ranks_by_match_strength_then_recency() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        let now = Utc::now().timestamp_millis();
+        let mut strong_old = sample_playbook("strong-old");
+        strong_old.id = "implementation".to_string();
+        strong_old.name = "Implementation heavy playbook".to_string();
+        strong_old.goal = "Implementation implementation workflow".to_string();
+        strong_old.last_used_ms = Some(now - 86_400_000 * 3);
+
+        let mut weak_new = sample_playbook("weak-new");
+        weak_new.name = "Implementation quick pass".to_string();
+        weak_new.goal = "Implementation helper".to_string();
+        weak_new.last_used_ms = Some(now);
+
+        let mut unrelated_recent = sample_playbook("unrelated");
+        unrelated_recent.name = "Docs cleanup".to_string();
+        unrelated_recent.goal = "Refresh documentation and examples".to_string();
+        unrelated_recent.last_used_ms = Some(now - 86_400_000);
+
+        store.save(&strong_old).await.expect("save strong");
+        store.save(&weak_new).await.expect("save weak");
+        store.save(&unrelated_recent).await.expect("save unrelated");
+
+        let ranked = store.relevant("implementation", 3).await.expect("relevant");
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].id, "implementation");
+        assert_eq!(ranked[1].id, "weak-new");
+    }
+
+    #[tokio::test]
+    async fn relevant_falls_back_to_recent_when_query_has_no_match() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        let now = Utc::now().timestamp_millis();
+        let mut older = sample_playbook("older");
+        older.goal = "Older playbook".to_string();
+        older.last_used_ms = Some(now - 86_400_000 * 2);
+
+        let mut newer = sample_playbook("newer");
+        newer.goal = "Newer playbook".to_string();
+        newer.last_used_ms = Some(now);
+
+        store.save(&older).await.expect("save older");
+        store.save(&newer).await.expect("save newer");
+
+        let ranked = store.relevant("no-match-here", 2).await.expect("relevant");
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].id, "newer");
+        assert_eq!(ranked[1].id, "older");
     }
 
     #[tokio::test]

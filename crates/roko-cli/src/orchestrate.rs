@@ -83,7 +83,7 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
-use roko_learn::playbook::{Playbook, PlaybookStore};
+use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore};
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
@@ -1920,6 +1920,89 @@ fn render_playbook_context(playbook: &Playbook) -> String {
     parts.join("\n\n")
 }
 
+fn render_playbook_contexts(playbooks: &[Playbook]) -> String {
+    playbooks
+        .iter()
+        .map(render_playbook_context)
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn playbook_query(
+    task: &str,
+    task_text: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> String {
+    let mut parts = vec![task.to_string(), task_text.to_string()];
+    if let Some(task_def) = task_def {
+        parts.push(task_def.title.clone());
+        if let Some(description) = &task_def.description {
+            parts.push(description.clone());
+        }
+        if !task_def.files.is_empty() {
+            parts.push(task_def.files.join(" "));
+        }
+        if !task_def.acceptance.is_empty() {
+            parts.push(task_def.acceptance.join(" "));
+        }
+    }
+    parts.join("\n")
+}
+
+fn build_task_playbook(task_def: &crate::task_parser::TaskDef) -> Playbook {
+    let goal = task_def
+        .description
+        .clone()
+        .unwrap_or_else(|| task_def.title.clone());
+    let mut playbook = Playbook::new(task_def.id.clone(), goal);
+    playbook.name = task_def.title.clone();
+
+    let mut next_index = 0u32;
+    playbook.steps.push(PlaybookStep::new(
+        next_index,
+        task_def
+            .description
+            .clone()
+            .unwrap_or_else(|| task_def.title.clone()),
+        task_def
+            .role
+            .clone()
+            .unwrap_or_else(|| "execute_task".to_string()),
+        if task_def.acceptance.is_empty() {
+            vec!["task_success".to_string()]
+        } else {
+            task_def.acceptance.clone()
+        },
+    ));
+    next_index += 1;
+
+    if !task_def.files.is_empty() {
+        playbook.steps.push(PlaybookStep::new(
+            next_index,
+            format!("Touch files: {}", task_def.files.join(", ")),
+            "edit_file",
+            task_def.files.clone(),
+        ));
+        next_index += 1;
+    }
+
+    if !task_def.verify.is_empty() {
+        let signals = task_def
+            .verify
+            .iter()
+            .map(|step| step.phase.clone())
+            .collect::<Vec<_>>();
+        playbook.steps.push(PlaybookStep::new(
+            next_index,
+            format!("Verify task with {} checks", task_def.verify.len()),
+            "verify",
+            signals,
+        ));
+    }
+
+    playbook
+}
+
 fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
     for line in text.lines().rev() {
         let trimmed = line.trim();
@@ -3125,11 +3208,9 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3251,11 +3332,9 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3375,11 +3454,9 @@ impl PlanRunner {
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -4560,6 +4637,7 @@ impl PlanRunner {
     ///
     /// Returns an error if agent dispatch, gate execution, or substrate
     /// I/O fails fatally (per-plan failures are recorded in the report).
+    #[instrument(skip_all)]
     pub async fn run_all(
         &mut self,
         watcher_cancel: &TokioCancellationToken,
@@ -5093,6 +5171,7 @@ impl PlanRunner {
     // ── Internal dispatch ─────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
+    #[instrument(skip_all, fields(action = ?action))]
     async fn dispatch_action(&mut self, action: ExecutorAction) {
         self.actions_since_save += 1;
 
@@ -7203,15 +7282,30 @@ impl PlanRunner {
             }
         }
 
-        if let Some(task_def) = task_def.as_ref()
-            && let Err(err) = self.playbook.record(&task_def.id, result.success).await
-        {
-            tracing::warn!(
-                plan_id = %plan_id,
-                task_id = %task_id,
-                error = %err,
-                "failed to record playbook outcome"
-            );
+        if let Some(task_def) = task_def.as_ref() {
+            match self.playbook.record(&task_def.id, result.success).await {
+                Ok(true) => {}
+                Ok(false) if !result.success => {}
+                Ok(false) => {
+                    let playbook = build_task_playbook(task_def);
+                    if let Err(err) = self.playbook.save(&playbook).await {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            task_id = %task_id,
+                            error = %err,
+                            "failed to persist inferred playbook"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        error = %err,
+                        "failed to record playbook outcome"
+                    );
+                }
+            }
         }
 
         let mut ep = Episode::new("Implementer", task_id).succeeded();
@@ -9475,6 +9569,7 @@ impl PlanRunner {
     }
 
     /// Core agent dispatch with optional prompt, model, and system-prompt overrides.
+    #[instrument(skip_all, fields(plan_id = %plan_id, role = ?role, task = %task))]
     async fn dispatch_agent_with(
         &mut self,
         plan_id: &str,
@@ -9793,9 +9888,10 @@ impl PlanRunner {
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let prior_skills =
             select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
-        let playbook_context_section = match self.playbook.lookup(task).await {
-            Ok(Some(playbook)) => {
-                let playbook_text = render_playbook_context(&playbook);
+        let playbook_query = playbook_query(task, &task_text, task_def.as_ref());
+        let playbook_context_section = match self.playbook.relevant(&playbook_query, 3).await {
+            Ok(playbooks) if !playbooks.is_empty() => {
+                let playbook_text = render_playbook_contexts(&playbooks);
                 let playbook_text_len = playbook_text.len();
                 Some((
                     PromptSection::new("playbook", playbook_text)
@@ -9805,9 +9901,11 @@ impl PlanRunner {
                     playbook_text_len,
                 ))
             }
-            Ok(None) => None,
+            Ok(_) => None,
             Err(err) => {
-                tracing::warn!("[orchestrate] failed to lookup playbook for task {task}: {err}");
+                tracing::warn!(
+                    "[orchestrate] failed to lookup relevant playbooks for task {task}: {err}"
+                );
                 None
             }
         };
@@ -10973,6 +11071,7 @@ impl PlanRunner {
     }
 
     /// Run gates at the specified rung level and return whether all passed.
+    #[instrument(skip_all, fields(plan_id = %plan_id, rung))]
     async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
         let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
@@ -11293,6 +11392,7 @@ impl PlanRunner {
     }
 
     /// Run task-level verification commands declared in `tasks.toml` for a plan.
+    #[instrument(skip_all, fields(plan_id = %plan_id))]
     async fn run_plan_verify_steps(
         &self,
         plan_id: &str,

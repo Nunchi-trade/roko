@@ -708,7 +708,11 @@ impl TuiState {
     /// TuiState. Fields not covered by `DashboardData` are left unchanged.
     pub fn update_from_snapshot(&mut self, data: &DashboardData) {
         let executor_summary = data.executor_summary();
-        self.orchestrator_state = executor_summary.orchestrator_state;
+        self.orchestrator_state = if executor_summary.orchestrator_state.is_empty() {
+            String::from("idle")
+        } else {
+            executor_summary.orchestrator_state
+        };
         self.current_iteration = executor_summary.current_iteration;
         self.current_phase = executor_summary.current_phase;
         let expanded_by_plan: HashMap<String, bool> = self

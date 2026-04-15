@@ -112,7 +112,11 @@ fn render_pipeline_header(
     }
     if tui_state.wave_count() > 0 {
         health_parts.push(Span::styled(
-            format!(" wave {}/{}", tui_state.current_wave().saturating_add(1), tui_state.wave_count()),
+            format!(
+                " wave {}/{}",
+                tui_state.current_wave().saturating_add(1),
+                tui_state.wave_count()
+            ),
             Style::default().fg(theme.muted),
         ));
     }
@@ -894,15 +898,15 @@ fn render_selected_plan_summary(
     }
 
     let plan = selected.unwrap();
-    let plan_state = selected_tui.map(|plan| plan.status.as_str()).unwrap_or("pending");
-    let tasks_done = selected_tui.map(|plan| plan.tasks_done).unwrap_or_else(|| {
-        if plan.completed {
-            plan.task_count
-        } else {
-            0
-        }
-    });
-    let tasks_total = selected_tui.map(|plan| plan.tasks_total).unwrap_or(plan.task_count);
+    let plan_state = selected_tui
+        .map(|plan| plan.status.as_str())
+        .unwrap_or("pending");
+    let tasks_done = selected_tui
+        .map(|plan| plan.tasks_done)
+        .unwrap_or_else(|| if plan.completed { plan.task_count } else { 0 });
+    let tasks_total = selected_tui
+        .map(|plan| plan.tasks_total)
+        .unwrap_or(plan.task_count);
     let tasks_failed = selected_tui.map(|plan| plan.tasks_failed).unwrap_or(0);
     let elapsed_secs = selected_tui.map(|plan| plan.elapsed_secs).unwrap_or(0.0);
     let remaining = tasks_total.saturating_sub(tasks_done);
@@ -913,7 +917,12 @@ fn render_selected_plan_summary(
     let lines = vec![
         Line::from(vec![
             Span::styled(" plan ", Style::default().fg(theme.muted)),
-            Span::styled(&plan.title, Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &plan.title,
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  ", Style::default()),
             Span::styled(format!("({})", plan.id), Style::default().fg(theme.muted)),
         ]),
@@ -961,10 +970,7 @@ fn render_selected_plan_summary(
         ]),
     ];
 
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 // ---------------------------------------------------------------------------

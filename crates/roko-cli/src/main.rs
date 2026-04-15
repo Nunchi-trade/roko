@@ -23,9 +23,9 @@ use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::App;
 use roko_cli::{
-    Config, DaemonMode, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode,
-    PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
-    WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
+    Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
+    PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs,
+    config_cmd, load_layered, run_init_wizard, run_once,
 };
 use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
@@ -38,6 +38,7 @@ use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::cost_table::CostTable;
+use roko_learn::costs_log::CostsLog;
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::latency::{LatencyRegistry, LatencyStats};
@@ -782,10 +783,8 @@ fn main() {
     };
 
     let cli = Cli::parse();
-    let filter = tracing_subscriber::EnvFilter::try_new(
-        env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
-    )
-    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = tracing_subscriber::EnvFilter::try_new(tracing_log_directive())
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"));
 
     // ROKO_LOG_RAW=1 disables secret redaction (useful for debugging).
     let raw_logs = env::var("ROKO_LOG_RAW")
@@ -796,12 +795,16 @@ fn main() {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
+                    .with_target(false)
                     .json()
                     .with_env_filter(filter)
                     .init();
             }
             LogFormat::Text => {
-                tracing_subscriber::fmt().with_env_filter(filter).init();
+                tracing_subscriber::fmt()
+                    .with_target(false)
+                    .with_env_filter(filter)
+                    .init();
             }
         }
     } else {
@@ -809,6 +812,7 @@ fn main() {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
+                    .with_target(false)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format().json(),
                         scrubber,
@@ -818,6 +822,7 @@ fn main() {
             }
             LogFormat::Text => {
                 tracing_subscriber::fmt()
+                    .with_target(false)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format(),
                         scrubber,
@@ -883,6 +888,16 @@ where
     }
 }
 
+fn tracing_log_directive() -> String {
+    tracing_log_directive_from(env::var("RUST_LOG").ok(), env::var("ROKO_LOG").ok())
+}
+
+fn tracing_log_directive_from(rust_log: Option<String>, roko_log: Option<String>) -> String {
+    rust_log
+        .or(roko_log)
+        .unwrap_or_else(|| "roko=info".to_string())
+}
+
 async fn dispatch(mut cli: Cli) -> Result<i32> {
     // If there is an explicit subcommand, handle it.
     if let Some(command) = cli.command.take() {
@@ -891,7 +906,7 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
 
     // Headless daemon mode.
     if cli.headless {
-        return Ok(cmd_headless(&cli));
+        return cmd_headless(&cli).await;
     }
 
     // One-shot mode: positional prompt argument.
@@ -991,30 +1006,33 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
     }
 }
 
-async fn cmd_daemon(_cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
+async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
+    let workdir = resolve_workdir(cli);
     match cmd {
         DaemonCmd::Start { foreground, port } => {
-            roko_cli::daemon::daemon_start(foreground, port).await?;
+            prepare_runtime_hooks(&workdir, cli.quiet);
+            roko_cli::daemon::daemon_start(&workdir, foreground, port).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Stop => {
-            roko_cli::daemon::daemon_stop().await?;
+            roko_cli::daemon::daemon_stop(&workdir).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Status => {
-            roko_cli::daemon::daemon_status().await?;
+            roko_cli::daemon::daemon_status(&workdir).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Logs { follow, lines } => {
-            roko_cli::daemon::daemon_logs(follow, lines).await?;
+            roko_cli::daemon::daemon_logs(&workdir, follow, lines).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Reload => {
-            roko_cli::daemon::daemon_reload().await?;
+            roko_cli::daemon::daemon_reload(&workdir).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Restart { port } => {
-            roko_cli::daemon::daemon_restart(port).await?;
+            prepare_runtime_hooks(&workdir, cli.quiet);
+            roko_cli::daemon::daemon_restart(&workdir, port).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Install => {
@@ -1105,36 +1123,11 @@ async fn cmd_event_sources(cli: &Cli, cmd: EventSourcesCmd) -> Result<i32> {
     }
 }
 
-fn cmd_headless(cli: &Cli) -> i32 {
-    let session_id = cli
-        .resume
-        .clone()
-        .unwrap_or_else(|| format!("daemon-{}", std::process::id()));
+async fn cmd_headless(cli: &Cli) -> Result<i32> {
     let workdir = resolve_workdir(cli);
     prepare_runtime_hooks(&workdir, cli.quiet);
-    let mut daemon = DaemonMode::with_workdir(&workdir, session_id);
-
-    daemon.start();
-    let status = daemon.status_summary();
-
-    if cli.json {
-        println!(
-            r#"{{"session":"{}","state":"{}","pid":{},"socket":"{}"}}"#,
-            status.session_id,
-            status.state,
-            status.pid,
-            status.socket_path.display(),
-        );
-    } else if !cli.quiet {
-        println!("{status}");
-    }
-
-    // In a real implementation this would block on a socket listener.
-    // For now, report that the daemon started and exit cleanly.
-    daemon.stop();
-    daemon.mark_stopped();
-
-    EXIT_SUCCESS
+    roko_cli::daemon::daemon_start(&workdir, false, 9090).await?;
+    Ok(EXIT_SUCCESS)
 }
 
 async fn cmd_dashboard(
@@ -5226,6 +5219,14 @@ async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<
 
 async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Result<()> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    if !cli.quiet {
+        tracing::info!(
+            workdir = %workdir.display(),
+            json = cli.json,
+            cfactor,
+            "collecting status snapshot"
+        );
+    }
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
         .map_err(|e| anyhow!("open substrate: {e}"))?;
@@ -5255,6 +5256,16 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     } else {
         "→"
     };
+    let learn_dir = workdir.join(".roko").join("learn");
+    let costs_log = CostsLog::at(learn_dir.join("costs.jsonl"));
+    let total_cost_usd = costs_log.total_cost().await.ok();
+    let today_cost_usd = costs_log
+        .daily_cost(1)
+        .await
+        .ok()
+        .and_then(|days| days.last().map(|(_, cost)| *cost));
+    let cost_by_model = costs_log.cost_by_model().await.unwrap_or_default();
+    let cost_by_plan = costs_log.cost_by_plan().await.unwrap_or_default();
 
     if cli.json {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -5270,6 +5281,8 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             episode_count: Some(episode_count),
             last_episode_passed: None,
             cfactor: cfactor_snapshot,
+            total_cost_usd,
+            today_cost_usd,
         };
         println!("{}", status.display_json());
         return Ok(());
@@ -5326,7 +5339,6 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     println!("gate verdicts: {passed} pass / {failed} fail");
 
     // Learning subsystem stats.
-    let learn_dir = workdir.join(".roko").join("learn");
     let efficiency_path = learn_dir.join("efficiency.jsonl");
     match read_efficiency_events(&efficiency_path).await {
         Ok(events) if !events.is_empty() => {
@@ -5380,6 +5392,23 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
         }
     }
 
+    if total_cost_usd.is_some() || !cost_by_model.is_empty() || !cost_by_plan.is_empty() {
+        println!();
+        println!("Cost Summary:");
+        if let Some(total_cost_usd) = total_cost_usd {
+            println!("  Total:    ${total_cost_usd:.4}");
+        }
+        if let Some(today_cost_usd) = today_cost_usd {
+            println!("  Today:    ${today_cost_usd:.4}");
+        }
+        if !cost_by_model.is_empty() {
+            println!("  By model: {}", format_cost_breakdown(&cost_by_model, 5));
+        }
+        if !cost_by_plan.is_empty() {
+            println!("  By plan:  {}", format_cost_breakdown(&cost_by_plan, 5));
+        }
+    }
+
     // Health probes — quick snapshot of orchestrator readiness.
     let health_probes = roko_core::obs::health::ProbeRegistry::new();
     health_probes.register(std::sync::Arc::new(
@@ -5422,6 +5451,28 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     }
 
     Ok(())
+}
+
+fn format_cost_breakdown(costs: &HashMap<String, f64>, limit: usize) -> String {
+    let mut entries = costs
+        .iter()
+        .map(|(name, cost)| (name.as_str(), *cost))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_name, left_cost), (right_name, right_cost)| {
+        right_cost
+            .total_cmp(left_cost)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    entries.truncate(limit);
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+
+    entries
+        .into_iter()
+        .map(|(name, cost)| format!("{name}=${cost:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
@@ -7259,5 +7310,20 @@ mod tests {
             output.contains("[REDACTED:MY_TOKEN]"),
             "should use named redaction, got: {output}"
         );
+    }
+
+    #[test]
+    fn tracing_log_directive_prefers_rust_log() {
+        let directive = tracing_log_directive_from(Some("roko=debug".into()), Some("info".into()));
+        assert_eq!(directive, "roko=debug");
+    }
+
+    #[test]
+    fn tracing_log_directive_falls_back_to_roko_log_and_default() {
+        let directive = tracing_log_directive_from(None, Some("roko=trace".into()));
+        assert_eq!(directive, "roko=trace");
+
+        let default_directive = tracing_log_directive_from(None, None);
+        assert_eq!(default_directive, "roko=info");
     }
 }

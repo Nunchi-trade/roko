@@ -39,6 +39,7 @@ members = [
     "crates/roko-mcp-github",
     "crates/roko-mcp-slack",
     "crates/roko-mcp-scripts",
+    "crates/roko-mcp-code",
 
     # Roko CLI: minimal user-facing binary that wires the universal loop
     # (prompt → compose → agent → gate → persist → policy) against a working

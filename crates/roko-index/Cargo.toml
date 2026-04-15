@@ -11,7 +11,14 @@ description = "Code intelligence: source parsing, symbol graphs, PageRank scorin
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 roko-core = { path = "../roko-core" }
 serde = { workspace = true, features = ["derive"] }
+regex = { workspace = true }
+roko-lang-go = { path = "../roko-lang-go" }
+roko-lang-rust = { path = "../roko-lang-rust" }
+roko-lang-typescript = { path = "../roko-lang-typescript" }
+tracing = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
