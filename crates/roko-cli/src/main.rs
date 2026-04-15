@@ -986,7 +986,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             list_pages,
             text,
             workdir,
-        } => cmd_dashboard(cli, workdir, page, list_pages, text).await,
+        } => cmd_dashboard(cli, workdir, page, list_pages, text, None).await,
         Command::Serve {
             bind,
             port,
@@ -1136,6 +1136,7 @@ async fn cmd_dashboard(
     page: Option<String>,
     list_pages: bool,
     text: bool,
+    state_hub: Option<roko_core::SharedStateHub>,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
@@ -1152,7 +1153,12 @@ async fn cmd_dashboard(
 
     if !text && !list_pages && std::io::stdout().is_terminal() {
         // Use the Mori-style interactive TUI with 60fps event loop.
-        if App::new_with_page(&workdir, initial_page).run().is_ok() {
+        let app = if let Some(state_hub) = state_hub.as_ref() {
+            App::new_connected_with_page(&workdir, initial_page, state_hub)
+        } else {
+            App::new_with_page(&workdir, initial_page)
+        };
+        if app.run().is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
@@ -3168,6 +3174,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
+            let state_hub = roko_core::shared_state_hub();
 
             // Create the shared metric registry and register standard metrics.
             let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
@@ -3217,6 +3224,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 .await?
             };
             runner.set_claude_resume_session(cli.resume.clone());
+            runner.set_state_hub(state_hub.sender());
 
             // Use task-driven execution (reads tasks.toml directly) instead of
             // the phase-machine executor which expects enrichment phases.

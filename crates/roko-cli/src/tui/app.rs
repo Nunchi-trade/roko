@@ -92,6 +92,10 @@ pub struct App {
     data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
     /// Background git data receiver (git commands off main thread).
     git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    /// Live dashboard snapshot receiver from `StateHub` when connected.
+    pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
+    /// Last error entry surfaced from the live snapshot stream.
+    last_snapshot_error_marker: Option<(String, u64)>,
     /// Frame counter for adaptive frame rate.
     frame_counter: u64,
     /// Last user input time for adaptive frame rate.
@@ -345,7 +349,8 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
                 _ => {}
             }
         }
-        if app.last_refresh.elapsed() > Duration::from_secs(1) {
+        app.drain_snapshot_channel();
+        if app.snapshot_rx.is_none() && app.last_refresh.elapsed() > Duration::from_secs(1) {
             app.data.refresh().await?;
             app.tui_state.update_from_snapshot(&app.data);
             app.last_refresh = Instant::now();
@@ -398,6 +403,8 @@ impl App {
             sys_rx: None,
             data_rx: None,
             git_rx: None,
+            snapshot_rx: None,
+            last_snapshot_error_marker: None,
             frame_counter: 0,
             last_input: Instant::now(),
             terminal_size,
@@ -405,6 +412,34 @@ impl App {
         app.fx_config = EffectsConfig::load_from_root(&app.workdir);
         // Populate git info synchronously on first load (fast enough for startup).
         app.populate_git_info();
+        app
+    }
+
+    /// Build a new app connected to a shared `StateHub`.
+    #[must_use]
+    pub fn new_connected(root: impl AsRef<Path>, state_hub: &roko_core::SharedStateHub) -> Self {
+        Self::new_connected_with_page(root, None, state_hub)
+    }
+
+    /// Build a new connected app with an optional initial page selection.
+    #[must_use]
+    pub fn new_connected_with_page(
+        root: impl AsRef<Path>,
+        initial_page: Option<PageId>,
+        state_hub: &roko_core::SharedStateHub,
+    ) -> Self {
+        let mut app = Self::new_with_page(root, initial_page);
+        let snapshot_rx = state_hub.snapshot();
+        if snapshot_has_content(&snapshot_rx.borrow()) {
+            let snapshot = snapshot_rx.borrow();
+            apply_dashboard_snapshot(
+                &mut app.tui_state,
+                &mut app.notifications,
+                &mut app.last_snapshot_error_marker,
+                &snapshot,
+            );
+        }
+        app.snapshot_rx = Some(snapshot_rx);
         app
     }
 
@@ -557,10 +592,12 @@ impl App {
         // Event loop
         // ---------------------------------------------------------------
         while self.running {
+            self.drain_snapshot_channel();
             match events.next().context("poll TUI event")? {
                 Event::Key(key) => {
                     self.last_input = Instant::now();
                     self.handle_key(key);
+                    self.drain_snapshot_channel();
                     // Drain background channels before immediate redraw
                     self.drain_background_channels();
                     terminal
@@ -577,6 +614,7 @@ impl App {
                 }
                 Event::Tick => {
                     self.tui_state.atmosphere.tick();
+                    self.drain_snapshot_channel();
                     self.drain_background_channels();
                     self.expire_notifications();
                 }
@@ -1972,6 +2010,8 @@ impl App {
     fn drain_background_channels(&mut self) {
         const MAX_MESSAGES_PER_DRAIN: usize = 20;
 
+        self.drain_snapshot_channel();
+
         // -- sys metrics (merge, don't replace — keep history) --
         if let Some(rx) = &self.sys_rx {
             let mut count = 0;
@@ -2037,7 +2077,9 @@ impl App {
                 }
             }
             if got_data {
-                self.tui_state.update_from_snapshot(&self.data);
+                if self.snapshot_rx.is_none() {
+                    self.tui_state.update_from_snapshot(&self.data);
+                }
                 if rebuild_scaffold {
                     self.scaffold = DashboardScaffold::new_in(&self.workdir);
                 }
@@ -2076,6 +2118,26 @@ impl App {
                 }
             }
         }
+    }
+
+    fn drain_snapshot_channel(&mut self) {
+        let (snapshot_rx, tui_state, notifications, last_marker) = (
+            &mut self.snapshot_rx,
+            &mut self.tui_state,
+            &mut self.notifications,
+            &mut self.last_snapshot_error_marker,
+        );
+
+        let Some(rx) = snapshot_rx.as_mut() else {
+            return;
+        };
+
+        if !rx.has_changed().unwrap_or(false) {
+            return;
+        }
+
+        let snapshot = rx.borrow_and_update();
+        apply_dashboard_snapshot(tui_state, notifications, last_marker, &snapshot);
     }
 
     fn pages(&self) -> PageRegistry {
@@ -2294,6 +2356,44 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+fn apply_dashboard_snapshot(
+    tui_state: &mut TuiState,
+    notifications: &mut Vec<super::modals::Notification>,
+    last_snapshot_error_marker: &mut Option<(String, u64)>,
+    snapshot: &roko_core::DashboardSnapshot,
+) {
+    tui_state.update_from_dashboard_snapshot(snapshot);
+
+    if !snapshot.errors.is_empty() {
+        let start_idx = last_snapshot_error_marker
+            .as_ref()
+            .and_then(|marker| {
+                snapshot
+                    .errors
+                    .iter()
+                    .position(|error| error.message == marker.0 && error.ts_millis == marker.1)
+                    .map(|idx| idx + 1)
+            })
+            .unwrap_or(0);
+
+        for error in snapshot.errors.iter().skip(start_idx) {
+            notifications.push(super::modals::Notification::error(error.message.clone()));
+        }
+
+        if let Some(last_error) = snapshot.errors.last() {
+            *last_snapshot_error_marker = Some((last_error.message.clone(), last_error.ts_millis));
+        }
+    }
+}
+
+fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
+    !snapshot.plans.is_empty()
+        || !snapshot.tasks.is_empty()
+        || !snapshot.agents.is_empty()
+        || !snapshot.gates.is_empty()
+        || !snapshot.errors.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2313,6 +2413,137 @@ mod tests {
         let app = App::new(dir.path());
         assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn app_new_connected_installs_snapshot_receiver() {
+        let dir = tempdir().unwrap();
+        let hub = roko_core::shared_state_hub();
+        let app = App::new_connected(dir.path(), &hub);
+        assert!(app.snapshot_rx.is_some());
+    }
+
+    #[test]
+    fn dashboard_snapshot_updates_preserve_navigation_state() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plans = vec![
+            super::super::state::PlanEntry {
+                id: "plan-a".to_string(),
+                expanded: true,
+                ..Default::default()
+            },
+            super::super::state::PlanEntry {
+                id: "plan-b".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.tui_state.agents = vec![
+            super::super::state::AgentRow {
+                id: "agent-a".to_string(),
+                ..Default::default()
+            },
+            super::super::state::AgentRow {
+                id: "agent-b".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.tui_state.selected_plan_idx = 0;
+        app.tui_state.current_plan_idx = 1;
+        app.tui_state.selected_agent = 1;
+        app.tui_state.active_tab = Tab::Agents;
+        app.tui_state.plan_scroll_offset = 17;
+        app.tui_state.agent_scroll = Some(9);
+
+        let snapshot = roko_core::DashboardSnapshot {
+            plans: [
+                (
+                    "plan-b".to_string(),
+                    roko_core::dashboard_snapshot::PlanState {
+                        plan_id: "plan-b".to_string(),
+                        phase: "done".to_string(),
+                        tasks_total: 2,
+                        tasks_done: 2,
+                        tasks_failed: 0,
+                        active: false,
+                    },
+                ),
+                (
+                    "plan-c".to_string(),
+                    roko_core::dashboard_snapshot::PlanState {
+                        plan_id: "plan-c".to_string(),
+                        phase: "active".to_string(),
+                        tasks_total: 1,
+                        tasks_done: 0,
+                        tasks_failed: 0,
+                        active: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            agents: [
+                (
+                    "agent-b".to_string(),
+                    roko_core::dashboard_snapshot::AgentState {
+                        agent_id: "agent-b".to_string(),
+                        role: "reviewer".to_string(),
+                        active: true,
+                        output_bytes: 0,
+                    },
+                ),
+                (
+                    "agent-c".to_string(),
+                    roko_core::dashboard_snapshot::AgentState {
+                        agent_id: "agent-c".to_string(),
+                        role: "planner".to_string(),
+                        active: false,
+                        output_bytes: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            gates: vec![roko_core::dashboard_snapshot::GateVerdict {
+                plan_id: "plan-b".to_string(),
+                task_id: "task-1".to_string(),
+                gate: "compile".to_string(),
+                passed: true,
+                ts_millis: 42,
+            }],
+            errors: vec![roko_core::dashboard_snapshot::ErrorEntry {
+                message: "boom".to_string(),
+                ts_millis: 7,
+            }],
+            ..Default::default()
+        };
+
+        apply_dashboard_snapshot(
+            &mut app.tui_state,
+            &mut app.notifications,
+            &mut app.last_snapshot_error_marker,
+            &snapshot,
+        );
+
+        assert_eq!(app.tui_state.active_tab, Tab::Agents);
+        assert_eq!(app.tui_state.plan_scroll_offset, 17);
+        assert_eq!(app.tui_state.agent_scroll, Some(9));
+        assert_eq!(app.tui_state.plans[0].id, "plan-b");
+        assert_eq!(app.tui_state.plans[0].status, super::super::state::PlanPhase::Done);
+        assert_eq!(app.tui_state.plans[1].id, "plan-c");
+        assert!(!app.tui_state.plans[0].expanded);
+        assert_eq!(app.tui_state.selected_plan_idx, 0);
+        assert_eq!(app.tui_state.current_plan_idx, 0);
+        assert_eq!(app.tui_state.agents[0].id, "agent-b");
+        assert!(app.tui_state.agents[0].active);
+        assert_eq!(app.tui_state.selected_agent, 0);
+        assert_eq!(app.tui_state.gate_results.len(), 1);
+        assert_eq!(app.tui_state.gate_results[0].output, "task task-1");
+        assert!(
+            app.notifications
+                .iter()
+                .any(|notification| notification.message == "boom")
+        );
     }
 
     #[test]

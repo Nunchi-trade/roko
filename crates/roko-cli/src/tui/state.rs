@@ -925,11 +925,6 @@ impl TuiState {
         }
         self.current_iteration = executor_summary.current_iteration;
         self.current_phase = executor_summary.current_phase;
-        let expanded_by_plan: HashMap<String, bool> = self
-            .plans
-            .iter()
-            .map(|plan| (plan.id.clone(), plan.expanded))
-            .collect();
         let latest_events = latest_agent_events(&data.efficiency_events);
 
         let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
@@ -1200,6 +1195,320 @@ impl TuiState {
         self.selected_agent_tab = self.selected_agent_tab.min(6);
     }
 
+    /// Populate state from a connected-mode `DashboardSnapshot`.
+    ///
+    /// This mirrors the live state published by `StateHub` without touching
+    /// navigation or scroll state.
+    pub fn update_from_dashboard_snapshot(&mut self, snap: &roko_core::DashboardSnapshot) {
+        let prev_selected_plan_id = self
+            .plans
+            .get(self.selected_plan_idx)
+            .map(|plan| plan.id.clone());
+        let prev_current_plan_id = self
+            .plans
+            .get(self.current_plan_idx)
+            .map(|plan| plan.id.clone());
+        let prev_selected_agent_id = self
+            .agents
+            .get(self.selected_agent)
+            .map(|agent| agent.id.clone());
+        let prev_plan_order: HashMap<String, usize> = self
+            .plans
+            .iter()
+            .enumerate()
+            .map(|(idx, plan)| (plan.id.clone(), idx))
+            .collect();
+        let prev_agent_order: HashMap<String, usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(idx, agent)| (agent.id.clone(), idx))
+            .collect();
+        let prev_plan_expanded: HashMap<String, bool> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.expanded))
+            .collect();
+        let prev_plan_elapsed: HashMap<String, f64> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.elapsed_secs))
+            .collect();
+        let prev_plan_wave: HashMap<String, Option<usize>> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.wave))
+            .collect();
+        let prev_task_elapsed: HashMap<String, f64> = self
+            .current_task_checklist
+            .iter()
+            .map(|task| (task.id.clone(), task.elapsed_secs))
+            .collect();
+        let prev_wave_expanded: HashMap<usize, bool> = self
+            .execution_waves
+            .iter()
+            .map(|wave| (wave.index, wave.expanded))
+            .collect();
+        let prev_agent_rows: HashMap<String, AgentRow> = self
+            .agents
+            .iter()
+            .cloned()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect();
+        let prev_agent_state = self.agents_by_id.clone();
+
+        let mut snapshot_tasks: Vec<&roko_core::dashboard_snapshot::TaskState> =
+            snap.tasks.values().collect();
+        snapshot_tasks.sort_by(|lhs, rhs| {
+            lhs.plan_id
+                .cmp(&rhs.plan_id)
+                .then_with(|| lhs.task_id.cmp(&rhs.task_id))
+        });
+
+        let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
+        self.current_task_checklist = snapshot_tasks
+            .iter()
+            .map(|task| {
+                let status = snapshot_task_status(task);
+                tasks_by_plan
+                    .entry(task.plan_id.clone())
+                    .or_default()
+                    .push(TaskEntry {
+                        id: task.task_id.clone(),
+                        name: task.task_id.clone(),
+                        status,
+                        agent_id: None,
+                    });
+                TaskRow {
+                    id: task.task_id.clone(),
+                    title: task.task_id.clone(),
+                    status,
+                    elapsed_secs: prev_task_elapsed.get(&task.task_id).copied().unwrap_or(0.0),
+                }
+            })
+            .collect();
+
+        let mut plan_ids: Vec<String> = snap.plans.keys().cloned().collect();
+        plan_ids.sort_by(|lhs, rhs| {
+            prev_plan_order
+                .get(lhs)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&prev_plan_order.get(rhs).copied().unwrap_or(usize::MAX))
+                .then_with(|| lhs.cmp(rhs))
+        });
+
+        self.plans = plan_ids
+            .iter()
+            .map(|plan_id| {
+                let plan = &snap.plans[plan_id];
+                let tasks = tasks_by_plan.remove(plan_id).unwrap_or_default();
+                let tasks_total = plan.tasks_total.max(tasks.len());
+                PlanEntry {
+                    id: plan.plan_id.clone(),
+                    name: plan.plan_id.clone(),
+                    status: snapshot_plan_status(plan),
+                    active: plan.active,
+                    phase: snapshot_plan_phase(plan),
+                    tasks_total,
+                    tasks_done: plan.tasks_done.min(tasks_total),
+                    tasks_failed: plan.tasks_failed.min(tasks_total),
+                    elapsed_secs: prev_plan_elapsed.get(plan_id).copied().unwrap_or(0.0),
+                    wave: prev_plan_wave.get(plan_id).copied().flatten(),
+                    task_total: tasks_total,
+                    task_done: plan.tasks_done.min(tasks_total),
+                    expanded: prev_plan_expanded.get(plan_id).copied().unwrap_or(false),
+                    tasks,
+                }
+            })
+            .collect();
+
+        let mut orphaned_plan_ids: Vec<String> = tasks_by_plan.keys().cloned().collect();
+        orphaned_plan_ids.sort();
+        for plan_id in orphaned_plan_ids {
+            let tasks = tasks_by_plan.remove(&plan_id).unwrap_or_default();
+            let tasks_total = tasks.len();
+            let tasks_done = tasks.iter().filter(|task| task.status.is_done()).count();
+            let tasks_failed = tasks.iter().filter(|task| task.status.is_failed()).count();
+            let active = tasks.iter().any(|task| task.status.is_active());
+            self.plans.push(PlanEntry {
+                id: plan_id.clone(),
+                name: plan_id.clone(),
+                status: if active {
+                    PlanPhase::Active
+                } else if tasks_failed > 0 {
+                    PlanPhase::Failed
+                } else if tasks_total > 0 && tasks_done == tasks_total {
+                    PlanPhase::Done
+                } else {
+                    PlanPhase::Pending
+                },
+                active,
+                phase: if active {
+                    String::from("active")
+                } else if tasks_failed > 0 {
+                    String::from("failed")
+                } else if tasks_total > 0 && tasks_done == tasks_total {
+                    String::from("completed")
+                } else {
+                    String::from("pending")
+                },
+                tasks_total,
+                tasks_done,
+                tasks_failed,
+                elapsed_secs: prev_plan_elapsed.get(&plan_id).copied().unwrap_or(0.0),
+                wave: prev_plan_wave.get(&plan_id).copied().flatten(),
+                task_total: tasks_total,
+                task_done: tasks_done,
+                expanded: prev_plan_expanded.get(&plan_id).copied().unwrap_or(false),
+                tasks,
+            });
+        }
+
+        let mut agent_ids: Vec<String> = snap.agents.keys().cloned().collect();
+        agent_ids.sort_by(|lhs, rhs| {
+            prev_agent_order
+                .get(lhs)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&prev_agent_order.get(rhs).copied().unwrap_or(usize::MAX))
+                .then_with(|| lhs.cmp(rhs))
+        });
+
+        self.agents = agent_ids
+            .iter()
+            .map(|agent_id| {
+                let agent = &snap.agents[agent_id];
+                let prev_row = prev_agent_rows.get(agent_id);
+                let model = prev_row.map(|row| row.model.clone()).unwrap_or_default();
+                let context_limit = prev_row
+                    .map(|row| row.context_limit)
+                    .filter(|limit| *limit > 0)
+                    .unwrap_or_else(|| model_context_limit(&model));
+
+                AgentRow {
+                    id: agent.agent_id.clone(),
+                    active: agent.active,
+                    status: if agent.active {
+                        AgentStatus::Active
+                    } else {
+                        AgentStatus::Idle
+                    },
+                    role: agent.role.clone(),
+                    model,
+                    input_tokens: prev_row.map(|row| row.input_tokens).unwrap_or(0),
+                    output_tokens: prev_row
+                        .map(|row| row.output_tokens)
+                        .unwrap_or(0)
+                        .max(agent.output_bytes as u64),
+                    context_limit,
+                    current_plan: prev_row
+                        .map(|row| row.current_plan.clone())
+                        .unwrap_or_default(),
+                    current_task: prev_row
+                        .map(|row| row.current_task.clone())
+                        .unwrap_or_default(),
+                    last_output_line: prev_row
+                        .map(|row| row.last_output_line.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        self.agents_by_id = agent_ids
+            .iter()
+            .map(|agent_id| {
+                let agent = &snap.agents[agent_id];
+                let prev = prev_agent_state.get(agent_id);
+                (
+                    agent.agent_id.clone(),
+                    AgentState {
+                        id: agent.agent_id.clone(),
+                        name: agent.role.clone(),
+                        status: if agent.active {
+                            AgentStatus::Active
+                        } else {
+                            AgentStatus::Idle
+                        },
+                        output_lines: prev
+                            .map(|agent_state| agent_state.output_lines.clone())
+                            .unwrap_or_default(),
+                        diff_content: prev
+                            .map(|agent_state| agent_state.diff_content.clone())
+                            .unwrap_or_default(),
+                        input_tokens: prev.map(|agent_state| agent_state.input_tokens).unwrap_or(0),
+                        output_tokens: prev
+                            .map(|agent_state| agent_state.output_tokens)
+                            .unwrap_or(0)
+                            .max(agent.output_bytes as u64),
+                        render_cache: None,
+                        plan_id: prev.and_then(|agent_state| agent_state.plan_id.clone()),
+                        task_id: prev.and_then(|agent_state| agent_state.task_id.clone()),
+                    },
+                )
+            })
+            .collect();
+
+        self.parallel_agents = self
+            .agents
+            .iter()
+            .filter(|a| a.active)
+            .map(|a| ParallelAgentState {
+                agent_id: a.id.clone(),
+                plan_id: a.current_plan.clone(),
+                task_id: a.current_task.clone(),
+                status: AgentStatus::Active,
+                progress_pct: 0.0,
+            })
+            .collect();
+
+        self.gate_results = snap
+            .gates
+            .iter()
+            .map(|gate_result| GateResultEntry {
+                gate: gate_result.gate.clone(),
+                plan_id: gate_result.plan_id.clone(),
+                passed: gate_result.passed,
+                output: if gate_result.task_id.is_empty() {
+                    String::new()
+                } else {
+                    format!("task {}", gate_result.task_id)
+                },
+            })
+            .collect();
+
+        self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
+        self.execution_waves = build_execution_waves(&self.plans);
+        for wave in &mut self.execution_waves {
+            if let Some(expanded) = prev_wave_expanded.get(&wave.index).copied() {
+                wave.expanded = expanded;
+            }
+        }
+
+        self.orchestrator_state = if snap.stats.plans_active > 0 {
+            String::from("running")
+        } else if snap.stats.plans_failed > 0 {
+            String::from("failed")
+        } else if self.orchestrator_state.is_empty() {
+            String::from("idle")
+        } else {
+            self.orchestrator_state.clone()
+        };
+        self.current_phase = self
+            .plans
+            .iter()
+            .find(|plan| plan.active)
+            .or_else(|| self.plans.first())
+            .map(|plan| plan.phase.clone())
+            .unwrap_or_default();
+        self.filter = self.filter_text.clone();
+
+        restore_selected_plan_idx(&self.plans, &mut self.selected_plan_idx, prev_selected_plan_id);
+        restore_selected_plan_idx(&self.plans, &mut self.current_plan_idx, prev_current_plan_id);
+        restore_selected_agent_idx(&self.agents, &mut self.selected_agent, prev_selected_agent_id);
+        self.selected_agent_tab = self.selected_agent_tab.min(6);
+    }
+
     fn update_efficiency_rates(&mut self) {
         let now = Instant::now();
         let token_total = self.token_total;
@@ -1291,6 +1600,177 @@ fn plan_task_counts(
         summary.tasks_done.min(tasks_total),
         summary.tasks_failed.min(tasks_total),
     )
+}
+
+fn snapshot_plan_phase(plan: &roko_core::dashboard_snapshot::PlanState) -> String {
+    if plan.phase.is_empty() {
+        if plan.active {
+            String::from("active")
+        } else if plan.tasks_failed > 0 {
+            String::from("failed")
+        } else if plan.tasks_done >= plan.tasks_total && plan.tasks_total > 0 {
+            String::from("completed")
+        } else {
+            String::from("pending")
+        }
+    } else {
+        plan.phase.clone()
+    }
+}
+
+fn snapshot_plan_status(plan: &roko_core::dashboard_snapshot::PlanState) -> PlanPhase {
+    if plan.active {
+        PlanPhase::Active
+    } else if plan.tasks_failed > 0 {
+        PlanPhase::Failed
+    } else {
+        match snapshot_plan_phase(plan).as_str() {
+            "completed" | "done" => PlanPhase::Done,
+            "failed" | "error" => PlanPhase::Failed,
+            phase => PlanPhase::from(phase),
+        }
+    }
+}
+
+fn snapshot_task_status(task: &roko_core::dashboard_snapshot::TaskState) -> TaskStatus {
+    match task.outcome.as_deref() {
+        Some(outcome)
+            if outcome.contains("fail")
+                || outcome.contains("error")
+                || outcome.contains("Fail")
+                || outcome.contains("Error") =>
+        {
+            TaskStatus::Failed
+        }
+        Some(_) => TaskStatus::Done,
+        None => TaskStatus::from(task.phase.as_str()),
+    }
+}
+
+fn canonical_phase_index_for_snapshot_task(
+    task: &roko_core::dashboard_snapshot::TaskState,
+) -> Option<usize> {
+    let phase = task.phase.trim().to_ascii_lowercase();
+    if phase.is_empty() {
+        return None;
+    }
+
+    if matches!(phase.as_str(), "completed" | "done") {
+        return Some(CANONICAL_PHASES.len().saturating_sub(1));
+    }
+
+    CANONICAL_PHASES.iter().position(|candidate| {
+        *candidate == phase
+            || (*candidate == "compile-gate" && phase.contains("compile"))
+            || (*candidate == "test-gate" && (phase.contains("test") || phase.contains("verif")))
+            || (*candidate == "critic-review" && phase.contains("critic"))
+    })
+}
+
+fn build_phase_pipeline_from_dashboard_snapshot(
+    snap: &roko_core::dashboard_snapshot::DashboardSnapshot,
+) -> Vec<PhaseStep> {
+    #[derive(Clone, Copy, Default)]
+    struct PhaseTaskCounts {
+        total: usize,
+        done: usize,
+        active: usize,
+        failed: usize,
+    }
+
+    let mut counts = vec![PhaseTaskCounts::default(); CANONICAL_PHASES.len()];
+
+    for task in snap.tasks.values() {
+        let Some(current_idx) = canonical_phase_index_for_snapshot_task(task) else {
+            continue;
+        };
+
+        let failed = snapshot_task_status(task).is_failed();
+        let done = snapshot_task_status(task).is_done();
+
+        for (phase_idx, phase_counts) in counts.iter_mut().enumerate() {
+            phase_counts.total += 1;
+
+            if phase_idx < current_idx {
+                phase_counts.done += 1;
+            } else if phase_idx == current_idx {
+                if failed {
+                    phase_counts.failed += 1;
+                } else if done {
+                    phase_counts.done += 1;
+                } else {
+                    phase_counts.active += 1;
+                }
+            }
+        }
+    }
+
+    CANONICAL_PHASES
+        .iter()
+        .enumerate()
+        .map(|(idx, phase)| {
+            let counts = counts[idx];
+            let status = if counts.failed > 0 {
+                PlanPhase::Failed
+            } else if counts.active > 0 {
+                PlanPhase::Active
+            } else if counts.total > 0 && counts.done == counts.total {
+                PlanPhase::Done
+            } else {
+                PlanPhase::Pending
+            };
+            let pct = if counts.total == 0 {
+                0.0
+            } else {
+                (counts.done as f64 / counts.total as f64) * 100.0
+            };
+
+            PhaseStep {
+                name: (*phase).to_string(),
+                status,
+                elapsed_secs: 0.0,
+                pct,
+            }
+        })
+        .collect()
+}
+
+fn restore_selected_plan_idx(plans: &[PlanEntry], selected: &mut usize, previous_id: Option<String>) {
+    match previous_id {
+        Some(previous_id) => {
+            if let Some(idx) = plans.iter().position(|plan| plan.id == previous_id) {
+                *selected = idx;
+            } else if plans.is_empty() {
+                *selected = 0;
+            } else {
+                *selected = (*selected).min(plans.len() - 1);
+            }
+        }
+        None if plans.is_empty() => *selected = 0,
+        None if *selected >= plans.len() => *selected = plans.len() - 1,
+        None => {}
+    }
+}
+
+fn restore_selected_agent_idx(
+    agents: &[AgentRow],
+    selected: &mut usize,
+    previous_id: Option<String>,
+) {
+    match previous_id {
+        Some(previous_id) => {
+            if let Some(idx) = agents.iter().position(|agent| agent.id == previous_id) {
+                *selected = idx;
+            } else if agents.is_empty() {
+                *selected = 0;
+            } else {
+                *selected = (*selected).min(agents.len() - 1);
+            }
+        }
+        None if agents.is_empty() => *selected = 0,
+        None if *selected >= agents.len() => *selected = agents.len() - 1,
+        None => {}
+    }
 }
 
 /// Build the canonical 9-phase pipeline, inferring status from active tasks.
@@ -2248,6 +2728,216 @@ tier = "focused"
     }
 
     #[test]
+    fn update_from_dashboard_snapshot_maps_connected_state_and_preserves_navigation() {
+        use roko_core::dashboard_snapshot::{
+            AgentState as SnapshotAgentState, DashboardSnapshot, ErrorEntry, GateVerdict, PlanState,
+        };
+
+        let mut state = TuiState::default();
+        state.active_tab = Tab::Git;
+        state.selected_plan_idx = 1;
+        state.current_plan_idx = 0;
+        state.selected_agent = 1;
+        state.selected_agent_tab = 4;
+        state.focus = FocusZone::AgentOutput;
+        state.agent_scroll = Some(12);
+        state.diff_scroll = 7;
+        state.task_scroll = 9;
+        state.command_output_scroll = 11;
+        state.plan_detail_scroll = 13;
+        state.plan_scroll_offset = 15;
+        state.log_scroll = 17;
+        state.log_auto_tail = false;
+
+        state.plans = vec![
+            PlanEntry {
+                id: "plan-b".into(),
+                expanded: false,
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-a".into(),
+                expanded: true,
+                ..PlanEntry::default()
+            },
+        ];
+        state.agents = vec![
+            AgentRow {
+                id: "agent-b".into(),
+                active: false,
+                ..AgentRow::default()
+            },
+            AgentRow {
+                id: "agent-a".into(),
+                active: true,
+                ..AgentRow::default()
+            },
+        ];
+
+        let snap = DashboardSnapshot {
+            plans: [
+                (
+                    "plan-a".to_string(),
+                    PlanState {
+                        plan_id: "plan-a".into(),
+                        phase: "started".into(),
+                        tasks_total: 4,
+                        tasks_done: 1,
+                        tasks_failed: 0,
+                        active: true,
+                    },
+                ),
+                (
+                    "plan-b".to_string(),
+                    PlanState {
+                        plan_id: "plan-b".into(),
+                        phase: "failed".into(),
+                        tasks_total: 2,
+                        tasks_done: 1,
+                        tasks_failed: 1,
+                        active: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            tasks: Default::default(),
+            agents: [
+                (
+                    "agent-a".to_string(),
+                    SnapshotAgentState {
+                        agent_id: "agent-a".into(),
+                        role: "implementer".into(),
+                        active: true,
+                        output_bytes: 128,
+                    },
+                ),
+                (
+                    "agent-b".to_string(),
+                    SnapshotAgentState {
+                        agent_id: "agent-b".into(),
+                        role: "reviewer".into(),
+                        active: false,
+                        output_bytes: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            gates: vec![
+                GateVerdict {
+                    plan_id: "plan-a".into(),
+                    task_id: "task-1".into(),
+                    gate: "compile".into(),
+                    passed: true,
+                    ts_millis: 1_000,
+                },
+                GateVerdict {
+                    plan_id: "plan-b".into(),
+                    task_id: "task-2".into(),
+                    gate: "test".into(),
+                    passed: false,
+                    ts_millis: 2_000,
+                },
+            ],
+            errors: vec![
+                ErrorEntry {
+                    message: "compile failed".into(),
+                    ts_millis: 3_000,
+                },
+                ErrorEntry {
+                    message: "timeout".into(),
+                    ts_millis: 4_000,
+                },
+            ],
+            stats: Default::default(),
+        };
+
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.plans.len(), 2);
+        let plan_a = state.plans.iter().find(|plan| plan.id == "plan-a").unwrap();
+        let plan_b = state.plans.iter().find(|plan| plan.id == "plan-b").unwrap();
+        assert_eq!(plan_a.status, PlanPhase::Active);
+        assert!(plan_a.active);
+        assert!(plan_a.expanded);
+        assert_eq!(plan_b.status, PlanPhase::Failed);
+        assert_eq!(plan_b.tasks_failed, 1);
+
+        assert_eq!(state.agents.len(), 2);
+        let agent_a = state.agents.iter().find(|agent| agent.id == "agent-a").unwrap();
+        let agent_b = state.agents.iter().find(|agent| agent.id == "agent-b").unwrap();
+        assert!(agent_a.active);
+        assert_eq!(agent_a.role, "implementer");
+        assert!(!agent_b.active);
+
+        assert_eq!(state.parallel_agents.len(), 1);
+        assert_eq!(state.parallel_agents[0].agent_id, "agent-a");
+
+        assert_eq!(state.gate_results.len(), 2);
+        assert_eq!(state.gate_results[0].gate, "compile");
+        assert_eq!(state.gate_results[1].plan_id, "plan-b");
+        assert!(!state.gate_results[1].passed);
+
+        assert_eq!(state.active_tab, Tab::Git);
+        assert_eq!(state.plans[state.selected_plan_idx].id, "plan-a");
+        assert_eq!(state.plans[state.current_plan_idx].id, "plan-b");
+        assert_eq!(state.agents[state.selected_agent].id, "agent-a");
+        assert_eq!(state.selected_agent_tab, 4);
+        assert_eq!(state.focus, FocusZone::AgentOutput);
+        assert_eq!(state.agent_scroll, Some(12));
+        assert_eq!(state.diff_scroll, 7);
+        assert_eq!(state.task_scroll, 9);
+        assert_eq!(state.command_output_scroll, 11);
+        assert_eq!(state.plan_detail_scroll, 13);
+        assert_eq!(state.plan_scroll_offset, 15);
+        assert_eq!(state.log_scroll, 17);
+        assert!(!state.log_auto_tail);
+    }
+
+    #[test]
+    fn update_from_dashboard_snapshot_keeps_expanded_state_when_matching_plan_remains() {
+        use roko_core::dashboard_snapshot::{DashboardSnapshot, PlanState};
+
+        let mut state = TuiState::default();
+        state.plans = vec![
+            PlanEntry {
+                id: "plan-a".into(),
+                expanded: false,
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-b".into(),
+                expanded: true,
+                ..PlanEntry::default()
+            },
+        ];
+
+        let snap = DashboardSnapshot {
+            plans: [(
+                "plan-b".to_string(),
+                PlanState {
+                    plan_id: "plan-b".into(),
+                    phase: "completed".into(),
+                    tasks_total: 1,
+                    tasks_done: 1,
+                    tasks_failed: 0,
+                    active: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.plans.len(), 1);
+        assert_eq!(state.plans[0].id, "plan-b");
+        assert!(state.plans[0].expanded);
+    }
+
+    #[test]
     fn update_from_snapshot_populates_token_history_and_rate() {
         let mut data = DashboardData::default();
         data.efficiency_events = vec![
@@ -2288,6 +2978,202 @@ tier = "focused"
         assert_eq!(history.len(), 60);
         assert_eq!(history.front().copied(), Some(2));
         assert_eq!(history.back().copied(), Some(61));
+    }
+
+    #[test]
+    fn update_from_dashboard_snapshot_maps_streaming_fields() {
+        let mut snap = roko_core::DashboardSnapshot::default();
+        snap.plans.insert(
+            "plan-a".into(),
+            roko_core::dashboard_snapshot::PlanState {
+                plan_id: "plan-a".into(),
+                phase: "implementer".into(),
+                tasks_total: 2,
+                tasks_done: 1,
+                tasks_failed: 0,
+                active: true,
+            },
+        );
+        snap.tasks.insert(
+            "plan-a/task-1".into(),
+            roko_core::dashboard_snapshot::TaskState {
+                task_id: "task-1".into(),
+                plan_id: "plan-a".into(),
+                phase: "implementer".into(),
+                outcome: None,
+            },
+        );
+        snap.tasks.insert(
+            "plan-a/task-2".into(),
+            roko_core::dashboard_snapshot::TaskState {
+                task_id: "task-2".into(),
+                plan_id: "plan-a".into(),
+                phase: "completed".into(),
+                outcome: Some("success".into()),
+            },
+        );
+        snap.agents.insert(
+            "agent-1".into(),
+            roko_core::dashboard_snapshot::AgentState {
+                agent_id: "agent-1".into(),
+                role: "implementer".into(),
+                active: true,
+                output_bytes: 42,
+            },
+        );
+        snap.gates.push(roko_core::dashboard_snapshot::GateVerdict {
+            plan_id: "plan-a".into(),
+            task_id: "task-2".into(),
+            gate: "compile".into(),
+            passed: true,
+            ts_millis: 1,
+        });
+        snap.errors.push(roko_core::dashboard_snapshot::ErrorEntry {
+            message: "compile failed once".into(),
+            ts_millis: 2,
+        });
+        snap.stats.plans_active = 1;
+        snap.stats.tasks_active = 1;
+        snap.stats.gates_passed = 1;
+        snap.stats.errors_total = 1;
+
+        let mut state = TuiState::default();
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.orchestrator_state, "running");
+        assert_eq!(state.current_phase, "implementer");
+        assert_eq!(state.plans.len(), 1);
+        assert_eq!(state.plans[0].id, "plan-a");
+        assert_eq!(state.plans[0].tasks_total, 2);
+        assert_eq!(state.plans[0].tasks_done, 1);
+        assert_eq!(state.plans[0].phase, "implementer");
+        assert_eq!(state.plans[0].tasks.len(), 2);
+        assert_eq!(state.current_task_checklist.len(), 2);
+        assert_eq!(state.current_task_checklist[0].id, "task-1");
+        assert_eq!(state.current_task_checklist[0].status, TaskStatus::Active);
+        assert_eq!(state.current_task_checklist[1].status, TaskStatus::Done);
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].id, "agent-1");
+        assert_eq!(state.agents[0].role, "implementer");
+        assert_eq!(state.agents[0].output_tokens, 42);
+        assert_eq!(state.parallel_agents.len(), 1);
+        assert_eq!(state.gate_results.len(), 1);
+        assert_eq!(state.gate_results[0].gate, "compile");
+        assert_eq!(state.gate_results[0].output, "task task-2");
+        assert_eq!(state.execution_waves.len(), 1);
+        assert_eq!(state.execution_waves[0].plans, vec![String::from("plan-a")]);
+        assert_eq!(state.phase_pipeline.len(), 9);
+        assert_eq!(state.phase_pipeline[2].status, PhaseStatus::Active);
+    }
+
+    #[test]
+    fn update_from_dashboard_snapshot_preserves_navigation_state_by_id() {
+        let mut state = TuiState::default();
+        state.active_tab = Tab::Agents;
+        state.focus = FocusZone::RightPanel;
+        state.selected_plan_idx = 1;
+        state.current_plan_idx = 1;
+        state.selected_agent = 1;
+        state.selected_agent_tab = 4;
+        state.agent_scroll = Some(9);
+        state.plan_scroll_offset = 12;
+        state.log_scroll = 7;
+        state.plans = vec![
+            PlanEntry {
+                id: "plan-a".into(),
+                expanded: false,
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-b".into(),
+                expanded: true,
+                ..PlanEntry::default()
+            },
+        ];
+        state.agents = vec![
+            AgentRow {
+                id: "agent-1".into(),
+                ..AgentRow::default()
+            },
+            AgentRow {
+                id: "agent-2".into(),
+                ..AgentRow::default()
+            },
+        ];
+        state.current_task_checklist = vec![TaskRow {
+            id: "task-2".into(),
+            title: "task-2".into(),
+            status: TaskStatus::Active,
+            elapsed_secs: 15.0,
+        }];
+
+        let mut snap = roko_core::DashboardSnapshot::default();
+        snap.plans.insert(
+            "plan-b".into(),
+            roko_core::dashboard_snapshot::PlanState {
+                plan_id: "plan-b".into(),
+                phase: "implementer".into(),
+                tasks_total: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                active: true,
+            },
+        );
+        snap.plans.insert(
+            "plan-a".into(),
+            roko_core::dashboard_snapshot::PlanState {
+                plan_id: "plan-a".into(),
+                phase: "pending".into(),
+                tasks_total: 0,
+                tasks_done: 0,
+                tasks_failed: 0,
+                active: false,
+            },
+        );
+        snap.tasks.insert(
+            "plan-b/task-2".into(),
+            roko_core::dashboard_snapshot::TaskState {
+                task_id: "task-2".into(),
+                plan_id: "plan-b".into(),
+                phase: "implementer".into(),
+                outcome: None,
+            },
+        );
+        snap.agents.insert(
+            "agent-2".into(),
+            roko_core::dashboard_snapshot::AgentState {
+                agent_id: "agent-2".into(),
+                role: "reviewer".into(),
+                active: true,
+                output_bytes: 3,
+            },
+        );
+        snap.agents.insert(
+            "agent-1".into(),
+            roko_core::dashboard_snapshot::AgentState {
+                agent_id: "agent-1".into(),
+                role: "implementer".into(),
+                active: false,
+                output_bytes: 0,
+            },
+        );
+        snap.stats.plans_active = 1;
+
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.active_tab, Tab::Agents);
+        assert_eq!(state.focus, FocusZone::RightPanel);
+        assert_eq!(state.agent_scroll, Some(9));
+        assert_eq!(state.plan_scroll_offset, 12);
+        assert_eq!(state.log_scroll, 7);
+        assert_eq!(state.selected_plan_idx, 1);
+        assert_eq!(state.current_plan_idx, 1);
+        assert_eq!(state.plans[state.selected_plan_idx].id, "plan-b");
+        assert_eq!(state.selected_agent, 1);
+        assert_eq!(state.agents[state.selected_agent].id, "agent-2");
+        assert_eq!(state.selected_agent_tab, 4);
+        assert!(state.plans[1].expanded);
+        assert_eq!(state.current_task_checklist[0].elapsed_secs, 15.0);
     }
 
     #[test]
