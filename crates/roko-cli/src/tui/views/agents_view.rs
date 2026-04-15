@@ -586,7 +586,19 @@ fn render_output_body(
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(area);
-    let visible_height = inner.height as usize;
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    render_route_metrics_bar(frame, layout[0], data, tui_state, view_state, theme);
+
+    if layout[1].width == 0 || layout[1].height == 0 {
+        return;
+    }
+
+    let visible_height = layout[1].height as usize;
     let max_scroll = total_lines
         .saturating_sub(visible_height)
         .min(u16::MAX as usize);
@@ -596,23 +608,24 @@ fn render_output_body(
     } else {
         format!("[PINNED line {}]", scroll.saturating_add(1))
     };
-
-    let block = block.title(vec![
-        Span::styled(format!(" {title_label}"), title_style),
-        Span::styled(
-            format!(" {tail_indicator} "),
-            if tui_state.agent_scroll.is_none() {
-                Style::default().fg(theme.success)
-            } else {
-                Style::default().fg(theme.warning)
-            },
-        ),
-    ]);
+    let block = block
+        .border_style(border_style)
+        .title(vec![
+            Span::styled(format!(" {title_label}"), title_style),
+            Span::styled(
+                format!(" {tail_indicator} "),
+                if tui_state.agent_scroll.is_none() {
+                    Style::default().fg(theme.success)
+                } else {
+                    Style::default().fg(theme.warning)
+                },
+            ),
+        ]);
     frame.render_widget(block, area);
 
     if output_lines.is_empty() {
         // Centered empty state
-        let v_pad = inner.height / 2;
+        let v_pad = layout[1].height / 2;
         let mut empty_lines: Vec<Line<'_>> = Vec::new();
         for _ in 0..v_pad.saturating_sub(2) {
             empty_lines.push(Line::from(""));
@@ -631,7 +644,7 @@ fn render_output_body(
         let empty = Paragraph::new(empty_lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
+        frame.render_widget(empty, layout[1]);
         return;
     }
 
@@ -639,7 +652,7 @@ fn render_output_body(
         .style(theme.text())
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, layout[1]);
 }
 
 pub(crate) fn collect_agent_output_lines(
@@ -836,6 +849,112 @@ fn format_uptime(ms: u64) -> String {
     } else {
         format!("{:.1}h", ms as f64 / 3_600_000.0)
     }
+}
+
+fn render_route_metrics_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let selected_agent = data.agents.get(view_state.selected);
+    let selected_id = selected_agent
+        .map(|a| a.id.as_str())
+        .or_else(|| {
+            tui_state
+                .agents
+                .get(view_state.selected)
+                .map(|agent| agent.id.as_str())
+        })
+        .unwrap_or("");
+    let agent_row = tui_state.agents.iter().find(|row| row.id == selected_id);
+    let metrics = tui_state.route_metrics.get(selected_id);
+
+    let model = metrics
+        .map(|metric| metric.model.as_str())
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            agent_row
+                .map(|row| row.model.as_str())
+                .filter(|model| !model.is_empty())
+        })
+        .unwrap_or("");
+    let model_label = if model.is_empty() || model == "-" {
+        "unknown".to_string()
+    } else {
+        shorten_model(model)
+    };
+    let context_used = metrics
+        .map(|metric| metric.context_used)
+        .unwrap_or_else(|| agent_row.map_or(0, |row| row.input_tokens + row.output_tokens));
+    let context_limit = metrics
+        .map(|metric| metric.context_limit)
+        .filter(|limit| *limit > 0)
+        .or_else(|| agent_row.map(|row| row.context_limit).filter(|limit| *limit > 0))
+        .unwrap_or_else(|| model_context_limit(model));
+    let utilization = if context_limit > 0 {
+        (context_used as f64 / context_limit as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let focus_score = metrics.map_or(0.0, |metric| metric.focus_score);
+    let tier = metrics
+        .map(|metric| metric.tier.as_str())
+        .filter(|tier| !tier.is_empty())
+        .unwrap_or("balanced");
+
+    let usage_color = if utilization >= 0.8 {
+        theme.danger
+    } else if utilization >= 0.5 {
+        theme.warning
+    } else {
+        theme.success
+    };
+    let focus_color = if focus_score >= 0.75 {
+        theme.foreground
+    } else if focus_score >= 0.4 {
+        theme.muted
+    } else {
+        Color::Rgb(110, 95, 115)
+    };
+
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            format!("[{}]", model_label),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default()),
+        Span::styled("ctx:", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {}/{}", format_tokens(context_used), format_tokens(context_limit)),
+            Style::default().fg(usage_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(theme.muted)),
+        Span::styled("focus:", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {:.2}", focus_score),
+            Style::default().fg(focus_color).add_modifier(if focus_score >= 0.75 {
+                Modifier::BOLD
+            } else {
+                Modifier::DIM
+            }),
+        ),
+        Span::styled(" │ ", Style::default().fg(theme.muted)),
+        Span::styled("tier:", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {}", tier),
+            Style::default().fg(theme.foreground),
+        ),
+    ]);
+
+    frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);
 }
 
 fn is_agent_active(status: &str) -> bool {

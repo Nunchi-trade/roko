@@ -12,7 +12,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::{AgentStatus, TuiState};
+use crate::tui::state::{AgentStatus, RouteMetrics, TuiState};
 use crate::tui::widgets;
 
 // ---------------------------------------------------------------------------
@@ -198,8 +198,22 @@ fn render_sub_agents(
     focused: bool,
     theme: &Theme,
 ) {
-    let sections =
-        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    let route_row_count = tui_state
+        .agents
+        .iter()
+        .filter(|agent| tui_state.route_metrics.contains_key(&agent.id))
+        .count();
+    let route_height = if route_row_count == 0 {
+        3
+    } else {
+        (route_row_count as u16 + 3).min(8)
+    };
+    let sections = Layout::vertical([
+        Constraint::Percentage(52),
+        Constraint::Length(route_height),
+        Constraint::Min(0),
+    ])
+    .split(area);
 
     widgets::parallel_pool::render_parallel_pool(
         frame,
@@ -210,9 +224,10 @@ fn render_sub_agents(
             .min(tui_state.agents.len().saturating_sub(1)),
         theme,
     );
+    render_agent_routes_table(frame, sections[1], tui_state, &tui_state.route_metrics, theme);
     render_output_panel(
         frame,
-        sections[1],
+        sections[2],
         data,
         tui_state,
         view_state,
@@ -323,6 +338,85 @@ fn render_output_panel(
             .style(theme.text())
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0)),
+        inner,
+    );
+}
+
+fn render_agent_routes_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    route_metrics: &HashMap<String, RouteMetrics>,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Routes ")
+        .border_style(theme.muted());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = tui_state
+        .agents
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, agent)| {
+            route_metrics.get(&agent.id).map(|metric| {
+                let tier_style = route_tier_style(&metric.tier, theme);
+                let row_style = if idx == tui_state.selected_agent {
+                    theme.selection()
+                } else {
+                    Style::default()
+                };
+                let model = if metric.model.is_empty() {
+                    "-".to_string()
+                } else {
+                    truncate(&shorten_model(&metric.model), 18)
+                };
+                Row::new(vec![
+                    Cell::from(truncate(&agent.id, 14)),
+                    Cell::from(Span::styled(
+                        model,
+                        theme.text().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(truncate(&metric.tier, 10), tier_style)),
+                ])
+                .style(row_style)
+            })
+        })
+        .collect();
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no agent route metrics").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let rows = rows
+        .into_iter()
+        .take(inner.height.saturating_sub(2) as usize)
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(14),
+                Constraint::Min(18),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new(["Agent", "Model", "Tier"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
         inner,
     );
 }
@@ -1038,5 +1132,14 @@ fn fmt_count(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+fn route_tier_style(tier: &str, theme: &Theme) -> Style {
+    match tier {
+        "fast" => theme.success(),
+        "balanced" => theme.accent(),
+        "deep" => theme.warning(),
+        _ => theme.muted(),
     }
 }

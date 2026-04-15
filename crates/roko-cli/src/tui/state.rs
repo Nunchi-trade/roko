@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use ratatui::text::Line;
+use roko_core::OperatingFrequency;
 
 use super::atmosphere::Atmosphere;
 use super::dashboard::{DashboardData, PlanTaskListSnapshot, Theme};
@@ -269,6 +270,21 @@ pub struct AgentRow {
     pub last_output_line: String,
 }
 
+/// Per-agent routing and context metrics shown in the TUI.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteMetrics {
+    /// Routed or observed model slug (for example `claude-sonnet-4-5`).
+    pub model: String,
+    /// Compact routing tier label such as `fast`, `balanced`, or `deep`.
+    pub tier: String,
+    /// Total tokens consumed for the latest observed turn.
+    pub context_used: u64,
+    /// Model context window in tokens.
+    pub context_limit: u64,
+    /// Prompt-focus score in the range `0.0..=1.0`.
+    pub focus_score: f64,
+}
+
 /// Resolve a model slug to its known context window in tokens.
 #[must_use]
 pub fn model_context_limit(model: &str) -> u64 {
@@ -285,6 +301,128 @@ pub fn model_context_limit(model: &str) -> u64 {
         200_000
     } else {
         200_000
+    }
+}
+
+#[must_use]
+fn route_tier_label_for_frequency(frequency: OperatingFrequency) -> &'static str {
+    match frequency {
+        OperatingFrequency::Gamma => "fast",
+        OperatingFrequency::Theta => "balanced",
+        OperatingFrequency::Delta => "deep",
+    }
+}
+
+#[must_use]
+fn route_tier_label_for_model(model: &str) -> &'static str {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        "balanced"
+    } else if lower.contains("haiku")
+        || lower.contains("flash-lite")
+        || lower.contains("flash lite")
+        || lower.contains("mini")
+        || lower.contains("nano")
+    {
+        "fast"
+    } else if lower.contains("opus")
+        || lower.contains("pro-preview")
+        || lower.contains("pro preview")
+        || lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("r1")
+    {
+        "deep"
+    } else {
+        "balanced"
+    }
+}
+
+#[must_use]
+fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
+    if event.model.trim().is_empty() {
+        event.model_used.trim().to_string()
+    } else {
+        event.model.trim().to_string()
+    }
+}
+
+#[must_use]
+fn prompt_focus_score(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> f64 {
+    if event.prompt_sections.is_empty() {
+        return if event.total_prompt_tokens > 0 { 1.0 } else { 0.0 };
+    }
+
+    let mut max_weighted = 0.0;
+    let mut retained_weighted = 0.0;
+    for section in &event.prompt_sections {
+        let priority_weight = 1.0 / (1.0 + f64::from(section.priority));
+        let weighted_tokens = section.tokens as f64 * priority_weight;
+        max_weighted += weighted_tokens;
+
+        let retention = if section.was_dropped {
+            0.0
+        } else if section.was_truncated {
+            0.5
+        } else {
+            1.0
+        };
+        retained_weighted += weighted_tokens * retention;
+    }
+
+    if max_weighted > 0.0 {
+        (retained_weighted / max_weighted).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+#[must_use]
+fn route_focus_score(
+    event: &roko_learn::efficiency::AgentEfficiencyEvent,
+    data: &DashboardData,
+    model: &str,
+) -> f64 {
+    if let Some(stats) = data.cascade_router.confidence_stats.get(model) {
+        if stats.trials > 0 {
+            return (stats.successes as f64 / stats.trials as f64).clamp(0.0, 1.0);
+        }
+    }
+    prompt_focus_score(event)
+}
+
+#[must_use]
+fn route_metrics_from_event(
+    event: &roko_learn::efficiency::AgentEfficiencyEvent,
+    data: &DashboardData,
+) -> RouteMetrics {
+    let model = event_model_slug(event);
+    let context_limit = model_context_limit(&model);
+    let focus_score = route_focus_score(event, data, &model);
+    RouteMetrics {
+        tier: if model.is_empty() {
+            route_tier_label_for_frequency(event.frequency).to_string()
+        } else {
+            route_tier_label_for_model(&model).to_string()
+        },
+        model,
+        context_used: event.total_tokens(),
+        context_limit,
+        focus_score,
+    }
+}
+
+#[must_use]
+fn fallback_route_metrics_for_agent(agent: &AgentRow) -> RouteMetrics {
+    let context_limit = agent
+        .context_limit
+        .max(model_context_limit(agent.model.as_str()));
+    RouteMetrics {
+        model: agent.model.clone(),
+        tier: route_tier_label_for_model(&agent.model).to_string(),
+        context_used: agent.input_tokens.saturating_add(agent.output_tokens),
+        context_limit,
+        focus_score: 0.0,
     }
 }
 
@@ -508,6 +646,8 @@ pub struct TuiState {
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
     pub agents: Vec<AgentRow>,
+    /// Per-agent route and context metrics keyed by agent identifier.
+    pub route_metrics: HashMap<String, RouteMetrics>,
     /// Cached styled agent output keyed by agent identifier.
     pub agent_output_cache: RefCell<HashMap<String, CachedRender>>,
     // -- navigation --
@@ -665,6 +805,7 @@ impl Default for TuiState {
             gate_results: Vec::new(),
 
             agents: Vec::new(),
+            route_metrics: HashMap::new(),
             agent_output_cache: RefCell::new(HashMap::new()),
             active_tab: Tab::default(),
             selected_plan_idx: 0,
@@ -842,6 +983,7 @@ impl TuiState {
         self.current_iteration = executor_summary.current_iteration;
         self.current_phase = executor_summary.current_phase;
         let latest_events = latest_agent_events(&data.efficiency_events);
+        let latest_route_metrics = latest_route_metrics(&data.efficiency_events, data);
 
         let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
         for task in &data.active_tasks {
@@ -1016,6 +1158,26 @@ impl TuiState {
                 }
             }
         }
+        self.route_metrics = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let metrics = latest_route_metrics
+                    .get(&agent.id)
+                    .cloned()
+                    .map(|mut metrics| {
+                        if metrics.model.is_empty() && !agent.model.is_empty() {
+                            metrics.model = agent.model.clone();
+                        }
+                        if metrics.context_limit == 0 {
+                            metrics.context_limit = agent.context_limit.max(1);
+                        }
+                        metrics
+                    })
+                    .unwrap_or_else(|| fallback_route_metrics_for_agent(agent));
+                (agent.id.clone(), metrics)
+            })
+            .collect();
         self.prune_agent_output_cache();
 
         self.cost_dollars = data.efficiency.total_cost_usd;
@@ -1127,6 +1289,7 @@ impl TuiState {
             .cloned()
             .map(|agent| (agent.id.clone(), agent))
             .collect();
+        let prev_route_metrics = self.route_metrics.clone();
         let mut snapshot_tasks: Vec<&roko_core::dashboard_snapshot::TaskState> =
             snap.tasks.values().collect();
         snapshot_tasks.sort_by(|lhs, rhs| {
@@ -1281,6 +1444,30 @@ impl TuiState {
                         .map(|row| row.last_output_line.clone())
                         .unwrap_or_default(),
                 }
+            })
+            .collect();
+        self.route_metrics = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let metrics = prev_route_metrics
+                    .get(&agent.id)
+                    .cloned()
+                    .map(|mut metrics| {
+                        if metrics.model.is_empty() && !agent.model.is_empty() {
+                            metrics.model = agent.model.clone();
+                        }
+                        metrics.context_used = agent.input_tokens.saturating_add(agent.output_tokens);
+                        if metrics.context_limit == 0 {
+                            metrics.context_limit = agent.context_limit.max(1);
+                        }
+                        if metrics.tier.is_empty() {
+                            metrics.tier = route_tier_label_for_model(&metrics.model).to_string();
+                        }
+                        metrics
+                    })
+                    .unwrap_or_else(|| fallback_route_metrics_for_agent(agent));
+                (agent.id.clone(), metrics)
             })
             .collect();
         self.prune_agent_output_cache();
@@ -2104,6 +2291,37 @@ fn latest_agent_events(
     }
 
     latest
+}
+
+fn latest_route_metrics(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+    data: &DashboardData,
+) -> HashMap<String, RouteMetrics> {
+    let mut latest: HashMap<String, (Option<DateTime<Utc>>, RouteMetrics)> = HashMap::new();
+
+    for event in events {
+        let timestamp = parse_efficiency_timestamp(&event.timestamp);
+        let should_replace = latest
+            .get(&event.agent_id)
+            .map(|(existing, _)| match (*existing, timestamp) {
+                (Some(lhs), Some(rhs)) => rhs >= lhs,
+                (None, Some(_)) => true,
+                (None, None) => true,
+                _ => false,
+            })
+            .unwrap_or(true);
+        if should_replace {
+            latest.insert(
+                event.agent_id.clone(),
+                (timestamp, route_metrics_from_event(event, data)),
+            );
+        }
+    }
+
+    latest
+        .into_iter()
+        .map(|(agent_id, (_, metrics))| (agent_id, metrics))
+        .collect()
 }
 
 fn plan_is_active(status: &str) -> bool {
@@ -3061,6 +3279,45 @@ tier = "focused"
         state.update_from_snapshot(&data);
 
         assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_from_snapshot_populates_route_metrics() {
+        let mut data = DashboardData::default();
+        data.efficiency_events = vec![AgentEfficiencyEvent {
+            agent_id: "agent-a".to_string(),
+            role: "implementer".to_string(),
+            model: "claude-haiku-4-5".to_string(),
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            prompt_sections: vec![roko_learn::efficiency::PromptSectionMeta {
+                name: "workspace_map".to_string(),
+                tokens: 800,
+                priority: 0,
+                was_truncated: false,
+                was_dropped: false,
+            }],
+            frequency: OperatingFrequency::Gamma,
+            timestamp: "2026-04-14T12:00:00Z".to_string(),
+            ..AgentEfficiencyEvent::default()
+        }];
+        data.cascade_router.confidence_stats.insert(
+            "claude-haiku-4-5".to_string(),
+            crate::tui::dashboard::CascadeRouterModelStats {
+                trials: 10,
+                successes: 8,
+            },
+        );
+
+        let mut state = TuiState::default();
+        state.update_from_snapshot(&data);
+
+        let metrics = state.route_metrics.get("agent-a").expect("route metrics");
+        assert_eq!(metrics.model, "claude-haiku-4-5");
+        assert_eq!(metrics.tier, "fast");
+        assert_eq!(metrics.context_used, 15_000);
+        assert_eq!(metrics.context_limit, 200_000);
+        assert!((metrics.focus_score - 0.8).abs() < f64::EPSILON);
     }
 
     #[test]
