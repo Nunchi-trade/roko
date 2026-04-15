@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::LogFilterLevel;
 use crate::tui::state::TuiState;
 
 /// A parsed log entry.
@@ -58,6 +59,15 @@ impl LogLevel {
             Self::Error => "ERR",
         }
     }
+
+    fn filter_level(self) -> LogFilterLevel {
+        match self {
+            Self::Info => LogFilterLevel::Info,
+            Self::Warn => LogFilterLevel::Warn,
+            Self::Error => LogFilterLevel::Error,
+            Self::Debug => LogFilterLevel::Debug,
+        }
+    }
 }
 
 /// Render the full logs view.
@@ -65,12 +75,12 @@ pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
-    _tui_state: &TuiState,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let entries = build_unified_log(data);
-    render_with_entries(frame, area, &entries, data, view_state, theme);
+    render_with_entries(frame, area, &entries, data, tui_state, view_state, theme);
 }
 
 /// Render the logs view with explicit log entries (for integration layer).
@@ -79,10 +89,15 @@ pub fn render_with_entries(
     area: Rect,
     entries: &[LogEntry],
     data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let sections = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
+    let filtered_entries: Vec<&LogEntry> = entries
+        .iter()
+        .filter(|entry| tui_state.log_level_visible(entry.level.filter_level()))
+        .collect();
 
     // Status bar with source counts
     let signal_count = data.recent_signals.len();
@@ -96,9 +111,26 @@ pub fn render_with_entries(
     } else {
         "SCROLL"
     };
-    let status_line1 = Line::from(vec![
-        Span::styled(format!(" {} entries ", entries.len()), theme.muted()),
+    let entry_label = if filtered_entries.len() == entries.len() {
+        format!(" {} entries ", entries.len())
+    } else {
+        format!(" {}/{} entries ", filtered_entries.len(), entries.len())
+    };
+    let mut status_spans = vec![
+        Span::styled(entry_label, theme.muted()),
         Span::styled(format!("[{tail_label}]"), theme.accent()),
+        Span::styled("  |  levels:", theme.muted()),
+    ];
+    for level in LogFilterLevel::all() {
+        let style = if tui_state.log_level_visible(level) {
+            level_filter_style(level, theme)
+        } else {
+            theme.muted()
+        };
+        status_spans.push(Span::raw(" "));
+        status_spans.push(Span::styled(format!("[{}]", level.label()), style));
+    }
+    status_spans.extend([
         Span::styled("  |  ", theme.muted()),
         Span::styled(format!("signals:{signal_count}"), theme.info()),
         Span::styled("  ", theme.muted()),
@@ -110,6 +142,7 @@ pub fn render_with_entries(
         Span::styled("  ", theme.muted()),
         Span::styled(format!("events:{event_count}"), theme.text()),
     ]);
+    let status_line1 = Line::from(status_spans);
     let status = Paragraph::new(vec![status_line1]).alignment(Alignment::Right);
     frame.render_widget(status, sections[0]);
 
@@ -129,7 +162,15 @@ pub fn render_with_entries(
         return;
     }
 
-    let lines: Vec<Line<'_>> = entries
+    if filtered_entries.is_empty() {
+        let empty = Paragraph::new("no log entries match the active level filter")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let lines: Vec<Line<'_>> = filtered_entries
         .iter()
         .map(|entry| {
             let level_style = level_style(entry.level, theme);
@@ -361,6 +402,15 @@ fn level_style(level: LogLevel, theme: &Theme) -> ratatui::style::Style {
         LogLevel::Info => theme.text(),
         LogLevel::Warn => theme.warning(),
         LogLevel::Error => theme.danger(),
+    }
+}
+
+fn level_filter_style(level: LogFilterLevel, theme: &Theme) -> ratatui::style::Style {
+    match level {
+        LogFilterLevel::Debug => theme.muted(),
+        LogFilterLevel::Info => theme.text(),
+        LogFilterLevel::Warn => theme.warning(),
+        LogFilterLevel::Error => theme.danger(),
     }
 }
 

@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use super::super::dashboard::Theme;
+use super::super::state::PlanPhase;
 
 /// A single plan entry within a wave.
 #[derive(Debug, Clone)]
@@ -74,12 +75,11 @@ pub fn render_wave_overview(
 
             // Plan entries
             for plan in &wave.plans {
-                let status_style = match plan.status.as_str() {
-                    "done" | "completed" => theme.success(),
-                    "running" | "active" => theme.info(),
-                    "failed" | "error" => theme.danger(),
-                    "pending" | "queued" => theme.muted(),
-                    _ => theme.text(),
+                let status_style = match PlanPhase::from(plan.status.as_str()) {
+                    PlanPhase::Done => theme.success(),
+                    PlanPhase::Active => theme.info(),
+                    PlanPhase::Failed => theme.danger(),
+                    PlanPhase::Pending => theme.muted(),
                 };
 
                 let dur = plan

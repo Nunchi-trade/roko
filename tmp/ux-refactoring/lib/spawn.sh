@@ -6,6 +6,107 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 : "${UX_REASONING:=high}"
 : "${UX_TIMEOUT:=5400}"
 
+emit_delegation_guidance() {
+  local batch="$1"
+  cat <<EOF
+## Delegation Requirement
+
+You are explicitly authorized to use multiple subagents for this batch.
+Use them aggressively where it helps, but keep the immediate blocking work local.
+
+Required delegation behavior:
+
+- Before coding, form a short plan and identify 2-4 concrete sidecar subtasks.
+- Spawn explorers for targeted codebase questions and workers for bounded code edits.
+- Each subagent gets the same context pack plus its specific task.
+- Give each worker a disjoint write scope and tell them they are not alone in the codebase.
+- Do not wait idly for subagents if you can make progress locally.
+- If subagents are unavailable in this environment, continue locally without failing.
+
+Suggested parallel split for batch \`$batch\`:
+EOF
+
+  case "$batch" in
+    A1|A2)
+      cat <<'EOF'
+- explorer: mirage/serve dashboard data paths and API surface
+- worker: frontend-facing dashboard state or route wiring in the owned scope
+- worker: tests and verification fixes for touched backend/cli paths
+EOF
+      ;;
+    B1|B2)
+      cat <<'EOF'
+- explorer: demo manifest/scenario/runtime wiring and missing contracts
+- worker: contracts and forge tests
+- worker: `crates/roko-demo` scenario/runtime/event streaming implementation
+EOF
+      ;;
+    C1|C2)
+      cat <<'EOF'
+- explorer: `roko-agent-server` and existing serve/mirage integration seams
+- worker: new crate or backend aggregator implementation
+- worker: migration cleanup, muxing, and compile/test follow-through
+EOF
+      ;;
+    D1)
+      cat <<'EOF'
+- explorer: current gaps in attestation/lineage/tiering/VCG/router paths
+- worker: `crates/roko-core` + `crates/roko-chain` completion
+- worker: `crates/roko-neuro` + `crates/roko-daimon` completion
+- worker: `crates/roko-agent` provider/tool-loop/runtime wiring
+EOF
+      ;;
+    E1)
+      cat <<'EOF'
+- explorer: live routing/replanning/prompt composition call graph
+- worker: `crates/roko-learn` feedback signals and storage wiring
+- worker: `crates/roko-conductor` + `crates/roko-compose` prompt/routing integration
+- worker: `crates/roko-orchestrator` + `crates/roko-cli` replanning/runtime wiring
+EOF
+      ;;
+    D2)
+      cat <<'EOF'
+- explorer: orchestrator/runtime/dreams ownership seams
+- worker: `crates/roko-orchestrator` DAG/executor changes
+- worker: `crates/roko-agent` + `crates/roko-runtime` supervision/runtime changes
+- worker: `crates/roko-dreams` middle-layer dream capabilities
+EOF
+      ;;
+    D3)
+      cat <<'EOF'
+- explorer: long-horizon learning, daemon, and safety seams already present
+- worker: `crates/roko-neuro` + `crates/roko-learn` learning/pheromone work
+- worker: `crates/roko-daimon` + `crates/roko-dreams` heartbeat/deployment work
+- worker: `crates/roko-compose` + `crates/roko-cli` prompt/daemon integration
+EOF
+      ;;
+    F1)
+      cat <<'EOF'
+- explorer: current TUI navigation/view gaps and missing serve routes
+- worker: `crates/roko-cli/src/tui` interactive views and data loading
+- worker: `crates/roko-serve/src/routes` endpoint additions and tests
+EOF
+      ;;
+    F2)
+      cat <<'EOF'
+- explorer: daemon/PRD/MCP/playbook wiring seams
+- worker: `crates/roko-cli` daemon, tracing, and promote-hook work
+- worker: `crates/roko-mcp-*` / `crates/roko-index` code-intelligence surface
+- worker: `crates/roko-learn` playbook/cost aggregation integration
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+- explorer: targeted read-only architecture questions
+- worker: first bounded implementation slice
+- worker: second bounded implementation slice
+EOF
+      ;;
+  esac
+
+  echo
+}
+
 do_timeout() {
   local seconds="$1"
   shift
@@ -43,6 +144,7 @@ compose_prompt_snapshot() {
       echo "Use that context to avoid repeating the same failure."
       echo
     fi
+    emit_delegation_guidance "$batch"
     cat "$(batch_prompt_file "$batch")"
   } > "$out"
 

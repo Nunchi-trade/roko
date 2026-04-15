@@ -1,7 +1,7 @@
 //! F2 Plans view -- Mori-style wave browser + plan detail.
 //!
-//! Layout: left 31% (wave list with pipeline header + collapsible plan
-//! groups), right 69% (selected plan detail with tasks, gate results,
+//! Layout: left 35% (wave list with pipeline header + collapsible plan
+//! groups), right 65% (selected plan detail with tasks, gate results,
 //! timing).
 //!
 //! Renders hierarchical wave groups with gradient progress bars, status
@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::TuiState;
+use crate::tui::state::{PlanEntry, TaskEntry, TaskStatus, TuiState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,7 +42,7 @@ pub fn render(
     theme: &Theme,
 ) {
     let panels =
-        Layout::horizontal([Constraint::Percentage(31), Constraint::Percentage(69)]).split(area);
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
     render_left_panel(frame, panels[0], data, tui_state, view_state, theme);
     render_right_panel(frame, panels[1], data, tui_state, view_state, theme);
@@ -86,7 +86,7 @@ fn render_pipeline_header(
     let active_count = tui_state
         .plans
         .iter()
-        .filter(|p| p.status == "running" || p.status == "active")
+        .filter(|p| p.status.is_active())
         .count();
     let pct = if total_plans > 0 {
         completed as f64 / total_plans as f64
@@ -169,14 +169,14 @@ fn render_wave_tree(
     let failed = tui_state
         .plans
         .iter()
-        .filter(|p| p.status == "failed" || p.status == "error")
+        .filter(|p| p.status.is_failed())
         .count();
 
     let mut health_suffix = String::new();
     let active = tui_state
         .plans
         .iter()
-        .filter(|p| p.status == "running" || p.status == "active")
+        .filter(|p| p.status.is_active())
         .count();
     if active > 0 {
         health_suffix.push_str(&format!(" {active}\u{25b8}"));
@@ -278,7 +278,7 @@ fn render_wave_tree(
                 tui_state
                     .plans
                     .get(i)
-                    .map(|p| p.status == "running" || p.status == "active")
+                    .map(|p| p.status.is_active())
                     .unwrap_or(false)
             });
 
@@ -323,7 +323,7 @@ fn render_wave_tree(
                     tui_state
                         .plans
                         .get(i)
-                        .map(|p| p.status == "failed" || p.status == "error")
+                        .map(|p| p.status.is_failed())
                         .unwrap_or(false)
                 })
                 .count();
@@ -455,10 +455,10 @@ fn render_plan_line(
     let is_selected = idx == view_state.selected;
     let tui_plan = tui_state.plans.get(idx);
     let is_active = tui_plan
-        .map(|p| p.status == "running" || p.status == "active")
+        .map(|p| p.status.is_active())
         .unwrap_or(false);
     let is_failed = tui_plan
-        .map(|p| p.status == "failed" || p.status == "error")
+        .map(|p| p.status.is_failed())
         .unwrap_or(false);
     let task_done = tui_plan.map(|p| p.task_done).unwrap_or(0);
     let task_total = plan.task_count;
@@ -709,47 +709,26 @@ fn render_right_panel(
         return;
     }
 
-    // Show execution detail if available
-    if let Some(exec) = &data.current_plan_execution {
-        // Check for last_error on the matching plan summary.
-        let plan_error: Option<&str> = data
+    if let Some(plan) = tui_state.plans.get(tui_state.selected_plan_idx) {
+        let plan_summary = data
             .plans
             .iter()
-            .find(|p| p.id == exec.plan_id)
-            .and_then(|p| p.last_error.as_deref());
-        let error_height = if plan_error.is_some() { 2u16 } else { 0u16 };
-
-        let sections = Layout::vertical([
-            Constraint::Length(error_height), // Error banner (if any)
-            Constraint::Length(5),            // Plan header + progress
-            Constraint::Min(0),               // Task table
-            Constraint::Length(6),            // Gate results
-        ])
-        .split(inner);
-
-        // Render error banner at the top of the detail panel.
-        if let Some(err) = plan_error {
-            let err_line = Line::from(vec![
-                Span::styled(
-                    " \u{26a0} ERROR: ",
-                    Style::default()
-                        .fg(theme.danger)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(truncate(err, 70), Style::default().fg(theme.danger)),
-            ]);
-            frame.render_widget(Paragraph::new(vec![err_line, Line::from("")]), sections[0]);
-        }
-
-        render_execution_header(frame, sections[1], exec, theme);
-        render_execution_tasks(frame, sections[2], exec, view_state, theme);
-        render_gate_summary(frame, sections[3], data, theme);
-        return;
-    }
-
-    // Fallback: show selected plan summary
-    if let Some(plan) = data.plans.get(view_state.selected) {
-        render_plan_summary(frame, inner, plan, data, tui_state, view_state, theme);
+            .find(|summary| summary.id == plan.id)
+            .or_else(|| data.plans.get(tui_state.selected_plan_idx));
+        let plan_execution = data
+            .current_plan_execution
+            .as_ref()
+            .filter(|exec| exec.plan_id == plan.id);
+        render_plan_summary(
+            frame,
+            inner,
+            plan,
+            plan_summary,
+            plan_execution,
+            data,
+            view_state,
+            theme,
+        );
     } else {
         let v_pad = inner.height / 2;
         let mut empty_lines: Vec<Line<'_>> = Vec::new();
@@ -770,44 +749,128 @@ fn render_right_panel(
 }
 
 // ---------------------------------------------------------------------------
-// Execution header (plan name + progress bar)
+// Selected plan detail
 // ---------------------------------------------------------------------------
 
-fn render_execution_header(
+fn render_plan_summary(
     frame: &mut Frame<'_>,
     area: Rect,
-    exec: &crate::tui::dashboard::PlanExecutionSnapshot,
+    plan: &PlanEntry,
+    plan_summary: Option<&crate::plan::PlanSummary>,
+    plan_execution: Option<&crate::tui::dashboard::PlanExecutionSnapshot>,
+    data: &DashboardData,
+    view_state: &ViewState,
     theme: &Theme,
 ) {
-    let pct = if exec.tasks_total > 0 {
-        exec.tasks_done as f64 / exec.tasks_total as f64
+    let plan_name = if plan.name.is_empty() {
+        plan_summary
+            .map(|summary| summary.title.as_str())
+            .unwrap_or(plan.id.as_str())
+    } else {
+        plan.name.as_str()
+    };
+    let summary_completed = plan_summary
+        .map(|summary| summary.completed)
+        .unwrap_or(false);
+    let tasks_total = plan
+        .tasks_total
+        .max(plan.task_total)
+        .max(plan_summary.map_or(0, |summary| summary.task_count));
+    let tasks_done = plan.tasks_done.max(plan.task_done).min(tasks_total);
+    let pct = if tasks_total > 0 {
+        tasks_done as f64 / tasks_total as f64
+    } else if summary_completed {
+        1.0
     } else {
         0.0
     };
-
-    let bar_w = 20usize;
+    let raw_status = if plan.status.is_active() && !plan.phase.is_empty() {
+        plan.phase.as_str()
+    } else if summary_completed {
+        "completed"
+    } else {
+        plan.status.label()
+    };
+    let (status_icon, status_color, status_label) = if summary_completed || plan.status.is_done() {
+        ("\u{2713}", theme.success, "completed")
+    } else if plan.status.is_failed() {
+        ("\u{2717}", theme.danger, "failed")
+    } else if plan.status.is_active() {
+        ("\u{25b6}", theme.warning, raw_status)
+    } else {
+        ("\u{25cb}", theme.muted, raw_status)
+    };
+    let plan_gates: Vec<_> = data
+        .gate_results
+        .iter()
+        .filter(|gate| gate.plan_id == plan.id)
+        .collect();
+    let gate_passed = plan_gates.iter().filter(|gate| gate.passed).count();
+    let last_error = plan_summary.and_then(|summary| summary.last_error.as_deref());
+    let bar_w = area.width.saturating_sub(28).clamp(10, 32) as usize;
     let bar = build_progress_bar(pct, bar_w);
-    let bar_color = if exec.tasks_done == exec.tasks_total && exec.tasks_total > 0 {
+    let bar_color = if tasks_done == tasks_total && tasks_total > 0 {
         theme.success
+    } else if plan.tasks_failed > 0 {
+        theme.danger
     } else {
         semantic_color(pct, theme)
     };
 
-    let lines = vec![
+    let mut header_lines = vec![
         Line::from(vec![
             Span::styled(" plan: ", Style::default().fg(theme.muted)),
             Span::styled(
-                &exec.plan_title,
+                plan_name,
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(""),
+        Line::from(vec![
+            Span::styled(" status: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{status_icon} {status_label}"),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("id ", Style::default().fg(theme.muted)),
+            Span::styled(
+                truncate(&plan.id, 24),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" tasks: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{tasks_done}/{tasks_total} done"),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled(
+                format!("  {} failed", plan.tasks_failed),
+                Style::default().fg(if plan.tasks_failed > 0 {
+                    theme.danger
+                } else {
+                    theme.muted
+                }),
+            ),
+            Span::styled(
+                format!("  {gate_passed}/{} gates", plan_gates.len()),
+                Style::default().fg(if plan_gates.is_empty() {
+                    theme.muted
+                } else if gate_passed == plan_gates.len() {
+                    theme.success
+                } else {
+                    theme.warning
+                }),
+            ),
+        ]),
         Line::from(vec![
             Span::styled(" progress: ", Style::default().fg(theme.muted)),
             Span::styled(
-                format!("{}/{}", exec.tasks_done, exec.tasks_total),
+                format!("{tasks_done}/{tasks_total}"),
                 Style::default().fg(theme.foreground),
             ),
             Span::raw("  "),
@@ -817,91 +880,104 @@ fn render_execution_header(
                 Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(Span::styled(
-            format!(
-                " {}",
-                "\u{2500}".repeat(area.width.saturating_sub(3) as usize)
-            ),
-            Style::default().fg(Color::Rgb(40, 35, 42)),
-        )),
     ];
-    let para = Paragraph::new(lines);
-    frame.render_widget(para, area);
+    if let Some(err) = last_error {
+        header_lines.push(Line::from(vec![
+            Span::styled(" error: ", Style::default().fg(theme.danger)),
+            Span::styled(
+                truncate(err, area.width.saturating_sub(10) as usize),
+                Style::default()
+                    .fg(theme.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    header_lines.push(Line::from(Span::styled(
+        format!(
+            " {}",
+            "\u{2500}".repeat(area.width.saturating_sub(3) as usize)
+        ),
+        Style::default().fg(Color::Rgb(40, 35, 42)),
+    )));
+
+    let header_height = header_lines.len() as u16;
+    let sections = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(0),
+        Constraint::Length(6),
+        Constraint::Length(4),
+    ])
+    .split(area);
+
+    frame.render_widget(Paragraph::new(header_lines), sections[0]);
+    render_plan_tasks(frame, sections[1], &plan.tasks, view_state, theme);
+    render_plan_gates(frame, sections[2], &plan_gates, theme);
+    render_plan_timing(frame, sections[3], plan, plan_execution, &plan_gates, theme);
 }
 
-// ---------------------------------------------------------------------------
-// Execution tasks table
-// ---------------------------------------------------------------------------
-
-fn render_execution_tasks(
+fn render_plan_tasks(
     frame: &mut Frame<'_>,
     area: Rect,
-    exec: &crate::tui::dashboard::PlanExecutionSnapshot,
+    tasks: &[TaskEntry],
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    if exec.tasks.is_empty() {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .title(Span::styled(" Tasks ", Style::default().fg(theme.muted)))
+        .border_style(Style::default().fg(Color::Rgb(40, 35, 42)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tasks.is_empty() {
         let empty = Paragraph::new(Span::styled(
-            " no tasks in execution",
+            " no tasks recorded for this plan",
             Style::default()
                 .fg(theme.muted)
                 .add_modifier(Modifier::ITALIC),
         ))
         .wrap(Wrap { trim: false });
-        frame.render_widget(empty, area);
+        frame.render_widget(empty, inner);
         return;
     }
 
-    let rows: Vec<Row<'_>> = exec
-        .tasks
+    let rows: Vec<Row<'_>> = tasks
         .iter()
         .enumerate()
         .map(|(i, task)| {
-            let (icon, icon_color) = if task.is_current {
-                ("\u{25b6}", theme.warning) // ▶
-            } else if task.phase == "done" || task.phase == "completed" {
-                ("\u{2713}", theme.success) // checkmark
-            } else if task.phase == "failed" {
-                ("\u{2717}", theme.danger) // X
+            let (icon, icon_color) = task_status_icon(task, theme);
+            let task_title = if task.name.is_empty() {
+                task.id.as_str()
             } else {
-                ("\u{00b7}", theme.muted) // ·
+                task.name.as_str()
             };
-
-            let style = if task.is_current {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else if i == view_state.secondary_selected {
+            let status = if task.status.is_empty() {
+                "pending"
+            } else {
+                task.status.as_str()
+            };
+            let style = if i == view_state.secondary_selected {
                 theme.selection()
             } else {
                 theme.text()
             };
-
-            let short_model = if task.model.is_empty() {
-                "-".to_string()
-            } else {
-                shorten_model(&task.model)
-            };
-
-            // Phase chip with semantic color
-            let phase_color = phase_color(&task.phase, theme);
 
             Row::new(vec![
                 Cell::from(Span::styled(
                     format!(" {icon}"),
                     Style::default().fg(icon_color),
                 )),
-                Cell::from(truncate(&task.task_id, 14)),
-                Cell::from(truncate(&task.title, 22)),
+                Cell::from(truncate(task_title, 32)),
                 Cell::from(Span::styled(
-                    truncate(&task.phase, 10),
-                    Style::default().fg(phase_color),
+                    truncate(status, 12),
+                    Style::default().fg(phase_color(status, theme)),
                 )),
-                Cell::from(short_model),
-                Cell::from(Span::styled(
-                    task.duration.clone(),
-                    Style::default().fg(theme.muted),
-                )),
+                Cell::from(
+                    task.agent_id
+                        .as_deref()
+                        .map(|agent| truncate(agent, 14))
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
             ])
             .style(style)
         })
@@ -909,29 +985,28 @@ fn render_execution_tasks(
 
     let widths = [
         Constraint::Length(3),
-        Constraint::Min(10),
-        Constraint::Min(14),
-        Constraint::Length(10),
+        Constraint::Min(16),
         Constraint::Length(12),
-        Constraint::Length(8),
+        Constraint::Min(8),
     ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new([" ", "task", "title", "phase", "model", "time"]).style(
+            Row::new([" ", "task", "status", "agent"]).style(
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
         )
         .column_spacing(1);
-    frame.render_widget(table, area);
+    frame.render_widget(table, inner);
 }
 
-// ---------------------------------------------------------------------------
-// Gate results summary
-// ---------------------------------------------------------------------------
-
-fn render_gate_summary(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+fn render_plan_gates(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    plan_gates: &[&crate::tui::dashboard::GateResultSummary],
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::TOP)
         .title(Span::styled(
@@ -942,7 +1017,7 @@ fn render_gate_summary(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if data.gate_results.is_empty() && data.gate_results_page.gate_rows.is_empty() {
+    if plan_gates.is_empty() {
         let empty = Paragraph::new(Span::styled(
             " no gate results yet",
             Style::default()
@@ -954,310 +1029,149 @@ fn render_gate_summary(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, 
         return;
     }
 
-    if !data.gate_results_page.gate_rows.is_empty() {
-        let rows: Vec<Row<'_>> = data
-            .gate_results_page
-            .gate_rows
-            .iter()
-            .take(inner.height as usize)
-            .map(|row| {
-                let rate_color = if row.pass_rate >= 0.9 {
-                    theme.success
-                } else if row.pass_rate >= 0.5 {
-                    theme.warning
-                } else {
-                    theme.danger
-                };
-
-                // Mini pass-rate bar
-                let bar_w = 6;
-                let filled = (row.pass_rate * bar_w as f64).round() as usize;
-                let empty = bar_w - filled.min(bar_w);
-                let mini_bar = format!(
-                    "{}{}",
-                    "\u{2588}".repeat(filled.min(bar_w)),
-                    "\u{2500}".repeat(empty)
-                );
-
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!(" {}", truncate(&row.gate_name, 14)),
-                        Style::default().fg(theme.foreground),
-                    )),
-                    Cell::from(format!("{}", row.total_runs)),
-                    Cell::from(Span::styled(
-                        format!("{:.0}%", row.pass_rate * 100.0),
-                        Style::default().fg(rate_color),
-                    )),
-                    Cell::from(Span::styled(mini_bar, Style::default().fg(rate_color))),
-                    Cell::from(Span::styled(
-                        format!("{:.0}ms", row.avg_duration_ms),
-                        Style::default().fg(theme.muted),
-                    )),
-                ])
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Min(10),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(8),
-        ];
-        let table = Table::new(rows, widths)
-            .header(
-                Row::new([" gate", "runs", "pass%", "bar", "avg ms"]).style(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .column_spacing(1);
-        frame.render_widget(table, inner);
-    } else {
-        // Fall back to raw gate results
-        let passed = data.gate_results.iter().filter(|g| g.passed).count();
-        let total_gates = data.gate_results.len();
-        let color = if passed == total_gates && total_gates > 0 {
-            theme.success
-        } else if passed > 0 {
-            theme.warning
-        } else {
-            theme.danger
-        };
-
-        let pct = if total_gates > 0 {
-            (passed as f64 / total_gates as f64 * 100.0).round() as u64
-        } else {
-            0
-        };
-
-        let bar_w = 12;
-        let filled = if total_gates > 0 {
-            (passed as f64 / total_gates as f64 * bar_w as f64).round() as usize
-        } else {
-            0
-        };
-        let empty = bar_w - filled.min(bar_w);
-
-        let summary = Paragraph::new(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(
-                format!("{passed}/{total_gates}"),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" gates passed ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!(
-                    "{}{}",
-                    "\u{2588}".repeat(filled.min(bar_w)),
-                    "\u{2500}".repeat(empty)
-                ),
-                Style::default().fg(color),
-            ),
-            Span::styled(format!(" {pct}%"), Style::default().fg(color)),
-        ]));
-        frame.render_widget(summary, inner);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Plan summary (when no active execution)
-// ---------------------------------------------------------------------------
-
-fn render_plan_summary(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    plan: &crate::plan::PlanSummary,
-    data: &DashboardData,
-    _tui_state: &TuiState,
-    view_state: &ViewState,
-    theme: &Theme,
-) {
-    let header_height = if plan.last_error.is_some() {
-        8u16
-    } else {
-        7u16
-    };
-    let sections = Layout::vertical([
-        Constraint::Length(header_height), // Header (extra line for error)
-        Constraint::Min(0),                // Tasks
-    ])
-    .split(area);
-
-    // Plan header
-    let status_style = if plan.completed {
-        theme.success()
-    } else {
-        theme.warning()
-    };
-
-    // Gate results for this plan
-    let plan_gates: Vec<_> = data
-        .gate_results
+    let rows: Vec<Row<'_>> = plan_gates
         .iter()
-        .filter(|g| g.plan_id == plan.id)
-        .collect();
-    let gate_passed = plan_gates.iter().filter(|g| g.passed).count();
-    let gate_total = plan_gates.len();
+        .rev()
+        .map(|gate| {
+            let (icon, color) = if gate.passed {
+                ("\u{2713}", theme.success)
+            } else {
+                ("\u{2717}", theme.danger)
+            };
 
-    let mut header_lines = vec![
-        Line::from(vec![
-            Span::styled(" plan:   ", Style::default().fg(theme.muted)),
-            Span::styled(
-                &plan.title,
+            Row::new(vec![
+                Cell::from(Span::styled(format!(" {icon}"), Style::default().fg(color))),
+                Cell::from(truncate(&gate.gate_name, 12)),
+                Cell::from(Span::styled(
+                    truncate(&gate.summary, 36),
+                    Style::default().fg(theme.foreground),
+                )),
+                Cell::from(Span::styled(
+                    format_duration_ms(gate.duration_ms),
+                    Style::default().fg(theme.muted),
+                )),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(3),
+        Constraint::Length(12),
+        Constraint::Min(12),
+        Constraint::Length(8),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new([" ", "gate", "summary", "time"]).style(
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled(" id:     ", Style::default().fg(theme.muted)),
-            Span::styled(&plan.id, Style::default().fg(theme.foreground)),
-        ]),
-        Line::from(vec![
-            Span::styled(" tasks:  ", Style::default().fg(theme.muted)),
-            Span::styled(
-                plan.task_count.to_string(),
-                Style::default().fg(theme.foreground),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" status: ", Style::default().fg(theme.muted)),
-            if plan.completed {
-                Span::styled("\u{2713} completed", status_style)
-            } else {
-                Span::styled("\u{25cb} pending", status_style)
-            },
-        ]),
-    ];
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
 
-    // Show last error prominently if present.
-    if let Some(err) = &plan.last_error {
-        header_lines.push(Line::from(vec![
-            Span::styled(" error:  ", Style::default().fg(theme.danger)),
-            Span::styled(
-                truncate(err, 80),
-                Style::default()
-                    .fg(theme.danger)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
+fn render_plan_timing(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    plan: &PlanEntry,
+    plan_execution: Option<&crate::tui::dashboard::PlanExecutionSnapshot>,
+    plan_gates: &[&crate::tui::dashboard::GateResultSummary],
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .title(Span::styled(" Timing ", Style::default().fg(theme.muted)))
+        .border_style(Style::default().fg(Color::Rgb(40, 35, 42)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    if gate_total > 0 {
-        let gate_color = if gate_passed == gate_total {
-            theme.success
-        } else if gate_passed > 0 {
-            theme.warning
-        } else {
-            theme.danger
-        };
-        header_lines.push(Line::from(vec![
-            Span::styled(" gates:  ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{gate_passed}/{gate_total} passed"),
-                Style::default().fg(gate_color),
-            ),
-        ]));
-    }
-
-    // Separator
-    header_lines.push(Line::from(Span::styled(
-        format!(
-            " {}",
-            "\u{2500}".repeat(area.width.saturating_sub(3) as usize)
-        ),
-        Style::default().fg(Color::Rgb(40, 35, 42)),
-    )));
-
-    let header = Paragraph::new(header_lines);
-    frame.render_widget(header, sections[0]);
-
-    // Active tasks for this plan
-    let matching_tasks: Vec<_> = data
-        .active_tasks
-        .iter()
-        .filter(|t| t.plan_id == plan.id)
-        .collect();
-
-    if !matching_tasks.is_empty() {
-        let rows: Vec<Row<'_>> = matching_tasks
-            .iter()
-            .enumerate()
-            .map(|(i, task)| {
-                let (icon, icon_color) = match task.status.as_str() {
-                    "done" | "completed" => ("\u{2713}", theme.success),
-                    "running" | "in_progress" => ("\u{25b6}", theme.warning),
-                    "failed" => ("\u{2717}", theme.danger),
-                    _ => ("\u{00b7}", theme.muted),
-                };
-
-                let style = if i == view_state.secondary_selected {
-                    theme.selection()
-                } else {
-                    theme.text()
-                };
-
-                let iter_str = if task.iteration > 0 {
-                    format!("#{}", task.iteration)
-                } else {
-                    "-".to_string()
-                };
-
-                let agents = if task.assigned_agents.is_empty() {
-                    "-".to_string()
-                } else {
-                    task.assigned_agents.join(", ")
-                };
-
-                // Phase color
-                let phase_color = phase_color(&task.status, theme);
-
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!(" {icon}"),
-                        Style::default().fg(icon_color),
-                    )),
-                    Cell::from(truncate(&task.task_id, 18)),
-                    Cell::from(Span::styled(
-                        task.status.clone(),
-                        Style::default().fg(phase_color),
-                    )),
-                    Cell::from(iter_str),
-                    Cell::from(truncate(&agents, 14)),
-                ])
-                .style(style)
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Length(3),
-            Constraint::Min(12),
-            Constraint::Length(12),
-            Constraint::Length(5),
-            Constraint::Min(10),
-        ];
-        let table = Table::new(rows, widths)
-            .header(
-                Row::new([" ", "task", "status", "iter", "agents"]).style(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .column_spacing(1);
-        frame.render_widget(table, sections[1]);
-    } else {
+    let timing_lines = build_timing_lines(plan, plan_execution, plan_gates, theme);
+    if timing_lines.is_empty() {
         let empty = Paragraph::new(Span::styled(
-            " no active tasks for this plan",
+            " timing not available",
             Style::default()
                 .fg(theme.muted)
                 .add_modifier(Modifier::ITALIC),
         ))
         .wrap(Wrap { trim: false });
-        frame.render_widget(empty, sections[1]);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(timing_lines).wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn build_timing_lines(
+    plan: &PlanEntry,
+    plan_execution: Option<&crate::tui::dashboard::PlanExecutionSnapshot>,
+    plan_gates: &[&crate::tui::dashboard::GateResultSummary],
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let tasks_done = plan.tasks_done.max(plan.task_done);
+
+    if plan.elapsed_secs > 0.0 {
+        lines.push(Line::from(vec![
+            Span::styled(" total ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format_duration_secs(plan.elapsed_secs),
+                Style::default().fg(theme.foreground),
+            ),
+        ]));
+    }
+
+    if plan.elapsed_secs > 0.0 && tasks_done > 0 {
+        lines.push(Line::from(vec![
+            Span::styled(" avg/done ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format_duration_secs(plan.elapsed_secs / tasks_done as f64),
+                Style::default().fg(theme.foreground),
+            ),
+        ]));
+    }
+
+    if let Some(exec) = plan_execution {
+        if let Some(current_task) = exec.tasks.iter().find(|task| task.is_current) {
+            if let Some(current_secs) = parse_duration_secs(&current_task.duration) {
+                lines.push(Line::from(vec![
+                    Span::styled(" current ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        format_duration_secs(current_secs),
+                        Style::default().fg(theme.warning),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    if !plan_gates.is_empty() {
+        let gate_secs = plan_gates
+            .iter()
+            .map(|gate| gate.duration_ms as f64 / 1000.0)
+            .sum::<f64>();
+        lines.push(Line::from(vec![
+            Span::styled(" gates ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format_duration_secs(gate_secs),
+                Style::default().fg(theme.foreground),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+fn task_status_icon(task: &TaskEntry, theme: &Theme) -> (&'static str, Color) {
+    match TaskStatus::from(task.status.as_str()) {
+        TaskStatus::Done => ("\u{2713}", theme.success),
+        TaskStatus::Active => ("\u{25b6}", theme.warning),
+        TaskStatus::Failed | TaskStatus::Blocked => ("\u{2717}", theme.danger),
+        TaskStatus::Pending => ("\u{00b7}", theme.muted),
     }
 }
 
@@ -1381,7 +1295,8 @@ fn semantic_color(pct: f64, theme: &Theme) -> Color {
 
 /// Phase-specific color.
 fn phase_color(phase: &str, theme: &Theme) -> Color {
-    match phase {
+    let phase = phase.to_ascii_lowercase();
+    match phase.as_str() {
         p if p.contains("done") || p.contains("completed") => theme.success,
         p if p.contains("fail") || p.contains("error") => theme.danger,
         p if p.contains("running") || p.contains("active") || p.contains("implement") => {
@@ -1393,15 +1308,53 @@ fn phase_color(phase: &str, theme: &Theme) -> Color {
     }
 }
 
-/// Shorten model slug for compact display.
-fn shorten_model(slug: &str) -> String {
-    slug.replace("claude-", "")
-        .replace("gpt-", "")
-        .replace("-codex", "c")
-        .replace("-mini", "m")
-        .replace("sonnet-", "s")
-        .replace("opus-", "o")
-        .replace("haiku-", "h")
+fn format_duration_ms(duration_ms: u64) -> String {
+    if duration_ms >= 1000 {
+        format_duration_secs(duration_ms as f64 / 1000.0)
+    } else {
+        format!("{duration_ms}ms")
+    }
+}
+
+fn format_duration_secs(seconds: f64) -> String {
+    let total_seconds = seconds.max(0.0).round() as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let secs = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn parse_duration_secs(duration: &str) -> Option<f64> {
+    if duration.is_empty() || duration == "--" {
+        return None;
+    }
+
+    let mut total = 0.0;
+    let mut matched = false;
+    for part in duration.split_whitespace() {
+        if let Some(ms) = part.strip_suffix("ms") {
+            total += ms.parse::<f64>().ok()? / 1000.0;
+            matched = true;
+        } else if let Some(hours) = part.strip_suffix('h') {
+            total += hours.parse::<f64>().ok()? * 3600.0;
+            matched = true;
+        } else if let Some(minutes) = part.strip_suffix('m') {
+            total += minutes.parse::<f64>().ok()? * 60.0;
+            matched = true;
+        } else if let Some(seconds) = part.strip_suffix('s') {
+            total += seconds.parse::<f64>().ok()?;
+            matched = true;
+        }
+    }
+
+    matched.then_some(total)
 }
 
 /// Truncate with trailing `...`.

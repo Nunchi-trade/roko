@@ -3073,6 +3073,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         id,
                         title: "(unloaded)".into(),
                         task_count: 0,
+                        tasks_done: 0,
+                        tasks_failed: 0,
                         completed: false,
                         old_format: plan_has_old_tasks_format(&wd, p),
                         last_error: None,

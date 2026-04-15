@@ -183,6 +183,7 @@ load_run() {
     log_err "cli" "Worktree missing for run $RUN_ID: $WORKTREE"
     exit 1
   fi
+  ln -sfn "$LOG_ROOT/$RUN_ID" "$LOG_ROOT/latest"
 }
 
 batch_status() {
@@ -214,6 +215,17 @@ deps_terminal_failure() {
     terminal_failure_status "$status" && return 0
   done
   return 1
+}
+
+resume_preserved_batch() {
+  local batch="$1"
+  local current_batch result
+  [[ -n "$CONTINUE_RUN" ]] || return 1
+  current_batch="$(current_batch_name "$RUN_ID" 2>/dev/null || true)"
+  [[ "$current_batch" == "$batch" ]] || return 1
+  result="$(batch_status "$batch")"
+  [[ -z "$result" ]] || return 1
+  worktree_dirty "$WORKTREE"
 }
 
 run_one_batch() {
@@ -251,12 +263,26 @@ run_one_batch() {
   fi
 
   local attempt spawn_rc commit_rc
+  local preserve_dirty_resume=0
+  local start_attempt=1
+
+  if resume_preserved_batch "$batch"; then
+    preserve_dirty_resume=1
+    start_attempt="$(current_batch_attempt "$RUN_ID" 2>/dev/null || echo 1)"
+    log_warn "$batch" "Resuming interrupted batch from preserved dirty worktree state"
+  fi
+
   : > "$failure_file"
-  for attempt in $(seq 1 "$UX_MAX_RETRIES"); do
+  for attempt in $(seq "$start_attempt" "$UX_MAX_RETRIES"); do
     set_current_batch "$RUN_ID" "$batch" "$attempt"
-    record_status "$RUN_ID" "$batch" "$attempt" "attempt_started" "$(batch_title "$batch")"
     log_header "$batch ATTEMPT $attempt/$UX_MAX_RETRIES"
-    reset_runner_worktree "$WORKTREE"
+    if (( preserve_dirty_resume == 1 && attempt == start_attempt )); then
+      record_status "$RUN_ID" "$batch" "$attempt" "attempt_resumed" "reusing dirty worktree state from interrupted run"
+      log_info "$batch" "Keeping current worktree changes; skipping reset before restart"
+    else
+      record_status "$RUN_ID" "$batch" "$attempt" "attempt_started" "$(batch_title "$batch")"
+      reset_runner_worktree "$WORKTREE"
+    fi
 
     spawn_rc=0
     if spawn_batch "$batch" "$RUN_ID" "$WORKTREE" "$attempt" "$failure_file"; then

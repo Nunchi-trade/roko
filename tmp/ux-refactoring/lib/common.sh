@@ -86,7 +86,10 @@ require_file() {
 
 latest_run_id() {
   [[ -d "$LOG_ROOT" ]] || return 1
-  find "$LOG_ROOT" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; | sort | tail -1
+  find "$LOG_ROOT" -maxdepth 1 -mindepth 1 -type f -name manifest.env -exec dirname {} \; \
+    | xargs -n 1 basename \
+    | sort \
+    | tail -1
 }
 
 run_manifest_file() { echo "$LOG_ROOT/$1/manifest.env"; }
@@ -99,6 +102,30 @@ run_failure_file() { echo "$LOG_ROOT/$1/$2.failure.txt"; }
 run_status_file() { echo "$LOG_ROOT/$1/status.tsv"; }
 run_current_batch_file() { echo "$LOG_ROOT/$1/current-batch.env"; }
 batch_prompt_file() { echo "$PROMPTS_DIR/$1.prompt.md"; }
+
+current_batch_value() {
+  local run_id="$1"
+  local key="$2"
+  local file
+  file="$(run_current_batch_file "$run_id")"
+  [[ -f "$file" ]] || return 1
+  awk -F= -v key="$key" '$1 == key { gsub(/\047/, "", $2); print $2 }' "$file"
+}
+
+current_batch_name() {
+  current_batch_value "$1" "BATCH"
+}
+
+current_batch_attempt() {
+  current_batch_value "$1" "ATTEMPT"
+}
+
+worktree_dirty() {
+  local worktree="$1"
+  git -C "$worktree" status --porcelain=v1 -uall \
+    | grep -Ev '^[ MADRCU?!]{2} (\.cargo-target/|target/)' \
+    | grep -q .
+}
 
 record_status() {
   local run_id="$1"

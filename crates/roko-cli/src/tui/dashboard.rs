@@ -9,6 +9,7 @@ use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -31,6 +32,8 @@ use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::skill_library::Skill;
 
 use super::pages::{PageId, PageScaffold, efficiency, operations};
+use super::state::{PlanPhase, TaskStatus};
+use super::widgets::rosedust::MoriTheme;
 
 const MEMORY_DIR: &str = ".roko/memory";
 const EPISODES_FILE: &str = "episodes.jsonl";
@@ -111,17 +114,17 @@ impl Theme {
     #[must_use]
     pub const fn dark() -> Self {
         Self {
-            foreground: Color::Rgb(165, 142, 158), // #A58E9E — rose-tinted text
-            muted: Color::Rgb(110, 85, 105),       // #6E5569 — ghost text
-            background: Color::Rgb(0, 0, 0),       // #000000 — void
-            accent: Color::Rgb(185, 120, 148),     // #B97894 — primary rose
-            accent_foreground: Color::Rgb(0, 0, 0), // #000000 — contrast on rose
-            success: Color::Rgb(125, 158, 140),    // #7D9E8C — sage green
-            warning: Color::Rgb(195, 155, 95),     // #C39B5F — amber caution
-            danger: Color::Rgb(195, 110, 85),      // #C36E55 — ember red
-            info: Color::Rgb(120, 115, 165),       // #7873A5 — dream indigo
-            selection_background: Color::Rgb(34, 28, 36), // #221C24 — highlight
-            selection_foreground: Color::Rgb(215, 198, 158), // #D7C69E — bone bright
+            foreground: MoriTheme::TEXT,
+            muted: MoriTheme::TEXT_GHOST,
+            background: MoriTheme::BG,
+            accent: MoriTheme::ROSE,
+            accent_foreground: MoriTheme::VOID,
+            success: MoriTheme::SAGE,
+            warning: MoriTheme::WARNING,
+            danger: MoriTheme::EMBER,
+            info: MoriTheme::DREAM,
+            selection_background: MoriTheme::BG_HIGHLIGHT,
+            selection_foreground: MoriTheme::BONE,
         }
     }
 
@@ -493,6 +496,10 @@ pub struct DashboardData {
     pub task_outputs: HashMap<String, Vec<String>>,
     /// Last observed task-outputs directory metadata.
     task_outputs_stamp: FileStamp,
+    /// Cached git diff shown in the Dashboard Diff sub-tab.
+    pub git_diff: String,
+    /// Whether the cached git diff came from staged changes.
+    pub git_diff_is_staged: bool,
     /// Orchestrator event log from `.roko/state/events.json`.
     pub event_log: Vec<EventLogEntry>,
     /// Last observed events file metadata.
@@ -516,7 +523,7 @@ impl DashboardData {
         let learn_dir = roko_dir.join("learn");
         let state_path = roko_dir.join("state").join("executor.json");
         let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = resolve_episodes_path(&root);
+        let episodes_path = root.join(MEMORY_DIR).join(EPISODES_FILE);
         let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
         let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
         let gate_thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
@@ -575,6 +582,7 @@ impl DashboardData {
         let events_path = roko_dir.join("state").join("events.json");
         let event_log = load_event_log(&events_path);
         let event_log_stamp = file_stamp(&events_path);
+        let (git_diff, git_diff_is_staged) = load_dashboard_git_diff(&root);
 
         Self {
             root,
@@ -607,6 +615,8 @@ impl DashboardData {
             cascade_router_stamp,
             task_outputs,
             task_outputs_stamp,
+            git_diff,
+            git_diff_is_staged,
             event_log,
             event_log_stamp,
         }
@@ -628,7 +638,7 @@ impl DashboardData {
         let roko_dir = self.root.join(".roko");
         let state_path = roko_dir.join("state").join("executor.json");
         let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = resolve_episodes_path(&self.root);
+        let episodes_path = self.root.join(MEMORY_DIR).join(EPISODES_FILE);
         let efficiency_path = roko_dir.join("learn").join(EFFICIENCY_FILE);
         let experiments_path = roko_dir.join("learn").join(EXPERIMENTS_FILE);
         let gate_thresholds_path = roko_dir.join("learn").join(GATE_THRESHOLDS_FILE);
@@ -709,6 +719,10 @@ impl DashboardData {
             self.event_log_stamp = stamp;
             self.event_log = load_event_log(&events_path);
         }
+
+        let (git_diff, git_diff_is_staged) = load_dashboard_git_diff(&self.root);
+        self.git_diff = git_diff;
+        self.git_diff_is_staged = git_diff_is_staged;
 
         if state_changed {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
@@ -837,6 +851,53 @@ impl DashboardData {
     pub(crate) fn executor_summary(&self) -> ExecutorSummary {
         summarize_executor_state(&self.executor_state)
     }
+
+    #[must_use]
+    pub(crate) fn gate_signals_for_task(&self, task_id: &str) -> Vec<GateSignalSummary> {
+        self.gate_signal_summaries
+            .iter()
+            .filter(|signal| signal.task_id.as_deref() == Some(task_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Plan/task snapshots for the interactive plans tree and detail panes.
+    #[must_use]
+    pub(crate) fn plan_task_snapshots(&self) -> HashMap<String, PlanTaskListSnapshot> {
+        build_plan_task_snapshots(
+            &self.root,
+            &self.executor_state,
+            &self.plans,
+            &self.active_tasks,
+            &self.episodes,
+        )
+    }
+}
+
+fn load_dashboard_git_diff(root: &Path) -> (String, bool) {
+    let staged = run_dashboard_git_diff(root, true);
+    if !staged.is_empty() {
+        return (staged, true);
+    }
+
+    (run_dashboard_git_diff(root, false), false)
+}
+
+fn run_dashboard_git_diff(root: &Path, staged: bool) -> String {
+    let args: &[&str] = if staged {
+        &["diff", "--cached"]
+    } else {
+        &["diff", "HEAD"]
+    };
+
+    Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// Summary of a task that is currently active.
@@ -1009,6 +1070,26 @@ pub struct ReadFileSnapshot {
     pub path: String,
     pub lines: Option<String>,
     pub why: String,
+}
+
+/// Lightweight task snapshot used by the interactive TUI plan views.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlanTaskSnapshot {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub agent_id: Option<String>,
+}
+
+/// Per-plan snapshot used to hydrate `TuiState::plans`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlanTaskListSnapshot {
+    pub phase: String,
+    pub active: bool,
+    pub tasks_done: usize,
+    pub tasks_failed: usize,
+    pub elapsed_secs: f64,
+    pub tasks: Vec<PlanTaskSnapshot>,
 }
 
 /// Aggregate learning efficiency snapshot.
@@ -1566,6 +1647,7 @@ fn backfill_agent_output_tail(
 
 fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     let mut ids = std::collections::BTreeSet::new();
+    let trackers = load_task_trackers(root);
     if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
         ids.extend(plan_states.keys().cloned());
     }
@@ -1587,6 +1669,8 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     for id in ids {
         let mut title = id.clone();
         let mut task_count = 0usize;
+        let mut tasks_done = 0usize;
+        let mut tasks_failed = 0usize;
         let plan_dir = plans_dir(root).join(&id);
         let tasks_path = plan_dir.join("tasks.toml");
         if let Ok(tasks_file) = TasksFile::parse(&tasks_path) {
@@ -1594,20 +1678,39 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
                 title = tasks_file.meta.plan.clone();
             }
             task_count = tasks_file.tasks.len();
+
+            let tracker = trackers.get(&id);
+            let completed: HashSet<String> = tracker
+                .map(|tracker| tracker.completed.iter().cloned().collect())
+                .unwrap_or_default();
+            let failed: HashSet<String> = tracker
+                .map(|tracker| tracker.failed.iter().cloned().collect())
+                .unwrap_or_default();
+
+            for task in &tasks_file.tasks {
+                if completed.contains(&task.id) || is_task_done_status(&task.status) {
+                    tasks_done += 1;
+                } else if failed.contains(&task.id) || is_task_failed_status(&task.status) {
+                    tasks_failed += 1;
+                }
+            }
         }
 
-        let completed = state
+        let phase = state
             .get("plan_states")
             .and_then(Value::as_object)
             .and_then(|plans| plans.get(&id))
             .and_then(current_phase_label)
-            .map(|phase| {
-                matches!(
-                    phase.to_ascii_lowercase().as_str(),
-                    "complete" | "done" | "failed" | "skipped"
-                )
-            })
-            .unwrap_or(false);
+            .unwrap_or_default();
+        let phase_status = PlanPhase::from(phase.as_str());
+        let completed = phase_status.is_done() || phase_status.is_failed();
+        if task_count > 0
+            && tasks_done == 0
+            && tasks_failed == 0
+            && phase_status.is_done()
+        {
+            tasks_done = task_count;
+        }
 
         let last_error = state
             .get("plan_states")
@@ -1626,6 +1729,8 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             id,
             title,
             task_count,
+            tasks_done,
+            tasks_failed,
             completed,
             old_format: false,
             last_error,
@@ -1634,6 +1739,129 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
 
     summaries.sort_by(|a, b| a.id.cmp(&b.id));
     summaries
+}
+
+fn build_plan_task_snapshots(
+    root: &Path,
+    state: &Value,
+    plans: &[PlanSummary],
+    active_tasks: &[TaskSummary],
+    episodes: &[Episode],
+) -> HashMap<String, PlanTaskListSnapshot> {
+    let trackers = load_task_trackers(root);
+    let plan_states = state.get("plan_states").and_then(Value::as_object);
+    let active_by_key: HashMap<(String, String), &TaskSummary> = active_tasks
+        .iter()
+        .map(|task| ((task.plan_id.clone(), task.task_id.clone()), task))
+        .collect();
+    let current_task_by_plan: HashMap<&str, &str> = active_tasks
+        .iter()
+        .map(|task| (task.plan_id.as_str(), task.task_id.as_str()))
+        .collect();
+    let mut snapshots = HashMap::new();
+
+    for plan in plans {
+        let plan_state = plan_states.and_then(|states| states.get(&plan.id));
+        let phase = plan_state.and_then(current_phase_label).unwrap_or_else(|| {
+            if plan.completed {
+                String::from("done")
+            } else {
+                String::from("pending")
+            }
+        });
+        let plan_succeeded = PlanPhase::from(phase.as_str()).is_done();
+        let active = plan_state
+            .map(|state| !plan_state_is_terminal(state) && !plan_state_is_paused(state))
+            .unwrap_or(!plan.completed);
+        let elapsed_secs = episodes
+            .iter()
+            .filter(|episode| episode_matches_plan(episode, &plan.id, None))
+            .map(|episode| episode.usage.wall_ms as f64 / 1000.0)
+            .sum();
+        let mut snapshot = PlanTaskListSnapshot {
+            phase,
+            active,
+            elapsed_secs,
+            ..PlanTaskListSnapshot::default()
+        };
+
+        let tasks_path = plans_dir(root).join(&plan.id).join("tasks.toml");
+        let Ok(tasks_file) = TasksFile::parse(&tasks_path) else {
+            snapshots.insert(plan.id.clone(), snapshot);
+            continue;
+        };
+
+        let tracker = trackers.get(&plan.id);
+        let completed: HashSet<String> = tracker
+            .map(|tracker| tracker.completed.iter().cloned().collect())
+            .unwrap_or_default();
+        let failed: HashSet<String> = tracker
+            .map(|tracker| tracker.failed.iter().cloned().collect())
+            .unwrap_or_default();
+        let current_task_id = current_task_by_plan
+            .get(plan.id.as_str())
+            .map(|task_id| (*task_id).to_string())
+            .or_else(|| current_task_id(&tasks_file, tracker, &completed, &failed));
+
+        snapshot.tasks = tasks_file
+            .tasks
+            .iter()
+            .map(|task| {
+                let active_task = active_by_key
+                    .get(&(plan.id.clone(), task.id.clone()))
+                    .copied();
+                let status = if completed.contains(&task.id) {
+                    String::from("done")
+                } else if failed.contains(&task.id) {
+                    String::from("failed")
+                } else if let Some(active_task) = active_task {
+                    active_task.status.clone()
+                } else if is_task_done_status(&task.status) || is_task_failed_status(&task.status) {
+                    task.status.clone()
+                } else if plan_succeeded {
+                    String::from("done")
+                } else {
+                    task_phase_label(
+                        task,
+                        &snapshot.phase,
+                        current_task_id.as_deref(),
+                        tracker,
+                        &completed,
+                        &failed,
+                    )
+                };
+
+                PlanTaskSnapshot {
+                    id: task.id.clone(),
+                    title: task.title.clone(),
+                    status,
+                    agent_id: active_task.and_then(|task| task.assigned_agents.first().cloned()),
+                }
+            })
+            .collect();
+        snapshot.tasks_done = snapshot
+            .tasks
+            .iter()
+            .filter(|task| is_task_done_status(&task.status))
+            .count();
+        snapshot.tasks_failed = snapshot
+            .tasks
+            .iter()
+            .filter(|task| is_task_failed_status(&task.status))
+            .count();
+
+        snapshots.insert(plan.id.clone(), snapshot);
+    }
+
+    snapshots
+}
+
+fn is_task_done_status(status: &str) -> bool {
+    TaskStatus::from(status).is_done()
+}
+
+fn is_task_failed_status(status: &str) -> bool {
+    TaskStatus::from(status).is_failed()
 }
 
 fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {

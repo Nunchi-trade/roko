@@ -78,3 +78,6 @@ node_modules/
 *.tsbuildinfo
 .next/
 dist/
+.roko-local-target/
+.codex-target/
+.cargo-target/

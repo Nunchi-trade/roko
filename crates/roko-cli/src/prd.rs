@@ -883,12 +883,28 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
 /// Returns true if a PRD markdown string contains substantive body content.
 #[must_use]
 pub fn has_substantive_markdown_content(content: &str) -> bool {
+    let mut in_frontmatter = false;
+    let mut saw_frontmatter = false;
+
     content.lines().any(|line| {
         let trimmed = line.trim();
-        !trimmed.is_empty()
-            && !trimmed.starts_with("---")
-            && !trimmed.starts_with('#')
-            && !trimmed.starts_with("##")
+        if trimmed == "---" {
+            if !saw_frontmatter {
+                saw_frontmatter = true;
+                in_frontmatter = true;
+                return false;
+            }
+            if in_frontmatter {
+                in_frontmatter = false;
+                return false;
+            }
+        }
+
+        if in_frontmatter {
+            return false;
+        }
+
+        !trimmed.is_empty() && !trimmed.starts_with('#')
     })
 }
 

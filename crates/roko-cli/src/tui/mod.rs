@@ -5,6 +5,7 @@
 //! `pages`, and `widgets`. The Mori-style modal+focus+tab system is in
 //! `input`, `state`, and `tabs`.
 
+pub mod ansi;
 pub mod app;
 pub mod atmosphere;
 pub mod config_meta;

@@ -18,6 +18,10 @@ pub struct PlanSummary {
     pub title: String,
     /// Number of tasks in the plan.
     pub task_count: usize,
+    /// Number of completed tasks observed for the plan.
+    pub tasks_done: usize,
+    /// Number of failed tasks observed for the plan.
+    pub tasks_failed: usize,
     /// Whether the plan has been completed.
     pub completed: bool,
     /// Whether the plan's `tasks.toml` is missing modern fields.
@@ -91,6 +95,8 @@ impl Plan {
             id: self.id.clone(),
             title: self.title.clone(),
             task_count: self.tasks.len(),
+            tasks_done: self.tasks.iter().filter(|task| task.completed).count(),
+            tasks_failed: 0,
             completed,
             old_format: false,
             last_error: None,
@@ -274,6 +280,8 @@ mod tests {
             id: "p1".into(),
             title: "Test".into(),
             task_count: 3,
+            tasks_done: 0,
+            tasks_failed: 0,
             completed: false,
             old_format: false,
             last_error: None,
@@ -291,6 +299,8 @@ mod tests {
                 id: "a".into(),
                 title: "Alpha".into(),
                 task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
                 completed: true,
                 old_format: false,
                 last_error: None,
@@ -299,6 +309,8 @@ mod tests {
                 id: "b".into(),
                 title: "Beta".into(),
                 task_count: 2,
+                tasks_done: 0,
+                tasks_failed: 0,
                 completed: false,
                 old_format: true,
                 last_error: None,
@@ -376,6 +388,8 @@ mod tests {
             id: "p1".into(),
             title: "My Plan".into(),
             task_count: 5,
+            tasks_done: 0,
+            tasks_failed: 0,
             completed: true,
             old_format: true,
             last_error: None,
