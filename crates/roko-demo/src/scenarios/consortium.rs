@@ -11,9 +11,9 @@ use async_trait::async_trait;
 
 use crate::bindings::{BountyMarket, ConsortiumValidator, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
-use crate::events::EventEmitter;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::Scenario;
+use crate::scenarios::ScenarioRuntime;
 use crate::scenarios::llm::{LlmProvider, LlmRequest, VoteDecision};
 
 /// Consortium validation scenario.
@@ -34,12 +34,11 @@ impl Scenario for Consortium {
         &self,
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
-        llm: Arc<dyn LlmProvider>,
-        _events: Arc<dyn EventEmitter>,
+        runtime: Arc<ScenarioRuntime>,
     ) -> anyhow::Result<()> {
         prepare(&ctx).await?;
         let job_id = post_and_submit_job(&ctx).await?;
-        assemble_and_vote(&ctx, llm, job_id).await?;
+        assemble_and_vote(&ctx, runtime.llm.clone(), job_id).await?;
         Ok(())
     }
 }

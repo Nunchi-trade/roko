@@ -10,6 +10,7 @@
 //! scenarios run headless in CI.
 
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 
@@ -27,6 +28,18 @@ pub mod yield_routing;
 
 pub use llm::{LlmProvider, StubLlm, create_provider};
 
+/// Runtime values that are shared across scenario entrypoints.
+pub struct ScenarioRuntime {
+    /// LLM backend used by the scenario.
+    pub llm: Arc<dyn LlmProvider>,
+    /// Event sink used by the scenario.
+    pub events: Arc<dyn EventEmitter>,
+    /// Runtime artifact directory from the CLI.
+    pub runtime_dir: PathBuf,
+    /// Whether worker reputation snapshots should be restored/saved.
+    pub persist_reputation: bool,
+}
+
 /// Scripted-spine lifecycle.
 #[async_trait]
 pub trait Scenario: Send + Sync {
@@ -39,8 +52,7 @@ pub trait Scenario: Send + Sync {
         &self,
         ctx: Arc<ChainCtx>,
         manifest: &ScenarioManifest,
-        llm: Arc<dyn LlmProvider>,
-        events: Arc<dyn EventEmitter>,
+        runtime: Arc<ScenarioRuntime>,
     ) -> anyhow::Result<()>;
 }
 

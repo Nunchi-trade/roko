@@ -31,6 +31,8 @@ reqwest = { workspace = true }
 async-trait = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = { workspace = true }

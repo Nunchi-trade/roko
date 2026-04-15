@@ -4,8 +4,35 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::ws_server;
+
+/// One node in the emitted knowledge graph.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KnowledgeNode {
+    /// Stable graph node id.
+    pub id: String,
+    /// Human-readable content label.
+    pub content: String,
+    /// Poster wallet or address.
+    pub poster: String,
+    /// Current pheromone weight from the board.
+    pub pheromone_weight: u64,
+    /// Number of confirmations represented in the graph.
+    pub confirmations: u64,
+}
+
+/// One edge in the emitted knowledge graph.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KnowledgeEdge {
+    /// Source node or actor id.
+    pub from: String,
+    /// Destination node id.
+    pub to: String,
+    /// Relationship kind: posted, confirmed, or queried.
+    pub kind: String,
+}
 
 /// Structured event emitted by demo scenarios.
 #[allow(missing_docs)]
@@ -37,8 +64,18 @@ pub enum DemoEvent {
     KnowledgeQueried { round: u32, worker: String, insights_available: usize },
     CFactorMeasured { round_1_output_eth: f64, round_2_output_eth: f64, improvement_bps: u32 },
     ReputationUpdated { worker: String, reputation: String },
-    AgentSlashed { worker: String, reason_code: u8, amount_wei: String },
-    KnowledgeGraphUpdate { total_insights: String },
+    AgentSlashed {
+        worker: String,
+        reason_code: u8,
+        amount_wei: String,
+        new_bond_wei: String,
+        new_reputation: String,
+    },
+    KnowledgeGraphUpdate {
+        round: u32,
+        nodes: Vec<KnowledgeNode>,
+        edges: Vec<KnowledgeEdge>,
+    },
     Error { message: String },
 }
 
@@ -65,10 +102,22 @@ pub struct CompositeEmitter {
     emitters: Vec<Arc<dyn EventEmitter>>,
 }
 
+/// Pushes cloned events into an mpsc channel for local consumers such as the TUI.
+pub struct ChannelEmitter {
+    sender: mpsc::Sender<DemoEvent>,
+}
+
 impl CompositeEmitter {
     /// Construct a composite emitter.
     pub fn new(emitters: Vec<Arc<dyn EventEmitter>>) -> Self {
         Self { emitters }
+    }
+}
+
+impl ChannelEmitter {
+    /// Construct a channel-backed emitter.
+    pub fn new(sender: mpsc::Sender<DemoEvent>) -> Self {
+        Self { sender }
     }
 }
 
@@ -124,5 +173,12 @@ impl EventEmitter for CompositeEmitter {
         for emitter in &self.emitters {
             emitter.emit(event.clone()).await;
         }
+    }
+}
+
+#[async_trait]
+impl EventEmitter for ChannelEmitter {
+    async fn emit(&self, event: DemoEvent) {
+        let _ = self.sender.send(event).await;
     }
 }
