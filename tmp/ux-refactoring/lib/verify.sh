@@ -61,6 +61,9 @@ commit_batch_if_needed() {
   local title
   title=$(batch_title "$batch")
 
+  # Never stage build artifacts into runner commits.
+  rm -rf "$worktree/.cargo-target" "$worktree/target"
+
   git -C "$worktree" add -A
   if git -C "$worktree" diff --cached --quiet; then
     if [[ -n "$run_id" ]]; then
