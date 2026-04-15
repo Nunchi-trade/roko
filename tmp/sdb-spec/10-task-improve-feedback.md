@@ -1,5 +1,12 @@
 # Checklist: Add task improve/feedback endpoint
 
+## Implementation note (2026-04-15)
+
+- `TaskEntry` now stores `parent_task_id`, and `TaskStore::create_improvement` creates an auto-assigned child task from a completed parent
+- The implementation requires the parent task to have an assignee and inherits that assignee, the parent priority, and tags
+- Improvement tasks use kind `improvement`, title `Improve: {parent.title}`, description equal to the feedback text, and `stake_wei = 0`
+- `POST /api/tasks/{id}/improve` currently requires both `feedback` and `creator`
+
 **Priority**: P2 — enables iterative job deliverables
 **Estimated LOC**: ~50 lines
 **Source**: `workspace/sdb/prds/jobs-prd.md`, `workspace/sdb/prds/product-design-review.md`, [GitHub #45](https://github.com/Nunchi-trade/collaboration/issues/45)

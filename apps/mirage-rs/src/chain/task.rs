@@ -90,6 +90,9 @@ pub struct TaskEntry {
     pub reward_wei: u128,
     /// ID of the insight produced as a result.
     pub result_insight_id: Option<String>,
+    /// Parent task when this task is an improvement follow-up.
+    #[serde(default)]
+    pub parent_task_id: Option<TaskId>,
     /// Task deliverables recorded on completion.
     #[serde(default)]
     pub artifacts: Vec<TaskArtifact>,
@@ -255,6 +258,9 @@ pub enum TaskError {
     /// Task has exceeded maximum attempts.
     #[error("task {0} exceeded max attempts")]
     MaxAttempts(TaskId),
+    /// Improvement tasks must inherit a concrete assignee from the parent.
+    #[error("task {0} has no assignee to reuse for improvement")]
+    ImprovementTargetUnassigned(TaskId),
 }
 
 /// In-memory task store with auto-incrementing IDs and lifecycle management.
@@ -304,6 +310,7 @@ impl TaskStore {
             stake_wei,
             reward_wei: 0,
             result_insight_id: None,
+            parent_task_id: None,
             artifacts: Vec::new(),
             summary: None,
             completion_metadata: None,
@@ -313,6 +320,61 @@ impl TaskStore {
         };
         self.tasks.insert(id, entry);
         id
+    }
+
+    /// Create a follow-up improvement task for a completed parent task.
+    pub fn create_improvement(
+        &mut self,
+        parent_id: TaskId,
+        feedback: String,
+        creator: String,
+        now: u64,
+    ) -> Result<TaskId, TaskError> {
+        let parent = self
+            .tasks
+            .get(&parent_id)
+            .cloned()
+            .ok_or(TaskError::NotFound(parent_id))?;
+        if parent.state != TaskState::Completed {
+            return Err(TaskError::InvalidState {
+                id: parent_id,
+                current: parent.state,
+                expected: TaskState::Completed,
+            });
+        }
+
+        let Some(parent_assignee) = parent.assignee.clone() else {
+            return Err(TaskError::ImprovementTargetUnassigned(parent_id));
+        };
+
+        let id = self.next_id;
+        self.next_id += 1;
+        let entry = TaskEntry {
+            id,
+            title: format!("Improve: {}", parent.title),
+            description: feedback,
+            kind: "improvement".to_string(),
+            priority: parent.priority,
+            state: TaskState::Assigned,
+            creator,
+            assignee: Some(parent_assignee),
+            created_at: now,
+            assigned_at: Some(now),
+            started_at: None,
+            completed_at: None,
+            stake_wei: 0,
+            reward_wei: 0,
+            result_insight_id: None,
+            parent_task_id: Some(parent_id),
+            artifacts: Vec::new(),
+            summary: None,
+            completion_metadata: None,
+            tags: parent.tags,
+            attempts: 0,
+            max_attempts: parent.max_attempts,
+        };
+        self.tasks.insert(id, entry);
+        Ok(id)
     }
 
     /// Assign a task to an agent. Task must be in `Open` state.
@@ -645,6 +707,63 @@ mod tests {
     }
 
     #[test]
+    fn create_improvement_inherits_parent_assignment() {
+        let mut store = TaskStore::new();
+        let parent_id = store.create(
+            "ship report".into(),
+            "deliver first draft".into(),
+            "report".into(),
+            TaskPriority::High,
+            "user-1".into(),
+            vec!["defi".into()],
+            100,
+            10,
+        );
+        store.assign(parent_id, "agent-7".into(), 11).unwrap();
+        store.start(parent_id, 12).unwrap();
+        store
+            .complete(parent_id, None, Vec::new(), Some("draft".into()), None, 13)
+            .unwrap();
+
+        let child_id = store
+            .create_improvement(
+                parent_id,
+                "tighten the conclusions".into(),
+                "user-2".into(),
+                20,
+            )
+            .unwrap();
+
+        let child = store.get(child_id).unwrap();
+        assert_eq!(child.parent_task_id, Some(parent_id));
+        assert_eq!(child.kind, "improvement");
+        assert_eq!(child.state, TaskState::Assigned);
+        assert_eq!(child.assignee.as_deref(), Some("agent-7"));
+        assert_eq!(child.tags, vec!["defi"]);
+        assert_eq!(child.description, "tighten the conclusions");
+    }
+
+    #[test]
+    fn create_improvement_requires_completed_parent() {
+        let mut store = TaskStore::new();
+        let parent_id = store.create(
+            "ship report".into(),
+            "deliver first draft".into(),
+            "report".into(),
+            TaskPriority::High,
+            "user-1".into(),
+            vec![],
+            0,
+            10,
+        );
+
+        let err = store
+            .create_improvement(parent_id, "please revise".into(), "user-2".into(), 20)
+            .unwrap_err();
+        assert!(matches!(err, TaskError::InvalidState { .. }));
+    }
+
+    #[test]
     fn list_filters() {
         let mut store = TaskStore::new();
         store.create(
@@ -745,7 +864,9 @@ mod tests {
 
         store.assign(id1, "b".into(), 1).unwrap();
         store.start(id1, 2).unwrap();
-        store.complete(id1, None, Vec::new(), None, None, 3).unwrap();
+        store
+            .complete(id1, None, Vec::new(), None, None, 3)
+            .unwrap();
 
         let s = store.stats();
         assert_eq!(s.completed, 1);

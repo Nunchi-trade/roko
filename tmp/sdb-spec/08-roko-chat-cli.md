@@ -1,5 +1,11 @@
 # Checklist: Add `roko chat` REPL CLI command
 
+## Implementation note (2026-04-15)
+
+- `roko chat` is implemented in `crates/roko-cli/src/chat.rs` and exposed from `crates/roko-cli/src/main.rs`
+- The shipped v1 uses `POST /api/agents/{id}/message` plus polling on `GET /api/run/{id}/status`
+- The current REPL reports completion or failure status only; it does not yet stream token-by-token agent output
+
 **Priority**: P1 — developer adoption, testing tool
 **Estimated LOC**: ~80 lines
 **Source**: [GitHub #45](https://github.com/Nunchi-trade/collaboration/issues/45) (issue body: "roko run doesn't print agent output to stdout")

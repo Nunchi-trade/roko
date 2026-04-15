@@ -245,6 +245,15 @@ enum Command {
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
+    /// Interactive chat REPL backed by roko-serve agent messaging.
+    Chat {
+        /// Agent ID to chat with.
+        #[arg(long, default_value = "nunchi-intelligence")]
+        agent: String,
+        /// roko-serve base URL.
+        #[arg(long, default_value = "http://localhost:6677")]
+        serve_url: String,
+    },
     /// Search durable knowledge and memory entries.
     Neuro {
         #[command(subcommand)]
@@ -936,6 +945,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let result = cmd_research(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
+        }
+        Command::Chat { agent, serve_url } => {
+            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+            Ok(EXIT_SUCCESS)
         }
         Command::Neuro { cmd } => cmd_neuro(cli, cmd).await,
         Command::Subscription { cmd } => {

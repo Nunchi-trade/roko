@@ -27,6 +27,7 @@ pub mod hnsw;
 pub mod insight;
 pub mod knowledge;
 pub mod pheromone;
+pub mod prediction;
 pub mod projection;
 pub mod task;
 
@@ -41,6 +42,11 @@ pub use knowledge::{
 };
 pub use pheromone::{
     DECAY_BUCKETS, Pheromone, PheromoneField, PheromoneHit, PheromoneId, PheromoneKind,
+};
+pub use prediction::{
+    CalibrationCategorySummary, CalibrationSummary, ClaimId, ClaimState, PredictionClaim,
+    PredictionError, PredictionEvent, PredictionSession, PredictionStore, ResolveResult, SessionId,
+    SessionState,
 };
 pub use projection::{
     DEFAULT_EMBEDDING_DIM, HDC_BITS, ProjectionMatrix, project_bytes, project_tokens,

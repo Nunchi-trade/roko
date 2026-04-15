@@ -844,14 +844,14 @@ impl TuiState {
             })
             .collect();
 
-        self.cumulative_cost_usd=data.efficiency.total_cost_usd;
-        self.cumulative_input_tokens=data.efficiency.total_input_tokens;
-        self.cumulative_output_tokens=data.efficiency.total_output_tokens;
-        self.cost_dollars=self.cumulative_cost_usd;
-        self.token_total=self.cumulative_input_tokens+self.cumulative_output_tokens;
-        sum_costs(data,&mut self.cost_per_plan,&mut self.cost_per_task);
+        self.cumulative_cost_usd = data.efficiency.total_cost_usd;
+        self.cumulative_input_tokens = data.efficiency.total_input_tokens;
+        self.cumulative_output_tokens = data.efficiency.total_output_tokens;
+        self.cost_dollars = self.cumulative_cost_usd;
+        self.token_total = self.cumulative_input_tokens + self.cumulative_output_tokens;
+        sum_costs(data, &mut self.cost_per_plan, &mut self.cost_per_task);
 
-                                                                          self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
+        self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
 
         // Populate phase elapsed times from episodes (Task 7)
         populate_phase_elapsed(&mut self.phase_pipeline, data.episodes());
@@ -1066,14 +1066,10 @@ fn classify_failed_phase(task: &super::dashboard::TaskSummary) -> &'static str {
     let hint = classify_phase_from_hints(task);
     if hint == "preflight" || hint == "strategist" {
         hint
-    } else if task
-        .latest_gate
-        .as_deref()
-        .is_some_and(|gate| {
-            let gate = gate.to_ascii_lowercase();
-            gate.contains("test") || gate.contains("verify")
-        })
-    {
+    } else if task.latest_gate.as_deref().is_some_and(|gate| {
+        let gate = gate.to_ascii_lowercase();
+        gate.contains("test") || gate.contains("verify")
+    }) {
         "test-gate"
     } else if task.latest_gate.is_some() {
         "compile-gate"
@@ -1214,18 +1210,26 @@ fn extract_episode_output(episode: &roko_learn::episode_logger::Episode) -> Stri
     episode.failure_reason.as_deref().unwrap_or("").to_string()
 }
 
-fn sum_costs(data:&DashboardData,plans:&mut HashMap<String,f64>,tasks:&mut HashMap<String,f64>){
+fn sum_costs(
+    data: &DashboardData,
+    plans: &mut HashMap<String, f64>,
+    tasks: &mut HashMap<String, f64>,
+) {
     plans.clear();
     tasks.clear();
     for e in &data.efficiency_events {
-        if !e.plan_id.is_empty(){*plans.entry(e.plan_id.clone()).or_default()+=e.cost_usd;}
-        if !e.task_id.is_empty(){*tasks.entry(e.task_id.clone()).or_default()+=e.cost_usd;}
+        if !e.plan_id.is_empty() {
+            *plans.entry(e.plan_id.clone()).or_default() += e.cost_usd;
+        }
+        if !e.task_id.is_empty() {
+            *tasks.entry(e.task_id.clone()).or_default() += e.cost_usd;
+        }
     }
 }
 
-fn build_task_checklist_from_execution(data:&DashboardData)->Vec<TaskRow>{
-    if let Some(exec)=&data.current_plan_execution {
-                           return exec
+fn build_task_checklist_from_execution(data: &DashboardData) -> Vec<TaskRow> {
+    if let Some(exec) = &data.current_plan_execution {
+        return exec
             .tasks
             .iter()
             .map(|t| {
@@ -1434,8 +1438,8 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use roko_learn::efficiency::AgentEfficiencyEvent;
     use crate::tui::dashboard::TaskSummary;
+    use roko_learn::efficiency::AgentEfficiencyEvent;
     use tempfile::tempdir;
 
     fn efficiency_event(

@@ -1,5 +1,14 @@
 # Checklist: Mirofish prediction endpoints on mirage-rs
 
+## Implementation note (2026-04-15)
+
+- Implemented with an in-memory `PredictionStore` in `apps/mirage-rs/src/chain/prediction.rs`
+- Session IDs and claim IDs are generated as 32-character hex strings
+- Implemented session lifecycle is `dispatching -> collecting -> registered -> resolved` with `pending` retained in the enum for compatibility
+- Claims validate `confidence` in `0.0..=1.0`, not `0..=100`
+- Calibration summaries are exposed per agent and grouped by category after session resolution
+- Websocket broadcasting is wired through Mirage as a `prediction` channel with optional `session_id` filtering
+
 **Priority**: P1 — core product, lead demo feature
 **Estimated LOC**: ~400 lines (new module)
 **Source**: `workspace/sdb/mirofish-implementation-spec.md`, `workspace/sdb/prds/predictions-prd.md`, [GitHub #45](https://github.com/Nunchi-trade/collaboration/issues/45)

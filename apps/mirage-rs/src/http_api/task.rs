@@ -9,9 +9,7 @@ use serde::Deserialize;
 
 use super::{ApiError, ApiState, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
 use crate::chain::agent::AgentStats;
-use crate::chain::task::{
-    CompletionMetadata, TaskArtifact, TaskError, TaskPriority, TaskState,
-};
+use crate::chain::task::{CompletionMetadata, TaskArtifact, TaskError, TaskPriority, TaskState};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -361,6 +359,60 @@ pub async fn get_task_artifacts(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/tasks/{id}/improve
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/tasks/{id}/improve`.
+#[derive(Debug, Deserialize)]
+pub struct ImproveTaskRequest {
+    /// Requested revision or follow-up direction.
+    pub feedback: String,
+    /// Actor requesting the improvement loop.
+    pub creator: String,
+}
+
+/// `POST /api/tasks/{id}/improve` — create a child improvement task.
+pub async fn improve_task(
+    State(state): State<ApiState>,
+    Path(id): Path<u64>,
+    Json(req): Json<ImproveTaskRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.feedback.trim().is_empty() {
+        return Err(ApiError {
+            error: "feedback must not be empty".into(),
+            code: 400,
+        });
+    }
+    if req.creator.trim().is_empty() {
+        return Err(ApiError {
+            error: "creator must not be empty".into(),
+            code: 400,
+        });
+    }
+
+    let now = now_secs();
+    let mut chain = state.chain.write();
+    let child_id = chain
+        .task_store
+        .create_improvement(id, req.feedback, req.creator.clone(), now)
+        .map_err(task_error_to_api)?;
+
+    let _ = chain.task_bus.send(crate::chain::TaskEvent::Created {
+        id: child_id,
+        title: format!("Improvement on task #{id}"),
+        kind: "improvement".to_string(),
+        creator: req.creator,
+    });
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "parent_task_id": id,
+        "improvement_task_id": child_id,
+        "created_at": now,
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/tasks/{id}/fail
 // ---------------------------------------------------------------------------
 
@@ -492,6 +544,10 @@ fn task_error_to_api(e: TaskError) -> ApiError {
             code: 409,
         },
         TaskError::MaxAttempts(_) => ApiError {
+            error: e.to_string(),
+            code: 409,
+        },
+        TaskError::ImprovementTargetUnassigned(_) => ApiError {
             error: e.to_string(),
             code: 409,
         },

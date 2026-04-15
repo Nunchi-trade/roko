@@ -134,7 +134,10 @@ pub async fn get_agent_stats(
     let chain = state.chain.read();
     match chain.agent_registry.get_agent(&id) {
         Some(agent) => {
-            let recent_task_count = chain.task_store.list(None, None, Some(&id), usize::MAX, 0).1;
+            let recent_task_count = chain
+                .task_store
+                .list(None, None, Some(&id), usize::MAX, 0)
+                .1;
             Json(serde_json::json!({
                 "agent_id": id,
                 "owner": agent.owner,
@@ -191,9 +194,13 @@ pub async fn register_agent(
     let now = now_secs();
 
     let mut chain = state.chain.write();
-    let registered = chain
-        .agent_registry
-        .register(req.id.clone(), address, req.role.clone(), req.owner.clone(), now);
+    let registered = chain.agent_registry.register(
+        req.id.clone(),
+        address,
+        req.role.clone(),
+        req.owner.clone(),
+        now,
+    );
 
     if registered {
         let _ = chain.agent_bus.send(crate::chain::AgentEvent::Registered {

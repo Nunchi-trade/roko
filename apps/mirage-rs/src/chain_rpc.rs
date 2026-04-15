@@ -105,6 +105,10 @@ pub struct ChainContext {
     pub task_store: crate::chain::TaskStore,
     /// Broadcast bus for task lifecycle events (WebSocket streaming).
     pub task_bus: tokio::sync::broadcast::Sender<crate::chain::TaskEvent>,
+    /// Prediction session and claim store.
+    pub prediction_store: crate::chain::PredictionStore,
+    /// Broadcast bus for prediction lifecycle events.
+    pub prediction_bus: tokio::sync::broadcast::Sender<crate::chain::PredictionEvent>,
 }
 
 impl ChainContext {
@@ -123,6 +127,8 @@ impl ChainContext {
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
             task_store: crate::chain::TaskStore::new(),
             task_bus: tokio::sync::broadcast::channel(1_024).0,
+            prediction_store: crate::chain::PredictionStore::new(),
+            prediction_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -141,6 +147,8 @@ impl ChainContext {
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
             task_store: crate::chain::TaskStore::new(),
             task_bus: tokio::sync::broadcast::channel(1_024).0,
+            prediction_store: crate::chain::PredictionStore::new(),
+            prediction_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -163,6 +171,8 @@ impl ChainContext {
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
             task_store: crate::chain::TaskStore::new(),
             task_bus: tokio::sync::broadcast::channel(1_024).0,
+            prediction_store: crate::chain::PredictionStore::new(),
+            prediction_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -182,7 +192,12 @@ impl std::fmt::Debug for ChainContext {
         dbg.field("toggles", &self.toggles)
             .field("insights", &self.knowledge.len())
             .field("pheromones", &self.pheromones.len())
-            .field("tasks", &self.task_store.len());
+            .field("tasks", &self.task_store.len())
+            .field(
+                "prediction_sessions",
+                &self.prediction_store.session_count(),
+            )
+            .field("prediction_claims", &self.prediction_store.claim_count());
         #[cfg(feature = "roko")]
         {
             dbg.field("pheromone_bus", &self.pheromone_bus.is_some())
@@ -1416,9 +1431,10 @@ pub fn handle_register_agent(
         .map_err(|e| ErrorObjectOwned::owned(err_code::INVALID, e.to_string(), None::<()>))?;
     let mut chain = chain.write();
     let timestamp = crate::http_api::now_secs();
-    let registered = chain
-        .agent_registry
-        .register(id.clone(), address, role.clone(), String::new(), timestamp);
+    let registered =
+        chain
+            .agent_registry
+            .register(id.clone(), address, role.clone(), String::new(), timestamp);
     if registered {
         let _ = chain
             .agent_bus

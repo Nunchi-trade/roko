@@ -84,9 +84,18 @@ pub(crate) async fn spawn_background_run(
         async move {
             publish_run_started(&bus, &run_id, &prompt_for_handle, agent_target.as_deref());
 
-            match runtime.run_once(workdir.as_path(), &prompt_for_handle).await {
+            match runtime
+                .run_once(workdir.as_path(), &prompt_for_handle)
+                .await
+            {
                 Ok(result) => {
-                    publish_run_completed(&bus, &run_id, agent_target.as_deref(), result.success, None);
+                    publish_run_completed(
+                        &bus,
+                        &run_id,
+                        agent_target.as_deref(),
+                        result.success,
+                        None,
+                    );
                 }
                 Err(e) => {
                     let error_message = format!("run failed: {e}");
@@ -112,7 +121,11 @@ pub(crate) async fn spawn_background_run(
         handle,
     };
 
-    state.active_runs.write().await.insert(run_id.clone(), run_handle);
+    state
+        .active_runs
+        .write()
+        .await
+        .insert(run_id.clone(), run_handle);
     run_id
 }
 

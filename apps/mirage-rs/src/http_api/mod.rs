@@ -155,8 +155,10 @@ impl ProjectionCache {
 }
 
 pub mod agent;
+pub mod isfr;
 pub mod knowledge;
 pub mod pheromone;
+pub mod prediction;
 pub mod skills;
 pub mod task;
 pub mod topology;
@@ -266,8 +268,30 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/tasks/{id}/start", post(task::start_task))
         .route("/tasks/{id}/complete", post(task::complete_task))
         .route("/tasks/{id}/artifacts", get(task::get_task_artifacts))
+        .route("/tasks/{id}/improve", post(task::improve_task))
         .route("/tasks/{id}/fail", post(task::fail_task))
         .route("/tasks/{id}/cancel", post(task::cancel_task))
+        // External service proxies
+        .route("/isfr/current", get(isfr::isfr_current))
+        .route("/isfr/history", get(isfr::isfr_history))
+        // Predictions
+        .route(
+            "/predictions/sessions",
+            get(prediction::list_sessions).post(prediction::create_session),
+        )
+        .route("/predictions/sessions/{id}", get(prediction::get_session))
+        .route(
+            "/predictions/sessions/{id}/resolve",
+            post(prediction::resolve_session),
+        )
+        .route(
+            "/predictions/claims",
+            get(prediction::list_claims).post(prediction::submit_claim),
+        )
+        .route(
+            "/predictions/calibration/{agent_id}",
+            get(prediction::get_calibration),
+        )
         // Combined stats
         .route("/stats", get(combined_stats));
 
@@ -318,6 +342,8 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let pheromone_count = chain.pheromones.len();
     let agent_count = chain.agent_registry.list_agents().len();
     let task_count = chain.task_store.len();
+    let prediction_session_count = chain.prediction_store.session_count();
+    let prediction_claim_count = chain.prediction_store.claim_count();
 
     Json(serde_json::json!({
         "status": "ok",
@@ -333,6 +359,8 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
                 "pheromones": pheromone_count,
                 "agents": agent_count,
                 "tasks": task_count,
+                "prediction_sessions": prediction_session_count,
+                "prediction_claims": prediction_claim_count,
             }
         }
     }))
@@ -375,6 +403,8 @@ async fn combined_stats(State(state): State<ApiState>) -> impl IntoResponse {
     }
 
     let task_stats = chain.task_store.stats();
+    let prediction_session_count = chain.prediction_store.session_count();
+    let prediction_claim_count = chain.prediction_store.claim_count();
 
     with_cache_control(
         serde_json::json!({
@@ -401,6 +431,10 @@ async fn combined_stats(State(state): State<ApiState>) -> impl IntoResponse {
                 "cancelled": task_stats.cancelled,
                 "total_stake_wei": task_stats.total_stake_wei,
                 "total_reward_wei": task_stats.total_reward_wei,
+            },
+            "predictions": {
+                "sessions": prediction_session_count,
+                "claims": prediction_claim_count,
             },
             "toggles": {
                 "hdc": chain.toggles.hdc,

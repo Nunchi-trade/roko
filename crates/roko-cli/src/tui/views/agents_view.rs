@@ -638,7 +638,10 @@ fn render_output_body(
     let selected_agent = data.agents.get(view_state.selected);
     let selected_role = selected_agent.map(|a| a.label.as_str()).unwrap_or("");
     let accent = role_accent(selected_role, theme);
-    let focused = matches!(tui_state.focus, FocusZone::AgentOutput | FocusZone::RightPanel);
+    let focused = matches!(
+        tui_state.focus,
+        FocusZone::AgentOutput | FocusZone::RightPanel
+    );
 
     let title_label = if selected_role.is_empty() {
         "Agent Output".to_string()

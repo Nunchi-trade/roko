@@ -392,9 +392,27 @@ mod tests {
     #[test]
     fn list_agents_by_owner_filters() {
         let mut reg = AgentRegistry::new();
-        reg.register("agent-1".into(), vec![], "watcher".into(), "0xabc".into(), 0);
-        reg.register("agent-2".into(), vec![], "watcher".into(), "0xdef".into(), 0);
-        reg.register("agent-3".into(), vec![], "watcher".into(), "0xabc".into(), 0);
+        reg.register(
+            "agent-1".into(),
+            vec![],
+            "watcher".into(),
+            "0xabc".into(),
+            0,
+        );
+        reg.register(
+            "agent-2".into(),
+            vec![],
+            "watcher".into(),
+            "0xdef".into(),
+            0,
+        );
+        reg.register(
+            "agent-3".into(),
+            vec![],
+            "watcher".into(),
+            "0xabc".into(),
+            0,
+        );
 
         let owned = reg.list_agents_by_owner("0xabc");
         assert_eq!(owned.len(), 2);
@@ -404,7 +422,13 @@ mod tests {
     #[test]
     fn skills_round_trip() {
         let mut reg = AgentRegistry::new();
-        reg.register("agent-1".into(), vec![], "watcher".into(), "0xabc".into(), 0);
+        reg.register(
+            "agent-1".into(),
+            vec![],
+            "watcher".into(),
+            "0xabc".into(),
+            0,
+        );
 
         let config = SkillConfig {
             enabled: true,

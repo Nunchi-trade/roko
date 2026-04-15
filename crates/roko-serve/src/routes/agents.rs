@@ -146,7 +146,9 @@ fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) ->
     let mut prompt = format!("[agent:{agent_id}] {message}");
     if let Some(context) = context {
         prompt.push_str("\n\nContext:\n");
-        prompt.push_str(&serde_json::to_string_pretty(context).unwrap_or_else(|_| context.to_string()));
+        prompt.push_str(
+            &serde_json::to_string_pretty(context).unwrap_or_else(|_| context.to_string()),
+        );
     }
     prompt
 }
