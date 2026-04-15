@@ -22,6 +22,7 @@ use crate::templates::task_impl::TaskImplTemplate;
 use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context};
 use roko_learn::section_effect::SectionEffectivenessRegistry;
+use roko_learn::skill_library::Skill;
 use tracing::warn;
 
 /// Default conventions appended to every constructed system prompt.
@@ -134,6 +135,8 @@ pub struct RoleSystemPromptSpec {
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended after defaults.
     pub extra_anti_patterns: Vec<String>,
+    /// Optional relevant skills injected into the system prompt.
+    pub relevant_skills: Vec<Skill>,
     /// Optional affect state used to tune tone and focus.
     pub affect_state: Option<PadState>,
     /// Whether to include cache markers between stability tiers.
@@ -151,6 +154,7 @@ impl RoleSystemPromptSpec {
             model_hint: None,
             extra_conventions: None,
             extra_anti_patterns: Vec::new(),
+            relevant_skills: Vec::new(),
             affect_state: None,
             cache_markers: false,
         }
@@ -174,6 +178,13 @@ impl RoleSystemPromptSpec {
     #[must_use]
     pub fn add_anti_pattern(mut self, rule: impl Into<String>) -> Self {
         self.extra_anti_patterns.push(rule.into());
+        self
+    }
+
+    /// Attach relevant learned skills to the prompt.
+    #[must_use]
+    pub fn with_relevant_skills(mut self, skills: &[Skill]) -> Self {
+        self.relevant_skills = skills.to_vec();
         self
     }
 
@@ -228,6 +239,9 @@ impl RoleSystemPromptSpec {
 
         if let Some(registry) = section_effectiveness {
             builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
+        }
+        if !self.relevant_skills.is_empty() {
+            builder = builder.with_skills(&self.relevant_skills);
         }
 
         let domain = self.task_context.domain_layer();
@@ -427,6 +441,7 @@ pub fn role_identity_for(role: AgentRole) -> String {
 mod tests {
     use super::*;
     use crate::prompt::SectionPriority;
+    use roko_learn::skill_library::Skill;
     use std::collections::HashSet;
 
     #[test]
@@ -490,6 +505,23 @@ mod tests {
         assert_eq!(hinted.model_hint.as_deref(), Some("glm-5.1"));
         assert_eq!(baseline.build(), hinted.build());
         assert_eq!(baseline.build_sections(), hinted.build_sections());
+    }
+
+    #[test]
+    fn relevant_skills_are_forwarded_into_the_prompt_builder() {
+        let ctx = TaskContext::new("Implement skill injection");
+        let skill = Skill::new(
+            "git_fixup",
+            "Use fixup commits for focused rewrites.",
+            "Use fixup commits and autosquash to keep history tidy.",
+        );
+
+        let prompt = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .with_relevant_skills(&[skill])
+            .build();
+
+        assert!(prompt.contains("## Relevant Techniques"));
+        assert!(prompt.contains("Use fixup commits"));
     }
 
     #[test]

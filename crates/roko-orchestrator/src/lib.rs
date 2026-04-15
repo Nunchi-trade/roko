@@ -39,4 +39,4 @@ pub use progress::{
     ErrorEvent, ProgressError, ProgressTracker, ValidationError as EnrichmentValidationError,
     publish_error, validate_enrichment,
 };
-pub use replan::ReplanStrategy;
+pub use replan::{ReplanResult, ReplanStrategy};

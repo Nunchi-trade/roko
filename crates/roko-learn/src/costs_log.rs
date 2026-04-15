@@ -6,7 +6,9 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -129,16 +131,60 @@ impl CostsLog {
         }
         Ok(out)
     }
+
+    /// Return the recent cost rate for the last `window` of wall-clock time.
+    ///
+    /// The result is expressed in USD/minute.
+    pub async fn recent_cost_rate(&self, window: Duration) -> io::Result<f64> {
+        let records = self.read_all().await?;
+        Ok(recent_cost_rate_from_records(&records, window))
+    }
+
+    /// Return `true` when the recent cost rate exceeds `threshold`.
+    ///
+    /// Uses a conservative 15-minute window by default.
+    pub async fn is_cost_spike(&self, threshold: f64) -> io::Result<bool> {
+        Ok(self.recent_cost_rate(DEFAULT_COST_SPIKE_WINDOW).await? > threshold)
+    }
+}
+
+/// Default lookback window for cost-spike detection.
+pub const DEFAULT_COST_SPIKE_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+fn recent_cost_rate_from_records(records: &[CostRecord], window: Duration) -> f64 {
+    if window.is_zero() {
+        return 0.0;
+    }
+
+    let Ok(window_chrono) = chrono::Duration::from_std(window) else {
+        return 0.0;
+    };
+    let cutoff = Utc::now() - window_chrono;
+    let recent_cost: f64 = records
+        .iter()
+        .filter_map(|record| record_timestamp(record).map(|ts| (ts, record.cost_usd)))
+        .filter(|(ts, _)| *ts >= cutoff)
+        .map(|(_, cost)| cost)
+        .sum();
+
+    recent_cost / (window.as_secs_f64() / 60.0)
+}
+
+fn record_timestamp(record: &CostRecord) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&record.timestamp)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
     use tempfile::TempDir;
 
     fn record(task: &str, cost: f64) -> CostRecord {
         CostRecord {
-            timestamp: "2026-04-08T00:00:00Z".to_string(),
+            timestamp: Utc::now().to_rfc3339(),
             model: "claude-opus-4-6".to_string(),
             provider: "anthropic".to_string(),
             role: "Implementer".to_string(),
@@ -201,5 +247,31 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].task_id, "ok-1");
         assert_eq!(all[1].task_id, "ok-2");
+    }
+
+    #[tokio::test]
+    async fn recent_cost_rate_and_spike_detection_use_recent_records_only() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("costs.jsonl");
+        let log = CostsLog::at(&path);
+        let now = Utc::now();
+        let recent = CostRecord {
+            timestamp: now.to_rfc3339(),
+            ..record("recent", 0.75)
+        };
+        let stale = CostRecord {
+            timestamp: (now - ChronoDuration::minutes(30)).to_rfc3339(),
+            ..record("stale", 4.0)
+        };
+        log.append_all(&[recent.clone(), stale]).await.unwrap();
+
+        let rate = log
+            .recent_cost_rate(Duration::from_secs(10 * 60))
+            .await
+            .unwrap();
+        assert!(rate > 0.0);
+        assert!(rate < 1.0);
+        assert!(log.is_cost_spike(0.01).await.unwrap());
+        assert!(!log.is_cost_spike(100.0).await.unwrap());
     }
 }

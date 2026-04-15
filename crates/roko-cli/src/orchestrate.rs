@@ -31,7 +31,7 @@ use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, SafetyLayer};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
-    PromptSection, SectionPriority, SectionScorer, TaskContext, budget_for,
+    PromptSection, SectionPriority, SectionScorer, TaskContext,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
@@ -74,6 +74,7 @@ use roko_learn::conductor::{
     ConductorAction as RetryConductorAction, ConductorBandit,
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
 };
+use roko_learn::costs_log::CostsLog;
 use roko_learn::costs_db::CostRecord;
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
@@ -96,6 +97,7 @@ use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
+use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
@@ -103,7 +105,8 @@ use roko_neuro::{
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager, format_branch_name};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanStrategy, discover_plans,
+    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanResult, ReplanStrategy,
+    discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::ProcessSupervisor;
@@ -154,6 +157,10 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("latency-stats.json")
+}
+
+fn static_overrides_path(workdir: &Path) -> PathBuf {
+    workdir.join(DEFAULT_STATIC_OVERRIDES_PATH)
 }
 
 fn routing_log_path(workdir: &Path) -> PathBuf {
@@ -1560,6 +1567,27 @@ async fn load_or_create_playbook_store(path: &Path) -> Result<PlaybookStore> {
     Ok(PlaybookStore::new(path))
 }
 
+fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Path) {
+    let overrides_path = static_overrides_path(workdir);
+    let winners = {
+        let store = learning.experiment_store().lock();
+        let winners = store.concluded_winners();
+        if let Err(err) = store.apply_winners_to(&winners, &overrides_path) {
+            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to persist experiment winners");
+        }
+        winners
+    };
+
+    if winners.is_empty() {
+        return;
+    }
+
+    match learning.cascade_router().load_static_overrides(&overrides_path) {
+        Ok(applied) => tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides"),
+        Err(err) => tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides"),
+    }
+}
+
 /// Convert the latest efficiency entries into the signals expected by the conductor.
 fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Engram> {
     let mut signals = Vec::new();
@@ -1708,6 +1736,36 @@ fn select_prompt_skills(
         .filter(|skill| skill.score >= 0.5)
         .filter(|skill| !skill.tags.iter().any(|tag| tag == "outcome:failure"))
         .collect()
+}
+
+fn slug_matches(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs
+        || lhs
+            .split(['/', '-'])
+            .next()
+            .is_some_and(|family| rhs.starts_with(family))
+        || rhs
+            .split(['/', '-'])
+            .next()
+            .is_some_and(|family| lhs.starts_with(family))
+}
+
+fn is_premium_model(slug: &str) -> bool {
+    let normalized = slug.to_ascii_lowercase();
+    normalized.contains("opus")
+        || normalized.contains("gpt-5")
+        || normalized.contains("o3")
+        || normalized.contains("sonnet-max")
+}
+
+fn cascade_routing_bias_from_conductor(
+    bias: &roko_conductor::RoutingBias,
+) -> roko_learn::cascade_router::RoutingBias {
+    roko_learn::cascade_router::RoutingBias {
+        deprioritize: bias.deprioritize.clone(),
+        prefer_cheaper: bias.prefer_cheaper,
+        reason: bias.reason.clone(),
+    }
 }
 
 fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
@@ -3038,6 +3096,7 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
@@ -3163,6 +3222,7 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
@@ -3286,6 +3346,7 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
@@ -3480,6 +3541,32 @@ impl PlanRunner {
                 }
             };
             self.emit_execution_event(plan_id, exec_event);
+        }
+    }
+
+    /// Apply a structured re-plan result to the live executor state.
+    fn apply_replan_result(&mut self, result: &ReplanResult) {
+        if !result.requires_restart() {
+            return;
+        }
+
+        let plan_id = result.plan_id().to_string();
+        let task_id = result.task_id().to_string();
+        let old_phase = self
+            .executor
+            .plan_state(&plan_id)
+            .map(|state| Self::phase_label(state.current_phase.kind()).to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if self.executor.restart_plan(&plan_id).is_some() {
+            self.emit_execution_event(
+                &plan_id,
+                crate::serve::events::ExecutionEvent::TaskPhaseChanged {
+                    task_id,
+                    old_phase,
+                    new_phase: "queued".to_string(),
+                },
+            );
         }
     }
 
@@ -7246,6 +7333,11 @@ impl PlanRunner {
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
+                        let result = ReplanResult::RetrySame {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                        };
+                        self.apply_replan_result(&result);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -7286,7 +7378,7 @@ impl PlanRunner {
                         AgentRole::Strategist,
                         "replan",
                         Some(prompt),
-                        Some(escalate_model),
+                        Some(escalate_model.clone()),
                         None,
                         None,
                     )
@@ -7310,6 +7402,12 @@ impl PlanRunner {
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
+                        let result = ReplanResult::RetryWithEscalation {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                            escalated_model: escalate_model.clone(),
+                        };
+                        self.apply_replan_result(&result);
                     }
                     Err(e) => {
                         tracing::error!("[orchestrate] escalated replan failed for {plan_id}: {e}");
@@ -7694,6 +7792,15 @@ impl PlanRunner {
                             tracker.last_impl_task_id = None;
                             tracker.last_impl_model_slug = None;
                         }
+                        let result = ReplanResult::Decompose {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                            new_task_ids: resulting_subtasks
+                                .iter()
+                                .map(|task| task.id.clone())
+                                .collect(),
+                        };
+                        self.apply_replan_result(&result);
                         self.record_replan_episode(
                             plan_id,
                             &task_id,
@@ -7801,6 +7908,12 @@ impl PlanRunner {
                     failure_count,
                 );
                 self.record_and_check_learning(input, plan_id).await;
+
+                let result = ReplanResult::Skip {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.clone(),
+                };
+                self.apply_replan_result(&result);
 
                 if self
                     .task_trackers
@@ -8036,6 +8149,15 @@ impl PlanRunner {
                     tracker.last_impl_task_id = None;
                     tracker.last_impl_model_slug = None;
                 }
+                let result = ReplanResult::RegeneratePlan {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.to_string(),
+                    new_task_ids: regenerated_subtasks
+                        .iter()
+                        .map(|task| task.id.clone())
+                        .collect(),
+                };
+                self.apply_replan_result(&result);
             }
             Err(e) => {
                 tracing::error!("[orchestrate] plan regeneration failed for {plan_id}: {e}");
@@ -9213,6 +9335,24 @@ impl PlanRunner {
             routing_ctx.active_agents = load_snapshot.active_agents;
             routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
             routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
+            let routing_bias = {
+                let mut signals = self.conductor_signals.clone();
+                if let Ok(efficiency_signals) = load_efficiency_signals_sync(
+                    &self.learning.paths().efficiency_jsonl,
+                    self.executor.config().budget_usd,
+                ) {
+                    signals.extend(efficiency_signals);
+                }
+                let _ = self.conductor.decide(&signals, &Context::now());
+                self.conductor.routing_bias()
+            };
+            if routing_bias.prefer_cheaper {
+                routing_ctx.conductor_load = routing_ctx.conductor_load.max(0.85);
+            }
+            let cost_spike = CostsLog::at(self.learning.paths().costs_jsonl.clone())
+                .is_cost_spike(0.50)
+                .await
+                .unwrap_or(false);
             let agent_id = format!("{role:?}");
             let all_model_slugs = cascade_router
                 .linucb()
@@ -9234,6 +9374,7 @@ impl PlanRunner {
                 effective_context_window_tokens(&self.config) as u64,
             );
             let healthy_models = {
+                let fallback_models = healthy_models.clone();
                 let mut ranked = healthy_models
                     .iter()
                     .filter_map(|slug| {
@@ -9249,21 +9390,47 @@ impl PlanRunner {
                 if ranked.is_empty() {
                     healthy_models
                 } else {
-                    ranked
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    ranked.into_iter().map(|(slug, _)| slug).collect()
+                    let cascade_bias = cascade_routing_bias_from_conductor(&routing_bias);
+                    cascade_router.apply_bias(&mut ranked, &cascade_bias);
+                    cascade_router.apply_cost_pressure(&mut ranked, cost_spike);
+                    let candidate_count = ranked.len();
+                    ranked.retain(|(slug, score)| {
+                        *score > 0.0
+                            && (!cost_spike || !is_premium_model(slug))
+                            && (!routing_bias
+                                .deprioritize
+                                .iter()
+                                .any(|blocked| slug_matches(slug, blocked))
+                                || candidate_count == 1)
+                    });
+                    if ranked.is_empty() {
+                        fallback_models
+                    } else {
+                        ranked.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        ranked.into_iter().map(|(slug, _)| slug).collect()
+                    }
                 }
             };
 
-            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
+            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
             if let Some(explanation) = routing_explanation.as_ref() {
                 routing_stage = explanation.stage.label().to_string();
-                routing_reason = match explanation.stage {
+                routing_reason = if cost_spike {
+                    "cost_spike"
+                } else if !routing_bias.deprioritize.is_empty() {
+                    "conductor_deprioritize"
+                } else if routing_bias.prefer_cheaper {
+                    "conductor_prefer_cheaper"
+                } else {
+                    match explanation.stage {
                     roko_learn::cascade_router::CascadeStage::Static => "role_default",
                     roko_learn::cascade_router::CascadeStage::Confidence => {
                         "highest_confidence_score"
                     }
                     roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
+                }
                 }
                 .to_string();
             }
@@ -9351,21 +9518,6 @@ impl PlanRunner {
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let prior_skills =
             select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
-        let skill_budget = budget_for(role).skills;
-        let skill_context_section = if prior_skills.is_empty() || skill_budget == 0 {
-            None
-        } else {
-            let skill_text = render_prior_experience(&prior_skills);
-            let skill_text_len = skill_text.len();
-            Some((
-                PromptSection::new("skill-library", skill_text)
-                    .with_priority(SectionPriority::Low)
-                    .with_placement(Placement::Middle)
-                    .with_hard_cap(skill_budget),
-                skill_text_len,
-            ))
-        };
-
         let playbook_context_section = match self.playbook.lookup(task).await {
             Ok(Some(playbook)) => {
                 let playbook_text = render_playbook_context(&playbook);
@@ -9672,6 +9824,7 @@ impl PlanRunner {
                 relevant_context.as_deref(),
                 Some(task_affect_state),
                 task_def.as_ref(),
+                &prior_skills,
                 context_window_tokens,
                 Some(&section_effectiveness),
             )?
@@ -9700,23 +9853,6 @@ impl PlanRunner {
                 )
                 .into_signal()
                 .map_err(|e| anyhow!("context section: {e}"))?,
-            );
-        }
-
-        if let Some((skill_section, skill_text_len)) = skill_context_section {
-            sections.push(
-                apply_section_effectiveness_to_prompt_section(
-                    skill_section,
-                    &role_key,
-                    &section_effectiveness,
-                )
-                .with_bidder(AttentionBidder::PlaybookRules)
-                .into_signal()
-                .map_err(|e| anyhow!("skill-library section: {e}"))?,
-            );
-            tracing::info!(
-                "[orchestrate] injected skill library context ({} chars)",
-                skill_text_len
             );
         }
 
@@ -12142,6 +12278,7 @@ fn build_system_prompt_with_context_validated(
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
     task_def: Option<&crate::task_parser::TaskDef>,
+    relevant_skills: &[Skill],
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
@@ -12158,6 +12295,7 @@ fn build_system_prompt_with_context_validated(
         PromptBuildOptions {
             affect_state,
             extra_conventions: task_dispatch_conventions(task_def),
+            relevant_skills: relevant_skills.to_vec(),
             ..PromptBuildOptions::default()
         },
         context_window_tokens,
@@ -12535,6 +12673,7 @@ impl PlanRunner {
                     "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.".to_string(),
                     "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.".to_string(),
                 ],
+                relevant_skills: Vec::new(),
             },
         )
     }

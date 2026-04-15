@@ -15,10 +15,24 @@ use crate::watchers::{
     IterationLoopWatcher, ReviewLoopWatcher, SpecDriftWatcher, StuckPatternWatcher,
     TestFailureBudgetWatcher, TimeOverrunWatcher,
 };
+use parking_lot::Mutex;
 use roko_core::{Body, ConductorDecision, Context, Engram, Kind, Policy};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Tag key on intervention signals for the plan ID.
 pub const PLAN_ID_TAG: &str = "plan_id";
+
+/// Routing bias emitted by the conductor from the latest live signal stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingBias {
+    /// Model slugs that should be deprioritized for the next routing decision.
+    pub deprioritize: Vec<String>,
+    /// Whether routing should bias toward cheaper tiers.
+    pub prefer_cheaper: bool,
+    /// Human-readable reason for the bias.
+    pub reason: String,
+}
 
 /// The conductor: runs all watchers, applies escalation policy, tracks
 /// circuit breaker state.
@@ -43,6 +57,8 @@ pub struct Conductor {
     policy: Box<dyn InterventionPolicy>,
     /// Per-plan circuit breaker.
     circuit_breaker: CircuitBreaker,
+    /// Most recent routing bias derived from the live signal stream.
+    routing_bias: Mutex<RoutingBias>,
 }
 
 impl std::fmt::Debug for Conductor {
@@ -81,6 +97,7 @@ impl Conductor {
             watchers,
             policy: Box::new(WorstSeverityPolicy),
             circuit_breaker: CircuitBreaker::default(),
+            routing_bias: Mutex::new(RoutingBias::default()),
         }
     }
 
@@ -100,6 +117,7 @@ impl Conductor {
             watchers,
             policy: Box::new(WorstSeverityPolicy),
             circuit_breaker: CircuitBreaker::default(),
+            routing_bias: Mutex::new(RoutingBias::default()),
         }
     }
 
@@ -123,6 +141,12 @@ impl Conductor {
         &self.circuit_breaker
     }
 
+    /// Return the most recently computed routing bias snapshot.
+    #[must_use]
+    pub fn routing_bias(&self) -> RoutingBias {
+        self.routing_bias.lock().clone()
+    }
+
     /// Run all watchers and produce a conductor decision.
     ///
     /// This is the core function: it runs each watcher, collects
@@ -133,6 +157,7 @@ impl Conductor {
         // Check circuit breaker first.
         if let Some(plan_id) = extract_plan_id(stream) {
             if self.circuit_breaker.is_tripped(&plan_id) {
+                self.update_routing_bias(stream, &[]);
                 return ConductorDecision::fail(
                     "circuit-breaker",
                     roko_core::FailureKind::MaxIterations,
@@ -142,6 +167,7 @@ impl Conductor {
 
         // Run all watchers and collect outputs.
         let watcher_outputs = collect_watcher_outputs(&self.watchers, stream, ctx);
+        self.update_routing_bias(stream, &watcher_outputs);
 
         // Apply escalation policy.
         let decision = self.policy.evaluate(&watcher_outputs, ctx);
@@ -201,6 +227,7 @@ impl Policy for Conductor {
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         // Run all watchers and collect outputs.
         let watcher_outputs = collect_watcher_outputs(&self.watchers, stream, ctx);
+        self.update_routing_bias(stream, &watcher_outputs);
 
         // Convert non-info outputs to signals for the substrate.
         let mut result = outputs_to_signals(&watcher_outputs);
@@ -225,6 +252,90 @@ impl Policy for Conductor {
     fn name(&self) -> &str {
         "conductor"
     }
+}
+
+impl Conductor {
+    fn update_routing_bias(&self, stream: &[Engram], watcher_outputs: &[WatcherOutput]) {
+        let bias = derive_routing_bias(stream, watcher_outputs);
+        if !bias.reason.is_empty() || bias.prefer_cheaper || !bias.deprioritize.is_empty() {
+            tracing::info!(
+                prefer_cheaper = bias.prefer_cheaper,
+                deprioritize = ?bias.deprioritize,
+                reason = %bias.reason,
+                "conductor routing bias updated"
+            );
+        }
+        *self.routing_bias.lock() = bias;
+    }
+}
+
+fn derive_routing_bias(stream: &[Engram], watcher_outputs: &[WatcherOutput]) -> RoutingBias {
+    let mut reasons = Vec::new();
+    let mut prefer_cheaper = false;
+    let mut deprioritize = Vec::new();
+
+    let load_pressure = watcher_outputs.iter().any(|output| {
+        matches!(
+            output.watcher.as_str(),
+            "cost-overrun" | "context-window-pressure" | "time-overrun"
+        ) && output.severity >= Severity::Warning
+    });
+    if load_pressure {
+        prefer_cheaper = true;
+        reasons.push("load pressure".to_string());
+    }
+
+    if watcher_outputs.iter().any(|output| {
+        matches!(
+            output.watcher.as_str(),
+            "ghost-turn"
+                | "review-loop"
+                | "iteration-loop"
+                | "test-failure-budget"
+                | "compile-fail-repeat"
+                | "stuck-pattern"
+                | "spec-drift"
+        ) && output.severity >= Severity::Warning
+    }) {
+        if let Some(model) = latest_model_from_stream(stream) {
+            deprioritize.push(model.clone());
+            reasons.push(format!("recent failure on {model}"));
+        } else {
+            reasons.push("recent failure".to_string());
+        }
+    }
+
+    dedup_strings(&mut deprioritize);
+
+    RoutingBias {
+        deprioritize,
+        prefer_cheaper,
+        reason: reasons.join("; "),
+    }
+}
+
+fn latest_model_from_stream(stream: &[Engram]) -> Option<String> {
+    stream.iter().rev().find_map(extract_model_slug)
+}
+
+fn extract_model_slug(signal: &Engram) -> Option<String> {
+    signal.tag("model").map(str::to_owned).or_else(|| {
+        signal
+            .body
+            .as_json::<serde_json::Value>()
+            .ok()
+            .and_then(|json| {
+                json.get("model")
+                    .or_else(|| json.get("model_used"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+    })
+}
+
+fn dedup_strings(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 #[cfg(test)]
@@ -381,5 +492,64 @@ mod tests {
     fn watcher_count() {
         let c = Conductor::default();
         assert_eq!(c.watchers.len(), 10);
+    }
+
+    #[test]
+    fn routing_bias_defaults_to_neutral() {
+        let c = Conductor::default();
+        let bias = c.routing_bias();
+        assert!(bias.deprioritize.is_empty());
+        assert!(!bias.prefer_cheaper);
+    }
+
+    #[test]
+    fn routing_bias_tracks_recent_failures_and_load_pressure() {
+        let c = Conductor::default();
+        let stream = vec![
+            Engram::builder(Kind::Custom("conductor.agent_output".into()))
+                .body(
+                    Body::from_json(&serde_json::json!({
+                        "model": "claude-opus-4-6",
+                        "plan_id": "plan-1",
+                        "task": "task-1",
+                        "duration_ms": 12_000,
+                        "timeout_secs": 10,
+                    }))
+                    .expect("serialize timing event"),
+                )
+                .build(),
+            Engram::builder(Kind::Metric)
+                .body(Body::text("cost"))
+                .tag("name", "plan_cost")
+                .tag("value", "12.5")
+                .build(),
+            Engram::builder(Kind::Metric)
+                .body(Body::text("budget"))
+                .tag("name", "plan_budget")
+                .tag("value", "10.0")
+                .build(),
+        ];
+
+        let _ = c.evaluate(&stream, &Context::at(0));
+        let bias = c.routing_bias();
+        assert!(bias.prefer_cheaper);
+        assert!(bias.reason.contains("load pressure"));
+        assert!(bias.deprioritize.is_empty());
+    }
+
+    #[test]
+    fn routing_bias_deprioritizes_recent_model_failures() {
+        let c = Conductor::default();
+        let stream = ghost_stream(3);
+
+        let _ = c.evaluate(&stream, &Context::at(0));
+        let bias = c.routing_bias();
+        assert!(!bias.prefer_cheaper);
+        assert!(
+            bias.deprioritize
+                .iter()
+                .any(|model| model == "claude-sonnet-4-6")
+        );
+        assert!(bias.reason.contains("recent failure"));
     }
 }

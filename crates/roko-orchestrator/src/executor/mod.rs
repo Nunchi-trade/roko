@@ -317,6 +317,16 @@ impl ParallelExecutor {
         }
     }
 
+    /// Restart a plan after a structural re-plan.
+    ///
+    /// Returns the plan's previous phase if it was found and reset.
+    pub fn restart_plan(&mut self, plan_id: &str) -> Option<PlanPhase> {
+        let state = self.plans.get_mut(plan_id)?;
+        let previous_phase = state.current_phase.clone();
+        state.restart_for_replan();
+        Some(previous_phase)
+    }
+
     /// Move a failed plan to the back of the queue.
     pub fn demote_failed(&mut self, plan_id: &str) {
         self.queue = reorder_queue(&self.queue, plan_id);
@@ -727,5 +737,27 @@ mod tests {
             ..ExecutorConfig::default()
         });
         assert_eq!(ex.config().max_concurrent_plans, 7);
+    }
+
+    #[test]
+    fn restart_plan_for_replan_resets_state() {
+        let mut ex = default_executor();
+        let mut ps = PlanState::new("p");
+        ps.current_phase = PlanPhase::Gating;
+        ps.iteration = 3;
+        ps.paused = true;
+        ps.assigned_agents = vec!["agent-1".into()];
+        ps.merge_attempts = 2;
+        ex.add_plan(ps);
+
+        let previous = ex.restart_plan("p").unwrap();
+        assert_eq!(previous, PlanPhase::Gating);
+
+        let state = ex.plan_state("p").unwrap();
+        assert_eq!(state.current_phase, PlanPhase::Queued);
+        assert_eq!(state.iteration, 4);
+        assert!(!state.paused);
+        assert!(state.assigned_agents.is_empty());
+        assert_eq!(state.merge_attempts, 0);
     }
 }
