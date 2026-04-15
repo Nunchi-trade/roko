@@ -339,7 +339,7 @@ fn content_style(kind: SegmentKind, theme: &Theme) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{output_byte_len, parse_segment_groups, render_cached_output, SegmentKind};
+    use super::{SegmentKind, output_byte_len, parse_segment_groups, render_cached_output};
     use crate::tui::dashboard::Theme;
 
     #[test]
@@ -425,15 +425,18 @@ mod tests {
         );
         assert_eq!(render.groups.len(), 2);
         assert!(render.styled_lines.len() >= 4);
-        assert!(render.styled_lines[0]
-            .spans
-            .iter()
-            .any(|span| span.content.contains("TOOL USE")));
+        assert!(
+            render.styled_lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("TOOL USE"))
+        );
     }
 
     #[test]
     fn recognizes_mori_success_and_error_markers() {
-        let groups = parse_segment_groups(&["ok wrote patch".to_string(), "REVISE plan".to_string()]);
+        let groups =
+            parse_segment_groups(&["ok wrote patch".to_string(), "REVISE plan".to_string()]);
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].kind, SegmentKind::Success);
@@ -446,9 +449,11 @@ mod tests {
 
         assert_eq!(render.groups.len(), 1);
         assert_eq!(render.groups[0].kind, SegmentKind::Blank);
-        assert!(render.styled_lines[0]
-            .spans
-            .iter()
-            .any(|span| span.content.contains("BLANK")));
+        assert!(
+            render.styled_lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("BLANK"))
+        );
     }
 }

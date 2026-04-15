@@ -2,52 +2,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::super::dashboard::Theme;
-
-/// State of a single parallel agent instance.
-#[derive(Debug, Clone)]
-pub(crate) struct ParallelAgentState {
-    pub(crate) role: String,
-    pub(crate) model: String,
-    pub(crate) task: String,
-    pub(crate) tokens_used: u64,
-    pub(crate) tokens_total: u64,
-    pub(crate) state: AgentRunState,
-    pub(crate) context_pct: f64,
-}
-
-/// Running state of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentRunState {
-    Active,
-    Idle,
-    Done,
-    Failed,
-}
-
-impl AgentRunState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Idle => "idle",
-            Self::Done => "done",
-            Self::Failed => "failed",
-        }
-    }
-
-    fn color(self, theme: &Theme) -> Color {
-        match self {
-            Self::Active => theme.accent,
-            Self::Idle => theme.muted,
-            Self::Done => theme.success,
-            Self::Failed => theme.danger,
-        }
-    }
-}
+use super::super::state::{AgentRow, AgentStatus};
 
 /// Render a table of parallel agent instances.
 ///
@@ -55,14 +16,15 @@ impl AgentRunState {
 pub(crate) fn render_parallel_pool(
     frame: &mut Frame<'_>,
     area: Rect,
-    agents: &[ParallelAgentState],
+    agents: &[AgentRow],
     selected: usize,
     theme: &Theme,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("parallel agents")
-        .border_style(theme.muted());
+        .border_style(theme.muted())
+        .title_style(theme.accent_bold());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -79,11 +41,12 @@ pub(crate) fn render_parallel_pool(
     }
 
     // Sort: active first, then by role.
-    let mut sorted: Vec<(usize, &ParallelAgentState)> = agents.iter().enumerate().collect();
+    let mut sorted: Vec<(usize, &AgentRow)> = agents.iter().enumerate().collect();
     sorted.sort_by(|(_, a), (_, b)| {
-        let a_active = a.state == AgentRunState::Active;
-        let b_active = b.state == AgentRunState::Active;
-        b_active.cmp(&a_active).then_with(|| a.role.cmp(&b.role))
+        b.active
+            .cmp(&a.active)
+            .then_with(|| a.role.cmp(&b.role))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     let rows: Vec<Row<'_>> = sorted
@@ -96,22 +59,29 @@ pub(crate) fn render_parallel_pool(
                 Style::default()
             };
 
-            let state_color = agent.state.color(theme);
-            let ctx_pct = format!("{:.0}%", agent.context_pct * 100.0);
-            let tokens = format!("{}/{}", agent.tokens_used, agent.tokens_total);
+            let current_task = if !agent.current_task.is_empty() {
+                agent.current_task.clone()
+            } else if !agent.current_plan.is_empty() {
+                agent.current_plan.clone()
+            } else {
+                "-".to_string()
+            };
+            let status = agent.status;
+            let ctx_limit = agent.context_limit.max(1);
+            let ctx_ratio = (agent.input_tokens as f64 / ctx_limit as f64).clamp(0.0, 1.0);
 
             Row::new(vec![
+                Cell::from(truncate(&agent.id, 14)),
                 Cell::from(truncate(&agent.role, 12)),
                 Cell::from(truncate(&agent.model, 14)),
-                Cell::from(truncate(&agent.task, 20)),
-                Cell::from(tokens),
-                Cell::from(Span::styled(
-                    agent.state.label().to_string(),
-                    Style::default()
-                        .fg(state_color)
-                        .add_modifier(Modifier::BOLD),
+                Cell::from(truncate(&current_task, 24)),
+                Cell::from(render_status_label(status, theme)),
+                Cell::from(render_context_gauge(
+                    agent.input_tokens,
+                    ctx_limit,
+                    ctx_ratio,
+                    theme,
                 )),
-                Cell::from(ctx_pct),
             ])
             .style(row_style)
         })
@@ -120,26 +90,26 @@ pub(crate) fn render_parallel_pool(
     let table = Table::new(
         rows,
         [
+            Constraint::Length(14),
             Constraint::Length(12),
             Constraint::Length(14),
-            Constraint::Min(16),
-            Constraint::Length(16),
-            Constraint::Length(8),
-            Constraint::Length(6),
+            Constraint::Min(18),
+            Constraint::Length(10),
+            Constraint::Min(22),
         ],
     )
     .header(
         Row::new(vec![
+            Cell::from("agent id"),
             Cell::from("role"),
             Cell::from("model"),
             Cell::from("task"),
-            Cell::from("tokens"),
-            Cell::from("state"),
-            Cell::from("ctx"),
+            Cell::from("progress"),
+            Cell::from("context"),
         ])
         .style(
             Style::default()
-                .fg(Color::Gray)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
     )
@@ -154,4 +124,48 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
+}
+
+fn render_status_label(status: AgentStatus, theme: &Theme) -> Line<'static> {
+    let (label, color) = match status {
+        AgentStatus::Active => ("active", theme.accent),
+        AgentStatus::Idle => ("idle", theme.muted),
+        AgentStatus::Done => ("done", theme.success),
+        AgentStatus::Failed => ("failed", theme.danger),
+    };
+
+    Line::from(vec![Span::styled(
+        format!("{:^8}", label),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn render_context_gauge(
+    input_tokens: u64,
+    context_limit: u64,
+    ctx_ratio: f64,
+    theme: &Theme,
+) -> Line<'static> {
+    let gauge_width = 8usize;
+    let filled = (ctx_ratio * gauge_width as f64).round() as usize;
+    let empty = gauge_width.saturating_sub(filled);
+    let fill_color = if ctx_ratio >= 0.8 {
+        theme.danger
+    } else if ctx_ratio >= 0.5 {
+        theme.warning
+    } else {
+        theme.accent
+    };
+
+    let label = format!("{}k/{}k", input_tokens / 1000, context_limit.max(1) / 1000);
+
+    Line::from(vec![
+        Span::styled(
+            "\u{2588}".repeat(filled),
+            Style::default().fg(fill_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{2500}".repeat(empty), Style::default().fg(theme.muted)),
+        Span::styled(" ", Style::default()),
+        Span::styled(label, Style::default().fg(theme.foreground)),
+    ])
 }

@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::Path;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -17,7 +18,8 @@ use super::dashboard::{DashboardData, PlanTaskListSnapshot, Theme};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
 use super::segment::{CachedRender, output_byte_len, render_cached_output};
 use super::tabs::Tab;
-use crate::plan::PlanSummary;
+use crate::plan::{PlanSummary, plans_dir};
+use crate::task_parser::{TaskDef, TasksFile};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -219,28 +221,10 @@ impl From<&str> for PlanPhase {
             "done" | "completed" | "complete" | "passed" | "skipped" => Self::Done,
             "failed" | "error" => Self::Failed,
             "pending" | "queued" | "" => Self::Pending,
-            "running"
-            | "active"
-            | "executing"
-            | "preflight"
-            | "strategist"
-            | "implementer"
-            | "compile-gate"
-            | "compile_gate"
-            | "test-gate"
-            | "test_gate"
-            | "reviewing"
-            | "critic-review"
-            | "critic_review"
-            | "verdict"
-            | "committing"
-            | "implementing"
-            | "gating"
-            | "verifying"
-            | "review"
-            | "merge"
-            | "merging"
-            | "commit" => Self::Active,
+            "running" | "active" | "executing" | "preflight" | "strategist" | "implementer"
+            | "compile-gate" | "compile_gate" | "test-gate" | "test_gate" | "reviewing"
+            | "critic-review" | "critic_review" | "verdict" | "committing" | "implementing"
+            | "gating" | "verifying" | "review" | "merge" | "merging" | "commit" => Self::Active,
             _ => Self::Pending,
         }
     }
@@ -897,6 +881,7 @@ impl TuiState {
             .iter()
             .map(|plan| (plan.id.clone(), plan.expanded))
             .collect();
+        let plan_waves = derive_plan_waves(data.root(), &data.plans);
         let plan_snapshots = data.plan_task_snapshots();
         self.plans = data
             .plans
@@ -927,7 +912,7 @@ impl TuiState {
                     tasks_done,
                     tasks_failed,
                     elapsed_secs: snapshot.map(|plan| plan.elapsed_secs).unwrap_or(0.0),
-                    wave: None,
+                    wave: plan_waves.get(&p.id).copied(),
                     expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
                     tasks: snapshot
                         .map(|plan| {
@@ -1053,7 +1038,6 @@ impl TuiState {
             .collect();
         sum_costs(data, &mut self.cost_per_plan, &mut self.cost_per_task);
 
-
         self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
 
         // Populate phase elapsed times from episodes (Task 7)
@@ -1062,18 +1046,7 @@ impl TuiState {
         // Build current_task_checklist from active_tasks + task-trackers (Task 3)
         self.current_task_checklist = build_task_checklist_from_execution(data);
 
-        // Build execution_waves — group plans by wave if available, else wave 0
-        let prev_wave_expanded: std::collections::HashMap<usize, bool> = self
-            .execution_waves
-            .iter()
-            .map(|w| (w.index, w.expanded))
-            .collect();
-        self.execution_waves = build_execution_waves(&self.plans);
-        for wave in &mut self.execution_waves {
-            if let Some(&exp) = prev_wave_expanded.get(&wave.index) {
-                wave.expanded = exp;
-            }
-        }
+        self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
 
         // Sync filter alias
         self.filter = self.filter_text.clone();
@@ -1095,6 +1068,8 @@ impl TuiState {
             self.selected_agent = self.agents.len() - 1;
         }
         self.selected_agent_tab = self.selected_agent_tab.min(6);
+        self.selected_wave_idx =
+            clamp_selected_wave_idx(self.selected_wave_idx, self.execution_waves.len());
     }
 
     /// Populate state from a connected-mode `DashboardSnapshot`.
@@ -1145,11 +1120,6 @@ impl TuiState {
             .current_task_checklist
             .iter()
             .map(|task| (task.id.clone(), task.elapsed_secs))
-            .collect();
-        let prev_wave_expanded: HashMap<usize, bool> = self
-            .execution_waves
-            .iter()
-            .map(|wave| (wave.index, wave.expanded))
             .collect();
         let prev_agent_rows: HashMap<String, AgentRow> = self
             .agents
@@ -1331,12 +1301,7 @@ impl TuiState {
             .collect();
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
-        self.execution_waves = build_execution_waves(&self.plans);
-        for wave in &mut self.execution_waves {
-            if let Some(expanded) = prev_wave_expanded.get(&wave.index).copied() {
-                wave.expanded = expanded;
-            }
-        }
+        self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
 
         self.orchestrator_state = if snap.stats.plans_active > 0 {
             String::from("running")
@@ -1356,10 +1321,24 @@ impl TuiState {
             .unwrap_or_default();
         self.filter = self.filter_text.clone();
 
-        restore_selected_plan_idx(&self.plans, &mut self.selected_plan_idx, prev_selected_plan_id);
-        restore_selected_plan_idx(&self.plans, &mut self.current_plan_idx, prev_current_plan_id);
-        restore_selected_agent_idx(&self.agents, &mut self.selected_agent, prev_selected_agent_id);
+        restore_selected_plan_idx(
+            &self.plans,
+            &mut self.selected_plan_idx,
+            prev_selected_plan_id,
+        );
+        restore_selected_plan_idx(
+            &self.plans,
+            &mut self.current_plan_idx,
+            prev_current_plan_id,
+        );
+        restore_selected_agent_idx(
+            &self.agents,
+            &mut self.selected_agent,
+            prev_selected_agent_id,
+        );
         self.selected_agent_tab = self.selected_agent_tab.min(6);
+        self.selected_wave_idx =
+            clamp_selected_wave_idx(self.selected_wave_idx, self.execution_waves.len());
     }
 
     /// Return cached, styled agent output lines for the selected agent pane.
@@ -1471,9 +1450,9 @@ impl TuiState {
             .iter()
             .map(|agent| agent.id.as_str())
             .collect::<HashSet<_>>();
-        self.agent_output_cache.borrow_mut().retain(|key, _| {
-            key == "__agent-output__" || valid_ids.contains(key.as_str())
-        });
+        self.agent_output_cache
+            .borrow_mut()
+            .retain(|key, _| key == "__agent-output__" || valid_ids.contains(key.as_str()));
     }
 }
 
@@ -1632,7 +1611,11 @@ fn build_phase_pipeline_from_dashboard_snapshot(
         .collect()
 }
 
-fn restore_selected_plan_idx(plans: &[PlanEntry], selected: &mut usize, previous_id: Option<String>) {
+fn restore_selected_plan_idx(
+    plans: &[PlanEntry],
+    selected: &mut usize,
+    previous_id: Option<String>,
+) {
     match previous_id {
         Some(previous_id) => {
             if let Some(idx) = plans.iter().position(|plan| plan.id == previous_id) {
@@ -1864,8 +1847,9 @@ fn task_status_is_done(status: &str) -> bool {
     TaskStatus::from(status).is_done()
 }
 
-/// Build execution waves from plan entries. Groups by `wave` field if set,
-/// otherwise places all plans in wave 0.
+/// Build execution waves from plan entries.
+///
+/// Groups by `wave` field if set, otherwise places all plans in wave 0.
 fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
     if plans.is_empty() {
         return Vec::new();
@@ -1873,48 +1857,163 @@ fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
 
     let has_waves = plans.iter().any(|p| p.wave.is_some());
     if !has_waves {
-        // All plans in a single wave
-        let done = plans
-            .iter()
-            .filter(|p| !p.active && !p.status.is_failed())
-            .count();
+        let done = plans.iter().filter(|plan| plan_is_complete(plan)).count();
         return vec![Wave {
             index: 0,
-            plans: plans.iter().map(|p| p.id.clone()).collect(),
+            plans: plans.iter().map(|plan| plan.id.clone()).collect(),
             done,
             total: plans.len(),
             expanded: true,
         }];
     }
 
-    // Group by wave index
-    let mut wave_map: std::collections::BTreeMap<usize, Vec<String>> =
+    let mut wave_map: std::collections::BTreeMap<usize, Vec<&PlanEntry>> =
         std::collections::BTreeMap::new();
     for plan in plans {
-        let wi = plan.wave.unwrap_or(0);
-        wave_map.entry(wi).or_default().push(plan.id.clone());
+        let wave_index = plan.wave.unwrap_or(0);
+        wave_map.entry(wave_index).or_default().push(plan);
     }
 
     wave_map
         .into_iter()
-        .map(|(idx, plan_ids)| {
-            let done = plan_ids
+        .map(|(idx, wave_plans)| {
+            let done = wave_plans
                 .iter()
-                .filter(|pid| {
-                    plans
-                        .iter()
-                        .any(|p| &p.id == *pid && !p.active && !p.status.is_failed())
-                })
+                .filter(|plan| plan_is_complete(plan))
                 .count();
             Wave {
                 index: idx,
-                plans: plan_ids.clone(),
+                plans: wave_plans.iter().map(|plan| plan.id.clone()).collect(),
                 done,
-                total: plan_ids.len(),
+                total: wave_plans.len(),
                 expanded: true,
             }
         })
         .collect()
+}
+
+fn rebuild_execution_waves(plans: &[PlanEntry], previous: &[Wave]) -> Vec<Wave> {
+    let prev_wave_expanded: std::collections::HashMap<usize, bool> = previous
+        .iter()
+        .map(|wave| (wave.index, wave.expanded))
+        .collect();
+
+    let mut waves = build_execution_waves(plans);
+    for wave in &mut waves {
+        if let Some(expanded) = prev_wave_expanded.get(&wave.index).copied() {
+            wave.expanded = expanded;
+        }
+    }
+
+    waves
+}
+
+fn clamp_selected_wave_idx(selected_wave_idx: usize, wave_count: usize) -> usize {
+    if wave_count == 0 {
+        0
+    } else {
+        selected_wave_idx.min(wave_count - 1)
+    }
+}
+
+fn plan_is_complete(plan: &PlanEntry) -> bool {
+    !plan.active && !plan.status.is_failed()
+}
+
+fn derive_plan_waves(root: &Path, plans: &[PlanSummary]) -> HashMap<String, usize> {
+    if plans.is_empty() {
+        return HashMap::new();
+    }
+
+    let known_plan_ids: HashSet<String> = plans.iter().map(|plan| plan.id.clone()).collect();
+    let mut deps_by_plan: HashMap<String, Vec<String>> = HashMap::new();
+    let mut saw_dependency = false;
+
+    for plan in plans {
+        let tasks_path = plans_dir(root).join(&plan.id).join("tasks.toml");
+        let mut deps: HashSet<String> = HashSet::new();
+
+        if let Ok(tasks_file) = TasksFile::parse(&tasks_path) {
+            for task in &tasks_file.tasks {
+                deps.extend(task_plan_dependencies(task, &plan.id, &known_plan_ids));
+            }
+        }
+
+        let mut deps = deps.into_iter().collect::<Vec<_>>();
+        deps.sort();
+        saw_dependency |= !deps.is_empty();
+        deps_by_plan.insert(plan.id.clone(), deps);
+    }
+
+    if !saw_dependency {
+        return HashMap::new();
+    }
+
+    let mut plan_waves = HashMap::new();
+    for plan in plans {
+        let mut visiting = HashSet::new();
+        let wave = resolve_plan_wave(&plan.id, &deps_by_plan, &mut plan_waves, &mut visiting);
+        plan_waves.insert(plan.id.clone(), wave);
+    }
+    plan_waves
+}
+
+fn task_plan_dependencies(
+    task: &TaskDef,
+    current_plan_id: &str,
+    known_plan_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut deps = HashSet::new();
+
+    for dep in &task.depends_on_plan {
+        let plan_id = dep.trim();
+        if !plan_id.is_empty() && plan_id != current_plan_id && known_plan_ids.contains(plan_id) {
+            deps.insert(plan_id.to_string());
+        }
+    }
+
+    for dep in &task.depends_on {
+        let Some((plan_id, _task_id)) = dep.split_once(':') else {
+            continue;
+        };
+        let plan_id = plan_id.trim();
+        if !plan_id.is_empty() && plan_id != current_plan_id && known_plan_ids.contains(plan_id) {
+            deps.insert(plan_id.to_string());
+        }
+    }
+
+    let mut deps = deps.into_iter().collect::<Vec<_>>();
+    deps.sort();
+    deps
+}
+
+fn resolve_plan_wave(
+    plan_id: &str,
+    deps_by_plan: &HashMap<String, Vec<String>>,
+    cache: &mut HashMap<String, usize>,
+    visiting: &mut HashSet<String>,
+) -> usize {
+    if let Some(&wave) = cache.get(plan_id) {
+        return wave;
+    }
+
+    if !visiting.insert(plan_id.to_string()) {
+        return 0;
+    }
+
+    let wave = deps_by_plan
+        .get(plan_id)
+        .map(|deps| {
+            deps.iter()
+                .map(|dep| resolve_plan_wave(dep, deps_by_plan, cache, visiting) + 1)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    visiting.remove(plan_id);
+    cache.insert(plan_id.to_string(), wave);
+    wave
 }
 
 /// Extract output text from an episode's extra fields.
@@ -2311,6 +2410,135 @@ mod tests {
         state.selected_wave_idx = 1;
         assert_eq!(state.wave_count(), 2);
         assert_eq!(state.current_wave(), 1);
+    }
+
+    #[test]
+    fn derive_plan_waves_uses_cross_plan_dependencies() {
+        let tmpdir = tempdir().expect("tempdir");
+        let plans_root = tmpdir.path().join("plans");
+        fs::create_dir_all(plans_root.join("plan-a")).expect("create plan-a");
+        fs::create_dir_all(plans_root.join("plan-b")).expect("create plan-b");
+        fs::create_dir_all(plans_root.join("plan-c")).expect("create plan-c");
+
+        fs::write(
+            plans_root.join("plan-a").join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan A"
+total = 1
+
+[[task]]
+id = "T1"
+title = "start"
+depends_on = []
+"#,
+        )
+        .expect("write plan-a");
+
+        fs::write(
+            plans_root.join("plan-b").join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan B"
+total = 1
+
+[[task]]
+id = "T1"
+title = "after a"
+depends_on = []
+depends_on_plan = ["plan-a"]
+"#,
+        )
+        .expect("write plan-b");
+
+        fs::write(
+            plans_root.join("plan-c").join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan C"
+total = 1
+
+[[task]]
+id = "T1"
+title = "after b"
+depends_on = ["plan-b:T1"]
+"#,
+        )
+        .expect("write plan-c");
+
+        let plans = vec![
+            PlanSummary {
+                id: "plan-a".into(),
+                title: "Plan A".into(),
+                task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                completed: false,
+                old_format: false,
+                last_error: None,
+            },
+            PlanSummary {
+                id: "plan-b".into(),
+                title: "Plan B".into(),
+                task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                completed: false,
+                old_format: false,
+                last_error: None,
+            },
+            PlanSummary {
+                id: "plan-c".into(),
+                title: "Plan C".into(),
+                task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                completed: false,
+                old_format: false,
+                last_error: None,
+            },
+        ];
+
+        let plan_waves = derive_plan_waves(tmpdir.path(), &plans);
+        assert_eq!(plan_waves.get("plan-a"), Some(&0));
+        assert_eq!(plan_waves.get("plan-b"), Some(&1));
+        assert_eq!(plan_waves.get("plan-c"), Some(&2));
+    }
+
+    #[test]
+    fn rebuild_execution_waves_preserves_expanded_state_by_index() {
+        let plans = vec![
+            PlanEntry {
+                id: "plan-a".into(),
+                wave: Some(1),
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-b".into(),
+                wave: Some(2),
+                ..PlanEntry::default()
+            },
+        ];
+        let previous = vec![
+            Wave {
+                index: 1,
+                expanded: false,
+                ..Wave::default()
+            },
+            Wave {
+                index: 2,
+                expanded: true,
+                ..Wave::default()
+            },
+        ];
+
+        let waves = rebuild_execution_waves(&plans, &previous);
+
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].index, 1);
+        assert!(!waves[0].expanded);
+        assert_eq!(waves[1].index, 2);
+        assert!(waves[1].expanded);
     }
 
     #[test]
@@ -2743,8 +2971,16 @@ tier = "focused"
         assert_eq!(plan_b.tasks_failed, 1);
 
         assert_eq!(state.agents.len(), 2);
-        let agent_a = state.agents.iter().find(|agent| agent.id == "agent-a").unwrap();
-        let agent_b = state.agents.iter().find(|agent| agent.id == "agent-b").unwrap();
+        let agent_a = state
+            .agents
+            .iter()
+            .find(|agent| agent.id == "agent-a")
+            .unwrap();
+        let agent_b = state
+            .agents
+            .iter()
+            .find(|agent| agent.id == "agent-b")
+            .unwrap();
         assert!(agent_a.active);
         assert_eq!(agent_a.role, "implementer");
         assert!(!agent_b.active);

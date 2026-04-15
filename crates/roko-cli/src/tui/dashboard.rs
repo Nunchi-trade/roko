@@ -1762,11 +1762,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             .unwrap_or_default();
         let phase_status = PlanPhase::from(phase.as_str());
         let completed = phase_status.is_done() || phase_status.is_failed();
-        if task_count > 0
-            && tasks_done == 0
-            && tasks_failed == 0
-            && phase_status.is_done()
-        {
+        if task_count > 0 && tasks_done == 0 && tasks_failed == 0 && phase_status.is_done() {
             tasks_done = task_count;
         }
 

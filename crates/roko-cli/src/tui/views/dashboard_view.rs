@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::{AgentStatus, TuiState, model_context_limit};
+use crate::tui::state::{AgentStatus, TuiState};
 use crate::tui::widgets;
 
 // ---------------------------------------------------------------------------
@@ -201,55 +201,13 @@ fn render_sub_agents(
     let sections =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
-    // Build pool entries once.
-    let activity =
-        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
-
-    let pool: Vec<widgets::parallel_pool::ParallelAgentState> = data
-        .agents
-        .iter()
-        .map(|agent| {
-            let row = activity
-                .as_ref()
-                .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
-            let state = match AgentStatus::from(agent.status.as_str()) {
-                AgentStatus::Active => widgets::parallel_pool::AgentRunState::Active,
-                AgentStatus::Done => widgets::parallel_pool::AgentRunState::Done,
-                AgentStatus::Failed => widgets::parallel_pool::AgentRunState::Failed,
-                AgentStatus::Idle => widgets::parallel_pool::AgentRunState::Idle,
-            };
-            let used = row.map_or(0, |r| r.tokens_used);
-            let total = tui_state
-                .agents
-                .iter()
-                .find(|state_agent| state_agent.id == agent.id)
-                .map(|state_agent| state_agent.context_limit)
-                .filter(|limit| *limit > 0)
-                .or_else(|| row.map(|r| model_context_limit(&r.model)))
-                .unwrap_or_else(|| model_context_limit(""));
-            widgets::parallel_pool::ParallelAgentState {
-                role: agent.label.clone(),
-                model: row.map_or_else(|| "-".to_string(), |r| r.model.clone()),
-                task: agent.plan_id.as_deref().unwrap_or("-").to_string(),
-                tokens_used: used,
-                tokens_total: total,
-                state,
-                context_pct: if total > 0 {
-                    used as f64 / total as f64
-                } else {
-                    0.0
-                },
-            }
-        })
-        .collect();
-
     widgets::parallel_pool::render_parallel_pool(
         frame,
         sections[0],
-        &pool,
+        &tui_state.agents,
         tui_state
-            .selected_agent_tab
-            .min(pool.len().saturating_sub(1)),
+            .selected_agent
+            .min(tui_state.agents.len().saturating_sub(1)),
         theme,
     );
     render_output_panel(

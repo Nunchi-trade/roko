@@ -536,7 +536,6 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         return Some(TuiAction::QuitConfirmed);
     }
 
-
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
@@ -606,6 +605,8 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         // Plan tree operations
         KeyCode::Enter => TuiAction::ShowPlanDetail,
         KeyCode::Esc => TuiAction::ClosePlanDetail,
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WavePrev,
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WaveNext,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
 
@@ -650,6 +651,8 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('t') => TuiAction::OpenTaskPicker,
         KeyCode::Char('[') => TuiAction::WavePrev,
         KeyCode::Char(']') => TuiAction::WaveNext,
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WavePrev,
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WaveNext,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
         KeyCode::PageUp => TuiAction::ScrollPageUp,
@@ -1054,6 +1057,44 @@ mod tests {
         assert_eq!(action, TuiAction::ScrollAgentEnd);
     }
 
+    #[test]
+    fn shift_arrow_keys_navigate_waves() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Left, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WavePrev);
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Right, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WaveNext);
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Left, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WavePrev);
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Right, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WaveNext);
+    }
 
     fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
         let action = handle_key(

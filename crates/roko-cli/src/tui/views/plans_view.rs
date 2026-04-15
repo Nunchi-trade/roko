@@ -460,16 +460,13 @@ fn render_plan_line(
 ) {
     let is_selected = idx == view_state.selected;
     let tui_plan = tui_state.plans.get(idx);
-    let is_active = tui_plan
-        .map(|p| p.status.is_active())
-        .unwrap_or(false);
-    let is_failed = tui_plan
-        .map(|p| p.status.is_failed())
-        .unwrap_or(false);
+    let is_active = tui_plan.map(|p| p.status.is_active()).unwrap_or(false);
+    let is_failed = tui_plan.map(|p| p.status.is_failed()).unwrap_or(false);
     let task_total = tui_plan.map(|p| p.tasks_total).unwrap_or(plan.task_count);
-    let task_done = tui_plan
-        .map(|p| p.tasks_done)
-        .unwrap_or(if plan.completed { task_total } else { 0 });
+    let task_done =
+        tui_plan
+            .map(|p| p.tasks_done)
+            .unwrap_or(if plan.completed { task_total } else { 0 });
 
     // Status icon
     let (icon, icon_style) = if plan.completed {

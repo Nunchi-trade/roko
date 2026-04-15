@@ -1674,7 +1674,6 @@ impl App {
         }
     }
 
-
     fn apply_signed_scroll(current: usize, delta: i16) -> usize {
         if delta < 0 {
             current.saturating_sub(delta.saturating_abs() as usize)
@@ -1828,7 +1827,6 @@ impl App {
     // Legacy compatibility
     // -----------------------------------------------------------------------
 
-
     #[allow(dead_code)]
     fn select_page_by_slot(&mut self, slot: usize) {
         let pages = self.pages().ids();
@@ -1869,8 +1867,9 @@ impl App {
                 self.data = DashboardData::load_best_effort(&self.workdir);
                 self.tui_state.update_from_snapshot(&self.data);
                 self.fx_config = EffectsConfig::load_from_root(&self.workdir);
-                self.notifications
-                    .push(super::modals::Notification::info("Config saved and reloaded"));
+                self.notifications.push(super::modals::Notification::info(
+                    "Config saved and reloaded",
+                ));
             }
             Err(error) => {
                 self.notifications
@@ -1943,7 +1942,6 @@ impl App {
                 data.branches.len()
             })
     }
-
 
     // `update_sys_metrics` removed -- see `collect_sys_metrics_bg()` standalone
     // function below, called from the background thread.
@@ -2388,7 +2386,10 @@ mod tests {
         assert_eq!(app.tui_state.plan_scroll_offset, 17);
         assert_eq!(app.tui_state.agent_scroll, Some(9));
         assert_eq!(app.tui_state.plans[0].id, "plan-b");
-        assert_eq!(app.tui_state.plans[0].status, super::super::state::PlanPhase::Done);
+        assert_eq!(
+            app.tui_state.plans[0].status,
+            super::super::state::PlanPhase::Done
+        );
         assert_eq!(app.tui_state.plans[1].id, "plan-c");
         assert!(!app.tui_state.plans[0].expanded);
         assert_eq!(app.tui_state.selected_plan_idx, 0);

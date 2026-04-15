@@ -665,9 +665,7 @@ fn build_context_data(data: &DashboardData) -> ContextViewData {
         b_total.cmp(&a_total)
     });
 
-    ContextViewData {
-        token_burns,
-    }
+    ContextViewData { token_burns }
 }
 
 fn format_count(n: u64) -> String {

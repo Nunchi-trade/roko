@@ -665,7 +665,11 @@ pub(crate) fn collect_agent_output_lines(
     }
 
     if let Some(agent_summary) = selected_agent {
-        if let Some(agent_row) = tui_state.agents.iter().find(|row| row.id == agent_summary.id) {
+        if let Some(agent_row) = tui_state
+            .agents
+            .iter()
+            .find(|row| row.id == agent_summary.id)
+        {
             if !agent_row.output_lines.is_empty() {
                 return agent_row.output_lines.clone();
             }

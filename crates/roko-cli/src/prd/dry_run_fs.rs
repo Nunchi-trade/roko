@@ -137,9 +137,8 @@ fn copy_workspace_dir(src: &Path, dst: &Path) -> Result<()> {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create {}", parent.display()))?;
             }
-            std::fs::copy(&path, &dest_path).with_context(|| {
-                format!("copy {} -> {}", path.display(), dest_path.display())
-            })?;
+            std::fs::copy(&path, &dest_path)
+                .with_context(|| format!("copy {} -> {}", path.display(), dest_path.display()))?;
         }
     }
     Ok(())
