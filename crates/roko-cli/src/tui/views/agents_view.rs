@@ -13,9 +13,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
+use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::TuiState;
+use crate::tui::state::{AgentStatus, TuiState, model_context_limit};
+use crate::tui::util::truncate_middle;
 
 // ---------------------------------------------------------------------------
 // Role tab labels (fixed order, matching Mori)
@@ -115,7 +117,7 @@ fn render_agent_roster(
 
     let active_count = agents
         .iter()
-        .filter(|(_, agent)| is_agent_active(&agent.status))
+        .filter(|a| AgentStatus::from(a.1.status.as_str()).is_active())
         .count();
     let title = format!(" Agents ({} active) ", active_count);
 
@@ -201,13 +203,36 @@ fn render_agent_roster(
         ]));
     }
 
-    for (display_idx, (_, agent)) in agents.iter().enumerate() {
-        let is_selected = display_idx == view_state.selected;
-        let is_active = is_agent_active(&agent.status);
-        let is_done = is_agent_done(&agent.status);
-        let is_failed = is_agent_failed(&agent.status);
-        let (icon, icon_style) = agent_status_icon(&agent.status, theme);
-        let accent = agent_status_color(&agent.status, theme);
+    for (idx, agent) in data.agents.iter().enumerate() {
+        let is_selected = idx == view_state.selected;
+        let status = AgentStatus::from(agent.status.as_str());
+        let is_active = status.is_active();
+        let is_done = status.is_done();
+        let is_failed = status.is_failed();
+
+        // Status icon
+        let (icon, icon_style) = if is_active {
+            (
+                "\u{25b6}", // ▶
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if is_done {
+            ("\u{2713}", Style::default().fg(theme.success)) // ✓
+        } else if is_failed {
+            (
+                "\u{2717}", // ✗
+                Style::default()
+                    .fg(theme.danger)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("\u{00b7}", Style::default().fg(theme.muted)) // ·
+        };
+
+        // Role accent color
+        let accent = role_accent(&agent.label, theme);
         let bg = if is_selected {
             theme.selection_background
         } else {
@@ -244,8 +269,17 @@ fn render_agent_roster(
                 }
             })
             .unwrap_or_else(|| "-".to_string());
+
+        // Context gauge — use tokens against the model's context window
         let total_tokens = activity_row.map_or(0u64, |r| r.tokens_used);
-        let ctx_limit = 200_000u64;
+        let ctx_limit = tui_state
+            .agents
+            .iter()
+            .find(|row| row.id == agent.id)
+            .map(|row| row.context_limit)
+            .filter(|limit| *limit > 0)
+            .or_else(|| activity_row.map(|row| model_context_limit(&row.model)))
+            .unwrap_or_else(|| model_context_limit(""));
         let fill_pct = (total_tokens as f64 / ctx_limit as f64).clamp(0.0, 1.0);
         let gauge_width = 6usize.min(content_width.saturating_sub(40));
         let state_label = if is_active {
@@ -379,11 +413,11 @@ fn render_summary_line(
     let active_count = data
         .agents
         .iter()
-        .filter(|a| a.status == "running" || a.status == "active")
+        .filter(|a| AgentStatus::from(a.status.as_str()).is_active())
         .count();
     let total_agents = data.agents.len();
     let total_tokens = tui_state.cumulative_input_tokens + tui_state.cumulative_output_tokens;
-    let cost = tui_state.cumulative_cost_usd;
+    let cost = tui_state.cost_dollars;
 
     let line1 = Line::from(vec![
         Span::styled(" agents: ", Style::default().fg(theme.muted)),
@@ -669,7 +703,8 @@ fn render_output_body(
     let selected_agent = data.agents.get(view_state.selected);
     let selected_id = selected_agent.map(|a| a.id.as_str()).unwrap_or("");
     let selected_status = selected_agent.map(|a| a.status.as_str()).unwrap_or("idle");
-    let accent = agent_status_color(selected_status, theme);
+    let selected_role = selected_agent.map(|a| a.label.as_str()).unwrap_or("");
+    let accent = role_accent(selected_role, theme);
     let focused = matches!(
         tui_state.focus,
         FocusZone::AgentOutput | FocusZone::RightPanel
@@ -684,110 +719,48 @@ fn render_output_body(
         )
     };
 
-    let tail_indicator = if view_state.auto_tail {
-        " TAIL"
-    } else {
-        " PINNED"
-    };
-
     let border_style = if focused {
         Style::default().fg(accent)
     } else {
         theme.muted()
     };
-    let title_style = if focused || is_agent_active(selected_status) {
+    let title_style = if focused
+        || selected_agent.is_some_and(|a| AgentStatus::from(a.status.as_str()).is_active())
+    {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         theme.muted()
     };
 
+    let collected = collect_agent_output_lines(data, tui_state, view_state.selected);
+    let total_lines = collected.len();
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(vec![
-            Span::styled(format!(" {title_label}"), title_style),
-            Span::styled(
-                format!(" [{tail_indicator}] "),
-                if view_state.auto_tail {
-                    Style::default().fg(theme.success)
-                } else {
-                    Style::default().fg(theme.warning)
-                },
-            ),
-        ])
         .border_style(border_style);
     let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Gather output lines from the best available source.
-    //
-    // Priority:
-    //   1. current_plan_execution.agent_output_tail
-    //   2. selected agent's output from tui_state.agents_by_id
-    //   3. task_outputs for the agent's current task
-    //   4. episode output text
-    let collected: Vec<String> = {
-        // 1. Plan execution output tail.
-        let exec_lines: Vec<String> = data
-            .current_plan_execution
-            .as_ref()
-            .map(|exec| exec.agent_output_tail.clone())
-            .unwrap_or_default();
-
-        if !exec_lines.is_empty() {
-            exec_lines
-        } else if let Some(agent_summary) = selected_agent {
-            // 2. Selected agent output from tui_state.agents_by_id.
-            if let Some(agent_state) = tui_state.agents_by_id.get(&agent_summary.id) {
-                if !agent_state.output_lines.is_empty() {
-                    agent_state.output_lines.clone()
-                } else if let Some(task_id) = &agent_state.task_id {
-                    // 3. Task outputs for agent's current task.
-                    data.task_outputs.get(task_id).cloned().unwrap_or_default()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        }
-    };
-
-    // 4. Fallback: episode output text for the selected agent.
-    let collected = if collected.is_empty() {
-        if let Some(agent_summary) = selected_agent {
-            let mut episode_output = Vec::new();
-            for episode in data.episodes() {
-                if episode.agent_id == agent_summary.id {
-                    // Extract output text from episode extra fields.
-                    for key in [
-                        "stderr",
-                        "agent_stderr",
-                        "output",
-                        "stdout",
-                        "agent_output",
-                        "output_tail",
-                    ] {
-                        if let Some(text) = episode.extra.get(key).and_then(|v| v.as_str()) {
-                            if !text.trim().is_empty() {
-                                episode_output = text.lines().map(String::from).collect();
-                                break;
-                            }
-                        }
-                    }
-                    if !episode_output.is_empty() {
-                        break;
-                    }
-                }
-            }
-            episode_output
-        } else {
-            Vec::new()
-        }
+    let visible_height = inner.height as usize;
+    let max_scroll = total_lines
+        .saturating_sub(visible_height)
+        .min(u16::MAX as usize);
+    let scroll = tui_state.agent_scroll.unwrap_or(max_scroll).min(max_scroll);
+    let tail_indicator = if tui_state.agent_scroll.is_none() {
+        "[TAIL]".to_string()
     } else {
-        collected
+        format!("[PINNED line {}]", scroll.saturating_add(1))
     };
+
+    let block = block.title(vec![
+        Span::styled(format!(" {title_label}"), title_style),
+        Span::styled(
+            format!(" {tail_indicator} "),
+            if tui_state.agent_scroll.is_none() {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default().fg(theme.warning)
+            },
+        ),
+    ]);
+    frame.render_widget(block, area);
 
     let output_lines: Vec<&str> = collected.iter().map(String::as_str).collect();
 
@@ -816,29 +789,80 @@ fn render_output_body(
         return;
     }
 
-    let text: Vec<Line<'_>> = output_lines
+    let text: Vec<Line<'static>> = output_lines
         .iter()
         .map(|line| {
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(*line, Style::default().fg(theme.foreground)),
-            ])
+            let mut spans = Vec::with_capacity(2);
+            spans.push(Span::raw(" "));
+            spans.extend(parse_ansi_line(line));
+            Line::from(spans)
         })
         .collect();
 
-    let max_scroll = text.len().saturating_sub(inner.height as usize);
-    let max_scroll = max_scroll.min(u16::MAX as usize);
-    let scroll = if view_state.auto_tail {
-        max_scroll as u16
-    } else {
-        let pinned = view_state.scroll as usize;
-        max_scroll.saturating_sub(pinned.min(max_scroll)) as u16
-    };
-
     let paragraph = Paragraph::new(text)
+        .style(theme.text())
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, inner);
+}
+
+pub(crate) fn collect_agent_output_lines(
+    data: &DashboardData,
+    tui_state: &TuiState,
+    selected: usize,
+) -> Vec<String> {
+    let selected_agent = data.agents.get(selected);
+
+    // Priority:
+    //   1. current_plan_execution.agent_output_tail
+    //   2. selected agent output from tui_state.agents_by_id
+    //   3. task_outputs for the agent's current task
+    //   4. episode output text
+    let collected: Vec<String> = data
+        .current_plan_execution
+        .as_ref()
+        .map(|exec| exec.agent_output_tail.clone())
+        .unwrap_or_default();
+
+    if !collected.is_empty() {
+        return collected;
+    }
+
+    if let Some(agent_summary) = selected_agent {
+        if let Some(agent_state) = tui_state.agents_by_id.get(&agent_summary.id) {
+            if !agent_state.output_lines.is_empty() {
+                return agent_state.output_lines.clone();
+            }
+            if let Some(task_id) = &agent_state.task_id {
+                let task_output = data.task_outputs.get(task_id).cloned().unwrap_or_default();
+                if !task_output.is_empty() {
+                    return task_output;
+                }
+            }
+        }
+
+        for episode in data.episodes() {
+            if episode.agent_id != agent_summary.id {
+                continue;
+            }
+            for key in [
+                "stderr",
+                "agent_stderr",
+                "output",
+                "stdout",
+                "agent_output",
+                "output_tail",
+            ] {
+                if let Some(text) = episode.extra.get(key).and_then(|v| v.as_str()) {
+                    if !text.trim().is_empty() {
+                        return text.lines().map(String::from).collect();
+                    }
+                }
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,23 +1060,4 @@ fn shorten_model(slug: &str) -> String {
         .replace("sonnet-", "s")
         .replace("opus-", "o")
         .replace("haiku-", "h")
-}
-
-/// Truncate in the middle with ellipsis if too long.
-fn truncate_middle(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
-    }
-    if max <= 3 {
-        return chars[..max].iter().collect();
-    }
-    let keep_left = (max - 1) / 2;
-    let keep_right = max - keep_left - 1;
-    let left: String = chars[..keep_left].iter().collect();
-    let right: String = chars[chars.len() - keep_right..].iter().collect();
-    format!("{left}\u{2026}{right}")
 }

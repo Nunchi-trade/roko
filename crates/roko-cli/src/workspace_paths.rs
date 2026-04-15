@@ -2,27 +2,20 @@
 
 use std::path::{Path, PathBuf};
 
+pub use crate::plan::plans_dir;
+
+/// Return the relative plans directory (no workspace root prefix).
+///
+/// Used by cloud execution where the workspace root is not yet known.
+#[must_use]
+pub fn relative_plans_dir() -> PathBuf {
+    PathBuf::from("plans")
+}
+
 /// Resolve the workspace-local `.roko` root.
 #[must_use]
 pub fn roko_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko")
-}
-
-/// Resolve the canonical plans directory.
-#[must_use]
-pub fn plans_dir(workdir: &Path) -> PathBuf {
-    let top_level = workdir.join("plans");
-    if top_level.is_dir() {
-        return top_level;
-    }
-
-    workdir.join(relative_plans_dir())
-}
-
-/// Resolve the plans directory relative to a workspace root.
-#[must_use]
-pub fn relative_plans_dir() -> PathBuf {
-    PathBuf::from(".roko").join("plans")
 }
 
 /// Resolve the PRD root directory.

@@ -12,13 +12,17 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
 
 use super::ViewState;
+use crate::config::Config;
+use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::TuiState;
+use crate::tui::state::{AgentStatus, TuiState, model_context_limit};
 use crate::tui::widgets;
 
 // ---------------------------------------------------------------------------
@@ -153,7 +157,7 @@ fn render_right_panel(
         3 => render_sub_errors(frame, sections[1], data, theme),
         4 => render_sub_git(frame, sections[1], tui_state, theme),
         5 => render_sub_mcp(frame, sections[1], data, tui_state, theme),
-        6 => render_sub_processes(frame, sections[1], data, focused, theme),
+        6 => render_sub_processes(frame, sections[1], data, tui_state, focused, theme),
         _ => {}
     }
 }
@@ -208,20 +212,21 @@ fn render_sub_agents(
             let row = activity
                 .as_ref()
                 .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
-            let state = match agent.status.as_str() {
-                "running" | "active" => widgets::parallel_pool::AgentRunState::Active,
-                "done" | "completed" => widgets::parallel_pool::AgentRunState::Done,
-                "error" | "failed" => widgets::parallel_pool::AgentRunState::Failed,
-                _ => widgets::parallel_pool::AgentRunState::Idle,
+            let state = match AgentStatus::from(agent.status.as_str()) {
+                AgentStatus::Active => widgets::parallel_pool::AgentRunState::Active,
+                AgentStatus::Done => widgets::parallel_pool::AgentRunState::Done,
+                AgentStatus::Failed => widgets::parallel_pool::AgentRunState::Failed,
+                AgentStatus::Idle => widgets::parallel_pool::AgentRunState::Idle,
             };
             let used = row.map_or(0, |r| r.tokens_used);
-            let total = row.map_or(200_000, |r| {
-                if r.tokens_used > 0 {
-                    r.tokens_used * 2
-                } else {
-                    200_000
-                }
-            });
+            let total = tui_state
+                .agents
+                .iter()
+                .find(|state_agent| state_agent.id == agent.id)
+                .map(|state_agent| state_agent.context_limit)
+                .filter(|limit| *limit > 0)
+                .or_else(|| row.map(|r| model_context_limit(&r.model)))
+                .unwrap_or_else(|| model_context_limit(""));
             widgets::parallel_pool::ParallelAgentState {
                 role: agent.label.clone(),
                 model: row.map_or_else(|| "-".to_string(), |r| r.model.clone()),
@@ -338,7 +343,10 @@ fn render_output_panel(
         return;
     }
 
-    let text: Vec<Line<'_>> = lines.iter().map(|l| Line::from(*l)).collect();
+    let text: Vec<Line<'static>> = lines
+        .iter()
+        .map(|line| Line::from(parse_ansi_line(line)))
+        .collect();
     let scroll = if view_state.auto_tail {
         text.len()
             .saturating_sub(inner.height as usize)
@@ -369,46 +377,12 @@ fn render_sub_diff(
     tui_state: &TuiState,
     theme: &Theme,
 ) {
-    let diff_text = gather_diff_text(data, tui_state);
     let scroll = if tui_state.diff_scroll > 0 {
         Some(tui_state.diff_scroll)
     } else {
         None
     };
-    widgets::diff_panel::render_diff_panel(frame, area, &diff_text, scroll, theme);
-}
-
-fn gather_diff_text(data: &DashboardData, tui_state: &TuiState) -> String {
-    // Try selected agent's diff content.
-    if let Some(agent_summary) = tui_state.agents.get(
-        tui_state
-            .selected_agent
-            .min(tui_state.agents.len().saturating_sub(1)),
-    ) {
-        if let Some(agent) = tui_state.agents_by_id.get(&agent_summary.id) {
-            if !agent.diff_content.is_empty() {
-                return agent.diff_content.clone();
-            }
-        }
-    }
-    // Fallback: extract diff-like lines from execution output.
-    if let Some(exec) = &data.current_plan_execution {
-        let diff_lines: Vec<&str> = exec
-            .agent_output_tail
-            .iter()
-            .map(String::as_str)
-            .filter(|l| {
-                l.starts_with('+')
-                    || l.starts_with('-')
-                    || l.starts_with("@@")
-                    || l.starts_with("diff ")
-            })
-            .collect();
-        if !diff_lines.is_empty() {
-            return diff_lines.join("\n");
-        }
-    }
-    String::new()
+    widgets::diff_panel::render_diff_panel(frame, area, &data.git_diff, scroll, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -581,32 +555,180 @@ fn render_sub_mcp(
     frame.render_widget(block, area);
 
     let eff = &data.efficiency;
-    let lines = vec![
+    let model_usage = aggregate_model_usage(&data.efficiency_events);
+    let mcp_config = load_mcp_config_view(data.root());
+    let total_trials: u64 = data
+        .cascade_router
+        .confidence_stats
+        .values()
+        .map(|stats| stats.trials)
+        .sum();
+    let total_successes: u64 = data
+        .cascade_router
+        .confidence_stats
+        .values()
+        .map(|stats| stats.successes)
+        .sum();
+
+    let mut lines = vec![
+        section_header("MCP Config", theme),
         Line::from(vec![
-            Span::styled("input tokens:  ", theme.muted()),
-            Span::styled(fmt_count(eff.total_input_tokens), theme.info()),
-        ]),
-        Line::from(vec![
-            Span::styled("output tokens: ", theme.muted()),
-            Span::styled(fmt_count(eff.total_output_tokens), theme.info()),
-        ]),
-        Line::from(vec![
-            Span::styled("total cost:    ", theme.muted()),
-            Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
-        ]),
-        Line::from(Span::raw("")),
-        Line::from(vec![
-            Span::styled("cascade router: ", theme.muted()),
+            Span::styled("agent.mcp_config: ", theme.muted()),
             Span::styled(
-                format!("{} models", data.cascade_router.model_slugs.len()),
-                theme.text(),
+                mcp_config.configured_path.as_ref().map_or_else(
+                    || "(not set)".to_string(),
+                    |path| path.display().to_string(),
+                ),
+                if mcp_config.configured_path.is_some() {
+                    theme.text()
+                } else {
+                    theme.muted()
+                },
             ),
         ]),
         Line::from(vec![
-            Span::styled("experiments:    ", theme.muted()),
-            Span::styled(format!("{} total", data.experiments.len()), theme.text()),
+            Span::styled("resolved path:     ", theme.muted()),
+            Span::styled(
+                mcp_config
+                    .resolved_path
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |path| path.display().to_string()),
+                if mcp_config.resolved_path.is_some() {
+                    theme.text()
+                } else {
+                    theme.muted()
+                },
+            ),
         ]),
+        Line::from(vec![
+            Span::styled("server count:       ", theme.muted()),
+            Span::styled(
+                mcp_config.config.as_ref().map_or_else(
+                    || "-".to_string(),
+                    |config| config.servers.len().to_string(),
+                ),
+                theme.info(),
+            ),
+        ]),
+        Line::from(Span::raw("")),
     ];
+
+    if let Some(error) = &mcp_config.error {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", theme.muted()),
+            Span::styled(
+                truncate(error, inner.width.saturating_sub(8) as usize),
+                theme.danger(),
+            ),
+        ]));
+    } else if let Some(config) = &mcp_config.config {
+        if config.servers.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("status: ", theme.muted()),
+                Span::styled("config loaded, no servers defined", theme.warning()),
+            ]));
+        } else {
+            for server in &config.servers {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:>12}: ", truncate(&server.name, 12)),
+                        theme.muted(),
+                    ),
+                    Span::styled(render_mcp_command(server), theme.text()),
+                ]));
+            }
+        }
+    } else if mcp_config.configured_path.is_some() {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", theme.muted()),
+            Span::styled("configured file not found", theme.warning()),
+        ]));
+    }
+
+    lines.extend([
+        Line::from(Span::raw("")),
+        section_header("Efficiency", theme),
+        Line::from(vec![
+            Span::styled("input tokens:  ", theme.muted()),
+            Span::styled(fmt_count(eff.total_input_tokens), theme.info()),
+            Span::styled("  output: ", theme.muted()),
+            Span::styled(fmt_count(eff.total_output_tokens), theme.info()),
+            Span::styled("  cost: ", theme.muted()),
+            Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
+        ]),
+    ]);
+
+    if model_usage.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("models: ", theme.muted()),
+            Span::styled("no efficiency events", theme.muted()),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("models: ", theme.muted()),
+            Span::styled(format!("{} tracked", model_usage.len()), theme.text()),
+        ]));
+        for (model, usage) in model_usage {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12}: ", truncate(&model, 12)), theme.muted()),
+                Span::styled(format!("{} turns", usage.turns), theme.text()),
+                Span::styled("  in ", theme.muted()),
+                Span::styled(fmt_count(usage.input_tokens), theme.info()),
+                Span::styled("  out ", theme.muted()),
+                Span::styled(fmt_count(usage.output_tokens), theme.info()),
+                Span::styled("  ", theme.muted()),
+                Span::styled(format!("${:.4}", usage.cost_usd), theme.warning()),
+            ]));
+        }
+    }
+
+    lines.extend([
+        Line::from(Span::raw("")),
+        section_header("Cascade Router", theme),
+    ]);
+    if data.cascade_router.model_slugs.is_empty() && total_trials == 0 {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", theme.muted()),
+            Span::styled("no router stats yet", theme.muted()),
+        ]));
+    } else {
+        let success_rate = if total_trials > 0 {
+            format!(
+                "{:.0}%",
+                total_successes as f64 / total_trials as f64 * 100.0
+            )
+        } else {
+            "-".to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("models: ", theme.muted()),
+            Span::styled(
+                data.cascade_router.model_slugs.len().to_string(),
+                theme.info(),
+            ),
+            Span::styled("  trials: ", theme.muted()),
+            Span::styled(total_trials.to_string(), theme.text()),
+            Span::styled("  success: ", theme.muted()),
+            Span::styled(success_rate, theme.text()),
+        ]));
+        for slug in &data.cascade_router.model_slugs {
+            let stats = data.cascade_router.confidence_stats.get(slug);
+            let trials = stats.map_or(0, |entry| entry.trials);
+            let successes = stats.map_or(0, |entry| entry.successes);
+            let rate = if trials > 0 {
+                format!("{:.0}%", successes as f64 / trials as f64 * 100.0)
+            } else {
+                "-".to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12}: ", truncate(slug, 12)), theme.muted()),
+                Span::styled(format!("{successes}/{trials}"), theme.text()),
+                Span::styled("  rate ", theme.muted()),
+                Span::styled(rate, theme.info()),
+            ]));
+        }
+    }
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -618,11 +740,11 @@ fn render_sub_processes(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
-    let sections =
-        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
     // Process table.
     let border = if focused {
@@ -637,51 +759,104 @@ fn render_sub_processes(
     let inner = block.inner(sections[0]);
     frame.render_widget(block, sections[0]);
 
-    if data.agents.is_empty() {
+    let activity =
+        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
+
+    let active_agents: Vec<_> = tui_state
+        .agents
+        .iter()
+        .filter(|agent| agent.active)
+        .collect();
+    let total_agents = tui_state.agents.len();
+
+    let process_rows: Vec<_> = active_agents
+        .iter()
+        .map(|agent| {
+            let activity_row = activity.as_ref().and_then(|snapshot| {
+                snapshot
+                    .active_agents
+                    .iter()
+                    .find(|row| row.agent_id == agent.id)
+            });
+            let model = if !agent.model.is_empty() {
+                agent.model.clone()
+            } else {
+                activity_row.map_or_else(|| "-".to_string(), |row| row.model.clone())
+            };
+            let task = if !agent.current_task.is_empty() {
+                agent.current_task.clone()
+            } else if let Some(row) = activity_row {
+                if !row.task.is_empty() && row.task != "-" {
+                    row.task.clone()
+                } else if !agent.current_plan.is_empty() {
+                    agent.current_plan.clone()
+                } else {
+                    "-".to_string()
+                }
+            } else if !agent.current_plan.is_empty() {
+                agent.current_plan.clone()
+            } else {
+                "-".to_string()
+            };
+            let tokens = agent.input_tokens.saturating_add(agent.output_tokens);
+            let status = tui_state
+                .agents_by_id
+                .get(&agent.id)
+                .map(|entry| entry.status)
+                .unwrap_or(AgentStatus::Active);
+            (
+                agent.id.clone(),
+                agent.role.clone(),
+                model,
+                task,
+                if tokens > 0 {
+                    tokens
+                } else {
+                    activity_row.map_or(0, |row| row.tokens_used)
+                },
+                status.to_string(),
+                activity_row.map_or(0.0, |row| row.cost_usd),
+            )
+        })
+        .collect();
+
+    if process_rows.is_empty() {
         frame.render_widget(
             Paragraph::new("no tracked processes").style(theme.muted()),
             inner,
         );
     } else {
-        let activity = crate::tui::dashboard::build_agent_activity_snapshot(
-            &data.agents,
-            &data.efficiency_events,
-        );
-        let rows: Vec<Row<'_>> = data
-            .agents
+        let rows: Vec<Row<'_>> = process_rows
             .iter()
-            .map(|agent| {
-                let ss = match agent.status.as_str() {
-                    "running" | "active" => theme.info(),
-                    "error" | "failed" => theme.danger(),
-                    _ => theme.muted(),
+            .map(|(id, role, model, task, tokens, status, _)| {
+                let status_style = match AgentStatus::from(status.as_str()) {
+                    AgentStatus::Active => theme.info(),
+                    AgentStatus::Failed => theme.danger(),
+                    AgentStatus::Done | AgentStatus::Idle => theme.muted(),
                 };
-                let row = activity
-                    .as_ref()
-                    .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
                 Row::new(vec![
-                    Cell::from(truncate(&agent.id, 14)),
-                    Cell::from(agent.label.as_str()),
-                    Cell::from(Span::styled(agent.status.as_str(), ss)),
-                    Cell::from(row.map_or("-".into(), |r| shorten_model(&r.model))),
-                    Cell::from(row.map_or("-".into(), |r| fmt_tokens(r.tokens_used))),
-                    Cell::from(agent.plan_id.as_deref().unwrap_or("-")),
+                    Cell::from(truncate(id, 14)),
+                    Cell::from(truncate(role, 12)),
+                    Cell::from(truncate(&shorten_model(model), 14)),
+                    Cell::from(truncate(task, 28)),
+                    Cell::from(fmt_tokens(*tokens)),
+                    Cell::from(Span::styled(status.as_str(), status_style)),
                 ])
             })
             .collect();
 
         let widths = [
-            Constraint::Min(10),
+            Constraint::Length(14),
             Constraint::Min(12),
-            Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(8),
-            Constraint::Min(8),
+            Constraint::Length(14),
+            Constraint::Min(20),
+            Constraint::Length(10),
+            Constraint::Length(10),
         ];
         frame.render_widget(
             Table::new(rows, widths)
                 .header(
-                    Row::new(["pid", "label", "status", "model", "tokens", "plan"])
+                    Row::new(["PID/ID", "Role", "Model", "Task", "Tokens", "Status"])
                         .style(theme.accent().add_modifier(Modifier::BOLD)),
                 )
                 .column_spacing(1),
@@ -689,46 +864,31 @@ fn render_sub_processes(
         );
     }
 
-    // System metrics summary.
-    let sys_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" System ")
-        .border_style(theme.muted());
-    let sys_inner = sys_block.inner(sections[1]);
-    frame.render_widget(sys_block, sections[1]);
+    let active_count = process_rows.len();
+    let summary_tokens = tui_state.token_total;
+    let summary_cost = tui_state.cost_dollars;
 
-    let eff = &data.efficiency;
-    let active = data
-        .agents
-        .iter()
-        .filter(|a| a.status == "running" || a.status == "active")
-        .count();
+    let summary_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Summary ")
+        .border_style(theme.muted());
+    let summary_inner = summary_block.inner(sections[1]);
+    frame.render_widget(summary_block, sections[1]);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("agents:  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{active} active / {} total", data.agents.len()),
-                    theme.text(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("tokens:  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!(
-                        "{}in + {}out",
-                        fmt_count(eff.total_input_tokens),
-                        fmt_count(eff.total_output_tokens)
-                    ),
-                    theme.text(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("cost:    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
-            ]),
-        ]),
-        sys_inner,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{active_count} active / {total_agents} total agents"),
+                theme.text(),
+            ),
+            Span::styled(", ", theme.muted()),
+            Span::styled(
+                format!("{} tokens", fmt_count(summary_tokens)),
+                theme.info(),
+            ),
+            Span::styled(", ", theme.muted()),
+            Span::styled(format!("${summary_cost:.4} cost"), theme.warning()),
+        ])),
+        summary_inner,
     );
 }
 
@@ -762,6 +922,122 @@ fn render_bottom_ribbon(
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+#[derive(Debug, Clone, Default)]
+struct McpConfigView {
+    configured_path: Option<PathBuf>,
+    resolved_path: Option<PathBuf>,
+    config: Option<roko_agent::mcp::McpConfig>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModelUsageAggregate {
+    turns: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+}
+
+fn section_header(title: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        theme.accent().add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn load_mcp_config_view(root: &Path) -> McpConfigView {
+    let config_path = root.join("roko.toml");
+    let config = match Config::from_file(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return McpConfigView {
+                error: Some(format!("failed to load roko.toml: {error}")),
+                ..McpConfigView::default()
+            };
+        }
+    };
+
+    let Some(configured_path) = config.agent.mcp_config else {
+        return McpConfigView::default();
+    };
+    let resolved_path = resolve_mcp_config_path(root, &configured_path);
+    if !resolved_path.is_file() {
+        return McpConfigView {
+            configured_path: Some(configured_path),
+            resolved_path: Some(resolved_path),
+            ..McpConfigView::default()
+        };
+    }
+
+    match roko_agent::mcp::McpConfig::load(&resolved_path) {
+        Ok(config) => McpConfigView {
+            configured_path: Some(configured_path),
+            resolved_path: Some(resolved_path),
+            config: Some(config),
+            error: None,
+        },
+        Err(error) => McpConfigView {
+            configured_path: Some(configured_path),
+            resolved_path: Some(resolved_path),
+            config: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn resolve_mcp_config_path(root: &Path, configured_path: &Path) -> PathBuf {
+    if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        root.join(configured_path)
+    }
+}
+
+fn render_mcp_command(server: &roko_agent::mcp::McpServerConfig) -> String {
+    if server.args.is_empty() {
+        server.command.clone()
+    } else {
+        format!("{} {}", server.command, server.args.join(" "))
+    }
+}
+
+fn aggregate_model_usage(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+) -> Vec<(String, ModelUsageAggregate)> {
+    let mut usage: BTreeMap<String, ModelUsageAggregate> = BTreeMap::new();
+    for event in events {
+        let model = event_model_slug(event);
+        let entry = usage.entry(model).or_default();
+        entry.turns += 1;
+        entry.input_tokens += event.input_tokens;
+        entry.output_tokens += event.output_tokens;
+        entry.cost_usd += event.cost_usd;
+    }
+
+    let mut usage: Vec<(String, ModelUsageAggregate)> = usage.into_iter().collect();
+    usage.sort_by(|a, b| {
+        b.1.cost_usd
+            .partial_cmp(&a.1.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.input_tokens.cmp(&a.1.input_tokens))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    usage
+}
+
+fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
+    let model = if event.model.is_empty() {
+        event.model_used.as_str()
+    } else {
+        event.model.as_str()
+    };
+    if model.is_empty() {
+        "unknown".to_string()
+    } else {
+        model.to_string()
+    }
+}
 
 fn shorten_model(slug: &str) -> String {
     slug.replace("claude-", "")

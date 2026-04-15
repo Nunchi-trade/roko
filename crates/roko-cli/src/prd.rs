@@ -926,21 +926,26 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
 #[must_use]
 pub fn has_substantive_markdown_content(content: &str) -> bool {
     let mut in_frontmatter = false;
-    let mut saw_frontmatter_start = false;
+    let mut saw_frontmatter = false;
 
     content.lines().any(|line| {
         let trimmed = line.trim();
-        if !saw_frontmatter_start && trimmed == "---" {
-            saw_frontmatter_start = true;
-            in_frontmatter = true;
-            return false;
-        }
-        if in_frontmatter {
-            if trimmed == "---" {
-                in_frontmatter = false;
+        if trimmed == "---" {
+            if !saw_frontmatter {
+                saw_frontmatter = true;
+                in_frontmatter = true;
+                return false;
             }
+            if in_frontmatter {
+                in_frontmatter = false;
+                return false;
+            }
+        }
+
+        if in_frontmatter {
             return false;
         }
+
         !trimmed.is_empty() && !trimmed.starts_with('#')
     })
 }

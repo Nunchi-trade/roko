@@ -6,6 +6,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::modals::ModalState;
 use super::tabs::Tab;
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,32 @@ impl std::fmt::Display for ConfirmAction {
     }
 }
 
+/// Logs tab filter levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogFilterLevel {
+    Info,
+    Warn,
+    Error,
+    Debug,
+}
+
+impl LogFilterLevel {
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [Self::Info, Self::Warn, Self::Error, Self::Debug]
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INF",
+            Self::Warn => "WRN",
+            Self::Error => "ERR",
+            Self::Debug => "DBG",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TuiAction
 // ---------------------------------------------------------------------------
@@ -168,6 +195,7 @@ impl std::fmt::Display for ConfirmAction {
 pub enum TuiAction {
     // -- lifecycle --
     Quit,
+    QuitConfirmed,
 
     // -- tab navigation --
     SwitchTab(Tab),
@@ -175,12 +203,15 @@ pub enum TuiAction {
     // -- plan list navigation --
     SelectPlanUp,
     SelectPlanDown,
+    TaskPickerUp,
+    TaskPickerDown,
 
     // -- log scrolling --
     ScrollLogUp,
     ScrollLogDown,
     ScrollLogEnd,
-    ToggleLogTail,
+    ToggleLogFilter(LogFilterLevel),
+    ShowAllLogFilters,
 
     // -- agent tab --
     SwitchAgentTab(usize),
@@ -199,6 +230,7 @@ pub enum TuiAction {
 
     // -- help --
     ShowHelp,
+    ToggleScreenPostFx,
 
     // -- focus --
     FocusNext,
@@ -247,7 +279,6 @@ pub enum TuiAction {
     ConfigToggle,
     ConfigCycleLeft,
     ConfigCycleRight,
-    ConfigStartEdit,
     ConfigCommitEdit,
     ConfigCancelEdit,
     ConfigSave,
@@ -273,9 +304,6 @@ pub enum TuiAction {
     StartFilter,
     AcceptFilter,
     CancelFilter,
-
-    // -- tree collapse --
-    CollapseExpand,
 
     // -- task detail modal --
     ShowTaskDetail,
@@ -326,7 +354,7 @@ pub fn handle_key(
     modals: &ModalVisibility,
 ) -> TuiAction {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return TuiAction::Quit;
+        return TuiAction::QuitConfirmed;
     }
 
     // Modal intercepts (highest priority first)
@@ -393,6 +421,25 @@ pub struct ModalVisibility {
     pub show_help: bool,
 }
 
+impl ModalVisibility {
+    #[must_use]
+    pub fn from_active_modal(active_modal: Option<&ModalState>) -> Self {
+        let mut visibility = Self::default();
+
+        match active_modal {
+            Some(ModalState::Help) => visibility.show_help = true,
+            Some(ModalState::PlanDetail { .. }) => visibility.show_plan_detail = true,
+            Some(ModalState::WaveOverview { .. }) => visibility.show_wave_overview = true,
+            Some(ModalState::QueueOverview { .. }) => visibility.show_queue_overview = true,
+            Some(ModalState::TaskPicker { .. }) => visibility.show_task_picker = true,
+            Some(ModalState::TaskDetail { .. }) => visibility.show_task_detail = true,
+            _ => {}
+        }
+
+        visibility
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Modal key handlers
 // ---------------------------------------------------------------------------
@@ -426,8 +473,8 @@ fn handle_task_picker_key(key: KeyEvent) -> TuiAction {
     match key.code {
         KeyCode::Esc => TuiAction::CloseTaskPicker,
         KeyCode::Enter => TuiAction::ShowTaskDetail,
-        KeyCode::Up | KeyCode::Char('k') => TuiAction::SelectPlanUp,
-        KeyCode::Down | KeyCode::Char('j') => TuiAction::SelectPlanDown,
+        KeyCode::Up | KeyCode::Char('k') => TuiAction::TaskPickerUp,
+        KeyCode::Down | KeyCode::Char('j') => TuiAction::TaskPickerDown,
         _ => TuiAction::None,
     }
 }
@@ -484,6 +531,12 @@ fn handle_filter_key(key: KeyEvent) -> TuiAction {
 // ---------------------------------------------------------------------------
 
 fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
+    // Ctrl-C force quits and bypasses confirmation.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Some(TuiAction::QuitConfirmed);
+    }
+
+
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
@@ -492,6 +545,7 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
     match key.code {
         KeyCode::Char('q') => Some(TuiAction::Quit),
         KeyCode::Char('?') => Some(TuiAction::ShowHelp),
+        KeyCode::Char('n') => Some(TuiAction::DismissNotification),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::Refresh)
         }
@@ -510,6 +564,10 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         // Ctrl-d: reset selected plan (confirm)
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ResetPlanState)
+        }
+        // Ctrl-e: toggle full-screen post-processing
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::ToggleScreenPostFx)
         }
         // Ctrl-g: reconcile git state (confirm)
         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -563,7 +621,6 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         // Modal triggers
         KeyCode::Char('w') => TuiAction::ShowWaveOverview,
         KeyCode::Char('p') => TuiAction::TogglePause,
-        KeyCode::Char('n') => TuiAction::DismissNotification,
         KeyCode::Char('i') => TuiAction::StartInject,
         KeyCode::Char('y') => TuiAction::ApproveCommand,
         KeyCode::Char('v') => TuiAction::ReverifyPlan,
@@ -686,7 +743,11 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::Home => TuiAction::ScrollFocusedHome,
         KeyCode::End => TuiAction::ScrollFocusedEnd,
         KeyCode::Char('G') => TuiAction::ScrollLogEnd,
-        KeyCode::Char('f') => TuiAction::ToggleLogTail,
+        KeyCode::Char('1') => TuiAction::ToggleLogFilter(LogFilterLevel::Info),
+        KeyCode::Char('2') => TuiAction::ToggleLogFilter(LogFilterLevel::Warn),
+        KeyCode::Char('3') => TuiAction::ToggleLogFilter(LogFilterLevel::Error),
+        KeyCode::Char('4') => TuiAction::ToggleLogFilter(LogFilterLevel::Debug),
+        KeyCode::Char('a') => TuiAction::ShowAllLogFilters,
         KeyCode::Char('/') => TuiAction::StartFilter,
         _ => TuiAction::None,
     }
@@ -769,7 +830,19 @@ mod tests {
             FocusZone::PlanTree,
             &modals(),
         );
-        assert_eq!(action, TuiAction::Quit);
+        assert_eq!(action, TuiAction::QuitConfirmed);
+    }
+
+    #[test]
+    fn global_n_dismisses_notifications_on_any_tab() {
+        let action = handle_key(
+            key(KeyCode::Char('n')),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::DismissNotification);
     }
 
     #[test]
@@ -821,6 +894,42 @@ mod tests {
     }
 
     #[test]
+    fn logs_tab_number_keys_toggle_expected_level() {
+        let action = handle_key(
+            key(KeyCode::Char('3')),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ToggleLogFilter(LogFilterLevel::Error));
+    }
+
+    #[test]
+    fn ctrl_e_toggles_screen_postfx() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ToggleScreenPostFx);
+    }
+
+    #[test]
+    fn logs_tab_a_restores_all_levels() {
+        let action = handle_key(
+            key(KeyCode::Char('a')),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ShowAllLogFilters);
+    }
+
+    #[test]
     fn task_picker_modal_intercepts() {
         let mut m = modals();
         m.show_task_picker = true;
@@ -832,6 +941,21 @@ mod tests {
             &m,
         );
         assert_eq!(action, TuiAction::CloseTaskPicker);
+    }
+
+    #[test]
+    fn modal_visibility_reads_active_modal() {
+        let vis = ModalVisibility::from_active_modal(Some(&ModalState::Help));
+        assert!(vis.show_help);
+        assert!(!vis.show_task_detail);
+
+        let vis = ModalVisibility::from_active_modal(Some(&ModalState::TaskPicker {
+            tasks: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+        }));
+        assert!(vis.show_task_picker);
+        assert!(!vis.show_plan_detail);
     }
 
     #[test]
@@ -889,16 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn logs_tab_can_toggle_tail_and_filter() {
-        let action = handle_key(
-            key(KeyCode::Char('f')),
-            InputMode::Normal,
-            Tab::Logs,
-            FocusZone::PlanTree,
-            &modals(),
-        );
-        assert_eq!(action, TuiAction::ToggleLogTail);
-
+    fn logs_tab_slash_starts_filter() {
         let action = handle_key(
             key(KeyCode::Char('/')),
             InputMode::Normal,
@@ -938,6 +1053,7 @@ mod tests {
         );
         assert_eq!(action, TuiAction::ScrollAgentEnd);
     }
+
 
     fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
         let action = handle_key(

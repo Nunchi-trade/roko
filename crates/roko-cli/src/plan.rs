@@ -7,7 +7,17 @@
 
 use std::path::{Path, PathBuf};
 
-pub use crate::workspace_paths::plans_dir;
+/// Resolve the plans directory, preferring the top-level layout and falling
+/// back to the legacy `.roko` location.
+#[must_use]
+pub fn plans_dir(workdir: &Path) -> PathBuf {
+    let top = workdir.join("plans");
+    if top.is_dir() {
+        return top;
+    }
+
+    workdir.join(".roko").join("plans")
+}
 
 /// A plan summary (used in list output).
 #[derive(Debug, Clone)]
@@ -325,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_uses_legacy_location_when_top_level_is_missing() {
+    fn uses_legacy_location_when_top_level_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(&dir).unwrap();
@@ -334,13 +344,13 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_falls_back_to_legacy_location() {
+    fn falls_back_to_legacy_location() {
         let dir = plans_dir(Path::new("/project"));
         assert_eq!(dir, PathBuf::from("/project/.roko/plans"));
     }
 
     #[test]
-    fn plans_dir_prefers_top_level_location_when_present() {
+    fn prefers_top_level_location_when_present() {
         let tmp = tempfile::tempdir().unwrap();
         let top_level = tmp.path().join("plans");
         std::fs::create_dir_all(&top_level).unwrap();

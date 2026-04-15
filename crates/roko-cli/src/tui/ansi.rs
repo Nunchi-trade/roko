@@ -54,23 +54,59 @@ fn apply_sgr_codes(params: &str, style: &mut Style) {
         return;
     }
 
-    for code in params.split(';') {
-        let Ok(code) = code.parse::<u8>() else {
-            continue;
-        };
+    let codes = params
+        .split(';')
+        .filter_map(|code| code.parse::<u8>().ok())
+        .collect::<Vec<_>>();
 
-        match code {
+    let mut i = 0usize;
+    while i < codes.len() {
+        match codes[i] {
+            38 if codes.get(i + 1) == Some(&5) => {
+                if let Some(&index) = codes.get(i + 2) {
+                    *style = style.fg(Color::Indexed(index));
+                    i += 3;
+                    continue;
+                }
+            }
+            48 if codes.get(i + 1) == Some(&5) => {
+                if let Some(&index) = codes.get(i + 2) {
+                    *style = style.bg(Color::Indexed(index));
+                    i += 3;
+                    continue;
+                }
+            }
+            38 if codes.get(i + 1) == Some(&2) => {
+                if let (Some(&r), Some(&g), Some(&b)) =
+                    (codes.get(i + 2), codes.get(i + 3), codes.get(i + 4))
+                {
+                    *style = style.fg(Color::Rgb(r, g, b));
+                    i += 5;
+                    continue;
+                }
+            }
+            48 if codes.get(i + 1) == Some(&2) => {
+                if let (Some(&r), Some(&g), Some(&b)) =
+                    (codes.get(i + 2), codes.get(i + 3), codes.get(i + 4))
+                {
+                    *style = style.bg(Color::Rgb(r, g, b));
+                    i += 5;
+                    continue;
+                }
+            }
             0 => *style = Style::default(),
             1 => *style = style.add_modifier(Modifier::BOLD),
             22 => *style = style.remove_modifier(Modifier::BOLD),
-            30..=37 => style.fg = Some(map_ansi_color(code - 30, false)),
+            30..=37 => style.fg = Some(map_ansi_color(codes[i] - 30, false)),
             39 => style.fg = None,
-            40..=47 => style.bg = Some(map_ansi_color(code - 40, false)),
+            40..=47 => style.bg = Some(map_ansi_color(codes[i] - 40, false)),
             49 => style.bg = None,
-            90..=97 => style.fg = Some(map_ansi_color(code - 90, true)),
-            100..=107 => style.bg = Some(map_ansi_color(code - 100, true)),
+            90..=97 => style.fg = Some(map_ansi_color(codes[i] - 90, true)),
+            100..=107 => style.bg = Some(map_ansi_color(codes[i] - 100, true)),
             _ => {}
         }
+
+        i += 1;
     }
 }
 
@@ -129,5 +165,23 @@ mod tests {
         assert_eq!(spans[0].style.fg, Some(Color::Green));
         assert_eq!(spans[0].style.bg, Some(Color::Blue));
         assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn parses_indexed_foreground_and_background_colors() {
+        let spans = parse_ansi_line("\x1b[38;5;208;48;5;235morange\x1b[0m");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "orange");
+        assert_eq!(spans[0].style.fg, Some(Color::Indexed(208)));
+        assert_eq!(spans[0].style.bg, Some(Color::Indexed(235)));
+    }
+
+    #[test]
+    fn parses_rgb_foreground_and_background_colors() {
+        let spans = parse_ansi_line("\x1b[38;2;255;136;0;48;2;12;34;56mcolor");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "color");
+        assert_eq!(spans[0].style.fg, Some(Color::Rgb(255, 136, 0)));
+        assert_eq!(spans[0].style.bg, Some(Color::Rgb(12, 34, 56)));
     }
 }
