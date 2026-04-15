@@ -28,6 +28,13 @@ The `chain` feature adds:
 
 The `http_api/` module (9 files) exposes ~30 REST endpoints across 6 concerns that do not belong in an EVM simulator.
 
+Current code reality after C1/C2:
+
+- `http_api` is already gated behind `legacy-api`
+- `chain` is already gated behind the `chain` cargo feature
+- `cargo build -p mirage-rs --no-default-features --features binary` succeeds, so pure-EVM mode exists today
+- default features still keep `legacy-api` enabled for compatibility until the dashboard URL swap is exercised against `roko-serve`
+
 ### Endpoint Extraction Map
 
 | Current Endpoint | Current Owner | New Home | Reason |
@@ -105,7 +112,7 @@ flowchart TD
 
 ```toml
 [features]
-default = ["binary", "chain"]
+default = ["binary", "chain", "legacy-api"]
 binary = []              # CLI entry point
 library = []             # Library-only mode
 sim-gas = []             # revm gas accounting
@@ -127,7 +134,7 @@ legacy-api = ["chain"]   # NEW: Keep old REST endpoints during migration
 - Dashboard points to per-agent servers for agent/knowledge/pheromone data
 - Dashboard points to roko-serve for task/plan data
 - Dashboard points to mirage-rs only for EVM simulation + JSON-RPC
-- `legacy-api` becomes opt-in (not in default features)
+- `legacy-api` can become opt-in after the `roko-serve` aggregator is the default dashboard base URL
 - Duration: 1 sprint
 
 ### Phase 3 — Remove Chain Features
@@ -140,7 +147,7 @@ legacy-api = ["chain"]   # NEW: Keep old REST endpoints during migration
 
 ## Target State
 
-After extraction, mirage-rs is:
+Target after Phase 3 cleanup, mirage-rs is:
 
 | Concern | Status |
 |---------|--------|

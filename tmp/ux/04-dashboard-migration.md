@@ -34,6 +34,20 @@ Sam's specs assume mirage-rs is the single backend. The correct architecture has
 
 **Where it lives:** Most naturally as a `routes/aggregator.rs` module on roko-serve. roko-serve already has `AppState`, `ProcessSupervisor`, and knows which agents are running. Adding mirage-compatible routes that fan out to the real sources is ~200-400 LOC.
 
+## Current Implementation Status
+
+The serve-side compatibility layer is partially landed now:
+
+- `/api/agents`, `/api/agents/topology`, `/api/agents/{id}/stats`, `/api/agents/{id}/skills`, `/api/agents/{id}/heartbeat`, and `/api/agents/{id}/trace` are served from `roko-serve`
+- `/api/predictions/sessions`, `/api/predictions/sessions/{id}`, `/api/predictions/claims`, and `/api/predictions/calibration/{agent_id}` fan out to discovered agent servers
+- `/api/tasks`, `/api/tasks/stats`, and `/api/tasks/{id}` are aggregated from discovered agent task surfaces
+- `/api/ws` multiplexes the `roko-serve` event bus plus discovered agent `/stream` WebSockets, and reconnects on discovery refresh
+
+Still placeholder or deferred in the current code:
+
+- knowledge endpoints return compatibility envelopes but not chain-backed data yet
+- pheromone compatibility routes are not yet implemented on `roko-serve`
+
 ## Endpoint Mapping: Sam's Specs → Aggregator Backend
 
 The aggregator presents the same routes. Under the hood, each route's data source changes:
@@ -125,14 +139,14 @@ flowchart LR
     style RS fill:#ddf4ff,stroke:#0969da
 ```
 
-Sam's work: change `NEXT_PUBLIC_API_URL` from mirage-rs to roko-serve aggregator. Everything else stays the same.
+Sam's work: change `NEXT_PUBLIC_API_URL` from mirage-rs to roko-serve aggregator. Keep `NEXT_PUBLIC_MIRAGE_URL` as an escape hatch during the overlap window.
 
-Backend work: `routes/aggregator.rs` on roko-serve (~300-400 LOC) that:
+Backend work in the current codebase: `routes/aggregator.rs` on roko-serve now:
 - Discovers agents via ERC-8004 registry (or ProcessSupervisor for locally-managed agents)
 - Fans out to per-agent servers for agent-specific data
-- Reads chain contracts for knowledge, pheromones, tasks
-- Merges/paginates results in the same shape mirage-rs returns today
+- Merges/paginates results in the same shape mirage-rs returns today for the landed compatibility routes
 - Multiplexes WS streams from N agents into one `/api/ws` connection
+- Leaves knowledge/pheromone backends as explicit follow-up work rather than pretending those sources are complete
 
 ### Phase 3: Mature (+ 4–8 weeks)
 
@@ -163,7 +177,7 @@ flowchart LR
 |------|-----------|
 | Agent servers not ready by Phase 2 | Aggregator can fall back to mirage-rs for missing agents |
 | Aggregator fan-out latency | Parallel requests + caching. Aggregator caches agent list (30s TTL), health (5s), predictions (10s) |
-| WS multiplexing complexity | Start with polling/SSE, add WS multiplexing later |
+| WS multiplexing complexity | Initial multiplexer is landed; keep reconnect and source-tagging simple while knowledge/pheromone streaming remains deferred |
 | Response shape mismatch | Integration tests comparing mirage-rs output vs aggregator output for same queries |
 | Sam builds against mirage-rs APIs that later change shape | Aggregator guarantees same shape — this is its whole purpose |
 
