@@ -11,108 +11,93 @@ use ratatui::style::{Color, Modifier, Style};
 // ---------------------------------------------------------------------------
 
 /// The Mori/rosedust palette as associated constants.
-pub struct MoriTheme;
+pub(crate) struct MoriTheme;
 
 impl MoriTheme {
     // -- Primaries --
-    pub const VOID: Color = Color::Rgb(0, 0, 0);
-    pub const ROSE: Color = Color::Rgb(185, 120, 148);
-    pub const ROSE_BRIGHT: Color = Color::Rgb(220, 155, 180);
-    pub const ROSE_DIM: Color = Color::Rgb(140, 96, 112);
-    pub const BONE: Color = Color::Rgb(215, 198, 158);
-    pub const BONE_DIM: Color = Color::Rgb(160, 142, 108);
+    pub(crate) const VOID: Color = Color::Rgb(0, 0, 0);
+    pub(crate) const ROSE: Color = Color::Rgb(185, 120, 148);
+    pub(crate) const ROSE_BRIGHT: Color = Color::Rgb(220, 155, 180);
+    pub(crate) const ROSE_DIM: Color = Color::Rgb(140, 96, 112);
+    pub(crate) const BONE: Color = Color::Rgb(215, 198, 158);
+    pub(crate) const BONE_DIM: Color = Color::Rgb(160, 142, 108);
 
     // -- Text --
-    pub const TEXT: Color = Color::Rgb(165, 142, 158);
-    pub const TEXT_DIM: Color = Color::Rgb(145, 120, 138);
-    pub const TEXT_GHOST: Color = Color::Rgb(110, 85, 105);
-    pub const TEXT_PHANTOM: Color = Color::Rgb(55, 42, 55);
+    pub(crate) const TEXT: Color = Color::Rgb(165, 142, 158);
+    pub(crate) const TEXT_DIM: Color = Color::Rgb(145, 120, 138);
+    pub(crate) const TEXT_GHOST: Color = Color::Rgb(110, 85, 105);
+    pub(crate) const TEXT_PHANTOM: Color = Color::Rgb(55, 42, 55);
 
     // -- Accents --
-    pub const DREAM: Color = Color::Rgb(120, 115, 165);
-    pub const SAGE: Color = Color::Rgb(125, 158, 140);
-    pub const EMBER: Color = Color::Rgb(195, 110, 85);
-    pub const WARNING: Color = Color::Rgb(195, 155, 95);
+    pub(crate) const DREAM: Color = Color::Rgb(120, 115, 165);
+    pub(crate) const SAGE: Color = Color::Rgb(125, 158, 140);
+    pub(crate) const EMBER: Color = Color::Rgb(195, 110, 85);
+    pub(crate) const WARNING: Color = Color::Rgb(195, 155, 95);
 
     // -- Backgrounds --
-    pub const BG: Color = Color::Rgb(0, 0, 0);
-    pub const BG_SECONDARY: Color = Color::Rgb(14, 12, 16);
-    pub const BG_HIGHLIGHT: Color = Color::Rgb(34, 28, 36);
-    pub const BG_RAISED: Color = Color::Rgb(14, 12, 18);
+    pub(crate) const BG: Color = Color::Rgb(0, 0, 0);
+    pub(crate) const BG_SECONDARY: Color = Color::Rgb(14, 12, 16);
+    pub(crate) const BG_HIGHLIGHT: Color = Color::Rgb(34, 28, 36);
 
     // -- Foreground aliases --
-    pub const FG: Color = Color::Rgb(165, 142, 158);
-    pub const FG_DIM: Color = Color::Rgb(145, 120, 138);
-    pub const FG_BRIGHT: Color = Color::Rgb(215, 198, 158);
+    pub(crate) const FG: Color = Color::Rgb(165, 142, 158);
+    pub(crate) const FG_DIM: Color = Color::Rgb(145, 120, 138);
 
     // -- Semantic status --
-    pub const STATUS_OK: Color = Color::Rgb(125, 158, 140); // = SAGE
-    pub const STATUS_ERROR: Color = Color::Rgb(195, 110, 85); // = EMBER
+    pub(crate) const STATUS_OK: Color = Color::Rgb(125, 158, 140); // = SAGE
+    pub(crate) const STATUS_ERROR: Color = Color::Rgb(195, 110, 85); // = EMBER
 
     // -- Block styling helpers -----------------------------------------------
 
     /// Default block background style — uses terminal default background
     /// for consistency across all panels.
-    pub fn block_style() -> Style {
+    pub(crate) fn block_style() -> Style {
         Style::default()
     }
 
     /// Focused-panel border style.
-    pub fn focused_border_style() -> Style {
+    pub(crate) fn focused_border_style() -> Style {
         Style::default().fg(Self::ROSE)
     }
 
     /// Unfocused-panel border style — uses TEXT_DIM for visible borders.
-    pub fn unfocused_border_style() -> Style {
+    pub(crate) fn unfocused_border_style() -> Style {
         Style::default().fg(Self::TEXT_DIM)
     }
 
     /// Focused-panel title style.
-    pub fn focused_title_style() -> Style {
+    pub(crate) fn focused_title_style() -> Style {
         Style::default()
             .fg(Self::ROSE_BRIGHT)
             .add_modifier(Modifier::BOLD)
     }
 
     /// Unfocused-panel title style.
-    pub fn unfocused_title_style() -> Style {
+    pub(crate) fn unfocused_title_style() -> Style {
         Style::default().fg(Self::FG_DIM)
     }
 
     /// Default title style (dim, not bold).
-    pub fn title_style() -> Style {
+    pub(crate) fn title_style() -> Style {
         Style::default().fg(Self::FG_DIM)
     }
 
-    /// Tab active style.
-    pub fn tab_active_style() -> Style {
-        Style::default()
-            .fg(Self::BONE)
-            .bg(Self::ROSE_DIM)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// Tab inactive style.
-    pub fn tab_inactive_style() -> Style {
-        Style::default().fg(Self::TEXT_DIM).bg(Self::BG_SECONDARY)
-    }
-
     /// Error style (EMBER, bold).
-    pub fn error_style() -> Style {
+    pub(crate) fn error_style() -> Style {
         Style::default()
             .fg(Self::EMBER)
             .add_modifier(Modifier::BOLD)
     }
 
     /// Success style (SAGE, bold).
-    pub fn success_style() -> Style {
+    pub(crate) fn success_style() -> Style {
         Style::default().fg(Self::SAGE).add_modifier(Modifier::BOLD)
     }
 
     // -- Semantic helpers ----------------------------------------------------
 
     /// Per-role accent color.
-    pub fn role_accent(role: &str) -> Color {
+    pub(crate) fn role_accent(role: &str) -> Color {
         match role {
             r if r.contains("implement") => Self::ROSE,
             r if r.contains("strateg") => Self::DREAM,
@@ -126,7 +111,7 @@ impl MoriTheme {
     }
 
     /// Phase-based accent color.
-    pub fn phase_accent(phase: &str) -> Color {
+    pub(crate) fn phase_accent(phase: &str) -> Color {
         match phase {
             p if p.contains("preflight") => Self::TEXT_GHOST,
             p if p.contains("implement") => Self::ROSE,
@@ -141,7 +126,7 @@ impl MoriTheme {
     }
 
     /// Semantic color on a 0..1 progress scale: red -> amber -> green.
-    pub fn semantic_color(t: f64) -> Color {
+    pub(crate) fn semantic_color(t: f64) -> Color {
         if t >= 0.8 {
             Self::SAGE
         } else if t >= 0.4 {
@@ -158,7 +143,7 @@ impl MoriTheme {
 
 /// A three-stop linear gradient.
 #[derive(Clone, Debug)]
-pub struct Gradient {
+pub(crate) struct Gradient {
     start: (f64, f64, f64),
     mid: (f64, f64, f64),
     end: (f64, f64, f64),
@@ -166,7 +151,7 @@ pub struct Gradient {
 
 impl Gradient {
     /// Sample the gradient at `t` in `0.0..=1.0`.
-    pub fn sample(&self, t: f64) -> Color {
+    pub(crate) fn sample(&self, t: f64) -> Color {
         let t = t.clamp(0.0, 1.0);
         let (r, g, b) = if t < 0.5 {
             let lt = t * 2.0;
@@ -192,7 +177,7 @@ impl Gradient {
 }
 
 /// Fire gradient: dark red -> amber -> gold.
-pub fn gradient_fire() -> Gradient {
+pub(crate) fn gradient_fire() -> Gradient {
     Gradient {
         start: (120.0, 30.0, 20.0),
         mid: (195.0, 110.0, 45.0),
@@ -201,7 +186,7 @@ pub fn gradient_fire() -> Gradient {
 }
 
 /// Ocean gradient: deep blue -> teal -> cyan.
-pub fn gradient_ocean() -> Gradient {
+pub(crate) fn gradient_ocean() -> Gradient {
     Gradient {
         start: (30.0, 40.0, 120.0),
         mid: (40.0, 120.0, 150.0),
@@ -209,17 +194,8 @@ pub fn gradient_ocean() -> Gradient {
     }
 }
 
-/// Context-usage gradient: dim rose -> bright rose -> warning amber.
-pub fn gradient_context() -> Gradient {
-    Gradient {
-        start: (100.0, 60.0, 80.0),
-        mid: (185.0, 120.0, 148.0),
-        end: (195.0, 155.0, 95.0),
-    }
-}
-
 /// Brighten (or dim) an RGB color by a multiplier.
-pub fn brighten(color: Color, factor: f64) -> Color {
+pub(crate) fn brighten(color: Color, factor: f64) -> Color {
     match color {
         Color::Rgb(r, g, b) => Color::Rgb(
             ((r as f64) * factor).clamp(0.0, 255.0) as u8,

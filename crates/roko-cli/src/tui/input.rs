@@ -446,7 +446,7 @@ impl ModalVisibility {
 
 fn handle_help_key(key: KeyEvent) -> TuiAction {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => TuiAction::ShowHelp,
+        KeyCode::Esc | KeyCode::Char('?' | 'q') => TuiAction::ShowHelp,
         _ => TuiAction::None,
     }
 }
@@ -500,8 +500,8 @@ fn handle_queue_overview_key(key: KeyEvent) -> TuiAction {
 
 fn handle_confirm_key(key: KeyEvent) -> TuiAction {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => TuiAction::ConfirmYes,
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => TuiAction::ConfirmNo,
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => TuiAction::ConfirmYes,
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => TuiAction::ConfirmNo,
         _ => TuiAction::None,
     }
 }

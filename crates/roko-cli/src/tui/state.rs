@@ -4,7 +4,7 @@
 //! needs: navigation, scroll positions, modal visibility, agent/plan data,
 //! cost tracking, git state, and more.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Instant;
 
@@ -249,36 +249,11 @@ impl fmt::Display for PlanPhase {
     }
 }
 
-/// Agent state tracked per active agent (legacy HashMap-based tracking).
-#[derive(Debug, Clone, Default)]
-pub struct AgentState {
-    /// Agent identifier.
-    pub id: String,
-    /// Display name.
-    pub name: String,
-    /// Current status label (e.g. "running", "waiting", "done").
-    pub status: AgentStatus,
-    /// Accumulated output lines.
-    pub output_lines: Vec<String>,
-    /// Latest diff content, if any.
-    pub diff_content: String,
-    /// Cumulative input tokens.
-    pub input_tokens: u64,
-    /// Cumulative output tokens.
-    pub output_tokens: u64,
-    /// Cached rendered output (invalidated on new output).
-    pub render_cache: Option<String>,
-    /// Plan this agent is working on, if known.
-    pub plan_id: Option<String>,
-    /// Task this agent is working on, if known.
-    pub task_id: Option<String>,
-}
-
 /// Agent row for the Vec-based agent roster used by widgets.
 ///
 /// Widgets index into `TuiState::agents` by position, and read fields
 /// like `.active`, `.role`, `.model`, `.current_plan`, `.current_task`,
-/// `.context_limit`, `.last_output_line` etc.
+/// `.context_limit`, `.output_lines`, `.last_output_line` etc.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRow {
     /// Agent identifier.
@@ -301,18 +276,10 @@ pub struct AgentRow {
     pub current_plan: String,
     /// Task this agent is working on.
     pub current_task: String,
+    /// Accumulated output lines for the output pane.
+    pub output_lines: Vec<String>,
     /// Last line of agent output (for the output pane).
     pub last_output_line: String,
-}
-
-/// State for parallel agent display.
-#[derive(Debug, Clone, Default)]
-pub struct ParallelAgentState {
-    pub agent_id: String,
-    pub plan_id: String,
-    pub task_id: String,
-    pub status: AgentStatus,
-    pub progress_pct: f64,
 }
 
 /// Resolve a model slug to its known context window in tokens.
@@ -357,11 +324,6 @@ pub struct PlanEntry {
     pub elapsed_secs: f64,
     /// Wave index this plan belongs to, if any.
     pub wave: Option<usize>,
-    // -- legacy aliases (kept for backward compatibility) --
-    /// Legacy: total tasks (alias for tasks_total).
-    pub task_total: usize,
-    /// Legacy: done tasks (alias for tasks_done).
-    pub task_done: usize,
     /// Whether the plan tree node is expanded.
     pub expanded: bool,
     /// Nested task entries (for plan detail view).
@@ -396,16 +358,6 @@ pub struct GitCommitEntry {
     pub author: String,
     pub timestamp_ms: i64,
     pub branch: Option<String>,
-}
-
-/// Token burn history entry for cost tracking.
-#[derive(Debug, Clone, Default)]
-pub struct TokenBurnEntry {
-    pub timestamp_ms: i64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_usd: f64,
-    pub role: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -569,11 +521,6 @@ pub struct TuiState {
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
     pub agents: Vec<AgentRow>,
-    /// Legacy per-agent state keyed by agent ID.
-    pub agents_by_id: HashMap<String, AgentState>,
-    /// Parallel agents currently executing.
-    pub parallel_agents: Vec<ParallelAgentState>,
-
     // -- navigation --
     /// Active top-level tab.
     pub active_tab: Tab,
@@ -646,21 +593,15 @@ pub struct TuiState {
     /// Cached git summary lines for the dashboard sub-tab (populated by background thread).
     pub git_summary_lines: Vec<String>,
     /// Cached full git view data for F4 Git tab (populated by background thread).
-    pub git_view_data: Option<super::views::git_view::GitViewData>,
+    pub(crate) git_view_data: Option<super::views::git_view::GitViewData>,
 
     // -- plan detail --
-    /// Content for the plan detail overlay.
-    pub plan_detail_content: String,
     /// Active sub-tab in the plan detail overlay.
     pub plan_detail_tab: usize,
-    /// Content for the plan summary view.
-    pub plan_summary_content: String,
 
     // -- pipeline --
     /// Whether pipeline execution is currently paused.
     pub is_paused: bool,
-    /// Whether parallel execution is active.
-    pub parallel_run: bool,
 
     // -- cost / tokens --
     /// Cost per plan (plan_id -> USD).
@@ -679,12 +620,6 @@ pub struct TuiState {
     pub cost_rate: f64,
     /// Cumulative cost in USD for header_bar display.
     pub cost_dollars: f64,
-
-    // -- token history --
-    /// Token burn history per role (role -> entries) — legacy.
-    pub token_burn_history: HashMap<String, Vec<TokenBurnEntry>>,
-    /// Per-role token time-series for sparkline rendering (role -> sample ring).
-    pub token_history: HashMap<String, VecDeque<u64>>,
 
     // -- system metrics --
     /// System resource metrics snapshot.
@@ -741,9 +676,6 @@ impl Default for TuiState {
             gate_results: Vec::new(),
 
             agents: Vec::new(),
-            agents_by_id: HashMap::new(),
-            parallel_agents: Vec::new(),
-
             active_tab: Tab::default(),
             selected_plan_idx: 0,
             selected_agent: 0,
@@ -781,12 +713,9 @@ impl Default for TuiState {
             git_summary_lines: Vec::new(),
             git_view_data: None,
 
-            plan_detail_content: String::new(),
             plan_detail_tab: 0,
-            plan_summary_content: String::new(),
 
             is_paused: false,
-            parallel_run: false,
 
             cost_per_plan: HashMap::new(),
             cost_per_task: HashMap::new(),
@@ -796,9 +725,6 @@ impl Default for TuiState {
             token_rate: 0.0,
             cost_rate: 0.0,
             cost_dollars: 0.0,
-
-            token_burn_history: HashMap::new(),
-            token_history: HashMap::new(),
 
             sys: SysMetrics::default(),
 
@@ -996,8 +922,6 @@ impl TuiState {
                     tasks_failed,
                     elapsed_secs: snapshot.map(|plan| plan.elapsed_secs).unwrap_or(0.0),
                     wave: None,
-                    task_total: tasks_total,
-                    task_done: tasks_done,
                     expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
                     tasks: snapshot
                         .map(|plan| {
@@ -1016,9 +940,8 @@ impl TuiState {
             })
             .collect();
 
-        // Agents — populate both Vec and HashMap
+        // Agents
         self.agents.clear();
-        self.agents_by_id.clear();
         let mut agent_ids = data
             .agents
             .iter()
@@ -1052,7 +975,7 @@ impl TuiState {
             self.agents.push(AgentRow {
                 id: agent_id.clone(),
                 active: is_active,
-                status: if is_active { AgentStatus::Active } else { AgentStatus::Idle },
+                status: AgentStatus::from(status.as_str()),
                 role: label.clone(),
                 model: latest.map(|event| event.model.clone()).unwrap_or_default(),
                 input_tokens: latest.map_or(0, |event| event.input_tokens),
@@ -1060,35 +983,18 @@ impl TuiState {
                 context_limit: model_context_limit(latest.map(|e| e.model.as_str()).unwrap_or("")),
                 current_plan: current_plan.clone(),
                 current_task: current_task.clone(),
+                output_lines: Vec::new(),
                 last_output_line: String::new(),
             });
-            self.agents_by_id.insert(
-                agent_id.clone(),
-                AgentState {
-                    id: agent_id,
-                    name: label,
-                    status: AgentStatus::from(status.as_str()),
-                    input_tokens: latest.map_or(0, |event| event.input_tokens),
-                    output_tokens: latest.map_or(0, |event| event.output_tokens),
-                    plan_id: (!current_plan.is_empty()).then_some(current_plan),
-                    task_id: (!current_task.is_empty()).then_some(current_task),
-                    ..AgentState::default()
-                },
-            );
         }
 
         // Populate agent output from episodes (Task 2)
         for episode in data.episodes() {
-            // Populate the HashMap-based agent state
-            if let Some(agent) = self.agents_by_id.get_mut(&episode.agent_id) {
-                let output_text = extract_episode_output(episode);
-                if !output_text.is_empty() {
-                    agent.output_lines = output_text.lines().map(String::from).collect();
-                }
-            }
-            // Populate the Vec-based agent roster last_output_line
             if let Some(row) = self.agents.iter_mut().find(|a| a.id == episode.agent_id) {
                 let output_text = extract_episode_output(episode);
+                if !output_text.is_empty() {
+                    row.output_lines = output_text.lines().map(String::from).collect();
+                }
                 if let Some(last_line) = output_text.lines().last() {
                     row.last_output_line = last_line.to_string();
                 }
@@ -1109,6 +1015,9 @@ impl TuiState {
         for (task_id, lines) in data.task_outputs() {
             // Find agent working on this task and add output if empty
             if let Some(row) = self.agents.iter_mut().find(|a| a.current_task == *task_id) {
+                if row.output_lines.is_empty() && !lines.is_empty() {
+                    row.output_lines = lines.clone();
+                }
                 if row.last_output_line.is_empty() {
                     if let Some(last) = lines.last() {
                         row.last_output_line = last.clone();
@@ -1117,24 +1026,10 @@ impl TuiState {
             }
         }
 
-        self.parallel_agents = self
-            .agents
-            .iter()
-            .filter(|a| a.active)
-            .map(|a| ParallelAgentState {
-                agent_id: a.id.clone(),
-                plan_id: a.current_plan.clone(),
-                task_id: a.current_task.clone(),
-                status: AgentStatus::Active,
-                progress_pct: 0.0,
-            })
-            .collect();
-
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
         self.token_total = self.cumulative_input_tokens + self.cumulative_output_tokens;
-        self.token_history = build_token_history(&data.efficiency_events);
         if self.token_rate == 0.0 {
             self.token_rate = compute_token_rate(&data.efficiency_events);
         }
@@ -1255,8 +1150,6 @@ impl TuiState {
             .cloned()
             .map(|agent| (agent.id.clone(), agent))
             .collect();
-        let prev_agent_state = self.agents_by_id.clone();
-
         let mut snapshot_tasks: Vec<&roko_core::dashboard_snapshot::TaskState> =
             snap.tasks.values().collect();
         snapshot_tasks.sort_by(|lhs, rhs| {
@@ -1315,8 +1208,6 @@ impl TuiState {
                     tasks_failed: plan.tasks_failed.min(tasks_total),
                     elapsed_secs: prev_plan_elapsed.get(plan_id).copied().unwrap_or(0.0),
                     wave: prev_plan_wave.get(plan_id).copied().flatten(),
-                    task_total: tasks_total,
-                    task_done: plan.tasks_done.min(tasks_total),
                     expanded: prev_plan_expanded.get(plan_id).copied().unwrap_or(false),
                     tasks,
                 }
@@ -1358,8 +1249,6 @@ impl TuiState {
                 tasks_failed,
                 elapsed_secs: prev_plan_elapsed.get(&plan_id).copied().unwrap_or(0.0),
                 wave: prev_plan_wave.get(&plan_id).copied().flatten(),
-                task_total: tasks_total,
-                task_done: tasks_done,
                 expanded: prev_plan_expanded.get(&plan_id).copied().unwrap_or(false),
                 tasks,
             });
@@ -1408,57 +1297,13 @@ impl TuiState {
                     current_task: prev_row
                         .map(|row| row.current_task.clone())
                         .unwrap_or_default(),
+                    output_lines: prev_row
+                        .map(|row| row.output_lines.clone())
+                        .unwrap_or_default(),
                     last_output_line: prev_row
                         .map(|row| row.last_output_line.clone())
                         .unwrap_or_default(),
                 }
-            })
-            .collect();
-
-        self.agents_by_id = agent_ids
-            .iter()
-            .map(|agent_id| {
-                let agent = &snap.agents[agent_id];
-                let prev = prev_agent_state.get(agent_id);
-                (
-                    agent.agent_id.clone(),
-                    AgentState {
-                        id: agent.agent_id.clone(),
-                        name: agent.role.clone(),
-                        status: if agent.active {
-                            AgentStatus::Active
-                        } else {
-                            AgentStatus::Idle
-                        },
-                        output_lines: prev
-                            .map(|agent_state| agent_state.output_lines.clone())
-                            .unwrap_or_default(),
-                        diff_content: prev
-                            .map(|agent_state| agent_state.diff_content.clone())
-                            .unwrap_or_default(),
-                        input_tokens: prev.map(|agent_state| agent_state.input_tokens).unwrap_or(0),
-                        output_tokens: prev
-                            .map(|agent_state| agent_state.output_tokens)
-                            .unwrap_or(0)
-                            .max(agent.output_bytes as u64),
-                        render_cache: None,
-                        plan_id: prev.and_then(|agent_state| agent_state.plan_id.clone()),
-                        task_id: prev.and_then(|agent_state| agent_state.task_id.clone()),
-                    },
-                )
-            })
-            .collect();
-
-        self.parallel_agents = self
-            .agents
-            .iter()
-            .filter(|a| a.active)
-            .map(|a| ParallelAgentState {
-                agent_id: a.id.clone(),
-                plan_id: a.current_plan.clone(),
-                task_id: a.current_task.clone(),
-                status: AgentStatus::Active,
-                progress_pct: 0.0,
             })
             .collect();
 
@@ -2127,24 +1972,6 @@ fn plan_is_active(status: &str) -> bool {
     )
 }
 
-fn build_token_history(
-    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
-) -> HashMap<String, VecDeque<u64>> {
-    let mut history = HashMap::new();
-
-    for event in events {
-        let series = history
-            .entry(event.role.clone())
-            .or_insert_with(VecDeque::new);
-        if series.len() >= 60 {
-            series.pop_front();
-        }
-        series.push_back(event.total_tokens());
-    }
-
-    history
-}
-
 fn compute_token_rate(events: &[roko_learn::efficiency::AgentEfficiencyEvent]) -> f64 {
     let mut first_seen: Option<DateTime<Utc>> = None;
     let mut last_seen: Option<DateTime<Utc>> = None;
@@ -2712,7 +2539,6 @@ tier = "focused"
         assert!(state.execution_waves.is_empty());
         assert!(state.current_task_checklist.is_empty());
         assert_eq!(state.sys.cpu_pct, 0.0);
-        assert!(state.token_history.is_empty());
         assert_eq!(state.token_total, 0);
         assert_eq!(state.token_rate, 0.0);
         assert_eq!(state.cost_rate, 0.0);
@@ -2871,9 +2697,6 @@ tier = "focused"
         assert_eq!(agent_a.role, "implementer");
         assert!(!agent_b.active);
 
-        assert_eq!(state.parallel_agents.len(), 1);
-        assert_eq!(state.parallel_agents[0].agent_id, "agent-a");
-
         assert_eq!(state.gate_results.len(), 2);
         assert_eq!(state.gate_results[0].gate, "compile");
         assert_eq!(state.gate_results[1].plan_id, "plan-b");
@@ -2938,7 +2761,7 @@ tier = "focused"
     }
 
     #[test]
-    fn update_from_snapshot_populates_token_history_and_rate() {
+    fn update_from_snapshot_populates_token_rate() {
         let mut data = DashboardData::default();
         data.efficiency_events = vec![
             efficiency_event("impl", 100, 50, "2026-04-14T12:00:00Z"),
@@ -2949,35 +2772,7 @@ tier = "focused"
         let mut state = TuiState::default();
         state.update_from_snapshot(&data);
 
-        assert_eq!(
-            state.token_history.get("impl").cloned().unwrap_or_default(),
-            VecDeque::from([150, 50])
-        );
-        assert_eq!(
-            state
-                .token_history
-                .get("review")
-                .cloned()
-                .unwrap_or_default(),
-            VecDeque::from([30])
-        );
         assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn update_from_snapshot_caps_token_history_at_sixty_samples() {
-        let mut data = DashboardData::default();
-        data.efficiency_events = (0..61)
-            .map(|i| efficiency_event("impl", i, 1, &format!("2026-04-14T12:{:02}:00Z", i % 60)))
-            .collect();
-
-        let mut state = TuiState::default();
-        state.update_from_snapshot(&data);
-
-        let history = state.token_history.get("impl").cloned().unwrap_or_default();
-        assert_eq!(history.len(), 60);
-        assert_eq!(history.front().copied(), Some(2));
-        assert_eq!(history.back().copied(), Some(61));
     }
 
     #[test]
@@ -3056,7 +2851,6 @@ tier = "focused"
         assert_eq!(state.agents[0].id, "agent-1");
         assert_eq!(state.agents[0].role, "implementer");
         assert_eq!(state.agents[0].output_tokens, 42);
-        assert_eq!(state.parallel_agents.len(), 1);
         assert_eq!(state.gate_results.len(), 1);
         assert_eq!(state.gate_results[0].gate, "compile");
         assert_eq!(state.gate_results[0].output, "task task-2");

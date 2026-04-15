@@ -23,9 +23,8 @@ use crate::tui::state::TuiState;
 
 /// A parsed log entry.
 #[derive(Debug, Clone)]
-pub struct LogEntry {
+struct LogEntry {
     pub timestamp: String,
-    pub timestamp_ms: i64,
     pub level: LogLevel,
     pub source: String,
     pub message: String,
@@ -33,7 +32,7 @@ pub struct LogEntry {
 
 /// Log severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
+enum LogLevel {
     Debug,
     Info,
     Warn,
@@ -41,16 +40,6 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// Parse a level string (case-insensitive).
-    pub fn parse(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "debug" | "trace" => Self::Debug,
-            "warn" | "warning" => Self::Warn,
-            "error" | "err" | "fatal" => Self::Error,
-            _ => Self::Info,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::Debug => "DBG",
@@ -71,7 +60,7 @@ impl LogLevel {
 }
 
 /// Render the full logs view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -84,7 +73,7 @@ pub fn render(
 }
 
 /// Render the logs view with explicit log entries (for integration layer).
-pub fn render_with_entries(
+fn render_with_entries(
     frame: &mut Frame<'_>,
     area: Rect,
     entries: &[LogEntry],
@@ -157,14 +146,6 @@ pub fn render_with_entries(
     if filtered_entries.is_empty() {
         let empty_text = "no log entries -- run agents to generate signals and episodes";
         let empty = Paragraph::new(empty_text)
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
-        return;
-    }
-
-    if filtered_entries.is_empty() {
-        let empty = Paragraph::new("no log entries match the active level filter")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
@@ -267,7 +248,6 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
             (signal.created_at_ms, seq),
             LogEntry {
                 timestamp: ts,
-                timestamp_ms: signal.created_at_ms,
                 level,
                 source: format!("signal:{}", truncate_kind(&signal.kind)),
                 message,
@@ -319,7 +299,6 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
             (ts_ms, seq),
             LogEntry {
                 timestamp: episode.timestamp.format("%H:%M:%S").to_string(),
-                timestamp_ms: ts_ms,
                 level,
                 source: format!("episode:{}", truncate_kind(&episode.kind)),
                 message,
@@ -365,7 +344,6 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
             (ts_ms, seq),
             LogEntry {
                 timestamp: ts,
-                timestamp_ms: ts_ms,
                 level,
                 source: format!("efficiency:{}", truncate(&event.agent_id, 12)),
                 message,
@@ -381,7 +359,6 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
             (failure.created_at_ms, seq),
             LogEntry {
                 timestamp: ts,
-                timestamp_ms: failure.created_at_ms,
                 level: LogLevel::Error,
                 source: format!("gate:{}", failure.gate_name),
                 message: format!(
@@ -413,7 +390,6 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
             (ts_ms, seq),
             LogEntry {
                 timestamp: ts,
-                timestamp_ms: ts_ms,
                 level,
                 source: format!("event:{}", truncate(&event.event_type, 16)),
                 message: detail,
@@ -462,30 +438,10 @@ fn source_style(source: &str, theme: &Theme) -> ratatui::style::Style {
     }
 }
 
-fn entry_matches_filter(entry: &LogEntry, filter_lower: &str) -> bool {
-    entry.timestamp.to_lowercase().contains(filter_lower)
-        || entry.message.to_lowercase().contains(filter_lower)
-        || entry.source.to_lowercase().contains(filter_lower)
-        || entry
-            .level
-            .label()
-            .to_ascii_lowercase()
-            .contains(filter_lower)
-}
-
 fn format_timestamp_ms(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .map(|dt| dt.format("%H:%M:%S").to_string())
         .unwrap_or_else(|| String::from("??:??:??"))
-}
-
-fn truncate_message(message: &str, max: usize) -> String {
-    let trimmed = message.trim();
-    if trimmed.len() <= max {
-        trimmed.to_string()
-    } else {
-        truncate(trimmed, max)
-    }
 }
 
 fn style_with_bg(

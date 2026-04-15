@@ -10,19 +10,19 @@ use super::super::dashboard::Theme;
 
 /// State of a single parallel agent instance.
 #[derive(Debug, Clone)]
-pub struct ParallelAgentState {
-    pub role: String,
-    pub model: String,
-    pub task: String,
-    pub tokens_used: u64,
-    pub tokens_total: u64,
-    pub state: AgentRunState,
-    pub context_pct: f64,
+pub(crate) struct ParallelAgentState {
+    pub(crate) role: String,
+    pub(crate) model: String,
+    pub(crate) task: String,
+    pub(crate) tokens_used: u64,
+    pub(crate) tokens_total: u64,
+    pub(crate) state: AgentRunState,
+    pub(crate) context_pct: f64,
 }
 
 /// Running state of an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentRunState {
+pub(crate) enum AgentRunState {
     Active,
     Idle,
     Done,
@@ -52,7 +52,7 @@ impl AgentRunState {
 /// Render a table of parallel agent instances.
 ///
 /// Active agents are sorted first. The selected row is highlighted.
-pub fn render_parallel_pool(
+pub(crate) fn render_parallel_pool(
     frame: &mut Frame<'_>,
     area: Rect,
     agents: &[ParallelAgentState],

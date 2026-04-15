@@ -38,7 +38,7 @@ const ROLE_TABS: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 /// Render the full agents view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -291,7 +291,7 @@ fn render_agent_roster(
         } else {
             " idle "
         };
-        let state_bg = if is_active {
+        let status_color = if is_active {
             accent
         } else if is_done {
             theme.success
@@ -299,11 +299,6 @@ fn render_agent_roster(
             theme.danger
         } else {
             Color::Reset
-        };
-        let state_fg = if state_bg == Color::Reset {
-            theme.muted
-        } else {
-            Color::Black
         };
 
         let mut spans = vec![
@@ -330,8 +325,12 @@ fn render_agent_roster(
             Span::styled(
                 format!("{:<7}", state_label),
                 Style::default()
-                    .fg(state_fg)
-                    .bg(state_bg)
+                    .fg(if status_color == Color::Reset {
+                        theme.muted
+                    } else {
+                        Color::Black
+                    })
+                    .bg(status_color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default().bg(bg)),
@@ -381,12 +380,15 @@ fn render_agent_roster(
                     Style::default().fg(theme.muted).bg(bg),
                 ));
             }
-            if let Some(agent_state) = tui_state.agents_by_id.get(&agent.id) {
-                if let Some(last_line) = agent_state.output_lines.last() {
+            if let Some(agent_row) = tui_state.agents.iter().find(|row| row.id == agent.id) {
+                if !agent_row.last_output_line.is_empty() {
                     detail.push(Span::styled(
                         format!(
                             "  last: {}",
-                            truncate_middle(last_line, content_width.saturating_sub(30))
+                            truncate_middle(
+                                &agent_row.last_output_line,
+                                content_width.saturating_sub(30)
+                            )
                         ),
                         Style::default().fg(theme.muted).bg(bg),
                     ));
@@ -459,164 +461,6 @@ fn render_summary_line(
 
     let para = Paragraph::new(vec![line1, line2]);
     frame.render_widget(para, area);
-}
-
-// ---------------------------------------------------------------------------
-// Token sparkline (6 lines, braille-style inline rendering)
-// ---------------------------------------------------------------------------
-
-fn render_token_sparkline(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    tui_state: &TuiState,
-    theme: &Theme,
-) {
-    let total_tokens = tui_state.cumulative_input_tokens + tui_state.cumulative_output_tokens;
-    let total_str = format_tokens(total_tokens);
-
-    let border_style = if total_tokens > 0 {
-        Style::default().fg(Color::Rgb(100, 65, 85))
-    } else {
-        theme.muted()
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Token Burn ",
-            Style::default().fg(theme.accent),
-        ))
-        .border_style(border_style);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width < 10 || inner.height < 2 {
-        return;
-    }
-
-    let inner_w = inner.width as usize;
-
-    // Build sparkline from efficiency events (aggregate by 10-event buckets)
-    let mut buckets: Vec<u64> = Vec::new();
-    let bucket_size = 10usize.max(1);
-    let mut bucket_accum: u64 = 0;
-    let mut bucket_count: usize = 0;
-    for event in &data.efficiency_events {
-        bucket_accum += event.input_tokens + event.output_tokens;
-        bucket_count += 1;
-        if bucket_count >= bucket_size {
-            buckets.push(bucket_accum);
-            bucket_accum = 0;
-            bucket_count = 0;
-        }
-    }
-    if bucket_count > 0 {
-        buckets.push(bucket_accum);
-    }
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    if buckets.len() >= 2 {
-        // Simple block chart sparkline
-        let max_val = buckets.iter().copied().max().unwrap_or(1).max(1);
-        let display: Vec<u64> = if buckets.len() > inner_w {
-            buckets[buckets.len() - inner_w..].to_vec()
-        } else {
-            buckets.clone()
-        };
-
-        let spark_chars = [
-            ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
-            '\u{2587}', '\u{2588}',
-        ];
-
-        let label_w = total_str.len() + 2;
-        let bar_w = inner_w.saturating_sub(label_w);
-
-        let mut spans: Vec<Span<'_>> = vec![Span::styled(
-            format!(" {} ", total_str),
-            Style::default().fg(theme.foreground),
-        )];
-
-        for i in 0..bar_w {
-            let idx = if display.len() > bar_w {
-                display.len() - bar_w + i
-            } else if i < display.len() {
-                i
-            } else {
-                continue;
-            };
-            if idx < display.len() {
-                let val = display[idx];
-                let frac = val as f64 / max_val as f64;
-                let ch_idx = (frac * 8.0).round() as usize;
-                let ch = spark_chars[ch_idx.min(8)];
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(theme.accent),
-                ));
-            }
-        }
-
-        lines.push(Line::from(spans));
-    } else {
-        lines.push(Line::from(Span::styled(
-            format!(" {} total tokens  waiting for data...", total_str),
-            Style::default().fg(theme.muted),
-        )));
-    }
-
-    // Per-role token breakdown
-    let mut role_tokens: Vec<(String, u64)> = Vec::new();
-    for event in &data.efficiency_events {
-        let role = event.role.clone();
-        let tokens = event.input_tokens + event.output_tokens;
-        if let Some(existing) = role_tokens.iter_mut().find(|(r, _)| *r == role) {
-            existing.1 += tokens;
-        } else {
-            role_tokens.push((role, tokens));
-        }
-    }
-    role_tokens.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let remaining_rows = (inner.height as usize).saturating_sub(lines.len());
-    for (role, tokens) in role_tokens.iter().take(remaining_rows) {
-        let accent = role_accent(role, theme);
-        let label = format!(" {:>5} ", &role[..role.len().min(5)]);
-        let pct = if total_tokens > 0 {
-            (*tokens as f64 / total_tokens as f64 * 100.0).round() as u64
-        } else {
-            0
-        };
-
-        let bar_budget = inner_w.saturating_sub(label.len() + 12);
-        let fill_pct = if total_tokens > 0 {
-            (*tokens as f64 / total_tokens as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let filled = (fill_pct * bar_budget as f64).round() as usize;
-        let empty = bar_budget.saturating_sub(filled);
-
-        lines.push(Line::from(vec![
-            Span::styled(label, Style::default().fg(accent)),
-            Span::styled(
-                "\u{2588}".repeat(filled.min(bar_budget)),
-                Style::default().fg(accent),
-            ),
-            Span::styled(
-                "\u{2500}".repeat(empty),
-                Style::default().fg(Color::Rgb(40, 35, 42)),
-            ),
-            Span::styled(
-                format!(" {} ({}%)", format_tokens(*tokens), pct),
-                Style::default().fg(theme.muted),
-            ),
-        ]));
-    }
-
-    let para = Paragraph::new(lines);
-    frame.render_widget(para, inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +659,7 @@ pub(crate) fn collect_agent_output_lines(
 
     // Priority:
     //   1. current_plan_execution.agent_output_tail
-    //   2. selected agent output from tui_state.agents_by_id
+    //   2. selected agent's live row data from tui_state.agents
     //   3. task_outputs for the agent's current task
     //   4. episode output text
     let collected: Vec<String> = data
@@ -829,12 +673,19 @@ pub(crate) fn collect_agent_output_lines(
     }
 
     if let Some(agent_summary) = selected_agent {
-        if let Some(agent_state) = tui_state.agents_by_id.get(&agent_summary.id) {
-            if !agent_state.output_lines.is_empty() {
-                return agent_state.output_lines.clone();
+        if let Some(agent_row) = tui_state.agents.iter().find(|row| row.id == agent_summary.id) {
+            if !agent_row.output_lines.is_empty() {
+                return agent_row.output_lines.clone();
             }
-            if let Some(task_id) = &agent_state.task_id {
-                let task_output = data.task_outputs.get(task_id).cloned().unwrap_or_default();
+            if !agent_row.last_output_line.is_empty() {
+                return vec![agent_row.last_output_line.clone()];
+            }
+            if !agent_row.current_task.is_empty() {
+                let task_output = data
+                    .task_outputs
+                    .get(&agent_row.current_task)
+                    .cloned()
+                    .unwrap_or_default();
                 if !task_output.is_empty() {
                     return task_output;
                 }
@@ -1014,40 +865,6 @@ fn agent_status_rank(status: &str) -> u8 {
         3
     } else {
         4
-    }
-}
-
-fn agent_status_color(status: &str, theme: &Theme) -> Color {
-    if is_agent_active(status) {
-        theme.accent
-    } else if is_agent_done(status) {
-        theme.success
-    } else if is_agent_failed(status) {
-        theme.danger
-    } else {
-        theme.muted
-    }
-}
-
-fn agent_status_icon(status: &str, theme: &Theme) -> (&'static str, Style) {
-    if is_agent_active(status) {
-        (
-            "\u{25b6}",
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else if is_agent_done(status) {
-        ("\u{2713}", Style::default().fg(theme.success))
-    } else if is_agent_failed(status) {
-        (
-            "\u{2717}",
-            Style::default()
-                .fg(theme.danger)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        ("\u{00b7}", Style::default().fg(theme.muted))
     }
 }
 

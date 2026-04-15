@@ -8,6 +8,16 @@
 //! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
+#![cfg_attr(
+    clippy,
+    allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::restriction,
+        missing_docs
+    )
+)]
 
 mod commands;
 

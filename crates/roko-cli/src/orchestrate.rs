@@ -622,8 +622,10 @@ fn drain_turn_learning_events(
                 }
             }
             Ok(_) => {}
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "learning feedback lagged behind event stream");
             }

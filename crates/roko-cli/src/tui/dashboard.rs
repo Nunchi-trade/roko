@@ -1780,7 +1780,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
                     .and_then(Value::as_u64)
                     .or_else(|| plan_state.get("tasks_done").and_then(Value::as_u64))
             })
-            .unwrap_or(0) as usize;
+            .unwrap_or(tasks_done as u64) as usize;
 
         let tasks_failed = state
             .get("plan_states")
@@ -1792,7 +1792,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
                     .and_then(Value::as_u64)
                     .or_else(|| plan_state.get("tasks_failed").and_then(Value::as_u64))
             })
-            .unwrap_or(0) as usize;
+            .unwrap_or(tasks_failed as u64) as usize;
 
         let last_error = state
             .get("plan_states")

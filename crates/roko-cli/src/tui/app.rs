@@ -239,17 +239,6 @@ fn task_picker_rows(state: &TuiState) -> Vec<TaskPickerRow> {
         .collect()
 }
 
-fn collect_git_age(workdir: &Path) -> String {
-    std::process::Command::new("git")
-        .args(["log", "-1", "--format=%cr"])
-        .current_dir(workdir)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 fn convert_git_branch_tree(
     branches: &[super::views::git_view::GitBranchNode],
 ) -> Vec<super::state::GitBranchNode> {
@@ -410,8 +399,6 @@ impl App {
             terminal_size,
         };
         app.fx_config = EffectsConfig::load_from_root(&app.workdir);
-        // Populate git info synchronously on first load (fast enough for startup).
-        app.populate_git_info();
         app
     }
 
@@ -542,7 +529,6 @@ impl App {
         // Spawn background git data collector thread
         // ---------------------------------------------------------------
         let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
-        let git_workdir = self.workdir.clone();
         let git_log_dispatch = log_dispatch;
         std::thread::Builder::new()
             .name("tui-git-refresh".into())
@@ -550,14 +536,19 @@ impl App {
                 let _log_guard = tracing::dispatcher::set_default(&git_log_dispatch);
                 loop {
                     let view_data = super::views::git_view::collect_git_data();
-                    let summary_lines = super::views::dashboard_view::collect_git_summary();
                     let branch = view_data.current_branch.clone();
                     let commit_short = view_data
                         .commits
                         .first()
                         .map(|c| c.hash_short.clone())
                         .unwrap_or_default();
-                    let age = collect_git_age(&git_workdir);
+                    let age = view_data
+                        .commits
+                        .first()
+                        .map(|commit| commit.age.clone())
+                        .unwrap_or_default();
+                    let summary_lines =
+                        super::views::dashboard_view::collect_git_summary(&view_data, &age);
                     let bg = GitBgData {
                         view_data,
                         summary_lines,
@@ -1720,12 +1711,11 @@ impl App {
                     return collected.len();
                 }
 
-                if let Some(agent) = self
-                    .tui_state
-                    .agents_by_id
-                    .values()
-                    .nth(self.tui_state.selected_agent_tab)
-                {
+                if let Some(agent) = self.tui_state.agents.get(
+                    self.tui_state
+                        .selected_agent
+                        .min(self.tui_state.agents.len().saturating_sub(1)),
+                ) {
                     if !agent.output_lines.is_empty() {
                         return agent.output_lines.len();
                     }
@@ -1856,9 +1846,6 @@ impl App {
         self.last_data_gen = self.data.generation;
         self.tui_state.update_from_snapshot(&self.data);
         self.fx_config = EffectsConfig::load_from_root(&self.workdir);
-        // Git info is refreshed by the background git thread; only
-        // populate synchronously on first load (when fields are empty).
-        self.populate_git_info();
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
         self.clamp_gate_failure_selection();
@@ -1890,49 +1877,6 @@ impl App {
                     .push(super::modals::Notification::error(&format!(
                         "Save failed: {error}"
                     )));
-            }
-        }
-    }
-
-    /// Populate TuiState git fields from actual git commands.
-    fn populate_git_info(&mut self) {
-        // Branch
-        if self.tui_state.git_branch.is_empty() {
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(&self.workdir)
-                .output()
-            {
-                if out.status.success() {
-                    self.tui_state.git_branch =
-                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                }
-            }
-        }
-        // Short commit hash
-        if self.tui_state.git_commit_short.is_empty() {
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["rev-parse", "--short", "HEAD"])
-                .current_dir(&self.workdir)
-                .output()
-            {
-                if out.status.success() {
-                    self.tui_state.git_commit_short =
-                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                }
-            }
-        }
-        // Commit age
-        if self.tui_state.git_age.is_empty() {
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["log", "-1", "--format=%cr"])
-                .current_dir(&self.workdir)
-                .output()
-            {
-                if out.status.success() {
-                    self.tui_state.git_age =
-                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                }
             }
         }
     }
@@ -2261,91 +2205,6 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
         Tab::Config => Some(PageId::ConfigView),
         Tab::Git | Tab::Inspect => None,
     }
-}
-
-fn help_lines() -> Vec<Line<'static>> {
-    let theme = Theme::from_env();
-    vec![
-        Line::from(Span::styled(
-            "roko dashboard keybindings",
-            theme.accent_bold(),
-        )),
-        Line::from(""),
-        Line::from(Span::styled("Navigation", theme.accent_bold())),
-        Line::from("F1-F7      switch tabs (Dashboard/Plans/Agents/Git/Logs/Config/Inspect)"),
-        Line::from("F8 / u     queue overview modal"),
-        Line::from("Tab        cycle focus between panels"),
-        Line::from("Shift+Tab  cycle focus backward"),
-        Line::from("j/k up/dn  scroll focused panel"),
-        Line::from("PgUp/PgDn  page scroll"),
-        Line::from("Home/End   jump to top/bottom"),
-        Line::from("Enter      expand/drill into selection"),
-        Line::from("Esc        close overlay / drill out"),
-        Line::from("q          close overlay or quit"),
-        Line::from(""),
-        Line::from(Span::styled("Dashboard Sub-Tabs (F1)", theme.accent_bold())),
-        Line::from("a          Agents panel"),
-        Line::from("o          Output panel"),
-        Line::from("d          Diff panel"),
-        Line::from("e          Errors panel"),
-        Line::from("g          Git panel"),
-        Line::from("m          MCP / Context panel"),
-        Line::from("P          Processes panel"),
-        Line::from(""),
-        Line::from(Span::styled("Modals & Modes", theme.accent_bold())),
-        Line::from("?          toggle this help"),
-        Line::from("w          wave overview"),
-        Line::from("p          pause/resume pipeline"),
-        Line::from("i          inject message to agent"),
-        Line::from("/          filter mode (Plans/Logs)"),
-        Line::from("Ctrl-t     task picker"),
-        Line::from("Ctrl-a     approve all pending"),
-        Line::from("Ctrl-x     force advance (confirm)"),
-        Line::from("Ctrl-d     reset selected plan (confirm)"),
-        Line::from("Ctrl-e     toggle screen effects"),
-        Line::from(""),
-        Line::from(Span::styled("Agent Controls (F3)", theme.accent_bold())),
-        Line::from("y          approve pending command"),
-        Line::from("A          approve all pending"),
-        Line::from("x          reject pending command"),
-        Line::from("`          cycle agent tabs"),
-        Line::from("1-7        switch agent tab directly"),
-        Line::from("G          resume auto-scroll"),
-        Line::from(""),
-        Line::from(Span::styled("Plans (F2)", theme.accent_bold())),
-        Line::from("e          expand/collapse plan"),
-        Line::from("[/]        wave prev/next"),
-        Line::from("h/l left/right drill out/in"),
-        Line::from("s          soft retry plan"),
-        Line::from("R          restart phase"),
-        Line::from("F          force advance"),
-        Line::from("V / c      re-verify plan"),
-        Line::from("S          repair (preserve completed)"),
-        Line::from("t          task picker"),
-        Line::from("o          queue overview"),
-        Line::from(""),
-        Line::from(Span::styled("Logs (F5)", theme.accent_bold())),
-        Line::from("1-4        toggle level filter (INF/WRN/ERR/DBG)"),
-        Line::from("a          show all log levels"),
-        Line::from(""),
-        Line::from(Span::styled("General", theme.accent_bold())),
-        Line::from("Ctrl-r     refresh data"),
-        Line::from("Ctrl-C     quit immediately"),
-    ]
-}
-
-/// Extract a numeric value from a vm_stat line like "Pages active:    123456."
-#[cfg(target_os = "macos")]
-fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
-    if !line.contains(key) {
-        return None;
-    }
-    line.split(':')
-        .nth(1)?
-        .trim()
-        .trim_end_matches('.')
-        .parse::<u64>()
-        .ok()
 }
 
 fn truncate_str(s: &str, max: usize) -> String {

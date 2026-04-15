@@ -44,7 +44,7 @@ const SUB_TAB_LABELS: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 /// Render the full dashboard view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -292,7 +292,7 @@ fn render_output_panel(
     //
     // Priority:
     //   1. current_plan_execution.agent_output_tail
-    //   2. selected agent's output from tui_state.agents_by_id
+    //   2. selected agent's live row data from tui_state.agents
     //   3. most recent task output from data.task_outputs
     let collected: Vec<String> = {
         // 1. Plan execution output tail.
@@ -303,18 +303,21 @@ fn render_output_panel(
             .unwrap_or_default();
         if !exec_lines.is_empty() {
             exec_lines
-        } else if let Some(agent_summary) = tui_state.agents.get(
+        } else if let Some(agent) = tui_state.agents.get(
             tui_state
                 .selected_agent
                 .min(tui_state.agents.len().saturating_sub(1)),
         ) {
-            // 2. Selected agent output.
-            if let Some(agent) = tui_state.agents_by_id.get(&agent_summary.id) {
-                if !agent.output_lines.is_empty() {
-                    agent.output_lines.clone()
-                } else {
-                    Vec::new()
-                }
+            // 2. Selected agent output from live row data.
+            if !agent.output_lines.is_empty() {
+                agent.output_lines.clone()
+            } else if !agent.last_output_line.is_empty() {
+                vec![agent.last_output_line.clone()]
+            } else if !agent.current_task.is_empty() {
+                data.task_outputs
+                    .get(&agent.current_task)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -460,58 +463,68 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// Collect git summary data as plain strings.
-///
-/// This runs multiple git subprocess calls and should only be called from
-/// a background thread, never from the render path.
-pub fn collect_git_summary() -> Vec<String> {
+/// Collect git summary data as plain strings from the cached git snapshot.
+pub(crate) fn collect_git_summary(
+    git_data: &crate::tui::views::git_view::GitViewData,
+    age: &str,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
-    let branch = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let commit = git_cmd(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
-    let age = git_cmd(&["log", "-1", "--format=%cr"]).unwrap_or_default();
+    let commit = git_data
+        .commits
+        .first()
+        .map(|commit| commit.hash_short.as_str())
+        .unwrap_or_default();
 
-    if !branch.is_empty() {
-        lines.push(format!(" branch: {branch}  {commit}  {age}"));
+    if !git_data.current_branch.is_empty() {
+        lines.push(format!(
+            " branch: {}  {commit}  {age}",
+            git_data.current_branch
+        ));
     }
 
-    if let Some(status) = git_cmd(&["status", "--short"]) {
-        let modified = status
-            .lines()
-            .filter(|l| l.starts_with(" M") || l.starts_with("M "))
-            .count();
-        let added = status
-            .lines()
-            .filter(|l| l.starts_with("A ") || l.starts_with("??"))
-            .count();
-        let deleted = status
-            .lines()
-            .filter(|l| l.starts_with(" D") || l.starts_with("D "))
-            .count();
-        let total = status.lines().filter(|l| !l.is_empty()).count();
-        if total > 0 {
-            lines.push(format!(
-                " status: {total} changed  M:{modified} A:{added} D:{deleted}"
-            ));
-        } else {
-            lines.push(" status: clean".to_string());
-        }
+    let modified = git_data
+        .status_lines
+        .iter()
+        .filter(|line| line.starts_with(" M") || line.starts_with("M "))
+        .count();
+    let added = git_data
+        .status_lines
+        .iter()
+        .filter(|line| line.starts_with("A ") || line.starts_with("??"))
+        .count();
+    let deleted = git_data
+        .status_lines
+        .iter()
+        .filter(|line| line.starts_with(" D") || line.starts_with("D "))
+        .count();
+    let total = git_data
+        .status_lines
+        .iter()
+        .filter(|line| !line.is_empty())
+        .count();
+    if total > 0 {
+        lines.push(format!(
+            " status: {total} changed  M:{modified} A:{added} D:{deleted}"
+        ));
+    } else if !git_data.current_branch.is_empty() {
+        lines.push(" status: clean".to_string());
     }
 
-    if let Some(log) = git_cmd(&["log", "--oneline", "--graph", "-8"]) {
+    if !git_data.commits.is_empty() {
         lines.push(String::new());
         lines.push(" recent commits:".to_string());
-        for line in log.lines().take(8) {
-            lines.push(format!("  {line}"));
+        for commit in git_data.commits.iter().take(8) {
+            lines.push(format!(
+                "  {}{} {}",
+                commit.graph_prefix, commit.hash_short, commit.subject
+            ));
         }
     }
 
-    if let Some(wt) = git_cmd(&["worktree", "list", "--porcelain"]) {
-        let count = wt.lines().filter(|l| l.starts_with("worktree ")).count();
-        if count > 1 {
-            lines.push(String::new());
-            lines.push(format!(" worktrees: {count}"));
-        }
+    if git_data.worktrees.len() > 1 {
+        lines.push(String::new());
+        lines.push(format!(" worktrees: {}", git_data.worktrees.len()));
     }
 
     if lines.is_empty() {
@@ -519,15 +532,6 @@ pub fn collect_git_summary() -> Vec<String> {
     }
 
     lines
-}
-
-fn git_cmd(args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -799,11 +803,7 @@ fn render_sub_processes(
                 "-".to_string()
             };
             let tokens = agent.input_tokens.saturating_add(agent.output_tokens);
-            let status = tui_state
-                .agents_by_id
-                .get(&agent.id)
-                .map(|entry| entry.status)
-                .unwrap_or(AgentStatus::Active);
+            let status = agent.status;
             (
                 agent.id.clone(),
                 agent.role.clone(),

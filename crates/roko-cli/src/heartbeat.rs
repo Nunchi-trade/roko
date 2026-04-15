@@ -173,17 +173,6 @@ impl HeartbeatClock {
         }
     }
 
-    /// Override the delta cadence.
-    #[must_use]
-    pub fn with_delta_interval(mut self, delta_interval: Duration) -> Self {
-        assert!(
-            delta_interval > Duration::ZERO,
-            "delta interval must be positive"
-        );
-        self.delta_interval = delta_interval;
-        self
-    }
-
     /// Seconds since the last theta heartbeat.
     #[must_use]
     pub fn seconds_since_last_theta(&self, now: Instant) -> u64 {
