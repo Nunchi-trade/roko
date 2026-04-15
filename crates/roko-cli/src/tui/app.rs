@@ -25,7 +25,9 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use sysinfo::System;
+use tokio::sync::{mpsc, oneshot};
 
+use super::approval_ipc::ApprovalRequest;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
@@ -34,7 +36,7 @@ use super::modals::{
     self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry,
 };
 use super::pages::{PageId, PageRegistry};
-use super::state::{PlanEntry, TaskRowStatus, TuiState};
+use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
@@ -92,6 +94,10 @@ pub struct App {
     data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
     /// Background git data receiver (git commands off main thread).
     git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    /// Optional approval request receiver from the orchestrator.
+    pub approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
+    /// Pending response channel for the active approval modal.
+    pending_approval_response: Option<oneshot::Sender<bool>>,
     /// Live dashboard snapshot receiver from `StateHub` when connected.
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
@@ -339,6 +345,7 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
             }
         }
         app.drain_snapshot_channel();
+        app.drain_approval_requests();
         if app.snapshot_rx.is_none() && app.last_refresh.elapsed() > Duration::from_secs(1) {
             app.data.refresh().await?;
             app.tui_state.update_from_snapshot(&app.data);
@@ -392,6 +399,8 @@ impl App {
             sys_rx: None,
             data_rx: None,
             git_rx: None,
+            approval_rx: None,
+            pending_approval_response: None,
             snapshot_rx: None,
             last_snapshot_error_marker: None,
             frame_counter: 0,
@@ -606,6 +615,7 @@ impl App {
                 Event::Tick => {
                     self.tui_state.atmosphere.tick();
                     self.drain_snapshot_channel();
+                    self.drain_approval_requests();
                     self.drain_background_channels();
                     self.expire_notifications();
                 }
@@ -1079,13 +1089,19 @@ impl App {
                 self.tui_state.plan_detail_tab = idx;
             }
             TuiAction::ApproveCommand => {
-                self.tui_state.pending_approval = None;
+                if !self.resolve_active_approval(true) {
+                    self.tui_state.pending_approval = None;
+                }
             }
             TuiAction::ApproveAll => {
-                self.tui_state.pending_approval = None;
+                if !self.resolve_active_approval(true) {
+                    self.tui_state.pending_approval = None;
+                }
             }
             TuiAction::RejectCommand => {
-                self.tui_state.pending_approval = None;
+                if !self.resolve_active_approval(false) {
+                    self.tui_state.pending_approval = None;
+                }
             }
             TuiAction::StartInject => {
                 self.tui_state.input_mode = InputMode::Inject;
@@ -1180,6 +1196,9 @@ impl App {
                 self.open_confirm_modal(self.resolve_confirm_action(action));
             }
             TuiAction::ConfirmYes => {
+                if self.resolve_active_approval(true) {
+                    return;
+                }
                 self.tui_state.input_mode = InputMode::Normal;
                 if matches!(self.active_modal, Some(ModalState::Quit)) {
                     self.dismiss_all_modals();
@@ -1234,6 +1253,9 @@ impl App {
                 self.active_modal = None;
             }
             TuiAction::ConfirmNo => {
+                if self.resolve_active_approval(false) {
+                    return;
+                }
                 self.dismiss_all_modals();
             }
             TuiAction::DismissNotification => {
@@ -1530,6 +1552,68 @@ impl App {
         });
     }
 
+    fn resolve_active_approval(&mut self, approved: bool) -> bool {
+        if !matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+            return false;
+        }
+
+        if let Some(response_tx) = self.pending_approval_response.take() {
+            let _ = response_tx.send(approved);
+        }
+
+        self.tui_state.pending_approval = None;
+        self.active_modal = None;
+        if self.tui_state.input_mode == InputMode::Confirm {
+            self.tui_state.input_mode = InputMode::Normal;
+        }
+        true
+    }
+
+    fn accept_approval_request(&mut self, request: ApprovalRequest) {
+        let ApprovalRequest {
+            role,
+            command,
+            approval_id,
+            response_tx,
+        } = request;
+
+        if self.pending_approval_response.is_some() {
+            let _ = response_tx.send(false);
+            return;
+        }
+
+        self.tui_state.pending_approval = Some(PendingApproval {
+            agent_id: role.clone(),
+            description: approval_id,
+            command: command.clone(),
+        });
+        self.pending_approval_response = Some(response_tx);
+        self.tui_state.input_mode = InputMode::Confirm;
+        self.active_modal = Some(ModalState::Approval { role, command });
+    }
+
+    fn drain_approval_requests(&mut self) {
+        let Some(mut rx) = self.approval_rx.take() else {
+            return;
+        };
+
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok(request) => self.accept_approval_request(request),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if !disconnected {
+            self.approval_rx = Some(rx);
+        }
+    }
+
     fn resolve_confirm_action(&self, action: ConfirmAction) -> ConfirmAction {
         match action {
             ConfirmAction::DiagnosePlan(plan_id) if plan_id.is_empty() => {
@@ -1816,6 +1900,9 @@ impl App {
     }
 
     fn dismiss_all_modals(&mut self) {
+        if matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+            let _ = self.resolve_active_approval(false);
+        }
         self.active_modal = None;
         self.tui_state.pending_confirm = None;
         if self.tui_state.input_mode == InputMode::Confirm {
@@ -2278,6 +2365,58 @@ mod tests {
         let hub = roko_core::shared_state_hub();
         let app = App::new_connected(dir.path(), &hub);
         assert!(app.snapshot_rx.is_some());
+    }
+
+    #[test]
+    fn approval_request_opens_modal_and_resolves_response() {
+        use super::super::approval_ipc::ApprovalChannel;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        let channel = ApprovalChannel::new(1);
+        let ApprovalChannel { tx, rx } = channel;
+        let (response_tx, response_rx) = oneshot::channel();
+
+        app.approval_rx = Some(rx);
+        tx.try_send(ApprovalRequest {
+            role: "reviewer".to_string(),
+            command: "echo hello".to_string(),
+            approval_id: "approval-42".to_string(),
+            response_tx,
+        })
+        .unwrap();
+
+        app.drain_approval_requests();
+
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::Approval { ref role, ref command })
+                if role == "reviewer" && command == "echo hello"
+        ));
+        assert_eq!(
+            app.tui_state.pending_approval.as_ref().map(|pending| (
+                pending.agent_id.as_str(),
+                pending.description.as_str(),
+                pending.command.as_str(),
+            )),
+            Some(("reviewer", "approval-42", "echo hello"))
+        );
+        assert_eq!(app.tui_state.input_mode, InputMode::Confirm);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let approved = rt.block_on(async move { response_rx.await.unwrap() });
+
+        assert!(approved);
+        assert!(app.active_modal.is_none());
+        assert!(app.pending_approval_response.is_none());
+        assert!(app.tui_state.pending_approval.is_none());
+        assert_eq!(app.tui_state.input_mode, InputMode::Normal);
     }
 
     #[test]

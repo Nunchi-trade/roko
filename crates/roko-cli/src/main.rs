@@ -31,7 +31,7 @@ use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
-use roko_cli::tui::App;
+use roko_cli::tui::{App, ApprovalChannel};
 use roko_cli::{
     Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
     PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs,
@@ -434,6 +434,9 @@ enum PlanCmd {
         /// Resume from `.roko/state/executor.json` in the working directory.
         #[arg(long = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
         resume_plan: Option<PathBuf>,
+        /// Launch the connected approval TUI while the plan runs.
+        #[arg(long)]
+        approval: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -3180,6 +3183,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             plans_dir,
             workdir,
             resume_plan,
+            approval,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
@@ -3235,6 +3239,34 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             };
             runner.set_claude_resume_session(cli.resume.clone());
             runner.set_state_hub(state_hub.sender());
+
+            if approval {
+                if !std::io::stdout().is_terminal() {
+                    anyhow::bail!("approval mode requires an interactive terminal");
+                }
+
+                let approval_channel = ApprovalChannel::new(16);
+                let state_hub_for_tui = state_hub.clone();
+                let workdir_for_tui = wd.clone();
+                let approval_rx = approval_channel.rx;
+
+                std::thread::Builder::new()
+                    .name("roko-plan-approval-tui".to_string())
+                    .spawn(move || {
+                        let mut app = App::new_connected_with_page(
+                            &workdir_for_tui,
+                            None,
+                            &state_hub_for_tui,
+                        );
+                        app.approval_rx = Some(approval_rx);
+                        if let Err(err) = app.run() {
+                            tracing::error!(error = %err, "approval TUI exited with error");
+                        }
+                    })
+                    .context("spawn approval TUI thread")?;
+
+                runner.set_approval_tx(Some(approval_channel.tx));
+            }
 
             // Use task-driven execution (reads tasks.toml directly) instead of
             // the phase-machine executor which expects enrichment phases.

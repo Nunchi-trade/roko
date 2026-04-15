@@ -7,6 +7,7 @@
 
 pub mod ansi;
 pub mod app;
+pub mod approval_ipc;
 pub mod atmosphere;
 pub mod config_meta;
 pub mod dashboard;
@@ -28,6 +29,7 @@ pub mod views;
 pub mod widgets;
 
 pub use app::App;
+pub use approval_ipc::{ApprovalChannel, ApprovalRequest};
 pub use atmosphere::Atmosphere;
 pub use dashboard::{DashboardData, DashboardScaffold, DashboardSummary, Theme};
 pub use effects_config::EffectsConfig;

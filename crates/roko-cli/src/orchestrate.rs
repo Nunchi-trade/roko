@@ -115,6 +115,7 @@ use roko_std::SumScorer;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
@@ -133,6 +134,7 @@ use crate::prompting::{
     PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
 };
 use crate::task_parser::{TaskValidationIssue, TasksFile};
+use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
 use crate::workspace_paths::find_prd_path;
 
@@ -2222,6 +2224,8 @@ pub struct PlanRunner {
     server_event_bus: Option<roko_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
     /// Optional state hub sender for unified dashboard snapshot updates.
     state_hub_sender: Option<roko_core::StateHubSender>,
+    /// Optional approval IPC sender for connected TUI sessions.
+    approval_tx: Option<mpsc::Sender<ApprovalRequest>>,
     /// Optional cloud execution state for code-implementer runs.
     cloud_execution: Option<CloudExecution>,
     /// Optional Perplexity search client for pre-dispatch context enrichment.
@@ -3296,6 +3300,7 @@ impl PlanRunner {
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
+            approval_tx: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -3414,6 +3419,7 @@ impl PlanRunner {
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
+            approval_tx: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -3536,6 +3542,7 @@ impl PlanRunner {
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
+            approval_tx: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -3562,6 +3569,11 @@ impl PlanRunner {
     /// Attach a state hub sender for unified dashboard snapshot updates.
     pub fn set_state_hub(&mut self, sender: roko_core::StateHubSender) {
         self.state_hub_sender = Some(sender);
+    }
+
+    /// Attach an approval IPC sender for connected TUI sessions.
+    pub fn set_approval_tx(&mut self, tx: Option<mpsc::Sender<ApprovalRequest>>) {
+        self.approval_tx = tx;
     }
 
     /// Enable cloud execution behavior for the current plan run.
@@ -3608,6 +3620,39 @@ impl PlanRunner {
             plan_id: plan_id.to_string(),
             event,
         });
+    }
+
+    fn approval_command_display(&self, selected_model: &str) -> String {
+        let mut parts = vec![self.config.agent.command.clone()];
+        parts.extend(self.config.agent.args.iter().cloned());
+        if !selected_model.is_empty() && !parts.iter().any(|arg| arg == "--model") {
+            parts.push("--model".to_string());
+            parts.push(selected_model.to_string());
+        }
+        parts.join(" ")
+    }
+
+    async fn request_approval(
+        &self,
+        role: AgentRole,
+        command: String,
+        approval_id: String,
+    ) -> Result<bool> {
+        let Some(tx) = self.approval_tx.as_ref() else {
+            return Ok(true);
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+        tx.send(ApprovalRequest {
+            role: role.label().to_string(),
+            command,
+            approval_id,
+            response_tx,
+        })
+        .await
+        .map_err(|_| anyhow!("approval IPC receiver dropped"))?;
+
+        Ok(response_rx.await.unwrap_or(false))
     }
 
     fn apply_event_and_emit(
@@ -9618,8 +9663,6 @@ impl PlanRunner {
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         let explicit_model_override = model_override;
 
-        let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
-
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
         let mut attribution_keys: Vec<(String, String)> = Vec::new();
@@ -9957,6 +10000,24 @@ impl PlanRunner {
         } else {
             selected_model
         };
+
+        if self.approval_tx.is_some() && claude_skip_permissions_for_role(role) {
+            let approval_id = format!(
+                "{plan_id}:{task}:{}:{selected_model}:{}",
+                role.label(),
+                now_ms()
+            );
+            let command = self.approval_command_display(&selected_model);
+            let approved = self.request_approval(role, command, approval_id).await?;
+            if !approved {
+                return Err(anyhow!(
+                    "approval denied for plan={plan_id} task={task} role={}",
+                    role.label()
+                ));
+            }
+        }
+
+        let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
         let task_strategy = self.current_task_strategy(plan_id, task, task_def.as_ref());
         let somatic_signal = self.daimon.query_somatic(task_strategy);

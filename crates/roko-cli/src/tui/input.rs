@@ -340,12 +340,10 @@ pub enum TuiAction {
 /// Top-level key dispatch with modal intercept priority.
 ///
 /// Priority order (highest first):
-/// 1. Task picker modal
-/// 2. Task detail modal
-/// 3. Queue overview modal
-/// 4. Confirm dialog
-/// 5. Inject / filter text input
-/// 6. Normal per-tab navigation
+/// 1. Help / approval / detail modals
+/// 2. Confirm dialog
+/// 3. Inject / filter text input
+/// 4. Normal per-tab navigation
 pub fn handle_key(
     key: KeyEvent,
     mode: InputMode,
@@ -360,6 +358,9 @@ pub fn handle_key(
     // Modal intercepts (highest priority first)
     if modals.show_help {
         return handle_help_key(key);
+    }
+    if modals.show_approval {
+        return handle_approval_key(key);
     }
     if modals.show_wave_overview {
         return handle_wave_overview_key(key);
@@ -413,6 +414,7 @@ pub fn handle_key(
 /// Subset of TuiState modal flags needed by key dispatch.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModalVisibility {
+    pub show_approval: bool,
     pub show_task_picker: bool,
     pub show_task_detail: bool,
     pub show_queue_overview: bool,
@@ -428,6 +430,7 @@ impl ModalVisibility {
 
         match active_modal {
             Some(ModalState::Help) => visibility.show_help = true,
+            Some(ModalState::Approval { .. }) => visibility.show_approval = true,
             Some(ModalState::PlanDetail { .. }) => visibility.show_plan_detail = true,
             Some(ModalState::WaveOverview { .. }) => visibility.show_wave_overview = true,
             Some(ModalState::QueueOverview { .. }) => visibility.show_queue_overview = true,
@@ -447,6 +450,18 @@ impl ModalVisibility {
 fn handle_help_key(key: KeyEvent) -> TuiAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('?' | 'q') => TuiAction::ShowHelp,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_approval_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => TuiAction::ApproveCommand,
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => TuiAction::RejectCommand,
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            TuiAction::ApproveAll
+        }
+        KeyCode::Char('A') => TuiAction::ApproveAll,
         _ => TuiAction::None,
     }
 }
@@ -947,10 +962,42 @@ mod tests {
     }
 
     #[test]
+    fn approval_modal_intercepts_yes_and_no() {
+        let mut m = modals();
+        m.show_approval = true;
+
+        let approve = handle_key(
+            key(KeyCode::Char('y')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &m,
+        );
+        assert_eq!(approve, TuiAction::ApproveCommand);
+
+        let reject = handle_key(
+            key(KeyCode::Char('n')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &m,
+        );
+        assert_eq!(reject, TuiAction::RejectCommand);
+    }
+
+    #[test]
     fn modal_visibility_reads_active_modal() {
         let vis = ModalVisibility::from_active_modal(Some(&ModalState::Help));
         assert!(vis.show_help);
+        assert!(!vis.show_approval);
         assert!(!vis.show_task_detail);
+
+        let vis = ModalVisibility::from_active_modal(Some(&ModalState::Approval {
+            role: "implementer".to_string(),
+            command: "cargo check".to_string(),
+        }));
+        assert!(vis.show_approval);
+        assert!(!vis.show_help);
 
         let vis = ModalVisibility::from_active_modal(Some(&ModalState::TaskPicker {
             tasks: Vec::new(),
