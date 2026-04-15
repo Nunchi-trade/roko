@@ -6,6 +6,7 @@
 //! and exposed via HTTP (`/api/agents/*`) and JSON-RPC (`chain_*Agent*`).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// Cognitive phase in the CoALA-style Retrieve→Reason→Act→Verify loop.
@@ -45,6 +46,17 @@ pub struct AgentStats {
     pub total_tokens: u64,
 }
 
+/// Per-skill configuration persisted for an agent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkillConfig {
+    /// Whether the skill is currently enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Arbitrary per-skill parameters.
+    #[serde(default, rename = "config", alias = "parameters")]
+    pub config: HashMap<String, Value>,
+}
+
 /// A single cognitive trace entry for an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTrace {
@@ -73,6 +85,9 @@ pub struct AgentEntry {
     pub address: Vec<u8>,
     /// Agent role (e.g. "researcher", "coder").
     pub role: String,
+    /// Wallet or account that owns this agent.
+    #[serde(default)]
+    pub owner: String,
     /// Registration timestamp (Unix seconds).
     pub registered_at: u64,
     /// Block number of last heartbeat.
@@ -81,6 +96,9 @@ pub struct AgentEntry {
     pub last_heartbeat_ts: u64,
     /// Accumulated statistics.
     pub stats: AgentStats,
+    /// Per-agent skill configuration.
+    #[serde(default)]
+    pub skills: HashMap<String, SkillConfig>,
 }
 
 /// Events broadcast on the agent bus for WebSocket streaming.
@@ -133,7 +151,14 @@ impl AgentRegistry {
     }
 
     /// Register a new agent. Returns `false` if already registered.
-    pub fn register(&mut self, id: String, address: Vec<u8>, role: String, timestamp: u64) -> bool {
+    pub fn register(
+        &mut self,
+        id: String,
+        address: Vec<u8>,
+        role: String,
+        owner: String,
+        timestamp: u64,
+    ) -> bool {
         if self.agents.contains_key(&id) {
             return false;
         }
@@ -143,10 +168,12 @@ impl AgentRegistry {
                 id: id.clone(),
                 address,
                 role,
+                owner,
                 registered_at: timestamp,
                 last_heartbeat_block: 0,
                 last_heartbeat_ts: timestamp,
                 stats: AgentStats::default(),
+                skills: HashMap::new(),
             },
         );
         self.traces.insert(id, Vec::new());
@@ -204,6 +231,14 @@ impl AgentRegistry {
         self.agents.values().collect()
     }
 
+    /// List agents owned by a specific wallet or account.
+    pub fn list_agents_by_owner(&self, owner: &str) -> Vec<&AgentEntry> {
+        self.agents
+            .values()
+            .filter(|agent| agent.owner == owner)
+            .collect()
+    }
+
     /// Check if an agent is alive (heartbeat within `timeout_blocks` of `current_block`).
     pub fn is_alive(&self, id: &str, current_block: u64, timeout_blocks: u64) -> Option<bool> {
         self.agents
@@ -228,6 +263,31 @@ impl AgentRegistry {
             false
         }
     }
+
+    /// Get the skills configured for an agent.
+    pub fn get_skills(&self, id: &str) -> Option<&HashMap<String, SkillConfig>> {
+        self.agents.get(id).map(|agent| &agent.skills)
+    }
+
+    /// Replace all skills for an agent.
+    pub fn set_skills(&mut self, id: &str, skills: HashMap<String, SkillConfig>) -> bool {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.skills = skills;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update or insert a single skill for an agent.
+    pub fn set_skill(&mut self, id: &str, skill_name: &str, config: SkillConfig) -> bool {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.skills.insert(skill_name.to_owned(), config);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,18 +297,31 @@ mod tests {
     #[test]
     fn register_agent() {
         let mut reg = AgentRegistry::new();
-        assert!(reg.register("agent-1".into(), vec![1, 2, 3], "researcher".into(), 1000));
-        assert!(!reg.register("agent-1".into(), vec![1, 2, 3], "researcher".into(), 1000));
+        assert!(reg.register(
+            "agent-1".into(),
+            vec![1, 2, 3],
+            "researcher".into(),
+            "0xabc".into(),
+            1000,
+        ));
+        assert!(!reg.register(
+            "agent-1".into(),
+            vec![1, 2, 3],
+            "researcher".into(),
+            "0xabc".into(),
+            1000,
+        ));
         assert_eq!(reg.list_agents().len(), 1);
         let agent = reg.get_agent("agent-1").unwrap();
         assert_eq!(agent.role, "researcher");
+        assert_eq!(agent.owner, "0xabc");
         assert_eq!(agent.registered_at, 1000);
     }
 
     #[test]
     fn heartbeat_updates_block() {
         let mut reg = AgentRegistry::new();
-        reg.register("agent-1".into(), vec![], "worker".into(), 100);
+        reg.register("agent-1".into(), vec![], "worker".into(), "0x1".into(), 100);
         assert!(reg.heartbeat("agent-1", 50, 200));
         assert!(!reg.heartbeat("nonexistent", 50, 200));
         let agent = reg.get_agent("agent-1").unwrap();
@@ -259,7 +332,7 @@ mod tests {
     #[test]
     fn add_and_get_traces() {
         let mut reg = AgentRegistry::new();
-        reg.register("agent-1".into(), vec![], "coder".into(), 0);
+        reg.register("agent-1".into(), vec![], "coder".into(), "0x1".into(), 0);
         for i in 0..5 {
             reg.add_trace(
                 "agent-1",
@@ -286,7 +359,7 @@ mod tests {
     #[test]
     fn stats_delta_accumulates() {
         let mut reg = AgentRegistry::new();
-        reg.register("agent-1".into(), vec![], "analyst".into(), 0);
+        reg.register("agent-1".into(), vec![], "analyst".into(), "0x1".into(), 0);
         let delta = AgentStats {
             confirmations_given: 5,
             challenges_given: 2,
@@ -309,10 +382,45 @@ mod tests {
     #[test]
     fn liveness_check() {
         let mut reg = AgentRegistry::new();
-        reg.register("agent-1".into(), vec![], "watcher".into(), 0);
+        reg.register("agent-1".into(), vec![], "watcher".into(), "0x1".into(), 0);
         reg.heartbeat("agent-1", 100, 500);
         assert_eq!(reg.is_alive("agent-1", 150, 200), Some(true));
         assert_eq!(reg.is_alive("agent-1", 350, 200), Some(false));
         assert_eq!(reg.is_alive("nonexistent", 150, 200), None);
+    }
+
+    #[test]
+    fn list_agents_by_owner_filters() {
+        let mut reg = AgentRegistry::new();
+        reg.register("agent-1".into(), vec![], "watcher".into(), "0xabc".into(), 0);
+        reg.register("agent-2".into(), vec![], "watcher".into(), "0xdef".into(), 0);
+        reg.register("agent-3".into(), vec![], "watcher".into(), "0xabc".into(), 0);
+
+        let owned = reg.list_agents_by_owner("0xabc");
+        assert_eq!(owned.len(), 2);
+        assert!(owned.iter().all(|agent| agent.owner == "0xabc"));
+    }
+
+    #[test]
+    fn skills_round_trip() {
+        let mut reg = AgentRegistry::new();
+        reg.register("agent-1".into(), vec![], "watcher".into(), "0xabc".into(), 0);
+
+        let config = SkillConfig {
+            enabled: true,
+            config: HashMap::from([("confidence_threshold".into(), Value::from(80))]),
+        };
+        assert!(reg.set_skill("agent-1", "risk-sentinel", config.clone()));
+        assert_eq!(
+            reg.get_skills("agent-1")
+                .and_then(|skills| skills.get("risk-sentinel"))
+                .cloned(),
+            Some(config.clone())
+        );
+
+        let updated = HashMap::from([("hedge-agent".into(), config)]);
+        assert!(reg.set_skills("agent-1", updated.clone()));
+        assert_eq!(reg.get_skills("agent-1").cloned(), Some(updated));
+        assert!(!reg.set_skill("missing", "x", SkillConfig::default()));
     }
 }

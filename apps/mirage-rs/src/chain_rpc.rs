@@ -1418,7 +1418,7 @@ pub fn handle_register_agent(
     let timestamp = crate::http_api::now_secs();
     let registered = chain
         .agent_registry
-        .register(id.clone(), address, role.clone(), timestamp);
+        .register(id.clone(), address, role.clone(), String::new(), timestamp);
     if registered {
         let _ = chain
             .agent_bus

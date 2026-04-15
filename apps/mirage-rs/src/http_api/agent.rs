@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::{ApiError, ApiState, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
 use crate::chain::agent::{AgentStats, AgentTrace};
+use crate::chain::task::TaskState;
 
 /// Trace pagination query parameters.
 #[derive(Deserialize)]
@@ -25,21 +26,36 @@ fn default_limit() -> usize {
     10
 }
 
+/// Optional agent filters for `GET /api/agents`.
+#[derive(Debug, Deserialize, Default)]
+pub struct AgentListQuery {
+    /// Filter agents by owner wallet/account.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
 /// `GET /api/agents` — list all registered agents with summary stats.
-pub async fn list_agents(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn list_agents(
+    State(state): State<ApiState>,
+    Query(query): Query<AgentListQuery>,
+) -> impl IntoResponse {
     let chain = state.chain.read();
-    let agents: Vec<_> = chain
-        .agent_registry
-        .list_agents()
+    let agent_entries = query.owner.as_deref().map_or_else(
+        || chain.agent_registry.list_agents(),
+        |owner| chain.agent_registry.list_agents_by_owner(owner),
+    );
+    let agents: Vec<_> = agent_entries
         .iter()
         .map(|a| {
             serde_json::json!({
                 "id": a.id,
                 "role": a.role,
+                "owner": a.owner,
                 "registered_at": a.registered_at,
                 "last_heartbeat_block": a.last_heartbeat_block,
                 "last_heartbeat_ts": a.last_heartbeat_ts,
                 "stats": a.stats,
+                "skills": a.skills,
             })
         })
         .collect();
@@ -88,9 +104,15 @@ pub async fn get_agent_heartbeat(
                 .agent_registry
                 .is_alive(&id, current_block, timeout_blocks)
                 .unwrap_or(false);
+            let busy = chain
+                .task_store
+                .list(Some(TaskState::InProgress), None, Some(&id), 1, 0)
+                .1
+                > 0;
             Json(serde_json::json!({
                 "agent_id": id,
                 "alive": alive,
+                "busy": busy,
                 "last_block": agent.last_heartbeat_block,
                 "last_timestamp": agent.last_heartbeat_ts,
                 "blocks_since": current_block.saturating_sub(agent.last_heartbeat_block),
@@ -111,17 +133,22 @@ pub async fn get_agent_stats(
 ) -> Json<serde_json::Value> {
     let chain = state.chain.read();
     match chain.agent_registry.get_agent(&id) {
-        Some(agent) => Json(serde_json::json!({
-            "agent_id": id,
-            "confirmations_given": agent.stats.confirmations_given,
-            "challenges_given": agent.stats.challenges_given,
-            "warnings_posted": agent.stats.warnings_posted,
-            "insights_posted": agent.stats.insights_posted,
-            "delta_cycles": agent.stats.delta_cycles,
-            "total_cost_usd": agent.stats.total_cost_usd,
-            "total_tokens": agent.stats.total_tokens,
-            "registered_at": agent.registered_at,
-        })),
+        Some(agent) => {
+            let recent_task_count = chain.task_store.list(None, None, Some(&id), usize::MAX, 0).1;
+            Json(serde_json::json!({
+                "agent_id": id,
+                "owner": agent.owner,
+                "confirmations_given": agent.stats.confirmations_given,
+                "challenges_given": agent.stats.challenges_given,
+                "warnings_posted": agent.stats.warnings_posted,
+                "insights_posted": agent.stats.insights_posted,
+                "delta_cycles": agent.stats.delta_cycles,
+                "total_cost_usd": agent.stats.total_cost_usd,
+                "total_tokens": agent.stats.total_tokens,
+                "registered_at": agent.registered_at,
+                "operating_frequency": derive_operating_frequency(recent_task_count),
+            }))
+        }
         None => Json(serde_json::json!({
             "error": "agent not found",
             "agent_id": id,
@@ -139,6 +166,8 @@ pub struct RegisterAgentRequest {
     #[serde(default)]
     pub pubkey: String,
     pub role: String,
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// `POST /api/agents` — register a new agent.
@@ -164,7 +193,7 @@ pub async fn register_agent(
     let mut chain = state.chain.write();
     let registered = chain
         .agent_registry
-        .register(req.id.clone(), address, req.role.clone(), now);
+        .register(req.id.clone(), address, req.role.clone(), req.owner.clone(), now);
 
     if registered {
         let _ = chain.agent_bus.send(crate::chain::AgentEvent::Registered {
@@ -178,6 +207,7 @@ pub async fn register_agent(
             "registered": true,
             "agent_id": req.id,
             "role": req.role,
+            "owner": req.owner,
             "registered_at": now,
         })))
     } else {
@@ -284,4 +314,13 @@ pub async fn post_agent_trace(
         "ok": true,
         "agent_id": id,
     })))
+}
+
+fn derive_operating_frequency(task_count: usize) -> &'static str {
+    match task_count {
+        0 => "idle",
+        1..=2 => "reactive",
+        3..=5 => "active",
+        _ => "intensive",
+    }
 }

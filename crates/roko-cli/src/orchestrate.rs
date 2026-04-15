@@ -11871,7 +11871,9 @@ fn server_event_to_dashboard(
             agent_id: agent_id.clone(),
             role: role.clone(),
         }),
-        ServerEvent::AgentOutput { agent_id, content } => Some(DashboardEvent::AgentOutput {
+        ServerEvent::AgentOutput {
+            agent_id, content, ..
+        } => Some(DashboardEvent::AgentOutput {
             agent_id: agent_id.clone(),
             content: content.clone(),
         }),

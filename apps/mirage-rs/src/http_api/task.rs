@@ -9,7 +9,9 @@ use serde::Deserialize;
 
 use super::{ApiError, ApiState, MAX_LIMIT, PaginatedResponse, now_secs, with_cache_control};
 use crate::chain::agent::AgentStats;
-use crate::chain::task::{TaskError, TaskPriority, TaskState};
+use crate::chain::task::{
+    CompletionMetadata, TaskArtifact, TaskError, TaskPriority, TaskState,
+};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -276,6 +278,15 @@ pub struct CompleteTaskRequest {
     /// Optional insight ID produced as a result of the task.
     #[serde(default)]
     pub result_insight_id: Option<String>,
+    /// Task deliverables recorded on completion.
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
+    /// Human-readable completion summary.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Runtime metadata recorded on completion.
+    #[serde(default)]
+    pub completion_metadata: Option<CompletionMetadata>,
 }
 
 /// `POST /api/tasks/{id}/complete` — complete a task with optional result insight.
@@ -288,7 +299,14 @@ pub async fn complete_task(
     let mut chain = state.chain.write();
     let reward = chain
         .task_store
-        .complete(id, req.result_insight_id.clone(), now)
+        .complete(
+            id,
+            req.result_insight_id.clone(),
+            req.artifacts.clone(),
+            req.summary.clone(),
+            req.completion_metadata.clone(),
+            now,
+        )
         .map_err(task_error_to_api)?;
 
     let assignee = chain
@@ -320,6 +338,26 @@ pub async fn complete_task(
         "reward_wei": reward,
         "completed_at": now,
     })))
+}
+
+/// `GET /api/tasks/{id}/artifacts` — list completion artifacts for a task.
+pub async fn get_task_artifacts(
+    State(state): State<ApiState>,
+    Path(id): Path<u64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let chain = state.chain.read();
+    match chain.task_store.get(id) {
+        Some(task) => Ok(Json(serde_json::json!({
+            "task_id": id,
+            "artifacts": task.artifacts,
+            "summary": task.summary,
+            "completion_metadata": task.completion_metadata,
+        }))),
+        None => Err(ApiError {
+            error: format!("task not found: {id}"),
+            code: 404,
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------

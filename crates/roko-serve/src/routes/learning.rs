@@ -24,6 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/learning/efficiency", get(efficiency))
         .route("/learn/efficiency", get(efficiency))
         .route("/learning/cascade-router", get(cascade_router))
+        .route("/learning/cost-tiers", get(cost_tiers))
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
         .route("/learning/experiments", get(experiments))
@@ -54,6 +55,15 @@ async fn cascade(State(state): State<Arc<AppState>>) -> Result<Json<CascadeRespo
     let path = state.workdir.join(".roko/learn/cascade-router.json");
     let snapshot = read_cascade_snapshot(&path).await?;
     Ok(Json(build_cascade_response(&path, snapshot)))
+}
+
+/// `GET /api/learning/cost-tiers` — summarize T0/T1/T2 routing distribution.
+async fn cost_tiers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CostTierResponse>, ApiError> {
+    let path = state.workdir.join(".roko/learn/cascade-router.json");
+    let snapshot = read_cascade_snapshot(&path).await?;
+    Ok(Json(build_cost_tier_response(snapshot)))
 }
 
 /// `GET /api/learn/experiments` — summarize `.roko/learn/experiments.json`.
@@ -650,6 +660,23 @@ struct CascadeRoutingStats {
     best_model: Option<String>,
 }
 
+/// Structured API response for `GET /api/learning/cost-tiers`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CostTierResponse {
+    #[serde(rename = "T0")]
+    t0: u64,
+    #[serde(rename = "T1")]
+    t1: u64,
+    #[serde(rename = "T2")]
+    t2: u64,
+    total: u64,
+    sample_count: u64,
+    t0_pct: f64,
+    t1_pct: f64,
+    t2_pct: f64,
+}
+
 /// Recommended model for one task category.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -658,6 +685,57 @@ struct TaskRecommendation {
     complexity_band: String,
     recommended_model: String,
     weight: f64,
+}
+
+fn build_cost_tier_response(snapshot: Option<CascadeSnapshotData>) -> CostTierResponse {
+    let snapshot = snapshot.unwrap_or_default();
+    let mut t0 = 0_u64;
+    let mut t1 = 0_u64;
+    let mut t2 = 0_u64;
+
+    for (model, stats) in snapshot.confidence_stats {
+        match cost_tier_for_model(&model) {
+            "T0" => t0 += stats.trials,
+            "T1" => t1 += stats.trials,
+            _ => t2 += stats.trials,
+        }
+    }
+
+    let total = t0 + t1 + t2;
+    let denom = (total as f64).max(f64::EPSILON);
+
+    CostTierResponse {
+        t0,
+        t1,
+        t2,
+        total,
+        sample_count: total,
+        t0_pct: if total == 0 {
+            0.0
+        } else {
+            (t0 as f64 / denom) * 100.0
+        },
+        t1_pct: if total == 0 {
+            0.0
+        } else {
+            (t1 as f64 / denom) * 100.0
+        },
+        t2_pct: if total == 0 {
+            0.0
+        } else {
+            (t2 as f64 / denom) * 100.0
+        },
+    }
+}
+
+fn cost_tier_for_model(model: &str) -> &'static str {
+    if model.contains("rust") || model.contains("fsm") || model.contains("haiku") {
+        "T0"
+    } else if model.contains("opus") || model.contains("premium") {
+        "T2"
+    } else {
+        "T1"
+    }
 }
 
 /// Structured API response for `GET /api/learn/experiments`.
@@ -923,6 +1001,20 @@ mod tests {
             .expect("research recommendation");
         assert_eq!(research.complexity_band, "complex");
         assert_eq!(research.recommended_model, "claude-opus-4");
+    }
+
+    #[test]
+    fn cost_tier_response_buckets_trials_by_model_tier() {
+        let response = build_cost_tier_response(Some(snapshot()));
+
+        assert_eq!(response.t0, 30);
+        assert_eq!(response.t1, 50);
+        assert_eq!(response.t2, 0);
+        assert_eq!(response.total, 80);
+        assert_eq!(response.sample_count, 80);
+        assert!((response.t0_pct - 37.5).abs() < 1e-9);
+        assert!((response.t1_pct - 62.5).abs() < 1e-9);
+        assert_eq!(response.t2_pct, 0.0);
     }
 
     #[test]

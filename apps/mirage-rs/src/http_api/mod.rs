@@ -157,6 +157,7 @@ impl ProjectionCache {
 pub mod agent;
 pub mod knowledge;
 pub mod pheromone;
+pub mod skills;
 pub mod task;
 pub mod topology;
 #[cfg(feature = "roko")]
@@ -249,6 +250,14 @@ pub fn build_router(state: ApiState) -> Router {
             get(agent::get_agent_heartbeat).post(agent::agent_heartbeat),
         )
         .route("/agents/{id}/stats", get(agent::get_agent_stats))
+        .route(
+            "/agents/{id}/skills",
+            get(skills::get_agent_skills).put(skills::update_agent_skills),
+        )
+        .route(
+            "/agents/{id}/skills/{skill}",
+            axum::routing::put(skills::update_single_skill),
+        )
         // Task tracking
         .route("/tasks", get(task::list_tasks).post(task::create_task))
         .route("/tasks/stats", get(task::task_stats))
@@ -256,6 +265,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/tasks/{id}/assign", post(task::assign_task))
         .route("/tasks/{id}/start", post(task::start_task))
         .route("/tasks/{id}/complete", post(task::complete_task))
+        .route("/tasks/{id}/artifacts", get(task::get_task_artifacts))
         .route("/tasks/{id}/fail", post(task::fail_task))
         .route("/tasks/{id}/cancel", post(task::cancel_task))
         // Combined stats
