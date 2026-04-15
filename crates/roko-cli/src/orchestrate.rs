@@ -48,8 +48,8 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
-    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, TaskRequirements,
-    ToolRegistry, Verdict, score_model_for_task,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
+    TaskCategory, TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -74,8 +74,8 @@ use roko_learn::conductor::{
     ConductorAction as RetryConductorAction, ConductorBandit,
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
 };
-use roko_learn::costs_log::CostsLog;
 use roko_learn::costs_db::CostRecord;
+use roko_learn::costs_log::CostsLog;
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
@@ -85,6 +85,7 @@ use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStore};
 use roko_learn::prediction::CalibrationTracker;
+use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -97,7 +98,6 @@ use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
-use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
@@ -124,6 +124,10 @@ use crate::agent_config::{
 };
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::config::Config;
+use crate::heartbeat::{
+    HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
+    persist_heartbeat_snapshot,
+};
 use crate::plan::plans_dir;
 use crate::prompting::{
     PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
@@ -173,6 +177,17 @@ fn cfactor_history_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("c-factor.jsonl")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeartbeatCounts {
+    active_tasks: usize,
+    ready_tasks: usize,
+    completed_tasks: usize,
+    failed_tasks: usize,
+    completion_rate: f64,
+    max_queue_wait_hours: f64,
+    cross_plan_blocked: bool,
 }
 
 #[derive(Clone)]
@@ -1582,9 +1597,16 @@ fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Pa
         return;
     }
 
-    match learning.cascade_router().load_static_overrides(&overrides_path) {
-        Ok(applied) => tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides"),
-        Err(err) => tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides"),
+    match learning
+        .cascade_router()
+        .load_static_overrides(&overrides_path)
+    {
+        Ok(applied) => {
+            tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides")
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides")
+        }
     }
 }
 
@@ -3816,6 +3838,249 @@ impl PlanRunner {
         }
     }
 
+    fn heartbeat_counts(&self, completed_plans: &[String]) -> HeartbeatCounts {
+        let mut total_tasks = 0usize;
+        let mut completed_tasks = 0usize;
+        let mut failed_tasks = 0usize;
+        let mut ready_tasks = 0usize;
+        let mut max_queue_wait_hours = 0.0f64;
+        let mut cross_plan_blocked = false;
+
+        for tracker in self.task_trackers.values() {
+            total_tasks += tracker.tasks_file.tasks.len();
+            completed_tasks += tracker.completed.len();
+            failed_tasks += tracker.failed.len();
+            let ready = tracker.ready_tasks(completed_plans);
+            ready_tasks += ready.len();
+            for task in ready {
+                if let Some(wait_hours) = tracker.queue_wait_hours(&task.id) {
+                    max_queue_wait_hours = max_queue_wait_hours.max(wait_hours);
+                }
+            }
+            cross_plan_blocked |= tracker.has_tasks_blocked_by_plans(completed_plans);
+        }
+
+        let active_tasks = total_tasks.saturating_sub(completed_tasks + failed_tasks);
+        let completion_rate = if total_tasks == 0 {
+            0.0
+        } else {
+            completed_tasks as f64 / total_tasks as f64
+        };
+
+        HeartbeatCounts {
+            active_tasks,
+            ready_tasks,
+            completed_tasks,
+            failed_tasks,
+            completion_rate,
+            max_queue_wait_hours,
+            cross_plan_blocked,
+        }
+    }
+
+    fn heartbeat_probe_results(
+        &self,
+        completed_plans: &[String],
+        counts: HeartbeatCounts,
+        active_agents: usize,
+        watcher_cancel: &TokioCancellationToken,
+        theta_due: bool,
+        delta_due: bool,
+    ) -> Vec<HeartbeatProbeResult> {
+        let (readiness, degraded_reasons) = self.health_probes.readiness();
+        let health_degraded = matches!(readiness, roko_core::obs::health::ReadinessStatus::NotReady);
+        let recent_gate_failure = self
+            .task_trackers
+            .values()
+            .any(|tracker| tracker.last_gate_failure.is_some());
+        let repeated_gate_failures = self
+            .task_trackers
+            .values()
+            .any(|tracker| tracker.gate_failure_count >= 2);
+        let total_spend = self.plan_costs.values().sum::<f64>();
+        let affect_confidence = self.daimon.query().confidence;
+        let low_affect_confidence = affect_confidence < 0.35;
+        let mcp_unavailable = !self.mcp_server_names.is_empty()
+            && self
+                .tool_registry
+                .as_ref()
+                .is_none_or(|registry| registry.all().is_empty());
+
+        vec![
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ShutdownRequested,
+                self.cancel.is_cancelled(),
+                self.cancel
+                    .is_cancelled()
+                    .then(|| "root cancel token tripped".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::WatcherCancelled,
+                watcher_cancel.is_cancelled(),
+                watcher_cancel
+                    .is_cancelled()
+                    .then(|| "watcher task cancellation observed".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::NoReadyTasks,
+                counts.ready_tasks == 0,
+                (counts.ready_tasks == 0).then(|| "no tasks are ready to dispatch".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ReadyQueueStalled,
+                counts.max_queue_wait_hours >= 0.25,
+                (counts.max_queue_wait_hours >= 0.25)
+                    .then(|| format!("max queued task wait {:.2}h", counts.max_queue_wait_hours)),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::CrossPlanBlocked,
+                counts.cross_plan_blocked,
+                counts.cross_plan_blocked.then(|| {
+                    format!(
+                        "{} plan(s) waiting on cross-plan dependencies",
+                        self.task_trackers
+                            .values()
+                            .filter(|tracker| tracker.has_tasks_blocked_by_plans(completed_plans))
+                            .count()
+                    )
+                }),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::GateFailurePresent,
+                recent_gate_failure,
+                recent_gate_failure.then(|| "recent gate failure recorded".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::RepeatedGateFailures,
+                repeated_gate_failures,
+                repeated_gate_failures.then(|| "repeated gate failures detected".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ForceModelOverrideArmed,
+                self.force_model_override.is_some(),
+                self.force_model_override
+                    .as_ref()
+                    .map(|model| format!("pending override: {model}")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::LowAffectConfidence,
+                low_affect_confidence,
+                low_affect_confidence.then(|| format!("daimon confidence {:.2}", affect_confidence)),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ActiveAgentsPresent,
+                active_agents > 0,
+                (active_agents > 0).then(|| format!("{active_agents} active agent(s)")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::HealthDegraded,
+                health_degraded,
+                health_degraded.then(|| {
+                    degraded_reasons
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                }),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::SearchUnavailable,
+                self.search_client.is_none(),
+                self.search_client
+                    .is_none()
+                    .then(|| "PERPLEXITY_API_KEY not configured".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::McpUnavailable,
+                mcp_unavailable,
+                mcp_unavailable.then(|| "MCP servers requested but no tools are active".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::SessionSpendElevated,
+                total_spend >= 1.0,
+                (total_spend >= 1.0).then(|| format!("session spend ${total_spend:.2}")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ThetaDue,
+                theta_due,
+                theta_due.then(|| "adaptive theta cadence elapsed".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::DeltaDue,
+                delta_due,
+                delta_due.then(|| "delta consolidation cadence elapsed while idle".to_string()),
+            ),
+        ]
+    }
+
+    async fn maybe_run_heartbeat(
+        &mut self,
+        heartbeat_clock: &mut HeartbeatClock,
+        watcher_cancel: &TokioCancellationToken,
+    ) {
+        let completed_plans = self.executor.completed_plans();
+        let counts = self.heartbeat_counts(&completed_plans);
+        let now = std::time::Instant::now();
+        let active_agents = self.supervisor.count().await;
+        let affect = self.daimon.query();
+        let context = OperatingFrequencyScheduleContext::from_affect(
+            Duration::from_secs(heartbeat_clock.seconds_since_last_theta(now)),
+            counts.active_tasks,
+            counts.completion_rate,
+            &affect,
+        );
+        let theta_due = heartbeat_clock.theta_due(now, context);
+        let delta_due = heartbeat_clock.delta_due(now, context);
+        let Some(frequency) = heartbeat_clock.next_due(now, context) else {
+            return;
+        };
+
+        let snapshot = HeartbeatSnapshot {
+            timestamp: chrono::Utc::now(),
+            frequency,
+            active_tasks: counts.active_tasks,
+            ready_tasks: counts.ready_tasks,
+            completed_tasks: counts.completed_tasks,
+            failed_tasks: counts.failed_tasks,
+            completion_rate: counts.completion_rate,
+            active_agents,
+            seconds_since_last_theta: heartbeat_clock.seconds_since_last_theta(now),
+            delta_interval_secs: heartbeat_clock.delta_interval_secs(),
+            probes: self.heartbeat_probe_results(
+                &completed_plans,
+                counts,
+                active_agents,
+                watcher_cancel,
+                theta_due,
+                delta_due,
+            ),
+        };
+
+        if let Err(err) = persist_heartbeat_snapshot(&self.workdir, &snapshot) {
+            tracing::warn!(error = %err, "failed to persist heartbeat snapshot");
+        }
+
+        let triggered = snapshot.triggered_probe_labels();
+        self.emit_conductor_signal(
+            Kind::Custom(format!("heartbeat.{}", frequency_label(frequency)).into()),
+            serde_json::to_value(&snapshot)
+                .unwrap_or_else(|_| serde_json::json!({"frequency": frequency_label(frequency)})),
+        );
+        tracing::info!(
+            frequency = frequency_label(frequency),
+            active_tasks = snapshot.active_tasks,
+            ready_tasks = snapshot.ready_tasks,
+            completion_rate = snapshot.completion_rate,
+            triggered = ?triggered,
+            "heartbeat snapshot recorded"
+        );
+        heartbeat_clock.record(now, frequency);
+
+        if frequency == OperatingFrequency::Delta {
+            self.maybe_auto_dream().await;
+        }
+    }
+
     fn record_conductor_negative_feedback(&self, plan_id: &str, intervention: &ConductorDecision) {
         let Some((task_id, model_slug, task_def)) =
             self.task_trackers.get(plan_id).and_then(|tracker| {
@@ -4337,6 +4602,7 @@ impl PlanRunner {
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
+        let mut heartbeat_clock = HeartbeatClock::new();
 
         loop {
             iteration += 1;
@@ -4369,6 +4635,8 @@ impl PlanRunner {
             let actions = self.executor.tick();
 
             if actions.is_empty() {
+                self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
+                    .await;
                 if self.all_terminal(&plan_ids) {
                     break;
                 }
@@ -4390,6 +4658,9 @@ impl PlanRunner {
                 }
                 self.dispatch_action(action).await;
             }
+
+            self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
+                .await;
 
             // Auto-save periodically.
             if self.actions_since_save >= AUTOSAVE_INTERVAL {
@@ -9414,7 +9685,8 @@ impl PlanRunner {
                 }
             };
 
-            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
+            routing_explanation =
+                Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
             if let Some(explanation) = routing_explanation.as_ref() {
                 routing_stage = explanation.stage.label().to_string();
                 routing_reason = if cost_spike {
@@ -9425,12 +9697,12 @@ impl PlanRunner {
                     "conductor_prefer_cheaper"
                 } else {
                     match explanation.stage {
-                    roko_learn::cascade_router::CascadeStage::Static => "role_default",
-                    roko_learn::cascade_router::CascadeStage::Confidence => {
-                        "highest_confidence_score"
+                        roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                        roko_learn::cascade_router::CascadeStage::Confidence => {
+                            "highest_confidence_score"
+                        }
+                        roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
                     }
-                    roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
-                }
                 }
                 .to_string();
             }
@@ -13659,6 +13931,7 @@ depends_on = []
             plan_states,
             queue_order: vec!["plan-1".to_string()],
             timestamp_ms: 0,
+            speculative_executions: HashMap::new(),
         };
         let snapshot_json = snapshot.to_json().unwrap();
         let mut runner = PlanRunner::from_snapshot(
@@ -13711,6 +13984,7 @@ depends_on = []
             plan_states,
             queue_order: vec!["plan-1".to_string()],
             timestamp_ms: 0,
+            speculative_executions: HashMap::new(),
         };
         let snapshot_json = snapshot.to_json().unwrap();
         let runner = PlanRunner::from_snapshot(

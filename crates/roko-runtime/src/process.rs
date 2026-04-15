@@ -501,7 +501,10 @@ impl ProcessSupervisor {
         let strategy = self.strategy.clone();
         let fallback_tier = strategy.fallback_tier().unwrap_or("standard");
 
-        if !self.allow_restart(&label, strategy.max_restarts(), strategy.within_ms()).await {
+        if !self
+            .allow_restart(&label, strategy.max_restarts(), strategy.within_ms())
+            .await
+        {
             warn!(
                 id = %id,
                 label = %label,
@@ -543,9 +546,13 @@ impl ProcessSupervisor {
         ids.sort_by_key(|id| id.0);
 
         match self.strategy {
-            SupervisionStrategy::OneForOne { .. } => ids.into_iter().filter(|id| *id == failed).collect(),
+            SupervisionStrategy::OneForOne { .. } => {
+                ids.into_iter().filter(|id| *id == failed).collect()
+            }
             SupervisionStrategy::OneForAll { .. } => ids,
-            SupervisionStrategy::RestForOne { .. } => ids.into_iter().filter(|id| id.0 >= failed.0).collect(),
+            SupervisionStrategy::RestForOne { .. } => {
+                ids.into_iter().filter(|id| id.0 >= failed.0).collect()
+            }
         }
     }
 

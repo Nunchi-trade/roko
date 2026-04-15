@@ -1210,6 +1210,8 @@ async fn graceful_shutdown_daemon(
 async fn flush_daemon_artifacts(workdir: &Path) -> Result<()> {
     flush_file(workdir.join(".roko").join("signals.jsonl")).await?;
     flush_file(workdir.join(".roko").join("episodes.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("learn").join("heartbeat.json")).await?;
+    flush_file(workdir.join(".roko").join("learn").join("heartbeat.jsonl")).await?;
     flush_file(workdir.join(".roko").join("logs").join("daemon.log")).await?;
     flush_file(workdir.join(".roko").join("logs").join("daemon.err")).await?;
     std::io::stdout().flush().context("flush stdout")?;

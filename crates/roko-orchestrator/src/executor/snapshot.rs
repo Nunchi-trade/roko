@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use roko_core::PlanPhase;
 
-use super::plan_state::PlanState;
 use super::SpeculativeExecution;
+use super::plan_state::PlanState;
 
 /// Serializable snapshot of the entire executor state.
 ///

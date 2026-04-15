@@ -697,7 +697,8 @@ impl UnifiedTaskDag {
         }
 
         for (id, task) in &self.tasks {
-            self.estimates.insert(id.clone(), task.estimated_minutes.unwrap_or(0));
+            self.estimates
+                .insert(id.clone(), task.estimated_minutes.unwrap_or(0));
             for raw in &task.depends_on {
                 let dep_id = resolve_dep_ref(&id.plan, raw);
                 if !node_set.contains(&dep_id) {
@@ -720,7 +721,10 @@ impl UnifiedTaskDag {
                 };
                 for id in &plan_tasks {
                     for dep_id in &dep_tasks {
-                        self.edges.entry(id.clone()).or_default().insert(dep_id.clone());
+                        self.edges
+                            .entry(id.clone())
+                            .or_default()
+                            .insert(dep_id.clone());
                     }
                 }
             }
@@ -772,12 +776,15 @@ impl UnifiedTaskDag {
         Vec<GlobalTaskId>,
     )> {
         let topo = self.topological_sort().ok()?;
-        let mut earliest: HashMap<GlobalTaskId, Duration> = HashMap::with_capacity(self.nodes.len());
+        let mut earliest: HashMap<GlobalTaskId, Duration> =
+            HashMap::with_capacity(self.nodes.len());
         for node in &topo {
             let start = self
                 .deps_of(node)
                 .iter()
-                .map(|dep| earliest.get(dep).copied().unwrap_or(Duration::ZERO) + self.task_duration(dep))
+                .map(|dep| {
+                    earliest.get(dep).copied().unwrap_or(Duration::ZERO) + self.task_duration(dep)
+                })
                 .max()
                 .unwrap_or(Duration::ZERO);
             earliest.insert(node.clone(), start);
@@ -785,7 +792,8 @@ impl UnifiedTaskDag {
 
         let mut project_duration = Duration::ZERO;
         for node in &topo {
-            let finish = earliest.get(node).copied().unwrap_or(Duration::ZERO) + self.task_duration(node);
+            let finish =
+                earliest.get(node).copied().unwrap_or(Duration::ZERO) + self.task_duration(node);
             project_duration = project_duration.max(finish);
         }
 
@@ -924,11 +932,7 @@ fn resolve_dep_ref(referrer_plan: &str, raw: &str) -> GlobalTaskId {
 }
 
 fn tasks_for_plan(tasks: &HashMap<GlobalTaskId, Task>, plan: &str) -> Option<Vec<GlobalTaskId>> {
-    let mut ids: Vec<GlobalTaskId> = tasks
-        .keys()
-        .filter(|id| id.plan == plan)
-        .cloned()
-        .collect();
+    let mut ids: Vec<GlobalTaskId> = tasks.keys().filter(|id| id.plan == plan).cloned().collect();
     if ids.is_empty() {
         return None;
     }
@@ -1034,9 +1038,9 @@ fn map_rebuild_error(err: DagError, _dag: &UnifiedTaskDag) -> DagMutationError {
         DagError::DanglingDepRef { referrer, target } => DagMutationError::InvalidMutation(
             format!("dangling dep during rebuild: {referrer} -> {target}"),
         ),
-        DagError::UnknownPlan(plan) => DagMutationError::InvalidMutation(format!(
-            "unknown plan during rebuild: {plan}"
-        )),
+        DagError::UnknownPlan(plan) => {
+            DagMutationError::InvalidMutation(format!("unknown plan during rebuild: {plan}"))
+        }
     }
 }
 

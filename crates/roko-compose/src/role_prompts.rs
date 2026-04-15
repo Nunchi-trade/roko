@@ -5,10 +5,11 @@
 //! role-template identities from [`crate::templates`] and exposes a typed API
 //! suitable for both single-shot and orchestrated execution paths.
 
+use crate::ContextChunk;
 use crate::PadState;
 use crate::prompt::estimate_tokens;
 use crate::prompt::{PromptComposer, PromptSection};
-use crate::scorer::SectionScorer;
+use crate::scorer::{ActiveInferenceScorer, SectionScorer};
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
 use crate::templates::common::CONTEXT_LAYOUT_STANZA;
@@ -20,7 +21,7 @@ use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use crate::templates::task_impl::TaskImplTemplate;
 use roko_core::error::{Result, RokoError};
-use roko_core::{AgentRole, Budget, Composer, Context};
+use roko_core::{AgentRole, Budget, Composer, Context, Scorer};
 use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
 use tracing::warn;
@@ -43,6 +44,8 @@ pub struct TaskContext {
     pub task: String,
     /// Optional plan id associated with the task.
     pub plan_id: Option<String>,
+    /// Optional goal guiding prompt composition and section scoring.
+    pub goal: Option<String>,
     /// Optional workspace label/path.
     pub workspace: Option<String>,
     /// Optional structured context assembled for this task.
@@ -68,6 +71,13 @@ impl TaskContext {
         self
     }
 
+    /// Attach a goal for active-inference scoring.
+    #[must_use]
+    pub fn with_goal(mut self, goal: impl Into<String>) -> Self {
+        self.goal = Some(goal.into());
+        self
+    }
+
     /// Attach a workspace label/path.
     #[must_use]
     pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
@@ -89,10 +99,26 @@ impl TaskContext {
         self
     }
 
+    fn goal_text(&self) -> Option<&str> {
+        self.goal.as_deref().filter(|goal| !goal.trim().is_empty())
+    }
+
     fn task_layer(&self) -> String {
         self.plan_id.as_ref().map_or_else(
-            || self.task.clone(),
-            |plan_id| format!("Plan: {plan_id}\nTask: {}", self.task),
+            || {
+                self.goal.as_ref().map_or_else(
+                    || self.task.clone(),
+                    |goal| format!("Goal: {goal}\nTask: {}", self.task),
+                )
+            },
+            |plan_id| {
+                let mut parts = vec![format!("Plan: {plan_id}")];
+                if let Some(goal) = &self.goal {
+                    parts.push(format!("Goal: {goal}"));
+                }
+                parts.push(format!("Task: {}", self.task));
+                parts.join("\n")
+            },
         )
     }
 
@@ -103,6 +129,9 @@ impl TaskContext {
         }
         if !self.task.is_empty() {
             parts.push(format!("Task: {}", self.task));
+        }
+        if let Some(goal) = &self.goal {
+            parts.push(format!("Goal: {goal}"));
         }
         if let Some(workspace) = &self.workspace {
             parts.push(format!("Workspace: {workspace}"));
@@ -137,6 +166,8 @@ pub struct RoleSystemPromptSpec {
     pub extra_anti_patterns: Vec<String>,
     /// Optional relevant skills injected into the system prompt.
     pub relevant_skills: Vec<Skill>,
+    /// Optional pheromone / active-signal chunks injected into the prompt.
+    pub pheromones: Vec<ContextChunk>,
     /// Optional affect state used to tune tone and focus.
     pub affect_state: Option<PadState>,
     /// Whether to include cache markers between stability tiers.
@@ -155,6 +186,7 @@ impl RoleSystemPromptSpec {
             extra_conventions: None,
             extra_anti_patterns: Vec::new(),
             relevant_skills: Vec::new(),
+            pheromones: Vec::new(),
             affect_state: None,
             cache_markers: false,
         }
@@ -185,6 +217,13 @@ impl RoleSystemPromptSpec {
     #[must_use]
     pub fn with_relevant_skills(mut self, skills: &[Skill]) -> Self {
         self.relevant_skills = skills.to_vec();
+        self
+    }
+
+    /// Attach active pheromone/context signals to the prompt.
+    #[must_use]
+    pub fn with_pheromones(mut self, pheromones: &[ContextChunk]) -> Self {
+        self.pheromones = pheromones.to_vec();
         self
     }
 
@@ -243,6 +282,9 @@ impl RoleSystemPromptSpec {
         if !self.relevant_skills.is_empty() {
             builder = builder.with_skills(&self.relevant_skills);
         }
+        if !self.pheromones.is_empty() {
+            builder = builder.with_pheromones(&self.pheromones);
+        }
 
         let domain = self.task_context.domain_layer();
         if !domain.is_empty() {
@@ -299,17 +341,26 @@ impl RoleSystemPromptSpec {
     /// This is useful when callers want a budget-aware system prompt string
     /// while preserving the role/system/session/task layering semantics.
     pub fn compose_with_budget(&self, token_budget: usize) -> Result<String> {
+        let scorer = self.composition_scorer();
+        let ctx = self.composition_context();
+        self.compose_with_budget_and_scorer(token_budget, scorer.as_ref(), &ctx)
+    }
+
+    /// Compose the section form under a token budget using an explicit scorer/context pair.
+    #[must_use]
+    pub fn compose_with_budget_and_scorer(
+        &self,
+        token_budget: usize,
+        scorer: &dyn Scorer,
+        ctx: &Context,
+    ) -> Result<String> {
         let sections = self.build_sections();
         let signals = sections
             .into_iter()
             .map(PromptSection::into_signal)
             .collect::<Result<Vec<_>>>()?;
-        let composed = PromptComposer::new().compose(
-            &signals,
-            &Budget::tokens(token_budget),
-            &SectionScorer::new(),
-            &Context::now(),
-        )?;
+        let composed =
+            PromptComposer::new().compose(&signals, &Budget::tokens(token_budget), scorer, ctx)?;
         composed.body.as_text().map(str::to_string)
     }
 
@@ -360,17 +411,14 @@ impl RoleSystemPromptSpec {
             } else {
                 self.build_sections()
             };
-            let signals = sections
-                .into_iter()
-                .map(PromptSection::into_signal)
-                .collect::<Result<Vec<_>>>()?;
-            let composed = PromptComposer::new().compose(
-                &signals,
-                &Budget::tokens(soft_limit),
-                &SectionScorer::new(),
-                &Context::now(),
+            let scorer = self.composition_scorer();
+            let ctx = self.composition_context();
+            let prompt = self.compose_sections_with_budget_and_scorer(
+                sections,
+                soft_limit,
+                scorer.as_ref(),
+                &ctx,
             )?;
-            let prompt = composed.body.as_text().map(str::to_string)?;
             let prompt_tokens = estimate_tokens(&prompt);
 
             if prompt_tokens > hard_limit {
@@ -385,6 +433,38 @@ impl RoleSystemPromptSpec {
         }
 
         Ok(prompt)
+    }
+
+    fn compose_sections_with_budget_and_scorer(
+        &self,
+        sections: Vec<PromptSection>,
+        token_budget: usize,
+        scorer: &dyn Scorer,
+        ctx: &Context,
+    ) -> Result<String> {
+        let signals = sections
+            .into_iter()
+            .map(PromptSection::into_signal)
+            .collect::<Result<Vec<_>>>()?;
+        let composed =
+            PromptComposer::new().compose(&signals, &Budget::tokens(token_budget), scorer, ctx)?;
+        composed.body.as_text().map(str::to_string)
+    }
+
+    fn composition_context(&self) -> Context {
+        let mut ctx = Context::now();
+        if let Some(goal) = self.task_context.goal_text() {
+            ctx = ctx.with_goal(goal);
+        }
+        ctx
+    }
+
+    fn composition_scorer(&self) -> Box<dyn Scorer> {
+        if let Some(goal) = self.task_context.goal_text() {
+            Box::new(ActiveInferenceScorer::new(goal))
+        } else {
+            Box::new(SectionScorer::new())
+        }
     }
 }
 
@@ -469,6 +549,7 @@ mod tests {
     fn built_prompt_includes_context_and_tool_guidance() {
         let ctx = TaskContext::new("Implement task wiring")
             .with_plan_id("042-golem-mortality")
+            .with_goal("keep routing and prompt composition aligned")
             .with_workspace("roko-cli orchestration")
             .with_context(
                 "## Relevant Context\n\n### Knowledge\n- [Heuristic] Keep the prompt compact.",
@@ -478,6 +559,7 @@ mod tests {
             .with_extra_conventions("Prefer additive changes.");
         let prompt = spec.build();
         assert!(prompt.contains("Plan: 042-golem-mortality"));
+        assert!(prompt.contains("Goal: keep routing and prompt composition aligned"));
         assert!(prompt.contains("Task: Implement task wiring"));
         assert!(prompt.contains("Workspace: roko-cli orchestration"));
         assert!(prompt.contains("## Relevant Context"));
@@ -551,5 +633,44 @@ mod tests {
         assert!(!prompt.contains("--- domain_context ---"));
         assert!(!prompt.contains("--- tool_instructions ---"));
         assert!(!prompt.contains("--- anti_patterns ---"));
+    }
+
+    #[test]
+    fn compose_with_budget_uses_goal_aware_active_inference_scoring() {
+        let ctx = TaskContext::new("Compose goal-aware prompt sections")
+            .with_goal("reduce routing latency");
+        let spec = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .with_extra_conventions("Prefer the fastest viable path.")
+            .with_pheromones(&[ContextChunk {
+                content: "- [Threat] context assembly is too slow.".to_string(),
+                source: crate::ContextSource::RecentSignal {
+                    signal_id: "pheromone-1".to_string(),
+                    plan_id: "plan-x".to_string(),
+                    kind: "pheromone".to_string(),
+                },
+                relevance: 0.95,
+                track_record: Some(0.9),
+                confidence: Some(0.8),
+                recency: Some(0.95),
+                emotional_tag: None,
+            }]);
+        let sections = spec.build_sections();
+        let critical_budget = sections
+            .iter()
+            .filter(|section| section.priority == SectionPriority::Critical)
+            .map(PromptSection::estimated_tokens)
+            .sum::<usize>();
+        let active_signal_budget = sections
+            .iter()
+            .find(|section| section.name == "active_signals")
+            .map(PromptSection::estimated_tokens)
+            .unwrap_or(0);
+
+        let prompt = spec
+            .compose_with_budget(critical_budget + active_signal_budget + 96)
+            .expect("composition should succeed");
+
+        assert!(prompt.contains("Goal: reduce routing latency"));
+        assert!(prompt.contains("context assembly is too slow"));
     }
 }

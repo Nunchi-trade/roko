@@ -51,7 +51,11 @@ pub struct Turn {
 impl Turn {
     /// Construct a turn from a backend response.
     #[must_use]
-    pub fn from_response(index: usize, response: &BackendResponse, tool_calls: Vec<ToolCall>) -> Self {
+    pub fn from_response(
+        index: usize,
+        response: &BackendResponse,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
         Self {
             index,
             assistant_text: response.extract_text(),
@@ -62,9 +66,9 @@ impl Turn {
     }
 
     fn tool_fingerprints(&self) -> impl Iterator<Item = String> + '_ {
-        self.tool_calls.iter().map(|call| {
-            format!("{}:{}", call.name, call.arguments)
-        })
+        self.tool_calls
+            .iter()
+            .map(|call| format!("{}:{}", call.name, call.arguments))
     }
 }
 
@@ -252,7 +256,11 @@ mod tests {
             index: 1,
             assistant_text: String::new(),
             reasoning: None,
-            tool_calls: vec![ToolCall::new("1", "read_file", serde_json::json!({"path": "x"}))],
+            tool_calls: vec![ToolCall::new(
+                "1",
+                "read_file",
+                serde_json::json!({"path": "x"}),
+            )],
             confidence: Some(0.9),
         };
         let turns = vec![turn.clone(), turn.clone(), turn];

@@ -91,7 +91,10 @@ pub fn delegate(
         return Err(CapabilityError::DepthExhausted);
     }
 
-    if subset.iter().any(|required| !check_capability(warrant, required)) {
+    if subset
+        .iter()
+        .any(|required| !check_capability(warrant, required))
+    {
         return Err(CapabilityError::NotCovered);
     }
 
@@ -108,9 +111,10 @@ fn capability_covers(granted: &Capability, required: &Capability) -> bool {
     match (granted, required) {
         (Capability::Tool(a), Capability::Tool(b)) => a == b,
         (Capability::Exec(a), Capability::Exec(b)) => a == b,
-        (Capability::Network { host: ah, port: ap }, Capability::Network { host: bh, port: bp }) => {
-            ah == bh && ap == bp
-        }
+        (
+            Capability::Network { host: ah, port: ap },
+            Capability::Network { host: bh, port: bp },
+        ) => ah == bh && ap == bp,
         (Capability::ReadPath(granted), Capability::ReadPath(required))
         | (Capability::WritePath(granted), Capability::WritePath(required)) => {
             path_contains(granted, required)
@@ -155,14 +159,20 @@ mod tests {
     fn check_capability_matches_exact_tool() {
         let warrant = AgentWarrant::new("issuer", vec![Capability::Tool("bash".into())], 1);
         assert!(check_capability(&warrant, &Capability::Tool("bash".into())));
-        assert!(!check_capability(&warrant, &Capability::Tool("grep".into())));
+        assert!(!check_capability(
+            &warrant,
+            &Capability::Tool("grep".into())
+        ));
     }
 
     #[test]
     fn delegate_reduces_scope() {
         let warrant = AgentWarrant::new(
             "issuer",
-            vec![Capability::Tool("bash".into()), Capability::Exec("bash".into())],
+            vec![
+                Capability::Tool("bash".into()),
+                Capability::Exec("bash".into()),
+            ],
             1,
         );
         let child = delegate(&warrant, &[Capability::Tool("bash".into())]).unwrap();

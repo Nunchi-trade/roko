@@ -47,10 +47,8 @@ use self::path::PathPolicy;
 use self::rate_limit::{RateLimitKey, RateLimiter};
 use self::scrub::ScrubPolicy;
 
-pub use capabilities::{
-    AgentWarrant, Capability, CapabilityError, check_capability, delegate,
-};
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
+pub use capabilities::{AgentWarrant, Capability, CapabilityError, check_capability, delegate};
 
 // ─── Tool-name constants used to match calls to policies ──────────────────
 
@@ -247,7 +245,11 @@ impl SafetyLayer {
     }
 }
 
-fn required_capabilities(call: &ToolCall, ctx: &ToolContext, path_policy: &PathPolicy) -> Vec<Capability> {
+fn required_capabilities(
+    call: &ToolCall,
+    ctx: &ToolContext,
+    path_policy: &PathPolicy,
+) -> Vec<Capability> {
     let mut required = vec![Capability::Tool(call.name.clone())];
     let name = call.name.as_str();
 
@@ -273,7 +275,8 @@ fn required_capabilities(call: &ToolCall, ctx: &ToolContext, path_policy: &PathP
             .or_else(|| call.arguments.get("pattern"))
             .and_then(|v| v.as_str());
         if let Some(path_arg) = path_arg
-            && let Ok(canonical) = path::canonicalize_with_policy(&ctx.worktree_path, path_arg, path_policy)
+            && let Ok(canonical) =
+                path::canonicalize_with_policy(&ctx.worktree_path, path_arg, path_policy)
         {
             required.push(match name {
                 "write_file" | "edit_file" | "multi_edit" | "apply_patch" | "notebook_edit" => {

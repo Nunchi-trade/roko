@@ -344,6 +344,64 @@ impl DreamSchedulePolicy {
     }
 }
 
+/// Heartbeat cadence and delta-loop policy for daemon-friendly polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DreamHeartbeatPolicy {
+    /// How often a daemon should poll for heartbeat updates, in seconds.
+    #[serde(default = "default_heartbeat_tick_secs")]
+    pub tick_interval_secs: u64,
+    /// Minimum age of the last consolidated dream before a delta loop may fire.
+    #[serde(default = "default_delta_interval_mins")]
+    pub delta_interval_mins: u64,
+    /// Minimum idle window before active plan work is considered quiescent.
+    #[serde(default = "default_idle_grace_mins")]
+    pub idle_grace_mins: u64,
+}
+
+impl Default for DreamHeartbeatPolicy {
+    fn default() -> Self {
+        Self {
+            tick_interval_secs: default_heartbeat_tick_secs(),
+            delta_interval_mins: default_delta_interval_mins(),
+            idle_grace_mins: default_idle_grace_mins(),
+        }
+    }
+}
+
+/// Runtime snapshot describing whether the dreams-side heartbeat may fire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamHeartbeatReport {
+    /// Cutoff used to decide which episodes are recent enough to matter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_through: Option<DateTime<Utc>>,
+    /// Number of recent episodes seen after the cutoff.
+    pub recent_episode_count: usize,
+    /// Timestamp of the most recent episode in the active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_episode_at: Option<DateTime<Utc>>,
+    /// Timestamp of the most recent consolidated dream run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dream_at: Option<DateTime<Utc>>,
+    /// Heartbeat polling interval, in seconds.
+    pub heartbeat_due_in_secs: u64,
+    /// Delta-loop interval, in minutes.
+    pub delta_interval_mins: u64,
+    /// Idle grace period, in minutes.
+    pub idle_grace_mins: u64,
+    /// Whether enough fresh episodes exist to justify a delta pass.
+    pub enough_recent_episodes: bool,
+    /// Whether the plan still looks active enough to suppress delta.
+    pub paused_for_active_plan: bool,
+    /// Idle age of the most recent episode, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_for_secs: Option<u64>,
+    /// Delay until the next delta loop is due, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_due_in_secs: Option<u64>,
+    /// Whether the delta loop is immediately runnable.
+    pub delta_ready: bool,
+}
+
 /// Combined runtime controls for replay, budgeting, and scheduling.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DreamRuntimeControls {
@@ -356,6 +414,9 @@ pub struct DreamRuntimeControls {
     /// Scheduling policy.
     #[serde(default)]
     pub schedule: DreamSchedulePolicy,
+    /// Heartbeat cadence and delta-loop policy.
+    #[serde(default)]
+    pub heartbeat: DreamHeartbeatPolicy,
     /// Creativity mode used for REM imagination.
     #[serde(default)]
     pub imagination_mode: ImaginationMode,
@@ -373,9 +434,69 @@ impl Default for DreamRuntimeControls {
             replay: DreamReplayPolicy::default(),
             budget: None,
             schedule: DreamSchedulePolicy::default(),
+            heartbeat: DreamHeartbeatPolicy::default(),
             imagination_mode: ImaginationMode::default(),
             threat_simulation: true,
             threat_severity_floor: 0.20,
+        }
+    }
+}
+
+impl DreamRuntimeControls {
+    /// Summarize the current heartbeat and delta-loop readiness.
+    #[must_use]
+    pub fn heartbeat_report(
+        &self,
+        episodes: &[Episode],
+        processed_through: Option<DateTime<Utc>>,
+        last_dream_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+        min_recent_episodes: usize,
+    ) -> DreamHeartbeatReport {
+        let recent_episodes: Vec<&Episode> = episodes
+            .iter()
+            .filter(|episode| processed_through.is_none_or(|ts| episode.timestamp > ts))
+            .collect();
+        let recent_episode_count = recent_episodes.len();
+        let latest_episode_at = recent_episodes
+            .iter()
+            .map(|episode| episode.timestamp.clone())
+            .max();
+        let idle_for_secs =
+            latest_episode_at.map(|ts| now.signed_duration_since(ts).num_seconds().max(0) as u64);
+        let enough_recent_episodes = recent_episode_count >= min_recent_episodes;
+        let paused_for_active_plan = idle_for_secs
+            .is_some_and(|secs| secs < self.heartbeat.idle_grace_mins.saturating_mul(60));
+        let delta_due_in_secs = if enough_recent_episodes && !paused_for_active_plan {
+            last_dream_at.map(|last_dream_at| {
+                let delta_ready_at = last_dream_at
+                    + chrono::Duration::minutes(self.heartbeat.delta_interval_mins as i64);
+                if delta_ready_at <= now {
+                    0
+                } else {
+                    delta_ready_at
+                        .signed_duration_since(now)
+                        .num_seconds()
+                        .max(0) as u64
+                }
+            })
+        } else {
+            None
+        };
+
+        DreamHeartbeatReport {
+            processed_through,
+            recent_episode_count,
+            latest_episode_at,
+            last_dream_at,
+            heartbeat_due_in_secs: self.heartbeat.tick_interval_secs.max(1),
+            delta_interval_mins: self.heartbeat.delta_interval_mins.max(1),
+            idle_grace_mins: self.heartbeat.idle_grace_mins.max(1),
+            enough_recent_episodes,
+            paused_for_active_plan,
+            idle_for_secs,
+            delta_due_in_secs,
+            delta_ready: delta_due_in_secs == Some(0),
         }
     }
 }
@@ -435,6 +556,15 @@ impl DreamRunner {
         load_latest_dream_report(&self.report_dir())
     }
 
+    /// Summarize the current heartbeat and delta-loop status.
+    pub fn heartbeat_report(&self) -> Result<DreamHeartbeatReport> {
+        let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
+        let episodes = block_on(EpisodeLogger::read_all_lossy(&episodes_path))
+            .with_context(|| format!("read episode log from {}", episodes_path.display()))?;
+        let latest_report = self.latest_report()?;
+        Ok(self.heartbeat_snapshot(&episodes, latest_report.as_ref(), Utc::now()))
+    }
+
     /// Run a full dream consolidation cycle against the workspace.
     pub fn consolidate_now(&mut self) -> Result<DreamReport> {
         block_on(self.consolidate_async())
@@ -463,6 +593,28 @@ impl DreamRunner {
 
     fn report_dir(&self) -> PathBuf {
         self.workdir.join(".roko").join("dreams")
+    }
+
+    fn heartbeat_snapshot(
+        &self,
+        episodes: &[Episode],
+        latest_report: Option<&DreamReport>,
+        now: DateTime<Utc>,
+    ) -> DreamHeartbeatReport {
+        let processed_through = latest_report.and_then(|report| {
+            report
+                .processed_through
+                .clone()
+                .or(Some(report.started_at.clone()))
+        });
+        let last_dream_at = latest_report.map(|report| report.completed_at.clone());
+        self.controls.heartbeat_report(
+            episodes,
+            processed_through,
+            last_dream_at,
+            now,
+            self.config.min_episodes_for_dream,
+        )
     }
 
     async fn consolidate_async(&mut self) -> Result<DreamReport> {
@@ -535,21 +687,14 @@ impl DreamEngine for DreamRunner {
         let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
         let episodes = block_on(EpisodeLogger::read_all_lossy(&episodes_path)).ok()?;
         let last_report = load_latest_dream_report(&self.report_dir()).ok().flatten();
-        let cutoff = last_report
-            .as_ref()
-            .and_then(|report| report.processed_through.or(Some(report.started_at)));
+        let now = Utc::now();
+        let heartbeat = self.heartbeat_snapshot(&episodes, last_report.as_ref(), now);
 
-        let recent: Vec<&Episode> = episodes
-            .iter()
-            .filter(|episode| cutoff.is_none_or(|ts| episode.timestamp > ts))
-            .collect();
-
-        if recent.len() < self.config.min_episodes_for_dream {
+        if !heartbeat.enough_recent_episodes {
             return None;
         }
 
-        let latest_episode = recent.iter().map(|episode| episode.timestamp).max()?;
-        let now = Utc::now();
+        let latest_episode = heartbeat.latest_episode_at?;
         let idle_delay = self.controls.schedule.trigger_delay(
             DreamTrigger::Idle,
             last_report.as_ref(),
@@ -575,6 +720,10 @@ impl DreamEngine for DreamRunner {
                     .idle_delay(Some(report), self.controls.budget.as_ref());
                 target = latest_episode + chrono::Duration::from_std(adjusted).ok()?;
             }
+        }
+        if let Some(delta_delay) = heartbeat.delta_due_in_secs {
+            let delta_fire_at = now + chrono::Duration::seconds(delta_delay as i64);
+            target = target.min(delta_fire_at);
         }
         if target <= now {
             Some(Duration::ZERO)
@@ -627,6 +776,18 @@ fn default_quality_penalty() -> f64 {
 
 fn default_threat_floor() -> f64 {
     0.20
+}
+
+fn default_heartbeat_tick_secs() -> u64 {
+    75
+}
+
+fn default_delta_interval_mins() -> u64 {
+    60
+}
+
+fn default_idle_grace_mins() -> u64 {
+    15
 }
 
 /// Load the latest persisted dream report from a report directory.
@@ -720,6 +881,33 @@ impl Agent for DreamReviewAgent {
 mod tests {
     use super::*;
     use roko_learn::episode_logger::Usage;
+    use tempfile::TempDir;
+
+    fn test_loop_config() -> DreamLoopConfig {
+        DreamLoopConfig {
+            auto_dream: true,
+            idle_threshold_mins: 15,
+            min_episodes_for_dream: 1,
+            agent: DreamAgentConfig {
+                command: "cat".to_string(),
+                args: Vec::new(),
+                model: None,
+                bare_mode: true,
+                effort: "medium".to_string(),
+                fallback_model: None,
+                timeout_ms: 120_000,
+                env: Vec::new(),
+            },
+        }
+    }
+
+    fn episode_at(agent: &str, task: &str, timestamp: DateTime<Utc>) -> Episode {
+        let mut episode = Episode::new(agent, task);
+        episode.timestamp = timestamp.clone();
+        episode.completed_at = timestamp.clone();
+        episode.started_at = timestamp;
+        episode
+    }
 
     #[test]
     fn budget_tracks_consumption() {
@@ -748,5 +936,81 @@ mod tests {
         let policy = DreamSchedulePolicy::default();
         let delay = policy.trigger_delay(DreamTrigger::Manual, None, None, Utc::now());
         assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn heartbeat_report_pauses_delta_during_recent_activity() {
+        let mut controls = DreamRuntimeControls::default();
+        controls.heartbeat = DreamHeartbeatPolicy {
+            tick_interval_secs: 30,
+            delta_interval_mins: 60,
+            idle_grace_mins: 15,
+        };
+        let now = Utc::now();
+        let episodes = vec![
+            episode_at("agent", "task-1", now - chrono::Duration::minutes(6)),
+            episode_at("agent", "task-1", now - chrono::Duration::minutes(5)),
+        ];
+
+        let report = controls.heartbeat_report(
+            &episodes,
+            Some(now - chrono::Duration::hours(2)),
+            Some(now - chrono::Duration::hours(3)),
+            now,
+            1,
+        );
+
+        assert_eq!(report.recent_episode_count, 2);
+        assert!(report.paused_for_active_plan);
+        assert_eq!(report.delta_due_in_secs, None);
+        assert!(!report.delta_ready);
+        assert_eq!(report.heartbeat_due_in_secs, 30);
+    }
+
+    #[test]
+    fn heartbeat_report_becomes_ready_after_interval() {
+        let mut controls = DreamRuntimeControls::default();
+        controls.heartbeat = DreamHeartbeatPolicy {
+            tick_interval_secs: 75,
+            delta_interval_mins: 60,
+            idle_grace_mins: 15,
+        };
+        let now = Utc::now();
+        let episodes = vec![episode_at(
+            "agent",
+            "task-1",
+            now - chrono::Duration::hours(3),
+        )];
+
+        let report = controls.heartbeat_report(
+            &episodes,
+            Some(now - chrono::Duration::hours(4)),
+            Some(now - chrono::Duration::hours(2)),
+            now,
+            1,
+        );
+
+        assert_eq!(report.recent_episode_count, 1);
+        assert!(!report.paused_for_active_plan);
+        assert_eq!(report.delta_due_in_secs, Some(0));
+        assert!(report.delta_ready);
+    }
+
+    #[test]
+    fn runner_heartbeat_report_handles_empty_workspace() {
+        let tmp = TempDir::new().unwrap_or_else(|err| panic!("tempdir: {err}"));
+        let runner = DreamRunner::with_controls(
+            tmp.path(),
+            test_loop_config(),
+            DreamRuntimeControls::default(),
+        );
+
+        let report = runner
+            .heartbeat_report()
+            .unwrap_or_else(|err| panic!("heartbeat report: {err}"));
+
+        assert_eq!(report.recent_episode_count, 0);
+        assert!(!report.enough_recent_episodes);
+        assert_eq!(report.delta_due_in_secs, None);
     }
 }

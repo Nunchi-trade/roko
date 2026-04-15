@@ -26,6 +26,7 @@ use parking_lot::Mutex;
 use roko_agent::provider::ProviderError;
 use roko_agent::{AgentResult, gemini::GeminiMetadata};
 use roko_core::OperatingFrequency;
+use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
@@ -35,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
+use crate::active_inference::{BeliefState, select_tier as select_tier_with_belief};
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::costs_db::CostTable;
 use crate::latency::LatencyTracker;
@@ -1204,6 +1206,17 @@ impl CascadeRouter {
                 candidates,
             )),
         }
+    }
+
+    /// Select a tier using the active-inference belief state.
+    #[must_use]
+    pub fn select_tier_with_active_inference(
+        &self,
+        belief: &BeliefState,
+        requirements: &TaskRequirements,
+    ) -> ModelTier {
+        let _ = self;
+        select_tier_with_belief(belief, requirements)
     }
 
     /// Return the strongest model currently available to the router.

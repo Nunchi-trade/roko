@@ -1,4 +1,4 @@
-//! Composable system prompt builder with 8 layers.
+//! Composable system prompt builder with 9 layers.
 //!
 //! Generates cache-aligned, role-specific system prompts from composable
 //! fragments. Each layer targets a different stability tier:
@@ -8,6 +8,7 @@
 //! | 1. Role identity | Who am I, what's my job | System (stable) |
 //! | 2. Conventions | Project coding standards | System (semi-stable) |
 //! | 3. Domain context | Project-specific knowledge | Session (semi-stable) |
+//! | 3c. Active signals | Pheromone / stigmergic guidance | Session (semi-stable) |
 //! | 4. Task context | Current task details | Task (volatile) |
 //! | 5. Tool instructions | Available tools and usage | System (stable) |
 //! | 6. Relevant techniques | Learned playbooks and skills | Task (volatile) |
@@ -16,7 +17,7 @@
 //!
 //! The builder emits sections in cache-layer order, with optional cache
 //! alignment markers between stability tiers. Layers 1 + 2 + 5 form the
-//! prefix-cacheable "system" tier; layers 3 form the "session" tier;
+//! prefix-cacheable "system" tier; layers 3 and 3c form the "session" tier;
 //! layers 4 + 6 + 7 are per-task; layer 8 is dynamic tone/focus guidance.
 //!
 //! # Design
@@ -28,15 +29,15 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
-use crate::PadState;
 use crate::prompt::estimate_tokens;
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::token_counter::TokenCounter;
+use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
 
-/// A composable system prompt built from 7 layers.
+/// A composable system prompt built from 9 layers.
 ///
 /// Use the builder pattern:
 /// ```ignore
@@ -57,6 +58,8 @@ pub struct SystemPromptBuilder {
     domain: Option<String>,
     /// Layer 3b: Relevant assembled context for the current task.
     context: Option<String>,
+    /// Layer 3c: Active pheromone/context signals.
+    pheromones: Vec<ContextChunk>,
     /// Layer 4: Task context — current task details.
     task: Option<String>,
     /// Layer 5: Tool instructions — available tools and how to use them.
@@ -117,6 +120,7 @@ impl SystemPromptBuilder {
             conventions: None,
             domain: None,
             context: None,
+            pheromones: Vec::new(),
             task: None,
             tools: None,
             relevant_skills: Vec::new(),
@@ -146,6 +150,13 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(normalize_owned(context));
+        self
+    }
+
+    /// Set layer 3c: active pheromone/context signals.
+    #[must_use]
+    pub fn with_pheromones(mut self, pheromones: &[ContextChunk]) -> Self {
+        self.pheromones = pheromones.to_vec();
         self
     }
 
@@ -312,7 +323,7 @@ impl SystemPromptBuilder {
     /// [`PromptAssembler`](crate::templates::assembly::PromptAssembler).
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut sections = Vec::with_capacity(9);
+        let mut sections = Vec::with_capacity(10);
 
         // Layer 1: Role Identity
         sections.push(
@@ -376,6 +387,11 @@ impl SystemPromptBuilder {
                         .with_placement(Placement::Middle),
                 );
             }
+        }
+
+        // Layer 3c: Active pheromone signals
+        if let Some(pheromones) = self.pheromone_section() {
+            sections.push(pheromones);
         }
 
         // Layer 4: Task Context
@@ -442,6 +458,9 @@ impl SystemPromptBuilder {
             count += 1;
         }
         if self.context.as_ref().is_some_and(|s| !s.is_empty()) {
+            count += 1;
+        }
+        if !self.pheromones.is_empty() {
             count += 1;
         }
         if self.task.as_ref().is_some_and(|s| !s.is_empty()) {
@@ -754,6 +773,7 @@ fn render_section(section: &PromptSection) -> String {
         "tool_instructions" => format!("## Tool Instructions\n\n{}", section.content),
         "domain_context" => format!("## Domain Context\n\n{}", section.content),
         "relevant_techniques" => section.content.clone(),
+        "pheromone_signals" => format!("## Active Signals\n\n{}", section.content),
         "anti_patterns" => format!("## Anti-Patterns\n\n{}", section.content),
         "affect_guidance" => format!("## Affect Guidance\n\n{}", section.content),
         "task_context" => format!("## Current Task\n\n{}", section.content),
@@ -862,11 +882,87 @@ fn section_order_rank(name: &str) -> u8 {
         "tool_instructions" => 2,
         "domain_context" => 3,
         "context_layer" => 4,
-        "task_context" => 5,
-        "relevant_techniques" => 6,
-        "anti_patterns" => 7,
-        "affect_guidance" => 8,
-        _ => 9,
+        "pheromone_signals" => 5,
+        "task_context" => 6,
+        "relevant_techniques" => 7,
+        "anti_patterns" => 8,
+        "affect_guidance" => 9,
+        _ => 10,
+    }
+}
+
+impl SystemPromptBuilder {
+    fn pheromone_section(&self) -> Option<PromptSection> {
+        if self.pheromones.is_empty() {
+            return None;
+        }
+
+        let mut pheromones = self
+            .pheromones
+            .iter()
+            .cloned()
+            .collect::<Vec<ContextChunk>>();
+        pheromones.sort_by(|left, right| {
+            right
+                .relevance
+                .partial_cmp(&left.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| chunk_priority_rank(left).cmp(&chunk_priority_rank(right)))
+                .then_with(|| left.content.cmp(&right.content))
+        });
+
+        let rendered = pheromones
+            .iter()
+            .map(render_pheromone_chunk)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Some(
+            PromptSection::new("pheromone_signals", rendered)
+                .with_priority(self.effective_priority("pheromone_signals", SectionPriority::High))
+                .with_cache_layer(CacheLayer::Workspace)
+                .with_placement(Placement::Middle)
+                .with_hard_cap(1_500),
+        )
+    }
+}
+
+fn render_pheromone_chunk(chunk: &ContextChunk) -> String {
+    let label = pheromone_label(chunk);
+    let mut parts = vec![format!("- [{label}] {}", chunk.content.trim())];
+    if let Some(recency) = chunk.recency {
+        parts.push(format!("  recency={recency:.2}"));
+    }
+    if let Some(confidence) = chunk.confidence {
+        parts.push(format!("  confidence={confidence:.2}"));
+    }
+    if let Some(track_record) = chunk.track_record {
+        parts.push(format!("  track_record={track_record:.2}"));
+    }
+    parts.join("\n")
+}
+
+fn pheromone_label(chunk: &ContextChunk) -> &'static str {
+    let lower = chunk.content.to_ascii_lowercase();
+    if lower.contains("[threat]") || lower.contains("threat") || lower.contains("failure") {
+        "Threat"
+    } else if lower.contains("[warning]") || lower.contains("warning") || lower.contains("risk") {
+        "Warning"
+    } else if lower.contains("[opportunity]") || lower.contains("opportunity") {
+        "Opportunity"
+    } else {
+        "Signal"
+    }
+}
+
+fn chunk_priority_rank(chunk: &ContextChunk) -> u8 {
+    let lower = chunk.content.to_ascii_lowercase();
+    if lower.contains("threat") || lower.contains("warning") || lower.contains("failure") {
+        0
+    } else if lower.contains("opportunity") || lower.contains("success") {
+        1
+    } else {
+        2
     }
 }
 
@@ -919,6 +1015,32 @@ mod tests {
     }
 
     #[test]
+    fn build_with_pheromones_includes_active_signals_layer() {
+        let pheromones = vec![ContextChunk {
+            content: "- [Threat] context assembly is too slow.".to_string(),
+            source: roko_neuro::ContextSource::RecentSignal {
+                signal_id: "pheromone-1".to_string(),
+                plan_id: "plan-1".to_string(),
+                kind: "pheromone".to_string(),
+            },
+            relevance: 0.92,
+            track_record: Some(0.9),
+            confidence: Some(0.8),
+            recency: Some(0.95),
+            emotional_tag: None,
+        }];
+
+        let prompt = SystemPromptBuilder::new("You are a conductor.")
+            .with_pheromones(&pheromones)
+            .with_task("Stabilize orchestration")
+            .build();
+
+        assert!(prompt.contains("## Active Signals"));
+        assert!(prompt.contains("[Threat]"));
+        assert!(prompt.contains("context assembly is too slow"));
+    }
+
+    #[test]
     fn build_minimal_only_role() {
         let prompt = SystemPromptBuilder::new("You are a reviewer.").build();
         assert!(prompt.contains("You are a reviewer."));
@@ -933,6 +1055,19 @@ mod tests {
             .with_conventions("LAYER2_CONV")
             .with_domain("LAYER3_DOMAIN")
             .with_context("LAYER3B_CONTEXT")
+            .with_pheromones(&[ContextChunk {
+                content: "- [Opportunity] reuse known-good prompt patterns.".to_string(),
+                source: roko_neuro::ContextSource::RecentSignal {
+                    signal_id: "pheromone-2".to_string(),
+                    plan_id: "plan-2".to_string(),
+                    kind: "pheromone".to_string(),
+                },
+                relevance: 0.75,
+                track_record: Some(0.8),
+                confidence: Some(0.7),
+                recency: Some(0.9),
+                emotional_tag: None,
+            }])
             .with_task("LAYER4_TASK")
             .with_tools("LAYER5_TOOLS")
             .add_anti_pattern("LAYER6_ANTI")
@@ -956,6 +1091,7 @@ mod tests {
         assert!(pos_context < pos_task, "context before task");
         assert!(pos_task < pos_anti, "task before anti-patterns");
         assert!(pos_task < pos_affect, "task before affect guidance");
+        assert!(prompt.contains("Active Signals"));
     }
 
     #[test]

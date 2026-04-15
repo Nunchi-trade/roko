@@ -1088,7 +1088,10 @@ mod tests {
             registry.record_failure("beta", ErrorClass::Timeout);
             registry.record_failure("beta", ErrorClass::Timeout);
 
-            std::thread::sleep(Duration::from_millis(250));
+            let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+            while !path.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
             assert!(path.exists(), "debounced autosave should create the file");
 
             let loaded = ProviderHealthRegistry::load_or_new(&path);

@@ -4,13 +4,13 @@
 //! conditional selection, and mixture-of-agents aggregation all ride on the
 //! existing [`crate::agent::Agent`] trait.
 
-use std::collections::HashMap;
 use async_trait::async_trait;
 use futures::future::join_all;
 use roko_core::{
     Body, Context, Engram, Kind, Provenance, Task, TaskCategory, TaskComplexityBand,
     TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority,
 };
+use std::collections::HashMap;
 
 use crate::agent::{Agent, AgentResult};
 use crate::usage::Usage;
@@ -169,9 +169,10 @@ impl std::fmt::Debug for AgentComposition {
                 .field(&agents.len())
                 .field(strategy)
                 .finish(),
-            Self::Conditional { branches, .. } => {
-                f.debug_struct("Conditional").field("branches", &branches.len()).finish()
-            }
+            Self::Conditional { branches, .. } => f
+                .debug_struct("Conditional")
+                .field("branches", &branches.len())
+                .finish(),
             Self::MixtureOfAgents { agents, .. } => f
                 .debug_struct("MixtureOfAgents")
                 .field("agents", &agents.len())
@@ -415,7 +416,9 @@ impl CompositeAgent {
         input: &Engram,
         ctx: &Context,
     ) -> AgentResult {
-        let fanout = self.run_parallel(agents, input, ctx, MergeStrategy::Aggregate).await;
+        let fanout = self
+            .run_parallel(agents, input, ctx, MergeStrategy::Aggregate)
+            .await;
         let summary_text = fanout
             .output
             .body
@@ -455,7 +458,10 @@ impl Agent for CompositeAgent {
             AgentComposition::Conditional {
                 condition,
                 branches,
-            } => self.run_conditional(condition.as_ref(), branches, input, ctx).await,
+            } => {
+                self.run_conditional(condition.as_ref(), branches, input, ctx)
+                    .await
+            }
             AgentComposition::MixtureOfAgents { agents, aggregator } => {
                 self.run_mixture(agents, aggregator, input, ctx).await
             }
@@ -468,7 +474,9 @@ impl Agent for CompositeAgent {
 
     fn supports_streaming(&self) -> bool {
         match &self.composition {
-            AgentComposition::Pipeline(agents) => agents.iter().all(|agent| agent.supports_streaming()),
+            AgentComposition::Pipeline(agents) => {
+                agents.iter().all(|agent| agent.supports_streaming())
+            }
             AgentComposition::Parallel(agents, _) => {
                 agents.iter().all(|agent| agent.supports_streaming())
             }

@@ -1000,6 +1000,32 @@ cargo run -p roko-cli -- dream --help 2>&1 | head -5
 
 ---
 
+## D3 Batch Reconciliation (2026-04-15)
+
+This summary supersedes the stale per-item status lines below for `D.34-D.54`.
+
+- `D.34` DONE: `roko-learn` now has `EwcRegularizer` and logs knowledge-preservation dampening during routing updates.
+- `D.35` DONE: `episode_logger` now computes episode importance and replay tiers from surprisal/novelty/difficulty/information-gain/diversity.
+- `D.36` DONE: `curriculum.rs` adds `CurriculumStrategy`, `DifficultyModel`, and task reordering helpers.
+- `D.37` DONE: `LearningRateSchedule` now modulates router exploration across cold/warm/mature phases.
+- `D.38` PARTIAL: meta-learning remains routed through existing runtime feedback, experiments, and playbooks; no standalone tool-sequence miner landed.
+- `D.39` PARTIAL: episode tiering is implemented as logical replay priority, not a hot/warm/cold storage migration.
+- `D.40` PARTIAL: pheromones are now represented and transported as `Kind::Pheromone` engrams, but there is still no dedicated core `PheromoneField` with decay/confirmation state.
+- `D.41` PARTIAL: mesh transport remains out of scope for this write boundary; D3 only lands local pheromone transport and prompt-enrichment seams.
+- `D.42` DONE: `cfactor.rs` now detects collective pathologies such as cascade/groupthink/echo-chamber style failures.
+- `D.43` DONE: CLI heartbeat theta reflection is wired through `heartbeat.rs` and `orchestrate.rs`, with persisted snapshots and conductor signals.
+- `D.44` DONE: delta heartbeat now gates dream consolidation and only triggers dream work when the system is idle and due.
+- `D.45` PARTIAL: adaptive cadence uses the existing `roko-core` operating-frequency scheduler instead of introducing a separate conductor-only clock stack.
+- `D.46` DONE: 16 zero-LLM heartbeat probes are implemented in the CLI heartbeat path and persisted with each snapshot.
+- `D.47` PARTIAL: universal safety work remains primarily in `roko-agent`; D3 did not extend backend safety wiring there.
+- `D.48` PARTIAL: daemon/heartbeat lifecycle flushing improved, but the full 8-step agent deletion lifecycle in `roko-runtime` did not land.
+- `D.49` PARTIAL: existing daemon mode now flushes heartbeat artifacts on shutdown.
+- `D.50` PARTIAL: explicitly reconciled as future work; no `roko-wasm` crate was added in this batch.
+- `D.51` DONE: compose/context assembly now ingest pheromone signals and render an active-signal layer.
+- `D.52` DONE: `ActiveInferenceScorer` and goal-aware composition routing are now wired into `roko-compose`.
+- `D.53` PARTIAL: no dedicated morphogenetic specialization module landed; current specialization is expressed through somatic strategy-space, routing, and pheromone-aware composition.
+- `D.54` PARTIAL: `active_inference.rs` is wired into tier selection, but as a pragmatic selector rather than the full 90-state POMDP from the source doc.
+
 ## D.34 — EWC Regularizer
 
 **Status**: NOT DONE

@@ -1,6 +1,6 @@
 //! Composite C-Factor metrics for dashboard and learning feedback.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -21,6 +21,9 @@ pub struct CFactor {
     /// Per-agent leave-one-out contribution scores.
     #[serde(default)]
     pub agent_contributions: Vec<AgentCFactorContribution>,
+    /// Pathologies detected in the underlying episode stream.
+    #[serde(default)]
+    pub pathologies: Vec<CollectivePathology>,
     /// Timestamp when the score was computed.
     pub computed_at: DateTime<Utc>,
     /// Number of episodes used in the calculation.
@@ -53,6 +56,38 @@ pub enum AgentDispatchBias {
     PreferCheaper,
     /// Keep the current routing decision.
     Neutral,
+}
+
+/// Collective pathologies detected from the episode stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CollectivePathology {
+    /// A failed agent appears to trigger a cluster of follow-on failures.
+    Cascade {
+        /// Agent that appears to have triggered the cascade.
+        trigger_agent: String,
+        /// Number of downstream episodes affected.
+        affected_count: usize,
+    },
+    /// The fleet converges on a narrow set of models or templates.
+    Groupthink {
+        /// Observed diversity score in `[0, 1]`.
+        diversity_score: f64,
+    },
+    /// The same knowledge or output signature repeats across agents.
+    EchoChamber {
+        /// Fraction of episodes that share the repeated claim signature.
+        repeated_knowledge_pct: f64,
+    },
+    /// Multiple agents remain blocked on the same task.
+    Deadlock {
+        /// Agents participating in the deadlock.
+        blocked_agents: Vec<String>,
+    },
+    /// Claims appear without grounding or gate support.
+    Hallucination {
+        /// Claim signatures that appear ungrounded.
+        ungrounded_claims: Vec<String>,
+    },
 }
 
 /// Individual C-Factor components.
@@ -132,6 +167,7 @@ impl Default for CFactor {
             overall: 0.0,
             components: CFactorComponents::default(),
             agent_contributions: Vec::new(),
+            pathologies: Vec::new(),
             computed_at: Utc::now(),
             episode_count: 0,
         }
@@ -382,6 +418,13 @@ pub fn compute_cfactor(
         + turn_taking_equality * 0.05
         + social_sensitivity * 0.05;
 
+    let pathologies = detect_pathologies(
+        &filtered
+            .iter()
+            .map(|episode| (*episode).clone())
+            .collect::<Vec<_>>(),
+    );
+
     let mut snapshot = CFactor {
         overall: overall.clamp(0.0, 1.0),
         components: CFactorComponents {
@@ -398,6 +441,7 @@ pub fn compute_cfactor(
             social_sensitivity,
         },
         agent_contributions: Vec::new(),
+        pathologies,
         computed_at,
         episode_count: filtered.len(),
     };
@@ -504,6 +548,312 @@ pub fn detect_cfactor_regression(
         drop_fraction,
         threshold,
     })
+}
+
+/// Detect collective pathologies from a batch of episodes.
+#[must_use]
+pub fn detect_pathologies(episodes: &[Episode]) -> Vec<CollectivePathology> {
+    if episodes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sorted: Vec<&Episode> = episodes.iter().collect();
+    sorted.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let mut pathologies = Vec::new();
+    if let Some(pathology) = detect_cascade(&sorted) {
+        pathologies.push(pathology);
+    }
+    if let Some(pathology) = detect_groupthink(&sorted) {
+        pathologies.push(pathology);
+    }
+    if let Some(pathology) = detect_echo_chamber(&sorted) {
+        pathologies.push(pathology);
+    }
+    if let Some(pathology) = detect_deadlock(&sorted) {
+        pathologies.push(pathology);
+    }
+    if let Some(pathology) = detect_hallucination(&sorted) {
+        pathologies.push(pathology);
+    }
+
+    pathologies
+}
+
+fn detect_cascade(episodes: &[&Episode]) -> Option<CollectivePathology> {
+    for (idx, episode) in episodes.iter().enumerate() {
+        if episode.success {
+            continue;
+        }
+
+        let trigger_agent = episode_agent_key(episode);
+        let trigger_task = episode_task_key(episode);
+        let mut affected_count = 0usize;
+        let mut affected_agents: HashSet<String> = HashSet::new();
+
+        for other in episodes.iter().skip(idx + 1).take(4) {
+            if other.success {
+                continue;
+            }
+            if episode_task_key(other) != trigger_task {
+                continue;
+            }
+            let agent = episode_agent_key(other);
+            if agent != trigger_agent {
+                affected_count += 1;
+                affected_agents.insert(agent);
+            }
+        }
+
+        if affected_count >= 2 && affected_agents.len() >= 2 {
+            return Some(CollectivePathology::Cascade {
+                trigger_agent,
+                affected_count,
+            });
+        }
+    }
+
+    None
+}
+
+fn detect_groupthink(episodes: &[&Episode]) -> Option<CollectivePathology> {
+    if episodes.len() < 5 {
+        return None;
+    }
+
+    let mut best: Option<f64> = None;
+    for window in episodes.windows(5) {
+        let diversity = collective_diversity_score(window);
+        if best.is_none_or(|current| diversity < current) {
+            best = Some(diversity);
+        }
+        if diversity < 0.3 {
+            return Some(CollectivePathology::Groupthink {
+                diversity_score: diversity,
+            });
+        }
+    }
+
+    best.filter(|diversity| *diversity < 0.3)
+        .map(|diversity| CollectivePathology::Groupthink { diversity_score: diversity })
+}
+
+fn detect_echo_chamber(episodes: &[&Episode]) -> Option<CollectivePathology> {
+    let mut signatures: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+    for episode in episodes {
+        if let Some(signature) = claim_signature(episode) {
+            let entry = signatures.entry(signature).or_default();
+            entry.0 += 1;
+            entry.1.insert(episode_agent_key(episode));
+        }
+    }
+
+    let Some((_signature, (count, agents))) = signatures
+        .into_iter()
+        .max_by(|left, right| left.1.0.cmp(&right.1.0).then_with(|| left.0.cmp(&right.0)))
+    else {
+        return None;
+    };
+
+    if count >= 3 && agents.len() > 1 {
+        Some(CollectivePathology::EchoChamber {
+            repeated_knowledge_pct: (count as f64 / episodes.len() as f64).clamp(0.0, 1.0),
+        })
+    } else {
+        None
+    }
+}
+
+fn detect_deadlock(episodes: &[&Episode]) -> Option<CollectivePathology> {
+    let mut blocked_by_task: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut failures_by_task: HashMap<String, usize> = HashMap::new();
+
+    for episode in episodes {
+        let task_key = episode_task_key(episode);
+        if episode.success {
+            continue;
+        }
+        failures_by_task
+            .entry(task_key.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        blocked_by_task
+            .entry(task_key)
+            .or_default()
+            .insert(episode_agent_key(episode));
+    }
+
+    let mut best: Option<(usize, Vec<String>)> = None;
+    for (task_key, count) in failures_by_task {
+        if count < 3 {
+            continue;
+        }
+        let Some(agents) = blocked_by_task.get(&task_key) else {
+            continue;
+        };
+        if agents.len() < 2 {
+            continue;
+        }
+
+        let mut agents: Vec<String> = agents.iter().cloned().collect();
+        agents.sort();
+        let score = agents.len();
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score > *best_score)
+        {
+            best = Some((score, agents));
+        }
+    }
+
+    best.map(|(_, blocked_agents)| CollectivePathology::Deadlock { blocked_agents })
+}
+
+fn detect_hallucination(episodes: &[&Episode]) -> Option<CollectivePathology> {
+    let mut signatures: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut grounded = HashSet::new();
+
+    for episode in episodes {
+        if episode.gate_verdicts.iter().any(|verdict| verdict.passed) {
+            grounded.insert(episode.id.clone());
+        }
+
+        if let Some(signature) = claim_signature(episode) {
+            signatures
+                .entry(signature)
+                .or_default()
+                .insert(episode_task_key(episode));
+        }
+    }
+
+    let mut ungrounded_claims = Vec::new();
+    for (signature, tasks) in signatures {
+        if tasks.len() < 2 {
+            continue;
+        }
+        if grounded.len() == episodes.len() {
+            continue;
+        }
+        ungrounded_claims.push(signature);
+    }
+
+    if ungrounded_claims.is_empty() {
+        None
+    } else {
+        ungrounded_claims.sort();
+        Some(CollectivePathology::Hallucination { ungrounded_claims })
+    }
+}
+
+fn collective_diversity_score(episodes: &[&Episode]) -> f64 {
+    let distinct_models = distinct_count(episodes, episode_model_key);
+    let distinct_templates = distinct_count(episodes, episode_template_key);
+    let distinct_agents = distinct_count(episodes, episode_agent_key);
+
+    let total = episodes.len().max(1) as f64;
+    ((distinct_models + distinct_templates + distinct_agents) as f64 / (3.0 * total))
+        .clamp(0.0, 1.0)
+}
+
+fn distinct_count<F>(episodes: &[&Episode], mut key: F) -> usize
+where
+    F: FnMut(&Episode) -> String,
+{
+    let mut set = HashSet::new();
+    for episode in episodes {
+        set.insert(key(episode));
+    }
+    set.len()
+}
+
+fn episode_agent_key(episode: &Episode) -> String {
+    episode
+        .agent_id
+        .trim()
+        .to_string()
+        .if_empty_then(|| episode.agent_template.trim().to_string())
+        .if_empty_then(|| episode.id.clone())
+}
+
+fn episode_task_key(episode: &Episode) -> String {
+    if !episode.task_id.trim().is_empty() {
+        episode.task_id.trim().to_string()
+    } else {
+        episode.id.clone()
+    }
+}
+
+fn episode_model_key(episode: &Episode) -> String {
+    if !episode.model.trim().is_empty() {
+        episode.model.trim().to_string()
+    } else {
+        "unknown-model".to_string()
+    }
+}
+
+fn episode_template_key(episode: &Episode) -> String {
+    if !episode.agent_template.trim().is_empty() {
+        episode.agent_template.trim().to_string()
+    } else {
+        episode.agent_id.trim().to_string()
+    }
+}
+
+fn claim_signature(episode: &Episode) -> Option<String> {
+    let summary = episode
+        .reasoning_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(normalize_signature);
+    if summary.is_some() {
+        return summary;
+    }
+
+    let output = episode.output_signal_hash.trim().to_string();
+    if !output.is_empty() {
+        return Some(output);
+    }
+
+    episode
+        .failure_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(normalize_signature)
+}
+
+fn normalize_signature(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
+
+trait IfEmptyThen {
+    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String;
+}
+
+impl IfEmptyThen for String {
+    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String {
+        if self.trim().is_empty() {
+            fallback()
+        } else {
+            self
+        }
+    }
 }
 
 fn ratio(numer: usize, denom: usize) -> f64 {
@@ -657,20 +1007,6 @@ fn episode_plan_key(episode: &Episode) -> String {
         .unwrap_or_else(|| episode.id.clone())
 }
 
-fn episode_agent_key(episode: &Episode) -> String {
-    let agent_id = episode.agent_id.trim();
-    if !agent_id.is_empty() {
-        return agent_id.to_string();
-    }
-
-    let template = episode.agent_template.trim();
-    if !template.is_empty() {
-        return template.to_string();
-    }
-
-    episode.id.clone()
-}
-
 fn episode_agent_template(episode: &Episode) -> Option<String> {
     let template = episode.agent_template.trim();
     if !template.is_empty() {
@@ -790,6 +1126,7 @@ fn compute_agent_contributions(
                 overall: 0.0,
                 components: CFactorComponents::default(),
                 agent_contributions: Vec::new(),
+                pathologies: Vec::new(),
                 computed_at,
                 episode_count: 0,
             }
@@ -979,6 +1316,12 @@ fn compute_cfactor_from_filtered(
             social_sensitivity,
         },
         agent_contributions: Vec::new(),
+        pathologies: detect_pathologies(
+            &filtered
+                .iter()
+                .map(|episode| (*episode).clone())
+                .collect::<Vec<_>>(),
+        ),
         computed_at,
         episode_count: filtered.len(),
     }
@@ -1380,5 +1723,123 @@ mod tests {
         );
 
         assert!(regression.is_none());
+    }
+
+    #[test]
+    fn detect_pathologies_finds_common_failure_modes() {
+        let mut cascade_a = episode_at("task-cascade", 9, 5.0, 1_000, false);
+        cascade_a.agent_id = "agent-a".to_string();
+        let mut cascade_b = episode_at("task-cascade", 8, 5.0, 1_000, false);
+        cascade_b.agent_id = "agent-b".to_string();
+        let mut cascade_c = episode_at("task-cascade", 7, 5.0, 1_000, false);
+        cascade_c.agent_id = "agent-c".to_string();
+
+        let mut groupthink_1 = episode_at("task-group-1", 6, 5.0, 1_000, true);
+        groupthink_1.model = "claude-haiku-3-5".to_string();
+        groupthink_1.agent_template = "implementer".to_string();
+        let mut groupthink_2 = episode_at("task-group-2", 5, 5.0, 1_000, true);
+        groupthink_2.model = "claude-haiku-3-5".to_string();
+        groupthink_2.agent_template = "implementer".to_string();
+        let mut groupthink_3 = episode_at("task-group-3", 4, 5.0, 1_000, true);
+        groupthink_3.model = "claude-haiku-3-5".to_string();
+        groupthink_3.agent_template = "implementer".to_string();
+        let mut groupthink_4 = episode_at("task-group-4", 3, 5.0, 1_000, true);
+        groupthink_4.model = "claude-haiku-3-5".to_string();
+        groupthink_4.agent_template = "implementer".to_string();
+        let mut groupthink_5 = episode_at("task-group-5", 2, 5.0, 1_000, true);
+        groupthink_5.model = "claude-haiku-3-5".to_string();
+        groupthink_5.agent_template = "implementer".to_string();
+
+        let mut echo_1 = episode_at("task-echo-1", 1, 5.0, 1_000, false);
+        echo_1.agent_id = "agent-x".to_string();
+        echo_1.reasoning_summary = Some("reuse cached answer".to_string());
+        let mut echo_2 = episode_at("task-echo-2", 1, 5.0, 1_000, false);
+        echo_2.agent_id = "agent-y".to_string();
+        echo_2.reasoning_summary = Some("reuse cached answer".to_string());
+        let mut echo_3 = episode_at("task-echo-3", 1, 5.0, 1_000, false);
+        echo_3.agent_id = "agent-z".to_string();
+        echo_3.reasoning_summary = Some("reuse cached answer".to_string());
+
+        let mut dead_a = episode_at("task-dead", 1, 5.0, 1_000, false);
+        dead_a.agent_id = "agent-d".to_string();
+        let mut dead_b = episode_at("task-dead", 1, 5.0, 1_000, false);
+        dead_b.agent_id = "agent-e".to_string();
+        let mut dead_c = episode_at("task-dead", 1, 5.0, 1_000, false);
+        dead_c.agent_id = "agent-f".to_string();
+
+        let mut hallucinated = episode_at("task-hall", 1, 5.0, 1_000, false);
+        hallucinated.agent_id = "agent-h".to_string();
+        hallucinated.output_signal_hash = "claim-123".to_string();
+        let mut hallucinated_2 = episode_at("task-hall-2", 1, 5.0, 1_000, false);
+        hallucinated_2.agent_id = "agent-i".to_string();
+        hallucinated_2.output_signal_hash = "claim-123".to_string();
+
+        let episodes = vec![
+            cascade_a,
+            cascade_b,
+            cascade_c,
+            groupthink_1,
+            groupthink_2,
+            groupthink_3,
+            groupthink_4,
+            groupthink_5,
+            echo_1,
+            echo_2,
+            echo_3,
+            dead_a,
+            dead_b,
+            dead_c,
+            hallucinated,
+            hallucinated_2,
+        ];
+
+        let pathologies = detect_pathologies(&episodes);
+        assert!(
+            pathologies
+                .iter()
+                .any(|p| matches!(p, CollectivePathology::Cascade { .. }))
+        );
+        assert!(
+            pathologies
+                .iter()
+                .any(|p| matches!(p, CollectivePathology::Groupthink { .. }))
+        );
+        assert!(
+            pathologies
+                .iter()
+                .any(|p| matches!(p, CollectivePathology::EchoChamber { .. }))
+        );
+        assert!(
+            pathologies
+                .iter()
+                .any(|p| matches!(p, CollectivePathology::Deadlock { .. }))
+        );
+        assert!(
+            pathologies
+                .iter()
+                .any(|p| matches!(p, CollectivePathology::Hallucination { .. }))
+        );
+    }
+
+    #[test]
+    fn compute_cfactor_embeds_detected_pathologies() {
+        let mut failed = episode_at("task-hall", 1, 5.0, 1_000, false);
+        failed.output_signal_hash = "claim-123".to_string();
+        let mut failed_2 = episode_at("task-hall-2", 1, 5.0, 1_000, false);
+        failed_2.output_signal_hash = "claim-123".to_string();
+
+        let cfactor = compute_cfactor(
+            &[failed, failed_2],
+            Duration::from_secs(CFACTOR_REGRESSION_WINDOW_SECS),
+            0.0,
+            0.0,
+            0.0,
+        );
+
+        assert!(!cfactor.pathologies.is_empty());
+        assert!(matches!(
+            cfactor.pathologies[0],
+            CollectivePathology::EchoChamber { .. } | CollectivePathology::Hallucination { .. }
+        ));
     }
 }

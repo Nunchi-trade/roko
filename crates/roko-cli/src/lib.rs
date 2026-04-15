@@ -23,6 +23,7 @@ pub mod config_cmd;
 pub mod daemon;
 pub mod episode;
 pub mod event_sources;
+mod heartbeat;
 pub mod index;
 pub mod inject;
 pub mod oneshot;

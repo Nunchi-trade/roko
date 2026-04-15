@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hdc")]
 use crate::hdc::KnowledgeHdcEncoder;
-use crate::{KnowledgeEntry, KnowledgeKind, NeuroStore};
+use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeTier, NeuroStore};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
@@ -720,12 +720,18 @@ fn fingerprint_entry(entry: &KnowledgeEntry) -> HdcVector {
 
 #[cfg(feature = "hdc")]
 fn prepare_entries_for_ingest(entries: Vec<KnowledgeEntry>) -> Vec<KnowledgeEntry> {
-    entries.into_iter().map(ensure_hdc_vector).collect()
+    entries
+        .into_iter()
+        .map(normalize_entry_for_ingest)
+        .collect()
 }
 
 #[cfg(not(feature = "hdc"))]
 fn prepare_entries_for_ingest(entries: Vec<KnowledgeEntry>) -> Vec<KnowledgeEntry> {
     entries
+        .into_iter()
+        .map(normalize_entry_for_ingest)
+        .collect()
 }
 
 #[cfg(feature = "hdc")]
@@ -738,6 +744,46 @@ fn ensure_hdc_vector(mut entry: KnowledgeEntry) -> KnowledgeEntry {
         entry.hdc_vector = Some(fingerprint_entry(&entry).to_bytes().to_vec());
     }
     entry
+}
+
+fn normalize_entry_for_ingest(entry: KnowledgeEntry) -> KnowledgeEntry {
+    let entry = normalize_entry_tier(entry);
+    #[cfg(feature = "hdc")]
+    {
+        return ensure_hdc_vector(entry);
+    }
+    #[cfg(not(feature = "hdc"))]
+    {
+        entry
+    }
+}
+
+fn normalize_entry_tier(mut entry: KnowledgeEntry) -> KnowledgeEntry {
+    let inferred = inferred_retention_tier(&entry);
+    if inferred.multiplier() > entry.tier.multiplier() {
+        entry.tier = inferred;
+    }
+    entry
+}
+
+fn inferred_retention_tier(entry: &KnowledgeEntry) -> KnowledgeTier {
+    let source_count = entry.source_episodes.len();
+    let confidence = entry.confidence.clamp(0.0, 1.0);
+
+    match entry.kind {
+        KnowledgeKind::StrategyFragment if source_count >= 3 => {
+            KnowledgeTier::Persistent
+        }
+        KnowledgeKind::StrategyFragment => KnowledgeTier::Working,
+        KnowledgeKind::Warning if source_count >= 2 || confidence >= 0.85 => {
+            KnowledgeTier::Consolidated
+        }
+        KnowledgeKind::Warning => KnowledgeTier::Working,
+        KnowledgeKind::AntiKnowledge => KnowledgeTier::Working,
+        _ if source_count >= 4 || confidence >= 0.9 => KnowledgeTier::Consolidated,
+        _ if source_count >= 2 || confidence >= 0.7 => KnowledgeTier::Working,
+        _ => KnowledgeTier::Transient,
+    }
 }
 
 #[cfg(feature = "hdc")]
@@ -1890,5 +1936,73 @@ mod tests {
             store.confirmations_path(),
             Path::new("/some/path/neuro/knowledge-confirmations.jsonl")
         );
+    }
+
+    #[test]
+    fn ingest_promotes_high_support_entries_to_longer_tiers() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(KnowledgeEntry {
+                id: "tiered".to_owned(),
+                kind: KnowledgeKind::Insight,
+                source: None,
+                content: "Repeatedly validated insight".to_owned(),
+                confidence: 0.92,
+                confidence_weight: 0.92,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-a".to_owned(), "ep-b".to_owned(), "ep-c".to_owned()],
+                tags: vec!["tier".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: now,
+                half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+                tier: KnowledgeTier::Transient,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            })
+            .expect("add tiered");
+
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].tier, KnowledgeTier::Consolidated);
+    }
+
+    #[test]
+    fn ingest_keeps_stronger_explicit_tiers() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(KnowledgeEntry {
+                id: "persistent".to_owned(),
+                kind: KnowledgeKind::StrategyFragment,
+                source: None,
+                content: "A durable playbook fragment".to_owned(),
+                confidence: 0.6,
+                confidence_weight: 0.6,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-a".to_owned()],
+                tags: vec!["strategy".to_owned()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: now,
+                half_life_days: KnowledgeKind::StrategyFragment.default_half_life_days(),
+                tier: KnowledgeTier::Persistent,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            })
+            .expect("add persistent");
+
+        let all = store.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].tier, KnowledgeTier::Persistent);
     }
 }

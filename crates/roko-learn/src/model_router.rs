@@ -42,6 +42,7 @@
 //! be shared across async tasks via `Arc<LinUCBRouter>` while allowing
 //! concurrent read-side routing.
 
+use crate::bandits::EwcRegularizer;
 use crate::cost_table::CostTable;
 use parking_lot::RwLock;
 use rand::Rng;
@@ -73,6 +74,53 @@ const ALPHA_MAX: f64 = 1.0;
 const ALPHA_TAU: f64 = 60.0;
 /// Default discount factor for Thompson sampling in non-stationary environments.
 const THOMPSON_DEFAULT_DISCOUNT: f64 = 0.99;
+
+/// Simple phase-aware learning-rate schedule used to modulate LinUCB alpha.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LearningRateSchedule {
+    /// Exploration multiplier while the router is still cold.
+    pub cold_rate: f64,
+    /// Exploration multiplier while the router is warming up.
+    pub warm_rate: f64,
+    /// Exploration multiplier once the router is mature.
+    pub mature_rate: f64,
+    /// Observation count below which the cold rate applies.
+    pub cold_threshold: u64,
+    /// Observation count below which the warm rate applies.
+    pub warm_threshold: u64,
+}
+
+impl Default for LearningRateSchedule {
+    fn default() -> Self {
+        Self {
+            cold_rate: 1.0,
+            warm_rate: 0.85,
+            mature_rate: 0.7,
+            cold_threshold: 25,
+            warm_threshold: 100,
+        }
+    }
+}
+
+impl LearningRateSchedule {
+    /// Return the phase-specific multiplier for `observations`.
+    #[must_use]
+    pub fn multiplier_for_observations(&self, observations: u64) -> f64 {
+        if observations < self.cold_threshold {
+            self.cold_rate
+        } else if observations < self.warm_threshold {
+            self.warm_rate
+        } else {
+            self.mature_rate
+        }
+    }
+
+    /// Apply the phase multiplier to the existing exponential alpha decay.
+    #[must_use]
+    pub fn alpha_for_observations(&self, observations: u64) -> f64 {
+        self.multiplier_for_observations(observations) * base_alpha_for_observations(observations)
+    }
+}
 
 // ─── RoutingContext ─────────────────────────────────────────────────────────
 
@@ -360,6 +408,9 @@ pub struct ArmState {
     /// Multi-objective reward history for this arm.
     #[serde(default)]
     pub reward_stats: MultiObjectiveStats,
+    /// Elastic regularizer that protects consolidated routing weights.
+    #[serde(default)]
+    pub ewc: EwcRegularizer,
 }
 
 /// Debug score for one candidate arm under a specific routing context.
@@ -388,6 +439,7 @@ impl ArmState {
             b_vector: vec![0.0; dim],
             observations: 0,
             reward_stats: MultiObjectiveStats::default(),
+            ewc: EwcRegularizer::new(dim),
         }
     }
 }
@@ -964,6 +1016,26 @@ impl LinUCBRouter {
                 return;
             };
 
+            let theta_before = arm_theta(arm);
+            let reward = if let Some(theta) = theta_before.as_deref() {
+                let adjusted = arm.ewc.regularize_reward(theta, reward);
+                if adjusted + f64::EPSILON < reward {
+                    tracing::info!(
+                        event = "knowledge_preservation",
+                        model = %arm.slug,
+                        penalty = arm.ewc.last_penalty(),
+                        reward_before = reward,
+                        reward_after = adjusted,
+                        preservation_events = arm.ewc.preservation_events(),
+                        observations = arm.observations,
+                        "damped router update to preserve learned weights"
+                    );
+                }
+                adjusted
+            } else {
+                reward.clamp(0.0, 1.0)
+            };
+
             // A = A + x * x^T
             for (i, row) in arm.a_matrix.iter_mut().enumerate() {
                 for (j, cell) in row.iter_mut().enumerate() {
@@ -1160,11 +1232,21 @@ fn linucb_score_components(arm: &ArmState, x: &[f64], alpha: f64) -> (f64, f64) 
     (exploitation, exploration)
 }
 
+fn arm_theta(arm: &ArmState) -> Option<Vec<f64>> {
+    let a_inv = cholesky_inverse(&arm.a_matrix)?;
+    Some(mat_vec_mul(&a_inv, &arm.b_vector))
+}
+
 /// Compute alpha (exploration parameter) from observation count.
 ///
 /// Exponential decay: `alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * exp(-n / TAU)`
 #[allow(clippy::cast_precision_loss)]
 fn alpha_for_observations(n: u64) -> f64 {
+    base_alpha_for_observations(n)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn base_alpha_for_observations(n: u64) -> f64 {
     let n_f = n as f64;
     (ALPHA_MAX - ALPHA_MIN).mul_add((-n_f / ALPHA_TAU).exp(), ALPHA_MIN)
 }
@@ -1452,7 +1534,19 @@ mod tests {
         );
     }
 
-    // ── Test 13: reward computation ─────────────────────────────────────
+    // ── Test 13: learning-rate schedule phases ─────────────────────────
+
+    #[test]
+    fn learning_rate_schedule_respects_phase_boundaries() {
+        let schedule = LearningRateSchedule::default();
+        assert!(schedule.multiplier_for_observations(0) > schedule.multiplier_for_observations(50));
+        assert!(
+            schedule.multiplier_for_observations(50) > schedule.multiplier_for_observations(150)
+        );
+        assert!(schedule.alpha_for_observations(0) > schedule.alpha_for_observations(150));
+    }
+
+    // ── Test 14: reward computation ─────────────────────────────────────
 
     #[test]
     fn reward_formula_basic() {

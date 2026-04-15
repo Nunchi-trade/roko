@@ -360,9 +360,13 @@ impl TaskStrategyObservation {
         let file_count = task.files.len();
         let verification_count = task.test_invariants.as_ref().map_or(0, Vec::len)
             + task.acceptance.len()
-            + task.formulas.as_ref().map_or(0, Vec::len);
-        let dependency_count =
-            task.depends_on.len() + context.dag_depth.round().clamp(0.0, 3.0) as usize;
+            + task.formulas.as_ref().map_or(0, Vec::len)
+            + task.types_to_define.as_ref().map_or(0, Vec::len)
+            + task.imports.as_ref().map_or(0, Vec::len);
+        let dependency_count = task.depends_on.len()
+            + task.integration_surfaces.as_ref().map_or(0, Vec::len)
+            + task.sidecar_requirements.as_ref().map_or(0, Vec::len)
+            + context.dag_depth.round().clamp(0.0, 3.0) as usize;
         let max_loc = task_max_loc_estimate(task);
         let familiarity = task_familiarity(task, context);
         let confidence = context.model_tier_confidence.clamp(0.0, 1.0);
@@ -431,24 +435,29 @@ impl TaskContext {
             Some(roko_core::TaskSpeedPriority::Accuracy) => 0.35,
             _ => (f64::from(task.estimated_minutes.unwrap_or(90)) / 240.0).clamp(0.25, 0.95),
         };
-        let existing_code_familiarity: f64 = if task.example_pattern.is_some() {
-            0.75
-        } else {
-            0.45
-        } + if task
-            .context_files
-            .as_ref()
-            .is_some_and(|files| !files.is_empty())
-        {
-            0.10
-        } else {
-            0.0
-        } - if matches!(task.research_before_edit, Some(true))
-        {
-            0.10
-        } else {
-            0.0
-        };
+        let surface_pressure = task_surface_pressure(task);
+        let existing_code_familiarity: f64 =
+            if task.example_pattern.is_some() {
+                0.75
+            } else {
+                0.45
+            } + if task
+                .context_files
+                .as_ref()
+                .is_some_and(|files| !files.is_empty())
+            {
+                0.10
+            } else {
+                0.0
+            } + if matches!(task.category, Some(roko_core::TaskCategory::Research)) {
+                0.05
+            } else {
+                0.0
+            } - if matches!(task.research_before_edit, Some(true)) {
+                0.10
+            } else {
+                0.0
+            } - (surface_pressure * 0.15);
         let test_coverage: f64 = if task
             .test_invariants
             .as_ref()
@@ -458,27 +467,40 @@ impl TaskContext {
             0.8
         } else {
             0.45
+        } + if task.acceptance.is_empty() {
+            0.0
+        } else {
+            0.05
         };
-        let dag_depth = (task.depends_on.len() as f64 / 6.0).clamp(0.0, 1.0);
-        let model_tier_confidence = match task.complexity_band {
-            Some(roko_core::TaskComplexityBand::Fast) => 0.35,
-            Some(roko_core::TaskComplexityBand::Standard) => 0.65,
-            Some(roko_core::TaskComplexityBand::Complex) => 0.90,
-            _ => {
-                if task.quality_profile == Some(roko_core::TaskQualityProfile::Hardened) {
-                    0.80
-                } else {
-                    0.55
+        let dag_depth = (task.depends_on.len() as f64
+            + optional_vec_len(&task.integration_surfaces) as f64 * 0.5
+            + optional_vec_len(&task.sidecar_requirements) as f64 * 0.5
+            + optional_vec_len(&task.dependency_tags) as f64 * 0.25)
+            / 6.0;
+        let model_tier_confidence: f64 =
+            match task.complexity_band {
+                Some(roko_core::TaskComplexityBand::Fast) => 0.35,
+                Some(roko_core::TaskComplexityBand::Standard) => 0.65,
+                Some(roko_core::TaskComplexityBand::Complex) => 0.90,
+                _ => {
+                    if task.quality_profile == Some(roko_core::TaskQualityProfile::Hardened) {
+                        0.80
+                    } else {
+                        0.55
+                    }
                 }
-            }
-        };
+            } + if task.preferred_model.is_some() || task.preferred_provider.is_some() {
+                0.05
+            } else {
+                0.0
+            };
 
         Self {
             deadline_proximity: deadline_proximity.clamp(0.0, 1.0),
             existing_code_familiarity: existing_code_familiarity.clamp(0.0, 1.0),
             test_coverage: test_coverage.clamp(0.0, 1.0),
-            dag_depth,
-            model_tier_confidence,
+            dag_depth: dag_depth.clamp(0.0, 1.0),
+            model_tier_confidence: model_tier_confidence.clamp(0.0, 1.0),
         }
     }
 }
@@ -1796,8 +1818,18 @@ fn task_max_loc_estimate(task: &Task) -> u32 {
         .as_ref()
         .map(|files| (files.len() as u32).saturating_mul(80))
         .unwrap_or(0);
+    let requirement_budget = optional_vec_len(&task.types_to_define) as u32 * 30
+        + optional_vec_len(&task.formulas) as u32 * 45
+        + task.acceptance.len() as u32 * 18
+        + optional_vec_len(&task.imports) as u32 * 20
+        + optional_vec_len(&task.sidecar_requirements) as u32 * 90
+        + optional_vec_len(&task.integration_surfaces) as u32 * 70
+        + optional_vec_len(&task.dependency_tags) as u32 * 15
+        + optional_vec_len(&task.fixture_keys) as u32 * 15
+        + if task.exclusive_files { 30 } else { 60 };
     base.saturating_add(file_budget)
         .saturating_add(context_budget)
+        .saturating_add(requirement_budget)
         .clamp(40, 1_200)
 }
 
@@ -1816,6 +1848,7 @@ fn task_familiarity(task: &Task, context: &TaskContext) -> f64 {
     if matches!(task.research_before_edit, Some(true)) {
         familiarity -= 0.10;
     }
+    familiarity -= task_surface_pressure(task) * 0.10;
     familiarity.clamp(0.0, 1.0)
 }
 
@@ -1832,6 +1865,7 @@ fn task_failure_pressure(task: &Task, context: &TaskContext) -> f64 {
         .as_ref()
         .map(|requirements| (requirements.len() as f64 / 4.0).min(1.0))
         .unwrap_or(0.0);
+    let surface_pressure = task_surface_pressure(task);
     let reversibility_gap = (1.0 - context.test_coverage.clamp(0.0, 1.0)).clamp(0.0, 1.0);
     let urgency_pressure = context.deadline_proximity.clamp(0.0, 1.0);
     let complexity_pressure = match task.complexity_band {
@@ -1840,15 +1874,52 @@ fn task_failure_pressure(task: &Task, context: &TaskContext) -> f64 {
         Some(roko_core::TaskComplexityBand::Complex) => 0.85,
         _ => 0.45,
     };
+    let routing_uncertainty = if task.preferred_model.is_some() || task.preferred_provider.is_some()
+    {
+        0.0
+    } else {
+        0.05
+    };
+    let retry_pressure = if matches!(task.escalate_on_retry, Some(true)) {
+        0.05
+    } else {
+        0.0
+    };
+    let exclusivity_pressure = if task.exclusive_files { 0.02 } else { 0.0 };
 
-    (0.18 * file_pressure
+    ((0.18 * file_pressure
         + 0.18 * dependency_pressure
         + 0.16 * integration_pressure
         + 0.10 * sidecar_pressure
+        + 0.12 * surface_pressure
         + 0.18 * reversibility_gap
         + 0.12 * urgency_pressure
         + 0.08 * complexity_pressure)
+        + routing_uncertainty
+        + retry_pressure
+        + exclusivity_pressure)
         .clamp(0.0, 1.0)
+}
+
+fn optional_vec_len(value: &Option<Vec<String>>) -> usize {
+    value.as_ref().map_or(0, Vec::len)
+}
+
+fn task_surface_load(task: &Task) -> usize {
+    task.files.len()
+        + optional_vec_len(&task.context_files)
+        + optional_vec_len(&task.types_to_define)
+        + optional_vec_len(&task.formulas)
+        + task.acceptance.len()
+        + optional_vec_len(&task.imports)
+        + optional_vec_len(&task.sidecar_requirements)
+        + optional_vec_len(&task.integration_surfaces)
+        + optional_vec_len(&task.dependency_tags)
+        + optional_vec_len(&task.fixture_keys)
+}
+
+fn task_surface_pressure(task: &Task) -> f64 {
+    (task_surface_load(task) as f64 / 18.0).clamp(0.0, 1.0)
 }
 
 fn squared_euclidean(left: &[f64; STRATEGY_DIMENSIONS], right: &[f64; STRATEGY_DIMENSIONS]) -> f64 {
@@ -2182,6 +2253,61 @@ mod tests {
         assert!(point[5] > 0.6);
         assert!(point[6] < 0.6);
         assert!(point[7] > 0.6);
+    }
+
+    #[test]
+    fn task_strategy_observation_accounts_for_richer_requirements() {
+        let mut task = roko_core::Task::new("task-b", "Wire the daemon heartbeat through dreams");
+        task.files = vec![
+            "crates/roko-dreams/src/runner.rs".to_string(),
+            "crates/roko-dreams/src/lib.rs".to_string(),
+        ];
+        task.depends_on = vec![
+            "task-a".to_string(),
+            "task-c".to_string(),
+            "task-d".to_string(),
+        ];
+        task.acceptance = vec![
+            "add heartbeat report".to_string(),
+            "pause delta while active".to_string(),
+        ];
+        task.test_invariants = Some(vec!["heartbeat".to_string(), "delta-loop".to_string()]);
+        task.types_to_define = Some(vec![
+            "DreamHeartbeatPolicy".to_string(),
+            "DreamHeartbeatReport".to_string(),
+        ]);
+        task.formulas = Some(vec![
+            "delta_due_in = max(0, last_dream + interval - now)".to_string(),
+        ]);
+        task.imports = Some(vec![
+            "chrono::DateTime".to_string(),
+            "std::time::Duration".to_string(),
+        ]);
+        task.context_files = Some(vec![
+            "tmp/ux-refactoring/D-architectural-gaps.md".to_string(),
+        ]);
+        task.sidecar_requirements = Some(vec!["daemon".to_string()]);
+        task.integration_surfaces = Some(vec![
+            "heartbeat".to_string(),
+            "runtime-controls".to_string(),
+        ]);
+        task.dependency_tags = Some(vec!["dreams".to_string(), "delta".to_string()]);
+        task.fixture_keys = Some(vec!["tempdir".to_string()]);
+        task.estimated_minutes = Some(240);
+        task.complexity_band = Some(roko_core::TaskComplexityBand::Complex);
+        task.research_before_edit = Some(true);
+        task.exclusive_files = false;
+        task.preferred_model = Some("claude-sonnet-4-6".to_string());
+        task.escalate_on_retry = Some(true);
+
+        let context = TaskContext::from_task(&task);
+        let observation = TaskStrategyObservation::from_task(&task, &context);
+
+        assert!(observation.verification_count >= 6);
+        assert!(observation.max_loc >= 600);
+        assert!(observation.failure_pressure > 0.6);
+        assert!(observation.familiarity < 0.7);
+        assert!(context.dag_depth > 0.5);
     }
 
     #[test]

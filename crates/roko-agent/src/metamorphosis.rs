@@ -39,10 +39,7 @@ impl RoleProfile {
 pub enum MorphError {
     /// The role transition is not present in the allowlist.
     #[error("role transition {from} -> {to} is not allowed")]
-    TransitionDenied {
-        from: AgentRole,
-        to: AgentRole,
-    },
+    TransitionDenied { from: AgentRole, to: AgentRole },
 }
 
 /// An [`Agent`] wrapper that can change roles during a run.
@@ -84,7 +81,10 @@ impl MorphableAgent {
 
     /// Override the allowlist of transitions.
     #[must_use]
-    pub fn with_transitions(mut self, allowed_transitions: HashMap<AgentRole, Vec<AgentRole>>) -> Self {
+    pub fn with_transitions(
+        mut self,
+        allowed_transitions: HashMap<AgentRole, Vec<AgentRole>>,
+    ) -> Self {
         self.allowed_transitions = allowed_transitions;
         self
     }
@@ -227,8 +227,10 @@ mod tests {
     #[test]
     fn morph_rejects_disallowed_transition() {
         let identity = AgentIdentity::new(AgentRole::Implementer, "steady");
-        let mut agent = MorphableAgent::new(Box::new(MockAgent::reply("ok")), identity)
-            .with_transitions(HashMap::from([(AgentRole::Implementer, vec![AgentRole::Auditor])]));
+        let mut agent =
+            MorphableAgent::new(Box::new(MockAgent::reply("ok")), identity).with_transitions(
+                HashMap::from([(AgentRole::Implementer, vec![AgentRole::Auditor])]),
+            );
         let err = agent.morph(AgentRole::Strategist).unwrap_err();
         assert!(matches!(err, MorphError::TransitionDenied { .. }));
     }

@@ -1114,6 +1114,9 @@ impl ConfigLayer {
                     budget_usd: e.budget_usd.or(defaults.budget_usd),
                     auto_replan: e.auto_replan.unwrap_or(defaults.auto_replan),
                     use_worktrees: e.use_worktrees.unwrap_or(defaults.use_worktrees),
+                    speculative_threshold_multiplier: e
+                        .speculative_threshold_multiplier
+                        .unwrap_or(defaults.speculative_threshold_multiplier),
                 }
             }
             None => ExecutorConfig::default(),
@@ -2229,6 +2232,9 @@ pub struct ExecutorLayer {
     /// Whether to use isolated git worktrees for plan and task execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_worktrees: Option<bool>,
+    /// Multiplier applied to expected-minutes before speculative task splits kick in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative_threshold_multiplier: Option<f64>,
 }
 
 /// Partial `ServeConfig` — every field optional.
@@ -2378,6 +2384,9 @@ impl ExecutorLayer {
             budget_usd: overlay.budget_usd.or(self.budget_usd),
             auto_replan: overlay.auto_replan.or(self.auto_replan),
             use_worktrees: overlay.use_worktrees.or(self.use_worktrees),
+            speculative_threshold_multiplier: overlay
+                .speculative_threshold_multiplier
+                .or(self.speculative_threshold_multiplier),
         }
     }
 }

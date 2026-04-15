@@ -273,9 +273,11 @@ impl ParallelExecutor {
         task: &str,
     ) -> Option<ExecutorAction> {
         let key = format!("{plan_id}:{task}");
-        self.speculative_executions.remove(&key).map(|_| ExecutorAction::CancelSpeculativeExecution {
-            plan_id: plan_id.to_string(),
-            task: task.to_string(),
+        self.speculative_executions.remove(&key).map(|_| {
+            ExecutorAction::CancelSpeculativeExecution {
+                plan_id: plan_id.to_string(),
+                task: task.to_string(),
+            }
         })
     }
 

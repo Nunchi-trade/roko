@@ -1,7 +1,7 @@
 //! Dreams subsystem crate.
 //!
-//! This package owns the dream-cycle runtime plus the remaining placeholder
-//! subsystem types that still live in the dreams domain.
+//! This package owns the dream-cycle runtime, heartbeat helpers, and the
+//! remaining placeholder subsystem types that still live in the dreams domain.
 
 pub mod cycle;
 pub mod hypnagogia;
@@ -20,9 +20,9 @@ pub use imagination::{
 };
 pub use replay::{DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, select_replay_episodes};
 pub use runner::{
-    DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine, DreamLoopConfig, DreamReport,
-    DreamRunner, DreamRuntimeControls, DreamSchedulePolicy, DreamTrigger, Episode, Insight,
-    build_dream_review_dispatcher,
+    DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine, DreamHeartbeatPolicy,
+    DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner, DreamRuntimeControls,
+    DreamSchedulePolicy, DreamTrigger, Episode, Insight, build_dream_review_dispatcher,
 };
 pub use threat::{ThreatScenario, enumerate_threats, threat_warning_entries};
 
