@@ -1,0 +1,39 @@
+[package]
+name = "roko-agent-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Per-agent HTTP server with feature-gated routes, bearer auth, and ERC-8004 agent-card registration helpers."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-agent = { path = "../roko-agent" }
+roko-chain = { path = "../roko-chain" }
+roko-learn = { path = "../roko-learn" }
+roko-neuro = { path = "../roko-neuro" }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+alloy-primitives = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["limit", "load-shed", "util"] }

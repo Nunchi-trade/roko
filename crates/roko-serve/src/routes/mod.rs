@@ -4,6 +4,7 @@
 //! [`build_router`] function assembles them into a single [`axum::Router`]
 //! with CORS and tracing middleware.
 
+mod aggregator;
 mod agents;
 mod config;
 mod deployments;
@@ -46,6 +47,7 @@ pub fn build_router(
         .merge(research::routes())
         .merge(subscriptions::routes())
         .merge(templates::routes())
+        .merge(aggregator::routes())
         .merge(agents::routes())
         .merge(learning::routes())
         .merge(config::routes())

@@ -46,6 +46,8 @@ members = [
     "crates/roko-cli",
     # HTTP server crate extracted from roko-cli's serve module.
     "crates/roko-serve",
+    # Per-agent HTTP server extracted from the legacy mirage dashboard surface.
+    "crates/roko-agent-server",
 
     # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
     "crates/roko-conductor",

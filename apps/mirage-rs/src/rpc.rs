@@ -136,6 +136,7 @@ pub async fn start_rpc_server_with_chain(
             _ => None,
         }
     };
+    #[cfg(feature = "legacy-api")]
     let api_router = {
         let block_state = Arc::clone(&local_state);
         let api_state = crate::http_api::ApiState {
@@ -148,6 +149,8 @@ pub async fn start_rpc_server_with_chain(
         };
         Some(crate::http_api::build_router(api_state))
     };
+    #[cfg(not(feature = "legacy-api"))]
+    let api_router = None;
     let module = build_rpc_module(ServerContext {
         state: Arc::clone(&local_state),
         shutdown,

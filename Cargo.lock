@@ -5388,6 +5388,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-agent-server"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "roko-agent",
+ "roko-chain",
+ "roko-learn",
+ "roko-neuro",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "roko-chain"
 version = "0.1.0"
 dependencies = [
@@ -5817,6 +5843,8 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "roko-agent",
+ "roko-agent-server",
+ "roko-chain",
  "roko-compose",
  "roko-conductor",
  "roko-core",
