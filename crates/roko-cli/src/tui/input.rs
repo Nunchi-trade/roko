@@ -230,6 +230,8 @@ pub enum TuiAction {
 
     // -- help --
     ShowHelp,
+    /// Cycle the visual-effects preset.
+    CycleEffectsPreset,
     ToggleScreenPostFx,
 
     // -- focus --
@@ -583,6 +585,7 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ToggleScreenPostFx)
         }
+        KeyCode::Char('v') => Some(TuiAction::CycleEffectsPreset),
         // Ctrl-g: reconcile git state (confirm)
         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::RequestConfirm(ConfirmAction::GitReconcile))
@@ -639,8 +642,6 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('p') => TuiAction::TogglePause,
         KeyCode::Char('i') => TuiAction::StartInject,
         KeyCode::Char('y') => TuiAction::ApproveCommand,
-        KeyCode::Char('v') => TuiAction::ReverifyPlan,
-
         // Agent role tabs (backtick cycles, Alt+N selects)
         KeyCode::Char('`') => TuiAction::SwitchAgentTab(usize::MAX), // cycle
 
@@ -933,6 +934,30 @@ mod tests {
             &modals(),
         );
         assert_eq!(action, TuiAction::ToggleScreenPostFx);
+    }
+
+    #[test]
+    fn v_cycles_effects_presets_outside_plans_tab() {
+        let action = handle_key(
+            key(KeyCode::Char('v')),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::CycleEffectsPreset);
+    }
+
+    #[test]
+    fn v_cycles_effects_presets_on_plans_tab() {
+        let action = handle_key(
+            key(KeyCode::Char('v')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::CycleEffectsPreset);
     }
 
     #[test]

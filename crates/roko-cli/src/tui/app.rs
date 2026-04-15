@@ -777,7 +777,7 @@ impl App {
         );
 
         // PostFX pipeline
-        if self.fx_config.screen_postfx {
+        if self.fx_config.screen_postfx || self.fx_config.nerv_viz || self.fx_config.particles {
             let buf = frame.buffer_mut();
             super::postfx_pipeline::apply_pipeline(
                 self.tui_state.active_tab as usize,
@@ -786,6 +786,7 @@ impl App {
                 self.tui_state.atmosphere.elapsed,
                 self.tui_state.atmosphere.frame_count,
                 &self.fx_config,
+                &self.tui_state,
             );
         }
     }
@@ -1015,6 +1016,24 @@ impl App {
                     .push(super::modals::Notification::info(&format!(
                         "Screen postfx {state}"
                     )));
+            }
+            TuiAction::CycleEffectsPreset => {
+                let preset = self.fx_config.cycle_preset();
+                match self.fx_config.save_preset(&self.workdir) {
+                    Ok(()) => {
+                        self.notifications
+                            .push(super::modals::Notification::info(&format!(
+                                "Effects: {}",
+                                preset.label()
+                            )));
+                    }
+                    Err(error) => {
+                        self.notifications
+                            .push(super::modals::Notification::error(&format!(
+                                "Effects preset save failed: {error}"
+                            )));
+                    }
+                }
             }
             TuiAction::ShowPlanDetail => {
                 self.active_modal = self
@@ -2880,6 +2899,43 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert!(!app.fx_config.screen_postfx);
+    }
+
+    #[test]
+    fn v_cycles_effects_presets_and_persists_without_touching_screen_postfx() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use super::super::effects_config::EffectsPreset;
+
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("roko.toml"),
+            RokoConfig::default().to_toml().unwrap(),
+        )
+        .unwrap();
+
+        let mut app = App::new(dir.path());
+        app.fx_config.screen_postfx = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.fx_config.preset, EffectsPreset::Minimal);
+        assert!(app.fx_config.screen_postfx);
+        assert!(!app.fx_config.nerv_viz);
+        assert!(app.fx_config.particles);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.fx_config.preset, EffectsPreset::Full);
+        assert!(app.fx_config.screen_postfx);
+        assert!(app.fx_config.nerv_viz);
+        assert!(app.fx_config.particles);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.fx_config.preset, EffectsPreset::Off);
+        assert!(app.fx_config.screen_postfx);
+        assert!(!app.fx_config.nerv_viz);
+        assert!(!app.fx_config.particles);
+
+        let saved = std::fs::read_to_string(dir.path().join("roko.toml")).unwrap();
+        assert!(saved.contains("preset = \"off\""));
     }
 
     #[test]
