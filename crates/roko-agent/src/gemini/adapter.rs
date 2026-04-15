@@ -13,7 +13,7 @@ use crate::provider::openai_compat::{max_tokens_for_model, tool_registry_for_opt
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
 };
-use crate::tool_loop::backends::GeminiNativeBackend;
+use crate::tool_loop::backends::create_tool_loop_backend;
 use crate::tool_loop::{OpenAiCompatBackend, ToolLoop, ToolLoopAgent};
 use crate::translate::{GeminiTranslator, OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
@@ -80,7 +80,6 @@ fn gemini_tool_loop_agent(
 }
 
 fn gemini_native_tool_loop_agent(
-    api_key: String,
     provider: &ProviderConfig,
     model: &ModelProfile,
     options: &AgentOptions,
@@ -90,14 +89,10 @@ fn gemini_native_tool_loop_agent(
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
     let translator: Arc<dyn Translator> = Arc::new(GeminiTranslator);
-    let backend = GeminiNativeBackend::new(
-        api_key,
-        provider.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL),
-        model.clone(),
-        options,
-    );
+    let backend =
+        create_tool_loop_backend(provider, model, options, Arc::new(ReqwestPoster::new()))?;
 
-    let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend)
         .with_max_iterations(50)
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
@@ -173,7 +168,7 @@ impl ProviderAdapter for GeminiAdapter {
                 &options,
             )))
         } else if model.supports_tools && model.tool_format == "gemini_native" {
-            gemini_native_tool_loop_agent(api_key, provider, model, &options)
+            gemini_native_tool_loop_agent(provider, model, &options)
         } else if model.supports_tools {
             gemini_tool_loop_agent(api_key, provider, model, &options)
         } else {

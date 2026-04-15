@@ -27,10 +27,13 @@ pub mod hnsw;
 pub mod insight;
 pub mod knowledge;
 pub mod pheromone;
+pub mod prediction;
 pub mod projection;
 pub mod task;
 
-pub use agent::{AgentEntry, AgentEvent, AgentRegistry, AgentStats, AgentTrace, CognitivePhase};
+pub use agent::{
+    AgentEntry, AgentEvent, AgentRegistry, AgentStats, AgentTrace, CognitivePhase, SkillConfig,
+};
 pub use hdc_index::{HdcIndex, Hit, IndexedVector};
 pub use hnsw::{HnswBinaryIndex, HnswConfig};
 pub use insight::{InsightEntry, InsightId, KnowledgeKind, KnowledgeState};
@@ -40,9 +43,15 @@ pub use knowledge::{
 pub use pheromone::{
     DECAY_BUCKETS, Pheromone, PheromoneField, PheromoneHit, PheromoneId, PheromoneKind,
 };
+pub use prediction::{
+    CalibrationCategorySummary, CalibrationSummary, ClaimId, ClaimState, PredictionClaim,
+    PredictionError, PredictionEvent, PredictionSession, PredictionStore, ResolveResult, SessionId,
+    SessionState,
+};
 pub use projection::{
     DEFAULT_EMBEDDING_DIM, HDC_BITS, ProjectionMatrix, project_bytes, project_tokens,
 };
 pub use task::{
-    TaskEntry, TaskError, TaskEvent, TaskId, TaskPriority, TaskState, TaskStats, TaskStore,
+    CompletionMetadata, TaskArtifact, TaskEntry, TaskError, TaskEvent, TaskId, TaskPriority,
+    TaskState, TaskStats, TaskStore,
 };

@@ -1153,6 +1153,38 @@ impl SkillLibrary {
         skills
     }
 
+    /// Return the most relevant skills for `task_category`, capped at `max`.
+    ///
+    /// Ranking prefers higher success rate, then more recent matches, then
+    /// higher validated evidence, then stable name ordering.
+    #[must_use]
+    pub fn relevant_skills(&self, task_category: &str, max: usize) -> Vec<Skill> {
+        if max == 0 {
+            return Vec::new();
+        }
+
+        let mut skills: Vec<Skill> = self
+            .skills
+            .read()
+            .values()
+            .filter(|skill| skill.matches_task_category(task_category))
+            .cloned()
+            .collect();
+
+        skills.sort_by(|a, b| {
+            b.success_rate
+                .partial_cmp(&a.success_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.last_matched.cmp(&a.last_matched))
+                .then_with(|| b.validated_count.cmp(&a.validated_count))
+                .then_with(|| b.match_count.cmp(&a.match_count))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        skills.truncate(max);
+        skills
+    }
+
     // ── Voyager-style extraction & selection (§16.3.2-16.3.4) ──────
 
     /// Extract a skill from a successful episode that passed gates on the
@@ -2249,6 +2281,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(library.select(&query, 2).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn relevant_skills_rank_by_success_rate_and_recency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("skills.json");
+        let library = SkillLibrary::new(&path).await.unwrap();
+
+        let mut older = Skill::new("older", "sum", "tmpl");
+        older.task_category = "implementation".into();
+        older.task_categories = vec!["implementation".into()];
+        older.success_rate = 0.7;
+        older.validated_count = 2;
+        older.match_count = 3;
+        older.last_matched = Some(Utc::now() - chrono::Duration::days(1));
+
+        let mut newer = Skill::new("newer", "sum", "tmpl");
+        newer.task_category = "implementation".into();
+        newer.task_categories = vec!["implementation".into()];
+        newer.success_rate = 0.9;
+        newer.validated_count = 1;
+        newer.match_count = 1;
+        newer.last_matched = Some(Utc::now());
+
+        library.register(&older).await.unwrap();
+        library.register(&newer).await.unwrap();
+
+        let ranked = library.relevant_skills("implementation", 2);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].name, "newer");
+        assert_eq!(ranked[1].name, "older");
     }
 
     #[tokio::test]

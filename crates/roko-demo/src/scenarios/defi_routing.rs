@@ -13,6 +13,7 @@ use crate::bindings::{BountyMarket, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::Scenario;
+use crate::scenarios::ScenarioRuntime;
 use crate::scenarios::llm::{LlmProvider, LlmRequest};
 
 /// DeFi routing benchmark scenario.
@@ -33,10 +34,10 @@ impl Scenario for DefiRouting {
         &self,
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
-        llm: Arc<dyn LlmProvider>,
+        runtime: Arc<ScenarioRuntime>,
     ) -> anyhow::Result<()> {
         prepare(&ctx).await?;
-        race(&ctx, llm).await
+        race(&ctx, runtime.llm.clone()).await
     }
 }
 

@@ -381,6 +381,61 @@ impl Episode {
     }
 }
 
+/// Decomposed components of an episode importance score.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeImportanceComponents {
+    /// How surprising the observed outcome was for the surrounding context.
+    pub surprisal: f64,
+    /// How unlike recent episodes the current episode is.
+    pub novelty: f64,
+    /// How difficult the episode appears from usage and gate complexity.
+    pub difficulty: f64,
+    /// How much the episode changed routing evidence relative to peers.
+    pub information_gain: f64,
+    /// How much the episode increases corpus diversity.
+    pub diversity: f64,
+}
+
+impl EpisodeImportanceComponents {
+    /// Weighted aggregate score in `[0, 1]`.
+    #[must_use]
+    pub fn score(self) -> f64 {
+        (self.surprisal * 0.3
+            + self.novelty * 0.25
+            + self.difficulty * 0.2
+            + self.information_gain * 0.15
+            + self.diversity * 0.1)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Replay priority tiers derived from episode importance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpisodePriorityTier {
+    /// Highly informative or surprising episodes.
+    Critical,
+    /// Strong training signal worth replaying soon.
+    High,
+    /// Ordinary episodes with moderate signal.
+    Normal,
+    /// Low-signal episodes that can be replayed last.
+    Background,
+}
+
+impl EpisodePriorityTier {
+    /// Human-readable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Background => "background",
+        }
+    }
+}
+
 /// Derive a stable id by hashing `(agent_id, task_id, timestamp)` with
 /// Rust's default hasher. Not cryptographic — collisions are acceptable
 /// because ids are scoped to a single log file.
@@ -414,19 +469,78 @@ fn suggest_template_from_episodes(episodes: &[Episode], signal: &Engram) -> Opti
             continue;
         };
         let similarity = signal_fingerprint.similarity(&episode_fingerprint) as f64;
-        if similarity <= TEMPLATE_SUGGESTION_MIN_SIMILARITY {
+        let importance = importance_score(episode, episodes);
+        let combined_score = similarity * (0.6 + importance * 0.4);
+        if combined_score <= TEMPLATE_SUGGESTION_MIN_SIMILARITY {
             continue;
         }
 
         let should_replace = best
             .as_ref()
-            .is_none_or(|(best_similarity, _)| similarity > *best_similarity);
+            .is_none_or(|(best_similarity, _)| combined_score > *best_similarity);
         if should_replace {
-            best = Some((similarity, template));
+            best = Some((combined_score, template));
         }
     }
 
     best.map(|(_, template)| template)
+}
+
+/// Compute a composite importance score for `episode` relative to `history`.
+#[must_use]
+pub fn importance_score(episode: &Episode, history: &[Episode]) -> f64 {
+    importance_components(episode, history).score()
+}
+
+/// Break the episode importance score into interpretable components.
+#[must_use]
+pub fn importance_components(
+    episode: &Episode,
+    history: &[Episode],
+) -> EpisodeImportanceComponents {
+    let peers: Vec<&Episode> = history
+        .iter()
+        .filter(|peer| !same_episode(peer, episode))
+        .collect();
+
+    EpisodeImportanceComponents {
+        surprisal: surprisal_score(episode, &peers),
+        novelty: novelty_score(episode, &peers),
+        difficulty: difficulty_score(episode),
+        information_gain: information_gain_score(episode, &peers),
+        diversity: diversity_score(episode, &peers),
+    }
+}
+
+/// Collapse the importance score into a replay tier.
+#[must_use]
+pub fn importance_tier(episode: &Episode, history: &[Episode]) -> EpisodePriorityTier {
+    match importance_score(episode, history) {
+        score if score >= 0.8 => EpisodePriorityTier::Critical,
+        score if score >= 0.6 => EpisodePriorityTier::High,
+        score if score >= 0.35 => EpisodePriorityTier::Normal,
+        _ => EpisodePriorityTier::Background,
+    }
+}
+
+/// Rank episodes by importance, highest score first.
+#[must_use]
+pub fn prioritize_by_importance<'a>(
+    episodes: &'a [Episode],
+    history: &[Episode],
+) -> Vec<&'a Episode> {
+    let mut ranked: Vec<(&Episode, f64)> = episodes
+        .iter()
+        .map(|episode| (episode, importance_score(episode, history)))
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.0.timestamp.cmp(&left.0.timestamp))
+    });
+    ranked.into_iter().map(|(episode, _)| episode).collect()
 }
 
 fn episode_fingerprint(episode: &Episode) -> Option<HdcVector> {
@@ -460,6 +574,207 @@ fn signal_fingerprint_text(signal: &Engram) -> String {
         body,
         outcome
     )
+}
+
+fn same_episode(lhs: &Episode, rhs: &Episode) -> bool {
+    (!lhs.id.is_empty() && lhs.id == rhs.id)
+        || (!lhs.episode_id.is_empty() && lhs.episode_id == rhs.episode_id)
+}
+
+fn episode_model_label(episode: &Episode) -> String {
+    normalized_template(&episode.model).unwrap_or_else(|| "unknown-model".to_string())
+}
+
+fn episode_template_label(episode: &Episode) -> String {
+    normalized_template(&episode.agent_template)
+        .or_else(|| normalized_template(&episode.agent_id))
+        .unwrap_or_else(|| "unknown-template".to_string())
+}
+
+fn episode_task_label(episode: &Episode) -> String {
+    normalized_template(&episode.task_id).unwrap_or_else(|| "unknown-task".to_string())
+}
+
+fn surprisal_score(episode: &Episode, history: &[&Episode]) -> f64 {
+    let mut matching = Vec::new();
+    for peer in history {
+        if episode_task_label(peer) == episode_task_label(episode)
+            || episode_template_label(peer) == episode_template_label(episode)
+            || episode_model_label(peer) == episode_model_label(episode)
+        {
+            matching.push(*peer);
+        }
+    }
+    if matching.is_empty() {
+        matching = history.to_vec();
+    }
+
+    if matching.is_empty() {
+        return 0.5;
+    }
+
+    let successes = matching.iter().filter(|peer| peer.success).count() as f64;
+    let total = matching.len() as f64;
+    let expected_success = (successes / total).clamp(0.0, 1.0);
+    let p_outcome = if episode.success {
+        expected_success
+    } else {
+        1.0 - expected_success
+    };
+    (1.0 - p_outcome).clamp(0.0, 1.0)
+}
+
+fn novelty_score(episode: &Episode, history: &[&Episode]) -> f64 {
+    let Some(fingerprint) = episode_fingerprint(episode) else {
+        return 0.5;
+    };
+
+    let mut best_similarity: f64 = 0.0;
+    for peer in history.iter().take(64) {
+        if let Some(peer_fingerprint) = episode_fingerprint(peer) {
+            best_similarity = best_similarity.max(fingerprint.similarity(&peer_fingerprint) as f64);
+        }
+    }
+
+    (1.0 - best_similarity).clamp(0.0, 1.0)
+}
+
+fn difficulty_score(episode: &Episode) -> f64 {
+    let token_pressure = ((episode.usage.input_tokens
+        + episode.usage.output_tokens
+        + episode.usage.cache_write_tokens) as f64)
+        .ln_1p()
+        / 16.0_f64.ln_1p();
+    let duration_pressure = episode.duration_secs.max(0.0).ln_1p() / 10.0_f64.ln_1p();
+    let gate_pressure = (episode.gate_verdicts.len() as f64 / 8.0).clamp(0.0, 1.0);
+    let model_pressure = match episode.model.to_ascii_lowercase().as_str() {
+        model if model.contains("opus") || model.contains("pro") => 1.0,
+        model if model.contains("sonnet") || model.contains("gpt-4") => 0.75,
+        model if model.contains("haiku") || model.contains("mini") || model.contains("fast") => {
+            0.35
+        }
+        _ => 0.55,
+    };
+
+    (token_pressure * 0.35
+        + duration_pressure * 0.20
+        + gate_pressure * 0.15
+        + model_pressure * 0.30)
+        .clamp(0.0, 1.0)
+}
+
+fn information_gain_score(episode: &Episode, history: &[&Episode]) -> f64 {
+    if history.is_empty() {
+        return if episode.success { 0.25 } else { 0.55 };
+    }
+
+    let task_matches: Vec<&Episode> = history
+        .iter()
+        .copied()
+        .filter(|peer| episode_task_label(peer) == episode_task_label(episode))
+        .collect();
+    let model_matches: Vec<&Episode> = history
+        .iter()
+        .copied()
+        .filter(|peer| episode_model_label(peer) == episode_model_label(episode))
+        .collect();
+
+    let model_shift = 1.0
+        - if history.is_empty() {
+            0.0
+        } else {
+            dominant_share(
+                history,
+                |peer| episode_model_label(peer),
+                episode_model_label(episode),
+            )
+        };
+
+    let task_shift = if task_matches.is_empty() {
+        0.75
+    } else {
+        1.0 - dominant_share(
+            &task_matches,
+            |peer| episode_template_label(peer),
+            episode_template_label(episode),
+        )
+    };
+
+    let outcome_shift = if task_matches.is_empty() {
+        if episode.success { 0.15 } else { 0.65 }
+    } else {
+        let success_rate = task_matches.iter().filter(|peer| peer.success).count() as f64
+            / task_matches.len() as f64;
+        (episode.success as u8 as f64 - success_rate).abs()
+    };
+
+    let gate_shift = if model_matches.is_empty() {
+        0.3
+    } else {
+        let pass_rate = model_matches
+            .iter()
+            .filter(|peer| peer.gate_verdicts.iter().all(|verdict| verdict.passed))
+            .count() as f64
+            / model_matches.len() as f64;
+        (1.0 - pass_rate).clamp(0.0, 1.0)
+    };
+
+    (model_shift * 0.35 + task_shift * 0.25 + outcome_shift * 0.20 + gate_shift * 0.20)
+        .clamp(0.0, 1.0)
+}
+
+fn diversity_score(episode: &Episode, history: &[&Episode]) -> f64 {
+    if history.is_empty() {
+        return 0.5;
+    }
+
+    let distinct_models = distinct_count(history, |peer| episode_model_label(peer));
+    let distinct_templates = distinct_count(history, |peer| episode_template_label(peer));
+    let distinct_tasks = distinct_count(history, |peer| episode_task_label(peer));
+    let distinct_outcomes = distinct_count(history, |peer| {
+        if peer.success {
+            "success".to_string()
+        } else {
+            "failure".to_string()
+        }
+    });
+
+    let history_scale = (history.len().max(1) as f64).min(16.0);
+    let novelty_anchor = if episode.success { 0.0 } else { 0.05 };
+    let distinctness = ((distinct_models + distinct_templates + distinct_tasks + distinct_outcomes)
+        as f64)
+        / (4.0 * history_scale);
+
+    (distinctness + novelty_anchor).clamp(0.0, 1.0)
+}
+
+fn distinct_count<F>(episodes: &[&Episode], mut key: F) -> usize
+where
+    F: FnMut(&Episode) -> String,
+{
+    let mut set = std::collections::BTreeSet::new();
+    for episode in episodes {
+        set.insert(key(episode));
+    }
+    set.len()
+}
+
+fn dominant_share<F>(episodes: &[&Episode], mut key: F, current_key: String) -> f64
+where
+    F: FnMut(&Episode) -> String,
+{
+    if episodes.is_empty() {
+        return 0.0;
+    }
+
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for episode in episodes {
+        *counts.entry(key(episode)).or_default() += 1;
+    }
+    let dominant = counts.values().copied().max().unwrap_or(0) as f64;
+    let total = episodes.len() as f64;
+    let current = counts.get(&current_key).copied().unwrap_or(0) as f64;
+    (dominant.max(current) / total).clamp(0.0, 1.0)
 }
 
 /// Append-only JSONL episode logger.
@@ -1526,5 +1841,63 @@ mod tests {
             .await
             .expect("suggest template");
         assert_eq!(suggestion.as_deref(), Some("code-implementer"));
+    }
+
+    #[test]
+    fn importance_score_rewards_novel_difficult_episodes() {
+        let mut routine = Episode::new("agent-a", "task-a");
+        routine.model = "claude-haiku-3-5".to_string();
+        routine.agent_template = "implementer".to_string();
+        routine.success = true;
+        routine.usage.input_tokens = 120;
+        routine.usage.output_tokens = 40;
+        routine.duration_secs = 12.0;
+
+        let mut novel = Episode::new("agent-b", "task-b");
+        novel.model = "claude-opus-4".to_string();
+        novel.agent_template = "architect".to_string();
+        novel.success = false;
+        novel.usage.input_tokens = 1_600;
+        novel.usage.output_tokens = 900;
+        novel.duration_secs = 240.0;
+        novel.gate_verdicts = vec![
+            GateVerdict::new("compile", false),
+            GateVerdict::new("test", false),
+        ];
+        novel.attach_metadata_fingerprint();
+
+        let history = vec![routine.clone(), routine.clone(), routine.clone()];
+        let routine_score = importance_score(&routine, &history);
+        let novel_score = importance_score(&novel, &history);
+
+        assert!(novel_score > routine_score);
+        assert!(matches!(
+            importance_tier(&novel, &history),
+            EpisodePriorityTier::Critical | EpisodePriorityTier::High
+        ));
+    }
+
+    #[test]
+    fn prioritize_by_importance_orders_high_signal_first() {
+        let mut low = Episode::new("agent-a", "task-a");
+        low.model = "claude-haiku-3-5".to_string();
+        low.agent_template = "implementer".to_string();
+
+        let mut high = Episode::new("agent-b", "task-b");
+        high.model = "claude-opus-4".to_string();
+        high.agent_template = "architect".to_string();
+        high.success = false;
+        high.usage.input_tokens = 2_000;
+        high.usage.output_tokens = 1_200;
+        high.duration_secs = 420.0;
+        high.gate_verdicts = vec![GateVerdict::new("compile", false)];
+        high.attach_metadata_fingerprint();
+
+        let episodes = [low.clone(), high.clone()];
+        let ranked = prioritize_by_importance(&episodes, &[low, high.clone()]);
+        assert_eq!(
+            ranked.first().map(|episode| episode.id.as_str()),
+            Some(high.id.as_str())
+        );
     }
 }

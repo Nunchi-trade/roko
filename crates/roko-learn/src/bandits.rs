@@ -102,6 +102,178 @@ impl BanditArm {
     }
 }
 
+// ─── EwcRegularizer ────────────────────────────────────────────────────────
+
+/// Elastic Weight Consolidation helper for preserving previously learned
+/// routing preferences.
+///
+/// The regularizer keeps a Fisher-style diagonal estimate of how sensitive
+/// each learned weight dimension is, along with an anchor point representing
+/// the consolidated parameter vector. When a new update would move the weights
+/// too far from the anchor on high-Fisher dimensions, the reward is damped and
+/// a knowledge-preservation event is recorded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EwcRegularizer {
+    /// Regularization strength.
+    pub lambda: f64,
+    /// Diagonal Fisher information estimate.
+    #[serde(default)]
+    pub fisher_diagonal: Vec<f64>,
+    /// Consolidated anchor weights.
+    #[serde(default)]
+    pub anchor_theta: Vec<f64>,
+    /// Number of update steps that were damped by the regularizer.
+    #[serde(default)]
+    pub preservation_events: u64,
+    /// Last penalty applied during regularization.
+    #[serde(default)]
+    pub last_penalty: f64,
+}
+
+impl Default for EwcRegularizer {
+    fn default() -> Self {
+        Self {
+            lambda: 0.1,
+            fisher_diagonal: Vec::new(),
+            anchor_theta: Vec::new(),
+            preservation_events: 0,
+            last_penalty: 0.0,
+        }
+    }
+}
+
+impl EwcRegularizer {
+    /// Construct a regularizer sized for `dim` weights.
+    #[must_use]
+    pub fn new(dim: usize) -> Self {
+        let mut reg = Self::default();
+        reg.resize(dim);
+        reg
+    }
+
+    /// Override the regularization strength.
+    #[must_use]
+    pub fn with_lambda(mut self, lambda: f64) -> Self {
+        self.lambda = if lambda.is_finite() && lambda >= 0.0 {
+            lambda
+        } else {
+            0.1
+        };
+        self
+    }
+
+    /// Current number of protected dimensions.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.anchor_theta.len().max(self.fisher_diagonal.len())
+    }
+
+    /// Whether the regularizer currently tracks any dimensions.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Total number of preservation events recorded so far.
+    #[must_use]
+    pub const fn preservation_events(&self) -> u64 {
+        self.preservation_events
+    }
+
+    /// Last penalty value computed by the regularizer.
+    #[must_use]
+    pub const fn last_penalty(&self) -> f64 {
+        self.last_penalty
+    }
+
+    fn resize(&mut self, dim: usize) {
+        if self.anchor_theta.len() != dim {
+            self.anchor_theta.resize(dim, 0.0);
+        }
+        if self.fisher_diagonal.len() != dim {
+            self.fisher_diagonal.resize(dim, 0.0);
+        }
+    }
+
+    /// Compute the current EWC penalty for a candidate weight vector.
+    #[must_use]
+    pub fn penalty(&self, theta: &[f64]) -> f64 {
+        if theta.is_empty() || self.anchor_theta.is_empty() {
+            return 0.0;
+        }
+
+        let len = theta
+            .len()
+            .min(self.anchor_theta.len())
+            .min(self.fisher_diagonal.len());
+        let mut penalty = 0.0;
+        for idx in 0..len {
+            let drift = theta[idx] - self.anchor_theta[idx];
+            penalty += self.fisher_diagonal[idx] * drift * drift;
+        }
+        penalty * 0.5 * self.lambda
+    }
+
+    /// Apply regularization to `reward` using the supplied parameter vector.
+    ///
+    /// The returned reward is clamped to `[0, 1]` because the router update
+    /// path expects normalized rewards.
+    #[must_use]
+    pub fn regularize_reward(&mut self, theta: &[f64], reward: f64) -> f64 {
+        if theta.is_empty() {
+            return reward.clamp(0.0, 1.0);
+        }
+
+        if self.anchor_theta.len() != theta.len() {
+            self.resize(theta.len());
+            self.anchor_theta.clone_from_slice(theta);
+            self.update_fisher(theta, reward);
+            return reward.clamp(0.0, 1.0);
+        }
+
+        let penalty = self.penalty(theta);
+        self.last_penalty = penalty;
+        let adjusted = if penalty <= f64::EPSILON {
+            reward.clamp(0.0, 1.0)
+        } else {
+            let damp = penalty.min(reward.max(0.0));
+            (reward - damp).clamp(0.0, 1.0)
+        };
+        if adjusted + f64::EPSILON < reward {
+            self.preservation_events = self.preservation_events.saturating_add(1);
+        }
+
+        self.update_fisher(theta, reward);
+        self.refresh_anchor(theta, reward);
+        adjusted
+    }
+
+    fn update_fisher(&mut self, theta: &[f64], reward: f64) {
+        let len = theta
+            .len()
+            .min(self.anchor_theta.len())
+            .min(self.fisher_diagonal.len());
+        let weight = reward.clamp(0.0, 1.0).max(0.05);
+        for idx in 0..len {
+            let drift = theta[idx] - self.anchor_theta[idx];
+            let estimate = (drift * drift + theta[idx].abs() * 0.01) * weight;
+            self.fisher_diagonal[idx] = 0.92 * self.fisher_diagonal[idx] + 0.08 * estimate;
+        }
+    }
+
+    fn refresh_anchor(&mut self, theta: &[f64], reward: f64) {
+        let len = theta
+            .len()
+            .min(self.anchor_theta.len())
+            .min(self.fisher_diagonal.len());
+        let anchor_rate = 0.02 + reward.clamp(0.0, 1.0) * 0.03;
+        for idx in 0..len {
+            self.anchor_theta[idx] =
+                (1.0 - anchor_rate) * self.anchor_theta[idx] + anchor_rate * theta[idx];
+        }
+    }
+}
+
 // ─── UcbBandit ───────────────────────────────────────────────────────────────
 
 /// Context-free UCB1 multi-armed bandit.
@@ -889,6 +1061,20 @@ mod tests {
 
     fn three_arm_names() -> Vec<String> {
         vec!["arm0".to_string(), "arm1".to_string(), "arm2".to_string()]
+    }
+
+    #[test]
+    fn ewc_regularizer_penalizes_drift_from_anchor() {
+        let mut regularizer = EwcRegularizer::new(3).with_lambda(0.2);
+        let theta = vec![0.9, 0.2, 0.1];
+        let first_reward = regularizer.regularize_reward(&theta, 0.9);
+        assert!((first_reward - 0.9).abs() < 1e-9);
+
+        let drifted = vec![0.2, 0.2, 0.1];
+        let adjusted = regularizer.regularize_reward(&drifted, 0.9);
+        assert!(adjusted < 0.9);
+        assert!(regularizer.preservation_events() > 0);
+        assert!(regularizer.last_penalty() > 0.0);
     }
 
     // ── Test 1 ───────────────────────────────────────────────────────────────

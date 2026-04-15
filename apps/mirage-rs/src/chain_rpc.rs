@@ -105,6 +105,10 @@ pub struct ChainContext {
     pub task_store: crate::chain::TaskStore,
     /// Broadcast bus for task lifecycle events (WebSocket streaming).
     pub task_bus: tokio::sync::broadcast::Sender<crate::chain::TaskEvent>,
+    /// Prediction session and claim store.
+    pub prediction_store: crate::chain::PredictionStore,
+    /// Broadcast bus for prediction lifecycle events.
+    pub prediction_bus: tokio::sync::broadcast::Sender<crate::chain::PredictionEvent>,
 }
 
 impl ChainContext {
@@ -123,6 +127,8 @@ impl ChainContext {
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
             task_store: crate::chain::TaskStore::new(),
             task_bus: tokio::sync::broadcast::channel(1_024).0,
+            prediction_store: crate::chain::PredictionStore::new(),
+            prediction_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -141,6 +147,8 @@ impl ChainContext {
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
             task_store: crate::chain::TaskStore::new(),
             task_bus: tokio::sync::broadcast::channel(1_024).0,
+            prediction_store: crate::chain::PredictionStore::new(),
+            prediction_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -163,6 +171,8 @@ impl ChainContext {
             agent_bus: tokio::sync::broadcast::channel(1_024).0,
             task_store: crate::chain::TaskStore::new(),
             task_bus: tokio::sync::broadcast::channel(1_024).0,
+            prediction_store: crate::chain::PredictionStore::new(),
+            prediction_bus: tokio::sync::broadcast::channel(1_024).0,
         }
     }
 
@@ -182,7 +192,12 @@ impl std::fmt::Debug for ChainContext {
         dbg.field("toggles", &self.toggles)
             .field("insights", &self.knowledge.len())
             .field("pheromones", &self.pheromones.len())
-            .field("tasks", &self.task_store.len());
+            .field("tasks", &self.task_store.len())
+            .field(
+                "prediction_sessions",
+                &self.prediction_store.session_count(),
+            )
+            .field("prediction_claims", &self.prediction_store.claim_count());
         #[cfg(feature = "roko")]
         {
             dbg.field("pheromone_bus", &self.pheromone_bus.is_some())
@@ -501,6 +516,7 @@ pub fn handle_confirm_insight(
     let confirmer_bytes = params.confirmer.into_bytes();
     #[cfg(feature = "roko")]
     let broadcast_confirmer = confirmer_bytes.clone();
+    #[cfg(feature = "roko")]
     let at = now_seconds();
     chain_lock
         .knowledge
@@ -550,6 +566,7 @@ pub fn handle_challenge_insight(
     let challenger_bytes = params.challenger.into_bytes();
     #[cfg(feature = "roko")]
     let broadcast_challenger = challenger_bytes.clone();
+    #[cfg(feature = "roko")]
     let at = now_seconds();
     chain_lock
         .knowledge
@@ -1415,10 +1432,11 @@ pub fn handle_register_agent(
     let address = alloy_primitives::hex::decode(address_hex.trim_start_matches("0x"))
         .map_err(|e| ErrorObjectOwned::owned(err_code::INVALID, e.to_string(), None::<()>))?;
     let mut chain = chain.write();
-    let timestamp = crate::http_api::now_secs();
-    let registered = chain
-        .agent_registry
-        .register(id.clone(), address, role.clone(), timestamp);
+    let timestamp = now_seconds();
+    let registered =
+        chain
+            .agent_registry
+            .register(id.clone(), address, role.clone(), String::new(), timestamp);
     if registered {
         let _ = chain
             .agent_bus
@@ -1434,7 +1452,7 @@ pub fn handle_agent_heartbeat(
     current_block: u64,
 ) -> bool {
     let mut chain = chain.write();
-    let timestamp = crate::http_api::now_secs();
+    let timestamp = now_seconds();
     let ok = chain
         .agent_registry
         .heartbeat(&id, current_block, timestamp);
@@ -1471,7 +1489,7 @@ pub fn handle_agent_trace(
         }
     };
     let mut chain = chain.write();
-    let timestamp = crate::http_api::now_secs();
+    let timestamp = now_seconds();
     let trace = crate::chain::AgentTrace {
         cycle: 0,
         phase: cognitive_phase,

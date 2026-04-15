@@ -5,7 +5,8 @@
 //!
 //! - [`PromptSection`] — typed payload for a labeled, priority-tagged prompt fragment
 //! - [`PromptComposer`] — combines sections into a final prompt under a token budget
-//! - [`SectionScorer`] — ranks sections by priority × recency × relevance
+//! - [`SectionScorer`] and [`ActiveInferenceScorer`] — rank sections by
+//!   priority/recency or goal-directed expected free energy, respectively
 //!
 //! # Design principle
 //!
@@ -39,7 +40,7 @@ pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_provider::{
     ContextBudgets, ContextProvider, ContextSection, ContextSource, ContextTier, PlanArtifacts,
     PriorTaskOutput, ReadFileSpec, ResolvedContext, SiblingTask, TaskInput, VerifySpec,
-    is_local_model,
+    is_local_model, pheromone_context,
 };
 pub use conventions::{ProjectConventions, detect_conventions};
 pub use prompt::{
@@ -51,7 +52,7 @@ pub use role_prompts::{
     DEFAULT_CONVENTIONS_SUFFIX, RoleSystemPromptSpec, TaskContext, role_identity_for,
     tool_allowlist_instructions,
 };
-pub use scorer::SectionScorer;
+pub use scorer::{ActiveInferenceScorer, SectionScorer};
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
     PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate, QuickReviewerInput,

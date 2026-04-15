@@ -8,7 +8,7 @@ Total estimated LOC: ~1,110
 
 ## A.01 — Agent Owner Field
 
-**Status**: NOT DONE
+**Status**: DONE
 **Priority**: P0
 **Estimated LOC**: ~40
 **Dependencies**: None
@@ -270,11 +270,18 @@ cargo build -p mirage-rs 2>&1 | tail -5
 # Then: curl http://localhost:8545/api/isfr/current | jq
 ```
 
+### Implemented reality
+
+- `apps/mirage-rs/src/http_api/isfr.rs` now proxies both endpoints through `reqwest::Client`
+- Query parameters are forwarded to the upstream service for both `/api/isfr/current` and `/api/isfr/history`
+- Upstream transport failures, non-2xx responses, and invalid JSON all return `502`
+- No `ISFR_score` / `isfr_score` symbol exists in this worktree; the rename note was not actionable here
+
 ---
 
 ## A.07 — Prediction Endpoints (Mirofish)
 
-**Status**: NOT DONE
+**Status**: DONE
 **Priority**: P1
 **Estimated LOC**: ~400
 **Dependencies**: None
@@ -325,11 +332,20 @@ cargo build -p mirage-rs 2>&1 | tail -5
 cargo test -p mirage-rs --lib -- prediction 2>&1 | tail -10
 ```
 
+### Implemented reality
+
+- Session and claim storage is in-memory via `PredictionStore`, keyed by 32-character hex IDs
+- Implemented session states are `dispatching`, `collecting`, `registered`, `pending`, and `resolved`
+- Implemented claim states are `registered`, `pending`, `resolved`, and `expired`
+- `confidence` is validated in the normalized range `0.0..=1.0`
+- Session registration becomes active once at least two claims are attached; resolution computes consensus value, mean residual, and per-agent calibration summaries
+- Prediction events are broadcast on the Mirage websocket channel with optional `session_id` filtering
+
 ---
 
 ## A.08 — roko chat CLI
 
-**Status**: NOT DONE
+**Status**: DONE
 **Priority**: P1
 **Estimated LOC**: ~80
 **Dependencies**: A.05 (agent messaging must exist first)
@@ -371,11 +387,18 @@ cargo build -p roko-cli 2>&1 | tail -5
 cargo run -p roko-cli -- chat --help 2>&1 | head -5
 ```
 
+### Implemented reality
+
+- `roko chat` is wired into the existing `roko-cli` command tree as a real subcommand
+- The v1 REPL posts to `/api/agents/{id}/message` and polls `/api/run/{id}/status` until completion
+- This implementation intentionally prints completion state only; it does not yet stream incremental agent output over SSE or websocket
+- Default agent is `nunchi-intelligence` and default serve URL is `http://localhost:6677`
+
 ---
 
 ## A.09 — Research Intent
 
-**Status**: NOT DONE
+**Status**: DONE
 **Priority**: P2
 **Estimated LOC**: ~20
 **Dependencies**: None
@@ -414,11 +437,17 @@ cargo build -p roko-serve 2>&1 | tail -5
 #   -d '{"topic":"test","intent":"invalid"}' -w '%{http_code}'
 ```
 
+### Implemented reality
+
+- `POST /api/research/topic` now accepts `intent`, defaults it to `explore`, validates it, and returns it in the accepted response payload
+- Intent is persisted into the spawned operation kind as `research_topic:{intent}:{topic}`
+- The topic prompt passed to the runtime includes both the selected intent and intent-specific closing instructions
+
 ---
 
 ## A.10 — Task Improve / Feedback
 
-**Status**: NOT DONE
+**Status**: DONE
 **Priority**: P2
 **Estimated LOC**: ~50
 **Dependencies**: A.04 (task artifacts must exist first)
@@ -458,3 +487,10 @@ After a job is delivered, there's no way to say "improve this." No iteration loo
 cargo build -p mirage-rs 2>&1 | tail -5
 cargo test -p mirage-rs --lib -- improve 2>&1 | tail -10
 ```
+
+### Implemented reality
+
+- `TaskEntry` now stores `parent_task_id: Option<TaskId>` with serde defaulting for backwards compatibility
+- Improvement tasks can only be created from completed parent tasks that still have an assignee
+- The child task inherits assignee, priority, and tags from the parent, uses kind `improvement`, resets `stake_wei` to `0`, and stores the feedback text as the new description
+- `POST /api/tasks/{id}/improve` requires both non-empty `feedback` and `creator`, and returns the new child task ID with the parent relationship

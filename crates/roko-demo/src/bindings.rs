@@ -44,7 +44,17 @@ sol! {
         function tier(address worker) external view returns (uint8);
         function canAccept(address worker, uint8 minTier) external view returns (bool);
         function reputationOf(address worker) external view returns (uint256);
+        function getWorker(address worker) external view returns (
+            uint256 bond,
+            uint256 reputation,
+            uint64 jobsCompleted,
+            uint64 jobsSlashed,
+            uint64 lastUpdated,
+            bool exists
+        );
         function registeredCount() external view returns (uint256);
+        function registeredAt(uint256 index) external view returns (address);
+        function authorized(address caller) external view returns (bool);
         function setAuthorized(address caller, bool allowed) external;
         function MIN_BOND() external view returns (uint256);
         function SLASH_QUALITY_REJECT() external view returns (uint8);
@@ -90,9 +100,42 @@ sol! {
         function post(bytes32 contentHash, string calldata uri) external returns (uint256);
         function confirm(uint256 id) external;
         function claim() external returns (uint256);
+        function rewardToken() external view returns (address);
+        function REWARD_PER_CONFIRM() external view returns (uint256);
+        function confirmed(uint256 id, address confirmer) external view returns (bool);
         function earningsOf(address poster) external view returns (uint256);
         function nextInsightId() external view returns (uint256);
+        function getInsight(uint256 id) external view returns (
+            address poster,
+            bytes32 contentHash,
+            string memory uri,
+            uint64 postedAt,
+            uint64 pheromone
+        );
         event InsightPosted(uint256 indexed id, address indexed poster, bytes32 contentHash, string uri);
         event InsightConfirmed(uint256 indexed id, address indexed confirmer, uint64 pheromone);
+        event EarningsClaimed(address indexed poster, uint256 amount);
+    }
+
+    #[sol(rpc)]
+    contract FeeDistributor {
+        function distribute(
+            uint256 jobId,
+            uint256 amount,
+            address winner,
+            address[] calldata validators,
+            address[] calldata dataProviders
+        ) external;
+        function cumulativeEarnings(address participant) external view returns (uint256);
+        event FeesDistributed(
+            uint256 indexed jobId,
+            uint256 amount,
+            address indexed winner,
+            uint256 validatorShare,
+            uint256 dataShare,
+            uint256 agentShare,
+            uint256 treasuryShare
+        );
+        event EarningsCredited(address indexed participant, uint256 amount);
     }
 }

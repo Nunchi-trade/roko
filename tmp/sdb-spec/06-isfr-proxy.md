@@ -1,5 +1,11 @@
 # Checklist: Proxy ISFR service endpoints through mirage-rs
 
+## Implementation note (2026-04-15)
+
+- Implemented in `apps/mirage-rs/src/http_api/isfr.rs` and wired in `http_api/mod.rs`
+- Both proxy endpoints forward query params and return `502` on transport failure, upstream non-success, or invalid JSON
+- The `ISFR_score` rename follow-up was not needed in this worktree; there are no live `ISFR_score` / `isfr_score` code references to rename
+
 **Priority**: P1 — feeds ISFR card, sidebar sparkline, network stats
 **Estimated LOC**: ~40 lines
 **Source**: `workspace/sdb/yield-perps-dashboard-integration.md`, [GitHub #45](https://github.com/Nunchi-trade/collaboration/issues/45)

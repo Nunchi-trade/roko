@@ -31,13 +31,14 @@ use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, SafetyLayer};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
-    PromptSection, SectionPriority, SectionScorer, TaskContext, budget_for,
+    PromptSection, SectionPriority, SectionScorer, TaskContext,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
+use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -47,8 +48,8 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
-    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, TaskRequirements, Verdict,
-    score_model_for_task,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
+    TaskCategory, TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -74,6 +75,7 @@ use roko_learn::conductor::{
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
 };
 use roko_learn::costs_db::CostRecord;
+use roko_learn::costs_log::CostsLog;
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
@@ -81,8 +83,9 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
-use roko_learn::playbook::{Playbook, PlaybookStore};
+use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore};
 use roko_learn::prediction::CalibrationTracker;
+use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -95,13 +98,15 @@ use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
+use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
 };
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager, format_branch_name};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanStrategy, discover_plans,
+    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanResult, ReplanStrategy,
+    discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::ProcessSupervisor;
@@ -119,6 +124,10 @@ use crate::agent_config::{
 };
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::config::Config;
+use crate::heartbeat::{
+    HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
+    persist_heartbeat_snapshot,
+};
 use crate::plan::plans_dir;
 use crate::prompting::{
     PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
@@ -154,6 +163,10 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join("latency-stats.json")
 }
 
+fn static_overrides_path(workdir: &Path) -> PathBuf {
+    workdir.join(DEFAULT_STATIC_OVERRIDES_PATH)
+}
+
 fn routing_log_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
@@ -164,6 +177,17 @@ fn cfactor_history_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("c-factor.jsonl")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeartbeatCounts {
+    active_tasks: usize,
+    ready_tasks: usize,
+    completed_tasks: usize,
+    failed_tasks: usize,
+    completion_rate: f64,
+    max_queue_wait_hours: f64,
+    cross_plan_blocked: bool,
 }
 
 #[derive(Clone)]
@@ -1558,6 +1582,34 @@ async fn load_or_create_playbook_store(path: &Path) -> Result<PlaybookStore> {
     Ok(PlaybookStore::new(path))
 }
 
+fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Path) {
+    let overrides_path = static_overrides_path(workdir);
+    let winners = {
+        let store = learning.experiment_store().lock();
+        let winners = store.concluded_winners();
+        if let Err(err) = store.apply_winners_to(&winners, &overrides_path) {
+            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to persist experiment winners");
+        }
+        winners
+    };
+
+    if winners.is_empty() {
+        return;
+    }
+
+    match learning
+        .cascade_router()
+        .load_static_overrides(&overrides_path)
+    {
+        Ok(applied) => {
+            tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides")
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides")
+        }
+    }
+}
+
 /// Convert the latest efficiency entries into the signals expected by the conductor.
 fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Engram> {
     let mut signals = Vec::new();
@@ -1708,6 +1760,36 @@ fn select_prompt_skills(
         .collect()
 }
 
+fn slug_matches(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs
+        || lhs
+            .split(['/', '-'])
+            .next()
+            .is_some_and(|family| rhs.starts_with(family))
+        || rhs
+            .split(['/', '-'])
+            .next()
+            .is_some_and(|family| lhs.starts_with(family))
+}
+
+fn is_premium_model(slug: &str) -> bool {
+    let normalized = slug.to_ascii_lowercase();
+    normalized.contains("opus")
+        || normalized.contains("gpt-5")
+        || normalized.contains("o3")
+        || normalized.contains("sonnet-max")
+}
+
+fn cascade_routing_bias_from_conductor(
+    bias: &roko_conductor::RoutingBias,
+) -> roko_learn::cascade_router::RoutingBias {
+    roko_learn::cascade_router::RoutingBias {
+        deprioritize: bias.deprioritize.clone(),
+        prefer_cheaper: bias.prefer_cheaper,
+        reason: bias.reason.clone(),
+    }
+}
+
 fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
     match role {
         AgentRole::Researcher | AgentRole::PrePlanner | AgentRole::Strategist => {
@@ -1836,6 +1918,89 @@ fn render_playbook_context(playbook: &Playbook) -> String {
     }
 
     parts.join("\n\n")
+}
+
+fn render_playbook_contexts(playbooks: &[Playbook]) -> String {
+    playbooks
+        .iter()
+        .map(render_playbook_context)
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn playbook_query(
+    task: &str,
+    task_text: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> String {
+    let mut parts = vec![task.to_string(), task_text.to_string()];
+    if let Some(task_def) = task_def {
+        parts.push(task_def.title.clone());
+        if let Some(description) = &task_def.description {
+            parts.push(description.clone());
+        }
+        if !task_def.files.is_empty() {
+            parts.push(task_def.files.join(" "));
+        }
+        if !task_def.acceptance.is_empty() {
+            parts.push(task_def.acceptance.join(" "));
+        }
+    }
+    parts.join("\n")
+}
+
+fn build_task_playbook(task_def: &crate::task_parser::TaskDef) -> Playbook {
+    let goal = task_def
+        .description
+        .clone()
+        .unwrap_or_else(|| task_def.title.clone());
+    let mut playbook = Playbook::new(task_def.id.clone(), goal);
+    playbook.name = task_def.title.clone();
+
+    let mut next_index = 0u32;
+    playbook.steps.push(PlaybookStep::new(
+        next_index,
+        task_def
+            .description
+            .clone()
+            .unwrap_or_else(|| task_def.title.clone()),
+        task_def
+            .role
+            .clone()
+            .unwrap_or_else(|| "execute_task".to_string()),
+        if task_def.acceptance.is_empty() {
+            vec!["task_success".to_string()]
+        } else {
+            task_def.acceptance.clone()
+        },
+    ));
+    next_index += 1;
+
+    if !task_def.files.is_empty() {
+        playbook.steps.push(PlaybookStep::new(
+            next_index,
+            format!("Touch files: {}", task_def.files.join(", ")),
+            "edit_file",
+            task_def.files.clone(),
+        ));
+        next_index += 1;
+    }
+
+    if !task_def.verify.is_empty() {
+        let signals = task_def
+            .verify
+            .iter()
+            .map(|step| step.phase.clone())
+            .collect::<Vec<_>>();
+        playbook.steps.push(PlaybookStep::new(
+            next_index,
+            format!("Verify task with {} checks", task_def.verify.len()),
+            "verify",
+            signals,
+        ));
+    }
+
+    playbook
 }
 
 fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
@@ -2083,6 +2248,12 @@ struct TaskTracker {
     last_impl_task_id: Option<String>,
     /// Model slug used by the most recently dispatched implementation task.
     last_impl_model_slug: Option<String>,
+    /// Output hash from the most recent implementation dispatch.
+    last_impl_output_hash: Option<ContentHash>,
+    /// Knowledge entry ids surfaced in the most recent task context.
+    last_context_knowledge_ids: Vec<String>,
+    /// Last detailed gate verdicts emitted for this plan.
+    last_gate_verdicts: Vec<GateVerdict>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -2284,6 +2455,9 @@ impl TaskTracker {
             last_gate_failure_phase: None,
             last_impl_task_id: None,
             last_impl_model_slug: None,
+            last_impl_output_hash: None,
+            last_context_knowledge_ids: Vec::new(),
+            last_gate_verdicts: Vec::new(),
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -3027,17 +3201,16 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3152,17 +3325,16 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3275,17 +3447,16 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3469,6 +3640,32 @@ impl PlanRunner {
                 }
             };
             self.emit_execution_event(plan_id, exec_event);
+        }
+    }
+
+    /// Apply a structured re-plan result to the live executor state.
+    fn apply_replan_result(&mut self, result: &ReplanResult) {
+        if !result.requires_restart() {
+            return;
+        }
+
+        let plan_id = result.plan_id().to_string();
+        let task_id = result.task_id().to_string();
+        let old_phase = self
+            .executor
+            .plan_state(&plan_id)
+            .map(|state| Self::phase_label(state.current_phase.kind()).to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if self.executor.restart_plan(&plan_id).is_some() {
+            self.emit_execution_event(
+                &plan_id,
+                crate::serve::events::ExecutionEvent::TaskPhaseChanged {
+                    task_id,
+                    old_phase,
+                    new_phase: "queued".to_string(),
+                },
+            );
         }
     }
 
@@ -3718,6 +3915,252 @@ impl PlanRunner {
         }
     }
 
+    fn heartbeat_counts(&self, completed_plans: &[String]) -> HeartbeatCounts {
+        let mut total_tasks = 0usize;
+        let mut completed_tasks = 0usize;
+        let mut failed_tasks = 0usize;
+        let mut ready_tasks = 0usize;
+        let mut max_queue_wait_hours = 0.0f64;
+        let mut cross_plan_blocked = false;
+
+        for tracker in self.task_trackers.values() {
+            total_tasks += tracker.tasks_file.tasks.len();
+            completed_tasks += tracker.completed.len();
+            failed_tasks += tracker.failed.len();
+            let ready = tracker.ready_tasks(completed_plans);
+            ready_tasks += ready.len();
+            for task in ready {
+                if let Some(wait_hours) = tracker.queue_wait_hours(&task.id) {
+                    max_queue_wait_hours = max_queue_wait_hours.max(wait_hours);
+                }
+            }
+            cross_plan_blocked |= tracker.has_tasks_blocked_by_plans(completed_plans);
+        }
+
+        let active_tasks = total_tasks.saturating_sub(completed_tasks + failed_tasks);
+        let completion_rate = if total_tasks == 0 {
+            0.0
+        } else {
+            completed_tasks as f64 / total_tasks as f64
+        };
+
+        HeartbeatCounts {
+            active_tasks,
+            ready_tasks,
+            completed_tasks,
+            failed_tasks,
+            completion_rate,
+            max_queue_wait_hours,
+            cross_plan_blocked,
+        }
+    }
+
+    fn heartbeat_probe_results(
+        &self,
+        completed_plans: &[String],
+        counts: HeartbeatCounts,
+        active_agents: usize,
+        watcher_cancel: &TokioCancellationToken,
+        theta_due: bool,
+        delta_due: bool,
+    ) -> Vec<HeartbeatProbeResult> {
+        let (readiness, degraded_reasons) = self.health_probes.readiness();
+        let health_degraded =
+            matches!(readiness, roko_core::obs::health::ReadinessStatus::NotReady);
+        let recent_gate_failure = self
+            .task_trackers
+            .values()
+            .any(|tracker| tracker.last_gate_failure.is_some());
+        let repeated_gate_failures = self
+            .task_trackers
+            .values()
+            .any(|tracker| tracker.gate_failure_count >= 2);
+        let total_spend = self.plan_costs.values().sum::<f64>();
+        let affect_confidence = self.daimon.query().confidence;
+        let low_affect_confidence = affect_confidence < 0.35;
+        let mcp_unavailable = !self.mcp_server_names.is_empty()
+            && self
+                .tool_registry
+                .as_ref()
+                .is_none_or(|registry| registry.all().is_empty());
+
+        vec![
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ShutdownRequested,
+                self.cancel.is_cancelled(),
+                self.cancel
+                    .is_cancelled()
+                    .then(|| "root cancel token tripped".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::WatcherCancelled,
+                watcher_cancel.is_cancelled(),
+                watcher_cancel
+                    .is_cancelled()
+                    .then(|| "watcher task cancellation observed".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::NoReadyTasks,
+                counts.ready_tasks == 0,
+                (counts.ready_tasks == 0).then(|| "no tasks are ready to dispatch".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ReadyQueueStalled,
+                counts.max_queue_wait_hours >= 0.25,
+                (counts.max_queue_wait_hours >= 0.25)
+                    .then(|| format!("max queued task wait {:.2}h", counts.max_queue_wait_hours)),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::CrossPlanBlocked,
+                counts.cross_plan_blocked,
+                counts.cross_plan_blocked.then(|| {
+                    format!(
+                        "{} plan(s) waiting on cross-plan dependencies",
+                        self.task_trackers
+                            .values()
+                            .filter(|tracker| tracker.has_tasks_blocked_by_plans(completed_plans))
+                            .count()
+                    )
+                }),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::GateFailurePresent,
+                recent_gate_failure,
+                recent_gate_failure.then(|| "recent gate failure recorded".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::RepeatedGateFailures,
+                repeated_gate_failures,
+                repeated_gate_failures.then(|| "repeated gate failures detected".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ForceModelOverrideArmed,
+                self.force_model_override.is_some(),
+                self.force_model_override
+                    .as_ref()
+                    .map(|model| format!("pending override: {model}")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::LowAffectConfidence,
+                low_affect_confidence,
+                low_affect_confidence
+                    .then(|| format!("daimon confidence {:.2}", affect_confidence)),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ActiveAgentsPresent,
+                active_agents > 0,
+                (active_agents > 0).then(|| format!("{active_agents} active agent(s)")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::HealthDegraded,
+                health_degraded,
+                health_degraded.then(|| {
+                    degraded_reasons
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                }),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::SearchUnavailable,
+                self.search_client.is_none(),
+                self.search_client
+                    .is_none()
+                    .then(|| "PERPLEXITY_API_KEY not configured".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::McpUnavailable,
+                mcp_unavailable,
+                mcp_unavailable
+                    .then(|| "MCP servers requested but no tools are active".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::SessionSpendElevated,
+                total_spend >= 1.0,
+                (total_spend >= 1.0).then(|| format!("session spend ${total_spend:.2}")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ThetaDue,
+                theta_due,
+                theta_due.then(|| "adaptive theta cadence elapsed".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::DeltaDue,
+                delta_due,
+                delta_due.then(|| "delta consolidation cadence elapsed while idle".to_string()),
+            ),
+        ]
+    }
+
+    async fn maybe_run_heartbeat(
+        &mut self,
+        heartbeat_clock: &mut HeartbeatClock,
+        watcher_cancel: &TokioCancellationToken,
+    ) {
+        let completed_plans = self.executor.completed_plans();
+        let counts = self.heartbeat_counts(&completed_plans);
+        let now = std::time::Instant::now();
+        let active_agents = self.supervisor.count().await;
+        let affect = self.daimon.query();
+        let context = OperatingFrequencyScheduleContext::from_affect(
+            Duration::from_secs(heartbeat_clock.seconds_since_last_theta(now)),
+            counts.active_tasks,
+            counts.completion_rate,
+            &affect,
+        );
+        let theta_due = heartbeat_clock.theta_due(now, context);
+        let delta_due = heartbeat_clock.delta_due(now, context);
+        let Some(frequency) = heartbeat_clock.next_due(now, context) else {
+            return;
+        };
+
+        let snapshot = HeartbeatSnapshot {
+            timestamp: chrono::Utc::now(),
+            frequency,
+            active_tasks: counts.active_tasks,
+            ready_tasks: counts.ready_tasks,
+            completed_tasks: counts.completed_tasks,
+            failed_tasks: counts.failed_tasks,
+            completion_rate: counts.completion_rate,
+            active_agents,
+            seconds_since_last_theta: heartbeat_clock.seconds_since_last_theta(now),
+            delta_interval_secs: heartbeat_clock.delta_interval_secs(),
+            probes: self.heartbeat_probe_results(
+                &completed_plans,
+                counts,
+                active_agents,
+                watcher_cancel,
+                theta_due,
+                delta_due,
+            ),
+        };
+
+        if let Err(err) = persist_heartbeat_snapshot(&self.workdir, &snapshot) {
+            tracing::warn!(error = %err, "failed to persist heartbeat snapshot");
+        }
+
+        let triggered = snapshot.triggered_probe_labels();
+        self.emit_conductor_signal(
+            Kind::Custom(format!("heartbeat.{}", frequency_label(frequency)).into()),
+            serde_json::to_value(&snapshot)
+                .unwrap_or_else(|_| serde_json::json!({"frequency": frequency_label(frequency)})),
+        );
+        tracing::info!(
+            frequency = frequency_label(frequency),
+            active_tasks = snapshot.active_tasks,
+            ready_tasks = snapshot.ready_tasks,
+            completion_rate = snapshot.completion_rate,
+            triggered = ?triggered,
+            "heartbeat snapshot recorded"
+        );
+        heartbeat_clock.record(now, frequency);
+
+        if frequency == OperatingFrequency::Delta {
+            self.maybe_auto_dream().await;
+        }
+    }
+
     fn record_conductor_negative_feedback(&self, plan_id: &str, intervention: &ConductorDecision) {
         let Some((task_id, model_slug, task_def)) =
             self.task_trackers.get(plan_id).and_then(|tracker| {
@@ -3754,10 +4197,12 @@ impl PlanRunner {
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
     fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
-        let sig = Engram::builder(kind)
-            .body(Body::Json(body))
-            .emotional_tag(self.daimon.emotional_tag("conductor"))
-            .build();
+        let sig = maybe_attest_engram(
+            Engram::builder(kind)
+                .body(Body::Json(body))
+                .emotional_tag(self.daimon.emotional_tag("conductor"))
+                .build(),
+        );
         self.conductor_signals.push(sig);
     }
 
@@ -4192,6 +4637,7 @@ impl PlanRunner {
     ///
     /// Returns an error if agent dispatch, gate execution, or substrate
     /// I/O fails fatally (per-plan failures are recorded in the report).
+    #[instrument(skip_all)]
     pub async fn run_all(
         &mut self,
         watcher_cancel: &TokioCancellationToken,
@@ -4237,6 +4683,7 @@ impl PlanRunner {
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
+        let mut heartbeat_clock = HeartbeatClock::new();
 
         loop {
             iteration += 1;
@@ -4269,6 +4716,8 @@ impl PlanRunner {
             let actions = self.executor.tick();
 
             if actions.is_empty() {
+                self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
+                    .await;
                 if self.all_terminal(&plan_ids) {
                     break;
                 }
@@ -4290,6 +4739,9 @@ impl PlanRunner {
                 }
                 self.dispatch_action(action).await;
             }
+
+            self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
+                .await;
 
             // Auto-save periodically.
             if self.actions_since_save >= AUTOSAVE_INTERVAL {
@@ -4719,6 +5171,7 @@ impl PlanRunner {
     // ── Internal dispatch ─────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
+    #[instrument(skip_all, fields(action = ?action))]
     async fn dispatch_action(&mut self, action: ExecutorAction) {
         self.actions_since_save += 1;
 
@@ -4790,9 +5243,20 @@ impl PlanRunner {
                             ..Usage::default()
                         };
                         self.stamp_episode_affect(&mut ep, "gate", None);
-                        ep.gate_verdicts
-                            .push(GateVerdict::new(format!("rung-{rung}"), passed));
-                        ep.input_signal_hash.clone_from(&plan_id);
+                        ep.gate_verdicts = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .map(|tracker| tracker.last_gate_verdicts.clone())
+                            .filter(|verdicts| !verdicts.is_empty())
+                            .unwrap_or_else(|| {
+                                vec![GateVerdict::new(format!("rung-{rung}"), passed)]
+                            });
+                        ep.input_signal_hash = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .and_then(|tracker| tracker.last_impl_output_hash)
+                            .map(|hash| hash.to_string())
+                            .unwrap_or_else(|| plan_id.clone());
                         let gate_input = self.enrich_completed_run(
                             ep,
                             &plan_id,
@@ -4802,6 +5266,7 @@ impl PlanRunner {
                             Some(passed),
                             1,
                         );
+                        self.apply_knowledge_tier_feedback(&plan_id);
                         self.record_and_check_learning(gate_input, &plan_id).await;
 
                         // Emit observability metric for gate result.
@@ -5497,6 +5962,9 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task_id.to_string());
             tracker.last_impl_model_slug = None;
+            tracker.last_impl_output_hash = None;
+            tracker.last_context_knowledge_ids.clear();
+            tracker.last_gate_verdicts.clear();
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -5777,6 +6245,18 @@ impl PlanRunner {
                 None,
             )
             .await;
+            if self.should_replan_after_task_failure()
+                && !self.no_replan
+                && self.executor.config().auto_replan
+            {
+                tracing::info!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    "[orchestrate] Daimon requested replan after task failure"
+                );
+                self.attempt_replan(plan_id).await;
+                terminal_failure_handled = true;
+            }
         }
 
         if self.worktrees_enabled() {
@@ -6802,15 +7282,30 @@ impl PlanRunner {
             }
         }
 
-        if let Some(task_def) = task_def.as_ref()
-            && let Err(err) = self.playbook.record(&task_def.id, result.success).await
-        {
-            tracing::warn!(
-                plan_id = %plan_id,
-                task_id = %task_id,
-                error = %err,
-                "failed to record playbook outcome"
-            );
+        if let Some(task_def) = task_def.as_ref() {
+            match self.playbook.record(&task_def.id, result.success).await {
+                Ok(true) => {}
+                Ok(false) if !result.success => {}
+                Ok(false) => {
+                    let playbook = build_task_playbook(task_def);
+                    if let Err(err) = self.playbook.save(&playbook).await {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            task_id = %task_id,
+                            error = %err,
+                            "failed to persist inferred playbook"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        error = %err,
+                        "failed to record playbook outcome"
+                    );
+                }
+            }
         }
 
         let mut ep = Episode::new("Implementer", task_id).succeeded();
@@ -6880,6 +7375,7 @@ impl PlanRunner {
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
+            tracker.last_impl_output_hash = Some(result.output.id);
         }
 
         self.emit_execution_event(
@@ -7205,6 +7701,11 @@ impl PlanRunner {
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
+                        let result = ReplanResult::RetrySame {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                        };
+                        self.apply_replan_result(&result);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -7245,7 +7746,7 @@ impl PlanRunner {
                         AgentRole::Strategist,
                         "replan",
                         Some(prompt),
-                        Some(escalate_model),
+                        Some(escalate_model.clone()),
                         None,
                         None,
                     )
@@ -7269,6 +7770,12 @@ impl PlanRunner {
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
+                        let result = ReplanResult::RetryWithEscalation {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                            escalated_model: escalate_model.clone(),
+                        };
+                        self.apply_replan_result(&result);
                     }
                     Err(e) => {
                         tracing::error!("[orchestrate] escalated replan failed for {plan_id}: {e}");
@@ -7653,6 +8160,15 @@ impl PlanRunner {
                             tracker.last_impl_task_id = None;
                             tracker.last_impl_model_slug = None;
                         }
+                        let result = ReplanResult::Decompose {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                            new_task_ids: resulting_subtasks
+                                .iter()
+                                .map(|task| task.id.clone())
+                                .collect(),
+                        };
+                        self.apply_replan_result(&result);
                         self.record_replan_episode(
                             plan_id,
                             &task_id,
@@ -7760,6 +8276,12 @@ impl PlanRunner {
                     failure_count,
                 );
                 self.record_and_check_learning(input, plan_id).await;
+
+                let result = ReplanResult::Skip {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.clone(),
+                };
+                self.apply_replan_result(&result);
 
                 if self
                     .task_trackers
@@ -7995,6 +8517,15 @@ impl PlanRunner {
                     tracker.last_impl_task_id = None;
                     tracker.last_impl_model_slug = None;
                 }
+                let result = ReplanResult::RegeneratePlan {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.to_string(),
+                    new_task_ids: regenerated_subtasks
+                        .iter()
+                        .map(|task| task.id.clone())
+                        .collect(),
+                };
+                self.apply_replan_result(&result);
             }
             Err(e) => {
                 tracing::error!("[orchestrate] plan regeneration failed for {plan_id}: {e}");
@@ -9038,6 +9569,7 @@ impl PlanRunner {
     }
 
     /// Core agent dispatch with optional prompt, model, and system-prompt overrides.
+    #[instrument(skip_all, fields(plan_id = %plan_id, role = ?role, task = %task))]
     async fn dispatch_agent_with(
         &mut self,
         plan_id: &str,
@@ -9172,6 +9704,24 @@ impl PlanRunner {
             routing_ctx.active_agents = load_snapshot.active_agents;
             routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
             routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
+            let routing_bias = {
+                let mut signals = self.conductor_signals.clone();
+                if let Ok(efficiency_signals) = load_efficiency_signals_sync(
+                    &self.learning.paths().efficiency_jsonl,
+                    self.executor.config().budget_usd,
+                ) {
+                    signals.extend(efficiency_signals);
+                }
+                let _ = self.conductor.decide(&signals, &Context::now());
+                self.conductor.routing_bias()
+            };
+            if routing_bias.prefer_cheaper {
+                routing_ctx.conductor_load = routing_ctx.conductor_load.max(0.85);
+            }
+            let cost_spike = CostsLog::at(self.learning.paths().costs_jsonl.clone())
+                .is_cost_spike(0.50)
+                .await
+                .unwrap_or(false);
             let agent_id = format!("{role:?}");
             let all_model_slugs = cascade_router
                 .linucb()
@@ -9193,6 +9743,7 @@ impl PlanRunner {
                 effective_context_window_tokens(&self.config) as u64,
             );
             let healthy_models = {
+                let fallback_models = healthy_models.clone();
                 let mut ranked = healthy_models
                     .iter()
                     .filter_map(|slug| {
@@ -9208,21 +9759,48 @@ impl PlanRunner {
                 if ranked.is_empty() {
                     healthy_models
                 } else {
-                    ranked
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    ranked.into_iter().map(|(slug, _)| slug).collect()
+                    let cascade_bias = cascade_routing_bias_from_conductor(&routing_bias);
+                    cascade_router.apply_bias(&mut ranked, &cascade_bias);
+                    cascade_router.apply_cost_pressure(&mut ranked, cost_spike);
+                    let candidate_count = ranked.len();
+                    ranked.retain(|(slug, score)| {
+                        *score > 0.0
+                            && (!cost_spike || !is_premium_model(slug))
+                            && (!routing_bias
+                                .deprioritize
+                                .iter()
+                                .any(|blocked| slug_matches(slug, blocked))
+                                || candidate_count == 1)
+                    });
+                    if ranked.is_empty() {
+                        fallback_models
+                    } else {
+                        ranked.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        ranked.into_iter().map(|(slug, _)| slug).collect()
+                    }
                 }
             };
 
-            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
+            routing_explanation =
+                Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
             if let Some(explanation) = routing_explanation.as_ref() {
                 routing_stage = explanation.stage.label().to_string();
-                routing_reason = match explanation.stage {
-                    roko_learn::cascade_router::CascadeStage::Static => "role_default",
-                    roko_learn::cascade_router::CascadeStage::Confidence => {
-                        "highest_confidence_score"
+                routing_reason = if cost_spike {
+                    "cost_spike"
+                } else if !routing_bias.deprioritize.is_empty() {
+                    "conductor_deprioritize"
+                } else if routing_bias.prefer_cheaper {
+                    "conductor_prefer_cheaper"
+                } else {
+                    match explanation.stage {
+                        roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                        roko_learn::cascade_router::CascadeStage::Confidence => {
+                            "highest_confidence_score"
+                        }
+                        roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
                     }
-                    roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
                 }
                 .to_string();
             }
@@ -9310,24 +9888,10 @@ impl PlanRunner {
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let prior_skills =
             select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
-        let skill_budget = budget_for(role).skills;
-        let skill_context_section = if prior_skills.is_empty() || skill_budget == 0 {
-            None
-        } else {
-            let skill_text = render_prior_experience(&prior_skills);
-            let skill_text_len = skill_text.len();
-            Some((
-                PromptSection::new("skill-library", skill_text)
-                    .with_priority(SectionPriority::Low)
-                    .with_placement(Placement::Middle)
-                    .with_hard_cap(skill_budget),
-                skill_text_len,
-            ))
-        };
-
-        let playbook_context_section = match self.playbook.lookup(task).await {
-            Ok(Some(playbook)) => {
-                let playbook_text = render_playbook_context(&playbook);
+        let playbook_query = playbook_query(task, &task_text, task_def.as_ref());
+        let playbook_context_section = match self.playbook.relevant(&playbook_query, 3).await {
+            Ok(playbooks) if !playbooks.is_empty() => {
+                let playbook_text = render_playbook_contexts(&playbooks);
                 let playbook_text_len = playbook_text.len();
                 Some((
                     PromptSection::new("playbook", playbook_text)
@@ -9337,9 +9901,11 @@ impl PlanRunner {
                     playbook_text_len,
                 ))
             }
-            Ok(None) => None,
+            Ok(_) => None,
             Err(err) => {
-                tracing::warn!("[orchestrate] failed to lookup playbook for task {task}: {err}");
+                tracing::warn!(
+                    "[orchestrate] failed to lookup relevant playbooks for task {task}: {err}"
+                );
                 None
             }
         };
@@ -9489,6 +10055,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task.to_string());
             tracker.last_impl_model_slug = Some(selected_model.clone());
+            tracker.last_context_knowledge_ids.clear();
         }
 
         // ── Build context via tiered ContextProvider ───────────────
@@ -9554,6 +10121,20 @@ impl PlanRunner {
                     }
                 })
                 .collect();
+            let context_knowledge_ids = resolved
+                .sections
+                .iter()
+                .filter_map(|cs| {
+                    use roko_compose::ContextSource;
+                    match &cs.source {
+                        ContextSource::KnowledgeEntry { entry_id, .. } => Some(entry_id.clone()),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                tracker.last_context_knowledge_ids = context_knowledge_ids;
+            }
 
             resolved.into_prompt_sections()
         } else {
@@ -9571,6 +10152,7 @@ impl PlanRunner {
         } else {
             claude_tools_csv.clone()
         };
+        let task_allowed_tools_csv = self.apply_daimon_tool_policy_csv(&task_allowed_tools_csv);
 
         // ── Adaptive format selection via bandit ─────────────────────
         let tool_count = task_allowed_tools_csv
@@ -9615,6 +10197,7 @@ impl PlanRunner {
                 relevant_context.as_deref(),
                 Some(task_affect_state),
                 task_def.as_ref(),
+                &prior_skills,
                 context_window_tokens,
                 Some(&section_effectiveness),
             )?
@@ -9643,23 +10226,6 @@ impl PlanRunner {
                 )
                 .into_signal()
                 .map_err(|e| anyhow!("context section: {e}"))?,
-            );
-        }
-
-        if let Some((skill_section, skill_text_len)) = skill_context_section {
-            sections.push(
-                apply_section_effectiveness_to_prompt_section(
-                    skill_section,
-                    &role_key,
-                    &section_effectiveness,
-                )
-                .with_bidder(AttentionBidder::PlaybookRules)
-                .into_signal()
-                .map_err(|e| anyhow!("skill-library section: {e}"))?,
-            );
-            tracing::info!(
-                "[orchestrate] injected skill library context ({} chars)",
-                skill_text_len
             );
         }
 
@@ -10505,33 +11071,49 @@ impl PlanRunner {
     }
 
     /// Run gates at the specified rung level and return whether all passed.
+    #[instrument(skip_all, fields(plan_id = %plan_id, rung))]
     async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
         let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
         let started = std::time::Instant::now();
-        let payload_sig = Engram::builder(Kind::Task)
+        let mut payload_builder = Engram::builder(Kind::Task)
             .body(Body::from_json(&payload)?)
             .provenance(Provenance::trusted("orchestrate"))
             .tag("plan_id", plan_id)
-            .tag("rung", rung.to_string())
-            .build();
+            .tag("rung", rung.to_string());
+        if let Some(parent_hash) = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_impl_output_hash)
+        {
+            payload_builder = payload_builder.lineage([parent_hash]);
+        }
+        let payload_sig = maybe_attest_engram(payload_builder.build());
 
         let verdicts = Self::run_gate_rung(&payload_sig, rung).await;
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_gate_verdicts = verdicts
+                .iter()
+                .map(|verdict| GateVerdict::new(verdict.gate.clone(), verdict.passed))
+                .collect();
+        }
 
         // Persist verdicts.
         let substrate_dir = self.workdir.join(".roko");
         if let Ok(substrate) = FileSubstrate::open(&substrate_dir).await {
             for verdict in &verdicts {
-                let sig = payload_sig
-                    .derive(
-                        Kind::GateVerdict,
-                        Body::from_json(verdict)
-                            .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
-                    )
-                    .provenance(Provenance::trusted("orchestrate"))
-                    .tag("gate", &verdict.gate)
-                    .tag("passed", verdict.passed.to_string())
-                    .build();
+                let sig = maybe_attest_engram(
+                    payload_sig
+                        .derive(
+                            Kind::GateVerdict,
+                            Body::from_json(verdict)
+                                .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
+                        )
+                        .provenance(Provenance::trusted("orchestrate"))
+                        .tag("gate", &verdict.gate)
+                        .tag("passed", verdict.passed.to_string())
+                        .build(),
+                );
                 let _ = substrate.put(sig).await;
             }
         }
@@ -10810,6 +11392,7 @@ impl PlanRunner {
     }
 
     /// Run task-level verification commands declared in `tasks.toml` for a plan.
+    #[instrument(skip_all, fields(plan_id = %plan_id))]
     async fn run_plan_verify_steps(
         &self,
         plan_id: &str,
@@ -11871,7 +12454,9 @@ fn server_event_to_dashboard(
             agent_id: agent_id.clone(),
             role: role.clone(),
         }),
-        ServerEvent::AgentOutput { agent_id, content } => Some(DashboardEvent::AgentOutput {
+        ServerEvent::AgentOutput {
+            agent_id, content, ..
+        } => Some(DashboardEvent::AgentOutput {
             agent_id: agent_id.clone(),
             content: content.clone(),
         }),
@@ -12068,6 +12653,7 @@ fn build_system_prompt_with_context_validated(
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
     task_def: Option<&crate::task_parser::TaskDef>,
+    relevant_skills: &[Skill],
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
@@ -12084,6 +12670,7 @@ fn build_system_prompt_with_context_validated(
         PromptBuildOptions {
             affect_state,
             extra_conventions: task_dispatch_conventions(task_def),
+            relevant_skills: relevant_skills.to_vec(),
             ..PromptBuildOptions::default()
         },
         context_window_tokens,
@@ -12214,6 +12801,89 @@ fn build_daimon_context_section(
 impl PlanRunner {
     fn current_pad_state(&self) -> PadState {
         PadState::from(self.daimon.query().pad)
+    }
+
+    fn current_daimon_policy(&self) -> DaimonPolicy {
+        let affect = self.daimon.query();
+        DaimonPolicy::new(affect.confidence, affect.behavioral_state)
+    }
+
+    fn apply_daimon_tool_policy_csv(&self, tools_csv: &str) -> String {
+        let policy = self.current_daimon_policy();
+        let Some(registry) = self.tool_registry.as_deref() else {
+            return tools_csv.to_string();
+        };
+        if !matches!(
+            policy.behavioral_state,
+            roko_core::BehavioralState::Struggling | roko_core::BehavioralState::Resting
+        ) {
+            return tools_csv.to_string();
+        }
+
+        tools_csv
+            .split(',')
+            .filter(|tool| !tool.is_empty())
+            .filter(|tool| {
+                registry
+                    .get(tool)
+                    .is_none_or(|def| !(def.permission.network || def.permission.git))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn should_replan_after_task_failure(&self) -> bool {
+        let policy = self.current_daimon_policy();
+        matches!(
+            policy.behavioral_state,
+            roko_core::BehavioralState::Struggling
+        ) && policy.affect_confidence < 0.45
+    }
+
+    fn apply_knowledge_tier_feedback(&mut self, plan_id: &str) {
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return;
+        };
+        if tracker.last_context_knowledge_ids.is_empty() || tracker.last_gate_verdicts.is_empty() {
+            return;
+        }
+
+        let touched_ids = tracker
+            .last_context_knowledge_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let verdicts = tracker.last_gate_verdicts.clone();
+
+        if let Err(err) = self.knowledge_store.update_entries(|entry| {
+            if !touched_ids.contains(&entry.id) {
+                return false;
+            }
+
+            match TierProgression::evaluate_tier_progression(entry, &verdicts) {
+                TierProgressionDecision::Promote(tier) | TierProgressionDecision::Demote(tier)
+                    if entry.tier != tier =>
+                {
+                    entry.tier = tier;
+                    true
+                }
+                TierProgressionDecision::ReviewExpiry => {
+                    if entry.tags.iter().any(|tag| tag == "expiry-review") {
+                        false
+                    } else {
+                        entry.tags.push("expiry-review".to_string());
+                        true
+                    }
+                }
+                _ => false,
+            }
+        }) {
+            tracing::warn!(
+                plan_id = %plan_id,
+                error = %err,
+                "failed to apply knowledge tier feedback"
+            );
+        }
     }
 
     fn current_task_strategy(
@@ -12378,6 +13048,7 @@ impl PlanRunner {
                     "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.".to_string(),
                     "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.".to_string(),
                 ],
+                relevant_skills: Vec::new(),
             },
         )
     }
@@ -12913,6 +13584,22 @@ fn save_task_output(workdir: &Path, task_id: &str, output: &str) {
     let _ = std::fs::write(output_path, summary);
 }
 
+fn attestation_signing_key_from_env() -> Option<SigningKey> {
+    let seed = std::env::var("ROKO_ATTEST_SIGNING_KEY_HEX").ok()?;
+    let seed = seed.trim().trim_start_matches("0x");
+    let hash = ContentHash::from_hex(seed)?;
+    Some(SigningKey::from_bytes(&hash.0))
+}
+
+fn maybe_attest_engram(mut signal: Engram) -> Engram {
+    if signal.attestation.is_none()
+        && let Some(key) = attestation_signing_key_from_env()
+    {
+        signal.attestation = Some(attestation::sign(&signal, &key));
+    }
+    signal
+}
+
 fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     let body = match &output.body {
         Body::Text(text) => {
@@ -12935,7 +13622,13 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     let mut builder = Engram::builder(output.kind.clone())
         .body(body)
         .provenance(output.provenance.clone())
-        .lineage([output.id]);
+        .lineage(
+            output
+                .lineage
+                .iter()
+                .copied()
+                .chain(std::iter::once(output.id)),
+        );
     for (key, value) in &output.tags {
         builder = builder.tag(key.clone(), value.clone());
     }
@@ -12945,7 +13638,7 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     if let Some(emotional_tag) = output.emotional_tag.clone() {
         builder = builder.emotional_tag(emotional_tag);
     }
-    Some(builder.build())
+    Some(maybe_attest_engram(builder.build()))
 }
 
 #[cfg(test)]
@@ -13341,6 +14034,7 @@ depends_on = []
             plan_states,
             queue_order: vec!["plan-1".to_string()],
             timestamp_ms: 0,
+            speculative_executions: HashMap::new(),
         };
         let snapshot_json = snapshot.to_json().unwrap();
         let mut runner = PlanRunner::from_snapshot(
@@ -13393,6 +14087,7 @@ depends_on = []
             plan_states,
             queue_order: vec!["plan-1".to_string()],
             timestamp_ms: 0,
+            speculative_executions: HashMap::new(),
         };
         let snapshot_json = snapshot.to_json().unwrap();
         let runner = PlanRunner::from_snapshot(

@@ -1,5 +1,10 @@
 # Checklist: Add intent field to research submission
 
+## Implementation note (2026-04-15)
+
+- `POST /api/research/topic` now accepts and validates `intent`, defaults it to `explore`, and echoes it in the accepted response payload
+- The selected intent is embedded in both the spawned operation kind and the runtime prompt so downstream report structure can follow the chosen mode
+
 **Priority**: P2 — improves research output actionability
 **Estimated LOC**: ~20 lines
 **Source**: `workspace/sdb/prds/research-prd.md`, `workspace/sdb/prds/product-design-review.md`, [GitHub #45](https://github.com/Nunchi-trade/collaboration/issues/45)

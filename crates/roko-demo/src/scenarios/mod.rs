@@ -9,11 +9,13 @@
 //! deterministic stub that produces bounded-random structured output so
 //! scenarios run headless in CI.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::chain_ctx::ChainCtx;
+use crate::events::EventEmitter;
 use crate::fixtures::FixtureRegistry;
 use crate::manifest::Scenario as ScenarioManifest;
 
@@ -22,8 +24,21 @@ pub mod defi_routing;
 pub mod flywheel;
 pub mod job_board;
 pub mod llm;
+pub mod yield_routing;
 
-pub use llm::{LlmProvider, StubLlm};
+pub use llm::{LlmProvider, StubLlm, create_provider};
+
+/// Runtime values that are shared across scenario entrypoints.
+pub struct ScenarioRuntime {
+    /// LLM backend used by the scenario.
+    pub llm: Arc<dyn LlmProvider>,
+    /// Event sink used by the scenario.
+    pub events: Arc<dyn EventEmitter>,
+    /// Runtime artifact directory from the CLI.
+    pub runtime_dir: PathBuf,
+    /// Whether worker reputation snapshots should be restored/saved.
+    pub persist_reputation: bool,
+}
 
 /// Scripted-spine lifecycle.
 #[async_trait]
@@ -37,7 +52,7 @@ pub trait Scenario: Send + Sync {
         &self,
         ctx: Arc<ChainCtx>,
         manifest: &ScenarioManifest,
-        llm: Arc<dyn LlmProvider>,
+        runtime: Arc<ScenarioRuntime>,
     ) -> anyhow::Result<()>;
 }
 
@@ -48,6 +63,7 @@ pub fn all() -> Vec<Box<dyn Scenario>> {
         Box::new(consortium::Consortium),
         Box::new(defi_routing::DefiRouting),
         Box::new(flywheel::Flywheel),
+        Box::new(yield_routing::YieldRouting),
     ]
 }
 

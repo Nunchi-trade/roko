@@ -16,6 +16,7 @@
 mod dry_run_fs;
 
 use std::fmt::Write as _;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -624,13 +625,54 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
     std::fs::write(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
-    if auto_plan_enabled(workdir)? {
-        let plans_root = generate_plan_from_prd(slug, &dst, false).await?;
-        if auto_execute {
-            run_generated_plans(workdir, &plans_root).await?;
+    let _ = maybe_generate_plan_after_promote(workdir, slug, &dst, auto_execute).await?;
+    Ok(())
+}
+
+async fn maybe_generate_plan_after_promote(
+    workdir: &Path,
+    slug: &str,
+    prd_path: &Path,
+    auto_execute: bool,
+) -> Result<Option<PathBuf>> {
+    maybe_generate_plan_after_promote_with(
+        workdir,
+        slug.to_string(),
+        prd_path.to_path_buf(),
+        auto_execute,
+        |slug, path, dry_run| async move { generate_plan_from_prd(&slug, &path, dry_run).await },
+    )
+    .await
+}
+
+async fn maybe_generate_plan_after_promote_with<F, Fut>(
+    workdir: &Path,
+    slug: String,
+    prd_path: PathBuf,
+    auto_execute: bool,
+    generator: F,
+) -> Result<Option<PathBuf>>
+where
+    F: FnOnce(String, PathBuf, bool) -> Fut,
+    Fut: Future<Output = Result<PathBuf>>,
+{
+    if !auto_plan_enabled(workdir)? {
+        return Ok(None);
+    }
+
+    match generator(slug, prd_path, false).await {
+        Ok(plans_root) => {
+            println!("Plan generated: {}", plans_root.display());
+            if auto_execute {
+                run_generated_plans(workdir, &plans_root).await?;
+            }
+            Ok(Some(plans_root))
+        }
+        Err(err) => {
+            eprintln!("warning: auto plan generation failed: {err:#}");
+            Ok(None)
         }
     }
-    Ok(())
 }
 
 async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
@@ -884,26 +926,21 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
 #[must_use]
 pub fn has_substantive_markdown_content(content: &str) -> bool {
     let mut in_frontmatter = false;
-    let mut saw_frontmatter = false;
+    let mut saw_frontmatter_start = false;
 
     content.lines().any(|line| {
         let trimmed = line.trim();
-        if trimmed == "---" {
-            if !saw_frontmatter {
-                saw_frontmatter = true;
-                in_frontmatter = true;
-                return false;
-            }
-            if in_frontmatter {
-                in_frontmatter = false;
-                return false;
-            }
-        }
-
-        if in_frontmatter {
+        if !saw_frontmatter_start && trimmed == "---" {
+            saw_frontmatter_start = true;
+            in_frontmatter = true;
             return false;
         }
-
+        if in_frontmatter {
+            if trimmed == "---" {
+                in_frontmatter = false;
+            }
+            return false;
+        }
         !trimmed.is_empty() && !trimmed.starts_with('#')
     })
 }
@@ -1046,6 +1083,26 @@ mod tests {
         assert!(published.exists());
         let content = std::fs::read_to_string(&published).unwrap();
         assert!(content.contains("status: published"));
+    }
+
+    #[tokio::test]
+    async fn promote_follow_on_generation_failure_is_non_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_dirs(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("roko.toml"), "[prd]\nauto_plan = true\n").unwrap();
+        let prd_path = published_dir(tmp.path()).join("test.md");
+
+        let outcome = maybe_generate_plan_after_promote_with(
+            tmp.path(),
+            "test".to_string(),
+            prd_path.clone(),
+            false,
+            |_slug, _path, _dry_run| async move { Err(anyhow!("synthetic generation failure")) },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.is_none());
     }
 
     #[test]

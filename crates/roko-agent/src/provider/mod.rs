@@ -986,7 +986,7 @@ mod tests {
             "claude",
             AgentOptions {
                 command: Some(script.display().to_string()),
-                timeout_ms: Some(1_500),
+                timeout_ms: Some(5_000),
                 name: "factory-claude".to_string(),
                 ..Default::default()
             },

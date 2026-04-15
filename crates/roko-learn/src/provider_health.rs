@@ -248,6 +248,24 @@ impl ProviderHealthRegistry {
         available
     }
 
+    /// Return whether `provider_id` currently looks healthy without mutating
+    /// the circuit state.
+    ///
+    /// Unknown providers are treated as healthy.
+    #[must_use]
+    pub fn is_healthy(&self, provider_id: &str) -> bool {
+        let providers = self.providers.lock();
+        match providers.get(provider_id) {
+            None => true,
+            Some(health) => match health.state {
+                CircuitState::Closed | CircuitState::HalfOpen => true,
+                CircuitState::Open => health
+                    .cooldown_until
+                    .is_some_and(|until| unix_ms_now() >= until),
+            },
+        }
+    }
+
     /// Filter `candidates` to only providers that are currently available.
     pub fn available_providers(&self, candidates: &[String]) -> Vec<String> {
         candidates
@@ -255,6 +273,23 @@ impl ProviderHealthRegistry {
             .filter(|provider_id| self.is_available(provider_id))
             .cloned()
             .collect()
+    }
+
+    /// Return a cloned snapshot of all tracked provider health records.
+    #[must_use]
+    pub fn snapshot(&self) -> HashMap<String, ProviderHealth> {
+        self.providers.lock().clone()
+    }
+
+    /// Return the current snapshot for `provider_id`, defaulting to a
+    /// healthy record when the provider has never been seen.
+    #[must_use]
+    pub fn get(&self, provider_id: &str) -> ProviderHealth {
+        self.providers
+            .lock()
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| new_provider_health(provider_id))
     }
 
     /// Persist the registry to `path` as JSON.
@@ -610,6 +645,37 @@ impl ProviderHealthTracker {
             .collect()
     }
 
+    /// Filter a set of bandit arms, keeping healthy arms when possible and
+    /// otherwise returning the least unhealthy fallback arm.
+    pub fn filter_arms_or_best<F>(&self, arms: &[String], provider_of: F) -> Vec<String>
+    where
+        F: Fn(&str) -> String,
+    {
+        let healthy = self.filter_arms(arms, &provider_of);
+        if !healthy.is_empty() {
+            return healthy;
+        }
+
+        self.least_unhealthy_arm(arms, provider_of)
+            .into_iter()
+            .collect()
+    }
+
+    /// Pick the least unhealthy arm from `arms`.
+    pub fn least_unhealthy_arm<F>(&self, arms: &[String], provider_of: F) -> Option<String>
+    where
+        F: Fn(&str) -> String,
+    {
+        let now = Instant::now();
+        arms.iter()
+            .min_by(|left, right| {
+                let left_status = self.get(&provider_of(left));
+                let right_status = self.get(&provider_of(right));
+                health_rank(&left_status, now).cmp(&health_rank(&right_status, now))
+            })
+            .cloned()
+    }
+
     /// Return a snapshot of every tracked provider's status.
     pub fn snapshot(&self) -> Vec<ProviderStatus> {
         self.providers.read().values().cloned().collect()
@@ -630,6 +696,27 @@ impl Default for ProviderHealthTracker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn health_rank(status: &ProviderStatus, now: Instant) -> (u8, u32, u128, u64) {
+    let (state_rank, recovery_delay_ms) = match status.state {
+        HealthState::Healthy => (0, 0),
+        HealthState::Probing => (1, 0),
+        HealthState::Unhealthy { recovery_at } => (
+            2,
+            recovery_at
+                .checked_duration_since(now)
+                .unwrap_or_default()
+                .as_millis(),
+        ),
+    };
+
+    (
+        state_rank,
+        status.consecutive_failures,
+        recovery_delay_ms,
+        status.total_attempts.saturating_sub(status.total_successes),
+    )
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1001,7 +1088,10 @@ mod tests {
             registry.record_failure("beta", ErrorClass::Timeout);
             registry.record_failure("beta", ErrorClass::Timeout);
 
-            std::thread::sleep(Duration::from_millis(250));
+            let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+            while !path.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
             assert!(path.exists(), "debounced autosave should create the file");
 
             let loaded = ProviderHealthRegistry::load_or_new(&path);

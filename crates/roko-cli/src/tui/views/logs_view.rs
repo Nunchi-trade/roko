@@ -18,7 +18,6 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
-use crate::tui::input::LogFilterLevel;
 use crate::tui::state::TuiState;
 
 /// A parsed log entry.
@@ -59,15 +58,6 @@ impl LogLevel {
             Self::Error => "ERR",
         }
     }
-
-    fn filter_level(self) -> LogFilterLevel {
-        match self {
-            Self::Info => LogFilterLevel::Info,
-            Self::Warn => LogFilterLevel::Warn,
-            Self::Error => LogFilterLevel::Error,
-            Self::Debug => LogFilterLevel::Debug,
-        }
-    }
 }
 
 /// Render the full logs view.
@@ -93,10 +83,30 @@ pub fn render_with_entries(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let sections = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
+    let sections = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(area);
+
+    let filter_text = if tui_state.filter_active {
+        let filter = tui_state.filter_ref().trim().to_lowercase();
+        if filter.is_empty() {
+            None
+        } else {
+            Some(filter)
+        }
+    } else {
+        None
+    };
     let filtered_entries: Vec<&LogEntry> = entries
         .iter()
-        .filter(|entry| tui_state.log_level_visible(entry.level.filter_level()))
+        .filter(|entry| {
+            filter_text
+                .as_ref()
+                .map_or(true, |filter| entry_matches_filter(entry, filter))
+        })
         .collect();
 
     // Status bar with source counts
@@ -111,26 +121,12 @@ pub fn render_with_entries(
     } else {
         "SCROLL"
     };
-    let entry_label = if filtered_entries.len() == entries.len() {
-        format!(" {} entries ", entries.len())
-    } else {
-        format!(" {}/{} entries ", filtered_entries.len(), entries.len())
-    };
     let mut status_spans = vec![
-        Span::styled(entry_label, theme.muted()),
+        Span::styled(
+            format!(" {} entries ", filtered_entries.len()),
+            theme.muted(),
+        ),
         Span::styled(format!("[{tail_label}]"), theme.accent()),
-        Span::styled("  |  levels:", theme.muted()),
-    ];
-    for level in LogFilterLevel::all() {
-        let style = if tui_state.log_level_visible(level) {
-            level_filter_style(level, theme)
-        } else {
-            theme.muted()
-        };
-        status_spans.push(Span::raw(" "));
-        status_spans.push(Span::styled(format!("[{}]", level.label()), style));
-    }
-    status_spans.extend([
         Span::styled("  |  ", theme.muted()),
         Span::styled(format!("signals:{signal_count}"), theme.info()),
         Span::styled("  ", theme.muted()),
@@ -141,7 +137,14 @@ pub fn render_with_entries(
         Span::styled(format!("gates:{gate_count}"), theme.warning()),
         Span::styled("  ", theme.muted()),
         Span::styled(format!("events:{event_count}"), theme.text()),
-    ]);
+    ];
+    if let Some(filter) = filter_text.as_deref() {
+        status_spans.push(Span::styled("  |  ", theme.muted()));
+        status_spans.push(Span::styled(
+            format!("filter:\"{filter}\""),
+            theme.warning(),
+        ));
+    }
     let status_line1 = Line::from(status_spans);
     let status = Paragraph::new(vec![status_line1]).alignment(Alignment::Right);
     frame.render_widget(status, sections[0]);
@@ -151,49 +154,98 @@ pub fn render_with_entries(
         .borders(Borders::ALL)
         .title(" Logs ")
         .border_style(theme.accent());
-    let inner = block.inner(sections[1]);
-    frame.render_widget(block, sections[1]);
-
-    if entries.is_empty() {
-        let empty = Paragraph::new("no log entries -- run agents to generate signals and episodes")
-            .style(theme.muted())
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
-        return;
-    }
+    let inner = block.inner(sections[2]);
+    frame.render_widget(block, sections[2]);
 
     if filtered_entries.is_empty() {
-        let empty = Paragraph::new("no log entries match the active level filter")
+        let empty_text = if filter_text.is_some() {
+            "no log entries match the active filter"
+        } else {
+            "no log entries -- run agents to generate signals and episodes"
+        };
+        let empty = Paragraph::new(empty_text)
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
         return;
     }
+
+    let row_focus_idx = if view_state.auto_tail {
+        filtered_entries.len().saturating_sub(1)
+    } else {
+        usize::from(view_state.scroll).min(filtered_entries.len().saturating_sub(1))
+    };
 
     let lines: Vec<Line<'_>> = filtered_entries
         .iter()
-        .map(|entry| {
-            let level_style = level_style(entry.level, theme);
-            let source_style = source_style(&entry.source, theme);
+        .enumerate()
+        .map(|(idx, entry)| {
+            let selected = idx == row_focus_idx;
+            let row_bg = if selected {
+                Some(theme.selection_background)
+            } else {
+                None
+            };
+            let prefix_style = if selected {
+                theme.selection()
+            } else {
+                theme.muted()
+            };
+            let entry_level_style = style_with_bg(level_style(entry.level, theme), row_bg);
+            let source_style = style_with_bg(source_style(&entry.source, theme), row_bg);
+            let message_style = style_with_bg(
+                level_style(entry.level, theme).remove_modifier(Modifier::BOLD),
+                row_bg,
+            );
+            let ts_style = style_with_bg(theme.muted(), row_bg);
+
             Line::from(vec![
-                Span::styled(&entry.timestamp, theme.muted()),
+                Span::styled(if selected { "▶" } else { " " }, prefix_style),
                 Span::raw(" "),
-                Span::styled(format!("[{}]", entry.level.label()), level_style),
+                Span::styled(&entry.timestamp, ts_style),
+                Span::raw(" "),
+                Span::styled(format!("[{}]", entry.level.label()), entry_level_style),
                 Span::raw(" "),
                 Span::styled(&entry.source, source_style),
                 Span::raw(": "),
-                Span::styled(&entry.message, level_style.remove_modifier(Modifier::BOLD)),
+                Span::styled(&entry.message, message_style),
             ])
         })
         .collect();
 
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
-    let max_scroll = max_scroll.min(u16::MAX as usize) as u16;
     let scroll = if view_state.auto_tail {
-        max_scroll
+        max_scroll.min(u16::MAX as usize) as u16
     } else {
-        view_state.scroll.min(max_scroll)
+        let pinned = view_state.scroll as usize;
+        max_scroll
+            .saturating_sub(pinned.min(max_scroll))
+            .min(u16::MAX as usize) as u16
     };
+
+    let summary_focus_idx = if view_state.auto_tail {
+        lines.len().saturating_sub(1)
+    } else {
+        scroll as usize
+    }
+    .min(filtered_entries.len().saturating_sub(1));
+
+    let focus_summary = if let Some(entry) = filtered_entries.get(summary_focus_idx) {
+        let summary = truncate_message(&entry.message, 96);
+        Line::from(vec![
+            Span::styled(" focus ", theme.accent()),
+            Span::styled(format!("[{}]", entry.level.label()), theme.warning()),
+            Span::styled(" ", theme.muted()),
+            Span::styled(&entry.source, theme.text()),
+            Span::styled(": ", theme.muted()),
+            Span::styled(summary, theme.muted()),
+        ])
+    } else if filter_text.is_some() {
+        Line::from(Span::styled(" focus: no matching entries", theme.muted()))
+    } else {
+        Line::from(Span::styled(" focus: waiting for logs", theme.muted()))
+    };
+    frame.render_widget(Paragraph::new(vec![focus_summary]), sections[1]);
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -405,15 +457,6 @@ fn level_style(level: LogLevel, theme: &Theme) -> ratatui::style::Style {
     }
 }
 
-fn level_filter_style(level: LogFilterLevel, theme: &Theme) -> ratatui::style::Style {
-    match level {
-        LogFilterLevel::Debug => theme.muted(),
-        LogFilterLevel::Info => theme.text(),
-        LogFilterLevel::Warn => theme.warning(),
-        LogFilterLevel::Error => theme.danger(),
-    }
-}
-
 /// Color style for log sources.
 fn source_style(source: &str, theme: &Theme) -> ratatui::style::Style {
     if source.starts_with("signal:") {
@@ -431,10 +474,41 @@ fn source_style(source: &str, theme: &Theme) -> ratatui::style::Style {
     }
 }
 
+fn entry_matches_filter(entry: &LogEntry, filter_lower: &str) -> bool {
+    entry.timestamp.to_lowercase().contains(filter_lower)
+        || entry.message.to_lowercase().contains(filter_lower)
+        || entry.source.to_lowercase().contains(filter_lower)
+        || entry
+            .level
+            .label()
+            .to_ascii_lowercase()
+            .contains(filter_lower)
+}
+
 fn format_timestamp_ms(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .map(|dt| dt.format("%H:%M:%S").to_string())
         .unwrap_or_else(|| String::from("??:??:??"))
+}
+
+fn truncate_message(message: &str, max: usize) -> String {
+    let trimmed = message.trim();
+    if trimmed.len() <= max {
+        trimmed.to_string()
+    } else {
+        truncate(trimmed, max)
+    }
+}
+
+fn style_with_bg(
+    style: ratatui::style::Style,
+    bg: Option<ratatui::style::Color>,
+) -> ratatui::style::Style {
+    if let Some(bg) = bg {
+        style.bg(bg)
+    } else {
+        style
+    }
 }
 
 /// Truncate a signal kind to the last two segments for readability.

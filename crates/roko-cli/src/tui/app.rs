@@ -19,13 +19,13 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-
 use sysinfo::System;
 
+use super::atmosphere::Atmosphere;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
@@ -55,6 +55,8 @@ pub struct App {
     // -- Mori-style state --
     /// Full TUI state (agents, plans, navigation, modals, scroll, etc.).
     pub tui_state: TuiState,
+    /// Atmosphere for breathing/heartbeat animations.
+    atmosphere: Atmosphere,
     /// PostFX configuration.
     fx_config: EffectsConfig,
     /// Active modal overlay.
@@ -115,10 +117,12 @@ struct GitBgData {
 fn plan_status_label(plan: &PlanEntry) -> String {
     if !plan.phase.is_empty() {
         plan.phase.clone()
+    } else if !plan.status.is_empty() {
+        plan.status.clone()
     } else if plan.active {
         "active".to_string()
     } else {
-        plan.status.label().to_string()
+        "pending".to_string()
     }
 }
 
@@ -377,6 +381,7 @@ impl App {
         let mut app = Self {
             workdir,
             tui_state,
+            atmosphere: Atmosphere::default(),
             fx_config: EffectsConfig::default(),
             active_modal: None,
             notifications: Vec::new(),
@@ -396,7 +401,6 @@ impl App {
             last_input: Instant::now(),
             terminal_size,
         };
-        app.fx_config = EffectsConfig::load_from_root(&app.workdir);
         // Populate git info synchronously on first load (fast enough for startup).
         app.populate_git_info();
         app
@@ -570,6 +574,7 @@ impl App {
                     self.terminal_size = (width, height);
                 }
                 Event::Tick => {
+                    self.atmosphere.tick();
                     self.tui_state.atmosphere.tick();
                     self.drain_background_channels();
                     self.expire_notifications();
@@ -680,9 +685,15 @@ impl App {
         }
 
         // Dim overlay before modals
-        if self.active_modal.is_some() {
+        if self.active_modal.is_some() || self.tui_state.show_help {
+            // Apply dim overlay on the buffer
             let buf = frame.buffer_mut();
             super::postfx::dim_overlay(content_area, buf, 0.45);
+        }
+
+        // Help overlay (legacy compatible)
+        if self.tui_state.show_help {
+            self.render_help_overlay(frame, full_area, &theme);
         }
 
         // Modal rendering
@@ -690,11 +701,10 @@ impl App {
             frame,
             full_area,
             self.active_modal.as_ref(),
-            &self.tui_state,
             &self.data,
+            &self.tui_state,
             &self.notifications,
             &theme,
-            self.fx_config.screen_postfx,
         );
 
         // PostFX pipeline
@@ -704,8 +714,8 @@ impl App {
                 self.tui_state.active_tab as usize,
                 content_area,
                 buf,
-                self.tui_state.atmosphere.elapsed,
-                self.tui_state.atmosphere.frame_count,
+                self.atmosphere.elapsed,
+                self.atmosphere.frame_count,
                 &self.fx_config,
             );
         }
@@ -722,7 +732,7 @@ impl App {
             self.tui_state.input_mode,
             self.tui_state.active_tab,
             self.tui_state.focus,
-            &input::ModalVisibility::from_active_modal(self.active_modal.as_ref()),
+            &self.tui_state.modal_visibility(),
         );
 
         self.dispatch_action(action);
@@ -731,8 +741,10 @@ impl App {
     fn dispatch_action(&mut self, action: TuiAction) {
         match action {
             TuiAction::Quit => {
-                if self.has_modal() {
-                    self.dismiss_all_modals();
+                // Bug fix: q with modal closes modal first
+                if self.tui_state.has_modal() {
+                    self.tui_state.dismiss_all_modals();
+                    self.active_modal = None;
                 } else {
                     self.running = false;
                 }
@@ -753,14 +765,33 @@ impl App {
                 self.tui_state.focus = self.tui_state.focus.prev(self.tui_state.active_tab);
             }
             TuiAction::SelectPlanUp => {
-                if self.tui_state.selected_plan_idx > 0 {
+                if matches!(self.tui_state.active_tab, Tab::Agents)
+                    && !matches!(
+                        self.tui_state.focus,
+                        FocusZone::AgentOutput | FocusZone::RightPanel
+                    )
+                {
+                    self.tui_state.selected_agent = self.tui_state.selected_agent.saturating_sub(1);
+                } else if self.tui_state.selected_plan_idx > 0 {
                     self.tui_state.selected_plan_idx -= 1;
                 }
             }
             TuiAction::SelectPlanDown => {
-                let max = self.tui_state.plans.len().saturating_sub(1);
-                if self.tui_state.selected_plan_idx < max {
-                    self.tui_state.selected_plan_idx += 1;
+                if matches!(self.tui_state.active_tab, Tab::Agents)
+                    && !matches!(
+                        self.tui_state.focus,
+                        FocusZone::AgentOutput | FocusZone::RightPanel
+                    )
+                {
+                    let max = self.tui_state.agents.len().saturating_sub(1);
+                    if self.tui_state.selected_agent < max {
+                        self.tui_state.selected_agent += 1;
+                    }
+                } else {
+                    let max = self.tui_state.plans.len().saturating_sub(1);
+                    if self.tui_state.selected_plan_idx < max {
+                        self.tui_state.selected_plan_idx += 1;
+                    }
                 }
             }
             TuiAction::ScrollFocusedUp => {
@@ -773,36 +804,67 @@ impl App {
             }
             TuiAction::ScrollPageUp => self.scroll_focused(-PAGE_SCROLL_LINES),
             TuiAction::ScrollPageDown => self.scroll_focused(PAGE_SCROLL_LINES),
-            TuiAction::ScrollFocusedHome => self.set_focused_scroll(0),
-            TuiAction::ScrollFocusedEnd => self.set_focused_scroll(usize::MAX),
+            TuiAction::ScrollFocusedHome => match (self.tui_state.active_tab, self.tui_state.focus)
+            {
+                (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
+                    self.tui_state.agent_scroll = Some(usize::MAX);
+                }
+                (Tab::Logs, _) => {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = usize::MAX;
+                }
+                _ => self.set_focused_scroll(0),
+            },
+            TuiAction::ScrollFocusedEnd => {
+                match (self.tui_state.active_tab, self.tui_state.focus) {
+                    (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
+                        self.tui_state.agent_scroll = None;
+                    }
+                    (Tab::Logs, _) => {
+                        self.tui_state.log_auto_tail = true;
+                        self.tui_state.log_scroll = 0;
+                    }
+                    _ => self.set_focused_scroll(usize::MAX),
+                }
+            }
             TuiAction::ScrollLogUp => {
-                let delta = self.scroll_accel.push(-1);
-                self.tui_state.log_scroll =
-                    Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
+                if self.tui_state.log_auto_tail {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = 1;
+                } else {
+                    self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_add(1);
+                }
             }
             TuiAction::ScrollLogDown => {
-                let delta = self.scroll_accel.push(1);
-                self.tui_state.log_scroll =
-                    Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
+                if !self.tui_state.log_auto_tail {
+                    if self.tui_state.log_scroll > 0 {
+                        self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_sub(1);
+                    }
+                    if self.tui_state.log_scroll == 0 {
+                        self.tui_state.log_auto_tail = true;
+                    }
+                }
             }
             TuiAction::ScrollLogEnd => {
-                self.tui_state.log_scroll = usize::MAX; // Clamped during render
+                self.tui_state.log_auto_tail = true;
+                self.tui_state.log_scroll = 0;
             }
-            TuiAction::ToggleLogFilter(level) => {
-                self.tui_state.toggle_log_filter_level(level);
-            }
-            TuiAction::ShowAllLogFilters => {
-                self.tui_state.show_all_log_filter_levels();
+            TuiAction::ToggleLogTail => {
+                self.tui_state.log_auto_tail = !self.tui_state.log_auto_tail;
+                self.tui_state.log_scroll = 0;
             }
             TuiAction::ScrollAgentUp => {
-                let current = self.current_agent_scroll_offset();
-                let delta = self.scroll_accel.push(-1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                let current = self.tui_state.agent_scroll.unwrap_or(0);
+                self.tui_state.agent_scroll = Some(current.saturating_add(1));
             }
             TuiAction::ScrollAgentDown => {
-                let current = self.current_agent_scroll_offset();
-                let delta = self.scroll_accel.push(1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                if let Some(current) = self.tui_state.agent_scroll {
+                    if current == 0 {
+                        self.tui_state.agent_scroll = None;
+                    } else {
+                        self.tui_state.agent_scroll = Some(current.saturating_sub(1));
+                    }
+                }
             }
             TuiAction::ScrollAgentEnd => {
                 self.tui_state.agent_scroll = None; // Resume auto-tail
@@ -818,97 +880,65 @@ impl App {
                     Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDetailUp => {
-                if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
+                if let Some(ModalState::PlanDetail { scroll_offset, .. }) =
                     self.active_modal.as_mut()
                 {
                     *scroll_offset = scroll_offset.saturating_sub(1);
-                } else {
-                    self.tui_state.plan_detail_scroll =
-                        self.tui_state.plan_detail_scroll.saturating_sub(1);
                 }
+                self.tui_state.plan_detail_scroll =
+                    self.tui_state.plan_detail_scroll.saturating_sub(1);
             }
             TuiAction::ScrollDetailDown => {
-                if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
+                if let Some(ModalState::PlanDetail { scroll_offset, .. }) =
                     self.active_modal.as_mut()
                 {
                     *scroll_offset = scroll_offset.saturating_add(1);
-                } else {
-                    self.tui_state.plan_detail_scroll =
-                        self.tui_state.plan_detail_scroll.saturating_add(1);
                 }
+                self.tui_state.plan_detail_scroll =
+                    self.tui_state.plan_detail_scroll.saturating_add(1);
             }
             TuiAction::ShowHelp => {
-                self.active_modal = if matches!(self.active_modal, Some(ModalState::Help)) {
-                    None
-                } else {
-                    Some(ModalState::Help)
-                };
-            }
-            TuiAction::ToggleScreenPostFx => {
-                self.fx_config.screen_postfx = !self.fx_config.screen_postfx;
-                let state = if self.fx_config.screen_postfx {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                self.notifications
-                    .push(super::modals::Notification::info(&format!(
-                        "Screen postfx {state}"
-                    )));
+                self.tui_state.show_help = !self.tui_state.show_help;
             }
             TuiAction::ShowPlanDetail => {
-                self.active_modal = self
-                    .tui_state
-                    .plans
-                    .get(self.tui_state.selected_plan_idx)
-                    .map(|plan| plan.id.clone())
-                    .and_then(|plan_id| {
-                        if matches!(
-                            self.active_modal.as_ref(),
-                            Some(ModalState::PlanDetail {
-                                plan_id: active_plan_id
-                            }) if active_plan_id == &plan_id
-                        ) {
-                            None
-                        } else {
-                            Some(ModalState::PlanDetail { plan_id })
-                        }
+                if self.tui_state.plans.is_empty() {
+                    self.tui_state.show_plan_detail = false;
+                    self.active_modal = None;
+                } else {
+                    self.tui_state.show_plan_detail = true;
+                    self.tui_state.plan_detail_scroll = 0;
+                    self.active_modal = Some(ModalState::PlanDetail {
+                        plan_idx: self.tui_state.selected_plan_idx,
+                        scroll_offset: 0,
                     });
+                }
             }
             TuiAction::ClosePlanDetail => {
+                self.tui_state.show_plan_detail = false;
                 if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
                     self.active_modal = None;
                 }
             }
             TuiAction::ShowTaskDetail => {
-                let task_count = self.tui_state.current_task_checklist.len();
-                if task_count > 0 {
-                    let task_idx = self.tui_state.task_scroll.min(task_count.saturating_sub(1));
-                    self.active_modal = Some(ModalState::TaskDetail {
-                        task_idx,
-                        scroll_offset: 0,
-                    });
-                }
+                self.tui_state.show_task_detail = !self.tui_state.show_task_detail;
             }
             TuiAction::CloseTaskDetail => {
-                if matches!(self.active_modal, Some(ModalState::TaskDetail { .. })) {
-                    self.active_modal = None;
-                }
+                self.tui_state.show_task_detail = false;
             }
             TuiAction::ShowWaveOverview => {
-                if matches!(self.active_modal, Some(ModalState::WaveOverview { .. })) {
-                    self.active_modal = None;
-                } else {
+                self.tui_state.show_wave_overview = !self.tui_state.show_wave_overview;
+                if self.tui_state.show_wave_overview {
                     self.active_modal = Some(ModalState::WaveOverview {
                         waves: execution_waves_for_modal(&self.tui_state),
                         scroll_offset: 0,
                     });
+                } else {
+                    self.active_modal = None;
                 }
             }
             TuiAction::ShowQueueOverview => {
-                if matches!(self.active_modal, Some(ModalState::QueueOverview { .. })) {
-                    self.active_modal = None;
-                } else {
+                self.tui_state.show_queue_overview = !self.tui_state.show_queue_overview;
+                if self.tui_state.show_queue_overview {
                     let milestones = queue_overview_milestones(&self.tui_state);
                     self.active_modal = Some(ModalState::QueueOverview {
                         selected_index: self
@@ -918,11 +948,17 @@ impl App {
                         scroll_offset: self.tui_state.current_wave() as u16,
                         milestones,
                     });
+                } else {
+                    self.active_modal = None;
                 }
             }
             TuiAction::OpenTaskPicker => {
+                self.tui_state.show_task_picker = true;
                 let tasks = task_picker_rows(&self.tui_state);
-                let selected_index = 0usize;
+                let selected_index = self
+                    .tui_state
+                    .task_scroll
+                    .min(tasks.len().saturating_sub(1));
                 self.active_modal = Some(ModalState::TaskPicker {
                     tasks,
                     selected_index,
@@ -930,9 +966,8 @@ impl App {
                 });
             }
             TuiAction::CloseTaskPicker => {
-                if matches!(self.active_modal, Some(ModalState::TaskPicker { .. })) {
-                    self.active_modal = None;
-                }
+                self.tui_state.show_task_picker = false;
+                self.active_modal = None;
             }
             TuiAction::ExpandCollapse => {
                 if let Some(plan) = self
@@ -962,12 +997,11 @@ impl App {
             }
             TuiAction::SwitchAgentTab(idx) => {
                 if idx == usize::MAX {
-                    // Cycle: backtick
-                    let agent_count = self.tui_state.agents.len().max(1);
+                    let agent_count = 7;
                     self.tui_state.selected_agent_tab =
                         (self.tui_state.selected_agent_tab + 1) % agent_count;
                 } else {
-                    self.tui_state.selected_agent_tab = idx;
+                    self.tui_state.selected_agent_tab = idx.min(6);
                 }
             }
             TuiAction::SwitchDetailTab(idx) => {
@@ -1330,7 +1364,33 @@ impl App {
                             }
                         }
                         super::config_meta::ConfigItem::SaveButton => {
-                            self.save_config_changes();
+                            // Inline save logic
+                            if self.tui_state.config_pending.is_empty() {
+                                self.notifications.push(super::modals::Notification::info(
+                                    "No pending changes to save",
+                                ));
+                            } else {
+                                match super::config_meta::save_pending_edits(
+                                    &self.workdir,
+                                    &self.tui_state.config_pending,
+                                ) {
+                                    Ok(()) => {
+                                        let count = self.tui_state.config_pending.len();
+                                        self.tui_state.config_pending.clear();
+                                        self.notifications
+                                            .push(super::modals::Notification::info(&format!(
+                                            "Config saved ({count} changes written to roko.toml)"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        self.notifications.push(
+                                            super::modals::Notification::error(&format!(
+                                                "Save failed: {e}"
+                                            )),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         super::config_meta::ConfigItem::Header(_) => {}
                     }
@@ -1398,7 +1458,31 @@ impl App {
                 self.tui_state.input_mode = InputMode::Normal;
             }
             TuiAction::ConfigSave => {
-                self.save_config_changes();
+                if self.tui_state.config_pending.is_empty() {
+                    self.notifications.push(super::modals::Notification::info(
+                        "No pending changes to save",
+                    ));
+                } else {
+                    match super::config_meta::save_pending_edits(
+                        &self.workdir,
+                        &self.tui_state.config_pending,
+                    ) {
+                        Ok(()) => {
+                            let count = self.tui_state.config_pending.len();
+                            self.tui_state.config_pending.clear();
+                            self.notifications
+                                .push(super::modals::Notification::info(&format!(
+                                    "Config saved ({count} changes written to roko.toml)"
+                                )));
+                        }
+                        Err(e) => {
+                            self.notifications
+                                .push(super::modals::Notification::error(&format!(
+                                    "Save failed: {e}"
+                                )));
+                        }
+                    }
+                }
             }
             TuiAction::MouseClick { x, y } => {
                 // Use hit_test to determine zone
@@ -1498,53 +1582,99 @@ impl App {
         self.tui_state
             .plans
             .iter()
-            .filter(|plan| !plan.active && !plan.status.is_failed())
+            .filter(|plan| !plan.active && plan.phase != "failed" && plan.status != "failed")
             .map(|plan| plan.id.clone())
             .collect()
     }
 
     fn scroll_focused(&mut self, delta: i32) {
-        match self.tui_state.focus {
-            FocusZone::PlanTree => {
+        match (self.tui_state.active_tab, self.tui_state.focus) {
+            (Tab::Logs, _) => {
+                if self.tui_state.log_auto_tail {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = delta.unsigned_abs() as usize;
+                } else {
+                    let current = self.tui_state.log_scroll as i32;
+                    let next = (current + delta).max(0) as usize;
+                    self.tui_state.log_scroll = next;
+                    if next == 0 {
+                        self.tui_state.log_auto_tail = true;
+                    }
+                }
+            }
+            (Tab::Agents, FocusZone::PlanTree) => {
+                let max = self.tui_state.agents.len().saturating_sub(1);
+                let next = (self.tui_state.selected_agent as i32 + delta).clamp(0, max as i32);
+                self.tui_state.selected_agent = next as usize;
+            }
+            (Tab::Agents, FocusZone::AgentOutput) => {
+                let current = self.tui_state.agent_scroll.unwrap_or(0);
+                if delta < 0 {
+                    self.tui_state.agent_scroll =
+                        Some(current.saturating_add(delta.unsigned_abs() as usize));
+                } else if current == 0 {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(current.saturating_sub(delta as usize));
+                }
+            }
+            (_, FocusZone::PlanTree) => {
                 let current = self.tui_state.plan_scroll_offset as i32;
                 self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
             }
-            FocusZone::TaskProgress => {
+            (_, FocusZone::TaskProgress) => {
                 let current = self.tui_state.task_scroll as i32;
                 self.tui_state.task_scroll = (current + delta).max(0) as usize;
             }
-            FocusZone::AgentOutput => {
-                let current = self.current_agent_scroll_offset() as i32;
-                self.tui_state.agent_scroll = Some((current + delta).max(0) as usize);
+            (_, FocusZone::AgentOutput) => {
+                let current = self.tui_state.agent_scroll.unwrap_or(0);
+                if delta < 0 {
+                    self.tui_state.agent_scroll =
+                        Some(current.saturating_add(delta.unsigned_abs() as usize));
+                } else if current == 0 {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(current.saturating_sub(delta as usize));
+                }
             }
-            FocusZone::CommandOutput => {
+            (_, FocusZone::CommandOutput) => {
                 let current = self.tui_state.command_output_scroll as i32;
                 self.tui_state.command_output_scroll = (current + delta).max(0) as usize;
             }
-            FocusZone::RightPanel => {
+            (_, FocusZone::RightPanel) => {
                 let current = self.tui_state.diff_scroll as i32;
                 self.tui_state.diff_scroll = (current + delta).max(0) as usize;
             }
         }
     }
 
-    /// Set the scroll offset for the currently focused zone to an absolute value.
-    fn set_focused_scroll(&mut self, value: usize) {
-        match self.tui_state.focus {
-            FocusZone::PlanTree => {
-                self.tui_state.plan_scroll_offset = value;
+    fn set_focused_scroll(&mut self, offset: usize) {
+        match (self.tui_state.active_tab, self.tui_state.focus) {
+            (Tab::Agents, FocusZone::PlanTree) => {
+                let max = self.tui_state.agents.len().saturating_sub(1);
+                self.tui_state.selected_agent = if offset == usize::MAX {
+                    max
+                } else {
+                    offset.min(max)
+                };
             }
-            FocusZone::TaskProgress => {
-                self.tui_state.task_scroll = value;
+            (Tab::Agents, FocusZone::AgentOutput) => {
+                self.tui_state.agent_scroll = Some(offset);
             }
-            FocusZone::AgentOutput => {
-                self.tui_state.agent_scroll = Some(value);
+            (_, FocusZone::PlanTree) => {
+                self.tui_state.plan_scroll_offset = offset;
             }
-            FocusZone::CommandOutput => {
-                self.tui_state.command_output_scroll = value;
+            (_, FocusZone::TaskProgress) => {
+                self.tui_state.task_scroll = offset;
             }
-            FocusZone::RightPanel => {
-                self.tui_state.diff_scroll = value;
+            (_, FocusZone::AgentOutput) => {
+                self.tui_state.agent_scroll = Some(offset);
+            }
+            (_, FocusZone::CommandOutput) => {
+                self.tui_state.command_output_scroll = offset;
+            }
+            (_, FocusZone::RightPanel) => {
+                self.tui_state.diff_scroll = offset;
             }
         }
     }
@@ -1554,98 +1684,6 @@ impl App {
             current.saturating_sub(delta.saturating_abs() as usize)
         } else {
             current.saturating_add(delta as usize)
-        }
-    }
-
-    fn current_agent_scroll_offset(&self) -> usize {
-        self.tui_state.agent_scroll.unwrap_or_else(|| {
-            self.current_agent_output_line_count()
-                .saturating_sub(self.current_agent_output_viewport_height())
-                .min(u16::MAX as usize)
-        })
-    }
-
-    fn current_agent_output_line_count(&self) -> usize {
-        match self.tui_state.active_tab {
-            Tab::Agents => views::agents_view::collect_agent_output_lines(
-                &self.data,
-                &self.tui_state,
-                self.current_view_state().selected,
-            )
-            .len(),
-            Tab::Dashboard if self.tui_state.plan_detail_tab == 1 => {
-                let collected: Vec<String> = self
-                    .data
-                    .current_plan_execution
-                    .as_ref()
-                    .map(|exec| exec.agent_output_tail.clone())
-                    .unwrap_or_default();
-
-                if !collected.is_empty() {
-                    return collected.len();
-                }
-
-                if let Some(agent) = self
-                    .tui_state
-                    .agents_by_id
-                    .values()
-                    .nth(self.tui_state.selected_agent_tab)
-                {
-                    if !agent.output_lines.is_empty() {
-                        return agent.output_lines.len();
-                    }
-                }
-
-                self.data
-                    .task_outputs
-                    .values()
-                    .max_by_key(|lines| lines.len())
-                    .map_or(0, Vec::len)
-            }
-            _ => 0,
-        }
-    }
-
-    fn current_agent_output_viewport_height(&self) -> usize {
-        let Ok((width, height)) = crossterm::terminal::size() else {
-            return 0;
-        };
-
-        let full_area = Rect::new(0, 0, width, height);
-        let content_area = super::layout::responsive_outer_margin(full_area);
-        let has_waves = !self.tui_state.execution_waves.is_empty();
-        let wave_row_height = if has_waves { 1 } else { 0 };
-        let main_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(wave_row_height),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
-        let content_area = main_layout[2];
-
-        match self.tui_state.active_tab {
-            Tab::Agents => {
-                let panels =
-                    Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
-                        .split(content_area);
-                let sections =
-                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(panels[1]);
-                sections[1].height.saturating_sub(2) as usize
-            }
-            Tab::Dashboard if self.tui_state.plan_detail_tab == 1 => {
-                let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(6)])
-                    .split(content_area);
-                let main =
-                    Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
-                        .split(outer[0]);
-                let sections =
-                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(main[1]);
-                sections[1].height.saturating_sub(2) as usize
-            }
-            _ => 0,
         }
     }
 
@@ -1682,25 +1720,27 @@ impl App {
         super::widgets::status_bar::render_status_bar(frame, area, &self.tui_state);
     }
 
+    fn render_help_overlay(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let popup = super::layout::centered_rect(86, 84, area);
+        frame.render_widget(Clear, popup);
+
+        let lines = help_lines();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("help")
+            .border_style(theme.accent());
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .style(theme.text())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
+    }
+
     fn expire_notifications(&mut self) {
         self.notifications.retain(|n| !n.is_expired());
     }
-
-    fn has_modal(&self) -> bool {
-        self.active_modal.is_some()
-    }
-
-    fn dismiss_all_modals(&mut self) {
-        self.active_modal = None;
-        self.tui_state.pending_confirm = None;
-        if self.tui_state.input_mode == InputMode::Confirm {
-            self.tui_state.input_mode = InputMode::Normal;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Legacy compatibility
-    // -----------------------------------------------------------------------
 
     #[allow(dead_code)]
     fn select_page_by_slot(&mut self, slot: usize) {
@@ -1717,7 +1757,6 @@ impl App {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.tui_state.update_from_snapshot(&self.data);
-        self.fx_config = EffectsConfig::load_from_root(&self.workdir);
         // Git info is refreshed by the background git thread; only
         // populate synchronously on first load (when fields are empty).
         self.populate_git_info();
@@ -1727,52 +1766,6 @@ impl App {
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
         }
-    }
-
-    fn save_config_changes(&mut self) {
-        if self.tui_state.config_pending.is_empty() {
-            self.notifications.push(super::modals::Notification::info(
-                "No pending changes to save",
-            ));
-            return;
-        }
-
-        match super::config_meta::save_pending_edits(&self.workdir, &self.tui_state.config_pending)
-        {
-            Ok(()) => {
-                let count = self.tui_state.config_pending.len();
-                self.tui_state.config_pending.clear();
-                self.notifications
-                    .push(super::modals::Notification::info(&format!(
-                        "Config saved ({count} changes written to roko.toml)"
-                    )));
-
-                if let Err(error) = self.reload_config_from_disk() {
-                    self.notifications
-                        .push(super::modals::Notification::error(&format!(
-                            "Config reload failed: {error}"
-                        )));
-                }
-            }
-            Err(error) => {
-                self.notifications
-                    .push(super::modals::Notification::error(&format!(
-                        "Save failed: {error}"
-                    )));
-            }
-        }
-    }
-
-    fn reload_config_from_disk(&mut self) -> Result<()> {
-        let mut config = roko_core::config::load_config(&self.workdir)
-            .with_context(|| format!("reload {}", self.workdir.join("roko.toml").display()))?;
-        config.apply_process_env();
-        drop(config);
-
-        self.refresh_snapshot();
-        self.notifications
-            .push(super::modals::Notification::info("Config reloaded"));
-        Ok(())
     }
 
     /// Populate TuiState git fields from actual git commands.
@@ -1819,15 +1812,56 @@ impl App {
     }
 
     fn current_view_state(&self) -> ViewState {
-        ViewState {
-            scroll: self.tui_state.plan_scroll_offset as u16,
-            selected: match self.tui_state.active_tab {
-                Tab::Git => self.tui_state.git_branch_cursor,
-                _ => self.tui_state.selected_plan_idx,
+        match self.tui_state.active_tab {
+            Tab::Dashboard => ViewState {
+                scroll: self.tui_state.agent_scroll.unwrap_or(0) as u16,
+                selected: self.tui_state.selected_plan_idx,
+                sub_tab: self.tui_state.plan_detail_tab,
+                secondary_selected: 0,
+                auto_tail: self.tui_state.agent_scroll.is_none(),
             },
-            sub_tab: self.tui_state.plan_detail_tab,
-            secondary_selected: 0,
-            auto_tail: self.tui_state.agent_scroll.is_none(),
+            Tab::Plans => ViewState {
+                scroll: self.tui_state.plan_scroll_offset as u16,
+                selected: self.tui_state.selected_plan_idx,
+                sub_tab: self.tui_state.plan_detail_tab,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Agents => ViewState {
+                scroll: self.tui_state.agent_scroll.unwrap_or(0) as u16,
+                selected: self.tui_state.selected_agent,
+                sub_tab: self.tui_state.selected_agent_tab,
+                secondary_selected: 0,
+                auto_tail: self.tui_state.agent_scroll.is_none(),
+            },
+            Tab::Git => ViewState {
+                scroll: self.tui_state.plan_scroll_offset as u16,
+                selected: self.tui_state.git_branch_cursor,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Logs => ViewState {
+                scroll: self.tui_state.log_scroll.min(u16::MAX as usize) as u16,
+                selected: 0,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: self.tui_state.log_auto_tail,
+            },
+            Tab::Config => ViewState {
+                scroll: self.tui_state.config_scroll_offset.min(u16::MAX as usize) as u16,
+                selected: self.tui_state.config_cursor,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Inspect => ViewState {
+                scroll: 0,
+                selected: 0,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
         }
     }
 
@@ -1847,16 +1881,14 @@ impl App {
     /// blocking.  Called on every tick and after every keypress so the UI
     /// reflects the latest data produced by background threads.
     fn drain_background_channels(&mut self) {
-        const MAX_MESSAGES_PER_DRAIN: usize = 20;
-
         // -- sys metrics (merge, don't replace — keep history) --
         if let Some(rx) = &self.sys_rx {
-            let mut count = 0;
             while let Ok(snap) = rx.try_recv() {
-                // CPU
-                let cpu_pct = self.tui_state.update_cpu_pct(snap.cpu_pct);
                 let sys = &mut self.tui_state.sys;
-                sys.cpu_history.push(cpu_pct);
+
+                // CPU
+                sys.cpu_pct = snap.cpu_pct;
+                sys.cpu_history.push(snap.cpu_pct);
                 if sys.cpu_history.len() > 60 {
                     sys.cpu_history.remove(0);
                 }
@@ -1887,26 +1919,15 @@ impl App {
                 }
                 sys.prev_disk_read = snap.disk_read_bytes_sec;
                 sys.disk_write_bytes_total = snap.disk_write_bytes_total;
-
-                count += 1;
-                if count >= MAX_MESSAGES_PER_DRAIN {
-                    break;
-                }
             }
         }
 
         // -- dashboard data --
         if let Some(rx) = &self.data_rx {
             let mut got_data = false;
-            let mut count = 0;
             while let Ok(new_data) = rx.try_recv() {
                 self.data = new_data;
                 got_data = true;
-
-                count += 1;
-                if count >= MAX_MESSAGES_PER_DRAIN {
-                    break;
-                }
             }
             if got_data {
                 self.tui_state.update_from_snapshot(&self.data);
@@ -1922,7 +1943,6 @@ impl App {
 
         // -- git data --
         if let Some(rx) = &self.git_rx {
-            let mut count = 0;
             while let Ok(bg) = rx.try_recv() {
                 self.tui_state.git_branch_tree = convert_git_branch_tree(&bg.view_data.branches);
                 self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
@@ -1938,11 +1958,6 @@ impl App {
                 }
                 if !bg.age.is_empty() {
                     self.tui_state.git_age = bg.age;
-                }
-
-                count += 1;
-                if count >= MAX_MESSAGES_PER_DRAIN {
-                    break;
                 }
             }
         }
@@ -2071,18 +2086,71 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
     }
 }
 
-/// Extract a numeric value from a vm_stat line like "Pages active:    123456."
-#[cfg(target_os = "macos")]
-fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
-    if !line.contains(key) {
-        return None;
-    }
-    line.split(':')
-        .nth(1)?
-        .trim()
-        .trim_end_matches('.')
-        .parse::<u64>()
-        .ok()
+fn help_lines() -> Vec<Line<'static>> {
+    let theme = Theme::from_env();
+    vec![
+        Line::from(Span::styled(
+            "roko dashboard keybindings",
+            theme.accent_bold(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("Navigation", theme.accent_bold())),
+        Line::from("F1-F7      switch tabs (Dashboard/Plans/Agents/Git/Logs/Config/Inspect)"),
+        Line::from("F8 / u     queue overview modal"),
+        Line::from("Tab        cycle focus between panels"),
+        Line::from("Shift+Tab  cycle focus backward"),
+        Line::from("j/k ↑/↓    scroll focused panel"),
+        Line::from("PgUp/PgDn  page scroll"),
+        Line::from("Enter      expand/drill into selection"),
+        Line::from("Esc        close overlay / drill out"),
+        Line::from("q          close overlay or quit"),
+        Line::from(""),
+        Line::from(Span::styled("Dashboard Sub-Tabs (F1)", theme.accent_bold())),
+        Line::from("a          Agents panel"),
+        Line::from("o          Output panel"),
+        Line::from("d          Diff panel"),
+        Line::from("e          Errors panel"),
+        Line::from("g          Git panel"),
+        Line::from("m          MCP / Context panel"),
+        Line::from("P          Processes panel"),
+        Line::from(""),
+        Line::from(Span::styled("Modals & Modes", theme.accent_bold())),
+        Line::from("?          toggle this help"),
+        Line::from("w          wave overview"),
+        Line::from("p          pause/resume pipeline"),
+        Line::from("i          inject message to agent"),
+        Line::from("/          filter mode (Plans/Logs)"),
+        Line::from("Ctrl-t     task picker"),
+        Line::from("Ctrl-a     approve all pending"),
+        Line::from("Ctrl-x     force advance (confirm)"),
+        Line::from("Ctrl-d     reset selected plan (confirm)"),
+        Line::from(""),
+        Line::from(Span::styled("Agent Controls (F3)", theme.accent_bold())),
+        Line::from("y          approve pending command"),
+        Line::from("A          approve all pending"),
+        Line::from("x          reject pending command"),
+        Line::from("`          cycle agent tabs"),
+        Line::from("1-7        switch agent tab directly"),
+        Line::from("Home/End   jump to top/bottom"),
+        Line::from("G          resume auto-scroll"),
+        Line::from(""),
+        Line::from(Span::styled("Plans (F2)", theme.accent_bold())),
+        Line::from("e          expand/collapse plan"),
+        Line::from("[/]        wave prev/next"),
+        Line::from("h/l ←/→    drill out/in"),
+        Line::from("s          soft retry plan"),
+        Line::from("R          restart phase"),
+        Line::from("F          force advance"),
+        Line::from("V / c      re-verify plan"),
+        Line::from("S          repair (preserve completed)"),
+        Line::from("t          task picker"),
+        Line::from("o          queue overview"),
+        Line::from(""),
+        Line::from(Span::styled("General", theme.accent_bold())),
+        Line::from("Ctrl-r     refresh data"),
+        Line::from("f          toggle log tail / pin"),
+        Line::from("Ctrl-C     quit immediately"),
+    ]
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -2096,7 +2164,6 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::config::RokoConfig;
     use tempfile::tempdir;
 
     #[test]
@@ -2208,82 +2275,125 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(!app.tui_state.show_help);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(app.tui_state.show_help);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(!app.tui_state.show_help);
     }
 
     #[test]
-    fn config_save_reloads_config_immediately() {
-        let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("roko.toml"),
-            RokoConfig::default().to_toml().unwrap(),
-        )
-        .unwrap();
-
-        let mut app = App::new(dir.path());
-        app.tui_state.config_pending.insert(
-            "agent.default_model".to_string(),
-            "claude-opus-4-6".to_string(),
-        );
-
-        app.dispatch_action(TuiAction::ConfigSave);
-
-        let mut reloaded = roko_core::config::load_config(dir.path()).unwrap();
-        reloaded.apply_process_env();
-
-        assert!(app.tui_state.config_pending.is_empty());
-        assert_eq!(reloaded.agent.default_model, "claude-opus-4-6");
-        assert!(
-            app.notifications
-                .iter()
-                .any(|notification| notification.message == "Config reloaded")
-        );
-    }
-
-    #[test]
-    fn config_save_reloads_screen_postfx_immediately() {
-        let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("roko.toml"),
-            RokoConfig::default().to_toml().unwrap(),
-        )
-        .unwrap();
-
-        let mut app = App::new(dir.path());
-        app.tui_state
-            .config_pending
-            .insert("tui.effects.screen_postfx".to_string(), "true".to_string());
-
-        app.dispatch_action(TuiAction::ConfigSave);
-
-        assert!(app.fx_config.screen_postfx);
-        let saved = std::fs::read_to_string(dir.path().join("roko.toml")).unwrap();
-        assert!(saved.contains("[tui.effects]"));
-        assert!(saved.contains("screen_postfx = true"));
-    }
-
-    #[test]
-    fn ctrl_e_toggles_screen_postfx() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
+    fn page_scroll_moves_focused_panel_by_twenty_lines() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        assert!(!app.fx_config.screen_postfx);
+        app.tui_state.focus = FocusZone::PlanTree;
+        app.tui_state.plan_scroll_offset = 40;
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert!(app.fx_config.screen_postfx);
+        app.dispatch_action(TuiAction::ScrollPageUp);
+        assert_eq!(app.tui_state.plan_scroll_offset, 20);
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert!(!app.fx_config.screen_postfx);
+        app.dispatch_action(TuiAction::ScrollPageDown);
+        assert_eq!(app.tui_state.plan_scroll_offset, 40);
     }
 
     #[test]
+    fn focused_home_end_jump_to_bounds() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.focus = FocusZone::RightPanel;
+        app.tui_state.diff_scroll = 12;
+
+        app.dispatch_action(TuiAction::ScrollFocusedHome);
+        assert_eq!(app.tui_state.diff_scroll, 0);
+
+        app.dispatch_action(TuiAction::ScrollFocusedEnd);
+        assert_eq!(app.tui_state.diff_scroll, usize::MAX);
+    }
+
+    #[test]
+    fn current_view_state_is_tab_specific() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.selected_plan_idx = 2;
+        app.tui_state.selected_agent = 3;
+        app.tui_state.selected_agent_tab = 4;
+        app.tui_state.plan_scroll_offset = 8;
+        app.tui_state.agent_scroll = Some(5);
+        app.tui_state.log_scroll = 7;
+        app.tui_state.log_auto_tail = false;
+
+        app.tui_state.active_tab = Tab::Dashboard;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 5);
+        assert_eq!(view.selected, 2);
+        assert_eq!(view.sub_tab, 0);
+        assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Plans;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 8);
+        assert_eq!(view.selected, 2);
+        assert_eq!(view.sub_tab, 0);
+        assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Agents;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 5);
+        assert_eq!(view.selected, 3);
+        assert_eq!(view.sub_tab, 4);
+        assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Logs;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 7);
+        assert_eq!(view.selected, 0);
+        assert!(!view.auto_tail);
+    }
+
+    #[test]
+    fn agents_tab_selection_moves_agent_roster() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.active_tab = Tab::Agents;
+        app.tui_state.selected_agent = 1;
+        app.tui_state.focus = FocusZone::PlanTree;
+        app.tui_state.agents = vec![
+            super::super::state::AgentRow::default(),
+            super::super::state::AgentRow::default(),
+            super::super::state::AgentRow::default(),
+        ];
+
+        app.dispatch_action(TuiAction::ScrollFocusedUp);
+        assert_eq!(app.tui_state.selected_agent, 0);
+
+        app.dispatch_action(TuiAction::ScrollFocusedDown);
+        assert_eq!(app.tui_state.selected_agent, 1);
+
+        app.dispatch_action(TuiAction::ScrollFocusedEnd);
+        assert_eq!(app.tui_state.selected_agent, 2);
+    }
+
+    #[test]
+    fn logs_tail_toggle_and_filter_input_work() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.active_tab = Tab::Logs;
+        app.tui_state.log_auto_tail = true;
+        app.tui_state.log_scroll = 0;
+
+        app.dispatch_action(TuiAction::ToggleLogTail);
+        assert!(!app.tui_state.log_auto_tail);
+
+        app.dispatch_action(TuiAction::ScrollLogUp);
+        assert_eq!(app.tui_state.log_scroll, 1);
+
+        app.dispatch_action(TuiAction::ScrollLogDown);
+        assert!(app.tui_state.log_auto_tail);
+        assert_eq!(app.tui_state.log_scroll, 0);
+    }
+
     fn drill_actions_on_git_use_git_cursor_not_plan_expansion() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
@@ -2328,7 +2438,7 @@ mod tests {
         app.tui_state.plans = vec![super::super::state::PlanEntry {
             id: "plan-7".to_string(),
             phase: "done".to_string(),
-            status: super::super::state::PlanPhase::Done,
+            status: "done".to_string(),
             active: false,
             ..Default::default()
         }];

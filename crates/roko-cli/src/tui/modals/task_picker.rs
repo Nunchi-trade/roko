@@ -6,7 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use super::super::dashboard::Theme;
-use super::super::state::TaskStatus;
 
 /// A row in the task picker.
 #[derive(Debug, Clone)]
@@ -80,12 +79,12 @@ pub fn render_task_picker(
             let status_style = if is_selected {
                 theme.selection()
             } else {
-                match TaskStatus::from(task.status.as_str()) {
-                    TaskStatus::Done => theme.success(),
-                    TaskStatus::Active => theme.info(),
-                    TaskStatus::Failed => theme.danger(),
-                    TaskStatus::Blocked => theme.warning(),
-                    TaskStatus::Pending => theme.muted(),
+                match task.status.as_str() {
+                    "done" | "completed" => theme.success(),
+                    "running" | "active" => theme.info(),
+                    "failed" | "error" => theme.danger(),
+                    "blocked" => theme.warning(),
+                    _ => theme.muted(),
                 }
             };
 

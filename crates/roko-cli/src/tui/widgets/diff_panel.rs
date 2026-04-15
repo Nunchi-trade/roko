@@ -62,26 +62,18 @@ pub fn render_diff_panel(
 }
 
 fn diff_line_style(line: &str, theme: &Theme) -> Style {
-    if line.starts_with("diff --git") || line.starts_with("index ") {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("@@") {
+    if line.starts_with("@@") {
         Style::default()
             .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("+++ ") {
-        Style::default()
-            .fg(theme.success)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("--- ") {
-        Style::default()
-            .fg(theme.danger)
             .add_modifier(Modifier::BOLD)
     } else if line.starts_with('+') {
         Style::default().fg(theme.success)
     } else if line.starts_with('-') {
         Style::default().fg(theme.danger)
+    } else if line.starts_with("diff ") || line.starts_with("index ") {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.foreground)
     }

@@ -1640,7 +1640,10 @@ async fn dispatch_template(
 
     state.event_bus.publish(ServerEvent::AgentOutput {
         agent_id: agent_name.clone(),
+        run_id: None,
         content: output_text.clone(),
+        done: true,
+        metadata: None,
     });
 
     let mut gate_verdicts = Vec::new();

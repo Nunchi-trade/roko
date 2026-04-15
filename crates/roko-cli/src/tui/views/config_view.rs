@@ -61,7 +61,7 @@ pub fn render(
     let cursor_top = line_offsets.get(cursor).copied().unwrap_or(0);
     let cursor_bottom =
         cursor_top + item_height(items.get(cursor).unwrap_or(&ConfigItem::SaveButton), true);
-    let mut scroll = 0;
+    let mut scroll = tui_state.config_scroll_offset;
     if cursor_top < scroll {
         scroll = cursor_top;
     }

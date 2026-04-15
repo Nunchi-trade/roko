@@ -4,17 +4,15 @@
 //! needs: navigation, scroll positions, modal visibility, agent/plan data,
 //! cost tracking, git state, and more.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
 use super::atmosphere::Atmosphere;
-use super::dashboard::{DashboardData, PlanTaskListSnapshot};
-use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
+use super::dashboard::DashboardData;
+use super::input::{ConfirmAction, FocusZone, InputMode, ModalVisibility};
 use super::tabs::Tab;
-use crate::plan::PlanSummary;
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -31,224 +29,6 @@ pub struct PendingApproval {
     pub command: String,
 }
 
-/// Canonical status for an agent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AgentStatus {
-    Active,
-    #[default]
-    Idle,
-    Done,
-    Failed,
-}
-
-impl AgentStatus {
-    #[must_use]
-    pub const fn is_active(self) -> bool {
-        matches!(self, Self::Active)
-    }
-
-    #[must_use]
-    pub const fn is_done(self) -> bool {
-        matches!(self, Self::Done)
-    }
-
-    #[must_use]
-    pub const fn is_failed(self) -> bool {
-        matches!(self, Self::Failed)
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Idle => "idle",
-            Self::Done => "done",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl From<&str> for AgentStatus {
-    fn from(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "running" | "active" | "executing" => Self::Active,
-            "done" | "completed" | "passed" => Self::Done,
-            "failed" | "error" => Self::Failed,
-            _ => Self::Idle,
-        }
-    }
-}
-
-impl fmt::Display for AgentStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Canonical status for a task.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TaskStatus {
-    #[default]
-    Pending,
-    Active,
-    Done,
-    Failed,
-    Blocked,
-}
-
-impl TaskStatus {
-    #[must_use]
-    pub const fn is_active(self) -> bool {
-        matches!(self, Self::Active)
-    }
-
-    #[must_use]
-    pub const fn is_done(self) -> bool {
-        matches!(self, Self::Done)
-    }
-
-    #[must_use]
-    pub const fn is_failed(self) -> bool {
-        matches!(self, Self::Failed)
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Active => "active",
-            Self::Done => "done",
-            Self::Failed => "failed",
-            Self::Blocked => "blocked",
-        }
-    }
-}
-
-impl From<&str> for TaskStatus {
-    fn from(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "done" | "completed" | "complete" | "passed" | "skipped" => Self::Done,
-            "running"
-            | "active"
-            | "executing"
-            | "in_progress"
-            | "implementing"
-            | "gating"
-            | "verifying"
-            | "reviewing"
-            | "review"
-            | "doc revision"
-            | "doc-revision"
-            | "doc_revision"
-            | "auto fixing"
-            | "auto-fixing"
-            | "auto_fixing"
-            | "regenerating verify"
-            | "regenerating-verify"
-            | "regenerating_verify"
-            | "preflight"
-            | "strategist"
-            | "implementer"
-            | "compile-gate"
-            | "compile_gate"
-            | "test-gate"
-            | "test_gate"
-            | "critic-review"
-            | "critic_review"
-            | "verdict"
-            | "committing"
-            | "merge"
-            | "merging"
-            | "commit" => Self::Active,
-            "failed" | "error" => Self::Failed,
-            "blocked" => Self::Blocked,
-            _ => Self::Pending,
-        }
-    }
-}
-
-impl fmt::Display for TaskStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Canonical phase state for a plan or pipeline phase.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PlanPhase {
-    #[default]
-    Pending,
-    Active,
-    Done,
-    Failed,
-}
-
-impl PlanPhase {
-    #[must_use]
-    pub const fn is_active(self) -> bool {
-        matches!(self, Self::Active)
-    }
-
-    #[must_use]
-    pub const fn is_done(self) -> bool {
-        matches!(self, Self::Done)
-    }
-
-    #[must_use]
-    pub const fn is_failed(self) -> bool {
-        matches!(self, Self::Failed)
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Active => "active",
-            Self::Done => "done",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl From<&str> for PlanPhase {
-    fn from(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "done" | "completed" | "complete" | "passed" | "skipped" => Self::Done,
-            "failed" | "error" => Self::Failed,
-            "pending" | "queued" | "" => Self::Pending,
-            "running"
-            | "active"
-            | "executing"
-            | "preflight"
-            | "strategist"
-            | "implementer"
-            | "compile-gate"
-            | "compile_gate"
-            | "test-gate"
-            | "test_gate"
-            | "reviewing"
-            | "critic-review"
-            | "critic_review"
-            | "verdict"
-            | "committing"
-            | "implementing"
-            | "gating"
-            | "verifying"
-            | "review"
-            | "merge"
-            | "merging"
-            | "commit" => Self::Active,
-            _ => Self::Pending,
-        }
-    }
-}
-
-impl fmt::Display for PlanPhase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 /// Agent state tracked per active agent (legacy HashMap-based tracking).
 #[derive(Debug, Clone, Default)]
 pub struct AgentState {
@@ -257,7 +37,7 @@ pub struct AgentState {
     /// Display name.
     pub name: String,
     /// Current status label (e.g. "running", "waiting", "done").
-    pub status: AgentStatus,
+    pub status: String,
     /// Accumulated output lines.
     pub output_lines: Vec<String>,
     /// Latest diff content, if any.
@@ -285,8 +65,6 @@ pub struct AgentRow {
     pub id: String,
     /// Whether the agent is currently active / running.
     pub active: bool,
-    /// Canonical agent status.
-    pub status: AgentStatus,
     /// Role label (e.g. "implementer", "strategist", "auditor").
     pub role: String,
     /// Model slug (e.g. "claude-sonnet-4-20250514").
@@ -315,25 +93,6 @@ pub struct ParallelAgentState {
     pub progress_pct: f64,
 }
 
-/// Resolve a model slug to its known context window in tokens.
-#[must_use]
-pub fn model_context_limit(model: &str) -> u64 {
-    let model = model.trim().to_ascii_lowercase();
-    if model.is_empty() {
-        return 200_000;
-    }
-
-    if model.contains("gemini") && model.contains("pro") {
-        1_000_000
-    } else if model.contains("gpt-4o") {
-        128_000
-    } else if model.contains("claude") {
-        200_000
-    } else {
-        200_000
-    }
-}
-
 /// A plan entry in the plan list.
 ///
 /// Extended with fields required by the plan_tree, header_bar, status_bar,
@@ -342,7 +101,7 @@ pub fn model_context_limit(model: &str) -> u64 {
 pub struct PlanEntry {
     pub id: String,
     pub name: String,
-    pub status: PlanPhase,
+    pub status: String,
     /// Whether the plan is currently executing.
     pub active: bool,
     /// Current phase label (e.g. "implementing", "done", "failed").
@@ -375,6 +134,15 @@ pub struct TaskEntry {
     pub name: String,
     pub status: String,
     pub agent_id: Option<String>,
+}
+
+/// A log entry for the log viewer.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp_ms: i64,
+    pub level: String,
+    pub source: String,
+    pub message: String,
 }
 
 /// Git branch tree node.
@@ -418,7 +186,7 @@ pub struct PhaseStep {
     /// Phase name (e.g. "preflight", "implementer", "compile-gate").
     pub name: String,
     /// Current status of this phase.
-    pub status: PlanPhase,
+    pub status: PhaseStatus,
     /// Elapsed seconds in this phase.
     pub elapsed_secs: f64,
     /// Completion percentage (0.0 .. 100.0).
@@ -426,7 +194,14 @@ pub struct PhaseStep {
 }
 
 /// Status of a phase pipeline step.
-pub type PhaseStatus = PlanPhase;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PhaseStatus {
+    #[default]
+    Pending,
+    Active,
+    Done,
+    Failed,
+}
 
 // ---------------------------------------------------------------------------
 // Execution waves (for plan_tree, wave_progress, header_bar widgets)
@@ -452,7 +227,15 @@ pub struct Wave {
 // ---------------------------------------------------------------------------
 
 /// Status of a task row in the checklist widget.
-pub type TaskRowStatus = TaskStatus;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskRowStatus {
+    #[default]
+    Pending,
+    Active,
+    Done,
+    Failed,
+    Blocked,
+}
 
 /// A row in the task checklist widget.
 #[derive(Debug, Clone, Default)]
@@ -462,7 +245,7 @@ pub struct TaskRow {
     /// Human-readable task title.
     pub title: String,
     /// Task status.
-    pub status: TaskStatus,
+    pub status: TaskRowStatus,
     /// Elapsed seconds for this task.
     pub elapsed_secs: f64,
 }
@@ -511,26 +294,6 @@ pub struct SysMetrics {
     pub prev_disk_read: u64,
 }
 
-#[derive(Debug, Clone)]
-struct SmoothedValue {
-    current: f64,
-    alpha: f64,
-}
-
-impl SmoothedValue {
-    fn new(alpha: f64) -> Self {
-        Self {
-            current: 0.0,
-            alpha,
-        }
-    }
-
-    fn update(&mut self, sample: f64) -> f64 {
-        self.current = self.alpha * sample + (1.0 - self.alpha) * self.current;
-        self.current
-    }
-}
-
 // ---------------------------------------------------------------------------
 // TuiState
 // ---------------------------------------------------------------------------
@@ -577,6 +340,8 @@ pub struct TuiState {
     // -- navigation --
     /// Active top-level tab.
     pub active_tab: Tab,
+    /// Selected plan index for the plan tree widget.
+    pub selected_plan: usize,
     /// Selected plan index (legacy, may differ from current_plan_idx during browsing).
     pub selected_plan_idx: usize,
     /// Selected agent index in the agent roster.
@@ -605,6 +370,8 @@ pub struct TuiState {
     // -- scroll positions --
     /// Agent output scroll. `None` means auto-tail (follow latest output).
     pub agent_scroll: Option<usize>,
+    /// Agent output scroll (usize alias, 0 = auto-tail).
+    pub output_scroll: usize,
     /// Diff panel scroll offset.
     pub diff_scroll: usize,
     /// Task list scroll offset.
@@ -613,12 +380,32 @@ pub struct TuiState {
     pub command_output_scroll: usize,
     /// Plan detail overlay scroll offset.
     pub plan_detail_scroll: usize,
-    /// Plan list / tree scroll offset.
+    /// Plan summary scroll offset.
+    pub plan_summary_scroll: usize,
+    /// Plan tree scroll offset.
     pub plan_scroll_offset: usize,
     /// Log viewer scroll offset.
     pub log_scroll: usize,
-    /// Active log levels shown in the Logs tab.
-    pub log_filter_levels: HashSet<LogFilterLevel>,
+    /// Whether the log viewer is following the tail.
+    pub log_auto_tail: bool,
+    /// Task detail overlay scroll offset.
+    pub task_detail_scroll: usize,
+
+    // -- modal visibility --
+    /// Whether the plan detail overlay is open.
+    pub show_plan_detail: bool,
+    /// Whether the help overlay is open.
+    pub show_help: bool,
+    /// Whether the wave overview overlay is open.
+    pub show_wave_overview: bool,
+    /// Whether the agent pool modal is open.
+    pub show_agent_pool_modal: bool,
+    /// Whether the queue overview overlay is open.
+    pub show_queue_overview: bool,
+    /// Whether the task detail overlay is open.
+    pub show_task_detail: bool,
+    /// Whether the task picker modal is open.
+    pub show_task_picker: bool,
 
     // -- approval / confirm --
     /// Pending agent command approval, if any.
@@ -646,6 +433,9 @@ pub struct TuiState {
     /// Cached full git view data for F4 Git tab (populated by background thread).
     pub git_view_data: Option<super::views::git_view::GitViewData>,
 
+    /// Log messages for the log viewer.
+    pub log_messages: Vec<LogEntry>,
+
     // -- plan detail --
     /// Content for the plan detail overlay.
     pub plan_detail_content: String,
@@ -661,6 +451,8 @@ pub struct TuiState {
     pub parallel_run: bool,
 
     // -- cost / tokens --
+    /// Cumulative cost in USD across all agents.
+    pub cumulative_cost_usd: f64,
     /// Cost per plan (plan_id -> USD).
     pub cost_per_plan: HashMap<String, f64>,
     /// Cost per task (task_id -> USD).
@@ -673,8 +465,6 @@ pub struct TuiState {
     pub token_total: u64,
     /// Current token burn rate (tokens per minute) for token_sparkline.
     pub token_rate: f64,
-    /// Current cost burn rate (USD per minute).
-    pub cost_rate: f64,
     /// Cumulative cost in USD for header_bar display.
     pub cost_dollars: f64,
 
@@ -699,6 +489,8 @@ pub struct TuiState {
     // -- config editor --
     /// Cursor index into the flat config item list.
     pub config_cursor: usize,
+    /// Viewport scroll offset for the config view.
+    pub config_scroll_offset: usize,
     /// Unsaved edits: config key -> new value string.
     pub config_pending: HashMap<String, String>,
     /// Whether text-input mode is active for a config field.
@@ -711,19 +503,10 @@ pub struct TuiState {
     // -- agent pane --
     /// Active agent pane display group (cycles through available groups).
     pub agent_pane_group: usize,
-
-    cpu_pct_smoothed: SmoothedValue,
-    token_rate_smoothed: SmoothedValue,
-    cost_rate_smoothed: SmoothedValue,
-    last_rate_sample_at: Option<Instant>,
-    last_token_total_sample: u64,
-    last_cost_dollars_sample: f64,
 }
 
 impl Default for TuiState {
     fn default() -> Self {
-        const METRIC_EMA_ALPHA: f64 = 0.25;
-
         Self {
             orchestrator_state: String::from("idle"),
             plans: Vec::new(),
@@ -741,6 +524,7 @@ impl Default for TuiState {
             parallel_agents: Vec::new(),
 
             active_tab: Tab::default(),
+            selected_plan: 0,
             selected_plan_idx: 0,
             selected_agent: 0,
             selected_agent_tab: 0,
@@ -755,13 +539,24 @@ impl Default for TuiState {
             filter: String::new(),
 
             agent_scroll: None,
+            output_scroll: 0,
             diff_scroll: 0,
             task_scroll: 0,
             command_output_scroll: 0,
             plan_detail_scroll: 0,
+            plan_summary_scroll: 0,
             plan_scroll_offset: 0,
             log_scroll: 0,
-            log_filter_levels: LogFilterLevel::all().into_iter().collect(),
+            log_auto_tail: true,
+            task_detail_scroll: 0,
+
+            show_plan_detail: false,
+            show_help: false,
+            show_wave_overview: false,
+            show_agent_pool_modal: false,
+            show_queue_overview: false,
+            show_task_detail: false,
+            show_task_picker: false,
 
             pending_approval: None,
             pending_confirm: None,
@@ -776,6 +571,8 @@ impl Default for TuiState {
             git_summary_lines: Vec::new(),
             git_view_data: None,
 
+            log_messages: Vec::new(),
+
             plan_detail_content: String::new(),
             plan_detail_tab: 0,
             plan_summary_content: String::new(),
@@ -783,13 +580,13 @@ impl Default for TuiState {
             pipeline_run_state: String::from("idle"),
             parallel_run: false,
 
+            cumulative_cost_usd: 0.0,
             cost_per_plan: HashMap::new(),
             cost_per_task: HashMap::new(),
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
             token_total: 0,
             token_rate: 0.0,
-            cost_rate: 0.0,
             cost_dollars: 0.0,
 
             token_burn_history: HashMap::new(),
@@ -802,19 +599,13 @@ impl Default for TuiState {
             selected_wave_idx: 0,
 
             config_cursor: 0,
+            config_scroll_offset: 0,
             config_pending: HashMap::new(),
             config_editing: false,
             config_edit_buffer: String::new(),
             config_edit_key: None,
 
             agent_pane_group: 0,
-
-            cpu_pct_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
-            token_rate_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
-            cost_rate_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
-            last_rate_sample_at: None,
-            last_token_total_sample: 0,
-            last_cost_dollars_sample: 0.0,
         }
     }
 }
@@ -852,6 +643,19 @@ impl TuiState {
         let mut state = Self::default();
         state.update_from_snapshot(data);
         state
+    }
+
+    /// Return the modal visibility flags needed by key dispatch.
+    #[must_use]
+    pub const fn modal_visibility(&self) -> ModalVisibility {
+        ModalVisibility {
+            show_task_picker: self.show_task_picker,
+            show_task_detail: self.show_task_detail,
+            show_queue_overview: self.show_queue_overview,
+            show_wave_overview: self.show_wave_overview,
+            show_plan_detail: self.show_plan_detail,
+            show_help: self.show_help,
+        }
     }
 
     // -- aggregate queries (used by header_bar, status_bar, etc.) -----------
@@ -896,12 +700,6 @@ impl TuiState {
         &self.filter
     }
 
-    pub fn update_cpu_pct(&mut self, sample: f32) -> f32 {
-        let smoothed = self.cpu_pct_smoothed.update(sample as f64) as f32;
-        self.sys.cpu_pct = smoothed;
-        smoothed
-    }
-
     // -- snapshot bridging ---------------------------------------------------
 
     /// Populate state from a `DashboardData` snapshot.
@@ -910,69 +708,122 @@ impl TuiState {
     /// TuiState. Fields not covered by `DashboardData` are left unchanged.
     pub fn update_from_snapshot(&mut self, data: &DashboardData) {
         let executor_summary = data.executor_summary();
-        if executor_summary.orchestrator_state.is_empty() {
-            if self.orchestrator_state.is_empty() {
-                self.orchestrator_state = String::from("idle");
-            }
+        self.orchestrator_state = if executor_summary.orchestrator_state.is_empty() {
+            String::from("idle")
         } else {
-            self.orchestrator_state = executor_summary.orchestrator_state;
-        }
+            executor_summary.orchestrator_state
+        };
         self.current_iteration = executor_summary.current_iteration;
         self.current_phase = executor_summary.current_phase;
-
-        // Plans
         let expanded_by_plan: HashMap<String, bool> = self
             .plans
             .iter()
             .map(|plan| (plan.id.clone(), plan.expanded))
             .collect();
-        let plan_snapshots = data.plan_task_snapshots();
+        let latest_events = latest_agent_events(&data.efficiency_events);
+
+        let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
+        for task in &data.active_tasks {
+            tasks_by_plan
+                .entry(task.plan_id.clone())
+                .or_default()
+                .push(TaskEntry {
+                    id: task.task_id.clone(),
+                    name: task.latest_gate.as_ref().map_or_else(
+                        || task.task_id.clone(),
+                        |gate| format!("{} ({gate})", task.task_id),
+                    ),
+                    status: task.status.clone(),
+                    agent_id: task.assigned_agents.first().cloned(),
+                });
+        }
+
+        if let Some(exec) = &data.current_plan_execution {
+            let entry = tasks_by_plan.entry(exec.plan_id.clone()).or_default();
+            if entry.is_empty() {
+                entry.extend(exec.tasks.iter().map(|task| TaskEntry {
+                    id: task.task_id.clone(),
+                    name: if task.title.is_empty() {
+                        task.task_id.clone()
+                    } else {
+                        task.title.clone()
+                    },
+                    status: task.phase.clone(),
+                    agent_id: None,
+                }));
+            }
+        }
+
+        // Plans
         self.plans = data
             .plans
             .iter()
             .map(|p| {
-                let completed = p.completed;
-                let snapshot = plan_snapshots.get(&p.id);
-                let phase = snapshot.map(|plan| plan.phase.clone()).unwrap_or_else(|| {
-                    if completed {
-                        String::from("done")
-                    } else {
-                        String::from("pending")
-                    }
-                });
-                let status = PlanPhase::from(phase.as_str());
-                let tasks_total = snapshot
-                    .map(|plan| plan.tasks.len())
-                    .filter(|count| *count > 0)
-                    .unwrap_or(p.task_count);
-                let (tasks_done, tasks_failed) = plan_task_counts(p, snapshot, tasks_total);
+                let tasks = tasks_by_plan.remove(&p.id).unwrap_or_default();
+                let current_exec = data
+                    .current_plan_execution
+                    .as_ref()
+                    .filter(|exec| exec.plan_id == p.id);
+                let tasks_done = if p.completed {
+                    current_exec.map_or(p.task_count, |exec| exec.tasks_done)
+                } else {
+                    current_exec.map_or_else(
+                        || {
+                            tasks
+                                .iter()
+                                .filter(|task| task_status_is_done(&task.status))
+                                .count()
+                        },
+                        |exec| exec.tasks_done,
+                    )
+                };
+                let tasks_failed = tasks
+                    .iter()
+                    .filter(|task| task_status_is_failed(&task.status))
+                    .count();
+                let tasks_active = tasks
+                    .iter()
+                    .filter(|task| {
+                        !task_status_is_done(&task.status) && !task_status_is_failed(&task.status)
+                    })
+                    .count();
+                let phase = if tasks_failed > 0 || p.last_error.is_some() {
+                    "failed".to_string()
+                } else if current_exec.is_some() || tasks_active > 0 {
+                    "running".to_string()
+                } else if p.completed || (p.task_count > 0 && tasks_done >= p.task_count) {
+                    "done".to_string()
+                } else if tasks_done > 0 {
+                    "running".to_string()
+                } else {
+                    "pending".to_string()
+                };
+                let tasks_total = current_exec
+                    .map(|exec| exec.tasks_total)
+                    .unwrap_or_else(|| p.task_count.max(tasks.len()));
+                let elapsed_secs = current_exec
+                    .map(|exec| {
+                        exec.tasks
+                            .iter()
+                            .map(|task| parse_duration_to_secs(&task.duration))
+                            .sum()
+                    })
+                    .unwrap_or(0.0);
                 PlanEntry {
                     id: p.id.clone(),
                     name: p.title.clone(),
-                    status,
-                    active: snapshot.map(|plan| plan.active).unwrap_or(!completed),
+                    status: phase.clone(),
+                    active: plan_is_active(&phase),
                     phase,
                     tasks_total,
                     tasks_done,
                     tasks_failed,
-                    elapsed_secs: snapshot.map(|plan| plan.elapsed_secs).unwrap_or(0.0),
+                    elapsed_secs,
                     wave: None,
                     task_total: tasks_total,
                     task_done: tasks_done,
                     expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
-                    tasks: snapshot
-                        .map(|plan| {
-                            plan.tasks
-                                .iter()
-                                .map(|task| TaskEntry {
-                                    id: task.id.clone(),
-                                    name: task.title.clone(),
-                                    status: task.status.clone(),
-                                    agent_id: task.agent_id.clone(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    tasks,
                 }
             })
             .collect();
@@ -980,29 +831,58 @@ impl TuiState {
         // Agents — populate both Vec and HashMap
         self.agents.clear();
         self.agents_by_id.clear();
-        for agent in &data.agents {
-            let status = AgentStatus::from(agent.status.as_str());
-            let is_active = status.is_active();
+        let mut agent_ids = data
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>();
+        if agent_ids.is_empty() {
+            agent_ids.extend(latest_events.keys().cloned());
+            agent_ids.sort();
+            agent_ids.dedup();
+        }
+        for agent_id in agent_ids {
+            let summary = data.agents.iter().find(|agent| agent.id == agent_id);
+            let latest = latest_events.get(&agent_id);
+            let label = summary
+                .map(|agent| agent.label.clone())
+                .filter(|label| !label.is_empty())
+                .or_else(|| latest.map(|event| event.role.clone()))
+                .unwrap_or_else(|| agent_id.clone());
+            let status = summary
+                .map(|agent| agent.status.clone())
+                .or_else(|| latest.map(|event| event.status.clone()))
+                .unwrap_or_else(|| "idle".to_string());
+            let current_plan = summary
+                .and_then(|agent| agent.plan_id.clone())
+                .or_else(|| latest.and_then(|event| event.plan_id.clone()))
+                .unwrap_or_default();
+            let current_task = latest
+                .map(|event| event.task_id.clone())
+                .unwrap_or_default();
+            let is_active = plan_is_active(&status);
             self.agents.push(AgentRow {
-                id: agent.id.clone(),
+                id: agent_id.clone(),
                 active: is_active,
-                status,
-                role: agent.label.clone(),
-                model: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                context_limit: model_context_limit(""),
-                current_plan: agent.plan_id.clone().unwrap_or_default(),
-                current_task: String::new(),
+                role: label.clone(),
+                model: latest.map(|event| event.model.clone()).unwrap_or_default(),
+                input_tokens: latest.map_or(0, |event| event.input_tokens),
+                output_tokens: latest.map_or(0, |event| event.output_tokens),
+                context_limit: 200_000, // sensible default
+                current_plan: current_plan.clone(),
+                current_task: current_task.clone(),
                 last_output_line: String::new(),
             });
             self.agents_by_id.insert(
-                agent.id.clone(),
+                agent_id.clone(),
                 AgentState {
-                    id: agent.id.clone(),
-                    name: agent.label.clone(),
+                    id: agent_id,
+                    name: label,
                     status,
-                    plan_id: agent.plan_id.clone(),
+                    input_tokens: latest.map_or(0, |event| event.input_tokens),
+                    output_tokens: latest.map_or(0, |event| event.output_tokens),
+                    plan_id: (!current_plan.is_empty()).then_some(current_plan),
+                    task_id: (!current_task.is_empty()).then_some(current_task),
                     ..AgentState::default()
                 },
             );
@@ -1026,7 +906,6 @@ impl TuiState {
                 // Also populate model and task from episode
                 if !episode.model.is_empty() {
                     row.model = episode.model.clone();
-                    row.context_limit = model_context_limit(&episode.model);
                 }
                 if !episode.task_id.is_empty() {
                     row.current_task = episode.task_id.clone();
@@ -1056,16 +935,35 @@ impl TuiState {
                 agent_id: a.id.clone(),
                 plan_id: a.current_plan.clone(),
                 task_id: a.current_task.clone(),
-                status: a.status.to_string(),
+                status: "running".to_string(),
                 progress_pct: 0.0,
             })
             .collect();
 
-        self.cost_dollars = data.efficiency.total_cost_usd;
+        // Cost from efficiency summary
+        self.cumulative_cost_usd = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
+        self.cost_dollars = data.efficiency.total_cost_usd;
+        self.token_total = data.efficiency.total_input_tokens + data.efficiency.total_output_tokens;
+        self.token_history = build_token_history(&data.efficiency_events);
+        self.token_rate = compute_token_rate(&data.efficiency_events);
+        self.gate_results = data
+            .gate_results
+            .iter()
+            .map(|gate_result| GateResultEntry {
+                gate: gate_result.gate_name.clone(),
+                plan_id: gate_result.plan_id.clone(),
+                passed: gate_result.passed,
+                output: gate_result.summary.clone(),
+            })
+            .collect();
+
+        self.cumulative_cost_usd = data.efficiency.total_cost_usd;
+        self.cumulative_input_tokens = data.efficiency.total_input_tokens;
+        self.cumulative_output_tokens = data.efficiency.total_output_tokens;
+        self.cost_dollars = self.cumulative_cost_usd;
         self.token_total = self.cumulative_input_tokens + self.cumulative_output_tokens;
-        self.update_efficiency_rates();
         sum_costs(data, &mut self.cost_per_plan, &mut self.cost_per_task);
 
         self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
@@ -1087,51 +985,49 @@ impl TuiState {
             if self.selected_plan_idx >= self.plans.len() {
                 self.selected_plan_idx = self.plans.len() - 1;
             }
+            if self.selected_plan >= self.plans.len() {
+                self.selected_plan = self.plans.len() - 1;
+            }
             if self.current_plan_idx >= self.plans.len() {
                 self.current_plan_idx = self.plans.len() - 1;
             }
         } else {
             self.selected_plan_idx = 0;
+            self.selected_plan = 0;
             self.current_plan_idx = 0;
         }
 
         if !self.agents.is_empty() && self.selected_agent >= self.agents.len() {
             self.selected_agent = self.agents.len() - 1;
         }
+        self.selected_agent_tab = self.selected_agent_tab.min(6);
     }
 
-    fn update_efficiency_rates(&mut self) {
-        let now = Instant::now();
-        let token_total = self.token_total;
-        let cost_dollars = self.cost_dollars;
-
-        if token_total < self.last_token_total_sample
-            || cost_dollars < self.last_cost_dollars_sample
-        {
-            const METRIC_EMA_ALPHA: f64 = 0.25;
-
-            self.token_rate = 0.0;
-            self.cost_rate = 0.0;
-            self.token_rate_smoothed = SmoothedValue::new(METRIC_EMA_ALPHA);
-            self.cost_rate_smoothed = SmoothedValue::new(METRIC_EMA_ALPHA);
-        } else if let Some(last_sample_at) = self.last_rate_sample_at {
-            let elapsed_secs = now.duration_since(last_sample_at).as_secs_f64();
-            if elapsed_secs > 0.0 {
-                let token_delta = token_total.saturating_sub(self.last_token_total_sample) as f64;
-                let cost_delta = (cost_dollars - self.last_cost_dollars_sample).max(0.0);
-
-                self.token_rate = self
-                    .token_rate_smoothed
-                    .update(token_delta * 60.0 / elapsed_secs);
-                self.cost_rate = self
-                    .cost_rate_smoothed
-                    .update(cost_delta * 60.0 / elapsed_secs);
-            }
+    /// Close all modal overlays and return to normal mode.
+    pub fn dismiss_all_modals(&mut self) {
+        self.show_plan_detail = false;
+        self.show_help = false;
+        self.show_wave_overview = false;
+        self.show_agent_pool_modal = false;
+        self.show_queue_overview = false;
+        self.show_task_detail = false;
+        self.show_task_picker = false;
+        self.pending_confirm = None;
+        if self.input_mode == InputMode::Confirm {
+            self.input_mode = InputMode::Normal;
         }
+    }
 
-        self.last_rate_sample_at = Some(now);
-        self.last_token_total_sample = token_total;
-        self.last_cost_dollars_sample = cost_dollars;
+    /// Whether any modal overlay is currently visible.
+    #[must_use]
+    pub const fn has_modal(&self) -> bool {
+        self.show_plan_detail
+            || self.show_help
+            || self.show_wave_overview
+            || self.show_agent_pool_modal
+            || self.show_queue_overview
+            || self.show_task_detail
+            || self.show_task_picker
     }
 
     /// Whether the state is in a text-input mode (inject or filter).
@@ -1143,54 +1039,22 @@ impl TuiState {
     /// Reset all scroll positions to zero.
     pub fn reset_scrolls(&mut self) {
         self.agent_scroll = None;
+        self.output_scroll = 0;
         self.diff_scroll = 0;
         self.task_scroll = 0;
         self.command_output_scroll = 0;
         self.plan_detail_scroll = 0;
+        self.plan_summary_scroll = 0;
         self.plan_scroll_offset = 0;
         self.log_scroll = 0;
-    }
-
-    /// Toggle visibility for a single log level in the Logs tab.
-    pub fn toggle_log_filter_level(&mut self, level: LogFilterLevel) {
-        if !self.log_filter_levels.insert(level) {
-            self.log_filter_levels.remove(&level);
-        }
-    }
-
-    /// Restore the Logs tab to show all available levels.
-    pub fn show_all_log_filter_levels(&mut self) {
-        self.log_filter_levels = LogFilterLevel::all().into_iter().collect();
-    }
-
-    /// Whether a log level is currently visible in the Logs tab.
-    #[must_use]
-    pub fn log_level_visible(&self, level: LogFilterLevel) -> bool {
-        self.log_filter_levels.contains(&level)
+        self.log_auto_tail = true;
+        self.task_detail_scroll = 0;
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn plan_task_counts(
-    summary: &PlanSummary,
-    snapshot: Option<&PlanTaskListSnapshot>,
-    tasks_total: usize,
-) -> (usize, usize) {
-    if let Some(snapshot) = snapshot {
-        return (
-            snapshot.tasks_done.min(tasks_total),
-            snapshot.tasks_failed.min(tasks_total),
-        );
-    }
-
-    (
-        summary.tasks_done.min(tasks_total),
-        summary.tasks_failed.min(tasks_total),
-    )
-}
 
 /// Build the canonical 9-phase pipeline, inferring status from active tasks.
 fn build_phase_pipeline(active_tasks: &[super::dashboard::TaskSummary]) -> Vec<PhaseStep> {
@@ -1244,13 +1108,13 @@ fn build_phase_pipeline(active_tasks: &[super::dashboard::TaskSummary]) -> Vec<P
                 0.0
             };
             let status = if phase_counts.failed > 0 {
-                PlanPhase::Failed
+                PhaseStatus::Failed
             } else if phase_counts.total > 0 && phase_counts.done == phase_counts.total {
-                PlanPhase::Done
+                PhaseStatus::Done
             } else if phase_counts.active > 0 {
-                PlanPhase::Active
+                PhaseStatus::Active
             } else {
-                PlanPhase::Pending
+                PhaseStatus::Pending
             };
 
             PhaseStep {
@@ -1379,11 +1243,14 @@ fn classify_phase_from_hints(task: &super::dashboard::TaskSummary) -> &'static s
 }
 
 fn task_status_is_failed(status: &str) -> bool {
-    TaskStatus::from(status).is_failed()
+    matches!(status.to_ascii_lowercase().as_str(), "failed" | "error")
 }
 
 fn task_status_is_done(status: &str) -> bool {
-    TaskStatus::from(status).is_done()
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "done" | "completed" | "complete" | "passed"
+    )
 }
 
 /// Build execution waves from plan entries. Groups by `wave` field if set,
@@ -1398,7 +1265,7 @@ fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
         // All plans in a single wave
         let done = plans
             .iter()
-            .filter(|p| !p.active && !p.status.is_failed())
+            .filter(|p| !p.active && p.phase != "failed")
             .count();
         return vec![Wave {
             index: 0,
@@ -1425,7 +1292,7 @@ fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
                 .filter(|pid| {
                     plans
                         .iter()
-                        .any(|p| &p.id == *pid && !p.active && !p.status.is_failed())
+                        .any(|p| &p.id == *pid && !p.active && p.phase != "failed")
                 })
                 .count();
             Wave {
@@ -1477,16 +1344,94 @@ fn sum_costs(
     }
 }
 
+#[derive(Debug, Clone)]
+struct LatestAgentEvent {
+    role: String,
+    status: String,
+    model: String,
+    plan_id: Option<String>,
+    task_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    timestamp: Option<DateTime<Utc>>,
+}
+
+fn latest_agent_events(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+) -> HashMap<String, LatestAgentEvent> {
+    let mut latest = HashMap::new();
+
+    for event in events {
+        let timestamp = parse_efficiency_timestamp(&event.timestamp);
+        let candidate = LatestAgentEvent {
+            role: event.role.clone(),
+            status: if event.gate_passed {
+                "done".to_string()
+            } else {
+                "active".to_string()
+            },
+            model: event.model.clone(),
+            plan_id: Some(event.plan_id.clone()),
+            task_id: event.task_id.clone(),
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            timestamp,
+        };
+
+        let should_replace = latest
+            .get(&event.agent_id)
+            .map(
+                |existing: &LatestAgentEvent| match (existing.timestamp, candidate.timestamp) {
+                    (Some(lhs), Some(rhs)) => rhs >= lhs,
+                    (None, Some(_)) => true,
+                    _ => false,
+                },
+            )
+            .unwrap_or(true);
+        if should_replace {
+            latest.insert(event.agent_id.clone(), candidate);
+        }
+    }
+
+    latest
+}
+
+fn plan_is_active(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "active"
+            | "running"
+            | "executing"
+            | "in_progress"
+            | "implementing"
+            | "gating"
+            | "verifying"
+            | "reviewing"
+            | "strategist"
+            | "implementer"
+            | "preflight"
+    )
+}
+
 fn build_task_checklist_from_execution(data: &DashboardData) -> Vec<TaskRow> {
     if let Some(exec) = &data.current_plan_execution {
         return exec
             .tasks
             .iter()
             .map(|t| {
-                let status = if t.is_current {
-                    TaskStatus::Active
-                } else {
-                    TaskStatus::from(t.phase.as_str())
+                let status = match t.phase.to_ascii_lowercase().as_str() {
+                    "done" => TaskRowStatus::Done,
+                    "failed" => TaskRowStatus::Failed,
+                    "implementing"
+                    | "gating"
+                    | "verifying"
+                    | "reviewing"
+                    | "doc revision"
+                    | "auto fixing"
+                    | "regenerating verify" => TaskRowStatus::Active,
+                    "queued" => TaskRowStatus::Pending,
+                    _ if t.is_current => TaskRowStatus::Active,
+                    _ => TaskRowStatus::Pending,
                 };
                 let elapsed_secs = parse_duration_to_secs(&t.duration);
                 TaskRow {
@@ -1503,7 +1448,13 @@ fn build_task_checklist_from_execution(data: &DashboardData) -> Vec<TaskRow> {
     data.active_tasks
         .iter()
         .map(|t| {
-            let status = TaskStatus::from(t.status.as_str());
+            let status = match t.status.as_str() {
+                "done" | "completed" | "passed" => TaskRowStatus::Done,
+                "running" | "active" | "executing" => TaskRowStatus::Active,
+                "failed" | "error" => TaskRowStatus::Failed,
+                "blocked" => TaskRowStatus::Blocked,
+                _ => TaskRowStatus::Pending,
+            };
             TaskRow {
                 id: t.task_id.clone(),
                 title: t.task_id.clone(),
@@ -1672,12 +1623,9 @@ fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
 mod tests {
     use std::fs;
 
-    use roko_learn::episode_logger::Episode;
-
     use super::*;
-    use roko_learn::efficiency::AgentEfficiencyEvent;
     use crate::tui::dashboard::TaskSummary;
-    use crate::tui::input::LogFilterLevel;
+    use roko_learn::efficiency::AgentEfficiencyEvent;
     use tempfile::tempdir;
 
     fn efficiency_event(
@@ -1702,7 +1650,37 @@ mod tests {
         assert_eq!(state.input_mode, InputMode::Normal);
         assert_eq!(state.focus, FocusZone::PlanTree);
         assert_eq!(state.orchestrator_state, "idle");
+        assert!(!state.has_modal());
         assert!(!state.is_text_input());
+    }
+
+    #[test]
+    fn modal_visibility_reflects_state() {
+        let mut state = TuiState::default();
+        assert!(!state.has_modal());
+
+        state.show_task_picker = true;
+        assert!(state.has_modal());
+
+        let vis = state.modal_visibility();
+        assert!(vis.show_task_picker);
+        assert!(!vis.show_task_detail);
+    }
+
+    #[test]
+    fn dismiss_all_modals_clears_everything() {
+        let mut state = TuiState::default();
+        state.show_plan_detail = true;
+        state.show_help = true;
+        state.show_task_picker = true;
+        state.pending_confirm = Some(ConfirmAction::RestartAllPlans);
+        state.input_mode = InputMode::Confirm;
+
+        state.dismiss_all_modals();
+
+        assert!(!state.has_modal());
+        assert!(state.pending_confirm.is_none());
+        assert_eq!(state.input_mode, InputMode::Normal);
     }
 
     #[test]
@@ -1735,24 +1713,6 @@ mod tests {
             },
         ];
         assert_eq!(state.task_counts(), (10, 15));
-    }
-
-    #[test]
-    fn log_filter_defaults_to_all_levels() {
-        let state = TuiState::default();
-        for level in LogFilterLevel::all() {
-            assert!(state.log_level_visible(level));
-        }
-    }
-
-    #[test]
-    fn log_filter_toggle_and_reset_work() {
-        let mut state = TuiState::default();
-        state.toggle_log_filter_level(LogFilterLevel::Warn);
-        assert!(!state.log_level_visible(LogFilterLevel::Warn));
-
-        state.show_all_log_filter_levels();
-        assert!(state.log_level_visible(LogFilterLevel::Warn));
     }
 
     #[test]
@@ -1919,143 +1879,6 @@ mod tests {
     }
 
     #[test]
-    fn from_dashboard_data_populates_plan_tasks_from_tracker_and_episodes() {
-        let tmpdir = tempdir().expect("tempdir");
-        let root = tmpdir.path();
-        let state_dir = root.join(".roko/state");
-        let plan_dir = root.join(".roko/plans/plan-a");
-        let memory_dir = root.join(".roko/memory");
-
-        fs::create_dir_all(&state_dir).expect("state dir");
-        fs::create_dir_all(&plan_dir).expect("plan dir");
-        fs::create_dir_all(&memory_dir).expect("memory dir");
-
-        let executor_state = serde_json::json!({
-            "plan_states": {
-                "plan-a": {
-                    "current_phase": { "kind": "implementing" },
-                    "task_id": "task-2",
-                    "assigned_agents": ["agent-a"]
-                }
-            }
-        });
-        fs::write(
-            state_dir.join("executor.json"),
-            serde_json::to_vec(&executor_state).expect("executor json"),
-        )
-        .expect("write executor state");
-
-        let tracker_state = serde_json::json!([
-            {
-                "plan_id": "plan-a",
-                "completed": ["task-1"],
-                "failed": ["task-3"],
-                "current_group_index": 1
-            }
-        ]);
-        fs::write(
-            state_dir.join("task-trackers.json"),
-            serde_json::to_vec(&tracker_state).expect("tracker json"),
-        )
-        .expect("write tracker state");
-
-        fs::write(
-            plan_dir.join("tasks.toml"),
-            r#"
-[meta]
-plan = "Plan A"
-iteration = 1
-total = 3
-done = 1
-status = "running"
-
-[[task]]
-id = "task-1"
-title = "Bootstrap"
-tier = "focused"
-
-[[task]]
-id = "task-2"
-title = "Wire dashboard"
-tier = "focused"
-
-[[task]]
-id = "task-3"
-title = "Handle failures"
-tier = "focused"
-"#,
-        )
-        .expect("tasks.toml");
-
-        let mut task_one = Episode::new("agent-a", "task-1");
-        task_one.input_signal_hash = "plan-a".to_string();
-        task_one
-            .extra
-            .insert("plan_id".to_string(), serde_json::json!("plan-a"));
-        task_one
-            .extra
-            .insert("task_id".to_string(), serde_json::json!("task-1"));
-        task_one.usage.wall_ms = 1_500;
-
-        let mut task_two = Episode::new("agent-a", "task-2");
-        task_two.input_signal_hash = "plan-a".to_string();
-        task_two
-            .extra
-            .insert("plan_id".to_string(), serde_json::json!("plan-a"));
-        task_two
-            .extra
-            .insert("task_id".to_string(), serde_json::json!("task-2"));
-        task_two.usage.wall_ms = 2_500;
-
-        let episodes = format!(
-            "{}\n{}\n",
-            serde_json::to_string(&task_one).expect("task one episode"),
-            serde_json::to_string(&task_two).expect("task two episode")
-        );
-        fs::write(memory_dir.join("episodes.jsonl"), episodes).expect("write episodes");
-
-        let data = DashboardData::load_best_effort(root);
-        let state = TuiState::from_dashboard_data(&data);
-        let plan = state
-            .plans
-            .iter()
-            .find(|plan| plan.id == "plan-a")
-            .expect("plan-a");
-
-        assert_eq!(plan.status, PlanPhase::Active);
-        assert_eq!(plan.phase, "implementing");
-        assert!(plan.active);
-        assert_eq!(plan.tasks_total, 3);
-        assert_eq!(plan.tasks_done, 1);
-        assert_eq!(plan.tasks_failed, 1);
-        assert!((plan.elapsed_secs - 4.0).abs() < f64::EPSILON);
-        assert_eq!(plan.tasks.len(), 3);
-        assert_eq!(plan.tasks[0].id, "task-1");
-        assert_eq!(plan.tasks[0].status, "done");
-        assert_eq!(plan.tasks[1].id, "task-2");
-        assert_eq!(plan.tasks[1].status, "implementing");
-        assert_eq!(plan.tasks[1].agent_id.as_deref(), Some("agent-a"));
-        assert_eq!(plan.tasks[2].id, "task-3");
-        assert_eq!(plan.tasks[2].status, "failed");
-    }
-
-    #[test]
-    fn plan_task_counts_uses_summary_progress_without_snapshot() {
-        let summary = crate::plan::PlanSummary {
-            id: "plan-a".into(),
-            title: "Plan A".into(),
-            task_count: 5,
-            tasks_done: 2,
-            tasks_failed: 1,
-            completed: false,
-            old_format: false,
-            last_error: None,
-        };
-
-        assert_eq!(plan_task_counts(&summary, None, 5), (2, 1));
-    }
-
-    #[test]
     fn new_fields_have_defaults() {
         let state = TuiState::default();
         assert!(state.phase_pipeline.is_empty());
@@ -2065,21 +1888,97 @@ tier = "focused"
         assert!(state.token_history.is_empty());
         assert_eq!(state.token_total, 0);
         assert_eq!(state.token_rate, 0.0);
-        assert_eq!(state.cost_rate, 0.0);
         assert_eq!(state.cost_dollars, 0.0);
         assert!(state.git_commit_short.is_empty());
         assert!(state.git_age.is_empty());
         assert!(state.run_started.is_none());
         assert!(state.filter.is_empty());
+        assert!(state.log_auto_tail);
+        assert_eq!(state.selected_plan, 0);
         assert_eq!(state.selected_agent, 0);
-        assert_eq!(state.agent_scroll, None);
-        assert_eq!(state.plan_scroll, 0);
+        assert_eq!(state.output_scroll, 0);
+        assert_eq!(state.plan_scroll_offset, 0);
     }
 
     #[test]
-    fn smoothed_value_applies_ema() {
-        let mut value = SmoothedValue::new(0.25);
-        assert_eq!(value.update(100.0), 25.0);
-        assert_eq!(value.update(100.0), 43.75);
+    fn update_from_snapshot_populates_plan_tasks_from_active_tasks() {
+        let mut data = DashboardData::default();
+        data.plans = vec![crate::plan::PlanSummary {
+            id: "plan-a".to_string(),
+            title: "Plan A".to_string(),
+            task_count: 3,
+            completed: false,
+            old_format: false,
+            last_error: None,
+        }];
+        data.active_tasks = vec![
+            TaskSummary {
+                plan_id: "plan-a".to_string(),
+                task_id: "task-1".to_string(),
+                status: "running".to_string(),
+                iteration: 1,
+                assigned_agents: vec!["agent-a".to_string()],
+                latest_gate: None,
+            },
+            TaskSummary {
+                plan_id: "plan-a".to_string(),
+                task_id: "task-2".to_string(),
+                status: "failed".to_string(),
+                iteration: 1,
+                assigned_agents: vec!["agent-b".to_string()],
+                latest_gate: Some("test".to_string()),
+            },
+        ];
+
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.plans.len(), 1);
+        assert_eq!(state.plans[0].tasks.len(), 2);
+        assert_eq!(state.plans[0].tasks_failed, 1);
+        assert_eq!(state.plans[0].tasks_done, 0);
+        assert_eq!(state.plans[0].tasks[0].agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn update_from_snapshot_populates_token_history_and_rate() {
+        let mut data = DashboardData::default();
+        data.efficiency_events = vec![
+            efficiency_event("impl", 100, 50, "2026-04-14T12:00:00Z"),
+            efficiency_event("review", 20, 10, "2026-04-14T12:05:00Z"),
+            efficiency_event("impl", 40, 10, "2026-04-14T12:10:00Z"),
+        ];
+
+        let mut state = TuiState::default();
+        state.update_from_snapshot(&data);
+
+        assert_eq!(
+            state.token_history.get("impl").cloned().unwrap_or_default(),
+            VecDeque::from([150, 50])
+        );
+        assert_eq!(
+            state
+                .token_history
+                .get("review")
+                .cloned()
+                .unwrap_or_default(),
+            VecDeque::from([30])
+        );
+        assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_from_snapshot_caps_token_history_at_sixty_samples() {
+        let mut data = DashboardData::default();
+        data.efficiency_events = (0..61)
+            .map(|i| efficiency_event("impl", i, 1, &format!("2026-04-14T12:{:02}:00Z", i % 60)))
+            .collect();
+
+        let mut state = TuiState::default();
+        state.update_from_snapshot(&data);
+
+        let history = state.token_history.get("impl").cloned().unwrap_or_default();
+        assert_eq!(history.len(), 60);
+        assert_eq!(history.front().copied(), Some(2));
+        assert_eq!(history.back().copied(), Some(61));
     }
 }

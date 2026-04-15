@@ -3,7 +3,7 @@
 //! Works with tools like `ollama run`, `mods`, `llm`, or just `cat` / `echo`
 //! for testing. This is the lowest-common-denominator LLM integration.
 
-use crate::agent::{Agent, AgentResult};
+use crate::agent::{Agent, AgentResult, derived_output};
 use crate::process::{
     GRACE_STDIN_CLOSE_MS, benign_stderr_warn_once, classify_benign_stderr, kill_tree,
     register_spawned_pid, set_process_group, unregister_pid,
@@ -330,8 +330,7 @@ impl Agent for ExecAgent {
             stdout.len()
         );
 
-        let out_signal = input
-            .derive(Kind::AgentOutput, Body::text(stdout.clone()))
+        let out_signal = derived_output(input, Kind::AgentOutput, Body::text(stdout.clone()))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("exit_code", "0")
@@ -363,8 +362,7 @@ impl Agent for ExecAgent {
 impl ExecAgent {
     fn failure_signal(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let output = input
-            .derive(Kind::AgentOutput, Body::text(reason))
+        let output = derived_output(input, Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("failed", "true")

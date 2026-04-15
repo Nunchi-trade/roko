@@ -76,6 +76,21 @@ impl SectionEffect {
         included_rate - excluded_rate
     }
 
+    /// Multiplicative budget weight derived from the measured lift.
+    ///
+    /// The weight is centered at `1.0`, with low-lift sections floored at
+    /// `0.5` and strong sections capped at `1.5`.
+    #[must_use]
+    pub fn lift_weight(&self) -> f64 {
+        (1.0 + self.lift()).clamp(0.5, 1.5)
+    }
+
+    /// Return the lift weight in a one-entry map keyed by section name.
+    #[must_use]
+    pub fn lift_weights(&self) -> HashMap<String, f64> {
+        HashMap::from([(self.section_name.clone(), self.lift_weight())])
+    }
+
     /// Recommend whether the section priority should change.
     #[must_use]
     pub fn recommend_priority_change(&self) -> PriorityChange {
@@ -192,6 +207,23 @@ impl SectionEffectivenessRegistry {
         sections
     }
 
+    /// Return multiplicative prompt-budget weights keyed by section name.
+    ///
+    /// When the same section appears under multiple roles, the strongest
+    /// observed lift wins so the composer can bias toward the highest-signal
+    /// version without double-counting.
+    #[must_use]
+    pub fn lift_weights(&self) -> HashMap<String, f64> {
+        let mut weights = HashMap::new();
+        for effect in self.effects.values() {
+            weights
+                .entry(effect.section_name.clone())
+                .and_modify(|weight: &mut f64| *weight = (*weight).max(effect.lift_weight()))
+                .or_insert_with(|| effect.lift_weight());
+        }
+        weights
+    }
+
     fn snapshot(&self) -> SectionEffectivenessSnapshot {
         let mut entries: Vec<_> = self
             .effects
@@ -272,6 +304,22 @@ mod tests {
             effect.recommend_priority_change(),
             PriorityChange::InsufficientData
         );
+    }
+
+    #[test]
+    fn section_effectiveness_lift_weights_are_clamped_and_aggregated() {
+        let mut effect = SectionEffect::new("workspace_map");
+        for _ in 0..30 {
+            effect.record(true, true);
+        }
+        for _ in 0..2 {
+            effect.record(false, false);
+        }
+
+        let weights = effect.lift_weights();
+        assert_eq!(weights.len(), 1);
+        assert!(weights["workspace_map"] >= 1.0);
+        assert!(weights["workspace_map"] <= 1.5);
     }
 
     #[test]

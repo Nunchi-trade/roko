@@ -6,7 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use super::super::dashboard::Theme;
-use super::super::state::TaskStatus;
 
 /// A completed task in the batch review.
 #[derive(Debug, Clone)]
@@ -86,10 +85,10 @@ pub fn render_batch_review(
             Span::styled(" FAIL ", theme.danger())
         };
 
-        let status_style = match TaskStatus::from(result.status.as_str()) {
-            TaskStatus::Done => theme.success(),
-            TaskStatus::Failed | TaskStatus::Blocked => theme.danger(),
-            TaskStatus::Active | TaskStatus::Pending => theme.muted(),
+        let status_style = match result.status.as_str() {
+            "done" | "completed" => theme.success(),
+            "failed" | "error" => theme.danger(),
+            _ => theme.muted(),
         };
 
         lines.push(Line::from(vec![

@@ -1,4 +1,4 @@
-//! Composable system prompt builder with 7 layers.
+//! Composable system prompt builder with 9 layers.
 //!
 //! Generates cache-aligned, role-specific system prompts from composable
 //! fragments. Each layer targets a different stability tier:
@@ -8,15 +8,17 @@
 //! | 1. Role identity | Who am I, what's my job | System (stable) |
 //! | 2. Conventions | Project coding standards | System (semi-stable) |
 //! | 3. Domain context | Project-specific knowledge | Session (semi-stable) |
+//! | 3c. Active signals | Pheromone / stigmergic guidance | Session (semi-stable) |
 //! | 4. Task context | Current task details | Task (volatile) |
 //! | 5. Tool instructions | Available tools and usage | System (stable) |
-//! | 6. Anti-patterns | What NOT to do | Session (semi-stable) |
-//! | 7. Affect guidance | Emotional tone and focus | Dynamic |
+//! | 6. Relevant techniques | Learned playbooks and skills | Task (volatile) |
+//! | 7. Anti-patterns | What NOT to do | Task (volatile) |
+//! | 8. Affect guidance | Emotional tone and focus | Dynamic |
 //!
 //! The builder emits sections in cache-layer order, with optional cache
 //! alignment markers between stability tiers. Layers 1 + 2 + 5 form the
-//! prefix-cacheable "system" tier; layers 3 + 6 form the "session" tier;
-//! layer 4 is per-task; layer 7 is dynamic tone/focus guidance.
+//! prefix-cacheable "system" tier; layers 3 and 3c form the "session" tier;
+//! layers 4 + 6 + 7 are per-task; layer 8 is dynamic tone/focus guidance.
 //!
 //! # Design
 //!
@@ -27,13 +29,15 @@
 //!
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
-use crate::PadState;
+use crate::prompt::estimate_tokens;
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::token_counter::TokenCounter;
+use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
+use roko_learn::skill_library::Skill;
 
-/// A composable system prompt built from 7 layers.
+/// A composable system prompt built from 9 layers.
 ///
 /// Use the builder pattern:
 /// ```ignore
@@ -54,13 +58,17 @@ pub struct SystemPromptBuilder {
     domain: Option<String>,
     /// Layer 3b: Relevant assembled context for the current task.
     context: Option<String>,
+    /// Layer 3c: Active pheromone/context signals.
+    pheromones: Vec<ContextChunk>,
     /// Layer 4: Task context — current task details.
     task: Option<String>,
     /// Layer 5: Tool instructions — available tools and how to use them.
     tools: Option<String>,
-    /// Layer 6: Anti-patterns — things the agent must NOT do.
+    /// Layer 6: Relevant skills — learned techniques to prefer for this task.
+    relevant_skills: Vec<Skill>,
+    /// Layer 7: Anti-patterns — things the agent must NOT do.
     anti_patterns: Vec<String>,
-    /// Layer 7: Affect guidance — current emotional tone and focus.
+    /// Layer 8: Affect guidance — current emotional tone and focus.
     affect_state: Option<PadState>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
@@ -75,6 +83,8 @@ struct SectionEffectivenessConfig {
     role: String,
     registry: SectionEffectivenessRegistry,
 }
+
+const RELEVANT_TECHNIQUES_TOKEN_BUDGET: usize = 500;
 
 /// Normalize prompt text so logically-identical content yields identical bytes.
 #[must_use]
@@ -110,8 +120,10 @@ impl SystemPromptBuilder {
             conventions: None,
             domain: None,
             context: None,
+            pheromones: Vec::new(),
             task: None,
             tools: None,
+            relevant_skills: Vec::new(),
             anti_patterns: Vec::new(),
             affect_state: None,
             cache_markers: false,
@@ -141,6 +153,13 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Set layer 3c: active pheromone/context signals.
+    #[must_use]
+    pub fn with_pheromones(mut self, pheromones: &[ContextChunk]) -> Self {
+        self.pheromones = pheromones.to_vec();
+        self
+    }
+
     /// Set layer 4: task context (current task details).
     #[must_use]
     pub fn with_task(mut self, task: impl Into<String>) -> Self {
@@ -155,21 +174,28 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Set layer 6: anti-patterns (things the agent must NOT do).
+    /// Set layer 6: relevant skills (learned techniques to inject).
+    #[must_use]
+    pub fn with_skills(mut self, skills: &[Skill]) -> Self {
+        self.relevant_skills = skills.to_vec();
+        self
+    }
+
+    /// Set layer 7: anti-patterns (things the agent must NOT do).
     #[must_use]
     pub fn with_anti_patterns(mut self, patterns: Vec<String>) -> Self {
         self.anti_patterns = patterns.into_iter().map(normalize_owned).collect();
         self
     }
 
-    /// Add a single anti-pattern to layer 6.
+    /// Add a single anti-pattern to layer 7.
     #[must_use]
     pub fn add_anti_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.anti_patterns.push(normalize_owned(pattern));
         self
     }
 
-    /// Set layer 7: affect guidance (current emotional tone and focus).
+    /// Set layer 8: affect guidance (current emotional tone and focus).
     #[must_use]
     pub const fn with_affect_state(mut self, affect_state: Option<PadState>) -> Self {
         self.affect_state = affect_state;
@@ -231,11 +257,14 @@ impl SystemPromptBuilder {
         };
 
         let rendered_sections = self
-            .build_sections()
+            .tuned_sections(token_budget, counter)
             .into_iter()
-            .map(|section| RenderedSection {
-                rendered: render_section(&section),
-                section,
+            .map(|section| {
+                let section = section.enforce_hard_cap();
+                RenderedSection {
+                    rendered: render_section(&section),
+                    section,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -294,7 +323,7 @@ impl SystemPromptBuilder {
     /// [`PromptAssembler`](crate::templates::assembly::PromptAssembler).
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut sections = Vec::with_capacity(8);
+        let mut sections = Vec::with_capacity(10);
 
         // Layer 1: Role Identity
         sections.push(
@@ -360,32 +389,9 @@ impl SystemPromptBuilder {
             }
         }
 
-        // Layer 6: Anti-Patterns
-        if !self.anti_patterns.is_empty() {
-            let anti_text: String = self
-                .anti_patterns
-                .iter()
-                .map(|p| format!("- {p}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            sections.push(
-                PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
-                    .with_priority(self.effective_priority("anti_patterns", SectionPriority::High))
-                    .with_cache_layer(CacheLayer::Workspace)
-                    .with_placement(Placement::End),
-            );
-        }
-
-        // Layer 7: Affect Guidance
-        if let Some(affect) = self.affect_guidance() {
-            sections.push(
-                PromptSection::new("affect_guidance", affect)
-                    .with_priority(
-                        self.effective_priority("affect_guidance", SectionPriority::Normal),
-                    )
-                    .with_cache_layer(CacheLayer::Volatile)
-                    .with_placement(Placement::End),
-            );
+        // Layer 3c: Active pheromone signals
+        if let Some(pheromones) = self.pheromone_section() {
+            sections.push(pheromones);
         }
 
         // Layer 4: Task Context
@@ -400,6 +406,41 @@ impl SystemPromptBuilder {
                         .with_placement(Placement::End),
                 );
             }
+        }
+
+        // Layer 6: Relevant Techniques
+        if let Some(skills) = self.relevant_techniques_section() {
+            sections.push(skills);
+        }
+
+        // Layer 7: Anti-Patterns
+        if !self.anti_patterns.is_empty() {
+            let anti_text: String = self
+                .anti_patterns
+                .iter()
+                .map(|p| format!("- {p}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(
+                PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
+                    .with_priority(
+                        self.effective_priority("anti_patterns", SectionPriority::Normal),
+                    )
+                    .with_cache_layer(CacheLayer::Plan)
+                    .with_placement(Placement::End),
+            );
+        }
+
+        // Layer 8: Affect Guidance
+        if let Some(affect) = self.affect_guidance() {
+            sections.push(
+                PromptSection::new("affect_guidance", affect)
+                    .with_priority(
+                        self.effective_priority("affect_guidance", SectionPriority::Normal),
+                    )
+                    .with_cache_layer(CacheLayer::Volatile)
+                    .with_placement(Placement::End),
+            );
         }
 
         sort_sections(&mut sections);
@@ -419,10 +460,16 @@ impl SystemPromptBuilder {
         if self.context.as_ref().is_some_and(|s| !s.is_empty()) {
             count += 1;
         }
+        if !self.pheromones.is_empty() {
+            count += 1;
+        }
         if self.task.as_ref().is_some_and(|s| !s.is_empty()) {
             count += 1;
         }
         if self.tools.as_ref().is_some_and(|s| !s.is_empty()) {
+            count += 1;
+        }
+        if !self.relevant_skills.is_empty() {
             count += 1;
         }
         if !self.anti_patterns.is_empty() {
@@ -488,6 +535,65 @@ impl SystemPromptBuilder {
             &config.registry,
         ))
     }
+
+    fn section_lift_weight(&self, section: &str) -> f64 {
+        let Some(config) = &self.section_effectiveness else {
+            return 1.0;
+        };
+
+        config
+            .registry
+            .get(section, &config.role)
+            .map(|effect| (1.0 + effect.lift()).clamp(0.5, 1.5))
+            .unwrap_or(1.0)
+    }
+
+    fn relevant_techniques_section(&self) -> Option<PromptSection> {
+        if self.relevant_skills.is_empty() {
+            return None;
+        }
+
+        let mut rendered = String::from("## Relevant Techniques");
+        let mut kept = 0usize;
+        let mut total_tokens = estimate_tokens(&rendered);
+
+        for skill in &self.relevant_skills {
+            let block = render_skill(skill);
+            let candidate = format!("{rendered}\n\n{block}");
+            let candidate_tokens = estimate_tokens(&candidate);
+            if candidate_tokens > RELEVANT_TECHNIQUES_TOKEN_BUDGET {
+                break;
+            }
+            rendered = candidate;
+            kept += 1;
+            total_tokens = candidate_tokens;
+        }
+
+        if kept < self.relevant_skills.len() {
+            tracing::info!(
+                kept,
+                dropped = self.relevant_skills.len() - kept,
+                token_budget = RELEVANT_TECHNIQUES_TOKEN_BUDGET,
+                used_tokens = total_tokens,
+                "trimmed relevant skills to fit the prompt budget"
+            );
+        } else {
+            tracing::info!(
+                kept,
+                token_budget = RELEVANT_TECHNIQUES_TOKEN_BUDGET,
+                used_tokens = total_tokens,
+                "included relevant skills in the prompt"
+            );
+        }
+
+        Some(
+            PromptSection::new("relevant_techniques", rendered)
+                .with_priority(SectionPriority::High)
+                .with_cache_layer(CacheLayer::Plan)
+                .with_placement(Placement::End)
+                .with_hard_cap(RELEVANT_TECHNIQUES_TOKEN_BUDGET),
+        )
+    }
 }
 
 fn adjusted_priority(
@@ -512,6 +618,118 @@ const fn section_priority_from_u8(priority: u8) -> SectionPriority {
     }
 }
 
+impl SystemPromptBuilder {
+    fn tuned_sections(&self, token_budget: usize, counter: &TokenCounter) -> Vec<PromptSection> {
+        let mut sections = self.build_sections();
+        if self.section_effectiveness.is_some() {
+            self.apply_learned_budget_tuning(&mut sections, token_budget, counter);
+        }
+        sections
+    }
+
+    fn apply_learned_budget_tuning(
+        &self,
+        sections: &mut [PromptSection],
+        token_budget: usize,
+        counter: &TokenCounter,
+    ) {
+        if token_budget == 0 {
+            return;
+        }
+
+        let mut data = Vec::with_capacity(sections.len());
+        let mut weighted_total = 0.0_f64;
+
+        for section in sections.iter() {
+            let rendered = render_section(&section.clone().enforce_hard_cap());
+            let base_tokens = counter.count(&rendered);
+            let weight = self.section_lift_weight(&section.name);
+            let weighted = base_tokens as f64 * weight;
+            weighted_total += weighted;
+            data.push((base_tokens, weight, weighted));
+        }
+
+        if weighted_total <= 0.0 {
+            return;
+        }
+
+        let mut caps = data
+            .iter()
+            .map(|(_, _, weighted)| {
+                ((token_budget as f64 * *weighted) / weighted_total).floor() as usize
+            })
+            .collect::<Vec<_>>();
+
+        let mut assigned = caps.iter().sum::<usize>();
+        let mut remainders = data
+            .iter()
+            .enumerate()
+            .map(|(index, (_, _, weighted))| {
+                let exact = (token_budget as f64 * *weighted) / weighted_total;
+                (exact.fract(), index)
+            })
+            .collect::<Vec<_>>();
+        remainders.sort_by(|lhs, rhs| rhs.0.total_cmp(&lhs.0).then_with(|| lhs.1.cmp(&rhs.1)));
+
+        for (_, index) in remainders {
+            if assigned >= token_budget {
+                break;
+            }
+            caps[index] = caps[index].saturating_add(1);
+            assigned += 1;
+        }
+
+        for (index, section) in sections.iter_mut().enumerate() {
+            let tuned_cap = caps[index];
+            section.hard_cap = Some(match section.hard_cap {
+                Some(existing) => existing.min(tuned_cap),
+                None => tuned_cap,
+            });
+
+            tracing::info!(
+                section = %section.name,
+                base_tokens = data[index].0,
+                weight = data[index].1,
+                tuned_cap = section.hard_cap.unwrap_or(0),
+                token_budget,
+                "applied learned section budget tuning"
+            );
+        }
+    }
+}
+
+fn render_skill(skill: &Skill) -> String {
+    let title = if skill.name.is_empty() {
+        "Unnamed skill"
+    } else {
+        skill.name.as_str()
+    };
+    let when_to_use = skill
+        .precondition
+        .trim()
+        .strip_prefix("Apply for ")
+        .map_or_else(
+            || {
+                if skill.precondition.trim().is_empty() {
+                    skill.summary.trim()
+                } else {
+                    skill.precondition.trim()
+                }
+            },
+            |rest| rest.trim_end_matches(" tasks.").trim(),
+        );
+    let how_to_apply = if skill.procedure.trim().is_empty() {
+        skill.prompt_template.trim()
+    } else {
+        skill.procedure.trim()
+    };
+
+    format!(
+        "### {title}\n\nWhen to use: {when_to_use}\nHow to apply: {how_to_apply}\nSuccess rate: {:.0}%\n",
+        (skill.success_rate.clamp(0.0, 1.0) * 100.0)
+    )
+}
+
 #[derive(Clone)]
 struct RenderedSection {
     section: PromptSection,
@@ -523,6 +741,8 @@ fn sort_sections(sections: &mut [PromptSection]) {
         a.cache_layer
             .cmp(&b.cache_layer)
             .then_with(|| b.priority.cmp(&a.priority))
+            .then_with(|| section_order_rank(&a.name).cmp(&section_order_rank(&b.name)))
+            .then_with(|| a.name.cmp(&b.name))
     });
 }
 
@@ -531,9 +751,12 @@ fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> S
 
     let rendered = sections
         .into_iter()
-        .map(|section| RenderedSection {
-            rendered: render_section(&section),
-            section,
+        .map(|section| {
+            let section = section.enforce_hard_cap();
+            RenderedSection {
+                rendered: render_section(&section),
+                section,
+            }
         })
         .collect::<Vec<_>>();
     let kept = rendered
@@ -549,6 +772,8 @@ fn render_section(section: &PromptSection) -> String {
         "conventions" => format!("## Project Conventions\n\n{}", section.content),
         "tool_instructions" => format!("## Tool Instructions\n\n{}", section.content),
         "domain_context" => format!("## Domain Context\n\n{}", section.content),
+        "relevant_techniques" => section.content.clone(),
+        "pheromone_signals" => format!("## Active Signals\n\n{}", section.content),
         "anti_patterns" => format!("## Anti-Patterns\n\n{}", section.content),
         "affect_guidance" => format!("## Affect Guidance\n\n{}", section.content),
         "task_context" => format!("## Current Task\n\n{}", section.content),
@@ -650,6 +875,97 @@ fn truncate_to_fit(
     best
 }
 
+fn section_order_rank(name: &str) -> u8 {
+    match name {
+        "role_identity" => 0,
+        "conventions" => 1,
+        "tool_instructions" => 2,
+        "domain_context" => 3,
+        "context_layer" => 4,
+        "pheromone_signals" => 5,
+        "task_context" => 6,
+        "relevant_techniques" => 7,
+        "anti_patterns" => 8,
+        "affect_guidance" => 9,
+        _ => 10,
+    }
+}
+
+impl SystemPromptBuilder {
+    fn pheromone_section(&self) -> Option<PromptSection> {
+        if self.pheromones.is_empty() {
+            return None;
+        }
+
+        let mut pheromones = self
+            .pheromones
+            .iter()
+            .cloned()
+            .collect::<Vec<ContextChunk>>();
+        pheromones.sort_by(|left, right| {
+            right
+                .relevance
+                .partial_cmp(&left.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| chunk_priority_rank(left).cmp(&chunk_priority_rank(right)))
+                .then_with(|| left.content.cmp(&right.content))
+        });
+
+        let rendered = pheromones
+            .iter()
+            .map(render_pheromone_chunk)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Some(
+            PromptSection::new("pheromone_signals", rendered)
+                .with_priority(self.effective_priority("pheromone_signals", SectionPriority::High))
+                .with_cache_layer(CacheLayer::Workspace)
+                .with_placement(Placement::Middle)
+                .with_hard_cap(1_500),
+        )
+    }
+}
+
+fn render_pheromone_chunk(chunk: &ContextChunk) -> String {
+    let label = pheromone_label(chunk);
+    let mut parts = vec![format!("- [{label}] {}", chunk.content.trim())];
+    if let Some(recency) = chunk.recency {
+        parts.push(format!("  recency={recency:.2}"));
+    }
+    if let Some(confidence) = chunk.confidence {
+        parts.push(format!("  confidence={confidence:.2}"));
+    }
+    if let Some(track_record) = chunk.track_record {
+        parts.push(format!("  track_record={track_record:.2}"));
+    }
+    parts.join("\n")
+}
+
+fn pheromone_label(chunk: &ContextChunk) -> &'static str {
+    let lower = chunk.content.to_ascii_lowercase();
+    if lower.contains("[threat]") || lower.contains("threat") || lower.contains("failure") {
+        "Threat"
+    } else if lower.contains("[warning]") || lower.contains("warning") || lower.contains("risk") {
+        "Warning"
+    } else if lower.contains("[opportunity]") || lower.contains("opportunity") {
+        "Opportunity"
+    } else {
+        "Signal"
+    }
+}
+
+fn chunk_priority_rank(chunk: &ContextChunk) -> u8 {
+    let lower = chunk.content.to_ascii_lowercase();
+    if lower.contains("threat") || lower.contains("warning") || lower.contains("failure") {
+        0
+    } else if lower.contains("opportunity") || lower.contains("success") {
+        1
+    } else {
+        2
+    }
+}
+
 const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
     match layer {
         CacheLayer::Role => Some("<!-- cache:system -->"),
@@ -663,6 +979,7 @@ mod tests {
     use super::*;
     use roko_core::tool::{ToolCategory, ToolPermission};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
+    use roko_learn::skill_library::Skill;
 
     fn test_tool(name: &str) -> ToolDef {
         ToolDef::new(
@@ -698,6 +1015,32 @@ mod tests {
     }
 
     #[test]
+    fn build_with_pheromones_includes_active_signals_layer() {
+        let pheromones = vec![ContextChunk {
+            content: "- [Threat] context assembly is too slow.".to_string(),
+            source: roko_neuro::ContextSource::RecentSignal {
+                signal_id: "pheromone-1".to_string(),
+                plan_id: "plan-1".to_string(),
+                kind: "pheromone".to_string(),
+            },
+            relevance: 0.92,
+            track_record: Some(0.9),
+            confidence: Some(0.8),
+            recency: Some(0.95),
+            emotional_tag: None,
+        }];
+
+        let prompt = SystemPromptBuilder::new("You are a conductor.")
+            .with_pheromones(&pheromones)
+            .with_task("Stabilize orchestration")
+            .build();
+
+        assert!(prompt.contains("## Active Signals"));
+        assert!(prompt.contains("[Threat]"));
+        assert!(prompt.contains("context assembly is too slow"));
+    }
+
+    #[test]
     fn build_minimal_only_role() {
         let prompt = SystemPromptBuilder::new("You are a reviewer.").build();
         assert!(prompt.contains("You are a reviewer."));
@@ -712,6 +1055,19 @@ mod tests {
             .with_conventions("LAYER2_CONV")
             .with_domain("LAYER3_DOMAIN")
             .with_context("LAYER3B_CONTEXT")
+            .with_pheromones(&[ContextChunk {
+                content: "- [Opportunity] reuse known-good prompt patterns.".to_string(),
+                source: roko_neuro::ContextSource::RecentSignal {
+                    signal_id: "pheromone-2".to_string(),
+                    plan_id: "plan-2".to_string(),
+                    kind: "pheromone".to_string(),
+                },
+                relevance: 0.75,
+                track_record: Some(0.8),
+                confidence: Some(0.7),
+                recency: Some(0.9),
+                emotional_tag: None,
+            }])
             .with_task("LAYER4_TASK")
             .with_tools("LAYER5_TOOLS")
             .add_anti_pattern("LAYER6_ANTI")
@@ -732,9 +1088,10 @@ mod tests {
         assert!(pos_conv < pos_tools, "conventions before tools");
         assert!(pos_tools < pos_domain, "tools before domain");
         assert!(pos_domain < pos_context, "domain before context");
-        assert!(pos_context < pos_anti, "context before anti-patterns");
-        assert!(pos_anti < pos_task, "workspace sections before task");
+        assert!(pos_context < pos_task, "context before task");
+        assert!(pos_task < pos_anti, "task before anti-patterns");
         assert!(pos_task < pos_affect, "task before affect guidance");
+        assert!(prompt.contains("Active Signals"));
     }
 
     #[test]
@@ -826,18 +1183,19 @@ mod tests {
         assert_eq!(sections[4].name, "context_layer");
         assert_eq!(sections[4].cache_layer, CacheLayer::Workspace);
 
-        // Layer 6: anti_patterns
-        assert_eq!(sections[5].name, "anti_patterns");
-        assert_eq!(sections[5].cache_layer, CacheLayer::Workspace);
+        // Layer 4: task_context
+        assert_eq!(sections[5].name, "task_context");
+        assert_eq!(sections[5].priority, SectionPriority::Critical);
+        assert_eq!(sections[5].cache_layer, CacheLayer::Plan);
         assert_eq!(sections[5].placement, Placement::End);
 
-        // Layer 4: task_context
-        assert_eq!(sections[6].name, "task_context");
-        assert_eq!(sections[6].priority, SectionPriority::Critical);
+        // Layer 6: relevant_techniques is absent in this test.
+        // Layer 7: anti_patterns
+        assert_eq!(sections[6].name, "anti_patterns");
         assert_eq!(sections[6].cache_layer, CacheLayer::Plan);
         assert_eq!(sections[6].placement, Placement::End);
 
-        // Layer 7: affect_guidance
+        // Layer 8: affect_guidance
         assert_eq!(sections[7].name, "affect_guidance");
         assert_eq!(sections[7].priority, SectionPriority::Normal);
         assert_eq!(sections[7].cache_layer, CacheLayer::Volatile);
@@ -1122,7 +1480,7 @@ mod tests {
             .find(|section| section.name == "anti_patterns");
         assert_eq!(
             anti_patterns.map(|section| section.priority),
-            Some(SectionPriority::Normal)
+            Some(SectionPriority::Low)
         );
     }
 
@@ -1146,6 +1504,28 @@ mod tests {
             tools.map(|section| section.priority),
             Some(SectionPriority::Normal)
         );
+    }
+
+    #[test]
+    fn relevant_skills_section_is_injected_and_budgeted() {
+        let mut skill = Skill::new(
+            "git_fixup",
+            "Use git fixup workflow for targeted rewrites.",
+            "Rebase or fix up the last commit when the patch is focused.",
+        );
+        skill.precondition = "Apply for focused refactor tasks.".to_string();
+        skill.procedure =
+            "Use `git commit --fixup` and autosquash to preserve history.".to_string();
+        skill.success_rate = 0.92;
+
+        let prompt = SystemPromptBuilder::new("Role")
+            .with_task("Task")
+            .with_skills(&[skill])
+            .build();
+
+        assert!(prompt.contains("## Relevant Techniques"));
+        assert!(prompt.contains("When to use: focused refactor"));
+        assert!(prompt.contains("How to apply: Use `git commit --fixup`"));
     }
 
     #[test]

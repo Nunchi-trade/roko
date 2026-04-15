@@ -1,177 +1,180 @@
-//! Task detail modal.
+//! Task breakdown modal.
+//!
+//! Displays task details, phase, outcome, related gate verdicts, and agent
+//! output in a bordered scrollable overlay.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::tui::dashboard::{GateSignalSummary, Theme};
-use crate::tui::state::{TaskRow, TaskRowStatus};
+use roko_core::dashboard_snapshot::{GateVerdict, TaskState};
 
-/// Render the task detail modal for a task in the checklist.
+use crate::tui::dashboard::Theme;
+
+/// Render the task detail modal overlay.
+///
+/// Caller should pass an area produced by `centered_rect(86, 84, frame.area())`.
+///
+/// `task_output` is an optional slice of output lines from `data.task_outputs`
+/// for this task. When present, they are rendered below the gate verdicts.
 pub fn render_task_detail_modal(
     frame: &mut Frame<'_>,
     area: Rect,
-    task: &TaskRow,
-    assigned_agents: &[String],
-    gate_results: &[GateSignalSummary],
-    scroll_offset: usize,
+    task: &TaskState,
+    gates: &[GateVerdict],
+    task_output: Option<&[String]>,
+    scroll: u16,
     theme: &Theme,
 ) {
-    let popup = centered_rect(78, 72, area);
-    frame.render_widget(Clear, popup);
+    frame.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Task Detail: {} ", task.id))
-        .title_alignment(Alignment::Center)
-        .border_style(theme.accent());
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+        .title(format!(" Task: {} ", task.task_id))
+        .border_style(theme.warning());
 
-    let sections = Layout::default()
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .constraints([Constraint::Length(8), Constraint::Min(0)])
         .split(inner);
 
-    let status_style = match task.status {
-        TaskRowStatus::Done => theme.success(),
-        TaskRowStatus::Active => theme.info(),
-        TaskRowStatus::Failed => theme.danger(),
-        TaskRowStatus::Blocked => theme.warning(),
-        TaskRowStatus::Pending => theme.muted(),
-    };
-    let assigned = if assigned_agents.is_empty() {
-        "unassigned".to_string()
-    } else {
-        assigned_agents.join(", ")
+    // Task metadata header.
+    let phase_style = match task.phase.as_str() {
+        "completed" => theme.success(),
+        _ => theme.warning(),
     };
 
-    let header = vec![
-        Line::from(vec![
-            Span::styled("Name:    ", theme.muted()),
-            Span::styled(&task.title, theme.text().add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("Task ID: ", theme.muted()),
-            Span::styled(&task.id, theme.text()),
-        ]),
-        Line::from(vec![
-            Span::styled("Status:  ", theme.muted()),
-            Span::styled(task_status_label(task.status), status_style),
-        ]),
-        Line::from(vec![
-            Span::styled("Elapsed: ", theme.muted()),
-            Span::styled(format_elapsed(task.elapsed_secs), theme.text()),
-        ]),
-        Line::from(vec![
-            Span::styled("Agents:  ", theme.muted()),
-            Span::styled(assigned, theme.text()),
-        ]),
-    ];
-    frame.render_widget(
-        Paragraph::new(header).wrap(Wrap { trim: false }),
-        sections[0],
-    );
+    let outcome_str = task.outcome.as_deref().unwrap_or("in progress");
+    let outcome_style = match task.outcome.as_deref() {
+        Some(o) if o.contains("fail") || o.contains("error") => theme.danger(),
+        Some(_) => theme.success(),
+        None => theme.muted(),
+    };
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Gate Results",
-            theme.accent().add_modifier(Modifier::BOLD),
-        )),
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled("Task ID:  ", theme.muted()),
+            Span::styled(&task.task_id, theme.text().add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("Plan:     ", theme.muted()),
+            Span::styled(&task.plan_id, theme.text()),
+        ]),
+        Line::from(vec![
+            Span::styled("Phase:    ", theme.muted()),
+            Span::styled(&task.phase, phase_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Outcome:  ", theme.muted()),
+            Span::styled(outcome_str, outcome_style),
+        ]),
         Line::from(""),
     ];
 
-    if gate_results.is_empty() {
+    let header = Paragraph::new(header_lines)
+        .style(theme.text())
+        .wrap(Wrap { trim: false });
+    frame.render_widget(header, chunks[0]);
+
+    // Gate verdicts for this task.
+    let mut lines: Vec<Line> = Vec::new();
+
+    let task_gates: Vec<_> = gates
+        .iter()
+        .filter(|g| g.task_id == task.task_id && g.plan_id == task.plan_id)
+        .collect();
+
+    if task_gates.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No gate results for this task.",
+            "No gate verdicts for this task.",
             theme.muted(),
         )));
     } else {
-        for gate in gate_results {
-            let verdict_style = if gate.passed {
+        lines.push(Line::from(Span::styled(
+            "Gate Verdicts",
+            theme.accent().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+
+        let passed_count = task_gates.iter().filter(|g| g.passed).count();
+        let failed_count = task_gates.len() - passed_count;
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {passed_count} passed"), theme.success()),
+            Span::styled("  /  ", theme.muted()),
+            Span::styled(
+                format!("{failed_count} failed"),
+                if failed_count > 0 {
+                    theme.danger()
+                } else {
+                    theme.muted()
+                },
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        for g in &task_gates {
+            let icon = if g.passed { "+" } else { "x" };
+            let style = if g.passed {
                 theme.success()
             } else {
                 theme.danger()
             };
-            let verdict = if gate.passed { "PASS" } else { "FAIL" };
-            let duration = if gate.duration_ms > 0 {
-                format!("{}ms", gate.duration_ms)
-            } else {
-                "--".to_string()
-            };
+
+            let ts = format_ts(g.ts_millis);
 
             lines.push(Line::from(vec![
-                Span::styled(format!("{verdict:<4} "), verdict_style),
+                Span::styled(format!("  [{icon}] "), style),
                 Span::styled(
-                    format!("{:<18}", gate.gate_name),
+                    format!("{:<20}", g.gate),
                     theme.text().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(duration, theme.muted()),
+                Span::styled(ts, theme.muted()),
             ]));
-
-            if !gate.excerpt.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("      ", theme.muted()),
-                    Span::styled(gate.excerpt.as_str(), theme.muted()),
-                ]));
-            }
-
-            lines.push(Line::from(""));
         }
     }
 
-    let scroll = scroll_offset.min(u16::MAX as usize) as u16;
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        sections[1],
-    );
-}
+    // Task output section (from data.task_outputs).
+    if let Some(output) = task_output {
+        if !output.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Agent Output",
+                theme.accent().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "\u{2500}".repeat(40),
+                theme.muted(),
+            )));
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
-}
-
-fn task_status_label(status: TaskRowStatus) -> &'static str {
-    match status {
-        TaskRowStatus::Pending => "pending",
-        TaskRowStatus::Active => "active",
-        TaskRowStatus::Done => "done",
-        TaskRowStatus::Failed => "failed",
-        TaskRowStatus::Blocked => "blocked",
+            for line in output {
+                lines.push(Line::from(Span::styled(format!("  {line}"), theme.text())));
+            }
+        }
     }
+
+    let paragraph = Paragraph::new(lines)
+        .style(theme.text())
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+
+    frame.render_widget(paragraph, chunks[1]);
 }
 
-fn format_elapsed(elapsed_secs: f64) -> String {
-    let elapsed_secs = elapsed_secs.max(0.0).round() as u64;
-    let hours = elapsed_secs / 3600;
-    let minutes = (elapsed_secs % 3600) / 60;
-    let seconds = elapsed_secs % 60;
+/// Format a Unix-millis timestamp as a short time string.
+fn format_ts(ts_millis: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
 
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m {seconds:02}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
+    let dt = UNIX_EPOCH + Duration::from_millis(ts_millis);
+    let secs = dt.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    let hours = (secs / 3600) % 24;
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }

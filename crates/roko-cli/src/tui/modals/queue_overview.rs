@@ -6,7 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use super::super::dashboard::Theme;
-use super::super::state::TaskStatus;
 
 /// A task within a milestone queue.
 #[derive(Debug, Clone)]
@@ -105,12 +104,12 @@ pub fn render_queue_overview(
     right_lines.push(Line::from(""));
 
     for task in &milestone.tasks {
-        let status_style = match TaskStatus::from(task.status.as_str()) {
-            TaskStatus::Done => theme.success(),
-            TaskStatus::Active => theme.info(),
-            TaskStatus::Failed => theme.danger(),
-            TaskStatus::Blocked => theme.warning(),
-            TaskStatus::Pending => theme.muted(),
+        let status_style = match task.status.as_str() {
+            "done" | "completed" => theme.success(),
+            "running" | "active" => theme.info(),
+            "failed" | "error" => theme.danger(),
+            "blocked" => theme.warning(),
+            _ => theme.muted(),
         };
 
         right_lines.push(Line::from(vec![

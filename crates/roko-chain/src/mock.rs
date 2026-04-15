@@ -19,6 +19,7 @@ use crate::types::{
     TxRequest,
 };
 use crate::wallet::ChainWallet;
+use crate::witness::{WITNESS_MARKER, WITNESS_TOPIC};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -336,6 +337,15 @@ impl ChainWallet for MockChainWallet {
         s.tx_counter = counter;
         let hash = TxHash::new(format!("0x{counter:064x}"));
         s.nonce += 1;
+        let witness_log = tx
+            .data
+            .strip_prefix(WITNESS_MARKER)
+            .and_then(|data| data.get(..32))
+            .map(|data| LogEntry {
+                address: tx.to.clone().unwrap_or_else(|| s.address.clone()),
+                topics: vec![WITNESS_TOPIC.to_string()],
+                data: data.to_vec(),
+            });
         s.submitted.push((hash.clone(), tx));
 
         // If paired with a client, mine a block and insert a receipt so the
@@ -348,7 +358,7 @@ impl ChainWallet for MockChainWallet {
                 status: true,
                 block_number,
                 gas_used: 21_000,
-                logs: Vec::new(),
+                logs: witness_log.into_iter().collect(),
             });
         }
 

@@ -31,12 +31,12 @@ const RESERVED: u16 = (COL_PROGRESS + COL_BAR + COL_DELTA + COL_VERIFY + COL_AGE
 
 /// Status icon and style for a plan entry.
 fn plan_icon(plan: &PlanEntry) -> (&'static str, Style) {
-    if !plan.active && plan.status.is_done() {
+    if !plan.active && (plan.phase == "done" || plan.phase == "completed") {
         (
             "\u{2713}", // ✓
             Style::default().fg(MoriTheme::SAGE),
         )
-    } else if !plan.active && plan.status.is_failed() {
+    } else if !plan.active && plan.phase == "failed" {
         (
             "\u{2717}", // ✗
             Style::default()
@@ -75,7 +75,7 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     let failed = state
         .plans
         .iter()
-        .filter(|p| !p.active && p.status.is_failed())
+        .filter(|p| !p.active && p.phase == "failed")
         .count();
 
     let health_suffix = {
@@ -174,8 +174,9 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     let total_lines = lines.len();
 
     // Scroll to keep selected visible
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll_offset = state.plan_scroll_offset.min(max_scroll);
+    let scroll_offset = state
+        .plan_scroll_offset
+        .min(total_lines.saturating_sub(visible_height));
     let visible: Vec<Line> = lines
         .into_iter()
         .skip(scroll_offset)
@@ -292,7 +293,7 @@ fn render_wave_tree(
                 state
                     .plans
                     .iter()
-                    .any(|p| p.id == **plan_id && !p.active && p.status.is_failed())
+                    .any(|p| p.id == **plan_id && !p.active && p.phase == "failed")
             })
             .count();
         if wave_failed > 0 {
@@ -360,13 +361,13 @@ fn render_plan_line(
     let (icon, icon_style) = plan_icon(plan);
 
     // Text styling by plan status
-    let text_style = if !plan.active && plan.status.is_done() {
+    let text_style = if !plan.active && (plan.phase == "done" || plan.phase == "completed") {
         Style::default().fg(MoriTheme::SAGE)
     } else if plan.active {
         Style::default()
             .fg(MoriTheme::ROSE_BRIGHT)
             .add_modifier(Modifier::BOLD)
-    } else if plan.status.is_failed() {
+    } else if plan.phase == "failed" {
         Style::default().fg(MoriTheme::EMBER)
     } else {
         Style::default().fg(MoriTheme::TEXT_DIM)
@@ -407,7 +408,7 @@ fn render_plan_line(
             } else {
                 MoriTheme::semantic_color(fill_pct)
             }
-        } else if plan.status.is_failed() {
+        } else if plan.phase == "failed" {
             MoriTheme::EMBER
         } else if plan.tasks_done == 0 {
             MoriTheme::TEXT_GHOST
@@ -437,7 +438,7 @@ fn render_plan_line(
             MoriTheme::SAGE
         } else if plan.active && fill_pct >= 0.999 {
             MoriTheme::WARNING
-        } else if plan.status.is_failed() {
+        } else if plan.phase == "failed" {
             MoriTheme::EMBER
         } else if plan.tasks_done == 0 && !plan.active {
             MoriTheme::TEXT_PHANTOM

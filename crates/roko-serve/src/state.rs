@@ -8,13 +8,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
+use base64::Engine;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{OnceCell, RwLock};
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
@@ -38,6 +41,137 @@ use crate::templates::TemplateRegistry;
 
 fn affect_state_path(layout_root: &Path) -> PathBuf {
     layout_root.join("daimon").join("affect.json")
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Known endpoint set for an agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentEndpoints {
+    /// Base REST endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<String>,
+    /// Streaming WebSocket endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<String>,
+    /// Optional A2A endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<String>,
+    /// Optional MCP endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<String>,
+}
+
+/// Agent discovery entry used by the serve-side aggregator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoveredAgent {
+    /// Stable agent identifier.
+    pub agent_id: String,
+    /// Optional process label from the supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional local process id when the agent is supervised here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u64>,
+    /// Optional owner identity.
+    #[serde(default)]
+    pub owner: String,
+    /// Registration timestamp.
+    #[serde(default)]
+    pub registered_at: u64,
+    /// Last refresh timestamp.
+    #[serde(default)]
+    pub last_seen_at: u64,
+    /// Known endpoint set.
+    #[serde(default)]
+    pub endpoints: AgentEndpoints,
+    /// Optional ERC-8004 card URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_uri: Option<String>,
+    /// Advertised capabilities.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Domain tags.
+    #[serde(default)]
+    pub domain_tags: Vec<String>,
+    /// Token hash used by the agent server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_hash: Option<String>,
+    /// Token expiry timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Coarse liveness label.
+    #[serde(default = "default_agent_status")]
+    pub status: String,
+    /// Ephemeral plaintext token retained only for active proxy fan-out.
+    #[serde(skip)]
+    pub proxy_token: Option<String>,
+}
+
+fn default_agent_status() -> String {
+    "discovered".to_string()
+}
+
+/// Upsert payload for the discovery registry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentRegistrationRecord {
+    /// Stable agent identifier.
+    pub agent_id: String,
+    /// Optional process label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional local process id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u64>,
+    /// Optional owner.
+    #[serde(default)]
+    pub owner: String,
+    /// Endpoints advertised by the agent.
+    #[serde(default)]
+    pub endpoints: AgentEndpoints,
+    /// Optional ERC-8004 card URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_uri: Option<String>,
+    /// Capability list.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Domain tags.
+    #[serde(default)]
+    pub domain_tags: Vec<String>,
+}
+
+/// Returned when a new token is issued or rotated.
+#[derive(Debug, Clone, Serialize)]
+pub struct IssuedAgentToken {
+    /// Agent identifier.
+    pub agent_id: String,
+    /// Plaintext token returned once to the caller.
+    pub token: String,
+    /// Token expiry timestamp.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Public status payload for an agent token.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTokenStatus {
+    /// Agent identifier.
+    pub agent_id: String,
+    /// Whether a token exists.
+    pub exists: bool,
+    /// Token expiry timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedJsonValue {
+    expires_at: Instant,
+    value: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +296,12 @@ pub struct AppState {
     pub template_runs: RwLock<HashMap<String, Vec<TemplateRunRecord>>>,
     /// Secret scrubber for redacting API-key / token patterns from responses.
     pub scrubber: Arc<LogScrubber>,
+    /// Shared HTTP client for aggregator fan-out.
+    pub http_client: reqwest::Client,
+    /// Discovery registry for local and chain-discovered agents.
+    pub discovered_agents: RwLock<HashMap<String, DiscoveredAgent>>,
+    /// Short-lived aggregator cache keyed by route + query signature.
+    pub aggregator_cache: RwLock<HashMap<String, CachedJsonValue>>,
 }
 
 impl AppState {
@@ -225,6 +365,9 @@ impl AppState {
             deployments: RwLock::new(HashMap::new()),
             template_runs: RwLock::new(HashMap::new()),
             scrubber: Arc::new(LogScrubber::new()),
+            http_client: reqwest::Client::new(),
+            discovered_agents: RwLock::new(HashMap::new()),
+            aggregator_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -245,6 +388,147 @@ impl AppState {
         self.cancel.cancel();
         self.supervisor.shutdown_all().await;
         self.event_bus.publish(ServerEvent::ServerShutdown);
+    }
+
+    /// Insert or update a discovery entry and return the stored snapshot.
+    pub async fn upsert_discovered_agent(
+        &self,
+        registration: AgentRegistrationRecord,
+    ) -> DiscoveredAgent {
+        let now = now_unix_secs();
+        let mut agents = self.discovered_agents.write().await;
+        let entry = agents
+            .entry(registration.agent_id.clone())
+            .or_insert_with(|| DiscoveredAgent {
+                agent_id: registration.agent_id.clone(),
+                label: registration.label.clone(),
+                process_id: registration.process_id,
+                owner: registration.owner.clone(),
+                registered_at: now,
+                last_seen_at: now,
+                endpoints: registration.endpoints.clone(),
+                card_uri: registration.card_uri.clone(),
+                capabilities: registration.capabilities.clone(),
+                domain_tags: registration.domain_tags.clone(),
+                token_hash: None,
+                token_expires_at: None,
+                status: "registered".to_string(),
+                proxy_token: None,
+            });
+
+        entry.label = registration.label.or_else(|| entry.label.clone());
+        entry.process_id = registration.process_id.or(entry.process_id);
+        if !registration.owner.is_empty() {
+            entry.owner = registration.owner;
+        }
+        if registration.endpoints.rest.is_some() {
+            entry.endpoints.rest = registration.endpoints.rest;
+        }
+        if registration.endpoints.websocket.is_some() {
+            entry.endpoints.websocket = registration.endpoints.websocket;
+        }
+        if registration.endpoints.a2a.is_some() {
+            entry.endpoints.a2a = registration.endpoints.a2a;
+        }
+        if registration.endpoints.mcp.is_some() {
+            entry.endpoints.mcp = registration.endpoints.mcp;
+        }
+        if registration.card_uri.is_some() {
+            entry.card_uri = registration.card_uri;
+        }
+        if !registration.capabilities.is_empty() {
+            entry.capabilities = registration.capabilities;
+        }
+        if !registration.domain_tags.is_empty() {
+            entry.domain_tags = registration.domain_tags;
+        }
+        entry.last_seen_at = now;
+        entry.status = "registered".to_string();
+        entry.clone()
+    }
+
+    /// List all known discovery entries.
+    pub async fn list_discovered_agents(&self) -> Vec<DiscoveredAgent> {
+        self.discovered_agents
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Fetch one discovery entry.
+    pub async fn discovered_agent(&self, agent_id: &str) -> Option<DiscoveredAgent> {
+        self.discovered_agents.read().await.get(agent_id).cloned()
+    }
+
+    /// Store a refreshed discovery entry.
+    pub async fn store_discovered_agent(&self, agent: DiscoveredAgent) {
+        self.discovered_agents
+            .write()
+            .await
+            .insert(agent.agent_id.clone(), agent);
+    }
+
+    /// Return a public token status snapshot for an agent.
+    pub async fn agent_token_status(&self, agent_id: &str) -> Option<AgentTokenStatus> {
+        self.discovered_agent(agent_id)
+            .await
+            .map(|agent| AgentTokenStatus {
+                agent_id: agent.agent_id,
+                exists: agent.token_hash.is_some(),
+                expires_at: agent.token_expires_at,
+            })
+    }
+
+    /// Issue or rotate the bearer token for an agent.
+    pub async fn rotate_agent_token(&self, agent_id: &str) -> Option<IssuedAgentToken> {
+        let mut agents = self.discovered_agents.write().await;
+        let agent = agents.get_mut(agent_id)?;
+
+        let raw = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let digest = hasher.finalize();
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+
+        agent.token_hash = Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest));
+        agent.token_expires_at = Some(expires_at);
+        agent.proxy_token = Some(token.clone());
+
+        Some(IssuedAgentToken {
+            agent_id: agent_id.to_string(),
+            token,
+            expires_at,
+        })
+    }
+
+    /// Fetch a cached JSON payload when it is still fresh.
+    pub async fn cached_json(&self, key: &str) -> Option<serde_json::Value> {
+        let cache = self.aggregator_cache.read().await;
+        let entry = cache.get(key)?;
+        if entry.expires_at > Instant::now() {
+            Some(entry.value.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Store a cached JSON payload with a time-to-live.
+    pub async fn put_cached_json(
+        &self,
+        key: impl Into<String>,
+        ttl: Duration,
+        value: serde_json::Value,
+    ) {
+        self.aggregator_cache.write().await.insert(
+            key.into(),
+            CachedJsonValue {
+                expires_at: Instant::now() + ttl,
+                value,
+            },
+        );
     }
 }
 

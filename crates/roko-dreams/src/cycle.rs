@@ -32,6 +32,11 @@ use roko_primitives::hdc::{HdcVector, text_fingerprint};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::hypnagogia::HypnagogiaEngine;
+use crate::imagination::synthesize_hypotheses;
+use crate::runner::DreamBudget;
+use crate::threat::threat_warning_entries;
+
 const DREAMS_SUCCESS_REGRESSION_THRESHOLD: f64 = 0.20;
 const DREAMS_REGRESSION_MIN_RECORDS: usize = 5;
 const DREAMS_PERFORMANCE_STALL_MIN_PLANS: usize = 5;
@@ -381,6 +386,19 @@ impl DreamCycle {
     /// Returns an error if the episode log cannot be read, the stores cannot
     /// be updated, or the report cannot be written.
     pub async fn run(&mut self) -> Result<DreamCycleReport> {
+        let mut budget = None;
+        self.run_budgeted(&mut budget).await
+    }
+
+    /// Run a full offline learning pass with an optional sleep-time budget.
+    ///
+    /// The budget is consumed using the actual episode data that gets replayed
+    /// during the cycle. When the budget is exhausted, the cycle stops after
+    /// the already-processed clusters and records a note in the report.
+    pub async fn run_budgeted(
+        &mut self,
+        budget: &mut Option<DreamBudget>,
+    ) -> Result<DreamCycleReport> {
         let started_at = Utc::now();
         let all_episodes = EpisodeLogger::read_all_lossy(self.episode_store.path())
             .await
@@ -404,7 +422,7 @@ impl DreamCycle {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        let processed_through = batch.iter().map(|episode| episode.timestamp).max();
+        let mut processed_through = batch.iter().map(|episode| episode.timestamp).max();
         self.emit_success_rate_regression(&historical, &batch, started_at)?;
         let cfactor_regression = self.emit_cfactor_regression(started_at)?;
         let progression = TierProgression::default();
@@ -418,8 +436,10 @@ impl DreamCycle {
         let mut knowledge_entries_written = 0usize;
         let mut playbooks_created = 0usize;
         let mut regressions_detected = Vec::new();
+        let mut budget_exhausted = false;
+        let mut processed_cluster_count = 0usize;
 
-        for entry in review_entries {
+        for entry in &review_entries {
             if written_knowledge_ids.insert(entry.id.clone()) {
                 self.knowledge_store.add(entry.clone())?;
                 knowledge_entries_written += 1;
@@ -427,6 +447,10 @@ impl DreamCycle {
         }
 
         for cluster in &mut clusters {
+            if budget.as_ref().is_some_and(|budget| budget.exhausted()) {
+                budget_exhausted = true;
+                break;
+            }
             let outcome = process_cluster(
                 cluster,
                 &self.dispatcher,
@@ -444,12 +468,42 @@ impl DreamCycle {
             cluster.regression_entries = outcome.regression_entries;
             cluster.agent_review = outcome.agent_review;
             cluster.warnings = outcome.warnings;
+            processed_cluster_count += 1;
+
+            if let Some(budget) = budget.as_mut() {
+                consume_cluster_budget(budget, cluster);
+                if budget.exhausted() {
+                    budget_exhausted = true;
+                    break;
+                }
+            }
+        }
+
+        if budget_exhausted {
+            clusters.truncate(processed_cluster_count);
+            processed_through = clusters.iter().map(|cluster| cluster.last_seen_at).max();
         }
 
         let strategy_hypotheses = generate_cross_domain_strategy_hypotheses(&clusters, started_at);
         for hypothesis in &strategy_hypotheses {
             if written_knowledge_ids.insert(hypothesis.id.clone()) {
                 self.knowledge_store.add(hypothesis.clone())?;
+                knowledge_entries_written += 1;
+            }
+        }
+
+        let mut liminal_entries = Vec::new();
+        if !budget_exhausted {
+            let processed_episodes = clusters_to_episodes(&clusters);
+            let hypnagogic =
+                HypnagogiaEngine::default().run(&review_entries, &processed_episodes, started_at);
+            liminal_entries.extend(hypnagogic);
+            liminal_entries.extend(synthesize_hypotheses(&processed_episodes, started_at));
+            liminal_entries.extend(threat_warning_entries(&processed_episodes, started_at));
+        }
+        for entry in liminal_entries {
+            if written_knowledge_ids.insert(entry.id.clone()) {
+                self.knowledge_store.add(entry.clone())?;
                 knowledge_entries_written += 1;
             }
         }
@@ -467,7 +521,15 @@ impl DreamCycle {
             playbooks_created,
             regressions_detected,
             strategy_hypotheses,
-            performance_notes,
+            performance_notes: {
+                let mut notes = performance_notes;
+                if budget_exhausted {
+                    notes.push(
+                        "dream budget exhausted before all clusters could be processed".to_string(),
+                    );
+                }
+                notes
+            },
         };
 
         let counterfactuals = build_counterfactuals(&clusters, started_at);
@@ -907,6 +969,20 @@ async fn process_cluster(
             .push("agent review returned an empty response".to_string());
     }
     Ok(outcome)
+}
+
+fn consume_cluster_budget(budget: &mut DreamBudget, cluster: &DreamCluster) {
+    for episode in &cluster.episodes {
+        budget.consume_episode(episode);
+    }
+}
+
+fn clusters_to_episodes(clusters: &[DreamCluster]) -> Vec<Episode> {
+    let mut episodes = Vec::new();
+    for cluster in clusters {
+        episodes.extend(cluster.episodes.iter().cloned());
+    }
+    episodes
 }
 
 #[derive(Debug, Clone)]

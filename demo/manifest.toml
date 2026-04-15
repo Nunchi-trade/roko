@@ -25,3 +25,8 @@ description = "Multi-pool routing benchmark with knowledge-base insights"
 name = "flywheel"
 path = "scenarios/flywheel.toml"
 description = "Knowledge flywheel: posters earn as confirmers accumulate pheromone weight"
+
+[[scenarios]]
+name = "yield-routing"
+path = "scenarios/yield-routing.toml"
+description = "Two-round yield routing demo spine with fee distribution, shared knowledge, and event streaming"

@@ -26,7 +26,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
 pub mod launchd;
@@ -199,11 +199,11 @@ impl std::fmt::Display for DaemonStatus {
 }
 
 /// Start the daemon in foreground or background mode.
-pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
-    let workdir = std::env::current_dir().context("resolve current working directory")?;
-    ensure_runtime_dirs(&workdir)?;
+#[instrument(skip_all, fields(workdir = %workdir.display(), foreground, port))]
+pub async fn daemon_start(workdir: &Path, foreground: bool, port: u16) -> Result<()> {
+    ensure_runtime_dirs(workdir)?;
 
-    if let Some(info) = read_daemon_info(&workdir)? {
+    if let Some(info) = read_daemon_info(workdir)? {
         if pid_is_alive(info.pid)? {
             return Err(anyhow!(
                 "daemon already running (pid {}, port {})",
@@ -212,24 +212,24 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
             ));
         }
 
-        cleanup_stale_runtime_files(&workdir);
+        cleanup_stale_runtime_files(workdir);
     }
 
     if !foreground {
-        spawn_detached_child(&workdir, port)?;
+        spawn_detached_child(workdir, port)?;
         return Ok(());
     }
 
-    let core_config = load_config(&workdir)?;
-    let cli_config = load_layered(&workdir)?.config;
+    let core_config = load_config(workdir)?;
+    let cli_config = load_layered(workdir)?.config;
     let dream_settings = cli_config.dreams.clone();
     let agent_settings = cli_config.agent.clone();
     let daimon_strategy_space = cli_config.daimon.strategy_space.clone();
-    let repo_registry = RepoRegistry::load(&cli_config, &workdir).unwrap_or_default();
+    let repo_registry = RepoRegistry::load(&cli_config, workdir).unwrap_or_default();
     let runtime = RokoCliRuntime::new(cli_config, repo_registry).into_arc();
     let deploy_backend = Arc::from(deploy::create_backend("manual", None, None, None)?);
     let state = Arc::new(AppState::new_with_daimon_strategy(
-        workdir.clone(),
+        workdir.to_path_buf(),
         runtime,
         core_config,
         deploy_backend,
@@ -259,7 +259,7 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
         started_at: Utc::now(),
         state: DaemonState::Running,
     };
-    write_daemon_info(&workdir, &info)?;
+    write_daemon_info(workdir, &info)?;
 
     let _scheduler = scheduler::start_scheduler(Arc::clone(&state));
     let _watchers = fswatcher::start_watchers(Arc::clone(&state));
@@ -309,7 +309,7 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
     }
 
     graceful_shutdown_daemon(
-        &workdir,
+        workdir,
         Arc::clone(&state),
         &info,
         shutdown_request,
@@ -322,8 +322,8 @@ pub async fn daemon_start(foreground: bool, port: u16) -> Result<()> {
 }
 
 /// Stop the active daemon for the current working directory.
-pub async fn daemon_stop() -> Result<()> {
-    let workdir = std::env::current_dir().context("resolve current working directory")?;
+#[instrument(skip_all, fields(workdir = %workdir.display()))]
+pub async fn daemon_stop(workdir: &Path) -> Result<()> {
     let info = match read_daemon_info(&workdir)? {
         Some(info) => info,
         None => {
@@ -375,9 +375,10 @@ pub async fn daemon_stop() -> Result<()> {
 }
 
 /// Restart the active daemon for the current working directory.
-pub async fn daemon_restart(port: u16) -> Result<()> {
-    daemon_stop().await?;
-    daemon_start(false, port).await
+#[instrument(skip_all, fields(workdir = %workdir.display(), port))]
+pub async fn daemon_restart(workdir: &Path, port: u16) -> Result<()> {
+    daemon_stop(workdir).await?;
+    daemon_start(workdir, false, port).await
 }
 
 /// Install the daemon as a macOS LaunchAgent.
@@ -438,8 +439,8 @@ pub fn daemon_uninstall() -> Result<()> {
 }
 
 /// Print daemon status for the current working directory.
-pub async fn daemon_status() -> Result<()> {
-    let workdir = std::env::current_dir().context("resolve current working directory")?;
+#[instrument(skip_all, fields(workdir = %workdir.display()))]
+pub async fn daemon_status(workdir: &Path) -> Result<()> {
     let info = match read_daemon_info(&workdir)? {
         Some(info) => info,
         None => {
@@ -516,8 +517,8 @@ pub async fn daemon_status() -> Result<()> {
 }
 
 /// Reload daemon templates and subscriptions without restarting active agents.
-pub async fn daemon_reload() -> Result<()> {
-    let workdir = std::env::current_dir().context("resolve current working directory")?;
+#[instrument(skip_all, fields(workdir = %workdir.display()))]
+pub async fn daemon_reload(workdir: &Path) -> Result<()> {
     let socket_path = daemon_socket_path(&workdir);
     let mut stream = UnixStream::connect(&socket_path)
         .await
@@ -564,8 +565,8 @@ pub async fn daemon_reload() -> Result<()> {
 }
 
 /// Print daemon logs for the current working directory.
-pub async fn daemon_logs(follow: bool, lines: usize) -> Result<()> {
-    let workdir = std::env::current_dir().context("resolve current working directory")?;
+#[instrument(skip_all, fields(workdir = %workdir.display(), follow, lines))]
+pub async fn daemon_logs(workdir: &Path, follow: bool, lines: usize) -> Result<()> {
     let path = log_path(&workdir, "daemon.log");
 
     if follow {
@@ -1210,6 +1211,8 @@ async fn graceful_shutdown_daemon(
 async fn flush_daemon_artifacts(workdir: &Path) -> Result<()> {
     flush_file(workdir.join(".roko").join("signals.jsonl")).await?;
     flush_file(workdir.join(".roko").join("episodes.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("learn").join("heartbeat.json")).await?;
+    flush_file(workdir.join(".roko").join("learn").join("heartbeat.jsonl")).await?;
     flush_file(workdir.join(".roko").join("logs").join("daemon.log")).await?;
     flush_file(workdir.join(".roko").join("logs").join("daemon.err")).await?;
     std::io::stdout().flush().context("flush stdout")?;

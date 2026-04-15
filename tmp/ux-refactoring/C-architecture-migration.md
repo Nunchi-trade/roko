@@ -295,7 +295,7 @@ cargo build -p roko-agent-server -p roko-chain 2>&1 | tail -5
 
 ## C.06 — mirage-rs REST Deletion (Phase 3)
 
-**Status**: NOT DONE
+**Status**: PARTIAL — reduction gates are in place; full deletion is still deferred
 **Priority**: P2 (Phase 3, +4-8 weeks post-demo)
 **Estimated LOC**: -4,500 (deletion)
 **Dependencies**: C.02, C.03
@@ -310,15 +310,18 @@ cargo build -p roko-agent-server -p roko-chain 2>&1 | tail -5
 
 After aggregator is stable and dashboard is switched, remove all extracted code from mirage-rs. Net result: mirage-rs drops from ~30 REST routes to 3 (health, EVM stats, JSON-RPC).
 
+Current code reality for C2:
+
+- pure-EVM mirage builds already work via `cargo build -p mirage-rs --no-default-features --features binary`
+- default mirage builds still keep `legacy-api` enabled for compatibility
+- runtime logging now explicitly tells operators to use `roko-serve /api` whenever legacy REST is absent
+
 ### Implementation details
 
-1. Remove `chain` feature and all `#[cfg(feature = "chain")]` code
-2. Remove `legacy-api` feature and all `#[cfg(feature = "legacy-api")]` code
-3. Remove `roko` feature
-4. Delete `chain/` module entirely (ChainContext, agent topology, HDC index, InsightEntry, pheromone field)
-5. Delete `http_api/` module except health and stats endpoints
-6. Simplify `ApiState` to only: `current_block`, `started_at`
-7. Remove unused dependencies from `Cargo.toml`
+1. Keep the current feature gates intact until the dashboard has switched to `roko-serve`
+2. Treat `legacy-api` as a compatibility surface, not as a permanent default
+3. Use the pure-EVM build as the verification gate for Phase 3 readiness
+4. Defer actual code deletion (`chain/`, most of `http_api/`, `roko`) until compatibility is no longer required
 
 ### Verify command
 
@@ -332,7 +335,7 @@ cargo test -p mirage-rs 2>&1 | tail -10
 
 ## C.07 — Dashboard URL Migration
 
-**Status**: NOT DONE
+**Status**: PARTIAL — serve-side compatibility is landed; dashboard env flip is still external
 **Priority**: P1 (Phase 2)
 **Estimated LOC**: ~10 (config change)
 **Dependencies**: C.03
@@ -345,12 +348,18 @@ cargo test -p mirage-rs 2>&1 | tail -10
 
 Sam changes one env var. All API shapes are identical. No code changes needed in dashboard — the aggregator returns the same JSON shapes.
 
+Current code reality for C2:
+
+- `roko-serve` now carries Mirage-compatible agent, prediction, task, and mux routes needed for the base-URL swap
+- knowledge routes are compatibility envelopes today, not chain-backed parity
+- pheromone routes are still pending on the aggregator side
+
 ### Implementation details
 
 1. Change `NEXT_PUBLIC_API_URL` from `http://mirage-rs:8545/api` to `http://roko-serve:6677/api`
-2. Verify all dashboard pages load correctly
-3. Verify WebSocket connection works through aggregator multiplexer
-4. Keep mirage-rs URL as fallback env var (`NEXT_PUBLIC_MIRAGE_URL`) during transition
+2. Keep `NEXT_PUBLIC_MIRAGE_URL` as a fallback during the overlap window
+3. Verify the agent, prediction, task, and WS-backed pages against `roko-serve`
+4. Treat knowledge/pheromone views as follow-up parity work until those aggregator sources are wired
 
 ### Verify command
 
@@ -367,7 +376,7 @@ diff <(curl -s http://mirage-rs:8545/api/agents | jq 'keys') \
 
 ## C.08 — WS Multiplexer
 
-**Status**: NOT DONE
+**Status**: DONE
 **Priority**: P2 (Phase 2)
 **Estimated LOC**: ~100
 **Dependencies**: C.01, C.03
@@ -380,22 +389,18 @@ diff <(curl -s http://mirage-rs:8545/api/agents | jq 'keys') \
 
 Dashboard currently gets one WS connection from mirage-rs. With N agent servers, the aggregator must multiplex N agent WS streams + M roko-serve events into one connection. This prevents N*M connections from dashboard.
 
+Current code reality for C2:
+
+- `/api/ws` on `roko-serve` forwards `roko-serve` backlog/live events and discovered agent `/stream` WebSockets through one connection
+- forwarded frames are wrapped as `{ "source": "...", "event": ... }`
+- the mux refreshes discovery and reconnects agent streams when endpoints change or disconnect
+
 ### Implementation details
 
-1. `GET /api/ws` handler on aggregator:
-   - On connection: discover all agent servers
-   - Connect to each agent's `/stream` WebSocket
-   - Also subscribe to roko-serve internal event bus
-   - Forward all events through single client connection, tagged with source
-2. Event wrapping:
-   ```json
-   {
-     "source": "agent-001",
-     "event": { /* original event */ }
-   }
-   ```
-3. Handle agent disconnection gracefully (log warning, continue forwarding from remaining agents)
-4. Reconnect to agents on discovery refresh (new agents appear, old ones removed)
+1. On client connect, replay `roko-serve` backlog and attach the live event bus
+2. Discover current agents and connect to each available `/stream` endpoint
+3. Wrap forwarded events with `source`
+4. Refresh discovery on an interval and reconnect agent streams as needed
 
 ### Verify command
 

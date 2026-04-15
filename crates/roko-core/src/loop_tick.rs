@@ -52,6 +52,13 @@ impl TickOutcome {
     }
 }
 
+fn ensure_lineage(mut signal: Engram, parent: crate::ContentHash) -> Engram {
+    if !signal.lineage.contains(&parent) {
+        signal.lineage.push(parent);
+    }
+    signal
+}
+
 /// Run one tick of the universal loop.
 ///
 /// # Steps
@@ -117,7 +124,10 @@ pub async fn loop_tick(
             written: Vec::new(),
         });
     };
-    let composed = composer.compose(&[chosen], budget, scorer, ctx)?;
+    let composed = ensure_lineage(
+        composer.compose(&[chosen.clone()], budget, scorer, ctx)?,
+        chosen.id,
+    );
 
     // 4. Gate verifies the composition.
     let verdict = gate.verify(&composed, ctx).await;
@@ -145,4 +155,164 @@ pub async fn loop_tick(
         emitted,
         written,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Body, Budget, ContentHash, Context, Engram, Kind, Provenance, Query, Result, Score,
+        Selection, verdict::Verdict,
+    };
+    use async_trait::async_trait;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    struct TestSubstrate {
+        candidate: Engram,
+        written: Arc<Mutex<Vec<Engram>>>,
+    }
+
+    #[async_trait]
+    impl Substrate for TestSubstrate {
+        async fn put(&self, signal: Engram) -> Result<ContentHash> {
+            self.written.lock().push(signal.clone());
+            Ok(signal.id)
+        }
+
+        async fn get(&self, _id: &ContentHash) -> Result<Option<Engram>> {
+            Ok(None)
+        }
+
+        async fn query(&self, _q: &Query, _ctx: &Context) -> Result<Vec<Engram>> {
+            Ok(vec![self.candidate.clone()])
+        }
+
+        async fn prune(&self, _threshold: f32, _ctx: &Context) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    struct TestRouter {
+        choice: Selection,
+    }
+
+    impl Router for TestRouter {
+        fn select(&self, _candidates: &[Engram], _ctx: &Context) -> Option<Selection> {
+            Some(self.choice.clone())
+        }
+
+        fn feedback(&self, _outcome: &crate::Outcome) {}
+
+        fn name(&self) -> &'static str {
+            "test_router"
+        }
+    }
+
+    struct PassthroughComposer;
+
+    impl Composer for PassthroughComposer {
+        fn compose(
+            &self,
+            signals: &[Engram],
+            _budget: &Budget,
+            _scorer: &dyn Scorer,
+            _ctx: &Context,
+        ) -> Result<Engram> {
+            Ok(Engram::builder(Kind::Prompt)
+                .body(Body::text("composed"))
+                .provenance(Provenance::trusted("composer"))
+                .score(Score::NEUTRAL)
+                .created_at_ms(0)
+                .lineage(
+                    signals
+                        .iter()
+                        .flat_map(|signal| signal.lineage.iter().copied()),
+                )
+                .build())
+        }
+
+        fn name(&self) -> &'static str {
+            "passthrough"
+        }
+    }
+
+    struct PassGate;
+
+    #[async_trait]
+    impl Gate for PassGate {
+        async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
+            Verdict::pass("pass_gate")
+        }
+
+        fn name(&self) -> &'static str {
+            "pass_gate"
+        }
+    }
+
+    struct NoopPolicy;
+
+    impl Policy for NoopPolicy {
+        fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "noop_policy"
+        }
+    }
+
+    struct ZeroScorer;
+
+    impl Scorer for ZeroScorer {
+        fn score(&self, _signal: &Engram, _ctx: &Context) -> crate::Score {
+            crate::Score::NEUTRAL
+        }
+
+        fn name(&self) -> &'static str {
+            "zero_scorer"
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_tick_adds_missing_upstream_lineage() {
+        let candidate = Engram::builder(Kind::Task)
+            .body(Body::text("task"))
+            .provenance(Provenance::trusted("source"))
+            .created_at_ms(0)
+            .build();
+        let substrate = TestSubstrate {
+            candidate: candidate.clone(),
+            written: Arc::new(Mutex::new(Vec::new())),
+        };
+        let router = TestRouter {
+            choice: Selection::new(candidate.id, "test_router"),
+        };
+        let composer = PassthroughComposer;
+        let gate = PassGate;
+        let policy = NoopPolicy;
+        let scorer = ZeroScorer;
+        let budget = Budget::unlimited();
+        let ctx = Context::now();
+
+        let outcome = loop_tick(
+            &substrate,
+            &scorer,
+            &router,
+            &composer,
+            &gate,
+            &policy,
+            &Query::all(),
+            &budget,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.passed());
+        let composed = outcome.composed.as_ref().expect("composed signal");
+        assert!(composed.lineage.contains(&candidate.id));
+        assert_eq!(substrate.written.lock().len(), 1);
+        assert!(substrate.written.lock()[0].lineage.contains(&candidate.id));
+    }
 }

@@ -25,6 +25,10 @@ pub struct SessionStatus {
     pub last_episode_passed: Option<bool>,
     /// Optional current C-Factor snapshot.
     pub cfactor: Option<CFactor>,
+    /// Total recorded cost in USD.
+    pub total_cost_usd: Option<f64>,
+    /// Recorded cost for the current UTC day in USD.
+    pub today_cost_usd: Option<f64>,
 }
 
 impl SessionStatus {
@@ -39,6 +43,8 @@ impl SessionStatus {
             episode_count: None,
             last_episode_passed: None,
             cfactor: None,
+            total_cost_usd: None,
+            today_cost_usd: None,
         }
     }
 
@@ -72,6 +78,12 @@ impl SessionStatus {
                 "last episode: {}",
                 if passed { "passed" } else { "failed" }
             ));
+        }
+        if let Some(cost) = self.total_cost_usd {
+            lines.push(format!("total cost: ${cost:.4}"));
+        }
+        if let Some(cost) = self.today_cost_usd {
+            lines.push(format!("today cost: ${cost:.4}"));
         }
         if let Some(cfactor) = &self.cfactor {
             lines.push(format!(
@@ -121,9 +133,15 @@ impl SessionStatus {
             || "null".to_string(),
             |value| serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
         );
+        let total_cost = self
+            .total_cost_usd
+            .map_or_else(|| "null".to_string(), |value| format!("{value:.6}"));
+        let today_cost = self
+            .today_cost_usd
+            .map_or_else(|| "null".to_string(), |value| format!("{value:.6}"));
 
         format!(
-            r#"{{"workdir":"{}","session":{},"daemon_running":{},"signal_count":{},"episode_count":{},"last_episode_passed":{},"cfactor":{}}}"#,
+            r#"{{"workdir":"{}","session":{},"daemon_running":{},"signal_count":{},"episode_count":{},"last_episode_passed":{},"cfactor":{},"total_cost_usd":{},"today_cost_usd":{}}}"#,
             self.workdir.display(),
             session,
             self.daemon_running,
@@ -131,6 +149,8 @@ impl SessionStatus {
             episodes,
             last,
             cfactor,
+            total_cost,
+            today_cost,
         )
     }
 }
@@ -156,6 +176,7 @@ mod tests {
         assert!(!status.daemon_running);
         assert!(status.signal_count.is_none());
         assert!(status.cfactor.is_none());
+        assert!(status.total_cost_usd.is_none());
     }
 
     #[test]
@@ -168,6 +189,8 @@ mod tests {
             episode_count: Some(3),
             last_episode_passed: Some(true),
             cfactor: None,
+            total_cost_usd: Some(12.5),
+            today_cost_usd: Some(1.25),
         };
         let text = status.display_text();
         assert!(text.contains("/project"));
@@ -176,6 +199,7 @@ mod tests {
         assert!(text.contains("42"));
         assert!(text.contains("3"));
         assert!(text.contains("passed"));
+        assert!(text.contains("12.5000"));
     }
 
     #[test]
@@ -196,12 +220,15 @@ mod tests {
             episode_count: Some(2),
             last_episode_passed: Some(false),
             cfactor: None,
+            total_cost_usd: Some(4.2),
+            today_cost_usd: Some(0.7),
         };
         let json = status.display_json();
         assert!(json.contains(r#""session":"s1""#));
         assert!(json.contains(r#""daemon_running":false"#));
         assert!(json.contains(r#""signal_count":10"#));
         assert!(json.contains(r#""last_episode_passed":false"#));
+        assert!(json.contains(r#""total_cost_usd":4.200000"#));
     }
 
     #[test]

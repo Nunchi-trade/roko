@@ -89,6 +89,16 @@ impl LatencyStats {
         let idx = idx.min(latencies.len().saturating_sub(1));
         latencies[idx]
     }
+
+    /// Mean of the recorded total latencies, when at least one sample exists.
+    #[must_use]
+    pub fn mean_latency_ms(&self) -> Option<f64> {
+        if self.recent_latencies.is_empty() {
+            return None;
+        }
+
+        Some(self.recent_latencies.iter().sum::<f64>() / self.recent_latencies.len() as f64)
+    }
 }
 
 /// Persisted snapshot for [`LatencyRegistry`].
@@ -259,6 +269,68 @@ impl Default for LatencyRegistry {
     }
 }
 
+/// Lightweight model-level tracker that records one latency value per model.
+pub struct LatencyTracker {
+    registry: LatencyRegistry,
+    provider_id: String,
+}
+
+const LATENCY_TRACKER_PROVIDER_ID: &str = "__latency_tracker__";
+
+impl LatencyTracker {
+    /// Create an empty tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            registry: LatencyRegistry::new(),
+            provider_id: LATENCY_TRACKER_PROVIDER_ID.to_string(),
+        }
+    }
+
+    /// Load a tracker from `path`, or return an empty tracker if missing.
+    #[must_use]
+    pub fn load_or_new(path: &Path) -> Self {
+        Self {
+            registry: LatencyRegistry::load_or_new(path),
+            provider_id: LATENCY_TRACKER_PROVIDER_ID.to_string(),
+        }
+    }
+
+    /// Record one observed model latency in milliseconds.
+    pub fn record(&mut self, model: &str, latency_ms: u64) {
+        let latency_ms = latency_ms as f64;
+        self.registry
+            .record(model, &self.provider_id, latency_ms, latency_ms, 1);
+    }
+
+    /// Return the mean observed latency for `model`, when available.
+    #[must_use]
+    pub fn mean_latency(&self, model: &str) -> Option<f64> {
+        self.registry
+            .get(model, &self.provider_id)
+            .and_then(|stats| stats.mean_latency_ms())
+    }
+
+    /// Return the p95 observed latency for `model`, when available.
+    #[must_use]
+    pub fn p95_latency(&self, model: &str) -> Option<f64> {
+        self.registry
+            .get(model, &self.provider_id)
+            .map(|stats| stats.p95_ms())
+    }
+
+    /// Persist the tracker to `path`.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        self.registry.save(path)
+    }
+}
+
+impl Default for LatencyTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for LatencyRegistry {
     fn drop(&mut self) {
         if let Some(tx) = self.save_tx.take() {
@@ -357,7 +429,7 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{LatencyRegistry, LatencyStats};
+    use super::{LatencyRegistry, LatencyStats, LatencyTracker};
     use std::collections::VecDeque;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -537,5 +609,16 @@ mod tests {
         assert_close(stats.p50_ms(), 200.0);
         assert_close(stats.p95_ms(), 300.0);
         assert_close(stats.p99_ms(), 300.0);
+    }
+
+    #[test]
+    fn latency_tracker_records_mean_and_p95() {
+        let mut tracker = LatencyTracker::new();
+        tracker.record("glm-5.1", 100);
+        tracker.record("glm-5.1", 250);
+        tracker.record("glm-5.1", 300);
+
+        assert_close(tracker.mean_latency("glm-5.1").unwrap(), 216.6666666667);
+        assert_close(tracker.p95_latency("glm-5.1").unwrap(), 300.0);
     }
 }

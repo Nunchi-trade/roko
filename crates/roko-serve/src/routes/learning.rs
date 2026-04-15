@@ -24,12 +24,17 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/learning/efficiency", get(efficiency))
         .route("/learn/efficiency", get(efficiency))
         .route("/learning/cascade-router", get(cascade_router))
+        .route("/learn/cascade-router", get(cascade_router))
+        .route("/learning/cascade", get(cascade))
+        .route("/learning/cost-tiers", get(cost_tiers))
+        .route("/learn/cost-tiers", get(cost_tiers))
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
         .route("/learning/experiments", get(experiments))
         .route("/learn/adaptive-thresholds", get(adaptive_thresholds))
         .route("/learning/adaptive-thresholds", get(adaptive_thresholds))
         .route("/learning/gate-thresholds", get(gate_thresholds))
+        .route("/learn/gate-thresholds", get(gate_thresholds))
 }
 
 /// `GET /api/learn/efficiency` — aggregate `.roko/learn/efficiency.jsonl`.
@@ -54,6 +59,15 @@ async fn cascade(State(state): State<Arc<AppState>>) -> Result<Json<CascadeRespo
     let path = state.workdir.join(".roko/learn/cascade-router.json");
     let snapshot = read_cascade_snapshot(&path).await?;
     Ok(Json(build_cascade_response(&path, snapshot)))
+}
+
+/// `GET /api/learning/cost-tiers` — summarize T0/T1/T2 routing distribution.
+async fn cost_tiers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CostTierResponse>, ApiError> {
+    let path = state.workdir.join(".roko/learn/cascade-router.json");
+    let snapshot = read_cascade_snapshot(&path).await?;
+    Ok(Json(build_cost_tier_response(snapshot)))
 }
 
 /// `GET /api/learn/experiments` — summarize `.roko/learn/experiments.json`.
@@ -103,7 +117,7 @@ async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore
     let content = match tokio::fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::not_found(format!("{} not found", path.display())));
+            return Ok(ExperimentStore::new());
         }
         Err(e) => {
             return Err(ApiError::internal(format!("read {}: {e}", path.display())));
@@ -650,6 +664,23 @@ struct CascadeRoutingStats {
     best_model: Option<String>,
 }
 
+/// Structured API response for `GET /api/learning/cost-tiers`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct CostTierResponse {
+    #[serde(rename = "T0")]
+    t0: u64,
+    #[serde(rename = "T1")]
+    t1: u64,
+    #[serde(rename = "T2")]
+    t2: u64,
+    total: u64,
+    sample_count: u64,
+    t0_pct: f64,
+    t1_pct: f64,
+    t2_pct: f64,
+}
+
 /// Recommended model for one task category.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -658,6 +689,57 @@ struct TaskRecommendation {
     complexity_band: String,
     recommended_model: String,
     weight: f64,
+}
+
+fn build_cost_tier_response(snapshot: Option<CascadeSnapshotData>) -> CostTierResponse {
+    let snapshot = snapshot.unwrap_or_default();
+    let mut t0 = 0_u64;
+    let mut t1 = 0_u64;
+    let mut t2 = 0_u64;
+
+    for (model, stats) in snapshot.confidence_stats {
+        match cost_tier_for_model(&model) {
+            "T0" => t0 += stats.trials,
+            "T1" => t1 += stats.trials,
+            _ => t2 += stats.trials,
+        }
+    }
+
+    let total = t0 + t1 + t2;
+    let denom = (total as f64).max(f64::EPSILON);
+
+    CostTierResponse {
+        t0,
+        t1,
+        t2,
+        total,
+        sample_count: total,
+        t0_pct: if total == 0 {
+            0.0
+        } else {
+            (t0 as f64 / denom) * 100.0
+        },
+        t1_pct: if total == 0 {
+            0.0
+        } else {
+            (t1 as f64 / denom) * 100.0
+        },
+        t2_pct: if total == 0 {
+            0.0
+        } else {
+            (t2 as f64 / denom) * 100.0
+        },
+    }
+}
+
+fn cost_tier_for_model(model: &str) -> &'static str {
+    if model.contains("rust") || model.contains("fsm") || model.contains("haiku") {
+        "T0"
+    } else if model.contains("opus") || model.contains("premium") {
+        "T2"
+    } else {
+        "T1"
+    }
 }
 
 /// Structured API response for `GET /api/learn/experiments`.
@@ -803,12 +885,17 @@ mod tests {
     use roko_core::OperatingFrequency;
     use std::sync::Arc;
 
+    use axum::body::Body;
     use axum::extract::State;
+    use axum::http::Request;
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     use crate::deploy::create_backend;
+    use crate::routes::build_router;
     use crate::runtime::NoOpRuntime;
     use crate::state::AppState;
+    use roko_core::config::ServeAuthConfig;
 
     fn make_experiment() -> PromptExperiment {
         let variants = vec![
@@ -926,6 +1013,20 @@ mod tests {
     }
 
     #[test]
+    fn cost_tier_response_buckets_trials_by_model_tier() {
+        let response = build_cost_tier_response(Some(snapshot()));
+
+        assert_eq!(response.t0, 30);
+        assert_eq!(response.t1, 50);
+        assert_eq!(response.t2, 0);
+        assert_eq!(response.total, 80);
+        assert_eq!(response.sample_count, 80);
+        assert!((response.t0_pct - 37.5).abs() < 1e-9);
+        assert!((response.t1_pct - 62.5).abs() < 1e-9);
+        assert_eq!(response.t2_pct, 0.0);
+    }
+
+    #[test]
     fn experiments_response_summarizes_active_experiments() {
         let mut store = ExperimentStore::new();
         store.register(make_experiment());
@@ -1006,14 +1107,216 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn experiments_returns_404_when_missing() {
+    async fn cascade_alias_is_served_under_api_grouping() {
+        let (dir, state) = test_state();
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .expect("create learn dir");
+        let cascade_path = learn_dir.join("cascade-router.json");
+        tokio::fs::write(
+            &cascade_path,
+            serde_json::json!({
+                "model_slugs": ["claude-sonnet-4-5"],
+                "confidence_stats": {
+                    "claude-sonnet-4-5": { "trials": 50, "successes": 30 }
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write cascade snapshot");
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learning/cascade")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("cascade response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: Value = serde_json::from_slice(&body).expect("parse cascade response");
+        assert_eq!(payload["source"], cascade_path.display().to_string());
+        assert_eq!(payload["routing_stats"]["total_observations"], 50);
+        assert_eq!(payload["model_weights"][0]["model"], "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
+    async fn gates_history_collection_is_served_under_api_grouping() {
+        let (dir, state) = test_state();
+        let signals = dir.path().join(".roko").join("signals.jsonl");
+        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+            .await
+            .expect("create signals dir");
+        tokio::fs::write(
+            &signals,
+            [
+                serde_json::json!({
+                    "id": "signal-1",
+                    "kind": "gate_verdict",
+                    "created_at_ms": 10,
+                    "tags": {
+                        "gate": "compile",
+                        "passed": "true",
+                        "duration_ms": 120
+                    }
+                })
+                .to_string(),
+                serde_json::json!({
+                    "id": "signal-2",
+                    "kind": "gate_verdict",
+                    "created_at_ms": 20,
+                    "tags": {
+                        "gate": "test",
+                        "passed": "false",
+                        "duration_ms": 240
+                    }
+                })
+                .to_string(),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .await
+        .expect("write gate history");
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/gates/history?limit=1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("gate history response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: Value = serde_json::from_slice(&body).expect("parse gate history response");
+        assert_eq!(payload["source"], signals.display().to_string());
+        assert_eq!(payload["total"], 2);
+        assert_eq!(payload["limit"], 1);
+        assert_eq!(payload["history"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["history"][0]["gate"], "test");
+        assert_eq!(payload["history"][0]["passed"], false);
+    }
+
+    #[tokio::test]
+    async fn experiments_returns_empty_store_when_missing() {
         let (_dir, state) = test_state();
 
-        let err = experiments(State(state))
+        let response = experiments(State(state))
             .await
-            .expect_err("missing experiments should fail");
+            .expect("missing experiments should return empty store");
+        let body = response.0;
 
-        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(body.running_experiments, 0);
+        assert_eq!(body.concluded_experiments, 0);
+        assert!(body.active_experiments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn learn_alias_routes_expose_cascade_router_cost_tiers_and_gate_thresholds() {
+        let (dir, state) = test_state();
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .expect("create learn dir");
+
+        let cascade_path = learn_dir.join("cascade-router.json");
+        tokio::fs::write(
+            &cascade_path,
+            serde_json::json!({
+                "model_slugs": ["claude-sonnet-4-5", "claude-haiku-3-5"],
+                "confidence_stats": {
+                    "claude-sonnet-4-5": { "trials": 50, "successes": 30 },
+                    "claude-haiku-3-5": { "trials": 10, "successes": 8 }
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write cascade snapshot");
+
+        let gate_thresholds_path = learn_dir.join("gate-thresholds.json");
+        tokio::fs::write(
+            &gate_thresholds_path,
+            serde_json::json!({"hello": "world"}).to_string(),
+        )
+        .await
+        .expect("write gate thresholds");
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+
+        let cascade_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learn/cascade-router")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("cascade router response");
+        assert_eq!(cascade_response.status(), axum::http::StatusCode::OK);
+        let cascade_body = axum::body::to_bytes(cascade_response.into_body(), usize::MAX)
+            .await
+            .expect("read cascade body");
+        let cascade_payload: Value =
+            serde_json::from_slice(&cascade_body).expect("parse cascade router response");
+        assert_eq!(cascade_payload["model_slugs"].as_array().unwrap().len(), 2);
+
+        let cost_tiers_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learn/cost-tiers")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("cost tiers response");
+        assert_eq!(cost_tiers_response.status(), axum::http::StatusCode::OK);
+        let cost_tiers_body = axum::body::to_bytes(cost_tiers_response.into_body(), usize::MAX)
+            .await
+            .expect("read cost tiers body");
+        let cost_tiers_payload: Value =
+            serde_json::from_slice(&cost_tiers_body).expect("parse cost tiers response");
+        assert_eq!(cost_tiers_payload["total"], 60);
+        assert_eq!(cost_tiers_payload["T0"], 10);
+        assert_eq!(cost_tiers_payload["T1"], 50);
+
+        let thresholds_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learn/gate-thresholds")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("gate thresholds response");
+        assert_eq!(thresholds_response.status(), axum::http::StatusCode::OK);
+        let thresholds_body = axum::body::to_bytes(thresholds_response.into_body(), usize::MAX)
+            .await
+            .expect("read gate thresholds body");
+        let thresholds_payload: Value =
+            serde_json::from_slice(&thresholds_body).expect("parse gate thresholds response");
+        assert_eq!(thresholds_payload["hello"], "world");
     }
 
     #[tokio::test]

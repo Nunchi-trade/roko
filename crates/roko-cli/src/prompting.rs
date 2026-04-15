@@ -4,6 +4,7 @@ use anyhow::Result;
 use roko_compose::{PadState, RoleSystemPromptSpec, TaskContext};
 use roko_core::AgentRole;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
+use roko_learn::skill_library::Skill;
 
 /// Optional prompt-builder settings shared across CLI dispatch paths.
 #[derive(Clone, Debug, Default)]
@@ -14,6 +15,8 @@ pub struct PromptBuildOptions {
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended to defaults.
     pub extra_anti_patterns: Vec<String>,
+    /// Optional relevant skills injected into the system prompt.
+    pub relevant_skills: Vec<Skill>,
 }
 
 fn build_spec(
@@ -29,6 +32,9 @@ fn build_spec(
     }
     for anti_pattern in options.extra_anti_patterns {
         spec = spec.add_anti_pattern(anti_pattern);
+    }
+    if !options.relevant_skills.is_empty() {
+        spec = spec.with_relevant_skills(&options.relevant_skills);
     }
     spec
 }

@@ -5388,6 +5388,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "roko-agent-server"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "roko-agent",
+ "roko-chain",
+ "roko-learn",
+ "roko-neuro",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "roko-chain"
 version = "0.1.0"
 dependencies = [
@@ -5518,6 +5544,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "ed25519-dalek",
  "parking_lot",
  "proptest",
  "regex",
@@ -5555,6 +5582,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "crossterm",
+ "futures-util",
+ "ratatui",
  "reqwest 0.12.28",
  "roko-chain",
  "serde",
@@ -5562,6 +5592,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "toml",
  "tracing",
  "tracing-subscriber 0.3.23",
@@ -5574,6 +5605,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "cron",
  "roko-agent",
  "roko-core",
  "roko-learn",
@@ -5620,8 +5652,15 @@ dependencies = [
 name = "roko-index"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "regex",
  "roko-core",
+ "roko-lang-go",
+ "roko-lang-rust",
+ "roko-lang-typescript",
  "serde",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -5666,6 +5705,20 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "roko-mcp-code"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "roko-core",
+ "roko-index",
+ "roko-mcp-stdio",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -5813,6 +5866,8 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "roko-agent",
+ "roko-agent-server",
+ "roko-chain",
  "roko-compose",
  "roko-conductor",
  "roko-core",
