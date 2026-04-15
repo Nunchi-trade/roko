@@ -62,12 +62,14 @@ fn render_left_panel(
 ) {
     let sections = Layout::vertical([
         Constraint::Length(3), // Pipeline header
+        Constraint::Length(4), // Selected plan summary
         Constraint::Min(0),    // Wave/plan tree
     ])
     .split(area);
 
     render_pipeline_header(frame, sections[0], data, tui_state, theme);
-    render_wave_tree(frame, sections[1], data, tui_state, view_state, theme);
+    render_selected_plan_summary(frame, sections[1], data, tui_state, view_state, theme);
+    render_wave_tree(frame, sections[2], data, tui_state, view_state, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +108,12 @@ fn render_pipeline_header(
             Style::default()
                 .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if tui_state.wave_count() > 0 {
+        health_parts.push(Span::styled(
+            format!(" wave {}/{}", tui_state.current_wave().saturating_add(1), tui_state.wave_count()),
+            Style::default().fg(theme.muted),
         ));
     }
 
@@ -721,7 +729,7 @@ fn render_right_panel(
 
         let sections = Layout::vertical([
             Constraint::Length(error_height), // Error banner (if any)
-            Constraint::Length(5),            // Plan header + progress
+            Constraint::Length(6),            // Plan header + progress
             Constraint::Min(0),               // Task table
             Constraint::Length(6),            // Gate results
         ])
@@ -817,6 +825,23 @@ fn render_execution_header(
                 Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ),
         ]),
+        Line::from(vec![
+            Span::styled(" remaining: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{}", exec.tasks_total.saturating_sub(exec.tasks_done)),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(" current: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                exec.current_task
+                    .as_ref()
+                    .map(|task| task.task_id.as_str())
+                    .unwrap_or("-")
+                    .to_string(),
+                Style::default().fg(theme.warning),
+            ),
+        ]),
         Line::from(Span::styled(
             format!(
                 " {}",
@@ -827,6 +852,119 @@ fn render_execution_header(
     ];
     let para = Paragraph::new(lines);
     frame.render_widget(para, area);
+}
+
+fn render_selected_plan_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Selected Plan ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(theme.muted());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let selected = data.plans.get(view_state.selected);
+    let selected_tui = tui_state.plans.get(view_state.selected);
+
+    if selected.is_none() {
+        let empty = Paragraph::new(Span::styled(
+            " select a plan to inspect live wave and task state",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
+        ))
+        .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let plan = selected.unwrap();
+    let plan_state = selected_tui.map(|plan| plan.status.as_str()).unwrap_or("pending");
+    let tasks_done = selected_tui.map(|plan| plan.tasks_done).unwrap_or_else(|| {
+        if plan.completed {
+            plan.task_count
+        } else {
+            0
+        }
+    });
+    let tasks_total = selected_tui.map(|plan| plan.tasks_total).unwrap_or(plan.task_count);
+    let tasks_failed = selected_tui.map(|plan| plan.tasks_failed).unwrap_or(0);
+    let elapsed_secs = selected_tui.map(|plan| plan.elapsed_secs).unwrap_or(0.0);
+    let remaining = tasks_total.saturating_sub(tasks_done);
+    let current_wave = tui_state.current_wave().saturating_add(1);
+    let total_waves = tui_state.wave_count().max(1);
+    let current_exec = data.current_plan_execution.as_ref();
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" plan ", Style::default().fg(theme.muted)),
+            Span::styled(&plan.title, Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD)),
+            Span::styled("  ", Style::default()),
+            Span::styled(format!("({})", plan.id), Style::default().fg(theme.muted)),
+        ]),
+        Line::from(vec![
+            Span::styled(" status ", Style::default().fg(theme.muted)),
+            Span::styled(plan_state, Style::default().fg(theme.accent)),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("wave {current_wave}/{total_waves}"),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("done {tasks_done}/{tasks_total} rem {remaining}"),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" elapsed ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{:.1}s", elapsed_secs.max(0.0)),
+                Style::default().fg(theme.warning),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(" fail ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{tasks_failed}"),
+                Style::default().fg(if tasks_failed > 0 {
+                    theme.danger
+                } else {
+                    theme.muted
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" current ", Style::default().fg(theme.muted)),
+            Span::styled(
+                current_exec
+                    .and_then(|exec| exec.current_task.as_ref())
+                    .map(|task| task.description.as_str())
+                    .unwrap_or("no active execution")
+                    .to_string(),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 // ---------------------------------------------------------------------------

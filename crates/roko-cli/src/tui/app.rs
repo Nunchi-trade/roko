@@ -765,14 +765,33 @@ impl App {
                 self.tui_state.focus = self.tui_state.focus.prev(self.tui_state.active_tab);
             }
             TuiAction::SelectPlanUp => {
-                if self.tui_state.selected_plan_idx > 0 {
+                if matches!(self.tui_state.active_tab, Tab::Agents)
+                    && !matches!(
+                        self.tui_state.focus,
+                        FocusZone::AgentOutput | FocusZone::RightPanel
+                    )
+                {
+                    self.tui_state.selected_agent = self.tui_state.selected_agent.saturating_sub(1);
+                } else if self.tui_state.selected_plan_idx > 0 {
                     self.tui_state.selected_plan_idx -= 1;
                 }
             }
             TuiAction::SelectPlanDown => {
-                let max = self.tui_state.plans.len().saturating_sub(1);
-                if self.tui_state.selected_plan_idx < max {
-                    self.tui_state.selected_plan_idx += 1;
+                if matches!(self.tui_state.active_tab, Tab::Agents)
+                    && !matches!(
+                        self.tui_state.focus,
+                        FocusZone::AgentOutput | FocusZone::RightPanel
+                    )
+                {
+                    let max = self.tui_state.agents.len().saturating_sub(1);
+                    if self.tui_state.selected_agent < max {
+                        self.tui_state.selected_agent += 1;
+                    }
+                } else {
+                    let max = self.tui_state.plans.len().saturating_sub(1);
+                    if self.tui_state.selected_plan_idx < max {
+                        self.tui_state.selected_plan_idx += 1;
+                    }
                 }
             }
             TuiAction::ScrollFocusedUp => {
@@ -785,30 +804,67 @@ impl App {
             }
             TuiAction::ScrollPageUp => self.scroll_focused(-PAGE_SCROLL_LINES),
             TuiAction::ScrollPageDown => self.scroll_focused(PAGE_SCROLL_LINES),
-            TuiAction::ScrollFocusedHome => self.set_focused_scroll(0),
-            TuiAction::ScrollFocusedEnd => self.set_focused_scroll(usize::MAX),
+            TuiAction::ScrollFocusedHome => match (self.tui_state.active_tab, self.tui_state.focus)
+            {
+                (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
+                    self.tui_state.agent_scroll = Some(usize::MAX);
+                }
+                (Tab::Logs, _) => {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = usize::MAX;
+                }
+                _ => self.set_focused_scroll(0),
+            },
+            TuiAction::ScrollFocusedEnd => {
+                match (self.tui_state.active_tab, self.tui_state.focus) {
+                    (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
+                        self.tui_state.agent_scroll = None;
+                    }
+                    (Tab::Logs, _) => {
+                        self.tui_state.log_auto_tail = true;
+                        self.tui_state.log_scroll = 0;
+                    }
+                    _ => self.set_focused_scroll(usize::MAX),
+                }
+            }
             TuiAction::ScrollLogUp => {
-                let delta = self.scroll_accel.push(-1);
-                self.tui_state.log_scroll =
-                    Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
+                if self.tui_state.log_auto_tail {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = 1;
+                } else {
+                    self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_add(1);
+                }
             }
             TuiAction::ScrollLogDown => {
-                let delta = self.scroll_accel.push(1);
-                self.tui_state.log_scroll =
-                    Self::apply_signed_scroll(self.tui_state.log_scroll, delta);
+                if !self.tui_state.log_auto_tail {
+                    if self.tui_state.log_scroll > 0 {
+                        self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_sub(1);
+                    }
+                    if self.tui_state.log_scroll == 0 {
+                        self.tui_state.log_auto_tail = true;
+                    }
+                }
             }
             TuiAction::ScrollLogEnd => {
-                self.tui_state.log_scroll = usize::MAX; // Clamped during render
+                self.tui_state.log_auto_tail = true;
+                self.tui_state.log_scroll = 0;
+            }
+            TuiAction::ToggleLogTail => {
+                self.tui_state.log_auto_tail = !self.tui_state.log_auto_tail;
+                self.tui_state.log_scroll = 0;
             }
             TuiAction::ScrollAgentUp => {
                 let current = self.tui_state.agent_scroll.unwrap_or(0);
-                let delta = self.scroll_accel.push(-1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                self.tui_state.agent_scroll = Some(current.saturating_add(1));
             }
             TuiAction::ScrollAgentDown => {
-                let current = self.tui_state.agent_scroll.unwrap_or(0);
-                let delta = self.scroll_accel.push(1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                if let Some(current) = self.tui_state.agent_scroll {
+                    if current == 0 {
+                        self.tui_state.agent_scroll = None;
+                    } else {
+                        self.tui_state.agent_scroll = Some(current.saturating_sub(1));
+                    }
+                }
             }
             TuiAction::ScrollAgentEnd => {
                 self.tui_state.agent_scroll = None; // Resume auto-tail
@@ -941,12 +997,11 @@ impl App {
             }
             TuiAction::SwitchAgentTab(idx) => {
                 if idx == usize::MAX {
-                    // Cycle: backtick
-                    let agent_count = self.tui_state.agents.len().max(1);
+                    let agent_count = 7;
                     self.tui_state.selected_agent_tab =
                         (self.tui_state.selected_agent_tab + 1) % agent_count;
                 } else {
-                    self.tui_state.selected_agent_tab = idx;
+                    self.tui_state.selected_agent_tab = idx.min(6);
                 }
             }
             TuiAction::SwitchDetailTab(idx) => {
@@ -1533,24 +1588,60 @@ impl App {
     }
 
     fn scroll_focused(&mut self, delta: i32) {
-        match self.tui_state.focus {
-            FocusZone::PlanTree => {
+        match (self.tui_state.active_tab, self.tui_state.focus) {
+            (Tab::Logs, _) => {
+                if self.tui_state.log_auto_tail {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = delta.unsigned_abs() as usize;
+                } else {
+                    let current = self.tui_state.log_scroll as i32;
+                    let next = (current + delta).max(0) as usize;
+                    self.tui_state.log_scroll = next;
+                    if next == 0 {
+                        self.tui_state.log_auto_tail = true;
+                    }
+                }
+            }
+            (Tab::Agents, FocusZone::PlanTree) => {
+                let max = self.tui_state.agents.len().saturating_sub(1);
+                let next = (self.tui_state.selected_agent as i32 + delta).clamp(0, max as i32);
+                self.tui_state.selected_agent = next as usize;
+            }
+            (Tab::Agents, FocusZone::AgentOutput) => {
+                let current = self.tui_state.agent_scroll.unwrap_or(0);
+                if delta < 0 {
+                    self.tui_state.agent_scroll =
+                        Some(current.saturating_add(delta.unsigned_abs() as usize));
+                } else if current == 0 {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(current.saturating_sub(delta as usize));
+                }
+            }
+            (_, FocusZone::PlanTree) => {
                 let current = self.tui_state.plan_scroll_offset as i32;
                 self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
             }
-            FocusZone::TaskProgress => {
+            (_, FocusZone::TaskProgress) => {
                 let current = self.tui_state.task_scroll as i32;
                 self.tui_state.task_scroll = (current + delta).max(0) as usize;
             }
-            FocusZone::AgentOutput => {
-                let current = self.tui_state.agent_scroll.unwrap_or(0) as i32;
-                self.tui_state.agent_scroll = Some((current + delta).max(0) as usize);
+            (_, FocusZone::AgentOutput) => {
+                let current = self.tui_state.agent_scroll.unwrap_or(0);
+                if delta < 0 {
+                    self.tui_state.agent_scroll =
+                        Some(current.saturating_add(delta.unsigned_abs() as usize));
+                } else if current == 0 {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(current.saturating_sub(delta as usize));
+                }
             }
-            FocusZone::CommandOutput => {
+            (_, FocusZone::CommandOutput) => {
                 let current = self.tui_state.command_output_scroll as i32;
                 self.tui_state.command_output_scroll = (current + delta).max(0) as usize;
             }
-            FocusZone::RightPanel => {
+            (_, FocusZone::RightPanel) => {
                 let current = self.tui_state.diff_scroll as i32;
                 self.tui_state.diff_scroll = (current + delta).max(0) as usize;
             }
@@ -1558,20 +1649,31 @@ impl App {
     }
 
     fn set_focused_scroll(&mut self, offset: usize) {
-        match self.tui_state.focus {
-            FocusZone::PlanTree => {
-                self.tui_state.plan_scroll_offset = offset;
+        match (self.tui_state.active_tab, self.tui_state.focus) {
+            (Tab::Agents, FocusZone::PlanTree) => {
+                let max = self.tui_state.agents.len().saturating_sub(1);
+                self.tui_state.selected_agent = if offset == usize::MAX {
+                    max
+                } else {
+                    offset.min(max)
+                };
             }
-            FocusZone::TaskProgress => {
-                self.tui_state.task_scroll = offset;
-            }
-            FocusZone::AgentOutput => {
+            (Tab::Agents, FocusZone::AgentOutput) => {
                 self.tui_state.agent_scroll = Some(offset);
             }
-            FocusZone::CommandOutput => {
+            (_, FocusZone::PlanTree) => {
+                self.tui_state.plan_scroll_offset = offset;
+            }
+            (_, FocusZone::TaskProgress) => {
+                self.tui_state.task_scroll = offset;
+            }
+            (_, FocusZone::AgentOutput) => {
+                self.tui_state.agent_scroll = Some(offset);
+            }
+            (_, FocusZone::CommandOutput) => {
                 self.tui_state.command_output_scroll = offset;
             }
-            FocusZone::RightPanel => {
+            (_, FocusZone::RightPanel) => {
                 self.tui_state.diff_scroll = offset;
             }
         }
@@ -1710,15 +1812,56 @@ impl App {
     }
 
     fn current_view_state(&self) -> ViewState {
-        ViewState {
-            scroll: self.tui_state.plan_scroll_offset as u16,
-            selected: match self.tui_state.active_tab {
-                Tab::Git => self.tui_state.git_branch_cursor,
-                _ => self.tui_state.selected_plan_idx,
+        match self.tui_state.active_tab {
+            Tab::Dashboard => ViewState {
+                scroll: self.tui_state.agent_scroll.unwrap_or(0) as u16,
+                selected: self.tui_state.selected_plan_idx,
+                sub_tab: self.tui_state.plan_detail_tab,
+                secondary_selected: 0,
+                auto_tail: self.tui_state.agent_scroll.is_none(),
             },
-            sub_tab: self.tui_state.plan_detail_tab,
-            secondary_selected: 0,
-            auto_tail: self.tui_state.agent_scroll.is_none(),
+            Tab::Plans => ViewState {
+                scroll: self.tui_state.plan_scroll_offset as u16,
+                selected: self.tui_state.selected_plan_idx,
+                sub_tab: self.tui_state.plan_detail_tab,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Agents => ViewState {
+                scroll: self.tui_state.agent_scroll.unwrap_or(0) as u16,
+                selected: self.tui_state.selected_agent,
+                sub_tab: self.tui_state.selected_agent_tab,
+                secondary_selected: 0,
+                auto_tail: self.tui_state.agent_scroll.is_none(),
+            },
+            Tab::Git => ViewState {
+                scroll: self.tui_state.plan_scroll_offset as u16,
+                selected: self.tui_state.git_branch_cursor,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Logs => ViewState {
+                scroll: self.tui_state.log_scroll.min(u16::MAX as usize) as u16,
+                selected: 0,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: self.tui_state.log_auto_tail,
+            },
+            Tab::Config => ViewState {
+                scroll: self.tui_state.config_scroll_offset.min(u16::MAX as usize) as u16,
+                selected: self.tui_state.config_cursor,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Inspect => ViewState {
+                scroll: 0,
+                selected: 0,
+                sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
         }
     }
 
@@ -2005,6 +2148,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(Span::styled("General", theme.accent_bold())),
         Line::from("Ctrl-r     refresh data"),
+        Line::from("f          toggle log tail / pin"),
         Line::from("Ctrl-C     quit immediately"),
     ]
 }
@@ -2166,6 +2310,88 @@ mod tests {
 
         app.dispatch_action(TuiAction::ScrollFocusedEnd);
         assert_eq!(app.tui_state.diff_scroll, usize::MAX);
+    }
+
+    #[test]
+    fn current_view_state_is_tab_specific() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.selected_plan_idx = 2;
+        app.tui_state.selected_agent = 3;
+        app.tui_state.selected_agent_tab = 4;
+        app.tui_state.plan_scroll_offset = 8;
+        app.tui_state.agent_scroll = Some(5);
+        app.tui_state.log_scroll = 7;
+        app.tui_state.log_auto_tail = false;
+
+        app.tui_state.active_tab = Tab::Dashboard;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 5);
+        assert_eq!(view.selected, 2);
+        assert_eq!(view.sub_tab, 0);
+        assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Plans;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 8);
+        assert_eq!(view.selected, 2);
+        assert_eq!(view.sub_tab, 0);
+        assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Agents;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 5);
+        assert_eq!(view.selected, 3);
+        assert_eq!(view.sub_tab, 4);
+        assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Logs;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 7);
+        assert_eq!(view.selected, 0);
+        assert!(!view.auto_tail);
+    }
+
+    #[test]
+    fn agents_tab_selection_moves_agent_roster() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.active_tab = Tab::Agents;
+        app.tui_state.selected_agent = 1;
+        app.tui_state.focus = FocusZone::PlanTree;
+        app.tui_state.agents = vec![
+            super::super::state::AgentRow::default(),
+            super::super::state::AgentRow::default(),
+            super::super::state::AgentRow::default(),
+        ];
+
+        app.dispatch_action(TuiAction::ScrollFocusedUp);
+        assert_eq!(app.tui_state.selected_agent, 0);
+
+        app.dispatch_action(TuiAction::ScrollFocusedDown);
+        assert_eq!(app.tui_state.selected_agent, 1);
+
+        app.dispatch_action(TuiAction::ScrollFocusedEnd);
+        assert_eq!(app.tui_state.selected_agent, 2);
+    }
+
+    #[test]
+    fn logs_tail_toggle_and_filter_input_work() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.active_tab = Tab::Logs;
+        app.tui_state.log_auto_tail = true;
+        app.tui_state.log_scroll = 0;
+
+        app.dispatch_action(TuiAction::ToggleLogTail);
+        assert!(!app.tui_state.log_auto_tail);
+
+        app.dispatch_action(TuiAction::ScrollLogUp);
+        assert_eq!(app.tui_state.log_scroll, 1);
+
+        app.dispatch_action(TuiAction::ScrollLogDown);
+        assert!(app.tui_state.log_auto_tail);
+        assert_eq!(app.tui_state.log_scroll, 0);
     }
 
     fn drill_actions_on_git_use_git_cursor_not_plan_expansion() {

@@ -771,9 +771,7 @@ fn inferred_retention_tier(entry: &KnowledgeEntry) -> KnowledgeTier {
     let confidence = entry.confidence.clamp(0.0, 1.0);
 
     match entry.kind {
-        KnowledgeKind::StrategyFragment if source_count >= 3 => {
-            KnowledgeTier::Persistent
-        }
+        KnowledgeKind::StrategyFragment if source_count >= 3 => KnowledgeTier::Persistent,
         KnowledgeKind::StrategyFragment => KnowledgeTier::Working,
         KnowledgeKind::Warning if source_count >= 2 || confidence >= 0.85 => {
             KnowledgeTier::Consolidated

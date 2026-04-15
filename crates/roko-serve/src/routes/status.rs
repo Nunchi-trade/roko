@@ -38,6 +38,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/metrics/coverage", get(coverage))
         .route("/dashboard", get(dashboard))
         .route("/gates/summary", get(gate_summary))
+        .route("/gates/history", get(gates_history))
         .route("/gates/{gate_name}/history", get(gate_history))
         .route("/episodes", get(episodes))
         .route("/signals", get(signals))
@@ -201,7 +202,41 @@ async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
 async fn gate_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko").join("signals.jsonl");
     let entries = read_jsonl_entries(&path).await?;
-    Ok(Json(summarize_gate_entries(&entries)))
+    let mut summary = summarize_gate_entries(&entries);
+    if let Some(obj) = summary.as_object_mut() {
+        obj.insert("rungs".to_string(), json!(summarize_gate_rungs(&entries)));
+    }
+    Ok(Json(summary))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GateHistoryQuery {
+    #[serde(default)]
+    gate: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /api/gates/history` — recent gate verdicts across all gates.
+async fn gates_history(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GateHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let entries = read_jsonl_entries(&path).await?;
+    let gate_filter = query.gate.as_deref();
+    let limit = query.limit.unwrap_or(100).min(MAX_JSONL_RESULTS);
+    let mut history = build_recent_gate_history(&entries, gate_filter);
+    let total = history.len();
+    history.truncate(limit);
+
+    Ok(Json(json!({
+        "source": path.display().to_string(),
+        "gate": gate_filter,
+        "limit": limit,
+        "total": total,
+        "history": history,
+    })))
 }
 
 /// `GET /api/gates/:gate_name/history` — time series of pass/fail results for one gate.
@@ -343,6 +378,8 @@ struct MetricsSummaryResponse {
     best_experiment_lift: Option<ExperimentLiftSummary>,
     gate_pass_rate: f64,
     self_improvement_velocity: f64,
+    c_factor: f64,
+    active_plans: usize,
     top_templates: Vec<TemplateSummary>,
 }
 
@@ -466,6 +503,13 @@ async fn build_metrics_summary(
 
     let experiment_path = state.workdir.join(".roko/learn/experiments.json");
     let experiments = read_experiment_store(&experiment_path).await?;
+    let c_factor_path = state.workdir.join(".roko/learn/c-factor.jsonl");
+    let c_factor_history = read_cfactor_history(&c_factor_path).await?;
+    let c_factor = c_factor_history
+        .last()
+        .map(|snapshot| snapshot.overall)
+        .unwrap_or(0.0);
+    let active_plans = state.active_plans.read().await.len();
 
     let agents_run = efficiency_events.len() as u64;
     let success_count = efficiency_events
@@ -499,6 +543,8 @@ async fn build_metrics_summary(
         best_experiment_lift,
         gate_pass_rate,
         self_improvement_velocity,
+        c_factor,
+        active_plans,
         top_templates,
     })
 }
@@ -1335,6 +1381,16 @@ struct GateSummary {
     last_run: Value,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct GateRungSummary {
+    rung: u32,
+    passed_runs: u64,
+    failed_runs: u64,
+    total_runs: u64,
+    pass_rate: f64,
+}
+
 fn summarize_gate_entries(entries: &[Value]) -> Value {
     let mut by_gate: BTreeMap<String, GateSummaryAcc> = BTreeMap::new();
 
@@ -1393,6 +1449,106 @@ fn summarize_gate_entries(entries: &[Value]) -> Value {
     serde_json::to_value(summary).unwrap_or_else(|_| json!({}))
 }
 
+fn summarize_gate_rungs(entries: &[Value]) -> Vec<GateRungSummary> {
+    let mut by_rung: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
+
+    for entry in entries {
+        let Some(kind) = entry.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        if !is_gate_result_kind(kind) {
+            continue;
+        }
+
+        let Some(rung) = extract_gate_rung(entry) else {
+            continue;
+        };
+        let Some(passed) = extract_gate_passed(entry) else {
+            continue;
+        };
+
+        let counts = by_rung.entry(rung).or_insert((0, 0));
+        counts.1 += 1;
+        if passed {
+            counts.0 += 1;
+        }
+    }
+
+    let mut rungs = by_rung
+        .into_iter()
+        .map(|(rung, (passed_runs, total_runs))| GateRungSummary {
+            rung,
+            passed_runs,
+            failed_runs: total_runs.saturating_sub(passed_runs),
+            total_runs,
+            pass_rate: ratio(passed_runs, total_runs),
+        })
+        .collect::<Vec<_>>();
+
+    rungs.sort_by_key(|summary| summary.rung);
+    rungs
+}
+
+fn build_recent_gate_history(entries: &[Value], gate_filter: Option<&str>) -> Vec<Value> {
+    let mut history: Vec<Value> = entries
+        .iter()
+        .filter(|entry| {
+            let Some(kind) = entry.get("kind").and_then(Value::as_str) else {
+                return false;
+            };
+            if !is_gate_result_kind(kind) {
+                return false;
+            }
+            match gate_filter {
+                Some(gate) => extract_gate_name(entry).as_deref() == Some(gate),
+                None => true,
+            }
+        })
+        .filter_map(|entry| {
+            let gate = extract_gate_name(entry)?;
+            let passed = extract_gate_passed(entry)?;
+            Some(json!({
+                "signal_id": entry.get("id").cloned().unwrap_or(Value::Null),
+                "created_at_ms": entry.get("created_at_ms").cloned().unwrap_or(Value::Null),
+                "gate": gate,
+                "passed": passed,
+                "duration_ms": extract_gate_duration_ms(entry).unwrap_or(0),
+                "plan_id": entry.pointer("/tags/plan_id")
+                    .cloned()
+                    .or_else(|| entry.pointer("/body/data/plan_id").cloned())
+                    .unwrap_or(Value::Null),
+                "task_id": entry.pointer("/tags/task_id")
+                    .cloned()
+                    .or_else(|| entry.pointer("/body/data/task_id").cloned())
+                    .unwrap_or(Value::Null),
+                "rung": entry.pointer("/tags/rung")
+                    .cloned()
+                    .or_else(|| entry.pointer("/body/data/rung").cloned())
+                    .unwrap_or(Value::Null),
+                "kind": entry.get("kind").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect();
+
+    history.sort_by(|a, b| {
+        let a_ts = a
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        let b_ts = b
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        b_ts.cmp(&a_ts).then_with(|| {
+            let a_id = a.get("signal_id").and_then(Value::as_str).unwrap_or("");
+            let b_id = b.get("signal_id").and_then(Value::as_str).unwrap_or("");
+            b_id.cmp(a_id)
+        })
+    });
+
+    history
+}
+
 fn is_gate_result_kind(kind: &str) -> bool {
     kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")
 }
@@ -1442,6 +1598,17 @@ fn extract_gate_duration_ms(entry: &Value) -> Option<u64> {
         .and_then(Value::as_u64)
         .or_else(|| entry.pointer("/body/duration_ms").and_then(Value::as_u64))
         .or_else(|| entry.pointer("/tags/duration_ms").and_then(Value::as_u64))
+}
+
+fn extract_gate_rung(entry: &Value) -> Option<u32> {
+    let raw = entry
+        .pointer("/tags/rung")
+        .or_else(|| entry.pointer("/body/data/rung"))
+        .or_else(|| entry.pointer("/body/rung"))?;
+
+    raw.as_u64()
+        .map(|rung| rung as u32)
+        .or_else(|| raw.as_str().and_then(|text| text.parse::<u32>().ok()))
 }
 
 fn build_cfactor_metrics_response(
@@ -1504,12 +1671,17 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use axum::body::Body as AxumBody;
     use axum::extract::{Path, Query, State};
+    use axum::http::Request;
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     use crate::deploy::create_backend;
+    use crate::routes::build_router;
     use crate::runtime::NoOpRuntime;
     use crate::state::{AppState, OperationStatus, PlanHandle};
+    use roko_core::config::ServeAuthConfig;
     use roko_core::{Body, Engram, Kind, Provenance, Verdict};
 
     fn gate_signal(gate: &str, passed: bool, duration_ms: u64) -> Value {
@@ -1526,7 +1698,25 @@ mod tests {
             .tag("gate", gate)
             .tag("passed", passed.to_string())
             .build();
-        serde_json::to_value(signal).unwrap()
+        let mut signal = serde_json::to_value(signal).unwrap();
+        signal
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .entry("tags")
+            .or_insert_with(|| serde_json::json!({}));
+        signal
+    }
+
+    fn gate_signal_with_rung(gate: &str, rung: u32, passed: bool, duration_ms: u64) -> Value {
+        let mut signal = gate_signal(gate, passed, duration_ms);
+        signal
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .get_mut("tags")
+            .and_then(Value::as_object_mut)
+            .expect("tags should be an object")
+            .insert("rung".into(), Value::from(rung));
+        signal
     }
 
     #[test]
@@ -1614,6 +1804,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gates_history_collection_is_mounted_under_api_grouping() {
+        let (dir, state) = test_state();
+        let signals = dir.path().join(".roko").join("signals.jsonl");
+        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+            .await
+            .expect("create signals dir");
+        let mut compile_early = gate_signal("compile", true, 120);
+        compile_early
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(10));
+        let mut compile_late = gate_signal("compile", false, 300);
+        compile_late
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(20));
+        let mut test = gate_signal("test", true, 200);
+        test.as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(30));
+        tokio::fs::write(
+            &signals,
+            [compile_early, compile_late, test]
+                .into_iter()
+                .map(|entry| entry.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .await
+        .expect("write gate history");
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/gates/history?limit=2")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("gate history response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: Value = serde_json::from_slice(&body).expect("parse gate history response");
+        assert_eq!(payload["source"], signals.display().to_string());
+        assert_eq!(payload["total"], 3);
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["history"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["history"][0]["gate"], "test");
+        assert_eq!(payload["history"][1]["gate"], "compile");
+    }
+
+    #[tokio::test]
+    async fn gate_summary_includes_rung_breakdown_under_api_grouping() {
+        let (dir, state) = test_state();
+        let signals = dir.path().join(".roko").join("signals.jsonl");
+        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+            .await
+            .expect("create signals dir");
+        let mut compile_pass = gate_signal_with_rung("compile", 1, true, 120);
+        compile_pass
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(10));
+        let mut compile_fail = gate_signal_with_rung("compile", 1, false, 300);
+        compile_fail
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(20));
+        let mut test_pass = gate_signal_with_rung("test", 2, true, 200);
+        test_pass
+            .as_object_mut()
+            .expect("gate signal should be an object")
+            .insert("created_at_ms".into(), Value::from(30));
+        tokio::fs::write(
+            &signals,
+            [compile_pass, compile_fail, test_pass]
+                .into_iter()
+                .map(|entry| entry.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .await
+        .expect("write gate summary");
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/gates/summary")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("gate summary response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: Value = serde_json::from_slice(&body).expect("parse gate summary response");
+        assert_eq!(payload["compile"]["total_runs"], 2);
+        assert_eq!(payload["compile"]["pass_rate"], 0.5);
+        assert_eq!(payload["rungs"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["rungs"][0]["rung"], 1);
+        assert_eq!(payload["rungs"][0]["passed_runs"], 1);
+        assert_eq!(payload["rungs"][0]["failed_runs"], 1);
+        assert_eq!(payload["rungs"][1]["rung"], 2);
+        assert_eq!(payload["rungs"][1]["passed_runs"], 1);
+        assert_eq!(payload["rungs"][1]["failed_runs"], 0);
+    }
+
+    #[tokio::test]
     async fn health_reports_status_version_uptime_and_counts() {
         let (_dir, state) = test_state();
 
@@ -1625,6 +1935,44 @@ mod tests {
         assert!(body["uptime_secs"].as_u64().is_some());
         assert_eq!(body["active_plans"], 0);
         assert_eq!(body["active_agents"], 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_summary_includes_active_plans_and_c_factor() {
+        let (dir, state) = test_state();
+        let plan_handle = PlanHandle {
+            id: "plan-1".into(),
+            plan_dir: dir.path().join(".roko/plans/plan-1"),
+            status: OperationStatus::Running,
+            handle: tokio::spawn(async {}),
+        };
+        state
+            .active_plans
+            .write()
+            .await
+            .insert("plan-1".into(), plan_handle);
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/metrics/summary")
+                    .body(AxumBody::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("metrics summary response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: Value = serde_json::from_slice(&body).expect("parse metrics summary response");
+        assert_eq!(payload["period"], "last_7_days");
+        assert_eq!(payload["active_plans"], 1);
+        assert_eq!(payload["c_factor"], 0.0);
+        assert_eq!(payload["experiments_active"], 0);
     }
 
     #[tokio::test]

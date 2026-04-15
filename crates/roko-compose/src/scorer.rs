@@ -251,7 +251,9 @@ fn tokenize(text: &str) -> Vec<String> {
 }
 
 fn token_overlap(left: &str, right: &str) -> f32 {
-    let left = tokenize(left).into_iter().collect::<std::collections::BTreeSet<_>>();
+    let left = tokenize(left)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     let right = tokenize(right)
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();

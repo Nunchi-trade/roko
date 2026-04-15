@@ -639,7 +639,9 @@ fn detect_groupthink(episodes: &[&Episode]) -> Option<CollectivePathology> {
     }
 
     best.filter(|diversity| *diversity < 0.3)
-        .map(|diversity| CollectivePathology::Groupthink { diversity_score: diversity })
+        .map(|diversity| CollectivePathology::Groupthink {
+            diversity_score: diversity,
+        })
 }
 
 fn detect_echo_chamber(episodes: &[&Episode]) -> Option<CollectivePathology> {

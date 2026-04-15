@@ -180,6 +180,7 @@ pub enum TuiAction {
     ScrollLogUp,
     ScrollLogDown,
     ScrollLogEnd,
+    ToggleLogTail,
 
     // -- agent tab --
     SwitchAgentTab(usize),
@@ -628,12 +629,12 @@ fn handle_agents_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Up | KeyCode::Char('k') => match focus {
             FocusZone::AgentOutput => TuiAction::ScrollAgentUp,
             FocusZone::RightPanel => TuiAction::ScrollDiffUp,
-            _ => TuiAction::ScrollFocusedUp,
+            _ => TuiAction::SelectPlanUp,
         },
         KeyCode::Down | KeyCode::Char('j') => match focus {
             FocusZone::AgentOutput => TuiAction::ScrollAgentDown,
             FocusZone::RightPanel => TuiAction::ScrollDiffDown,
-            _ => TuiAction::ScrollFocusedDown,
+            _ => TuiAction::SelectPlanDown,
         },
         KeyCode::PageUp => TuiAction::ScrollPageUp,
         KeyCode::PageDown => TuiAction::ScrollPageDown,
@@ -684,6 +685,7 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::PageDown => TuiAction::ScrollPageDown,
         KeyCode::Home => TuiAction::ScrollFocusedHome,
         KeyCode::End | KeyCode::Char('G') => TuiAction::ScrollLogEnd,
+        KeyCode::Char('f') => TuiAction::ToggleLogTail,
         KeyCode::Char('/') => TuiAction::StartFilter,
         _ => TuiAction::None,
     }
@@ -883,6 +885,27 @@ mod tests {
             &modals(),
         );
         assert_eq!(action, TuiAction::ScrollPageDown);
+    }
+
+    #[test]
+    fn logs_tab_can_toggle_tail_and_filter() {
+        let action = handle_key(
+            key(KeyCode::Char('f')),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::ToggleLogTail);
+
+        let action = handle_key(
+            key(KeyCode::Char('/')),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::StartFilter);
     }
 
     #[test]

@@ -3888,7 +3888,8 @@ impl PlanRunner {
         delta_due: bool,
     ) -> Vec<HeartbeatProbeResult> {
         let (readiness, degraded_reasons) = self.health_probes.readiness();
-        let health_degraded = matches!(readiness, roko_core::obs::health::ReadinessStatus::NotReady);
+        let health_degraded =
+            matches!(readiness, roko_core::obs::health::ReadinessStatus::NotReady);
         let recent_gate_failure = self
             .task_trackers
             .values()
@@ -3965,7 +3966,8 @@ impl PlanRunner {
             HeartbeatProbeResult::new(
                 HeartbeatProbeKind::LowAffectConfidence,
                 low_affect_confidence,
-                low_affect_confidence.then(|| format!("daimon confidence {:.2}", affect_confidence)),
+                low_affect_confidence
+                    .then(|| format!("daimon confidence {:.2}", affect_confidence)),
             ),
             HeartbeatProbeResult::new(
                 HeartbeatProbeKind::ActiveAgentsPresent,
@@ -3993,7 +3995,8 @@ impl PlanRunner {
             HeartbeatProbeResult::new(
                 HeartbeatProbeKind::McpUnavailable,
                 mcp_unavailable,
-                mcp_unavailable.then(|| "MCP servers requested but no tools are active".to_string()),
+                mcp_unavailable
+                    .then(|| "MCP servers requested but no tools are active".to_string()),
             ),
             HeartbeatProbeResult::new(
                 HeartbeatProbeKind::SessionSpendElevated,

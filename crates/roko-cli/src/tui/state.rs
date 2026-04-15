@@ -386,6 +386,8 @@ pub struct TuiState {
     pub plan_scroll_offset: usize,
     /// Log viewer scroll offset.
     pub log_scroll: usize,
+    /// Whether the log viewer is following the tail.
+    pub log_auto_tail: bool,
     /// Task detail overlay scroll offset.
     pub task_detail_scroll: usize,
 
@@ -545,6 +547,7 @@ impl Default for TuiState {
             plan_summary_scroll: 0,
             plan_scroll_offset: 0,
             log_scroll: 0,
+            log_auto_tail: true,
             task_detail_scroll: 0,
 
             show_plan_detail: false,
@@ -708,34 +711,115 @@ impl TuiState {
         self.orchestrator_state = executor_summary.orchestrator_state;
         self.current_iteration = executor_summary.current_iteration;
         self.current_phase = executor_summary.current_phase;
+        let expanded_by_plan: HashMap<String, bool> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.expanded))
+            .collect();
+        let latest_events = latest_agent_events(&data.efficiency_events);
+
+        let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
+        for task in &data.active_tasks {
+            tasks_by_plan
+                .entry(task.plan_id.clone())
+                .or_default()
+                .push(TaskEntry {
+                    id: task.task_id.clone(),
+                    name: task.latest_gate.as_ref().map_or_else(
+                        || task.task_id.clone(),
+                        |gate| format!("{} ({gate})", task.task_id),
+                    ),
+                    status: task.status.clone(),
+                    agent_id: task.assigned_agents.first().cloned(),
+                });
+        }
+
+        if let Some(exec) = &data.current_plan_execution {
+            let entry = tasks_by_plan.entry(exec.plan_id.clone()).or_default();
+            if entry.is_empty() {
+                entry.extend(exec.tasks.iter().map(|task| TaskEntry {
+                    id: task.task_id.clone(),
+                    name: if task.title.is_empty() {
+                        task.task_id.clone()
+                    } else {
+                        task.title.clone()
+                    },
+                    status: task.phase.clone(),
+                    agent_id: None,
+                }));
+            }
+        }
 
         // Plans
         self.plans = data
             .plans
             .iter()
             .map(|p| {
-                let completed = p.completed;
-                let phase = if completed {
+                let tasks = tasks_by_plan.remove(&p.id).unwrap_or_default();
+                let current_exec = data
+                    .current_plan_execution
+                    .as_ref()
+                    .filter(|exec| exec.plan_id == p.id);
+                let tasks_done = if p.completed {
+                    current_exec.map_or(p.task_count, |exec| exec.tasks_done)
+                } else {
+                    current_exec.map_or_else(
+                        || {
+                            tasks
+                                .iter()
+                                .filter(|task| task_status_is_done(&task.status))
+                                .count()
+                        },
+                        |exec| exec.tasks_done,
+                    )
+                };
+                let tasks_failed = tasks
+                    .iter()
+                    .filter(|task| task_status_is_failed(&task.status))
+                    .count();
+                let tasks_active = tasks
+                    .iter()
+                    .filter(|task| {
+                        !task_status_is_done(&task.status) && !task_status_is_failed(&task.status)
+                    })
+                    .count();
+                let phase = if tasks_failed > 0 || p.last_error.is_some() {
+                    "failed".to_string()
+                } else if current_exec.is_some() || tasks_active > 0 {
+                    "running".to_string()
+                } else if p.completed || (p.task_count > 0 && tasks_done >= p.task_count) {
                     "done".to_string()
+                } else if tasks_done > 0 {
+                    "running".to_string()
                 } else {
                     "pending".to_string()
                 };
-                let tasks_done = if completed { p.task_count } else { 0 };
+                let tasks_total = current_exec
+                    .map(|exec| exec.tasks_total)
+                    .unwrap_or_else(|| p.task_count.max(tasks.len()));
+                let elapsed_secs = current_exec
+                    .map(|exec| {
+                        exec.tasks
+                            .iter()
+                            .map(|task| parse_duration_to_secs(&task.duration))
+                            .sum()
+                    })
+                    .unwrap_or(0.0);
                 PlanEntry {
                     id: p.id.clone(),
                     name: p.title.clone(),
                     status: phase.clone(),
-                    active: !completed,
+                    active: plan_is_active(&phase),
                     phase,
-                    tasks_total: p.task_count,
+                    tasks_total,
                     tasks_done,
-                    tasks_failed: 0,
-                    elapsed_secs: 0.0,
+                    tasks_failed,
+                    elapsed_secs,
                     wave: None,
-                    task_total: p.task_count,
+                    task_total: tasks_total,
                     task_done: tasks_done,
-                    expanded: false,
-                    tasks: Vec::new(),
+                    expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
+                    tasks,
                 }
             })
             .collect();
@@ -743,27 +827,58 @@ impl TuiState {
         // Agents — populate both Vec and HashMap
         self.agents.clear();
         self.agents_by_id.clear();
-        for agent in &data.agents {
-            let is_active = agent.status == "active" || agent.status == "running";
+        let mut agent_ids = data
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>();
+        if agent_ids.is_empty() {
+            agent_ids.extend(latest_events.keys().cloned());
+            agent_ids.sort();
+            agent_ids.dedup();
+        }
+        for agent_id in agent_ids {
+            let summary = data.agents.iter().find(|agent| agent.id == agent_id);
+            let latest = latest_events.get(&agent_id);
+            let label = summary
+                .map(|agent| agent.label.clone())
+                .filter(|label| !label.is_empty())
+                .or_else(|| latest.map(|event| event.role.clone()))
+                .unwrap_or_else(|| agent_id.clone());
+            let status = summary
+                .map(|agent| agent.status.clone())
+                .or_else(|| latest.map(|event| event.status.clone()))
+                .unwrap_or_else(|| "idle".to_string());
+            let current_plan = summary
+                .and_then(|agent| agent.plan_id.clone())
+                .or_else(|| latest.and_then(|event| event.plan_id.clone()))
+                .unwrap_or_default();
+            let current_task = latest
+                .map(|event| event.task_id.clone())
+                .unwrap_or_default();
+            let is_active = plan_is_active(&status);
             self.agents.push(AgentRow {
-                id: agent.id.clone(),
+                id: agent_id.clone(),
                 active: is_active,
-                role: agent.label.clone(),
-                model: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
+                role: label.clone(),
+                model: latest.map(|event| event.model.clone()).unwrap_or_default(),
+                input_tokens: latest.map_or(0, |event| event.input_tokens),
+                output_tokens: latest.map_or(0, |event| event.output_tokens),
                 context_limit: 200_000, // sensible default
-                current_plan: agent.plan_id.clone().unwrap_or_default(),
-                current_task: String::new(),
+                current_plan: current_plan.clone(),
+                current_task: current_task.clone(),
                 last_output_line: String::new(),
             });
             self.agents_by_id.insert(
-                agent.id.clone(),
+                agent_id.clone(),
                 AgentState {
-                    id: agent.id.clone(),
-                    name: agent.label.clone(),
-                    status: agent.status.clone(),
-                    plan_id: agent.plan_id.clone(),
+                    id: agent_id,
+                    name: label,
+                    status,
+                    input_tokens: latest.map_or(0, |event| event.input_tokens),
+                    output_tokens: latest.map_or(0, |event| event.output_tokens),
+                    plan_id: (!current_plan.is_empty()).then_some(current_plan),
+                    task_id: (!current_task.is_empty()).then_some(current_task),
                     ..AgentState::default()
                 },
             );
@@ -816,11 +931,7 @@ impl TuiState {
                 agent_id: a.id.clone(),
                 plan_id: a.current_plan.clone(),
                 task_id: a.current_task.clone(),
-                status: if a.active {
-                    "running".to_string()
-                } else {
-                    "idle".to_string()
-                },
+                status: "running".to_string(),
                 progress_pct: 0.0,
             })
             .collect();
@@ -885,6 +996,7 @@ impl TuiState {
         if !self.agents.is_empty() && self.selected_agent >= self.agents.len() {
             self.selected_agent = self.agents.len() - 1;
         }
+        self.selected_agent_tab = self.selected_agent_tab.min(6);
     }
 
     /// Close all modal overlays and return to normal mode.
@@ -931,6 +1043,7 @@ impl TuiState {
         self.plan_summary_scroll = 0;
         self.plan_scroll_offset = 0;
         self.log_scroll = 0;
+        self.log_auto_tail = true;
         self.task_detail_scroll = 0;
     }
 }
@@ -1225,6 +1338,75 @@ fn sum_costs(
             *tasks.entry(e.task_id.clone()).or_default() += e.cost_usd;
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct LatestAgentEvent {
+    role: String,
+    status: String,
+    model: String,
+    plan_id: Option<String>,
+    task_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    timestamp: Option<DateTime<Utc>>,
+}
+
+fn latest_agent_events(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+) -> HashMap<String, LatestAgentEvent> {
+    let mut latest = HashMap::new();
+
+    for event in events {
+        let timestamp = parse_efficiency_timestamp(&event.timestamp);
+        let candidate = LatestAgentEvent {
+            role: event.role.clone(),
+            status: if event.gate_passed {
+                "done".to_string()
+            } else {
+                "active".to_string()
+            },
+            model: event.model.clone(),
+            plan_id: Some(event.plan_id.clone()),
+            task_id: event.task_id.clone(),
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            timestamp,
+        };
+
+        let should_replace = latest
+            .get(&event.agent_id)
+            .map(
+                |existing: &LatestAgentEvent| match (existing.timestamp, candidate.timestamp) {
+                    (Some(lhs), Some(rhs)) => rhs >= lhs,
+                    (None, Some(_)) => true,
+                    _ => false,
+                },
+            )
+            .unwrap_or(true);
+        if should_replace {
+            latest.insert(event.agent_id.clone(), candidate);
+        }
+    }
+
+    latest
+}
+
+fn plan_is_active(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "active"
+            | "running"
+            | "executing"
+            | "in_progress"
+            | "implementing"
+            | "gating"
+            | "verifying"
+            | "reviewing"
+            | "strategist"
+            | "implementer"
+            | "preflight"
+    )
 }
 
 fn build_task_checklist_from_execution(data: &DashboardData) -> Vec<TaskRow> {
@@ -1707,10 +1889,50 @@ mod tests {
         assert!(state.git_age.is_empty());
         assert!(state.run_started.is_none());
         assert!(state.filter.is_empty());
+        assert!(state.log_auto_tail);
         assert_eq!(state.selected_plan, 0);
         assert_eq!(state.selected_agent, 0);
         assert_eq!(state.output_scroll, 0);
         assert_eq!(state.plan_scroll_offset, 0);
+    }
+
+    #[test]
+    fn update_from_snapshot_populates_plan_tasks_from_active_tasks() {
+        let mut data = DashboardData::default();
+        data.plans = vec![crate::plan::PlanSummary {
+            id: "plan-a".to_string(),
+            title: "Plan A".to_string(),
+            task_count: 3,
+            completed: false,
+            old_format: false,
+            last_error: None,
+        }];
+        data.active_tasks = vec![
+            TaskSummary {
+                plan_id: "plan-a".to_string(),
+                task_id: "task-1".to_string(),
+                status: "running".to_string(),
+                iteration: 1,
+                assigned_agents: vec!["agent-a".to_string()],
+                latest_gate: None,
+            },
+            TaskSummary {
+                plan_id: "plan-a".to_string(),
+                task_id: "task-2".to_string(),
+                status: "failed".to_string(),
+                iteration: 1,
+                assigned_agents: vec!["agent-b".to_string()],
+                latest_gate: Some("test".to_string()),
+            },
+        ];
+
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.plans.len(), 1);
+        assert_eq!(state.plans[0].tasks.len(), 2);
+        assert_eq!(state.plans[0].tasks_failed, 1);
+        assert_eq!(state.plans[0].tasks_done, 0);
+        assert_eq!(state.plans[0].tasks[0].agent_id.as_deref(), Some("agent-a"));
     }
 
     #[test]

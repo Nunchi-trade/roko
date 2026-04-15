@@ -65,7 +65,8 @@ fn render_left_panel(
 ) {
     // Compute how much space to allocate.
     // Summary = 2 lines, sparkline = 6 lines (if token data exists), rest = roster.
-    let has_token_data = tui_state.cumulative_input_tokens > 0
+    let has_token_data = data.efficiency.event_count > 0
+        || tui_state.cumulative_input_tokens > 0
         || tui_state.cumulative_output_tokens > 0
         || !data.efficiency_events.is_empty();
 
@@ -81,7 +82,12 @@ fn render_left_panel(
     render_agent_roster(frame, sections[0], data, tui_state, view_state, theme);
     render_summary_line(frame, sections[1], data, tui_state, theme);
     if has_token_data {
-        render_token_sparkline(frame, sections[2], data, tui_state, theme);
+        crate::tui::widgets::token_sparkline::render_token_sparkline(
+            frame,
+            sections[2],
+            data,
+            tui_state,
+        );
     }
 }
 
@@ -93,14 +99,23 @@ fn render_agent_roster(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
-    _tui_state: &TuiState,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let active_count = data
-        .agents
+    let mut agents: Vec<(usize, &crate::tui::dashboard::AgentSummary)> =
+        data.agents.iter().enumerate().collect();
+    agents.sort_by(|(idx_a, a), (idx_b, b)| {
+        agent_status_rank(&a.status)
+            .cmp(&agent_status_rank(&b.status))
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+            .then_with(|| a.id.cmp(&b.id))
+            .then_with(|| idx_a.cmp(idx_b))
+    });
+
+    let active_count = agents
         .iter()
-        .filter(|a| a.status == "running" || a.status == "active")
+        .filter(|(_, agent)| is_agent_active(&agent.status))
         .count();
     let title = format!(" Agents ({} active) ", active_count);
 
@@ -128,7 +143,7 @@ fn render_agent_roster(
         return;
     }
 
-    if data.agents.is_empty() {
+    if agents.is_empty() {
         let v_pad = inner.height / 2;
         let mut empty_lines: Vec<Line<'_>> = Vec::new();
         for _ in 0..v_pad.saturating_sub(1) {
@@ -157,81 +172,69 @@ fn render_agent_roster(
     }
 
     let content_width = inner.width as usize;
-
-    // Build activity snapshot for token/cost columns
     let activity =
         crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
 
-    // Column header
     let mut lines: Vec<Line<'_>> = Vec::new();
     if inner.height > 3 {
-        let role_w = 11usize.min(content_width / 3);
+        let agent_w = 14usize.min(content_width / 4);
+        let task_w = 18usize.min(content_width / 3);
         lines.push(Line::from(vec![
             Span::styled("   ", Style::default()),
             Span::styled(
-                format!("{:<role_w$}", "role"),
+                format!("{:<agent_w$}", "agent"),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled("model", Style::default().fg(theme.muted)),
+            Span::styled("  ", Style::default()),
+            Span::styled("status", Style::default().fg(theme.muted)),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("{:<task_w$}", "task"),
                 Style::default().fg(theme.muted),
             ),
             Span::styled("  ", Style::default()),
             Span::styled("tokens", Style::default().fg(theme.muted)),
             Span::styled("  ", Style::default()),
             Span::styled("cost", Style::default().fg(theme.muted)),
-            Span::styled("   ", Style::default()),
-            Span::styled("ctx", Style::default().fg(theme.muted)),
         ]));
     }
 
-    for (idx, agent) in data.agents.iter().enumerate() {
-        let is_selected = idx == view_state.selected;
-        let is_active = agent.status == "running" || agent.status == "active";
-        let is_done = agent.status == "done" || agent.status == "completed";
-        let is_failed = agent.status == "error" || agent.status == "failed";
-
-        // Status icon
-        let (icon, icon_style) = if is_active {
-            (
-                "\u{25b6}", // ▶
-                Style::default()
-                    .fg(theme.warning)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else if is_done {
-            ("\u{2713}", Style::default().fg(theme.success)) // ✓
-        } else if is_failed {
-            (
-                "\u{2717}", // ✗
-                Style::default()
-                    .fg(theme.danger)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            ("\u{00b7}", Style::default().fg(theme.muted)) // ·
-        };
-
-        // Role accent color
-        let accent = role_accent(&agent.label, theme);
+    for (display_idx, (_, agent)) in agents.iter().enumerate() {
+        let is_selected = display_idx == view_state.selected;
+        let is_active = is_agent_active(&agent.status);
+        let is_done = is_agent_done(&agent.status);
+        let is_failed = is_agent_failed(&agent.status);
+        let (icon, icon_style) = agent_status_icon(&agent.status, theme);
+        let accent = agent_status_color(&agent.status, theme);
         let bg = if is_selected {
             theme.selection_background
         } else {
             Color::Reset
         };
-
-        // Cursor indicator
         let cursor = if is_selected { " \u{25b6} " } else { "   " };
-
-        // Role label
-        let role_w = 11usize.min(content_width / 3);
-        let role_label = truncate_middle(&agent.label, role_w);
-
-        // Activity data
+        let agent_w = 14usize.min(content_width / 4);
+        let task_w = 18usize.min(content_width / 3);
         let activity_row = activity
             .as_ref()
             .and_then(|snap| snap.active_agents.iter().find(|r| r.agent_id == agent.id));
 
+        let model = activity_row
+            .map(|r| shorten_model(&r.model))
+            .unwrap_or_else(|| "-".to_string());
+        let task = activity_row
+            .map(|r| truncate_middle(&r.task, task_w))
+            .or_else(|| {
+                agent
+                    .plan_id
+                    .as_deref()
+                    .map(|plan_id| truncate_middle(plan_id, task_w))
+            })
+            .unwrap_or_else(|| "-".to_string());
         let tokens_str = activity_row
             .map(|r| format_tokens(r.tokens_used))
             .unwrap_or_else(|| "-".to_string());
-
         let cost_str = activity_row
             .map(|r| {
                 if r.cost_usd > 0.001 {
@@ -241,22 +244,32 @@ fn render_agent_roster(
                 }
             })
             .unwrap_or_else(|| "-".to_string());
-
-        // Context gauge — use tokens / 200k as proxy fill
         let total_tokens = activity_row.map_or(0u64, |r| r.tokens_used);
-        let ctx_limit = 200_000u64; // default context window
+        let ctx_limit = 200_000u64;
         let fill_pct = (total_tokens as f64 / ctx_limit as f64).clamp(0.0, 1.0);
-        let gauge_width = 8usize.min(content_width.saturating_sub(30));
-
-        // State chip
-        let (state_label, state_fg, state_bg) = if is_active {
-            (" LIVE ", Color::Black, accent)
+        let gauge_width = 6usize.min(content_width.saturating_sub(40));
+        let state_label = if is_active {
+            " LIVE "
         } else if is_done {
-            (" DONE ", Color::Black, theme.success)
+            " DONE "
         } else if is_failed {
-            (" FAIL ", Color::Black, theme.danger)
+            " FAIL "
         } else {
-            (" idle ", theme.muted, Color::Reset)
+            " idle "
+        };
+        let state_bg = if is_active {
+            accent
+        } else if is_done {
+            theme.success
+        } else if is_failed {
+            theme.danger
+        } else {
+            Color::Reset
+        };
+        let state_fg = if state_bg == Color::Reset {
+            theme.muted
+        } else {
+            Color::Black
         };
 
         let mut spans = vec![
@@ -264,7 +277,7 @@ fn render_agent_roster(
             Span::styled(icon.to_string(), icon_style.bg(bg)),
             Span::styled(" ", Style::default().bg(bg)),
             Span::styled(
-                format!("{:<role_w$}", role_label),
+                format!("{:<agent_w$}", truncate_middle(&agent.id, agent_w)),
                 Style::default()
                     .fg(accent)
                     .bg(bg)
@@ -274,64 +287,82 @@ fn render_agent_roster(
                         Modifier::empty()
                     }),
             ),
+            Span::styled("  ", Style::default().bg(bg)),
             Span::styled(
-                format!(" {:>6}", tokens_str),
-                Style::default().fg(theme.foreground).bg(bg),
-            ),
-            Span::styled(
-                format!(" {:>6}", cost_str),
+                format!("{:<10}", model),
                 Style::default().fg(theme.muted).bg(bg),
             ),
-            Span::styled(" ", Style::default().bg(bg)),
+            Span::styled("  ", Style::default().bg(bg)),
+            Span::styled(
+                format!("{:<7}", state_label),
+                Style::default()
+                    .fg(state_fg)
+                    .bg(state_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default().bg(bg)),
+            Span::styled(
+                format!("{:<task_w$}", task),
+                Style::default().fg(theme.foreground).bg(bg),
+            ),
+            Span::styled("  ", Style::default().bg(bg)),
+            Span::styled(
+                format!("{:>6}", tokens_str),
+                Style::default().fg(theme.foreground).bg(bg),
+            ),
+            Span::styled("  ", Style::default().bg(bg)),
+            Span::styled(
+                format!("{:>6}", cost_str),
+                Style::default().fg(theme.muted).bg(bg),
+            ),
         ];
-
-        // Gradient gauge bar
-        spans.extend(gradient_bar(gauge_width, fill_pct, is_active, theme));
-
         spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.extend(gradient_bar(gauge_width, fill_pct, is_active, theme));
         spans.push(Span::styled(
-            state_label.to_string(),
-            Style::default()
-                .fg(state_fg)
-                .bg(state_bg)
-                .add_modifier(Modifier::BOLD),
+            format!(" {:>3}%", (fill_pct * 100.0).round() as u64),
+            Style::default().fg(theme.muted).bg(bg),
         ));
-
-        // Model tag (compact)
-        if content_width > 50 {
-            let model = activity_row
-                .map(|r| shorten_model(&r.model))
-                .unwrap_or_default();
-            if !model.is_empty() {
-                spans.push(Span::styled(
-                    format!(" {}", model),
-                    Style::default().fg(theme.muted).bg(bg),
-                ));
-            }
-        }
 
         lines.push(Line::from(spans));
 
-        // Detail row for selected agent
         if is_selected {
+            let mut detail = vec![Span::styled("    ", Style::default().bg(bg))];
+            detail.push(Span::styled(
+                format!(
+                    "plan:{} task:{}",
+                    agent.plan_id.as_deref().unwrap_or("-"),
+                    activity_row
+                        .map(|r| r.task.as_str())
+                        .unwrap_or(agent.plan_id.as_deref().unwrap_or("-"))
+                ),
+                Style::default().fg(theme.muted).bg(bg),
+            ));
             if let Some(row) = activity_row {
-                if !row.task.is_empty() {
-                    let snippet_max = content_width.saturating_sub(6);
-                    let snippet = truncate_middle(&row.task, snippet_max);
-                    lines.push(Line::from(vec![
-                        Span::styled("    ", Style::default().bg(bg)),
-                        Span::styled(
-                            format!("task: {snippet}"),
-                            Style::default().fg(theme.muted).bg(bg),
+                detail.push(Span::styled(
+                    format!(
+                        "  turns:{}  uptime:{}",
+                        row.turns,
+                        format_uptime(row.uptime_ms)
+                    ),
+                    Style::default().fg(theme.muted).bg(bg),
+                ));
+            }
+            if let Some(agent_state) = tui_state.agents_by_id.get(&agent.id) {
+                if let Some(last_line) = agent_state.output_lines.last() {
+                    detail.push(Span::styled(
+                        format!(
+                            "  last: {}",
+                            truncate_middle(last_line, content_width.saturating_sub(30))
                         ),
-                    ]));
+                        Style::default().fg(theme.muted).bg(bg),
+                    ));
                 }
             }
+            lines.push(Line::from(detail));
         }
     }
 
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,7 +622,7 @@ fn render_role_tabs(
 
     // Selected role from sub_tab
     let selected_role = ROLE_TABS
-        .get(view_state.sub_tab)
+        .get(view_state.sub_tab.min(ROLE_TABS.len().saturating_sub(1)))
         .map(|(role, _)| *role)
         .unwrap_or("");
 
@@ -636,17 +667,18 @@ fn render_output_body(
 ) {
     // Get selected agent's output
     let selected_agent = data.agents.get(view_state.selected);
-    let selected_role = selected_agent.map(|a| a.label.as_str()).unwrap_or("");
-    let accent = role_accent(selected_role, theme);
+    let selected_id = selected_agent.map(|a| a.id.as_str()).unwrap_or("");
+    let selected_status = selected_agent.map(|a| a.status.as_str()).unwrap_or("idle");
+    let accent = agent_status_color(selected_status, theme);
     let focused = matches!(
         tui_state.focus,
         FocusZone::AgentOutput | FocusZone::RightPanel
     );
 
-    let title_label = if selected_role.is_empty() {
+    let title_label = if selected_id.is_empty() {
         "Agent Output".to_string()
     } else {
-        format!("Output \u{00b7} {}", selected_role)
+        format!("Output \u{00b7} {} \u{00b7} {}", selected_id, selected_status)
     };
 
     let tail_indicator = if view_state.auto_tail {
@@ -660,9 +692,7 @@ fn render_output_body(
     } else {
         theme.muted()
     };
-    let title_style = if focused
-        || selected_agent.map_or(false, |a| a.status == "running" || a.status == "active")
-    {
+    let title_style = if focused || is_agent_active(selected_status) {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         theme.muted()
@@ -794,11 +824,12 @@ fn render_output_body(
         .collect();
 
     let max_scroll = text.len().saturating_sub(inner.height as usize);
-    let max_scroll = max_scroll.min(u16::MAX as usize) as u16;
+    let max_scroll = max_scroll.min(u16::MAX as usize);
     let scroll = if view_state.auto_tail {
-        max_scroll
+        max_scroll as u16
     } else {
-        view_state.scroll.min(max_scroll)
+        let pinned = view_state.scroll as usize;
+        max_scroll.saturating_sub(pinned.min(max_scroll)) as u16
     };
 
     let paragraph = Paragraph::new(text)
@@ -918,6 +949,78 @@ fn format_tokens(n: u64) -> String {
         format!("{}k", n / 1_000)
     } else {
         format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+fn format_uptime(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else if ms < 3_600_000 {
+        format!("{:.1}m", ms as f64 / 60_000.0)
+    } else {
+        format!("{:.1}h", ms as f64 / 3_600_000.0)
+    }
+}
+
+fn is_agent_active(status: &str) -> bool {
+    matches!(status, "running" | "active")
+}
+
+fn is_agent_done(status: &str) -> bool {
+    matches!(status, "done" | "completed")
+}
+
+fn is_agent_failed(status: &str) -> bool {
+    matches!(status, "error" | "failed")
+}
+
+fn agent_status_rank(status: &str) -> u8 {
+    if is_agent_active(status) {
+        0
+    } else if matches!(status, "idle" | "waiting") {
+        1
+    } else if is_agent_done(status) {
+        2
+    } else if is_agent_failed(status) {
+        3
+    } else {
+        4
+    }
+}
+
+fn agent_status_color(status: &str, theme: &Theme) -> Color {
+    if is_agent_active(status) {
+        theme.accent
+    } else if is_agent_done(status) {
+        theme.success
+    } else if is_agent_failed(status) {
+        theme.danger
+    } else {
+        theme.muted
+    }
+}
+
+fn agent_status_icon(status: &str, theme: &Theme) -> (&'static str, Style) {
+    if is_agent_active(status) {
+        (
+            "\u{25b6}",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if is_agent_done(status) {
+        ("\u{2713}", Style::default().fg(theme.success))
+    } else if is_agent_failed(status) {
+        (
+            "\u{2717}",
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("\u{00b7}", Style::default().fg(theme.muted))
     }
 }
 

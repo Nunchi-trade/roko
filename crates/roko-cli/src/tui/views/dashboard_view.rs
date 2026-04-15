@@ -242,7 +242,9 @@ fn render_sub_agents(
         frame,
         sections[0],
         &pool,
-        view_state.selected,
+        tui_state
+            .selected_agent_tab
+            .min(pool.len().saturating_sub(1)),
         theme,
     );
     render_output_panel(
@@ -296,14 +298,18 @@ fn render_output_panel(
             .unwrap_or_default();
         if !exec_lines.is_empty() {
             exec_lines
-        } else if let Some(agent) = tui_state
-            .agents_by_id
-            .values()
-            .nth(tui_state.selected_agent_tab)
-        {
+        } else if let Some(agent_summary) = tui_state.agents.get(
+            tui_state
+                .selected_agent
+                .min(tui_state.agents.len().saturating_sub(1)),
+        ) {
             // 2. Selected agent output.
-            if !agent.output_lines.is_empty() {
-                agent.output_lines.clone()
+            if let Some(agent) = tui_state.agents_by_id.get(&agent_summary.id) {
+                if !agent.output_lines.is_empty() {
+                    agent.output_lines.clone()
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             }
@@ -334,9 +340,14 @@ fn render_output_panel(
 
     let text: Vec<Line<'_>> = lines.iter().map(|l| Line::from(*l)).collect();
     let scroll = if view_state.auto_tail {
-        text.len().saturating_sub(inner.height as usize) as u16
+        text.len()
+            .saturating_sub(inner.height as usize)
+            .min(u16::MAX as usize) as u16
     } else {
-        view_state.scroll
+        let max_scroll = text.len().saturating_sub(inner.height as usize);
+        max_scroll
+            .saturating_sub((view_state.scroll as usize).min(max_scroll))
+            .min(u16::MAX as usize) as u16
     };
     frame.render_widget(
         Paragraph::new(text)
@@ -369,13 +380,15 @@ fn render_sub_diff(
 
 fn gather_diff_text(data: &DashboardData, tui_state: &TuiState) -> String {
     // Try selected agent's diff content.
-    if let Some(agent) = tui_state
-        .agents_by_id
-        .values()
-        .nth(tui_state.selected_agent_tab)
-    {
-        if !agent.diff_content.is_empty() {
-            return agent.diff_content.clone();
+    if let Some(agent_summary) = tui_state.agents.get(
+        tui_state
+            .selected_agent
+            .min(tui_state.agents.len().saturating_sub(1)),
+    ) {
+        if let Some(agent) = tui_state.agents_by_id.get(&agent_summary.id) {
+            if !agent.diff_content.is_empty() {
+                return agent.diff_content.clone();
+            }
         }
     }
     // Fallback: extract diff-like lines from execution output.
@@ -726,7 +739,7 @@ fn render_sub_processes(
 fn render_bottom_ribbon(
     frame: &mut Frame<'_>,
     area: Rect,
-    _data: &DashboardData,
+    data: &DashboardData,
     tui_state: &TuiState,
     _theme: &Theme,
 ) {
@@ -741,7 +754,7 @@ fn render_bottom_ribbon(
     // Wave progress: use the real widget
     widgets::wave_progress::render_wave_progress(frame, sections[0], tui_state);
     // Token sparkline: use the real widget
-    widgets::token_sparkline::render_token_sparkline(frame, sections[1], tui_state);
+    widgets::token_sparkline::render_token_sparkline(frame, sections[1], data, tui_state);
     // Sys metrics: use the real widget
     widgets::sys_metrics::render_sys_metrics(frame, sections[2], tui_state);
 }
