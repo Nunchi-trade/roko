@@ -32,14 +32,18 @@ verify_batch() {
   local log_file
   log_file=$(run_log_file "$run_id" "$batch")
   local attempt="${4:-?}"
+  local target_dir
+  target_dir=$(batch_target_dir "$run_id" "$batch" "verify" "$attempt")
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir"
 
   while IFS= read -r cmd; do
     [[ -z "$cmd" ]] && continue
     record_status "$run_id" "$batch" "$attempt" "verify_running" "$cmd"
-    echo "[verify] $cmd" >> "$log_file"
+    echo "[verify] CARGO_TARGET_DIR=$target_dir $cmd" >> "$log_file"
     if ! (
       cd "$worktree" &&
-      env CARGO_TARGET_DIR="$worktree/.cargo-target" bash -lc "$cmd"
+      env CARGO_TARGET_DIR="$target_dir" bash -lc "$cmd"
     ) >> "$log_file" 2>&1; then
       record_status "$run_id" "$batch" "$attempt" "verify_failed" "$cmd"
       log_err "$batch" "Verify failed: $cmd"

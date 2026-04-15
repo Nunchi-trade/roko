@@ -164,7 +164,11 @@ spawn_batch() {
   log_file=$(run_log_file "$run_id" "$batch")
   local last_message_file
   last_message_file=$(run_last_message_file "$run_id" "$batch")
+  local target_dir
+  target_dir=$(batch_target_dir "$run_id" "$batch" "codex" "$attempt")
   : > "$last_message_file"
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir"
 
   local start_ts
   start_ts=$(date +%s)
@@ -177,6 +181,7 @@ spawn_batch() {
     echo "=== Model: $UX_MODEL ==="
     echo "=== Reasoning: $UX_REASONING ==="
     echo "=== Timeout: $UX_TIMEOUT ==="
+    echo "=== Cargo target: $target_dir ==="
     echo "=== Prompt snapshot: $prompt_snapshot ==="
     echo
   } > "$log_file"
@@ -184,7 +189,7 @@ spawn_batch() {
   record_status "$run_id" "$batch" "$attempt" "spawn_started" "codex exec started"
 
   do_timeout "$UX_TIMEOUT" \
-    env CARGO_TARGET_DIR="$worktree/.cargo-target" \
+    env CARGO_TARGET_DIR="$target_dir" \
     codex exec \
       --model "$UX_MODEL" \
       --sandbox workspace-write \
