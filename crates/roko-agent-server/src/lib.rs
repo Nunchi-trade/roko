@@ -114,12 +114,10 @@ impl AgentServer {
             .local_addr()
             .context("read bound agent-server address")?;
 
-        let card = self
-            .registration
-            .as_ref()
-            .map_or_else(|| self.state.build_agent_card(local_addr), |r| {
-                r.build_card(&self.state, local_addr)
-            });
+        let card = self.registration.as_ref().map_or_else(
+            || self.state.build_agent_card(local_addr),
+            |r| r.build_card(&self.state, local_addr),
+        );
 
         if let Some(registration) = &self.registration {
             registration
@@ -128,7 +126,9 @@ impl AgentServer {
                 .context("register agent card")?;
         }
         if let Some(on_start) = &self.on_start {
-            on_start(local_addr, card).await.context("run on_start hook")?;
+            on_start(local_addr, card)
+                .await
+                .context("run on_start hook")?;
         }
 
         axum::serve(listener, self.router())
@@ -332,7 +332,12 @@ mod tests {
 
         let health = router
             .clone()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).expect("request"))
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
             .await
             .expect("health response");
         assert_eq!(health.status(), StatusCode::OK);

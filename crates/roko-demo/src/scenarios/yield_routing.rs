@@ -256,7 +256,12 @@ pub async fn post_round_job(
     let poster_provider = prepared.ctx.wallet_provider("poster0")?;
     let market = BountyMarket::new(prepared.market_addr, poster_provider);
     market
-        .postJob(keccak256(spec.as_bytes()).into(), bounty_wei, now_secs() + 3600, 1)
+        .postJob(
+            keccak256(spec.as_bytes()).into(),
+            bounty_wei,
+            now_secs() + 3600,
+            1,
+        )
         .send()
         .await?
         .watch()
@@ -358,12 +363,15 @@ pub async fn finalize_round(
         .clone();
     let winner_addr = prepared.ctx.wallet_address(&winning_bid.worker)?;
 
-    BountyMarket::new(prepared.market_addr, prepared.ctx.wallet_provider("deployer")?)
-        .assign(posted.job_id, winner_addr)
-        .send()
-        .await?
-        .watch()
-        .await?;
+    BountyMarket::new(
+        prepared.market_addr,
+        prepared.ctx.wallet_provider("deployer")?,
+    )
+    .assign(posted.job_id, winner_addr)
+    .send()
+    .await?
+    .watch()
+    .await?;
     events
         .emit(DemoEvent::JobAssigned {
             round: posted.round,
@@ -373,9 +381,8 @@ pub async fn finalize_round(
         })
         .await;
 
-    let submission_hash = keccak256(
-        format!("{}:{}", winning_bid.worker, winning_bid.proposal.reasoning).as_bytes(),
-    );
+    let submission_hash =
+        keccak256(format!("{}:{}", winning_bid.worker, winning_bid.proposal.reasoning).as_bytes());
     BountyMarket::new(
         prepared.market_addr,
         prepared.ctx.wallet_provider(&winning_bid.worker)?,
@@ -415,25 +422,31 @@ pub async fn finalize_round(
         events.clone(),
     )
     .await?;
-    distribute_fees(prepared, posted.round, posted.job_id, posted.bounty_wei, &winning_bid, &posted.insights_before, &validator_wallets, events.clone()).await?;
-
-    let insight_id = post_winner_insight(
+    distribute_fees(
         prepared,
-        llm,
         posted.round,
+        posted.job_id,
+        posted.bounty_wei,
         &winning_bid,
+        &posted.insights_before,
+        &validator_wallets,
         events.clone(),
     )
     .await?;
 
+    let insight_id =
+        post_winner_insight(prepared, llm, posted.round, &winning_bid, events.clone()).await?;
+
     let query_edges = bids
         .iter()
         .flat_map(|bid| {
-            bid.queried_insight_ids.iter().map(|insight_id| KnowledgeEdge {
-                from: bid.worker.clone(),
-                to: insight_node_id(insight_id),
-                kind: "queried".into(),
-            })
+            bid.queried_insight_ids
+                .iter()
+                .map(|insight_id| KnowledgeEdge {
+                    from: bid.worker.clone(),
+                    to: insight_node_id(insight_id),
+                    kind: "queried".into(),
+                })
         })
         .collect::<Vec<_>>();
     emit_knowledge_graph(prepared, posted.round, query_edges, events.clone()).await?;
@@ -510,7 +523,10 @@ pub async fn post_winner_insight(
         if confirmer == winning_bid.worker {
             continue;
         }
-        let board = InsightBoard::new(prepared.board_addr, prepared.ctx.wallet_provider(&confirmer)?);
+        let board = InsightBoard::new(
+            prepared.board_addr,
+            prepared.ctx.wallet_provider(&confirmer)?,
+        );
         board.confirm(insight_id).send().await?.watch().await?;
         let updated = winner_board.getInsight(insight_id).call().await?;
         events
@@ -563,16 +579,21 @@ pub async fn run_adversarial_phase(
 ) -> anyhow::Result<SlashOutcome> {
     let round = DEFAULT_ROUNDS + 1;
     let adversary = "worker4";
-    let board = InsightBoard::new(prepared.board_addr, prepared.ctx.wallet_provider(adversary)?);
-    let fabricated = "fabricated insight: Compound V3 USDC/ETH utilization is 99.9% with zero slippage";
-    board.post(
-        keccak256(fabricated.as_bytes()).into(),
-        "demo://yield-routing:adversarial".into(),
-    )
-    .send()
-    .await?
-    .watch()
-    .await?;
+    let board = InsightBoard::new(
+        prepared.board_addr,
+        prepared.ctx.wallet_provider(adversary)?,
+    );
+    let fabricated =
+        "fabricated insight: Compound V3 USDC/ETH utilization is 99.9% with zero slippage";
+    board
+        .post(
+            keccak256(fabricated.as_bytes()).into(),
+            "demo://yield-routing:adversarial".into(),
+        )
+        .send()
+        .await?
+        .watch()
+        .await?;
     let fabricated_id = board.nextInsightId().call().await? - U256::from(1);
     events
         .emit(DemoEvent::InsightPosted {
@@ -583,11 +604,22 @@ pub async fn run_adversarial_phase(
         })
         .await;
 
-    let market = BountyMarket::new(prepared.market_addr, prepared.ctx.wallet_provider("poster0")?);
-    let spec = format!("Verify insight {} and reject fabricated routing", fabricated_id);
+    let market = BountyMarket::new(
+        prepared.market_addr,
+        prepared.ctx.wallet_provider("poster0")?,
+    );
+    let spec = format!(
+        "Verify insight {} and reject fabricated routing",
+        fabricated_id
+    );
     let bounty_wei = U256::from(BOUNTY_WEI);
     market
-        .postJob(keccak256(spec.as_bytes()).into(), bounty_wei, now_secs() + 3600, 1)
+        .postJob(
+            keccak256(spec.as_bytes()).into(),
+            bounty_wei,
+            now_secs() + 3600,
+            1,
+        )
         .send()
         .await?
         .watch()
@@ -603,12 +635,15 @@ pub async fn run_adversarial_phase(
         .await;
 
     let adversary_addr = prepared.ctx.wallet_address(adversary)?;
-    BountyMarket::new(prepared.market_addr, prepared.ctx.wallet_provider("deployer")?)
-        .assign(job_id, adversary_addr)
-        .send()
-        .await?
-        .watch()
-        .await?;
+    BountyMarket::new(
+        prepared.market_addr,
+        prepared.ctx.wallet_provider("deployer")?,
+    )
+    .assign(job_id, adversary_addr)
+    .send()
+    .await?
+    .watch()
+    .await?;
     events
         .emit(DemoEvent::JobAssigned {
             round,
@@ -618,19 +653,27 @@ pub async fn run_adversarial_phase(
         })
         .await;
 
-    BountyMarket::new(prepared.market_addr, prepared.ctx.wallet_provider(adversary)?)
-        .submit(job_id, keccak256(b"bad-route").into())
-        .send()
-        .await?
-        .watch()
-        .await?;
+    BountyMarket::new(
+        prepared.market_addr,
+        prepared.ctx.wallet_provider(adversary)?,
+    )
+    .submit(job_id, keccak256(b"bad-route").into())
+    .send()
+    .await?
+    .watch()
+    .await?;
 
     mine_block(&prepared.ctx.rpc_url).await?;
     let consortium = ConsortiumValidator::new(
         prepared.consortium_addr,
         prepared.ctx.wallet_provider("deployer")?,
     );
-    consortium.assembleCommittee(job_id).send().await?.watch().await?;
+    consortium
+        .assembleCommittee(job_id)
+        .send()
+        .await?
+        .watch()
+        .await?;
     let members = consortium.getMembers(job_id).call().await?;
     let validators = members
         .into_iter()
@@ -666,7 +709,8 @@ pub async fn run_adversarial_phase(
         })
         .await;
 
-    let worker_registry = WorkerRegistry::new(prepared.registry_addr, prepared.ctx.read_provider()?);
+    let worker_registry =
+        WorkerRegistry::new(prepared.registry_addr, prepared.ctx.read_provider()?);
     let worker_state = worker_registry.getWorker(adversary_addr).call().await?;
     let reputation = worker_registry.reputationOf(adversary_addr).call().await?;
     let slash = SlashOutcome {
@@ -750,13 +794,19 @@ async fn prepare_participants(prepared: &PreparedYieldRouting) -> anyhow::Result
     let deployer_provider = prepared.ctx.wallet_provider("deployer")?;
     let token = MockERC20::new(prepared.token_addr, deployer_provider.clone());
     token
-        .mint(prepared.ctx.wallet_address("poster0")?, U256::from(POSTER_MINT))
+        .mint(
+            prepared.ctx.wallet_address("poster0")?,
+            U256::from(POSTER_MINT),
+        )
         .send()
         .await?
         .watch()
         .await?;
     token
-        .mint(prepared.ctx.wallet_address("deployer")?, U256::from(DEPLOYER_MINT))
+        .mint(
+            prepared.ctx.wallet_address("deployer")?,
+            U256::from(DEPLOYER_MINT),
+        )
         .send()
         .await?
         .watch()
@@ -785,12 +835,15 @@ async fn prepare_participants(prepared: &PreparedYieldRouting) -> anyhow::Result
             .await?;
     }
 
-    MockERC20::new(prepared.token_addr, prepared.ctx.wallet_provider("poster0")?)
-        .approve(prepared.market_addr, U256::MAX)
-        .send()
-        .await?
-        .watch()
-        .await?;
+    MockERC20::new(
+        prepared.token_addr,
+        prepared.ctx.wallet_provider("poster0")?,
+    )
+    .approve(prepared.market_addr, U256::MAX)
+    .send()
+    .await?
+    .watch()
+    .await?;
 
     let registry_deployer = WorkerRegistry::new(prepared.registry_addr, deployer_provider.clone());
     registry_deployer
@@ -862,14 +915,15 @@ async fn seed_baseline_insights(
             index + 1,
             10 + index
         );
-        board.post(
-            keccak256(body.as_bytes()).into(),
-            format!("demo://yield-routing:baseline:{index}").into(),
-        )
-        .send()
-        .await?
-        .watch()
-        .await?;
+        board
+            .post(
+                keccak256(body.as_bytes()).into(),
+                format!("demo://yield-routing:baseline:{index}").into(),
+            )
+            .send()
+            .await?
+            .watch()
+            .await?;
         let id = board.nextInsightId().call().await? - U256::from(1);
         events
             .emit(DemoEvent::InsightPosted {
@@ -896,7 +950,12 @@ async fn approve_round(
         prepared.consortium_addr,
         prepared.ctx.wallet_provider("deployer")?,
     );
-    consortium.assembleCommittee(job_id).send().await?.watch().await?;
+    consortium
+        .assembleCommittee(job_id)
+        .send()
+        .await?
+        .watch()
+        .await?;
     let members = consortium.getMembers(job_id).call().await?;
     let validators = members
         .into_iter()
@@ -981,7 +1040,13 @@ async fn distribute_fees(
         prepared.fee_addr,
         prepared.ctx.wallet_provider(&winning_bid.worker)?,
     )
-    .distribute(job_id, bounty_wei, winner_addr, validator_addrs, data_providers.clone())
+    .distribute(
+        job_id,
+        bounty_wei,
+        winner_addr,
+        validator_addrs,
+        data_providers.clone(),
+    )
     .send()
     .await?
     .watch()
@@ -1021,7 +1086,11 @@ async fn emit_knowledge_graph(
 ) -> anyhow::Result<()> {
     let (nodes, edges) = build_knowledge_graph(prepared, query_edges).await?;
     events
-        .emit(DemoEvent::KnowledgeGraphUpdate { round, nodes, edges })
+        .emit(DemoEvent::KnowledgeGraphUpdate {
+            round,
+            nodes,
+            edges,
+        })
         .await;
     Ok(())
 }

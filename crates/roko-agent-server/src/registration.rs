@@ -132,7 +132,11 @@ impl AgentRegistration {
     }
 
     /// Publish the card and optionally submit an `updateAgentCardUri` transaction.
-    pub async fn register(&self, state: &AgentState, addr: SocketAddr) -> Result<RegistrationOutcome> {
+    pub async fn register(
+        &self,
+        state: &AgentState,
+        addr: SocketAddr,
+    ) -> Result<RegistrationOutcome> {
         let card = self.build_card(state, addr);
         let card_uri = self.publisher.publish(&card).await?;
         let tx_hash = if let (Some(wallet), Some(registry), Some(passport_id)) = (
@@ -210,7 +214,10 @@ mod tests {
     #[test]
     fn calldata_contains_selector_and_dynamic_offsets() {
         let calldata = build_update_agent_card_uri_calldata("passport-1", "https://card");
-        assert_eq!(&calldata[..4], &keccak256("updateAgentCardUri(string,string)".as_bytes())[..4]);
+        assert_eq!(
+            &calldata[..4],
+            &keccak256("updateAgentCardUri(string,string)".as_bytes())[..4]
+        );
         assert_eq!(calldata.len() % 32, 4);
     }
 }

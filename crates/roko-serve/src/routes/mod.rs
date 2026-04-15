@@ -4,8 +4,8 @@
 //! [`build_router`] function assembles them into a single [`axum::Router`]
 //! with CORS and tracing middleware.
 
-mod aggregator;
 mod agents;
+mod aggregator;
 mod config;
 mod deployments;
 mod learning;

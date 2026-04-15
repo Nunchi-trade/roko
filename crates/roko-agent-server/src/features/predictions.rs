@@ -15,7 +15,10 @@ use crate::state::{AgentPrediction, AgentState, PredictionCreateRequest};
 /// Prediction routes.
 pub fn router() -> Router<Arc<AgentState>> {
     Router::new()
-        .route("/predictions", get(list_predictions).post(create_prediction))
+        .route(
+            "/predictions",
+            get(list_predictions).post(create_prediction),
+        )
         .route("/predictions/residuals", get(prediction_residuals))
         .route("/predictions/{id}", get(get_prediction))
 }
@@ -36,10 +39,10 @@ async fn get_prediction(
     State(state): State<Arc<AgentState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    state
-        .get_prediction(&id)
-        .await
-        .map_or_else(|| StatusCode::NOT_FOUND.into_response(), |prediction| Json(prediction).into_response())
+    state.get_prediction(&id).await.map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |prediction| Json(prediction).into_response(),
+    )
 }
 
 async fn prediction_residuals(State(state): State<Arc<AgentState>>) -> Json<serde_json::Value> {

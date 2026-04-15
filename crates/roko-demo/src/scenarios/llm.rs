@@ -5,8 +5,8 @@
 //! default so tests and CI stay reproducible.
 
 use std::env;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -130,7 +130,9 @@ impl MultiProvider {
     /// Create a new round-robin provider set.
     pub fn new(providers: Vec<Arc<dyn LlmProvider>>) -> anyhow::Result<Self> {
         if providers.is_empty() {
-            return Err(anyhow::anyhow!("multi backend requires at least one provider"));
+            return Err(anyhow::anyhow!(
+                "multi backend requires at least one provider"
+            ));
         }
         Ok(Self {
             providers,
@@ -276,7 +278,10 @@ impl LlmProvider for OllamaProvider {
     async fn fill(&self, req: LlmRequest) -> anyhow::Result<serde_json::Value> {
         let response = self
             .client
-            .post(format!("{}/api/generate", self.base_url.trim_end_matches('/')))
+            .post(format!(
+                "{}/api/generate",
+                self.base_url.trim_end_matches('/')
+            ))
             .json(&serde_json::json!({
                 "model": self.model,
                 "prompt": provider_prompt(&req),

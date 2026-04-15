@@ -2,7 +2,7 @@
 
 use crate::usage::Usage;
 use async_trait::async_trait;
-use roko_core::{Context, Engram};
+use roko_core::{Body, ContentHash, Context, Engram, EngramBuilder, Kind};
 
 /// The result of running an agent once.
 #[derive(Clone, Debug)]
@@ -66,6 +66,31 @@ impl AgentResult {
         v.push(self.output.clone());
         v
     }
+}
+
+/// Build an output signal that keeps the full upstream lineage from `input`.
+///
+/// Many runtime wrappers only emit a single final `AgentOutput`, so this helper
+/// centralizes the "input lineage + direct parent" propagation rule.
+#[must_use]
+pub fn derived_output(input: &Engram, kind: Kind, body: Body) -> EngramBuilder {
+    Engram::builder(kind).body(body).lineage(
+        input
+            .lineage
+            .iter()
+            .copied()
+            .chain(std::iter::once(input.id)),
+    )
+}
+
+/// Return the full upstream lineage for `input`, including the input hash.
+#[must_use]
+pub fn full_lineage(input: &Engram) -> impl Iterator<Item = ContentHash> + '_ {
+    input
+        .lineage
+        .iter()
+        .copied()
+        .chain(std::iter::once(input.id))
 }
 
 /// An agent: an async executor that takes an input signal (typically a prompt)

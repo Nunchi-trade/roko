@@ -39,17 +39,63 @@ pub struct KnowledgeEdge {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DemoEvent {
-    ScenarioStarted { scenario: String },
-    RoundStarted { scenario: String, round: u32 },
-    RoundCompleted { scenario: String, round: u32, winner: String, output_eth: f64 },
-    ScenarioCompleted { scenario: String, rounds: u32, improvement_bps: u32 },
-    JobPosted { round: u32, job_id: String, bounty_wei: String, spec: String },
-    JobAssigned { round: u32, job_id: String, worker: String, model: String },
-    AgentBid { round: u32, worker: String, model: String, expected_output_eth: f64, confidence: f64 },
-    ExecutionStarted { round: u32, worker: String, route_steps: usize },
-    ExecutionCompleted { round: u32, worker: String, actual_output_eth: f64 },
-    ValidationVote { round: u32, validator: String, approve: bool },
-    ValidationComplete { round: u32, accepted: bool, validators: Vec<String> },
+    ScenarioStarted {
+        scenario: String,
+    },
+    RoundStarted {
+        scenario: String,
+        round: u32,
+    },
+    RoundCompleted {
+        scenario: String,
+        round: u32,
+        winner: String,
+        output_eth: f64,
+    },
+    ScenarioCompleted {
+        scenario: String,
+        rounds: u32,
+        improvement_bps: u32,
+    },
+    JobPosted {
+        round: u32,
+        job_id: String,
+        bounty_wei: String,
+        spec: String,
+    },
+    JobAssigned {
+        round: u32,
+        job_id: String,
+        worker: String,
+        model: String,
+    },
+    AgentBid {
+        round: u32,
+        worker: String,
+        model: String,
+        expected_output_eth: f64,
+        confidence: f64,
+    },
+    ExecutionStarted {
+        round: u32,
+        worker: String,
+        route_steps: usize,
+    },
+    ExecutionCompleted {
+        round: u32,
+        worker: String,
+        actual_output_eth: f64,
+    },
+    ValidationVote {
+        round: u32,
+        validator: String,
+        approve: bool,
+    },
+    ValidationComplete {
+        round: u32,
+        accepted: bool,
+        validators: Vec<String>,
+    },
     FeesDistributed {
         round: u32,
         job_id: String,
@@ -59,11 +105,32 @@ pub enum DemoEvent {
         agent_share_wei: String,
         treasury_share_wei: String,
     },
-    InsightPosted { round: u32, insight_id: String, poster: String, uri: String },
-    InsightConfirmed { round: u32, insight_id: String, confirmer: String, pheromone: u64 },
-    KnowledgeQueried { round: u32, worker: String, insights_available: usize },
-    CFactorMeasured { round_1_output_eth: f64, round_2_output_eth: f64, improvement_bps: u32 },
-    ReputationUpdated { worker: String, reputation: String },
+    InsightPosted {
+        round: u32,
+        insight_id: String,
+        poster: String,
+        uri: String,
+    },
+    InsightConfirmed {
+        round: u32,
+        insight_id: String,
+        confirmer: String,
+        pheromone: u64,
+    },
+    KnowledgeQueried {
+        round: u32,
+        worker: String,
+        insights_available: usize,
+    },
+    CFactorMeasured {
+        round_1_output_eth: f64,
+        round_2_output_eth: f64,
+        improvement_bps: u32,
+    },
+    ReputationUpdated {
+        worker: String,
+        reputation: String,
+    },
     AgentSlashed {
         worker: String,
         reason_code: u8,
@@ -76,7 +143,9 @@ pub enum DemoEvent {
         nodes: Vec<KnowledgeNode>,
         edges: Vec<KnowledgeEdge>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Sink for demo events.

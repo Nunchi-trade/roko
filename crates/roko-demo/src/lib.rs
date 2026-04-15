@@ -23,9 +23,9 @@
 //! See `roko/demo/` for the declarative config + scenarios consumed by this
 //! crate's `roko-demo` binary.
 
-pub mod bindings;
 pub mod autonomous;
 pub mod benchmark;
+pub mod bindings;
 pub mod chain_ctx;
 pub mod deploy;
 pub mod events;

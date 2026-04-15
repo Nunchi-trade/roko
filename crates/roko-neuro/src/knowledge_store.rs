@@ -303,7 +303,8 @@ impl KnowledgeStore {
                 let keyword_score = keyword_score(&entry, &topic_terms, &topic_norm);
                 let recency = recency_factor(&entry, now);
                 let confidence = effective_confidence(&entry);
-                let score = keyword_score * confidence * recency;
+                let emotional = emotional_retrieval_boost(&entry);
+                let score = keyword_score * confidence * recency * emotional;
 
                 #[cfg(feature = "hdc")]
                 let score = score + hdc_similarity(&entry, topic);
@@ -417,6 +418,31 @@ impl KnowledgeStore {
         let removed = before_len.saturating_sub(entries.len());
         self.rewrite_all(&entries)?;
         Ok(removed)
+    }
+
+    /// Mutate matching entries in place and rewrite the store atomically.
+    ///
+    /// Returns the number of entries that changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn update_entries<F>(&self, mut update: F) -> Result<usize>
+    where
+        F: FnMut(&mut KnowledgeEntry) -> bool,
+    {
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut changed = 0usize;
+        for entry in &mut entries {
+            if update(entry) {
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(changed)
     }
 
     /// Read all knowledge entries from the store.
@@ -794,7 +820,7 @@ fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
 }
 
 fn effective_confidence(entry: &KnowledgeEntry) -> f64 {
-    bounded_confidence(entry) * confirmation_boost(entry) * entry.emotional_reliability_boost()
+    bounded_confidence(entry) * confirmation_boost(entry) * entry.emotional_consolidation_boost()
 }
 
 fn bounded_confidence(entry: &KnowledgeEntry) -> f64 {
@@ -828,6 +854,10 @@ fn compare_scores(
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .then_with(|| right.1.created_at.cmp(&left.1.created_at))
+}
+
+fn emotional_retrieval_boost(entry: &KnowledgeEntry) -> f64 {
+    entry.emotional_retrieval_boost()
 }
 
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
@@ -1082,6 +1112,60 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "k-diverse");
         assert_eq!(results[1].id, "k-narrow");
+    }
+
+    #[test]
+    fn query_prefers_emotionally_reinforced_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut neutral = entry(
+            KnowledgeKind::Warning,
+            "k-neutral",
+            "Prefer the rollback path when rollout validation fails",
+            &["deploy", "rollback"],
+            0.8,
+            &["ep-a"],
+            now,
+        );
+        neutral.emotional_provenance = Some(crate::EmotionalProvenance {
+            average_pad: PadVector::new(-0.1, 0.2, 0.0),
+            discovery_emotion: "neutral_mid_arousal".to_string(),
+            validation_arc: Some(crate::ValidationArc::Stable),
+            emotional_diversity: 0.0,
+        });
+
+        let mut reinforced = entry(
+            KnowledgeKind::Warning,
+            "k-reinforced",
+            "Prefer the rollback path when rollout validation fails",
+            &["deploy", "rollback"],
+            0.8,
+            &["ep-b"],
+            now,
+        );
+        reinforced.emotional_tag = Some(roko_core::EmotionalTag::new(
+            PadVector::new(-0.8, 0.4, 0.0),
+            0.95,
+            "rollback_failure",
+            PadVector::new(-0.7, 0.3, 0.0),
+        ));
+        reinforced.emotional_provenance = Some(crate::EmotionalProvenance {
+            average_pad: PadVector::new(-0.8, 0.4, 0.0),
+            discovery_emotion: "negative_high_arousal".to_string(),
+            validation_arc: Some(crate::ValidationArc::Redemptive),
+            emotional_diversity: 1.0,
+        });
+
+        store.add(neutral).expect("add neutral");
+        store.add(reinforced).expect("add reinforced");
+
+        let results = store
+            .query("rollback rollout validation failure", 2)
+            .expect("query");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "k-reinforced");
     }
 
     #[test]

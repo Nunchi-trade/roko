@@ -44,6 +44,9 @@ pub async fn start_ws_server(port: u16) -> anyhow::Result<broadcast::Sender<Stri
         }
     });
 
-    tracing::info!(ws_port = local_addr.port(), "demo event websocket server listening");
+    tracing::info!(
+        ws_port = local_addr.port(),
+        "demo event websocket server listening"
+    );
     Ok(sender)
 }

@@ -45,7 +45,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/predictions/sessions", get(list_prediction_sessions))
         .route("/predictions/sessions/{id}", get(get_prediction_session))
         .route("/predictions/claims", get(list_prediction_claims))
-        .route("/predictions/calibration/{agent_id}", get(prediction_calibration))
+        .route(
+            "/predictions/calibration/{agent_id}",
+            get(prediction_calibration),
+        )
         .route("/knowledge/entries", get(list_knowledge_entries))
         .route("/knowledge/edges", get(list_knowledge_edges))
         .route("/knowledge/search", get(search_knowledge))
@@ -169,7 +172,10 @@ async fn list_agents(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AgentListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let cache_key = format!("aggregator:agents:{}", query.owner.clone().unwrap_or_default());
+    let cache_key = format!(
+        "aggregator:agents:{}",
+        query.owner.clone().unwrap_or_default()
+    );
     if let Some(cached) = state.cached_json(&cache_key).await {
         return Ok(Json(cached));
     }
@@ -339,7 +345,9 @@ async fn agent_trace(
     })))
 }
 
-async fn agent_topology(State(state): State<Arc<AppState>>) -> Result<Json<TopologyResponse>, ApiError> {
+async fn agent_topology(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TopologyResponse>, ApiError> {
     let agents = known_agents(&state).await?;
     let nodes = agents
         .iter()
@@ -364,7 +372,9 @@ async fn agent_topology(State(state): State<Arc<AppState>>) -> Result<Json<Topol
     }))
 }
 
-async fn list_prediction_sessions(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn list_prediction_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
     let cache_key = "aggregator:prediction-sessions";
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
@@ -396,7 +406,9 @@ async fn get_prediction_session(
     })))
 }
 
-async fn list_prediction_claims(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn list_prediction_claims(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
     let cache_key = "aggregator:prediction-claims";
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
@@ -423,7 +435,9 @@ async fn prediction_calibration(
     Ok(Json(calibration))
 }
 
-async fn list_knowledge_entries(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn list_knowledge_entries(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
     let cache_key = "aggregator:knowledge:entries";
     if let Some(cached) = state.cached_json(cache_key).await {
         return Ok(Json(cached));
@@ -528,7 +542,12 @@ async fn list_tasks(
         .skip(query.offset)
         .take(query.limit)
         .collect::<Vec<_>>();
-    let body = json!(PaginatedResponse::new(items, total, query.offset, query.limit));
+    let body = json!(PaginatedResponse::new(
+        items,
+        total,
+        query.offset,
+        query.limit
+    ));
     state
         .put_cached_json(cache_key, TASKS_TTL, body.clone())
         .await;
@@ -664,7 +683,10 @@ async fn route_client_stream_message(
         .and_then(|command| command.message.as_ref())
         .map_or_else(|| text.to_string(), value_to_stream_payload);
 
-    let target_ids = parsed.as_ref().map(stream_command_targets).unwrap_or_default();
+    let target_ids = parsed
+        .as_ref()
+        .map(stream_command_targets)
+        .unwrap_or_default();
     let mut delivered = 0usize;
 
     if target_ids.is_empty() {
@@ -845,7 +867,9 @@ fn build_agent_stream_request(
     let mut request = url.to_string().into_client_request().ok()?;
     if let Some(token) = agent.proxy_token.as_deref() {
         let header_value = HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
-        request.headers_mut().insert(header::AUTHORIZATION, header_value);
+        request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, header_value);
     }
     Some(request)
 }
@@ -904,7 +928,10 @@ async fn collect_agent_tasks(state: &Arc<AppState>) -> Result<Vec<Value>, ApiErr
     Ok(join_all(futures).await.into_iter().flatten().collect())
 }
 
-async fn find_known_agent(state: &Arc<AppState>, agent_id: &str) -> Result<DiscoveredAgent, ApiError> {
+async fn find_known_agent(
+    state: &Arc<AppState>,
+    agent_id: &str,
+) -> Result<DiscoveredAgent, ApiError> {
     known_agents(state)
         .await?
         .into_iter()
@@ -914,7 +941,8 @@ async fn find_known_agent(state: &Arc<AppState>, agent_id: &str) -> Result<Disco
 
 async fn known_agents(state: &Arc<AppState>) -> Result<Vec<DiscoveredAgent>, ApiError> {
     let mut agents = state.list_discovered_agents().await;
-    let mut known_ids: HashSet<String> = agents.iter().map(|agent| agent.agent_id.clone()).collect();
+    let mut known_ids: HashSet<String> =
+        agents.iter().map(|agent| agent.agent_id.clone()).collect();
 
     for (pid, label) in state.supervisor.list().await {
         if known_ids.contains(&label) {
@@ -939,9 +967,11 @@ async fn known_agents(state: &Arc<AppState>) -> Result<Vec<DiscoveredAgent>, Api
         });
     }
 
-    let hydrated = join_all(agents.into_iter().map(|agent| async move {
-        hydrate_agent_card(state, agent).await
-    }))
+    let hydrated = join_all(
+        agents
+            .into_iter()
+            .map(|agent| async move { hydrate_agent_card(state, agent).await }),
+    )
     .await;
 
     Ok(hydrated)
@@ -987,7 +1017,11 @@ async fn fetch_agent_json(
     path: &str,
 ) -> Option<Value> {
     let rest = agent.endpoints.rest.as_ref()?;
-    let url = format!("{}/{}", rest.trim_end_matches('/'), path.trim_start_matches('/'));
+    let url = format!(
+        "{}/{}",
+        rest.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
     let mut request = state.http_client.get(url);
     if let Some(token) = agent.proxy_token.as_ref() {
         request = request.bearer_auth(token);
@@ -1141,7 +1175,9 @@ mod tests {
             })
             .await;
 
-        let router = Router::new().nest("/api", routes()).with_state(Arc::clone(&state));
+        let router = Router::new()
+            .nest("/api", routes())
+            .with_state(Arc::clone(&state));
 
         let skills = call_json(&router, "/api/agents/agent-1/skills").await;
         assert_eq!(skills["agent_id"], "agent-1");
@@ -1180,11 +1216,17 @@ mod tests {
             message: "local-backlog".into(),
         });
 
-        let router = Router::new().nest("/api", routes()).with_state(Arc::clone(&state));
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind aggregator");
+        let router = Router::new()
+            .nest("/api", routes())
+            .with_state(Arc::clone(&state));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind aggregator");
         let addr = listener.local_addr().expect("aggregator addr");
         let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("serve aggregator");
+            axum::serve(listener, router)
+                .await
+                .expect("serve aggregator");
         });
 
         let (mut socket, _) = connect_async(format!("ws://{addr}/api/ws"))
@@ -1231,7 +1273,12 @@ mod tests {
     async fn call_json(router: &Router, uri: &str) -> Value {
         let response = router
             .clone()
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("request"))
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
             .await
             .expect("response");
         assert!(response.status().is_success());
@@ -1361,7 +1408,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind agent");
         let addr = listener.local_addr().expect("agent addr");
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("serve mock agent");
+            axum::serve(listener, router)
+                .await
+                .expect("serve mock agent");
         });
 
         (
@@ -1379,7 +1428,9 @@ mod tests {
     }
 
     async fn next_ws_text(
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     ) -> String {
         loop {
             match socket.next().await {
@@ -1392,7 +1443,9 @@ mod tests {
     }
 
     async fn next_message_for_source_with_field(
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         source: &str,
         field: &str,
     ) -> String {

@@ -5544,6 +5544,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "ed25519-dalek",
  "parking_lot",
  "proptest",
  "regex",

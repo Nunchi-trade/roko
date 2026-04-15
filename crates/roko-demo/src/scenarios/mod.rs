@@ -9,8 +9,8 @@
 //! deterministic stub that produces bounded-random structured output so
 //! scenarios run headless in CI.
 
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 

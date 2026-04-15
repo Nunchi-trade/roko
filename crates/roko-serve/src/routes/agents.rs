@@ -180,13 +180,10 @@ async fn send_message(
         && let Some(rest) = agent.endpoints.rest
     {
         let url = format!("{}/message", rest.trim_end_matches('/'));
-        let mut request = state
-            .http_client
-            .post(url)
-            .json(&json!({
-                "prompt": req.message,
-                "context": req.context,
-            }));
+        let mut request = state.http_client.post(url).json(&json!({
+            "prompt": req.message,
+            "context": req.context,
+        }));
 
         if let Some(token) = agent.proxy_token {
             request = request.bearer_auth(token);

@@ -49,10 +49,7 @@ async fn message(
     }))
 }
 
-async fn stream(
-    State(state): State<Arc<AgentState>>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn stream(State(state): State<Arc<AgentState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_stream(socket, state))
 }
 

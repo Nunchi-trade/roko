@@ -168,7 +168,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Deploy { scenario } => deploy_cmd(&cli, &loaded, scenario).await?,
         Cmd::Seed { scenario } => seed_cmd(&cli, &loaded, scenario).await?,
         Cmd::Verify { scenario } => verify_cmd(&cli, &loaded, scenario).await?,
-        Cmd::Up { scenario, no_agents } => {
+        Cmd::Up {
+            scenario,
+            no_agents,
+        } => {
             deploy_cmd(&cli, &loaded, scenario).await?;
             seed_cmd(&cli, &loaded, scenario).await?;
             if !no_agents {
@@ -226,16 +229,8 @@ async fn main() -> anyhow::Result<()> {
                 events.clone(),
             )
             .await?;
-            let report = run_autonomous(
-                &prepared,
-                llm,
-                *agents,
-                *jobs,
-                *interval,
-                *timeout,
-                events,
-            )
-            .await?;
+            let report =
+                run_autonomous(&prepared, llm, *agents, *jobs, *interval, *timeout, events).await?;
             write_json_output(None, &report)?;
         }
         Cmd::Tui { scenario } => {

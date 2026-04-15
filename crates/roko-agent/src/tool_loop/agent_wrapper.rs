@@ -8,7 +8,7 @@ use roko_core::tool::{ToolContext, ToolDef};
 use roko_core::{Body, Context, Engram, Kind};
 use roko_fs::RokoLayout;
 
-use crate::agent::{Agent, AgentResult};
+use crate::agent::{Agent, AgentResult, derived_output};
 use crate::task_runner::task_id_from_context;
 
 use super::{StopReason, ToolLoop};
@@ -64,9 +64,8 @@ impl ToolLoopAgent {
         self
     }
 
-    fn output_signal(text: &str, stop_reason: &str, iterations: usize) -> Engram {
-        Engram::builder(Kind::AgentOutput)
-            .body(Body::text(text))
+    fn output_signal(input: &Engram, text: &str, stop_reason: &str, iterations: usize) -> Engram {
+        derived_output(input, Kind::AgentOutput, Body::text(text))
             .tag("stop_reason", stop_reason)
             .tag("iterations", iterations.to_string())
             .build()
@@ -107,24 +106,28 @@ impl Agent for ToolLoopAgent {
 
         match output.stop_reason {
             StopReason::Stop => AgentResult::ok(Self::output_signal(
+                input,
                 &output.final_text,
                 "stop",
                 output.iterations,
             ))
             .with_usage(output.total_usage),
             StopReason::MaxIterations => AgentResult::fail(Self::output_signal(
+                input,
                 &format!("Max iterations ({}) reached", output.iterations),
                 "max_iterations",
                 output.iterations,
             ))
             .with_usage(output.total_usage),
             StopReason::Cancelled => AgentResult::fail(Self::output_signal(
+                input,
                 "Tool loop cancelled",
                 "cancelled",
                 output.iterations,
             ))
             .with_usage(output.total_usage),
             StopReason::BackendError(err) => AgentResult::fail(Self::output_signal(
+                input,
                 &err,
                 "backend_error",
                 output.iterations,
@@ -313,8 +316,12 @@ mod tests {
             .with_system_prompt("system prompt")
             .with_tools(test_tools())
             .with_worktree_path("/tmp");
+        let ancestor = Engram::builder(Kind::Prompt)
+            .body(Body::text("ancestor"))
+            .build();
         let input = Engram::builder(Kind::Prompt)
             .body(Body::text("call the tool"))
+            .lineage([ancestor.id])
             .build();
 
         let result = agent.run(&input, &Context::now()).await;
@@ -324,6 +331,7 @@ mod tests {
             result.output.body.as_text().expect("text output"),
             "final answer"
         );
+        assert_eq!(result.output.lineage, vec![ancestor.id, input.id]);
         assert_eq!(result.output.tag("stop_reason"), Some("stop"));
         assert_eq!(result.output.tag("iterations"), Some("1"));
         assert_eq!(agent.name(), "glm-tool-loop");

@@ -112,9 +112,7 @@ impl TuiState {
                 self.push_log(format!("{worker} reputation updated to {reputation}"));
             }
             DemoEvent::InsightPosted {
-                poster,
-                insight_id,
-                ..
+                poster, insight_id, ..
             } => {
                 self.knowledge
                     .latest
@@ -134,9 +132,7 @@ impl TuiState {
                 self.push_log("knowledge graph refreshed".into());
             }
             DemoEvent::AgentSlashed {
-                worker,
-                amount_wei,
-                ..
+                worker, amount_wei, ..
             } => {
                 self.agent_mut(&worker).status = "Slashed".into();
                 self.push_log(format!("{worker} slashed by {amount_wei} wei"));
@@ -152,10 +148,12 @@ impl TuiState {
     }
 
     fn agent_mut(&mut self, name: &str) -> &mut AgentState {
-        self.agents.entry(name.into()).or_insert_with(|| AgentState {
-            status: "Idle".into(),
-            ..AgentState::default()
-        })
+        self.agents
+            .entry(name.into())
+            .or_insert_with(|| AgentState {
+                status: "Idle".into(),
+                ..AgentState::default()
+            })
     }
 
     fn push_log(&mut self, message: String) {
@@ -202,7 +200,10 @@ where
         terminal.draw(|frame| render(frame, &state, title))?;
 
         if !handle_done {
-            if task.as_ref().is_some_and(tokio::task::JoinHandle::is_finished) {
+            if task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
                 task.take()
                     .ok_or_else(|| anyhow::anyhow!("missing TUI task handle"))?
                     .await??;
@@ -254,7 +255,12 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &TuiState, title: &str) {
         .split(layout[2]);
 
     let title_text = Paragraph::new(Line::from(vec![
-        Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("  Round {}", state.current_round)),
         Span::raw("  q/Esc quit · j/k scroll"),
     ]))
@@ -266,7 +272,10 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &TuiState, title: &str) {
         .iter()
         .map(|(name, agent)| {
             ListItem::new(vec![
-                Line::from(Span::styled(name.clone(), Style::default().fg(Color::Yellow))),
+                Line::from(Span::styled(
+                    name.clone(),
+                    Style::default().fg(Color::Yellow),
+                )),
                 Line::from(format!(
                     "{} · rep {} · earned {}",
                     blank_if_empty(&agent.model, "unknown"),
@@ -282,7 +291,10 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &TuiState, title: &str) {
         middle[0],
     );
 
-    let log_start = state.log.len().saturating_sub(14 + state.log_scroll as usize);
+    let log_start = state
+        .log
+        .len()
+        .saturating_sub(14 + state.log_scroll as usize);
     let log_items = state.log[log_start..]
         .iter()
         .map(|entry| ListItem::new(entry.clone()))
@@ -309,7 +321,10 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &TuiState, title: &str) {
     frame.render_widget(knowledge, bottom[0]);
 
     let economics = Paragraph::new(vec![
-        Line::from(format!("Total distributed: {}", state.economics.total_distributed)),
+        Line::from(format!(
+            "Total distributed: {}",
+            state.economics.total_distributed
+        )),
         Line::from(format!("Treasury: {}", state.economics.treasury)),
         Line::from(format!(
             "Current winner: {}",

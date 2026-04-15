@@ -15,6 +15,7 @@ use std::path::Path;
 
 use chrono::Utc;
 use roko_learn::episode_logger::Episode;
+use roko_learn::episode_logger::GateVerdict;
 use roko_learn::pattern_discovery::{EpisodeView, PatternMiner};
 use serde::{Deserialize, Serialize};
 
@@ -131,6 +132,36 @@ pub struct TierProgressionReport {
     pub playbook: PlaybookCompilation,
 }
 
+/// Result of evaluating whether a knowledge entry should change tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierProgressionDecision {
+    /// Promote to the supplied tier.
+    Promote(KnowledgeTier),
+    /// Demote to the supplied tier.
+    Demote(KnowledgeTier),
+    /// Keep the tier, but schedule a freshness review.
+    ReviewExpiry,
+    /// No change required.
+    NoChange,
+}
+
+impl TierProgressionDecision {
+    /// Return the tier change, if any.
+    #[must_use]
+    pub const fn tier(self) -> Option<KnowledgeTier> {
+        match self {
+            Self::Promote(tier) | Self::Demote(tier) => Some(tier),
+            Self::ReviewExpiry | Self::NoChange => None,
+        }
+    }
+
+    /// Whether this decision should trigger an expiry review.
+    #[must_use]
+    pub const fn needs_expiry_review(self) -> bool {
+        matches!(self, Self::ReviewExpiry)
+    }
+}
+
 /// Tiered compressor over raw episode logs.
 #[derive(Debug, Clone, Copy)]
 pub struct TierProgression {
@@ -183,6 +214,53 @@ impl TierProgression {
             heuristics,
             playbook,
         }
+    }
+
+    /// Evaluate whether a knowledge entry should change tier based on gate verdicts.
+    ///
+    /// Promotion and demotion are intentionally conservative:
+    /// - 3+ passing verdicts promote one tier
+    /// - 2+ failing verdicts demote one tier
+    /// - entries older than 2× their effective half-life are marked for review
+    ///
+    /// # Notes
+    ///
+    /// The caller can use [`Self::evaluate_tier_progression`] for a richer
+    /// decision enum, or this method when only a concrete target tier matters.
+    #[must_use]
+    pub fn evaluate_promotion(
+        entry: &KnowledgeEntry,
+        verdicts: &[GateVerdict],
+    ) -> Option<KnowledgeTier> {
+        Self::evaluate_tier_progression(entry, verdicts).tier()
+    }
+
+    /// Rich progression decision that preserves expiry-review intent.
+    #[must_use]
+    pub fn evaluate_tier_progression(
+        entry: &KnowledgeEntry,
+        verdicts: &[GateVerdict],
+    ) -> TierProgressionDecision {
+        let successes = verdicts.iter().filter(|verdict| verdict.passed).count();
+        let failures = verdicts.len().saturating_sub(successes);
+
+        if successes >= 3 {
+            return TierProgressionDecision::Promote(promote_tier(entry.tier));
+        }
+        if failures >= 2 {
+            return TierProgressionDecision::Demote(demote_tier(entry.tier));
+        }
+        if entry_needs_expiry_review(entry) {
+            return TierProgressionDecision::ReviewExpiry;
+        }
+
+        TierProgressionDecision::NoChange
+    }
+
+    /// Whether an entry should be reviewed for expiry.
+    #[must_use]
+    pub fn needs_expiry_review(entry: &KnowledgeEntry) -> bool {
+        entry_needs_expiry_review(entry)
     }
 
     /// Replay heuristics against the supplied episodes and revise confidence.
@@ -774,6 +852,28 @@ fn compare_heuristics(left: &HeuristicRule, right: &HeuristicRule) -> std::cmp::
         .then_with(|| left.id.cmp(&right.id))
 }
 
+fn promote_tier(current: KnowledgeTier) -> KnowledgeTier {
+    match current {
+        KnowledgeTier::Transient => KnowledgeTier::Working,
+        KnowledgeTier::Working => KnowledgeTier::Consolidated,
+        KnowledgeTier::Consolidated | KnowledgeTier::Persistent => current,
+    }
+}
+
+fn demote_tier(current: KnowledgeTier) -> KnowledgeTier {
+    match current {
+        KnowledgeTier::Persistent => KnowledgeTier::Consolidated,
+        KnowledgeTier::Consolidated => KnowledgeTier::Working,
+        KnowledgeTier::Working | KnowledgeTier::Transient => KnowledgeTier::Transient,
+    }
+}
+
+fn entry_needs_expiry_review(entry: &KnowledgeEntry) -> bool {
+    let half_life_days = entry.effective_half_life_days().max(0.1);
+    let age_days = (Utc::now() - entry.created_at).num_seconds().max(0) as f64 / 86_400.0;
+    age_days >= half_life_days * 2.0
+}
+
 fn sorted_ids(ids: &BTreeSet<String>) -> Vec<String> {
     ids.iter().cloned().collect()
 }
@@ -1113,5 +1213,111 @@ mod tests {
         assert!(weakened.confidence < 0.8);
         assert_eq!(report.playbook.rules.len(), 2);
         assert!(report.playbook.markdown.contains("confidence"));
+    }
+
+    #[test]
+    fn evaluate_promotion_promotes_on_three_successes() {
+        let entry = KnowledgeEntry {
+            id: "entry-promote".to_string(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Promote me".to_string(),
+            confidence: 0.8,
+            confidence_weight: 0.8,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-1".to_string()],
+            tags: vec!["tier".to_string()],
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now(),
+            half_life_days: 30.0,
+            tier: KnowledgeTier::Transient,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+        };
+        let verdicts = vec![
+            GateVerdict::new("compile", true),
+            GateVerdict::new("test", true),
+            GateVerdict::new("lint", true),
+        ];
+
+        assert_eq!(
+            TierProgression::evaluate_promotion(&entry, &verdicts),
+            Some(KnowledgeTier::Working)
+        );
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&entry, &verdicts),
+            TierProgressionDecision::Promote(KnowledgeTier::Working)
+        );
+    }
+
+    #[test]
+    fn evaluate_promotion_demotes_on_two_failures() {
+        let entry = KnowledgeEntry {
+            id: "entry-demote".to_string(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Demote me".to_string(),
+            confidence: 0.8,
+            confidence_weight: 0.8,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-1".to_string()],
+            tags: vec!["tier".to_string()],
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now(),
+            half_life_days: 30.0,
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+        };
+        let verdicts = vec![
+            GateVerdict::new("compile", false),
+            GateVerdict::new("test", false),
+        ];
+
+        assert_eq!(
+            TierProgression::evaluate_promotion(&entry, &verdicts),
+            Some(KnowledgeTier::Transient)
+        );
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&entry, &verdicts),
+            TierProgressionDecision::Demote(KnowledgeTier::Transient)
+        );
+    }
+
+    #[test]
+    fn evaluate_promotion_marks_stale_entries_for_review() {
+        let entry = KnowledgeEntry {
+            id: "entry-review".to_string(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Review me".to_string(),
+            confidence: 0.8,
+            confidence_weight: 0.8,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-1".to_string()],
+            tags: vec!["tier".to_string()],
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now() - chrono::Duration::days(200),
+            half_life_days: 30.0,
+            tier: KnowledgeTier::Consolidated,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+        };
+
+        assert!(TierProgression::needs_expiry_review(&entry));
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&entry, &[]),
+            TierProgressionDecision::ReviewExpiry
+        );
+        assert_eq!(TierProgression::evaluate_promotion(&entry, &[]), None);
     }
 }

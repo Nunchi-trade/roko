@@ -449,7 +449,12 @@ impl AppState {
 
     /// List all known discovery entries.
     pub async fn list_discovered_agents(&self) -> Vec<DiscoveredAgent> {
-        self.discovered_agents.read().await.values().cloned().collect()
+        self.discovered_agents
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Fetch one discovery entry.
@@ -467,11 +472,13 @@ impl AppState {
 
     /// Return a public token status snapshot for an agent.
     pub async fn agent_token_status(&self, agent_id: &str) -> Option<AgentTokenStatus> {
-        self.discovered_agent(agent_id).await.map(|agent| AgentTokenStatus {
-            agent_id: agent.agent_id,
-            exists: agent.token_hash.is_some(),
-            expires_at: agent.token_expires_at,
-        })
+        self.discovered_agent(agent_id)
+            .await
+            .map(|agent| AgentTokenStatus {
+                agent_id: agent.agent_id,
+                exists: agent.token_hash.is_some(),
+                expires_at: agent.token_expires_at,
+            })
     }
 
     /// Issue or rotate the bearer token for an agent.

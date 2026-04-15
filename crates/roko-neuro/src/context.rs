@@ -2,13 +2,14 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
 use roko_core::{Body, EmotionalTag, Engram, PadVector};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{KnowledgeEntry, KnowledgeStore};
 
@@ -204,6 +205,17 @@ pub struct ContextChunk {
     pub emotional_tag: Option<EmotionalTag>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ContextTuningRecord {
+    created_at_ms: i64,
+    plan_id: String,
+    task_id: String,
+    somatic_valence: f64,
+    somatic_intensity: f64,
+    selected_chunks: usize,
+    top_source: Option<String>,
+}
+
 /// Stage 1/2 gatherer and ranker for context assembly.
 #[derive(Debug, Clone)]
 pub struct ContextAssembler {
@@ -268,8 +280,11 @@ impl ContextAssembler {
         chunks.extend(self.gather_read_files(workdir, task));
         chunks.extend(self.gather_recent_signals(plan_id, signals_path.as_ref()));
 
+        apply_somatic_bias(&mut chunks, self.affect_state);
         self.rank(&task_text, &mut chunks);
-        self.compress(chunks)
+        let compressed = self.compress(chunks);
+        self.log_context_tuning(workdir, task, plan_id, &compressed);
+        compressed
     }
 
     /// Rank gathered chunks by descending score.
@@ -296,6 +311,47 @@ impl ContextAssembler {
 
         for chunk in chunks.iter_mut() {
             chunk.relevance = score_chunk(task_text, chunk, self.affect_state.as_ref());
+        }
+    }
+
+    fn log_context_tuning(
+        &self,
+        workdir: &Path,
+        task: &TaskInput,
+        plan_id: &str,
+        chunks: &[ContextChunk],
+    ) {
+        let Some(affect) = self.affect_state else {
+            return;
+        };
+
+        let path = workdir
+            .join(".roko")
+            .join("learn")
+            .join("context-tuning.jsonl");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let record = ContextTuningRecord {
+            created_at_ms: Utc::now().timestamp_millis(),
+            plan_id: plan_id.to_string(),
+            task_id: task.id.clone(),
+            somatic_valence: affect.somatic_valence,
+            somatic_intensity: affect.somatic_intensity,
+            selected_chunks: chunks.len(),
+            top_source: chunks
+                .first()
+                .map(|chunk| context_source_label(&chunk.source)),
+        };
+
+        let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
+            return;
+        };
+        if let Ok(mut line) = serde_json::to_string(&record) {
+            line.push('\n');
+            let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+            let _ = std::io::Write::flush(&mut file);
         }
     }
 
@@ -1135,6 +1191,7 @@ fn score_chunk(task_text: &str, chunk: &ContextChunk, affect_state: Option<&PadS
     let dream_bonus = dream_source_bonus(&chunk.source);
     let recency = chunk.recency.unwrap_or(0.5);
     let confidence = chunk.confidence.unwrap_or(0.5);
+    let relevance_prior = chunk.relevance.clamp(0.0, 1.5);
     let affect_bias = affect_bias(chunk, recency, affect_state);
 
     if let Some(track_record) = chunk.track_record {
@@ -1149,6 +1206,7 @@ fn score_chunk(task_text: &str, chunk: &ContextChunk, affect_state: Option<&PadS
         + recency * 0.2
         + confidence * 0.3
         + source_priority * 0.2
+        + relevance_prior * 0.08
         + dream_bonus
         + affect_bias
 }
@@ -1192,6 +1250,45 @@ fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadStat
         + positive_somatic * (0.75 * action - 0.08 * caution);
 
     arousal_bias + pleasure_bias + emotional_congruence + somatic_bias
+}
+
+/// Apply a lightweight somatic prior to gathered chunks before scoring.
+///
+/// This keeps the assembler sensitive to affect hints without overriding the
+/// auction and contrarian selection logic that already protects retrieval
+/// diversity.
+pub fn apply_somatic_bias(chunks: &mut [ContextChunk], affect_state: Option<PadState>) {
+    let Some(affect) = affect_state else {
+        return;
+    };
+
+    let somatic_pressure = affect.somatic_valence.clamp(-1.0, 1.0) * affect.somatic_intensity;
+    for chunk in chunks {
+        let action = action_orientation(chunk);
+        let caution = caution_orientation(chunk);
+        let orientation = action - caution;
+        let emotional_match = chunk
+            .emotional_tag
+            .as_ref()
+            .map(|tag| {
+                let current = PadVector::new(affect.pleasure, affect.arousal, affect.dominance);
+                let congruence = current.cosine_similarity(tag.mood_snapshot);
+                (congruence - 0.5) * f64::from(tag.intensity).clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
+        let somatic_match = if somatic_pressure < 0.0 {
+            caution - action * 0.5
+        } else if somatic_pressure > 0.0 {
+            action - caution * 0.5
+        } else {
+            orientation.abs() * 0.2
+        };
+
+        chunk.relevance = (chunk.relevance
+            + somatic_match * somatic_pressure.abs() * 0.08
+            + emotional_match * 0.06)
+            .clamp(0.0, 2.0);
+    }
 }
 
 fn action_orientation(chunk: &ContextChunk) -> f64 {
@@ -1321,6 +1418,48 @@ fn summarize_content(content: &str) -> String {
 
 fn estimate_chunk_tokens(content: &str) -> usize {
     content.len() / 4
+}
+
+fn context_source_label(source: &ContextSource) -> String {
+    match source {
+        ContextSource::KnowledgeEntry {
+            entry_id,
+            kind,
+            source,
+        } => format!(
+            "knowledge:{}:{}:{}",
+            entry_id,
+            kind,
+            source.as_deref().unwrap_or("-")
+        ),
+        ContextSource::Episode {
+            episode_id,
+            plan_id,
+            task_id,
+        } => format!("episode:{episode_id}:{plan_id}:{task_id}"),
+        ContextSource::InlineFile { path, lines } => {
+            format!("file:{}:{}", path, lines.as_deref().unwrap_or("-"))
+        }
+        ContextSource::RecentSignal {
+            signal_id,
+            plan_id,
+            kind,
+        } => format!("signal:{signal_id}:{plan_id}:{kind}"),
+        ContextSource::SymbolSignature { symbol, file } => format!("symbol:{symbol}:{file}"),
+        ContextSource::AntiPattern => "directive:anti_pattern".to_string(),
+        ContextSource::Verification => "directive:verification".to_string(),
+        ContextSource::TaskBrief => "directive:task_brief".to_string(),
+        ContextSource::PriorTaskOutput { task_id } => {
+            format!("directive:prior_task_output:{task_id}")
+        }
+        ContextSource::PlanBrief => "directive:plan_brief".to_string(),
+        ContextSource::ResearchMemo => "directive:research_memo".to_string(),
+        ContextSource::Invariants => "directive:invariants".to_string(),
+        ContextSource::CrossPlanContext => "directive:cross_plan_context".to_string(),
+        ContextSource::PrdExtract => "directive:prd_extract".to_string(),
+        ContextSource::Decomposition => "directive:decomposition".to_string(),
+        ContextSource::SiblingTasks => "directive:sibling_tasks".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1657,6 +1796,57 @@ mod tests {
                 .all(|pair| score_chunk(&task_text, &pair[0], None)
                     >= score_chunk(&task_text, &pair[1], None))
         );
+    }
+
+    #[test]
+    fn gather_logs_somatic_influence_when_affect_is_present() {
+        let dir = TempDir::new().expect("tempdir");
+        let workdir = dir.path();
+        std::fs::create_dir_all(workdir.join(".roko/neuro")).expect("neuro dir");
+        std::fs::create_dir_all(workdir.join(".roko/learn")).expect("learn dir");
+
+        let knowledge_store = Arc::new(KnowledgeStore::new(
+            workdir.join(".roko/neuro/knowledge.jsonl"),
+        ));
+        knowledge_store
+            .add(KnowledgeEntry {
+                id: "k-somatic".into(),
+                kind: KnowledgeKind::Warning,
+                source: None,
+                content: "Check rollback health before retrying".into(),
+                confidence: 0.9,
+                confidence_weight: 0.9,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-a".into()],
+                tags: vec!["deploy".into(), "rollback".into()],
+                source_model: None,
+                model_generality: 1.0,
+                created_at: Utc::now(),
+                half_life_days: KnowledgeKind::Warning.default_half_life_days(),
+                tier: KnowledgeTier::Consolidated,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            })
+            .expect("add knowledge");
+
+        let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
+        std::fs::write(episode_store.path(), "").expect("write empty episodes");
+        let signals_path = workdir.join(".roko/signals.jsonl");
+        std::fs::write(&signals_path, "").expect("write empty signals");
+
+        let assembler = ContextAssembler::new(knowledge_store, episode_store).with_affect_state(
+            Some(PadState::new(0.1, 0.7, 0.5).with_somatic_hint(-0.8, 0.9)),
+        );
+        let chunks = assembler.gather(workdir, &task_input(), "plan-1", &signals_path);
+
+        assert!(!chunks.is_empty());
+        let log_path = workdir.join(".roko/learn/context-tuning.jsonl");
+        let log = std::fs::read_to_string(&log_path).expect("context tuning log");
+        assert!(log.contains("\"plan_id\":\"plan-1\""));
+        assert!(log.contains("\"somatic_valence\":-0.8"));
+        assert!(log.contains("\"selected_chunks\""));
     }
 
     #[test]

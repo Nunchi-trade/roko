@@ -3,10 +3,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::agent::derived_output;
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::AgentOptions;
+use crate::provider::current_safety_layer;
+use crate::safety::SafetyLayer;
 use crate::translate::{ChatResponse, FinishReason, ResponseMetadata, normalize_finish_reason};
 use crate::usage::Usage;
 use crate::{Agent, AgentResult};
@@ -111,6 +114,7 @@ pub struct GeminiNativeAgent {
     enable_grounding: bool,
     enable_code_execution: bool,
     safety_settings: Vec<SafetySettingRequest>,
+    safety: Option<SafetyLayer>,
     system_prompt: Option<String>,
     timeout_ms: u64,
     name: String,
@@ -143,12 +147,19 @@ impl GeminiNativeAgent {
             enable_grounding: model.supports_grounding,
             enable_code_execution: model.supports_code_execution,
             safety_settings: Vec::new(),
+            safety: current_safety_layer(),
             system_prompt: options.system_prompt.clone(),
             timeout_ms: options.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
             name,
             model,
             poster: Arc::new(ReqwestPoster::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_safety_layer(mut self, safety: Option<SafetyLayer>) -> Self {
+        self.safety = safety;
+        self
     }
 
     #[cfg(test)]
@@ -160,8 +171,7 @@ impl GeminiNativeAgent {
 
     fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let output = input
-            .derive(Kind::AgentOutput, Body::text(reason))
+        let output = derived_output(input, Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("failed", "true")
@@ -413,8 +423,12 @@ impl Agent for GeminiNativeAgent {
         let mut usage = parsed.usage;
         usage.wall_ms = wall_ms;
 
-        let mut builder = input
-            .derive(Kind::AgentOutput, Body::text(&parsed.content))
+        let content = self
+            .safety
+            .as_ref()
+            .map(|safety| safety.scrub_text(&parsed.content))
+            .unwrap_or_else(|| parsed.content.clone());
+        let mut builder = derived_output(input, Kind::AgentOutput, Body::text(content))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("model", &self.model.slug);
@@ -821,5 +835,49 @@ mod tests {
                 .iter()
                 .any(|tool| tool.get("code_execution").is_some())
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_native_agent_preserves_lineage_and_scrubs_output_when_safety_is_attached() {
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let poster = Arc::new(MockPoster::ok(
+            Arc::clone(&captured),
+            json!({
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "text": "PASSWORD=hunter2" }]
+                        },
+                        "finishReason": "STOP"
+                    }
+                ]
+            }),
+        ));
+        let ancestor = Engram::builder(Kind::Prompt)
+            .body(Body::text("ancestor"))
+            .build();
+        let input = Engram::builder(Kind::Prompt)
+            .body(Body::text("show the secret"))
+            .lineage([ancestor.id])
+            .build();
+
+        let agent = GeminiNativeAgent::new(
+            "test-key".to_string(),
+            "https://generativelanguage.googleapis.com".to_string(),
+            base_model(),
+            &AgentOptions::default(),
+        )
+        .with_safety_layer(Some(SafetyLayer::with_defaults()))
+        .with_http_poster(poster);
+
+        let result = agent.run(&input, &Context::now()).await;
+
+        assert!(result.success);
+        assert_eq!(
+            result.output.body.as_text().expect("output text"),
+            "PASSWORD=[REDACTED]"
+        );
+        assert_eq!(result.output.lineage, vec![ancestor.id, input.id]);
     }
 }

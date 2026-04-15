@@ -38,6 +38,7 @@ use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
+use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -47,8 +48,8 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
-    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, TaskRequirements, Verdict,
-    score_model_for_task,
+    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, TaskRequirements,
+    ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -95,6 +96,7 @@ use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
+use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
 };
@@ -2083,6 +2085,12 @@ struct TaskTracker {
     last_impl_task_id: Option<String>,
     /// Model slug used by the most recently dispatched implementation task.
     last_impl_model_slug: Option<String>,
+    /// Output hash from the most recent implementation dispatch.
+    last_impl_output_hash: Option<ContentHash>,
+    /// Knowledge entry ids surfaced in the most recent task context.
+    last_context_knowledge_ids: Vec<String>,
+    /// Last detailed gate verdicts emitted for this plan.
+    last_gate_verdicts: Vec<GateVerdict>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -2284,6 +2292,9 @@ impl TaskTracker {
             last_gate_failure_phase: None,
             last_impl_task_id: None,
             last_impl_model_slug: None,
+            last_impl_output_hash: None,
+            last_context_knowledge_ids: Vec::new(),
+            last_gate_verdicts: Vec::new(),
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -3754,10 +3765,12 @@ impl PlanRunner {
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
     fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
-        let sig = Engram::builder(kind)
-            .body(Body::Json(body))
-            .emotional_tag(self.daimon.emotional_tag("conductor"))
-            .build();
+        let sig = maybe_attest_engram(
+            Engram::builder(kind)
+                .body(Body::Json(body))
+                .emotional_tag(self.daimon.emotional_tag("conductor"))
+                .build(),
+        );
         self.conductor_signals.push(sig);
     }
 
@@ -4790,9 +4803,20 @@ impl PlanRunner {
                             ..Usage::default()
                         };
                         self.stamp_episode_affect(&mut ep, "gate", None);
-                        ep.gate_verdicts
-                            .push(GateVerdict::new(format!("rung-{rung}"), passed));
-                        ep.input_signal_hash.clone_from(&plan_id);
+                        ep.gate_verdicts = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .map(|tracker| tracker.last_gate_verdicts.clone())
+                            .filter(|verdicts| !verdicts.is_empty())
+                            .unwrap_or_else(|| {
+                                vec![GateVerdict::new(format!("rung-{rung}"), passed)]
+                            });
+                        ep.input_signal_hash = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .and_then(|tracker| tracker.last_impl_output_hash)
+                            .map(|hash| hash.to_string())
+                            .unwrap_or_else(|| plan_id.clone());
                         let gate_input = self.enrich_completed_run(
                             ep,
                             &plan_id,
@@ -4802,6 +4826,7 @@ impl PlanRunner {
                             Some(passed),
                             1,
                         );
+                        self.apply_knowledge_tier_feedback(&plan_id);
                         self.record_and_check_learning(gate_input, &plan_id).await;
 
                         // Emit observability metric for gate result.
@@ -5497,6 +5522,9 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task_id.to_string());
             tracker.last_impl_model_slug = None;
+            tracker.last_impl_output_hash = None;
+            tracker.last_context_knowledge_ids.clear();
+            tracker.last_gate_verdicts.clear();
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -5777,6 +5805,18 @@ impl PlanRunner {
                 None,
             )
             .await;
+            if self.should_replan_after_task_failure()
+                && !self.no_replan
+                && self.executor.config().auto_replan
+            {
+                tracing::info!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    "[orchestrate] Daimon requested replan after task failure"
+                );
+                self.attempt_replan(plan_id).await;
+                terminal_failure_handled = true;
+            }
         }
 
         if self.worktrees_enabled() {
@@ -6880,6 +6920,7 @@ impl PlanRunner {
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
+            tracker.last_impl_output_hash = Some(result.output.id);
         }
 
         self.emit_execution_event(
@@ -9489,6 +9530,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task.to_string());
             tracker.last_impl_model_slug = Some(selected_model.clone());
+            tracker.last_context_knowledge_ids.clear();
         }
 
         // ── Build context via tiered ContextProvider ───────────────
@@ -9554,6 +9596,20 @@ impl PlanRunner {
                     }
                 })
                 .collect();
+            let context_knowledge_ids = resolved
+                .sections
+                .iter()
+                .filter_map(|cs| {
+                    use roko_compose::ContextSource;
+                    match &cs.source {
+                        ContextSource::KnowledgeEntry { entry_id, .. } => Some(entry_id.clone()),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                tracker.last_context_knowledge_ids = context_knowledge_ids;
+            }
 
             resolved.into_prompt_sections()
         } else {
@@ -9571,6 +9627,7 @@ impl PlanRunner {
         } else {
             claude_tools_csv.clone()
         };
+        let task_allowed_tools_csv = self.apply_daimon_tool_policy_csv(&task_allowed_tools_csv);
 
         // ── Adaptive format selection via bandit ─────────────────────
         let tool_count = task_allowed_tools_csv
@@ -10509,29 +10566,44 @@ impl PlanRunner {
         let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
         let started = std::time::Instant::now();
-        let payload_sig = Engram::builder(Kind::Task)
+        let mut payload_builder = Engram::builder(Kind::Task)
             .body(Body::from_json(&payload)?)
             .provenance(Provenance::trusted("orchestrate"))
             .tag("plan_id", plan_id)
-            .tag("rung", rung.to_string())
-            .build();
+            .tag("rung", rung.to_string());
+        if let Some(parent_hash) = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_impl_output_hash)
+        {
+            payload_builder = payload_builder.lineage([parent_hash]);
+        }
+        let payload_sig = maybe_attest_engram(payload_builder.build());
 
         let verdicts = Self::run_gate_rung(&payload_sig, rung).await;
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_gate_verdicts = verdicts
+                .iter()
+                .map(|verdict| GateVerdict::new(verdict.gate.clone(), verdict.passed))
+                .collect();
+        }
 
         // Persist verdicts.
         let substrate_dir = self.workdir.join(".roko");
         if let Ok(substrate) = FileSubstrate::open(&substrate_dir).await {
             for verdict in &verdicts {
-                let sig = payload_sig
-                    .derive(
-                        Kind::GateVerdict,
-                        Body::from_json(verdict)
-                            .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
-                    )
-                    .provenance(Provenance::trusted("orchestrate"))
-                    .tag("gate", &verdict.gate)
-                    .tag("passed", verdict.passed.to_string())
-                    .build();
+                let sig = maybe_attest_engram(
+                    payload_sig
+                        .derive(
+                            Kind::GateVerdict,
+                            Body::from_json(verdict)
+                                .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
+                        )
+                        .provenance(Provenance::trusted("orchestrate"))
+                        .tag("gate", &verdict.gate)
+                        .tag("passed", verdict.passed.to_string())
+                        .build(),
+                );
                 let _ = substrate.put(sig).await;
             }
         }
@@ -12218,6 +12290,89 @@ impl PlanRunner {
         PadState::from(self.daimon.query().pad)
     }
 
+    fn current_daimon_policy(&self) -> DaimonPolicy {
+        let affect = self.daimon.query();
+        DaimonPolicy::new(affect.confidence, affect.behavioral_state)
+    }
+
+    fn apply_daimon_tool_policy_csv(&self, tools_csv: &str) -> String {
+        let policy = self.current_daimon_policy();
+        let Some(registry) = self.tool_registry.as_deref() else {
+            return tools_csv.to_string();
+        };
+        if !matches!(
+            policy.behavioral_state,
+            roko_core::BehavioralState::Struggling | roko_core::BehavioralState::Resting
+        ) {
+            return tools_csv.to_string();
+        }
+
+        tools_csv
+            .split(',')
+            .filter(|tool| !tool.is_empty())
+            .filter(|tool| {
+                registry
+                    .get(tool)
+                    .is_none_or(|def| !(def.permission.network || def.permission.git))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn should_replan_after_task_failure(&self) -> bool {
+        let policy = self.current_daimon_policy();
+        matches!(
+            policy.behavioral_state,
+            roko_core::BehavioralState::Struggling
+        ) && policy.affect_confidence < 0.45
+    }
+
+    fn apply_knowledge_tier_feedback(&mut self, plan_id: &str) {
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return;
+        };
+        if tracker.last_context_knowledge_ids.is_empty() || tracker.last_gate_verdicts.is_empty() {
+            return;
+        }
+
+        let touched_ids = tracker
+            .last_context_knowledge_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let verdicts = tracker.last_gate_verdicts.clone();
+
+        if let Err(err) = self.knowledge_store.update_entries(|entry| {
+            if !touched_ids.contains(&entry.id) {
+                return false;
+            }
+
+            match TierProgression::evaluate_tier_progression(entry, &verdicts) {
+                TierProgressionDecision::Promote(tier) | TierProgressionDecision::Demote(tier)
+                    if entry.tier != tier =>
+                {
+                    entry.tier = tier;
+                    true
+                }
+                TierProgressionDecision::ReviewExpiry => {
+                    if entry.tags.iter().any(|tag| tag == "expiry-review") {
+                        false
+                    } else {
+                        entry.tags.push("expiry-review".to_string());
+                        true
+                    }
+                }
+                _ => false,
+            }
+        }) {
+            tracing::warn!(
+                plan_id = %plan_id,
+                error = %err,
+                "failed to apply knowledge tier feedback"
+            );
+        }
+    }
+
     fn current_task_strategy(
         &self,
         plan_id: &str,
@@ -12915,6 +13070,22 @@ fn save_task_output(workdir: &Path, task_id: &str, output: &str) {
     let _ = std::fs::write(output_path, summary);
 }
 
+fn attestation_signing_key_from_env() -> Option<SigningKey> {
+    let seed = std::env::var("ROKO_ATTEST_SIGNING_KEY_HEX").ok()?;
+    let seed = seed.trim().trim_start_matches("0x");
+    let hash = ContentHash::from_hex(seed)?;
+    Some(SigningKey::from_bytes(&hash.0))
+}
+
+fn maybe_attest_engram(mut signal: Engram) -> Engram {
+    if signal.attestation.is_none()
+        && let Some(key) = attestation_signing_key_from_env()
+    {
+        signal.attestation = Some(attestation::sign(&signal, &key));
+    }
+    signal
+}
+
 fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     let body = match &output.body {
         Body::Text(text) => {
@@ -12937,7 +13108,13 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     let mut builder = Engram::builder(output.kind.clone())
         .body(body)
         .provenance(output.provenance.clone())
-        .lineage([output.id]);
+        .lineage(
+            output
+                .lineage
+                .iter()
+                .copied()
+                .chain(std::iter::once(output.id)),
+        );
     for (key, value) in &output.tags {
         builder = builder.tag(key.clone(), value.clone());
     }
@@ -12947,7 +13124,7 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     if let Some(emotional_tag) = output.emotional_tag.clone() {
         builder = builder.emotional_tag(emotional_tag);
     }
-    Some(builder.build())
+    Some(maybe_attest_engram(builder.build()))
 }
 
 #[cfg(test)]

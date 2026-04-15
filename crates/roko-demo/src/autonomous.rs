@@ -48,7 +48,8 @@ pub async fn run_autonomous(
     let mut rounds = Vec::new();
     let timeout = Duration::from_secs(timeout_secs);
     for round in 1..=jobs {
-        let future = run_autonomous_round(prepared, llm.clone(), round as u32, agents, events.clone());
+        let future =
+            run_autonomous_round(prepared, llm.clone(), round as u32, agents, events.clone());
         let outcome = tokio::time::timeout(timeout, future)
             .await
             .map_err(|_| anyhow::anyhow!("autonomous round {round} timed out"))??;
@@ -94,8 +95,15 @@ async fn run_autonomous_round(
         }
         sequential
     } else {
-        collect_concurrent_bids(prepared, llm.clone(), round, workers, &posted, events.clone())
-            .await?
+        collect_concurrent_bids(
+            prepared,
+            llm.clone(),
+            round,
+            workers,
+            &posted,
+            events.clone(),
+        )
+        .await?
     };
     finalize_round(prepared, posted, bids, llm, events).await
 }

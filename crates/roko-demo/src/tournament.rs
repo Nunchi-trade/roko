@@ -78,23 +78,22 @@ pub async fn run_tournament(
     }
     let mut final_rankings = aggregates
         .into_iter()
-        .map(|(agent_id, (wins, total_output, total_confidence))| AgentRanking {
-            avg_confidence: total_confidence / wins as f64,
-            agent_id,
-            wins,
-            total_output,
-        })
+        .map(
+            |(agent_id, (wins, total_output, total_confidence))| AgentRanking {
+                avg_confidence: total_confidence / wins as f64,
+                agent_id,
+                wins,
+                total_output,
+            },
+        )
         .collect::<Vec<_>>();
     final_rankings.sort_by(|left, right| {
-        right
-            .wins
-            .cmp(&left.wins)
-            .then_with(|| {
-                right
-                    .total_output
-                    .partial_cmp(&left.total_output)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        right.wins.cmp(&left.wins).then_with(|| {
+            right
+                .total_output
+                .partial_cmp(&left.total_output)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
 
     Ok(TournamentReport {

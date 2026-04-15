@@ -454,10 +454,12 @@ impl AgentState {
         let residuals: Vec<AgentPredictionResidual> = predictions
             .iter()
             .filter_map(|prediction| {
-                prediction.actual_value.map(|actual| AgentPredictionResidual {
-                    id: prediction.id.clone(),
-                    residual: (prediction.predicted_value - actual).abs(),
-                })
+                prediction
+                    .actual_value
+                    .map(|actual| AgentPredictionResidual {
+                        id: prediction.id.clone(),
+                        residual: (prediction.predicted_value - actual).abs(),
+                    })
             })
             .collect();
         let mse = if residuals.is_empty() {
@@ -496,11 +498,10 @@ impl AgentState {
             ],
             sources: vec![
                 format!("agent://{}/capabilities", self.agent_id),
-                self.chain_client
-                    .as_ref()
-                    .map_or_else(|| "chain://unconfigured".to_string(), |client| {
-                        format!("chain://{}", client.name())
-                    }),
+                self.chain_client.as_ref().map_or_else(
+                    || "chain://unconfigured".to_string(),
+                    |client| format!("chain://{}", client.name()),
+                ),
             ],
         }
     }
@@ -561,17 +562,30 @@ impl AgentState {
 }
 
 fn build_routes(capabilities: &[String]) -> Vec<String> {
-    let mut routes = vec!["/health".to_string(), "/capabilities".to_string(), "/stats".to_string()];
-    if capabilities.iter().any(|capability| capability == "messaging") {
+    let mut routes = vec![
+        "/health".to_string(),
+        "/capabilities".to_string(),
+        "/stats".to_string(),
+    ];
+    if capabilities
+        .iter()
+        .any(|capability| capability == "messaging")
+    {
         routes.push("/message".to_string());
         routes.push("/stream".to_string());
     }
-    if capabilities.iter().any(|capability| capability == "predictions") {
+    if capabilities
+        .iter()
+        .any(|capability| capability == "predictions")
+    {
         routes.push("/predictions".to_string());
         routes.push("/predictions/{id}".to_string());
         routes.push("/predictions/residuals".to_string());
     }
-    if capabilities.iter().any(|capability| capability == "research") {
+    if capabilities
+        .iter()
+        .any(|capability| capability == "research")
+    {
         routes.push("/research".to_string());
     }
     if capabilities.iter().any(|capability| capability == "tasks") {
