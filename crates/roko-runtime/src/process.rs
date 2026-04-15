@@ -19,7 +19,7 @@ use std::{
     path::PathBuf,
     process::ExitStatus,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::{
@@ -33,7 +33,9 @@ use tracing::{debug, info, warn};
 use crate::cancel::CancelToken;
 
 /// Monotonically increasing process identifier, unique within a single runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct ProcessId(pub u64);
 
 impl fmt::Display for ProcessId {
@@ -66,6 +68,65 @@ pub struct SpawnConfig {
     pub grace_period: Duration,
     /// Human-readable label for logging.
     pub label: String,
+}
+
+/// Erlang/OTP-style supervision strategy for managed processes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SupervisionStrategy {
+    /// Restart only the failed process.
+    OneForOne {
+        /// Maximum restarts in the configured time window.
+        max_restarts: u32,
+        /// Sliding restart window in milliseconds.
+        within_ms: u64,
+        /// Fallback tier label for escalation.
+        fallback_tier: String,
+    },
+    /// Restart every managed process when one fails.
+    OneForAll {
+        /// Maximum restarts in the configured time window.
+        max_restarts: u32,
+    },
+    /// Restart the failed process and those started after it.
+    RestForOne {
+        /// Maximum restarts in the configured time window.
+        max_restarts: u32,
+    },
+}
+
+impl Default for SupervisionStrategy {
+    fn default() -> Self {
+        Self::OneForOne {
+            max_restarts: 0,
+            within_ms: 0,
+            fallback_tier: "standard".into(),
+        }
+    }
+}
+
+impl SupervisionStrategy {
+    fn max_restarts(&self) -> u32 {
+        match self {
+            Self::OneForOne { max_restarts, .. }
+            | Self::OneForAll { max_restarts }
+            | Self::RestForOne { max_restarts } => *max_restarts,
+        }
+    }
+
+    fn within_ms(&self) -> u64 {
+        match self {
+            Self::OneForOne { within_ms, .. } => *within_ms,
+            Self::OneForAll { .. } | Self::RestForOne { .. } => 0,
+        }
+    }
+
+    fn fallback_tier(&self) -> Option<&str> {
+        match self {
+            Self::OneForOne { fallback_tier, .. } => Some(fallback_tier.as_str()),
+            _ => None,
+        }
+    }
 }
 
 impl Default for SpawnConfig {
@@ -104,6 +165,8 @@ pub struct ProcessHandle {
     os_pid: Option<u32>,
     grace_period: Duration,
     cancel: CancelToken,
+    spawn_config: SpawnConfig,
+    started_at: Instant,
 }
 
 impl ProcessHandle {
@@ -191,6 +254,11 @@ impl ProcessHandle {
     pub const fn cancel_token(&self) -> &CancelToken {
         &self.cancel
     }
+
+    /// How long this process has been alive.
+    pub fn uptime(&self) -> Duration {
+        self.started_at.elapsed()
+    }
 }
 
 enum WaitResult {
@@ -211,7 +279,9 @@ impl fmt::Debug for ProcessHandle {
 /// Manages a pool of child processes with bulk lifecycle operations.
 pub struct ProcessSupervisor {
     handles: Mutex<HashMap<ProcessId, ProcessHandle>>,
+    restart_history: Mutex<HashMap<String, Vec<Instant>>>,
     cancel: CancelToken,
+    strategy: SupervisionStrategy,
 }
 
 impl ProcessSupervisor {
@@ -219,14 +289,31 @@ impl ProcessSupervisor {
     pub fn new(cancel: CancelToken) -> Self {
         Self {
             handles: Mutex::new(HashMap::new()),
+            restart_history: Mutex::new(HashMap::new()),
             cancel,
+            strategy: SupervisionStrategy::default(),
         }
+    }
+
+    /// Override the supervision strategy.
+    #[must_use]
+    pub fn with_strategy(mut self, strategy: SupervisionStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Current supervision strategy.
+    #[must_use]
+    pub const fn strategy(&self) -> &SupervisionStrategy {
+        &self.strategy
     }
 
     /// Spawn a new managed process.
     pub async fn spawn(&self, config: SpawnConfig) -> std::io::Result<ProcessId> {
         let id = ProcessId::next();
         let child_cancel = self.cancel.child();
+        let spawn_config = config.clone();
+        let label = config.label.clone();
 
         let mut cmd = Command::new(&config.program);
         cmd.args(&config.args)
@@ -255,11 +342,13 @@ impl ProcessSupervisor {
 
         let handle = ProcessHandle {
             id,
-            label: config.label,
+            label,
             child,
             os_pid,
             grace_period: config.grace_period,
             cancel: child_cancel,
+            spawn_config,
+            started_at: Instant::now(),
         };
 
         self.handles.lock().await.insert(id, handle);
@@ -403,6 +492,82 @@ impl ProcessSupervisor {
             .iter()
             .map(|(id, h)| (*id, h.label.clone()))
             .collect()
+    }
+
+    /// Restart one process according to the configured strategy.
+    pub async fn restart_process(&self, id: ProcessId) -> Option<ProcessId> {
+        let mut handle = self.handles.lock().await.remove(&id)?;
+        let label = handle.label.clone();
+        let strategy = self.strategy.clone();
+        let fallback_tier = strategy.fallback_tier().unwrap_or("standard");
+
+        if !self.allow_restart(&label, strategy.max_restarts(), strategy.within_ms()).await {
+            warn!(
+                id = %id,
+                label = %label,
+                strategy = ?strategy,
+                fallback_tier = %fallback_tier,
+                "restart budget exhausted"
+            );
+            return None;
+        }
+
+        let _ = handle.shutdown().await;
+        let config = handle.spawn_config.clone();
+        match self.spawn(config).await {
+            Ok(new_id) => {
+                info!(old_id = %id, new_id = %new_id, label = %label, "restarted process");
+                Some(new_id)
+            }
+            Err(err) => {
+                warn!(old_id = %id, label = %label, error = %err, "failed to restart process");
+                None
+            }
+        }
+    }
+
+    /// Restart the failed process and any peers selected by the strategy.
+    pub async fn restart_wave(&self, failed: ProcessId) -> Vec<ProcessId> {
+        let ids = self.recovery_targets(failed).await;
+        let mut restarted = Vec::new();
+        for id in ids {
+            if let Some(new_id) = self.restart_process(id).await {
+                restarted.push(new_id);
+            }
+        }
+        restarted
+    }
+
+    async fn recovery_targets(&self, failed: ProcessId) -> Vec<ProcessId> {
+        let mut ids: Vec<ProcessId> = self.handles.lock().await.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+
+        match self.strategy {
+            SupervisionStrategy::OneForOne { .. } => ids.into_iter().filter(|id| *id == failed).collect(),
+            SupervisionStrategy::OneForAll { .. } => ids,
+            SupervisionStrategy::RestForOne { .. } => ids.into_iter().filter(|id| id.0 >= failed.0).collect(),
+        }
+    }
+
+    async fn allow_restart(&self, label: &str, max_restarts: u32, within_ms: u64) -> bool {
+        if max_restarts == 0 {
+            return false;
+        }
+
+        let mut history = self.restart_history.lock().await;
+        let entries = history.entry(label.to_string()).or_default();
+        let now = Instant::now();
+        if within_ms > 0 {
+            let window = Duration::from_millis(within_ms);
+            entries.retain(|ts| now.duration_since(*ts) <= window);
+        }
+
+        if entries.len() as u32 >= max_restarts {
+            return false;
+        }
+
+        entries.push(now);
+        true
     }
 }
 

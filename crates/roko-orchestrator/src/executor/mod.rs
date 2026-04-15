@@ -23,11 +23,12 @@
 //! - [`reorder`] — queue reordering strategies
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::safety::audit_chain::{AuditChain, AuditEntry};
 use serde::{Deserialize, Serialize};
 
-use roko_core::PlanPhase;
+use roko_core::{AgentRole, PlanPhase};
 
 pub mod action;
 pub mod plan_state;
@@ -41,6 +42,25 @@ pub use plan_state::{GateResult, PlanState};
 pub use reorder::{priority_reorder, reorder_queue};
 pub use snapshot::ExecutorSnapshot;
 pub use state_machine::{ExecutorEvent, PlanStateMachine, TransitionError};
+
+/// Live speculative execution tracking for dashboard and recovery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeculativeExecution {
+    /// The plan that owns the task.
+    pub plan_id: String,
+    /// The task being shadowed.
+    pub task: String,
+    /// The original expectation in minutes.
+    pub expected_minutes: u32,
+    /// The elapsed runtime that triggered speculation.
+    pub elapsed_minutes: u32,
+    /// The backup role to spawn.
+    pub backup_role: AgentRole,
+    /// Projected spend for the backup branch.
+    pub projected_cost_usd: f64,
+    /// When the speculative branch was recorded.
+    pub started_at_ms: u64,
+}
 
 /// Configuration for the parallel executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +81,9 @@ pub struct ExecutorConfig {
     /// Optional per-session budget cap in USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
+    /// Multiplier applied to the expected duration before speculation starts.
+    #[serde(default = "ExecutorConfig::default_speculative_threshold_multiplier")]
+    pub speculative_threshold_multiplier: f64,
     /// Whether to auto-replan after repeated gate failures.
     #[serde(default = "ExecutorConfig::default_auto_replan")]
     pub auto_replan: bool,
@@ -78,6 +101,7 @@ impl Default for ExecutorConfig {
             max_merge_attempts: 3,
             task_timeout_secs: Self::default_task_timeout_secs(),
             budget_usd: None,
+            speculative_threshold_multiplier: Self::default_speculative_threshold_multiplier(),
             auto_replan: Self::default_auto_replan(),
             use_worktrees: Self::default_use_worktrees(),
         }
@@ -91,6 +115,10 @@ impl ExecutorConfig {
 
     const fn default_task_timeout_secs() -> u64 {
         600
+    }
+
+    const fn default_speculative_threshold_multiplier() -> f64 {
+        2.0
     }
 
     const fn default_auto_replan() -> bool {
@@ -122,6 +150,8 @@ pub struct ParallelExecutor {
     queue: Vec<String>,
     /// Cross-plan dependencies: `plan_id` → list of `plan_id`s it depends on.
     plan_deps: HashMap<String, Vec<String>>,
+    /// Record of speculative execution branches.
+    speculative_executions: HashMap<String, SpeculativeExecution>,
     /// Optional tamper-evident audit chain for lifecycle transitions.
     audit_chain: Option<AuditChain>,
 }
@@ -135,6 +165,7 @@ impl ParallelExecutor {
             plans: HashMap::new(),
             queue: Vec::new(),
             plan_deps: HashMap::new(),
+            speculative_executions: HashMap::new(),
             audit_chain: None,
         }
     }
@@ -147,6 +178,7 @@ impl ParallelExecutor {
             plans: snapshot.plan_states,
             queue: snapshot.queue_order,
             plan_deps: HashMap::new(),
+            speculative_executions: snapshot.speculative_executions,
             audit_chain: None,
         }
     }
@@ -170,6 +202,81 @@ impl ParallelExecutor {
     /// Plans whose dependencies are not all terminal will be skipped in `tick()`.
     pub fn set_plan_dependencies(&mut self, deps: HashMap<String, Vec<String>>) {
         self.plan_deps = deps;
+    }
+
+    /// View the currently recorded speculative executions.
+    #[must_use]
+    pub fn speculative_executions(&self) -> Vec<&SpeculativeExecution> {
+        self.speculative_executions.values().collect()
+    }
+
+    /// Register a speculative execution if the observed runtime exceeds the configured threshold.
+    ///
+    /// Returns the action the runtime should dispatch, or `None` if speculation
+    /// is not warranted or the candidate was already recorded.
+    #[must_use]
+    pub fn register_speculative_execution(
+        &mut self,
+        plan_id: impl Into<String>,
+        task: impl Into<String>,
+        expected_minutes: u32,
+        elapsed_minutes: u32,
+        backup_role: AgentRole,
+        projected_cost_usd: f64,
+    ) -> Option<ExecutorAction> {
+        if expected_minutes == 0 {
+            return None;
+        }
+        if let Some(budget) = self.config.budget_usd {
+            if projected_cost_usd > budget {
+                return None;
+            }
+        }
+
+        let plan_id = plan_id.into();
+        let task = task.into();
+        let key = format!("{plan_id}:{task}");
+        if self.speculative_executions.contains_key(&key) {
+            return None;
+        }
+
+        let threshold = f64::from(expected_minutes) * self.config.speculative_threshold_multiplier;
+        if f64::from(elapsed_minutes) < threshold {
+            return None;
+        }
+
+        let record = SpeculativeExecution {
+            plan_id: plan_id.clone(),
+            task: task.clone(),
+            expected_minutes,
+            elapsed_minutes,
+            backup_role,
+            projected_cost_usd,
+            started_at_ms: current_timestamp_ms(),
+        };
+        self.speculative_executions.insert(key, record);
+
+        Some(ExecutorAction::StartSpeculativeExecution {
+            plan_id,
+            task,
+            backup_role,
+            expected_minutes,
+            elapsed_minutes,
+        })
+    }
+
+    /// Resolve a speculative execution and emit a cancellation action for the losing branch.
+    #[must_use]
+    pub fn resolve_speculative_execution(
+        &mut self,
+        plan_id: &str,
+        task: &str,
+    ) -> Option<ExecutorAction> {
+        let key = format!("{plan_id}:{task}");
+        self.speculative_executions.remove(&key).map(|_| ExecutorAction::CancelSpeculativeExecution {
+            plan_id: plan_id.to_string(),
+            task: task.to_string(),
+        })
     }
 
     /// Attach an audit chain to the executor.
@@ -403,6 +510,7 @@ impl ParallelExecutor {
         ExecutorSnapshot {
             plan_states: self.plans.clone(),
             queue_order: self.queue.clone(),
+            speculative_executions: self.speculative_executions.clone(),
             timestamp_ms,
         }
     }
@@ -418,6 +526,14 @@ impl ParallelExecutor {
     pub const fn config(&self) -> &ExecutorConfig {
         &self.config
     }
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
 }
 
 #[cfg(test)]
@@ -444,6 +560,39 @@ mod tests {
     #[test]
     fn executor_config_disables_worktrees_by_default() {
         assert!(!ExecutorConfig::default().use_worktrees);
+    }
+
+    #[test]
+    fn executor_config_sets_speculative_multiplier() {
+        assert_eq!(
+            ExecutorConfig::default().speculative_threshold_multiplier,
+            2.0
+        );
+    }
+
+    #[test]
+    fn register_speculative_execution_respects_threshold() {
+        let mut ex = default_executor();
+        let action = ex.register_speculative_execution(
+            "plan",
+            "t1",
+            10,
+            25,
+            roko_core::AgentRole::Implementer,
+            3.5,
+        );
+        assert!(matches!(
+            action,
+            Some(ExecutorAction::StartSpeculativeExecution { .. })
+        ));
+        assert_eq!(ex.speculative_executions().len(), 1);
+
+        let cancel = ex.resolve_speculative_execution("plan", "t1");
+        assert!(matches!(
+            cancel,
+            Some(ExecutorAction::CancelSpeculativeExecution { .. })
+        ));
+        assert!(ex.speculative_executions().is_empty());
     }
 
     // ── add_plan ──

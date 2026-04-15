@@ -6,12 +6,14 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use cron::Schedule;
 use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
 use roko_agent::{Agent, AgentResult};
 use roko_core::config::schema::RokoConfig;
@@ -24,6 +26,8 @@ use roko_neuro::{
 use serde::{Deserialize, Serialize};
 
 use crate::cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
+use crate::imagination::ImaginationMode;
+use crate::replay::{DreamReplayBatch, DreamReplayPolicy, select_replay_episodes};
 
 /// Public alias for the replay input episodes.
 pub type Episode = roko_learn::episode_logger::Episode;
@@ -147,11 +151,241 @@ pub struct DreamLoopConfig {
 /// Backwards-compatible config alias for callers that want a shorter name.
 pub type DreamConfig = DreamLoopConfig;
 
+/// Budget consumed by dream replay and consolidation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DreamBudget {
+    /// Maximum replay tokens allowed.
+    pub max_tokens: u64,
+    /// Maximum dollar cost allowed.
+    pub max_cost_usd: f64,
+    /// Maximum wall-clock duration allowed, in seconds.
+    pub max_duration_secs: u64,
+    /// Tokens consumed so far.
+    pub consumed_tokens: u64,
+    /// Dollar cost consumed so far.
+    pub consumed_cost_usd: f64,
+    /// Wall-clock seconds consumed so far.
+    pub consumed_duration_secs: u64,
+}
+
+impl Default for DreamBudget {
+    fn default() -> Self {
+        Self {
+            max_tokens: u64::MAX,
+            max_cost_usd: f64::MAX,
+            max_duration_secs: u64::MAX,
+            consumed_tokens: 0,
+            consumed_cost_usd: 0.0,
+            consumed_duration_secs: 0,
+        }
+    }
+}
+
+impl DreamBudget {
+    /// Consume the accounting for a single episode.
+    pub fn consume_episode(&mut self, episode: &Episode) {
+        let usage_tokens = episode
+            .usage
+            .input_tokens
+            .saturating_add(episode.usage.output_tokens);
+        let tokens = episode.tokens_used.max(usage_tokens);
+        self.consumed_tokens = self.consumed_tokens.saturating_add(tokens);
+        self.consumed_cost_usd += episode.usage.cost_usd;
+        self.consumed_duration_secs = self
+            .consumed_duration_secs
+            .saturating_add(episode.duration_secs.max(0.0).round() as u64);
+    }
+
+    /// Remaining budget fraction across all axes.
+    #[must_use]
+    pub fn remaining_fraction(self) -> f64 {
+        let token_fraction = remaining_fraction(self.consumed_tokens, self.max_tokens);
+        let cost_fraction = remaining_fraction_f64(self.consumed_cost_usd, self.max_cost_usd);
+        let duration_fraction =
+            remaining_fraction(self.consumed_duration_secs, self.max_duration_secs);
+        token_fraction.min(cost_fraction).min(duration_fraction)
+    }
+
+    /// Whether the budget is exhausted on any axis.
+    #[must_use]
+    pub fn exhausted(self) -> bool {
+        self.consumed_tokens >= self.max_tokens
+            || self.consumed_cost_usd >= self.max_cost_usd
+            || self.consumed_duration_secs >= self.max_duration_secs
+    }
+}
+
+/// Dream scheduling trigger kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DreamTrigger {
+    /// Idle gap between task dispatches.
+    Idle,
+    /// Cron-like schedule.
+    Scheduled,
+    /// Manual command invocation.
+    Manual,
+}
+
+impl DreamTrigger {
+    /// Stable lowercase label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Scheduled => "scheduled",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// Scheduling policy for when dream cycles may fire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamSchedulePolicy {
+    /// Whether automatic dreaming is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Idle threshold in minutes.
+    #[serde(default = "default_idle_threshold_mins")]
+    pub idle_threshold_mins: u64,
+    /// Optional cron expression for scheduled dreaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_cron: Option<String>,
+    /// Whether manual triggering is permitted.
+    #[serde(default = "default_true")]
+    pub manual_enabled: bool,
+    /// Factor applied when dream output quality is high.
+    #[serde(default = "default_quality_gain")]
+    pub quality_gain: f64,
+    /// Factor applied when dream output quality is low.
+    #[serde(default = "default_quality_penalty")]
+    pub quality_penalty: f64,
+}
+
+impl Default for DreamSchedulePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_threshold_mins: 15,
+            scheduled_cron: None,
+            manual_enabled: true,
+            quality_gain: 0.75,
+            quality_penalty: 1.25,
+        }
+    }
+}
+
+impl DreamSchedulePolicy {
+    /// Return the adapted idle delay for the current dream quality.
+    #[must_use]
+    pub fn idle_delay(
+        &self,
+        report: Option<&DreamReport>,
+        budget: Option<&DreamBudget>,
+    ) -> Duration {
+        let mut multiplier = 1.0;
+        if let Some(report) = report {
+            let quality = dream_quality_score(report);
+            if quality >= 1.5 {
+                multiplier *= self.quality_gain;
+            } else if quality <= 0.5 {
+                multiplier *= self.quality_penalty;
+            }
+        }
+        if let Some(budget) = budget
+            && budget.remaining_fraction() < 0.20
+        {
+            multiplier *= self.quality_penalty;
+        }
+        let minutes = (self.idle_threshold_mins as f64 * multiplier)
+            .max(1.0)
+            .round() as u64;
+        Duration::from_secs(minutes.saturating_mul(60))
+    }
+
+    /// Return the next cron fire delay, if a cron expression is configured.
+    #[must_use]
+    pub fn cron_delay(&self, now: DateTime<Utc>) -> Option<Duration> {
+        let expression = self.scheduled_cron.as_ref()?.trim();
+        if expression.is_empty() {
+            return None;
+        }
+        let schedule = Schedule::from_str(expression).ok()?;
+        let next = schedule.after(&now).next()?;
+        (next - now).to_std().ok()
+    }
+
+    /// Determine whether a trigger kind is allowed under the current policy.
+    #[must_use]
+    pub fn allows(&self, trigger: DreamTrigger) -> bool {
+        match trigger {
+            DreamTrigger::Idle | DreamTrigger::Scheduled => self.enabled,
+            DreamTrigger::Manual => self.manual_enabled,
+        }
+    }
+
+    /// Resolve the next delay for a specific trigger type.
+    #[must_use]
+    pub fn trigger_delay(
+        &self,
+        trigger: DreamTrigger,
+        report: Option<&DreamReport>,
+        budget: Option<&DreamBudget>,
+        now: DateTime<Utc>,
+    ) -> Option<Duration> {
+        if !self.allows(trigger) {
+            return None;
+        }
+        match trigger {
+            DreamTrigger::Idle => Some(self.idle_delay(report, budget)),
+            DreamTrigger::Scheduled => self.cron_delay(now),
+            DreamTrigger::Manual => Some(Duration::ZERO),
+        }
+    }
+}
+
+/// Combined runtime controls for replay, budgeting, and scheduling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamRuntimeControls {
+    /// Replay planner configuration.
+    #[serde(default)]
+    pub replay: DreamReplayPolicy,
+    /// Optional sleep-time compute budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<DreamBudget>,
+    /// Scheduling policy.
+    #[serde(default)]
+    pub schedule: DreamSchedulePolicy,
+    /// Creativity mode used for REM imagination.
+    #[serde(default)]
+    pub imagination_mode: ImaginationMode,
+    /// Whether to emit threat warnings from repeated failures.
+    #[serde(default = "default_true")]
+    pub threat_simulation: bool,
+    /// Minimum severity required before a threat becomes a warning entry.
+    #[serde(default = "default_threat_floor")]
+    pub threat_severity_floor: f64,
+}
+
+impl Default for DreamRuntimeControls {
+    fn default() -> Self {
+        Self {
+            replay: DreamReplayPolicy::default(),
+            budget: None,
+            schedule: DreamSchedulePolicy::default(),
+            imagination_mode: ImaginationMode::default(),
+            threat_simulation: true,
+            threat_severity_floor: 0.20,
+        }
+    }
+}
+
 /// Public facade for dream replay, consolidation, and scheduling.
 #[derive(Debug, Clone)]
 pub struct DreamRunner {
     workdir: PathBuf,
     config: DreamLoopConfig,
+    controls: DreamRuntimeControls,
 }
 
 impl DreamRunner {
@@ -161,6 +395,21 @@ impl DreamRunner {
         Self {
             workdir: workdir.into(),
             config,
+            controls: DreamRuntimeControls::default(),
+        }
+    }
+
+    /// Construct a dream runner with explicit runtime controls.
+    #[must_use]
+    pub fn with_controls(
+        workdir: impl Into<PathBuf>,
+        config: DreamLoopConfig,
+        controls: DreamRuntimeControls,
+    ) -> Self {
+        Self {
+            workdir: workdir.into(),
+            config,
+            controls,
         }
     }
 
@@ -169,9 +418,16 @@ impl DreamRunner {
     #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn replay_insights(&self, episodes: &[Episode]) -> Result<Vec<Insight>> {
+        let replay = self.plan_replay(episodes);
         let progression = NeuroTierProgression::default();
-        let report = progression.analyze(episodes);
+        let report = progression.analyze(&replay.episodes);
         Ok(report.insights)
+    }
+
+    /// Select a replay batch using the configured NREM mode.
+    #[must_use]
+    pub fn plan_replay(&self, episodes: &[Episode]) -> DreamReplayBatch {
+        select_replay_episodes(episodes, &self.controls.replay, Utc::now())
     }
 
     /// Load the latest persisted dream report from `.roko/dreams/`.
@@ -190,6 +446,21 @@ impl DreamRunner {
         self.schedule()
     }
 
+    /// Resolve the delay for a specific trigger kind.
+    #[must_use]
+    pub fn trigger_delay(&self, trigger: DreamTrigger) -> Option<Duration> {
+        if !self.config.auto_dream {
+            return None;
+        }
+        let latest_report = self.latest_report().ok().flatten();
+        self.controls.schedule.trigger_delay(
+            trigger,
+            latest_report.as_ref(),
+            self.controls.budget.as_ref(),
+            Utc::now(),
+        )
+    }
+
     fn report_dir(&self) -> PathBuf {
         self.workdir.join(".roko").join("dreams")
     }
@@ -203,7 +474,7 @@ impl DreamRunner {
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
         let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
-        cycle.run().await
+        cycle.run_budgeted(&mut self.controls.budget).await
     }
 }
 
@@ -250,7 +521,14 @@ impl DreamEngine for DreamRunner {
     }
 
     fn schedule(&self) -> Option<Duration> {
-        if !self.config.auto_dream {
+        if !self.config.auto_dream || !self.controls.schedule.enabled {
+            return None;
+        }
+        if self
+            .controls
+            .budget
+            .is_some_and(|budget| budget.exhausted())
+        {
             return None;
         }
 
@@ -271,16 +549,84 @@ impl DreamEngine for DreamRunner {
         }
 
         let latest_episode = recent.iter().map(|episode| episode.timestamp).max()?;
-        let idle_threshold =
-            Duration::from_secs(self.config.idle_threshold_mins.saturating_mul(60));
-        let target_fire_at = latest_episode + chrono::Duration::from_std(idle_threshold).ok()?;
         let now = Utc::now();
-        if target_fire_at <= now {
+        let idle_delay = self.controls.schedule.trigger_delay(
+            DreamTrigger::Idle,
+            last_report.as_ref(),
+            self.controls.budget.as_ref(),
+            now,
+        )?;
+        let idle_fire_at = latest_episode + chrono::Duration::from_std(idle_delay).ok()?;
+        let mut target = idle_fire_at;
+        if let Some(cron_delay) = self.controls.schedule.trigger_delay(
+            DreamTrigger::Scheduled,
+            last_report.as_ref(),
+            self.controls.budget.as_ref(),
+            now,
+        ) {
+            let cron_fire_at = now + chrono::Duration::from_std(cron_delay).ok()?;
+            target = target.min(cron_fire_at);
+        }
+        if let Some(report) = last_report.as_ref() {
+            if dream_quality_score(report) > 1.5 {
+                let adjusted = self
+                    .controls
+                    .schedule
+                    .idle_delay(Some(report), self.controls.budget.as_ref());
+                target = latest_episode + chrono::Duration::from_std(adjusted).ok()?;
+            }
+        }
+        if target <= now {
             Some(Duration::ZERO)
         } else {
-            (target_fire_at - now).to_std().ok()
+            (target - now).to_std().ok()
         }
     }
+}
+
+fn dream_quality_score(report: &DreamReport) -> f64 {
+    let cluster_count = report.clusters.len().max(1) as f64;
+    let knowledge = report.knowledge_entries_written as f64;
+    let playbooks = report.playbooks_created as f64 * 0.5;
+    let hypotheses = report.strategy_hypotheses.len() as f64 * 0.25;
+    let regressions = report.regressions_detected.len() as f64 * 0.35;
+    ((knowledge + playbooks + hypotheses) / cluster_count - regressions).clamp(0.0, 5.0)
+}
+
+fn remaining_fraction(current: u64, maximum: u64) -> f64 {
+    if maximum == 0 {
+        return 0.0;
+    }
+    let used = current.min(maximum) as f64 / maximum as f64;
+    (1.0 - used).clamp(0.0, 1.0)
+}
+
+fn remaining_fraction_f64(current: f64, maximum: f64) -> f64 {
+    if maximum <= 0.0 {
+        return 0.0;
+    }
+    let used = (current / maximum).clamp(0.0, 1.0);
+    (1.0 - used).clamp(0.0, 1.0)
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_idle_threshold_mins() -> u64 {
+    15
+}
+
+fn default_quality_gain() -> f64 {
+    0.75
+}
+
+fn default_quality_penalty() -> f64 {
+    1.25
+}
+
+fn default_threat_floor() -> f64 {
+    0.20
 }
 
 /// Load the latest persisted dream report from a report directory.
@@ -367,5 +713,40 @@ impl Agent for DreamReviewAgent {
 
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roko_learn::episode_logger::Usage;
+
+    #[test]
+    fn budget_tracks_consumption() {
+        let mut budget = DreamBudget {
+            max_tokens: 100,
+            max_cost_usd: 10.0,
+            max_duration_secs: 100,
+            consumed_tokens: 0,
+            consumed_cost_usd: 0.0,
+            consumed_duration_secs: 0,
+        };
+        let mut episode = Episode::new("agent", "task-1");
+        episode.tokens_used = 40;
+        episode.usage = Usage::tokens(20, 10);
+        episode.usage.cost_usd = 1.5;
+        episode.duration_secs = 2.0;
+
+        budget.consume_episode(&episode);
+
+        assert!(budget.remaining_fraction() < 1.0);
+        assert!(!budget.exhausted());
+    }
+
+    #[test]
+    fn schedule_manual_trigger_is_allowed() {
+        let policy = DreamSchedulePolicy::default();
+        let delay = policy.trigger_delay(DreamTrigger::Manual, None, None, Utc::now());
+        assert_eq!(delay, Some(Duration::ZERO));
     }
 }

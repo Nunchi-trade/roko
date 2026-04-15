@@ -23,11 +23,14 @@ pub mod replan;
 pub mod safety;
 pub mod worktree;
 
-pub use dag::{DagConfig, DagError, DagStats, ExecutionWave, UnifiedTaskDag};
+pub use dag::{
+    DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability, ExecutionWave,
+    IncrementalDag, UnifiedTaskDag,
+};
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
     ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
-    PlanState, PlanStateMachine, TransitionError,
+    PlanState, PlanStateMachine, SpeculativeExecution, TransitionError,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};
 pub use plan_discovery::{

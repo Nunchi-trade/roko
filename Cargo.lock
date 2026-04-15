@@ -5605,6 +5605,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "cron",
  "roko-agent",
  "roko-core",
  "roko-learn",

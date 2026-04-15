@@ -27,6 +27,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod bash;
+pub mod capabilities;
 pub mod contract;
 pub mod git;
 pub mod network;
@@ -45,6 +46,11 @@ use self::network::NetworkPolicy;
 use self::path::PathPolicy;
 use self::rate_limit::{RateLimitKey, RateLimiter};
 use self::scrub::ScrubPolicy;
+
+pub use capabilities::{
+    AgentWarrant, Capability, CapabilityError, check_capability, delegate,
+};
+use self::capabilities::{exec_capability_from_command, network_capability_from_url};
 
 // ─── Tool-name constants used to match calls to policies ──────────────────
 
@@ -86,6 +92,8 @@ pub struct SafetyLayer {
     /// Role name used as part of the rate-limit key.
     /// Defaults to `"default"`.
     pub role: String,
+    /// Optional OCaps-style warrant for tool execution.
+    pub warrant: Option<AgentWarrant>,
 }
 
 impl SafetyLayer {
@@ -105,6 +113,7 @@ impl SafetyLayer {
             scrub_policy: ScrubPolicy::default(),
             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
             role: "default".into(),
+            warrant: None,
         }
     }
 
@@ -112,6 +121,13 @@ impl SafetyLayer {
     #[must_use]
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.role = role.into();
+        self
+    }
+
+    /// Attach a warrant to the safety layer.
+    #[must_use]
+    pub fn with_warrant(mut self, warrant: AgentWarrant) -> Self {
+        self.warrant = Some(warrant);
         self
     }
 
@@ -131,7 +147,19 @@ impl SafetyLayer {
             limiter.check_and_record(&key)?;
         }
 
-        // 2. Bash / run_tests policy (command argument).
+        // 2. OCaps warrant check.
+        if let Some(ref warrant) = self.warrant {
+            for required in required_capabilities(call, ctx, &self.path_policy) {
+                if !check_capability(warrant, &required) {
+                    return Err(ToolError::PermissionDenied(format!(
+                        "missing capability for tool `{}`: {:?}",
+                        call.name, required
+                    )));
+                }
+            }
+        }
+
+        // 3. Bash / run_tests policy (command argument).
         if BASH_TOOLS.contains(&name) {
             if let Some(cmd) = call.arguments.get("command").and_then(|v| v.as_str()) {
                 bash::check_command_with_policy(cmd, &self.bash_policy)?;
@@ -139,14 +167,14 @@ impl SafetyLayer {
             }
         }
 
-        // 3. Network policy (url argument).
+        // 4. Network policy (url argument).
         if NETWORK_TOOLS.contains(&name) {
             if let Some(url) = call.arguments.get("url").and_then(|v| v.as_str()) {
                 network::check_url_with_policy(url, &self.network_policy)?;
             }
         }
 
-        // 4. Path policy (file_path / path argument).
+        // 5. Path policy (file_path / path argument).
         if FILE_TOOLS.contains(&name) {
             let worktree = &ctx.worktree_path;
             // Try common argument names for file paths.
@@ -217,6 +245,46 @@ impl SafetyLayer {
     pub fn scrub_text(&self, content: &str) -> String {
         scrub::scrub_secrets(content, &self.scrub_policy)
     }
+}
+
+fn required_capabilities(call: &ToolCall, ctx: &ToolContext, path_policy: &PathPolicy) -> Vec<Capability> {
+    let mut required = vec![Capability::Tool(call.name.clone())];
+    let name = call.name.as_str();
+
+    if BASH_TOOLS.contains(&name)
+        && let Some(command) = call.arguments.get("command").and_then(|v| v.as_str())
+        && let Some(exec) = exec_capability_from_command(command)
+    {
+        required.push(exec);
+    }
+
+    if NETWORK_TOOLS.contains(&name)
+        && let Some(url) = call.arguments.get("url").and_then(|v| v.as_str())
+        && let Some(network) = network_capability_from_url(url)
+    {
+        required.push(network);
+    }
+
+    if FILE_TOOLS.contains(&name) {
+        let path_arg = call
+            .arguments
+            .get("file_path")
+            .or_else(|| call.arguments.get("path"))
+            .or_else(|| call.arguments.get("pattern"))
+            .and_then(|v| v.as_str());
+        if let Some(path_arg) = path_arg
+            && let Ok(canonical) = path::canonicalize_with_policy(&ctx.worktree_path, path_arg, path_policy)
+        {
+            required.push(match name {
+                "write_file" | "edit_file" | "multi_edit" | "apply_patch" | "notebook_edit" => {
+                    Capability::WritePath(canonical.absolute)
+                }
+                _ => Capability::ReadPath(canonical.absolute),
+            });
+        }
+    }
+
+    required
 }
 
 fn shell_command_arg<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {

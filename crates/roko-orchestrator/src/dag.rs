@@ -20,8 +20,10 @@
 //! deterministic output.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::time::Duration;
 
 use roko_core::{GlobalTaskId, Task};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A single wave: every task in `tasks` has no open dependencies and
@@ -90,9 +92,79 @@ pub enum DagError {
     UnknownPlan(String),
 }
 
+/// Errors returned when mutating a DAG in place.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DagMutationError {
+    /// The target task does not exist.
+    #[error("unknown task: {0}")]
+    UnknownTask(GlobalTaskId),
+
+    /// The task already completed and must not be mutated.
+    #[error("completed task cannot be mutated: {0}")]
+    CompletedTask(GlobalTaskId),
+
+    /// The mutation payload was structurally invalid.
+    #[error("invalid DAG mutation: {0}")]
+    InvalidMutation(String),
+
+    /// The mutation introduced a cycle.
+    #[error("mutation introduced a cycle involving: {0:?}")]
+    Cycle(Vec<GlobalTaskId>),
+}
+
+/// A live DAG mutation request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum DagMutation {
+    /// Add a new task to the DAG.
+    AddTask {
+        /// The fully qualified task id.
+        task_id: GlobalTaskId,
+        /// The task spec to insert.
+        task: Task,
+        /// Direct dependencies of the inserted task.
+        depends_on: Vec<GlobalTaskId>,
+    },
+
+    /// Remove a task from the DAG and reconnect its dependents to its deps.
+    RemoveTask {
+        /// The fully qualified task id.
+        task_id: GlobalTaskId,
+    },
+
+    /// Replace one task with a serial chain of subtasks.
+    SplitTask {
+        /// The fully qualified task id.
+        task_id: GlobalTaskId,
+        /// Replacement tasks in execution order.
+        into: Vec<Task>,
+    },
+
+    /// Add an additional dependency edge `from -> to`.
+    AddDependency {
+        /// The task that should wait.
+        from: GlobalTaskId,
+        /// The task that must complete first.
+        to: GlobalTaskId,
+    },
+
+    /// Replace an existing task spec wholesale.
+    UpdateTaskMetadata {
+        /// The fully qualified task id.
+        task_id: GlobalTaskId,
+        /// The replacement task spec.
+        task: Task,
+    },
+}
+
 /// Unified DAG over every plan's tasks plus plan-level dependencies.
 #[derive(Debug, Clone)]
 pub struct UnifiedTaskDag {
+    /// Canonical task specs keyed by global id.
+    tasks: HashMap<GlobalTaskId, Task>,
+    /// Plan-level dependencies: plan → set of plans it depends on.
+    plan_deps: HashMap<String, HashSet<String>>,
     /// task → set of direct deps.
     edges: HashMap<GlobalTaskId, BTreeSet<GlobalTaskId>>,
     /// task → set of dependents.
@@ -139,103 +211,23 @@ impl UnifiedTaskDag {
                 }
             }
         }
-        // Collect all nodes (sorted by GlobalTaskId).
-        let mut nodes: Vec<GlobalTaskId> = plan_tasks
-            .iter()
-            .flat_map(|(plan, tasks)| {
-                tasks
-                    .iter()
-                    .map(move |t| GlobalTaskId::new(plan.clone(), t.id.clone()))
-            })
-            .collect();
-        nodes.sort_by(|a, b| {
-            (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str()))
-        });
-        let node_set: HashSet<GlobalTaskId> = nodes.iter().cloned().collect();
-        let mut edges: HashMap<GlobalTaskId, BTreeSet<GlobalTaskId>> = HashMap::new();
-        let mut estimates: HashMap<GlobalTaskId, u32> = HashMap::new();
-        let mut files: HashMap<GlobalTaskId, Vec<String>> = HashMap::new();
-        for n in &nodes {
-            edges.insert(n.clone(), BTreeSet::new());
-        }
-        // Intra- and cross-plan task deps + estimates + files.
-        for (plan, tasks) in plan_tasks {
-            for task in tasks {
+        let mut tasks: HashMap<GlobalTaskId, Task> = HashMap::new();
+        for (plan, plan_tasks) in plan_tasks {
+            for task in plan_tasks {
                 let id = GlobalTaskId::new(plan.clone(), task.id.clone());
-                estimates.insert(id.clone(), task.estimated_minutes.unwrap_or(0));
-                files.insert(id.clone(), task.files.clone());
-                for raw in &task.depends_on {
-                    let dep_id = resolve_dep_ref(plan, raw);
-                    if !node_set.contains(&dep_id) {
-                        return Err(DagError::DanglingDepRef {
-                            referrer: id,
-                            target: raw.clone(),
-                        });
-                    }
-                    edges.entry(id.clone()).or_default().insert(dep_id);
-                }
+                tasks.insert(id, task.clone());
             }
         }
-        // Plan-level deps: every task in `plan` depends on every task in each `dep` plan.
-        for (plan, deps) in plan_deps {
-            let plan_ids: Vec<GlobalTaskId> = plan_tasks[plan]
-                .iter()
-                .map(|t| GlobalTaskId::new(plan.clone(), t.id.clone()))
-                .collect();
-            for dep_plan in deps {
-                for dep_task in &plan_tasks[dep_plan] {
-                    let dep_id = GlobalTaskId::new(dep_plan.clone(), dep_task.id.clone());
-                    for id in &plan_ids {
-                        edges.entry(id.clone()).or_default().insert(dep_id.clone());
-                    }
-                }
-            }
-        }
-        // File-overlap inference (deterministic: earlier GlobalTaskId runs first).
-        if config.infer_file_overlap {
-            let mut by_file: HashMap<String, BTreeSet<GlobalTaskId>> = HashMap::new();
-            for (id, fs) in &files {
-                for f in fs {
-                    by_file.entry(f.clone()).or_default().insert(id.clone());
-                }
-            }
-            for (_, tasks) in by_file {
-                // Iterate every pair; the later node depends on all earlier ones.
-                let ordered: Vec<_> = tasks.into_iter().collect();
-                for i in 0..ordered.len() {
-                    for j in 0..i {
-                        // earlier wins; edges[i] gains a dep on ordered[j]
-                        // (avoid inserting a self-loop).
-                        if ordered[i] != ordered[j] {
-                            edges
-                                .entry(ordered[i].clone())
-                                .or_default()
-                                .insert(ordered[j].clone());
-                        }
-                    }
-                }
-            }
-        }
-        // Reverse edges.
-        let mut reverse_edges: HashMap<GlobalTaskId, BTreeSet<GlobalTaskId>> = HashMap::new();
-        for n in &nodes {
-            reverse_edges.insert(n.clone(), BTreeSet::new());
-        }
-        for (from, deps) in &edges {
-            for dep in deps {
-                reverse_edges
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(from.clone());
-            }
-        }
-        let dag = Self {
-            edges,
-            reverse_edges,
-            nodes,
-            estimates,
+        let mut dag = Self {
+            tasks,
+            plan_deps: plan_deps.clone(),
+            edges: HashMap::new(),
+            reverse_edges: HashMap::new(),
+            nodes: Vec::new(),
+            estimates: HashMap::new(),
             config,
         };
+        dag.rebuild_indexes()?;
         // Reject cycles eagerly so callers never hold a bad DAG.
         let _ = dag.topological_sort()?;
         Ok(dag)
@@ -259,10 +251,57 @@ impl UnifiedTaskDag {
             .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
 
+    /// The task spec for `id`, if it exists.
+    #[must_use]
+    pub fn task(&self, id: &GlobalTaskId) -> Option<&Task> {
+        self.tasks.get(id)
+    }
+
     /// Every task in canonical order.
     #[must_use]
     pub fn nodes(&self) -> &[GlobalTaskId] {
         &self.nodes
+    }
+
+    /// Return the earliest time a task can start.
+    #[must_use]
+    pub fn earliest_start(&self, task: &GlobalTaskId) -> Duration {
+        let Some((earliest, _, _, _)) = self.cpm_analysis() else {
+            return Duration::ZERO;
+        };
+        earliest.get(task).copied().unwrap_or(Duration::ZERO)
+    }
+
+    /// Return the latest time a task can start without extending the plan.
+    #[must_use]
+    pub fn latest_start(&self, task: &GlobalTaskId) -> Duration {
+        let Some((_, latest, _, _)) = self.cpm_analysis() else {
+            return Duration::ZERO;
+        };
+        latest.get(task).copied().unwrap_or(Duration::ZERO)
+    }
+
+    /// Return the slack for a task.
+    #[must_use]
+    pub fn slack(&self, task: &GlobalTaskId) -> Duration {
+        self.latest_start(task)
+            .saturating_sub(self.earliest_start(task))
+    }
+
+    /// Return the zero-slack tasks on the critical path.
+    #[must_use]
+    pub fn critical_path(&self) -> Vec<GlobalTaskId> {
+        let Some((earliest, latest, _, topo)) = self.cpm_analysis() else {
+            return Vec::new();
+        };
+        topo.into_iter()
+            .filter(|id| {
+                earliest
+                    .get(id)
+                    .zip(latest.get(id))
+                    .is_some_and(|(es, ls)| ls.saturating_sub(*es).is_zero())
+            })
+            .collect()
     }
 
     /// Topologically sort the DAG using Kahn's algorithm.
@@ -396,25 +435,10 @@ impl UnifiedTaskDag {
     #[must_use]
     pub fn stats(&self) -> DagStats {
         let edge_count: usize = self.edges.values().map(BTreeSet::len).sum();
-        // Critical path: longest path by estimated_minutes (DP on DAG).
-        let mut longest: HashMap<GlobalTaskId, u32> = HashMap::new();
-        // Process nodes in topological order so every dep has been seen
-        // before the node itself.
-        if let Ok(topo) = self.topological_sort() {
-            for id in &topo {
-                let est = self.estimates.get(id).copied().unwrap_or(0);
-                let max_dep = self
-                    .edges
-                    .get(id)
-                    .into_iter()
-                    .flatten()
-                    .map(|d| longest.get(d).copied().unwrap_or(0))
-                    .max()
-                    .unwrap_or(0);
-                longest.insert(id.clone(), max_dep + est);
-            }
-        }
-        let critical = longest.values().copied().max().unwrap_or(0);
+        let critical = self
+            .cpm_analysis()
+            .map(|(_, _, total, _)| duration_to_minutes(total))
+            .unwrap_or(0);
         let wave_count = self.waves().map(|w| w.len()).unwrap_or(0);
         DagStats {
             nodes: self.nodes.len(),
@@ -422,6 +446,472 @@ impl UnifiedTaskDag {
             waves: wave_count,
             critical_path_minutes: critical,
         }
+    }
+
+    /// Collapse eligible linear chains in place.
+    ///
+    /// Returns the number of fusions performed.
+    pub fn fuse_linear_chains(&mut self) -> usize {
+        let mut fusions = 0usize;
+
+        loop {
+            let Ok(topo) = self.topological_sort() else {
+                break;
+            };
+            let mut fused = false;
+
+            for start in topo {
+                if self.dependents_of(&start).len() != 1 {
+                    continue;
+                }
+                let mut chain = vec![start.clone()];
+                let mut cursor = start.clone();
+                let mut compatible = true;
+                while let Some(next) = self.dependents_of(&cursor).iter().next().cloned() {
+                    if self.deps_of(&next).len() != 1 {
+                        compatible = false;
+                        break;
+                    }
+                    if self.deps_of(&next).iter().next() != Some(&cursor) {
+                        compatible = false;
+                        break;
+                    }
+                    if !fusion_compatible(self.task(&cursor), self.task(&next)) {
+                        compatible = false;
+                        break;
+                    }
+                    chain.push(next.clone());
+                    cursor = next;
+                    if self.dependents_of(&cursor).is_empty() {
+                        break;
+                    }
+                    if self.dependents_of(&cursor).len() != 1 {
+                        compatible = false;
+                        break;
+                    }
+                }
+                if !compatible || chain.len() < 2 {
+                    continue;
+                }
+                let Some(mut target) = self.tasks.get(&start).cloned() else {
+                    continue;
+                };
+                if chain.iter().any(|id| {
+                    self.tasks
+                        .get(id)
+                        .is_some_and(|task| task.status == roko_core::TaskStatus::Done)
+                }) {
+                    continue;
+                }
+
+                for merged_id in chain.iter().skip(1) {
+                    if let Some(merged) = self.tasks.get(merged_id).cloned() {
+                        merge_task_specs(&mut target, &merged);
+                    }
+                }
+                self.tasks.insert(start.clone(), target);
+                for removed in chain.iter().skip(1) {
+                    self.tasks.remove(removed);
+                }
+
+                if self.rebuild_indexes().is_err() {
+                    break;
+                }
+                fusions += 1;
+                fused = true;
+                break;
+            }
+
+            if !fused {
+                break;
+            }
+        }
+
+        fusions
+    }
+
+    /// Apply a live DAG mutation.
+    ///
+    /// The mutation is validated against the current graph and rejected if
+    /// it would introduce a cycle or touch a completed task.
+    pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
+        let mut next = self.clone();
+        let result = match mutation {
+            DagMutation::AddTask {
+                task_id,
+                mut task,
+                depends_on,
+            } => {
+                if task_id.task != task.id {
+                    return Err(DagMutationError::InvalidMutation(format!(
+                        "task id mismatch: {task_id} vs {}",
+                        task.id
+                    )));
+                }
+                if next.tasks.contains_key(&task_id) {
+                    return Err(DagMutationError::InvalidMutation(format!(
+                        "task already exists: {task_id}"
+                    )));
+                }
+                task.depends_on = depends_on.iter().map(ToString::to_string).collect();
+                next.tasks.insert(task_id, task);
+                Ok(())
+            }
+            DagMutation::RemoveTask { task_id } => {
+                ensure_mutable(&next, &task_id)?;
+                let Some(task) = next.tasks.get(&task_id).cloned() else {
+                    return Err(DagMutationError::UnknownTask(task_id));
+                };
+                let deps = task.depends_on.clone();
+                let dependents: Vec<_> = next.dependents_of(&task_id).iter().cloned().collect();
+                let task_key = task_id.to_string();
+                for dependent in dependents {
+                    if let Some(dep_task) = next.tasks.get_mut(&dependent) {
+                        remove_dep(&mut dep_task.depends_on, &task_key);
+                        for dep in &deps {
+                            let dep_key = dep.to_string();
+                            if !dep_task.depends_on.iter().any(|raw| raw == &dep_key) {
+                                dep_task.depends_on.push(dep_key);
+                            }
+                        }
+                    }
+                }
+                next.tasks.remove(&task_id);
+                Ok(())
+            }
+            DagMutation::SplitTask { task_id, into } => {
+                ensure_mutable(&next, &task_id)?;
+                if into.is_empty() {
+                    return Err(DagMutationError::InvalidMutation(
+                        "split requires at least one replacement task".into(),
+                    ));
+                }
+                let Some(original) = next.tasks.get(&task_id).cloned() else {
+                    return Err(DagMutationError::UnknownTask(task_id));
+                };
+                let dependents: Vec<_> = next.dependents_of(&task_id).iter().cloned().collect();
+                let original_deps = original.depends_on.clone();
+                let mut chain: Vec<GlobalTaskId> = Vec::with_capacity(into.len());
+                for (index, mut task) in into.into_iter().enumerate() {
+                    if index == 0 && task.id != task_id.task {
+                        return Err(DagMutationError::InvalidMutation(format!(
+                            "split head must keep original id {}",
+                            task_id.task
+                        )));
+                    }
+                    if task.id.is_empty() {
+                        return Err(DagMutationError::InvalidMutation(
+                            "split tasks must have explicit ids".into(),
+                        ));
+                    }
+                    if index > 0 && task.id == task_id.task {
+                        return Err(DagMutationError::InvalidMutation(format!(
+                            "split task id mismatch: replacement must not reuse original id {}",
+                            task_id.task
+                        )));
+                    }
+                    task.depends_on = if index == 0 {
+                        original_deps.clone()
+                    } else {
+                        vec![chain[index - 1].to_string()]
+                    };
+                    chain.push(GlobalTaskId::new(&task_id.plan, task.id.clone()));
+                    next.tasks.insert(chain[index].clone(), task);
+                }
+
+                let last = chain
+                    .last()
+                    .cloned()
+                    .ok_or_else(|| DagMutationError::InvalidMutation("empty split".into()))?;
+                let last_key = last.to_string();
+                let task_key = task_id.to_string();
+                for dependent in dependents {
+                    if let Some(dep_task) = next.tasks.get_mut(&dependent) {
+                        replace_dep(&mut dep_task.depends_on, &task_key, &last_key);
+                    }
+                }
+                next.tasks.remove(&task_id);
+                Ok(())
+            }
+            DagMutation::AddDependency { from, to } => {
+                if from == to {
+                    return Err(DagMutationError::InvalidMutation(
+                        "self-dependency is not allowed".into(),
+                    ));
+                }
+                ensure_mutable(&next, &from)?;
+                let Some(task) = next.tasks.get_mut(&from) else {
+                    return Err(DagMutationError::UnknownTask(from));
+                };
+                let to_key = to.to_string();
+                if !task.depends_on.iter().any(|raw| raw == &to_key) {
+                    task.depends_on.push(to_key);
+                }
+                Ok(())
+            }
+            DagMutation::UpdateTaskMetadata { task_id, mut task } => {
+                ensure_mutable(&next, &task_id)?;
+                if task_id.task != task.id {
+                    return Err(DagMutationError::InvalidMutation(format!(
+                        "task id mismatch: {task_id} vs {}",
+                        task.id
+                    )));
+                }
+                task.depends_on = next
+                    .tasks
+                    .get(&task_id)
+                    .map(|current| current.depends_on.clone())
+                    .ok_or(DagMutationError::UnknownTask(task_id.clone()))?;
+                next.tasks.insert(task_id, task);
+                Ok(())
+            }
+        };
+
+        result?;
+        next.rebuild_indexes()
+            .map_err(|err| map_rebuild_error(err, &next))?;
+        if let Err(err) = next.topological_sort() {
+            return Err(match err {
+                DagError::Cycle(stuck) => DagMutationError::Cycle(stuck),
+                other => map_rebuild_error(other, &next),
+            });
+        }
+        *self = next;
+        Ok(())
+    }
+
+    fn rebuild_indexes(&mut self) -> Result<(), DagError> {
+        self.edges.clear();
+        self.reverse_edges.clear();
+        self.nodes.clear();
+        self.estimates.clear();
+
+        self.nodes = self.tasks.keys().cloned().collect();
+        self.nodes.sort_by(|a, b| {
+            (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str()))
+        });
+        let node_set: HashSet<GlobalTaskId> = self.nodes.iter().cloned().collect();
+        for node in &self.nodes {
+            self.edges.insert(node.clone(), BTreeSet::new());
+            self.reverse_edges.insert(node.clone(), BTreeSet::new());
+        }
+
+        for (id, task) in &self.tasks {
+            self.estimates.insert(id.clone(), task.estimated_minutes.unwrap_or(0));
+            for raw in &task.depends_on {
+                let dep_id = resolve_dep_ref(&id.plan, raw);
+                if !node_set.contains(&dep_id) {
+                    return Err(DagError::DanglingDepRef {
+                        referrer: id.clone(),
+                        target: raw.clone(),
+                    });
+                }
+                self.edges.entry(id.clone()).or_default().insert(dep_id);
+            }
+        }
+
+        for (plan, deps) in &self.plan_deps {
+            let Some(plan_tasks) = tasks_for_plan(&self.tasks, plan) else {
+                return Err(DagError::UnknownPlan(plan.clone()));
+            };
+            for dep_plan in deps {
+                let Some(dep_tasks) = tasks_for_plan(&self.tasks, dep_plan) else {
+                    return Err(DagError::UnknownPlan(dep_plan.clone()));
+                };
+                for id in &plan_tasks {
+                    for dep_id in &dep_tasks {
+                        self.edges.entry(id.clone()).or_default().insert(dep_id.clone());
+                    }
+                }
+            }
+        }
+
+        if self.config.infer_file_overlap {
+            let mut by_file: HashMap<String, BTreeSet<GlobalTaskId>> = HashMap::new();
+            for (id, task) in &self.tasks {
+                for file in &task.files {
+                    by_file.entry(file.clone()).or_default().insert(id.clone());
+                }
+            }
+            for tasks in by_file.into_values() {
+                let ordered: Vec<_> = tasks.into_iter().collect();
+                for i in 0..ordered.len() {
+                    for j in 0..i {
+                        if ordered[i] != ordered[j] {
+                            self.edges
+                                .entry(ordered[i].clone())
+                                .or_default()
+                                .insert(ordered[j].clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        for node in &self.nodes {
+            self.reverse_edges.insert(node.clone(), BTreeSet::new());
+        }
+        for (from, deps) in &self.edges {
+            for dep in deps {
+                self.reverse_edges
+                    .entry(dep.clone())
+                    .or_default()
+                    .insert(from.clone());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cpm_analysis(
+        &self,
+    ) -> Option<(
+        HashMap<GlobalTaskId, Duration>,
+        HashMap<GlobalTaskId, Duration>,
+        Duration,
+        Vec<GlobalTaskId>,
+    )> {
+        let topo = self.topological_sort().ok()?;
+        let mut earliest: HashMap<GlobalTaskId, Duration> = HashMap::with_capacity(self.nodes.len());
+        for node in &topo {
+            let start = self
+                .deps_of(node)
+                .iter()
+                .map(|dep| earliest.get(dep).copied().unwrap_or(Duration::ZERO) + self.task_duration(dep))
+                .max()
+                .unwrap_or(Duration::ZERO);
+            earliest.insert(node.clone(), start);
+        }
+
+        let mut project_duration = Duration::ZERO;
+        for node in &topo {
+            let finish = earliest.get(node).copied().unwrap_or(Duration::ZERO) + self.task_duration(node);
+            project_duration = project_duration.max(finish);
+        }
+
+        let mut latest: HashMap<GlobalTaskId, Duration> = HashMap::with_capacity(self.nodes.len());
+        for node in topo.iter().rev() {
+            let duration = self.task_duration(node);
+            let latest_finish = self
+                .dependents_of(node)
+                .iter()
+                .map(|dep| latest.get(dep).copied().unwrap_or(project_duration))
+                .min()
+                .unwrap_or(project_duration);
+            let latest_start = latest_finish.saturating_sub(duration);
+            latest.insert(node.clone(), latest_start);
+        }
+
+        Some((earliest, latest, project_duration, topo))
+    }
+
+    fn task_duration(&self, id: &GlobalTaskId) -> Duration {
+        self.tasks
+            .get(id)
+            .and_then(|task| task.estimated_minutes)
+            .map(|minutes| Duration::from_secs(u64::from(minutes).saturating_mul(60)))
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
+/// Durability level used by incremental DAG recomputation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Durability {
+    /// Recompute eagerly after any upstream change.
+    Low,
+    /// Default behaviour.
+    Medium,
+    /// Survives re-plans unless explicitly dirtied.
+    High,
+}
+
+/// Build-system-style incremental DAG wrapper.
+#[derive(Debug, Clone)]
+pub struct IncrementalDag {
+    /// The underlying DAG.
+    pub dag: UnifiedTaskDag,
+    dirty: HashSet<GlobalTaskId>,
+    durability: HashMap<GlobalTaskId, Durability>,
+}
+
+impl IncrementalDag {
+    /// Create a new incremental wrapper.
+    #[must_use]
+    pub fn new(dag: UnifiedTaskDag) -> Self {
+        Self {
+            dag,
+            dirty: HashSet::new(),
+            durability: HashMap::new(),
+        }
+    }
+
+    /// Read-only access to the underlying DAG.
+    #[must_use]
+    pub fn dag(&self) -> &UnifiedTaskDag {
+        &self.dag
+    }
+
+    /// Mutable access to the underlying DAG.
+    pub fn dag_mut(&mut self) -> &mut UnifiedTaskDag {
+        &mut self.dag
+    }
+
+    /// Set a task's durability.
+    pub fn set_durability(&mut self, task: GlobalTaskId, durability: Durability) {
+        self.durability.insert(task, durability);
+    }
+
+    /// Mark a task dirty and propagate to dependents.
+    pub fn mark_dirty(&mut self, task: GlobalTaskId) {
+        let mut stack = vec![task];
+        while let Some(next) = stack.pop() {
+            if !self.dirty.insert(next.clone()) {
+                continue;
+            }
+            if matches!(self.durability.get(&next), Some(Durability::High)) {
+                continue;
+            }
+            for dependent in self.dag.dependents_of(&next).iter().cloned() {
+                stack.push(dependent);
+            }
+        }
+    }
+
+    /// Return the tasks that do not need to be re-executed.
+    #[must_use]
+    pub fn clean_set(&self) -> HashSet<GlobalTaskId> {
+        self.dag
+            .nodes()
+            .iter()
+            .filter(|id| !self.dirty.contains(*id))
+            .cloned()
+            .collect()
+    }
+
+    /// Return the dirty tasks in execution order and clear their dirty marks.
+    #[must_use]
+    pub fn recompute_plan(&mut self) -> Vec<GlobalTaskId> {
+        let Ok(topo) = self.dag.topological_sort() else {
+            return Vec::new();
+        };
+        let mut dirty_order = Vec::new();
+        for id in topo {
+            if self.dirty.remove(&id) {
+                dirty_order.push(id);
+            }
+        }
+        dirty_order
+    }
+
+    /// Apply a mutation and mark the touched subtree dirty.
+    pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
+        let touched = mutation_touched_ids(&mutation);
+        self.dag.apply_mutation(mutation)?;
+        for id in touched {
+            self.mark_dirty(id);
+        }
+        Ok(())
     }
 }
 
@@ -431,6 +921,139 @@ impl UnifiedTaskDag {
 /// - `"09-foo:t3"` → `GlobalTaskId { plan: "09-foo", task: "t3" }`.
 fn resolve_dep_ref(referrer_plan: &str, raw: &str) -> GlobalTaskId {
     GlobalTaskId::parse(raw).unwrap_or_else(|| GlobalTaskId::new(referrer_plan, raw))
+}
+
+fn tasks_for_plan(tasks: &HashMap<GlobalTaskId, Task>, plan: &str) -> Option<Vec<GlobalTaskId>> {
+    let mut ids: Vec<GlobalTaskId> = tasks
+        .keys()
+        .filter(|id| id.plan == plan)
+        .cloned()
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    ids.sort_by(|a, b| (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str())));
+    Some(ids)
+}
+
+fn duration_to_minutes(duration: Duration) -> u32 {
+    let minutes = duration.as_secs() / 60;
+    u32::try_from(minutes).unwrap_or(u32::MAX)
+}
+
+fn replace_dep(deps: &mut Vec<String>, old: &str, new: &str) {
+    for dep in deps.iter_mut() {
+        if dep == old {
+            *dep = new.to_string();
+        }
+    }
+    dedup_in_place(deps);
+}
+
+fn remove_dep(deps: &mut Vec<String>, target: &str) {
+    deps.retain(|dep| dep != target);
+    dedup_in_place(deps);
+}
+
+fn dedup_in_place(deps: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    deps.retain(|dep| seen.insert(dep.clone()));
+}
+
+fn fusion_compatible(left: Option<&Task>, right: Option<&Task>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return false;
+    };
+    left.role == right.role
+        && left.preferred_model == right.preferred_model
+        && left.preferred_provider == right.preferred_provider
+        && left.complexity_band == right.complexity_band
+}
+
+fn merge_task_specs(target: &mut Task, merged: &Task) {
+    target.title = format!("{} + {}", target.title, merged.title);
+    target.estimated_minutes = Some(
+        target
+            .estimated_minutes
+            .unwrap_or(0)
+            .saturating_add(merged.estimated_minutes.unwrap_or(0)),
+    );
+    append_unique(&mut target.files, &merged.files);
+    append_unique(&mut target.acceptance, &merged.acceptance);
+    target.exclusive_files |= merged.exclusive_files;
+    if target.role.is_none() {
+        target.role = merged.role.clone();
+    }
+    if target.category.is_none() {
+        target.category = merged.category;
+    }
+    if target.reasoning_level.is_none() {
+        target.reasoning_level = merged.reasoning_level;
+    }
+    if target.speed_priority.is_none() {
+        target.speed_priority = merged.speed_priority;
+    }
+    if target.quality_profile.is_none() {
+        target.quality_profile = merged.quality_profile;
+    }
+    if target.context_weight.is_none() {
+        target.context_weight = merged.context_weight;
+    }
+    if target.complexity_band.is_none() {
+        target.complexity_band = merged.complexity_band;
+    }
+    if target.preferred_model.is_none() {
+        target.preferred_model = merged.preferred_model.clone();
+    }
+    if target.preferred_provider.is_none() {
+        target.preferred_provider = merged.preferred_provider.clone();
+    }
+}
+
+fn append_unique(target: &mut Vec<String>, source: &[String]) {
+    for item in source {
+        if !target.iter().any(|existing| existing == item) {
+            target.push(item.clone());
+        }
+    }
+}
+
+fn ensure_mutable(dag: &UnifiedTaskDag, task_id: &GlobalTaskId) -> Result<(), DagMutationError> {
+    let Some(task) = dag.tasks.get(task_id) else {
+        return Err(DagMutationError::UnknownTask(task_id.clone()));
+    };
+    if task.status == roko_core::TaskStatus::Done {
+        return Err(DagMutationError::CompletedTask(task_id.clone()));
+    }
+    Ok(())
+}
+
+fn map_rebuild_error(err: DagError, _dag: &UnifiedTaskDag) -> DagMutationError {
+    match err {
+        DagError::Cycle(stuck) => DagMutationError::Cycle(stuck),
+        DagError::DanglingDepRef { referrer, target } => DagMutationError::InvalidMutation(
+            format!("dangling dep during rebuild: {referrer} -> {target}"),
+        ),
+        DagError::UnknownPlan(plan) => DagMutationError::InvalidMutation(format!(
+            "unknown plan during rebuild: {plan}"
+        )),
+    }
+}
+
+fn mutation_touched_ids(mutation: &DagMutation) -> Vec<GlobalTaskId> {
+    match mutation {
+        DagMutation::AddTask { task_id, .. }
+        | DagMutation::RemoveTask { task_id }
+        | DagMutation::UpdateTaskMetadata { task_id, .. } => vec![task_id.clone()],
+        DagMutation::SplitTask { task_id, into } => {
+            let mut touched = vec![task_id.clone()];
+            if let Some(first) = into.first() {
+                touched.push(GlobalTaskId::new(&task_id.plan, first.id.clone()));
+            }
+            touched
+        }
+        DagMutation::AddDependency { from, .. } => vec![from.clone()],
+    }
 }
 
 #[cfg(test)]
@@ -474,6 +1097,96 @@ mod tests {
         assert_eq!(waves[1].tasks[0].task, "t2");
         assert_eq!(waves[2].tasks[0].task, "t3");
         assert_eq!(dag.stats().critical_path_minutes, 18);
+    }
+
+    #[test]
+    fn critical_path_helpers_follow_the_chain() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+        ])
+        .unwrap();
+        let id = GlobalTaskId::new("plan-a", "t2");
+        assert_eq!(dag.earliest_start(&id), Duration::from_secs(600));
+        assert_eq!(dag.latest_start(&id), Duration::from_secs(600));
+        assert!(dag.slack(&id).is_zero());
+        let critical: Vec<_> = dag.critical_path().into_iter().map(|id| id.task).collect();
+        assert_eq!(critical, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn fuse_linear_chains_collapses_serial_runs() {
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+        ])
+        .unwrap();
+        let fused = dag.fuse_linear_chains();
+        assert_eq!(fused, 1);
+        assert_eq!(dag.nodes().len(), 1);
+        let head = dag.task(&GlobalTaskId::new("plan-a", "t1")).unwrap();
+        assert_eq!(head.estimated_minutes, Some(18));
+    }
+
+    #[test]
+    fn incremental_dag_dirty_propagates_downstream() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+        ])
+        .unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        inc.mark_dirty(GlobalTaskId::new("plan-a", "t1"));
+        let dirty = inc.recompute_plan();
+        assert_eq!(dirty.len(), 3);
+        assert_eq!(dirty[0].task, "t1");
+        assert_eq!(dirty[2].task, "t3");
+        assert_eq!(inc.clean_set().len(), 3);
+    }
+
+    #[test]
+    fn apply_mutation_can_add_and_remove_tasks() {
+        let mut dag = single_plan_dag(vec![mk_task("t1", &[], &[], Some(10))]).unwrap();
+        dag.apply_mutation(DagMutation::AddTask {
+            task_id: GlobalTaskId::new("plan-a", "t2"),
+            task: mk_task("t2", &[], &[], Some(5)),
+            depends_on: vec![GlobalTaskId::new("plan-a", "t1")],
+        })
+        .unwrap();
+        assert_eq!(dag.nodes().len(), 2);
+        assert_eq!(
+            dag.deps_of(&GlobalTaskId::new("plan-a", "t2"))
+                .iter()
+                .next()
+                .unwrap()
+                .task,
+            "t1"
+        );
+
+        dag.apply_mutation(DagMutation::RemoveTask {
+            task_id: GlobalTaskId::new("plan-a", "t1"),
+        })
+        .unwrap();
+        assert_eq!(dag.nodes().len(), 1);
+        assert_eq!(dag.nodes()[0].task, "t2");
+    }
+
+    #[test]
+    fn apply_mutation_rejects_completed_tasks() {
+        let mut task = mk_task("t1", &[], &[], Some(10));
+        task.status = roko_core::TaskStatus::Done;
+        let mut plans = BTreeMap::new();
+        plans.insert("plan-a".to_string(), vec![task]);
+        let mut dag = UnifiedTaskDag::build(&plans, &HashMap::new(), DagConfig::default()).unwrap();
+        let err = dag
+            .apply_mutation(DagMutation::RemoveTask {
+                task_id: GlobalTaskId::new("plan-a", "t1"),
+            })
+            .unwrap_err();
+        assert!(matches!(err, DagMutationError::CompletedTask(_)));
     }
 
     #[test]
