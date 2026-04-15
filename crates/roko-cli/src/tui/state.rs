@@ -5,7 +5,7 @@
 //! cost tracking, git state, and more.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::Path;
 use std::time::Instant;
@@ -283,6 +283,27 @@ pub struct RouteMetrics {
     pub context_limit: u64,
     /// Prompt-focus score in the range `0.0..=1.0`.
     pub focus_score: f64,
+}
+
+/// Live system metrics for a supervised agent process.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessMetrics {
+    /// OS process identifier.
+    pub pid: u32,
+    /// Human-readable process role or label.
+    pub role: String,
+    /// Current CPU usage percentage.
+    pub cpu_pct: f32,
+    /// Resident memory in bytes.
+    pub mem_bytes: u64,
+    /// Compact state label such as `running`, `sleeping`, or `stopped`.
+    pub state: String,
+    /// Process uptime in seconds.
+    pub uptime_secs: f64,
+    /// Rolling CPU samples used for inline sparklines.
+    pub cpu_history: VecDeque<f32>,
+    /// Rolling memory samples used for inline sparklines.
+    pub mem_history: VecDeque<u64>,
 }
 
 /// Resolve a model slug to its known context window in tokens.
@@ -749,6 +770,8 @@ pub struct TuiState {
     pub cost_rate: f64,
     /// Cumulative cost in USD for header_bar display.
     pub cost_dollars: f64,
+    /// Per-process metrics for the dashboard Procs sub-tab.
+    pub process_metrics: Vec<ProcessMetrics>,
 
     // -- system metrics --
     /// System resource metrics snapshot.
@@ -856,6 +879,7 @@ impl Default for TuiState {
             token_rate: 0.0,
             cost_rate: 0.0,
             cost_dollars: 0.0,
+            process_metrics: Vec::new(),
 
             sys: SysMetrics::default(),
 

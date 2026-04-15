@@ -3,7 +3,7 @@
 //! Integrates the Mori-style tab system (F1-F7), modal dialogs, TuiState,
 //! TuiAction dispatch, PostFX pipeline, and atmosphere animations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use sysinfo::System;
+use roko_runtime::process::ProcessSupervisor;
+use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
 use tokio::sync::{mpsc, oneshot};
 
 use super::approval_ipc::ApprovalRequest;
@@ -89,11 +90,13 @@ pub struct App {
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
-    sys_rx: Option<std::sync::mpsc::Receiver<super::state::SysMetrics>>,
+    sys_rx: Option<std::sync::mpsc::Receiver<SysSnapshot>>,
     /// Background data refresh receiver (file reads off main thread).
     data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
     /// Background git data receiver (git commands off main thread).
     git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    /// Optional live process supervisor used for per-agent process sampling.
+    process_supervisor: Option<Arc<ProcessSupervisor>>,
     /// Optional approval request receiver from the orchestrator.
     pub approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
     /// Pending response channel for the active approval modal.
@@ -122,6 +125,30 @@ struct GitBgData {
     commit_short: String,
     /// Commit age string (e.g. "3 hours ago").
     age: String,
+}
+
+/// Combined host + process metrics snapshot emitted by the background sampler.
+struct SysSnapshot {
+    /// Host-level system metrics.
+    sys: super::state::SysMetrics,
+    /// Per-process point-in-time samples.
+    process_metrics: Vec<ProcessMetricSample>,
+}
+
+/// One sampled process row before history is merged into `TuiState`.
+struct ProcessMetricSample {
+    /// OS process identifier.
+    pid: u32,
+    /// Human-readable role or label.
+    role: String,
+    /// Current CPU usage percentage.
+    cpu_pct: f32,
+    /// Resident memory in bytes.
+    mem_bytes: u64,
+    /// Compact process state label.
+    state: String,
+    /// Process uptime in seconds.
+    uptime_secs: f64,
 }
 
 fn plan_status_label(plan: &PlanEntry) -> String {
@@ -399,6 +426,7 @@ impl App {
             sys_rx: None,
             data_rx: None,
             git_rx: None,
+            process_supervisor: None,
             approval_rx: None,
             pending_approval_response: None,
             snapshot_rx: None,
@@ -437,6 +465,11 @@ impl App {
         }
         app.snapshot_rx = Some(snapshot_rx);
         app
+    }
+
+    /// Install a live process supervisor used for per-agent process metrics.
+    pub fn set_process_supervisor(&mut self, supervisor: Arc<ProcessSupervisor>) {
+        self.process_supervisor = Some(supervisor);
     }
 
     /// Return the active page (legacy).
@@ -488,13 +521,14 @@ impl App {
         // ---------------------------------------------------------------
         // Spawn background sys metrics collector thread
         // ---------------------------------------------------------------
-        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<super::state::SysMetrics>();
+        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<SysSnapshot>();
         let sys_log_dispatch = log_dispatch.clone();
+        let process_supervisor = self.process_supervisor.clone();
         std::thread::Builder::new()
             .name("tui-sys-metrics".into())
             .spawn(move || {
                 let _log_guard = tracing::dispatcher::set_default(&sys_log_dispatch);
-                collect_sys_metrics_bg(sys_tx);
+                collect_sys_metrics_bg(sys_tx, process_supervisor);
             })
             .inspect_err(|err| {
                 tracing::warn!(
@@ -1766,6 +1800,38 @@ impl App {
         }
     }
 
+    fn merge_process_metrics(&mut self, samples: Vec<ProcessMetricSample>) {
+        const PROCESS_HISTORY_LIMIT: usize = 60;
+
+        let mut existing = std::mem::take(&mut self.tui_state.process_metrics);
+        let mut merged = Vec::with_capacity(samples.len());
+
+        for sample in samples {
+            let mut metric = if let Some(index) = existing.iter().position(|entry| entry.pid == sample.pid)
+            {
+                existing.swap_remove(index)
+            } else {
+                super::state::ProcessMetrics {
+                    pid: sample.pid,
+                    role: sample.role.clone(),
+                    ..Default::default()
+                }
+            };
+
+            metric.pid = sample.pid;
+            metric.role = sample.role;
+            metric.cpu_pct = sample.cpu_pct;
+            metric.mem_bytes = sample.mem_bytes;
+            metric.state = sample.state;
+            metric.uptime_secs = sample.uptime_secs;
+            push_bounded_history(&mut metric.cpu_history, sample.cpu_pct, PROCESS_HISTORY_LIMIT);
+            push_bounded_history(&mut metric.mem_history, sample.mem_bytes, PROCESS_HISTORY_LIMIT);
+            merged.push(metric);
+        }
+
+        self.tui_state.process_metrics = merged;
+    }
+
     fn current_agent_scroll_offset(&self) -> usize {
         self.tui_state.agent_scroll.unwrap_or_else(|| {
             self.current_agent_output_line_count()
@@ -2042,49 +2108,53 @@ impl App {
         self.drain_snapshot_channel();
 
         // -- sys metrics (merge, don't replace — keep history) --
+        let mut sys_snaps = Vec::new();
         if let Some(rx) = &self.sys_rx {
             let mut count = 0;
             while let Ok(snap) = rx.try_recv() {
-                // CPU
-                let cpu_pct = self.tui_state.update_cpu_pct(snap.cpu_pct);
-                let sys = &mut self.tui_state.sys;
-                sys.cpu_history.push(cpu_pct);
-                if sys.cpu_history.len() > 60 {
-                    sys.cpu_history.remove(0);
-                }
-
-                // Memory
-                sys.mem_used_bytes = snap.mem_used_bytes;
-                sys.mem_total_bytes = snap.mem_total_bytes;
-                let mem_frac = if snap.mem_total_bytes > 0 {
-                    snap.mem_used_bytes as f32 / snap.mem_total_bytes as f32
-                } else {
-                    0.0
-                };
-                sys.mem_history.push(mem_frac);
-                if sys.mem_history.len() > 60 {
-                    sys.mem_history.remove(0);
-                }
-
-                // Network: compute rate from delta of cumulative totals
-                if sys.prev_net_in > 0 && snap.net_down_bytes_sec > sys.prev_net_in {
-                    sys.net_down_bytes_sec = snap.net_down_bytes_sec - sys.prev_net_in;
-                }
-                sys.prev_net_in = snap.net_down_bytes_sec;
-                sys.net_out_bytes_total = snap.net_out_bytes_total;
-
-                // Disk: compute rate from delta of cumulative totals
-                if sys.prev_disk_read > 0 && snap.disk_read_bytes_sec > sys.prev_disk_read {
-                    sys.disk_read_bytes_sec = snap.disk_read_bytes_sec - sys.prev_disk_read;
-                }
-                sys.prev_disk_read = snap.disk_read_bytes_sec;
-                sys.disk_write_bytes_total = snap.disk_write_bytes_total;
-
+                sys_snaps.push(snap);
                 count += 1;
                 if count >= MAX_MESSAGES_PER_DRAIN {
                     break;
                 }
             }
+        }
+        for snap in sys_snaps {
+            // CPU
+            let cpu_pct = self.tui_state.update_cpu_pct(snap.sys.cpu_pct);
+            let sys = &mut self.tui_state.sys;
+            sys.cpu_history.push(cpu_pct);
+            if sys.cpu_history.len() > 60 {
+                sys.cpu_history.remove(0);
+            }
+
+            // Memory
+            sys.mem_used_bytes = snap.sys.mem_used_bytes;
+            sys.mem_total_bytes = snap.sys.mem_total_bytes;
+            let mem_frac = if snap.sys.mem_total_bytes > 0 {
+                snap.sys.mem_used_bytes as f32 / snap.sys.mem_total_bytes as f32
+            } else {
+                0.0
+            };
+            sys.mem_history.push(mem_frac);
+            if sys.mem_history.len() > 60 {
+                sys.mem_history.remove(0);
+            }
+
+            // Network: compute rate from delta of cumulative totals
+            if sys.prev_net_in > 0 && snap.sys.net_down_bytes_sec > sys.prev_net_in {
+                sys.net_down_bytes_sec = snap.sys.net_down_bytes_sec - sys.prev_net_in;
+            }
+            sys.prev_net_in = snap.sys.net_down_bytes_sec;
+            sys.net_out_bytes_total = snap.sys.net_out_bytes_total;
+
+            // Disk: compute rate from delta of cumulative totals
+            if sys.prev_disk_read > 0 && snap.sys.disk_read_bytes_sec > sys.prev_disk_read {
+                sys.disk_read_bytes_sec = snap.sys.disk_read_bytes_sec - sys.prev_disk_read;
+            }
+            sys.prev_disk_read = snap.sys.disk_read_bytes_sec;
+            sys.disk_write_bytes_total = snap.sys.disk_write_bytes_total;
+            self.merge_process_metrics(snap.process_metrics);
         }
 
         // -- dashboard data --
@@ -2258,26 +2328,92 @@ fn cycle_field_value(
 // ---------------------------------------------------------------------------
 
 /// Collect system metrics on a background thread using `sysinfo`.
-fn collect_sys_metrics_bg(tx: std::sync::mpsc::Sender<super::state::SysMetrics>) {
-    let mut sys = System::new();
+fn collect_sys_metrics_bg(
+    tx: std::sync::mpsc::Sender<SysSnapshot>,
+    process_supervisor: Option<Arc<ProcessSupervisor>>,
+) {
+    let mut sys = System::new_all();
 
     loop {
         sys.refresh_cpu_usage();
         sys.refresh_memory();
 
-        let metrics = super::state::SysMetrics {
-            cpu_pct: sys.global_cpu_usage(),
-            mem_used_bytes: sys.used_memory(),
-            mem_total_bytes: sys.total_memory(),
-            ..Default::default()
+        let snapshot = SysSnapshot {
+            sys: super::state::SysMetrics {
+                cpu_pct: sys.global_cpu_usage(),
+                mem_used_bytes: sys.used_memory(),
+                mem_total_bytes: sys.total_memory(),
+                ..Default::default()
+            },
+            process_metrics: collect_process_metrics(&mut sys, process_supervisor.as_deref()),
         };
 
-        if tx.send(metrics).is_err() {
+        if tx.send(snapshot).is_err() {
             break;
         }
 
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+fn collect_process_metrics(
+    sys: &mut System,
+    process_supervisor: Option<&ProcessSupervisor>,
+) -> Vec<ProcessMetricSample> {
+    let Some(process_supervisor) = process_supervisor else {
+        return Vec::new();
+    };
+
+    let active_pids = futures::executor::block_on(process_supervisor.active_pids());
+    if active_pids.is_empty() {
+        return Vec::new();
+    }
+
+    let pids: Vec<Pid> = active_pids
+        .iter()
+        .map(|(pid, _)| Pid::from_u32(*pid))
+        .collect();
+    sys.refresh_processes(ProcessesToUpdate::Some(&pids), true);
+
+    active_pids
+        .into_iter()
+        .filter_map(|(pid, role)| {
+            let proc = sys.process(Pid::from_u32(pid))?;
+            Some(ProcessMetricSample {
+                pid,
+                role,
+                cpu_pct: proc.cpu_usage(),
+                mem_bytes: proc.memory(),
+                state: process_state_label(proc.status()).to_string(),
+                uptime_secs: proc.run_time() as f64,
+            })
+        })
+        .collect()
+}
+
+fn process_state_label(status: ProcessStatus) -> &'static str {
+    match status {
+        ProcessStatus::Run => "running",
+        ProcessStatus::Sleep
+        | ProcessStatus::Idle
+        | ProcessStatus::Waking
+        | ProcessStatus::Parked => "sleeping",
+        ProcessStatus::Stop
+        | ProcessStatus::Tracing
+        | ProcessStatus::Dead
+        | ProcessStatus::Wakekill
+        | ProcessStatus::LockBlocked
+        | ProcessStatus::UninterruptibleDiskSleep
+        | ProcessStatus::Zombie => "stopped",
+        ProcessStatus::Unknown(_) => "unknown",
+    }
+}
+
+fn push_bounded_history<T>(history: &mut VecDeque<T>, value: T, max_len: usize) {
+    if history.len() >= max_len {
+        history.pop_front();
+    }
+    history.push_back(value);
 }
 
 /// Map a Mori-style Tab to a legacy PageId (best effort).
@@ -2577,7 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn keybinding_o_switches_to_output_subtab() {
+    fn dashboard_subtab_keybindings_include_procs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempdir().unwrap();
@@ -2598,6 +2734,9 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 5); // switched to MCP
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+        assert_eq!(app.tui_state.plan_detail_tab, 6); // switched to Procs
 
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 0); // back to Agents

@@ -2169,7 +2169,7 @@ pub struct PlanRunner {
     /// Durable knowledge store queried per task for task-scoped context.
     knowledge_store: KnowledgeStore,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
-    supervisor: ProcessSupervisor,
+    supervisor: Arc<ProcessSupervisor>,
     /// Root cancellation token for coordinated shutdown.
     cancel: CancelToken,
     /// Per-plan task tracking for granular Implementing → Gating progression.
@@ -3251,7 +3251,7 @@ impl PlanRunner {
             learning,
             daimon,
             skill_library,
-            supervisor: ProcessSupervisor::new(cancel.clone()),
+            supervisor: Arc::new(ProcessSupervisor::new(cancel.clone())),
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
@@ -3370,7 +3370,7 @@ impl PlanRunner {
             learning,
             daimon,
             skill_library,
-            supervisor: ProcessSupervisor::new(cancel.clone()),
+            supervisor: Arc::new(ProcessSupervisor::new(cancel.clone())),
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
@@ -3493,7 +3493,7 @@ impl PlanRunner {
             learning,
             daimon,
             skill_library,
-            supervisor: ProcessSupervisor::new(cancel.clone()),
+            supervisor: Arc::new(ProcessSupervisor::new(cancel.clone())),
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
@@ -3805,8 +3805,14 @@ impl PlanRunner {
 
     /// The process supervisor — exposed for status queries.
     #[must_use]
-    pub const fn supervisor(&self) -> &ProcessSupervisor {
-        &self.supervisor
+    pub fn supervisor(&self) -> &ProcessSupervisor {
+        self.supervisor.as_ref()
+    }
+
+    /// A cloneable handle to the process supervisor.
+    #[must_use]
+    pub fn supervisor_handle(&self) -> Arc<ProcessSupervisor> {
+        Arc::clone(&self.supervisor)
     }
 
     /// The filesystem-backed observability sinks — exposed for status queries.

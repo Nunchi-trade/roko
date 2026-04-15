@@ -65,6 +65,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
@@ -3249,6 +3250,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 let state_hub_for_tui = state_hub.clone();
                 let workdir_for_tui = wd.clone();
                 let approval_rx = approval_channel.rx;
+                let process_supervisor: Arc<_> = runner.supervisor_handle();
 
                 std::thread::Builder::new()
                     .name("roko-plan-approval-tui".to_string())
@@ -3258,6 +3260,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                             None,
                             &state_hub_for_tui,
                         );
+                        app.set_process_supervisor(process_supervisor);
                         app.approval_rx = Some(approval_rx);
                         if let Err(err) = app.run() {
                             tracing::error!(error = %err, "approval TUI exited with error");

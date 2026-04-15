@@ -7,11 +7,11 @@
 //!
 //! Delegates to compiled widgets for all panels.
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -22,8 +22,8 @@ use crate::config::Config;
 use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::{AgentStatus, RouteMetrics, TuiState};
-use crate::tui::widgets;
+use crate::tui::state::{RouteMetrics, TuiState};
+use crate::tui::widgets::{self, braille};
 
 // ---------------------------------------------------------------------------
 // Sub-tab labels
@@ -224,7 +224,13 @@ fn render_sub_agents(
             .min(tui_state.agents.len().saturating_sub(1)),
         theme,
     );
-    render_agent_routes_table(frame, sections[1], tui_state, &tui_state.route_metrics, theme);
+    render_agent_routes_table(
+        frame,
+        sections[1],
+        tui_state,
+        &tui_state.route_metrics,
+        theme,
+    );
     render_output_panel(
         frame,
         sections[2],
@@ -413,8 +419,7 @@ fn render_agent_routes_table(
             ],
         )
         .header(
-            Row::new(["Agent", "Model", "Tier"])
-                .style(theme.accent().add_modifier(Modifier::BOLD)),
+            Row::new(["Agent", "Model", "Tier"]).style(theme.accent().add_modifier(Modifier::BOLD)),
         )
         .column_spacing(1),
         inner,
@@ -795,14 +800,11 @@ fn render_sub_mcp(
 fn render_sub_processes(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
-    let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-
-    // Process table.
     let border = if focused {
         theme.accent()
     } else {
@@ -812,136 +814,143 @@ fn render_sub_processes(
         .borders(Borders::ALL)
         .title(" Processes ")
         .border_style(border);
-    let inner = block.inner(sections[0]);
-    frame.render_widget(block, sections[0]);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let activity =
-        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
-
-    let active_agents: Vec<_> = tui_state
-        .agents
-        .iter()
-        .filter(|agent| agent.active)
-        .collect();
-    let total_agents = tui_state.agents.len();
-
-    let process_rows: Vec<_> = active_agents
-        .iter()
-        .map(|agent| {
-            let activity_row = activity.as_ref().and_then(|snapshot| {
-                snapshot
-                    .active_agents
-                    .iter()
-                    .find(|row| row.agent_id == agent.id)
-            });
-            let model = if !agent.model.is_empty() {
-                agent.model.clone()
-            } else {
-                activity_row.map_or_else(|| "-".to_string(), |row| row.model.clone())
-            };
-            let task = if !agent.current_task.is_empty() {
-                agent.current_task.clone()
-            } else if let Some(row) = activity_row {
-                if !row.task.is_empty() && row.task != "-" {
-                    row.task.clone()
-                } else if !agent.current_plan.is_empty() {
-                    agent.current_plan.clone()
-                } else {
-                    "-".to_string()
-                }
-            } else if !agent.current_plan.is_empty() {
-                agent.current_plan.clone()
-            } else {
-                "-".to_string()
-            };
-            let tokens = agent.input_tokens.saturating_add(agent.output_tokens);
-            let status = agent.status;
-            (
-                agent.id.clone(),
-                agent.role.clone(),
-                model,
-                task,
-                if tokens > 0 {
-                    tokens
-                } else {
-                    activity_row.map_or(0, |row| row.tokens_used)
-                },
-                status.to_string(),
-                activity_row.map_or(0.0, |row| row.cost_usd),
-            )
-        })
-        .collect();
+    let mut process_rows: Vec<_> = tui_state.process_metrics.iter().collect();
+    process_rows.sort_by(|a, b| a.role.cmp(&b.role).then_with(|| a.pid.cmp(&b.pid)));
 
     if process_rows.is_empty() {
         frame.render_widget(
-            Paragraph::new("no tracked processes").style(theme.muted()),
+            Paragraph::new("No process data").style(theme.muted()),
             inner,
         );
-    } else {
-        let rows: Vec<Row<'_>> = process_rows
-            .iter()
-            .map(|(id, role, model, task, tokens, status, _)| {
-                let status_style = match AgentStatus::from(status.as_str()) {
-                    AgentStatus::Active => theme.info(),
-                    AgentStatus::Failed => theme.danger(),
-                    AgentStatus::Done | AgentStatus::Idle => theme.muted(),
-                };
-                Row::new(vec![
-                    Cell::from(truncate(id, 14)),
-                    Cell::from(truncate(role, 12)),
-                    Cell::from(truncate(&shorten_model(model), 14)),
-                    Cell::from(truncate(task, 28)),
-                    Cell::from(fmt_tokens(*tokens)),
-                    Cell::from(Span::styled(status.as_str(), status_style)),
-                ])
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Length(14),
-            Constraint::Min(12),
-            Constraint::Length(14),
-            Constraint::Min(20),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ];
-        frame.render_widget(
-            Table::new(rows, widths)
-                .header(
-                    Row::new(["PID/ID", "Role", "Model", "Task", "Tokens", "Status"])
-                        .style(theme.accent().add_modifier(Modifier::BOLD)),
-                )
-                .column_spacing(1),
-            inner,
-        );
+        return;
     }
 
-    let active_count = process_rows.len();
-    let summary_tokens = tui_state.token_total;
-    let summary_cost = tui_state.cost_dollars;
+    let inner_width = inner.width as usize;
+    let role_width = if inner_width < 72 {
+        10
+    } else if inner_width < 96 {
+        14
+    } else {
+        18
+    };
+    let uptime_width = if inner_width < 72 { 9 } else { 12 };
+    let trend_width: usize = if inner_width < 72 {
+        12
+    } else if inner_width < 96 {
+        18
+    } else {
+        22
+    };
+    let spark_width = trend_width.saturating_sub(10).max(4);
 
-    let summary_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Summary ")
-        .border_style(theme.muted());
-    let summary_inner = summary_block.inner(sections[1]);
-    frame.render_widget(summary_block, sections[1]);
+    let rows: Vec<Row<'_>> = process_rows
+        .into_iter()
+        .map(|proc| {
+            let cpu_style = if proc.cpu_pct >= 50.0 {
+                theme.warning()
+            } else {
+                theme.info()
+            };
+            let state_style = match proc.state.as_str() {
+                "running" => theme.info(),
+                "sleeping" => theme.muted(),
+                "stopped" => theme.danger(),
+                _ => theme.muted(),
+            };
+
+            let cpu_history: Vec<f32> = proc.cpu_history.iter().copied().collect();
+            let mem_history: Vec<u64> = proc.mem_history.iter().copied().collect();
+
+            let mut trend_spans = vec![Span::styled("c ", theme.muted())];
+            trend_spans.extend(braille::braille_spans_f32(
+                &cpu_history,
+                100.0,
+                spark_width,
+                theme.info,
+            ));
+            trend_spans.push(Span::styled(" m ", theme.muted()));
+            trend_spans.extend(braille::braille_spans_u64(
+                &mem_history,
+                spark_width,
+                theme.warning,
+            ));
+
+            Row::new(vec![
+                Cell::from(Span::styled(proc.pid.to_string(), theme.text())),
+                Cell::from(Span::styled(truncate(&proc.role, role_width), theme.text())),
+                Cell::from(Span::styled(format!("{:>5.1}%", proc.cpu_pct), cpu_style)),
+                Cell::from(Span::styled(
+                    format_mem_bytes(proc.mem_bytes),
+                    theme.warning(),
+                )),
+                Cell::from(Span::styled(truncate(&proc.state, 9), state_style)),
+                Cell::from(Span::styled(format_uptime(proc.uptime_secs), theme.text())),
+                Cell::from(Line::from(trend_spans)),
+            ])
+        })
+        .collect();
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let max_scroll = rows.len().saturating_sub(visible_rows.max(1));
+    let scroll = tui_state.diff_scroll.min(max_scroll);
+    let rows = rows
+        .into_iter()
+        .skip(scroll)
+        .take(visible_rows.max(1))
+        .collect::<Vec<_>>();
+
+    let widths = [
+        Constraint::Length(7),
+        Constraint::Min(role_width as u16),
+        Constraint::Length(7),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(uptime_width as u16),
+        Constraint::Min(trend_width as u16),
+    ];
+
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{active_count} active / {total_agents} total agents"),
-                theme.text(),
-            ),
-            Span::styled(", ", theme.muted()),
-            Span::styled(
-                format!("{} tokens", fmt_count(summary_tokens)),
-                theme.info(),
-            ),
-            Span::styled(", ", theme.muted()),
-            Span::styled(format!("${summary_cost:.4} cost"), theme.warning()),
-        ])),
-        summary_inner,
+        Table::new(rows, widths)
+            .header(
+                Row::new(["PID", "Role", "CPU%", "MEM", "State", "Uptime", "Trend"])
+                    .style(theme.accent().add_modifier(Modifier::BOLD)),
+            )
+            .column_spacing(1),
+        inner,
     );
+}
+
+fn format_mem_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_uptime(uptime_secs: f64) -> String {
+    let total = uptime_secs.max(0.0).round() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 // ===========================================================================
