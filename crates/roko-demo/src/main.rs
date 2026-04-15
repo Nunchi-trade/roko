@@ -16,25 +16,38 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use roko_demo::chain_ctx::ChainCtx;
 use roko_demo::deploy::deploy_suite;
+use roko_demo::events::create_emitter;
 use roko_demo::fixtures::{FixtureRegistry, run_fixtures};
 use roko_demo::manifest::{LoadedManifest, write_deployments};
-use roko_demo::scenarios::{self, StubLlm};
+use roko_demo::scenarios::{self, create_provider};
 use roko_demo::verify;
 
 #[derive(Parser)]
 #[command(name = "roko-demo", about = "Roko demo-environment orchestrator")]
 struct Cli {
     /// Path to the demo dir (containing manifest.toml).
-    #[arg(long, default_value = "roko/demo")]
+    #[arg(long, default_value = "demo")]
     demo_dir: PathBuf,
 
     /// Runtime artifacts dir (deployments.json lives here).
-    #[arg(long, default_value = "roko/demo/.runtime")]
+    #[arg(long, default_value = "demo/.runtime")]
     runtime_dir: PathBuf,
 
     /// Override JSON-RPC URL (else uses ROKO_MIRAGE_URL env / manifest default).
     #[arg(long)]
     rpc_url: Option<String>,
+
+    /// LLM backend to use for scenario slots.
+    #[arg(long, default_value = "stub")]
+    llm_backend: String,
+
+    /// Demo event output mode.
+    #[arg(long, default_value = "none")]
+    events: String,
+
+    /// WebSocket port for event streaming when `--events ws|both`.
+    #[arg(long, default_value_t = 9090)]
+    ws_port: u16,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -146,7 +159,10 @@ async fn seed_cmd(cli: &Cli, loaded: &LoadedManifest, scenario_name: &str) -> an
         addresses: deployments.contracts,
         deployed_at_block: deployments.deployed_at_block,
     };
-    let registry = FixtureRegistry::new();
+    let mut registry = FixtureRegistry::new();
+    if let Some(impls) = scenarios::find(scenario_name) {
+        impls.register_fixtures(&mut registry);
+    }
     run_fixtures(
         &ctx,
         &registry,
@@ -171,16 +187,19 @@ async fn agents_cmd(cli: &Cli, loaded: &LoadedManifest, scenario_name: &str) -> 
     });
     let scenario = scenarios::find(scenario_name)
         .ok_or_else(|| anyhow::anyhow!("no Rust impl for scenario {scenario_name}"))?;
-    let llm = Arc::new(StubLlm::new());
+    let llm = create_provider(&cli.llm_backend)?;
+    let events = create_emitter(&cli.events, cli.ws_port).await?;
     // Honour the declared timeout so CI doesn't hang on a stuck spine.
     let timeout = std::time::Duration::from_secs(scenario_manifest.success.max_duration_secs);
     tracing::info!(
         scenario = scenario_name,
+        llm_backend = llm.label(),
+        events = %cli.events,
         timeout_s = timeout.as_secs(),
         "running scripted spine"
     );
     tokio::select! {
-        result = scenario.spine(ctx, &scenario_manifest, llm) => result?,
+        result = scenario.spine(ctx, &scenario_manifest, llm, events) => result?,
         _ = tokio::time::sleep(timeout) => {
             return Err(anyhow::anyhow!(
                 "scenario {scenario_name} timed out after {}s",

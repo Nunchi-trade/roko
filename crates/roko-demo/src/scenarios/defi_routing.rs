@@ -11,6 +11,7 @@ use async_trait::async_trait;
 
 use crate::bindings::{BountyMarket, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
+use crate::events::EventEmitter;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::Scenario;
 use crate::scenarios::llm::{LlmProvider, LlmRequest};
@@ -34,6 +35,7 @@ impl Scenario for DefiRouting {
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
         llm: Arc<dyn LlmProvider>,
+        _events: Arc<dyn EventEmitter>,
     ) -> anyhow::Result<()> {
         prepare(&ctx).await?;
         race(&ctx, llm).await

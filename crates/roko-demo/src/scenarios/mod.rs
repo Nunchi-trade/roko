@@ -14,6 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::chain_ctx::ChainCtx;
+use crate::events::EventEmitter;
 use crate::fixtures::FixtureRegistry;
 use crate::manifest::Scenario as ScenarioManifest;
 
@@ -22,8 +23,9 @@ pub mod defi_routing;
 pub mod flywheel;
 pub mod job_board;
 pub mod llm;
+pub mod yield_routing;
 
-pub use llm::{LlmProvider, StubLlm};
+pub use llm::{LlmProvider, StubLlm, create_provider};
 
 /// Scripted-spine lifecycle.
 #[async_trait]
@@ -38,6 +40,7 @@ pub trait Scenario: Send + Sync {
         ctx: Arc<ChainCtx>,
         manifest: &ScenarioManifest,
         llm: Arc<dyn LlmProvider>,
+        events: Arc<dyn EventEmitter>,
     ) -> anyhow::Result<()>;
 }
 
@@ -48,6 +51,7 @@ pub fn all() -> Vec<Box<dyn Scenario>> {
         Box::new(consortium::Consortium),
         Box::new(defi_routing::DefiRouting),
         Box::new(flywheel::Flywheel),
+        Box::new(yield_routing::YieldRouting),
     ]
 }
 

@@ -92,7 +92,36 @@ sol! {
         function claim() external returns (uint256);
         function earningsOf(address poster) external view returns (uint256);
         function nextInsightId() external view returns (uint256);
+        function getInsight(uint256 id) external view returns (
+            address poster,
+            bytes32 contentHash,
+            string memory uri,
+            uint64 postedAt,
+            uint64 pheromone
+        );
         event InsightPosted(uint256 indexed id, address indexed poster, bytes32 contentHash, string uri);
         event InsightConfirmed(uint256 indexed id, address indexed confirmer, uint64 pheromone);
+    }
+
+    #[sol(rpc)]
+    contract FeeDistributor {
+        function distribute(
+            uint256 jobId,
+            uint256 amount,
+            address winner,
+            address[] calldata validators,
+            address[] calldata dataProviders
+        ) external;
+        function cumulativeEarnings(address participant) external view returns (uint256);
+        event FeesDistributed(
+            uint256 indexed jobId,
+            uint256 amount,
+            address indexed winner,
+            uint256 validatorShare,
+            uint256 dataShare,
+            uint256 agentShare,
+            uint256 treasuryShare
+        );
+        event EarningsCredited(address indexed participant, uint256 amount);
     }
 }

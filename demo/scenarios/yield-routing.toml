@@ -1,0 +1,90 @@
+schema_version = 1
+name = "yield-routing"
+
+[deploy]
+sender_wallet = "deployer"
+
+  [[deploy.contracts]]
+  name = "MockERC20"
+  args = [
+    { type = "string", value = "DAEJI" },
+    { type = "string", value = "DAEJI" },
+    { type = "uint8",  value = 18 },
+  ]
+
+  [[deploy.contracts]]
+  name = "AgentRegistry"
+
+  [[deploy.contracts]]
+  name = "WorkerRegistry"
+  args = [
+    { type = "address", value = "$contract(MockERC20)" },
+  ]
+
+  [[deploy.contracts]]
+  name = "BountyMarket"
+  args = [
+    { type = "address", value = "$contract(MockERC20)" },
+    { type = "address", value = "$contract(WorkerRegistry)" },
+  ]
+
+  [[deploy.contracts]]
+  name = "ConsortiumValidator"
+  args = [
+    { type = "address", value = "$contract(WorkerRegistry)" },
+    { type = "address", value = "$contract(BountyMarket)" },
+  ]
+
+  [[deploy.contracts]]
+  name = "InsightBoard"
+  args = [
+    { type = "address", value = "$contract(MockERC20)" },
+  ]
+
+  [[deploy.contracts]]
+  name = "FeeDistributor"
+  args = [
+    { type = "address", value = "$contract(MockERC20)" },
+    { type = "address", value = "$deployer" },
+  ]
+
+[[fixtures]]
+name = "authorize-market"
+kind = "contract-call"
+contract = "WorkerRegistry"
+method = "setAuthorized(address,bool)"
+from = "deployer"
+args = ["$contract(BountyMarket)", true]
+
+[[fixtures]]
+name = "authorize-consortium"
+kind = "contract-call"
+contract = "WorkerRegistry"
+method = "setAuthorized(address,bool)"
+from = "deployer"
+args = ["$contract(ConsortiumValidator)", true]
+
+[[fixtures]]
+name = "delegate-resolver-to-consortium"
+kind = "contract-call"
+contract = "BountyMarket"
+method = "setResolver(address)"
+from = "deployer"
+args = ["$contract(ConsortiumValidator)"]
+
+[[agents]]
+role = "yield-router"
+wallet = "worker{i}"
+prompt_template = "prompts/yield-router.md"
+count = 5
+scripted_actions = ["yield_route_and_submit"]
+llm_slots = ["route_proposal", "insight_content"]
+
+[success]
+max_duration_secs = 180
+expected_events = [
+  { contract = "BountyMarket", event = "JobResolved", min_count = 2 },
+  { contract = "ConsortiumValidator", event = "Tallied", min_count = 2 },
+  { contract = "InsightBoard", event = "InsightPosted", min_count = 2 },
+  { contract = "FeeDistributor", event = "FeesDistributed", min_count = 2 },
+]

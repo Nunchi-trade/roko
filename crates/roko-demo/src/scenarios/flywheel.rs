@@ -10,6 +10,7 @@ use async_trait::async_trait;
 
 use crate::bindings::InsightBoard;
 use crate::chain_ctx::ChainCtx;
+use crate::events::EventEmitter;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::Scenario;
 use crate::scenarios::llm::{LlmProvider, LlmRequest};
@@ -32,6 +33,7 @@ impl Scenario for Flywheel {
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
         llm: Arc<dyn LlmProvider>,
+        _events: Arc<dyn EventEmitter>,
     ) -> anyhow::Result<()> {
         let board_addr = ctx.address_of("InsightBoard")?;
         for round in 0..ROUNDS {

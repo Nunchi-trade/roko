@@ -15,6 +15,7 @@ use async_trait::async_trait;
 
 use crate::bindings::{BountyMarket, MockERC20, WorkerRegistry};
 use crate::chain_ctx::ChainCtx;
+use crate::events::EventEmitter;
 use crate::fixtures::FixtureRegistry;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::llm::LlmRequest;
@@ -42,6 +43,7 @@ impl Scenario for JobBoard {
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
         llm: Arc<dyn LlmProvider>,
+        _events: Arc<dyn EventEmitter>,
     ) -> anyhow::Result<()> {
         tracing::info!("job-board: preparing wallets + registrations");
         prepare_participants(&ctx).await?;

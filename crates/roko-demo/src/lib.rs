@@ -26,10 +26,12 @@
 pub mod bindings;
 pub mod chain_ctx;
 pub mod deploy;
+pub mod events;
 pub mod fixtures;
 pub mod manifest;
 pub mod scenarios;
 pub mod verify;
+pub mod ws_server;
 
 pub use chain_ctx::ChainCtx;
 pub use deploy::{ContractArtifact, DeployCtx, DeployedSuite, deploy_suite};
