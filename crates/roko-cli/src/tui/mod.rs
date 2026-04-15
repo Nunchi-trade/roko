@@ -20,6 +20,7 @@ pub mod pages;
 pub mod postfx;
 pub mod postfx_pipeline;
 pub mod scroll;
+pub mod segment;
 pub mod state;
 pub mod tabs;
 pub mod util;

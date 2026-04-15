@@ -13,7 +13,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
-use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
 use crate::tui::state::{AgentStatus, TuiState, model_context_limit};
@@ -577,7 +576,12 @@ fn render_output_body(
     };
 
     let collected = collect_agent_output_lines(data, tui_state, view_state.selected);
-    let total_lines = collected.len();
+    let output_lines = if collected.is_empty() {
+        Vec::new()
+    } else {
+        tui_state.render_agent_output_lines(selected_id, &collected, theme)
+    };
+    let total_lines = output_lines.len();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style);
@@ -606,8 +610,6 @@ fn render_output_body(
     ]);
     frame.render_widget(block, area);
 
-    let output_lines: Vec<&str> = collected.iter().map(String::as_str).collect();
-
     if output_lines.is_empty() {
         // Centered empty state
         let v_pad = inner.height / 2;
@@ -633,17 +635,7 @@ fn render_output_body(
         return;
     }
 
-    let text: Vec<Line<'static>> = output_lines
-        .iter()
-        .map(|line| {
-            let mut spans = Vec::with_capacity(2);
-            spans.push(Span::raw(" "));
-            spans.extend(parse_ansi_line(line));
-            Line::from(spans)
-        })
-        .collect();
-
-    let paragraph = Paragraph::new(text)
+    let paragraph = Paragraph::new(output_lines)
         .style(theme.text())
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));

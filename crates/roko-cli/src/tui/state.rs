@@ -4,15 +4,18 @@
 //! needs: navigation, scroll positions, modal visibility, agent/plan data,
 //! cost tracking, git state, and more.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use ratatui::text::Line;
 
 use super::atmosphere::Atmosphere;
-use super::dashboard::{DashboardData, PlanTaskListSnapshot};
+use super::dashboard::{DashboardData, PlanTaskListSnapshot, Theme};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
+use super::segment::{CachedRender, output_byte_len, render_cached_output};
 use super::tabs::Tab;
 use crate::plan::PlanSummary;
 
@@ -521,6 +524,8 @@ pub struct TuiState {
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
     pub agents: Vec<AgentRow>,
+    /// Cached styled agent output keyed by agent identifier.
+    pub agent_output_cache: RefCell<HashMap<String, CachedRender>>,
     // -- navigation --
     /// Active top-level tab.
     pub active_tab: Tab,
@@ -676,6 +681,7 @@ impl Default for TuiState {
             gate_results: Vec::new(),
 
             agents: Vec::new(),
+            agent_output_cache: RefCell::new(HashMap::new()),
             active_tab: Tab::default(),
             selected_plan_idx: 0,
             selected_agent: 0,
@@ -1025,6 +1031,7 @@ impl TuiState {
                 }
             }
         }
+        self.prune_agent_output_cache();
 
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
@@ -1306,6 +1313,7 @@ impl TuiState {
                 }
             })
             .collect();
+        self.prune_agent_output_cache();
 
         self.gate_results = snap
             .gates
@@ -1352,6 +1360,39 @@ impl TuiState {
         restore_selected_plan_idx(&self.plans, &mut self.current_plan_idx, prev_current_plan_id);
         restore_selected_agent_idx(&self.agents, &mut self.selected_agent, prev_selected_agent_id);
         self.selected_agent_tab = self.selected_agent_tab.min(6);
+    }
+
+    /// Return cached, styled agent output lines for the selected agent pane.
+    #[must_use]
+    pub fn render_agent_output_lines(
+        &self,
+        cache_key: &str,
+        raw_output: &[String],
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        if raw_output.is_empty() {
+            if !cache_key.is_empty() {
+                self.agent_output_cache.borrow_mut().remove(cache_key);
+            }
+            return Vec::new();
+        }
+
+        let cache_key = if cache_key.is_empty() {
+            "__agent-output__"
+        } else {
+            cache_key
+        };
+        let output_len = output_byte_len(raw_output);
+        let mut cache = self.agent_output_cache.borrow_mut();
+        let cached = cache
+            .entry(cache_key.to_string())
+            .or_insert_with(CachedRender::default);
+
+        if cached.last_len != output_len {
+            *cached = render_cached_output(raw_output, theme);
+        }
+
+        cached.styled_lines.clone()
     }
 
     fn update_efficiency_rates(&mut self) {
@@ -1422,6 +1463,17 @@ impl TuiState {
     #[must_use]
     pub fn log_level_visible(&self, level: LogFilterLevel) -> bool {
         self.log_filter_levels.contains(&level)
+    }
+
+    fn prune_agent_output_cache(&self) {
+        let valid_ids = self
+            .agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<HashSet<_>>();
+        self.agent_output_cache.borrow_mut().retain(|key, _| {
+            key == "__agent-output__" || valid_ids.contains(key.as_str())
+        });
     }
 }
 
