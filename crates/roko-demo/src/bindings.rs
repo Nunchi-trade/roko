@@ -97,6 +97,13 @@ sol! {
 
     #[sol(rpc)]
     contract InsightBoard {
+        struct Insight {
+            address poster;
+            bytes32 contentHash;
+            string uri;
+            uint64 postedAt;
+            uint64 pheromone;
+        }
         function post(bytes32 contentHash, string calldata uri) external returns (uint256);
         function confirm(uint256 id) external;
         function claim() external returns (uint256);
@@ -105,13 +112,7 @@ sol! {
         function confirmed(uint256 id, address confirmer) external view returns (bool);
         function earningsOf(address poster) external view returns (uint256);
         function nextInsightId() external view returns (uint256);
-        function getInsight(uint256 id) external view returns (
-            address poster,
-            bytes32 contentHash,
-            string memory uri,
-            uint64 postedAt,
-            uint64 pheromone
-        );
+        function getInsight(uint256 id) external view returns (Insight memory);
         event InsightPosted(uint256 indexed id, address indexed poster, bytes32 contentHash, string uri);
         event InsightConfirmed(uint256 indexed id, address indexed confirmer, uint64 pheromone);
         event EarningsClaimed(address indexed poster, uint256 amount);
