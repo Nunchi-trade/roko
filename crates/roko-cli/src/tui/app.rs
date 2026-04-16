@@ -97,6 +97,8 @@ pub struct App {
     pub approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
     /// Pending response channel for the active approval modal.
     pending_approval_response: Option<oneshot::Sender<bool>>,
+    /// Owning handle for the in-process or connected state hub.
+    _state_hub: Option<roko_core::SharedStateHub>,
     /// Live dashboard snapshot receiver from `StateHub` when connected.
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
@@ -354,11 +356,6 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
         }
         app.drain_snapshot_channel();
         app.drain_approval_requests();
-        if app.snapshot_rx.is_none() && app.last_refresh.elapsed() > Duration::from_secs(1) {
-            app.data.refresh().await?;
-            app.tui_state.update_from_snapshot(&app.data);
-            app.last_refresh = Instant::now();
-        }
         if !app.running {
             break;
         }
@@ -370,12 +367,24 @@ impl App {
     /// Build a new app from a workspace root.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
-        Self::new_with_page(root, None)
+        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let _ = state_hub.bootstrap_from_workdir(root.as_ref());
+        Self::new_connected_with_state_hub(root, None, state_hub)
     }
 
     /// Build a new app from a workspace root with an initial page selection.
     #[must_use]
     pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
+        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let _ = state_hub.bootstrap_from_workdir(root.as_ref());
+        Self::new_connected_with_state_hub(root, initial_page, state_hub)
+    }
+
+    fn new_with_page_inner(
+        root: impl AsRef<Path>,
+        initial_page: Option<PageId>,
+        state_hub: Option<roko_core::SharedStateHub>,
+    ) -> Self {
         let workdir = root.as_ref().to_path_buf();
         let terminal_size = size().unwrap_or((80, 24));
         let mut scaffold = DashboardScaffold::new_in(&workdir);
@@ -409,6 +418,7 @@ impl App {
             process_supervisor: None,
             approval_rx: None,
             pending_approval_response: None,
+            _state_hub: state_hub,
             snapshot_rx: None,
             last_snapshot_error_marker: None,
             frame_counter: 0,
@@ -432,7 +442,15 @@ impl App {
         initial_page: Option<PageId>,
         state_hub: &roko_core::SharedStateHub,
     ) -> Self {
-        let mut app = Self::new_with_page(root, initial_page);
+        Self::new_connected_with_state_hub(root, initial_page, state_hub.clone())
+    }
+
+    fn new_connected_with_state_hub(
+        root: impl AsRef<Path>,
+        initial_page: Option<PageId>,
+        state_hub: roko_core::SharedStateHub,
+    ) -> Self {
+        let mut app = Self::new_with_page_inner(root, initial_page, Some(state_hub.clone()));
         let snapshot_rx = state_hub.snapshot();
         if snapshot_has_content(&snapshot_rx.borrow()) {
             let snapshot = snapshot_rx.borrow();
@@ -2347,9 +2365,6 @@ impl App {
                 }
             }
             if got_data {
-                if self.snapshot_rx.is_none() {
-                    self.tui_state.update_from_snapshot(&self.data);
-                }
                 if rebuild_scaffold {
                     self.scaffold = DashboardScaffold::new_in(&self.workdir);
                 }
@@ -2684,6 +2699,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let hub = roko_core::shared_state_hub();
         let app = App::new_connected(dir.path(), &hub);
+        assert!(app.snapshot_rx.is_some());
+    }
+
+    #[test]
+    fn app_new_standalone_installs_snapshot_receiver() {
+        let dir = tempdir().unwrap();
+        let app = App::new(dir.path());
+        assert!(app._state_hub.is_some());
         assert!(app.snapshot_rx.is_some());
     }
 

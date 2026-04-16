@@ -4,7 +4,9 @@
 //! consumers (TUI, WebSocket, SSE, REST). It is updated atomically via
 //! [`apply`] when the [`StateHub`](super::state_hub::StateHub) receives events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -353,6 +355,29 @@ impl DashboardSnapshot {
             }
         }
     }
+
+    /// Load a best-effort snapshot from a workspace root.
+    ///
+    /// This seeds the live hub from persisted `.roko/` state when it is
+    /// available. Missing files are treated as an empty snapshot.
+    pub fn load_from_workdir(workdir: &Path) -> Result<Self, io::Error> {
+        let root = resolve_snapshot_root(workdir);
+        let roko_dir = root.join(".roko");
+        let state_dir = roko_dir.join("state");
+
+        let state =
+            read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
+        let task_trackers = read_task_trackers(&state_dir.join("task-trackers.json"))?;
+        let signal_gates = read_signal_gates(&roko_dir.join("signals.jsonl"))?;
+        let event_entries = read_event_entries(&state_dir.join("events.json"))?;
+
+        Ok(snapshot_from_workdir_parts(
+            &state,
+            &task_trackers,
+            &signal_gates,
+            &event_entries,
+        ))
+    }
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -362,9 +387,655 @@ fn current_ts_millis() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+fn read_json_value(path: &Path) -> Result<Option<serde_json::Value>, io::Error> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let value = serde_json::from_str::<serde_json::Value>(&text).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("parse {}: {err}", path.display()),
+                )
+            })?;
+            Ok(Some(value))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Debug, Default)]
+struct TaskTrackerSnapshot {
+    completed: Vec<String>,
+    failed: Vec<String>,
+}
+
+fn snapshot_from_workdir_parts(
+    state: &serde_json::Value,
+    task_trackers: &HashMap<String, TaskTrackerSnapshot>,
+    signal_gates: &[GateVerdict],
+    event_entries: &[serde_json::Value],
+) -> DashboardSnapshot {
+    let mut snapshot = DashboardSnapshot::default();
+    let Some(plan_states) = state
+        .get("plan_states")
+        .and_then(serde_json::Value::as_object)
+    else {
+        for gate in signal_gates {
+            push_gate(&mut snapshot, gate.clone());
+        }
+        append_event_errors(&mut snapshot, event_entries);
+        return snapshot;
+    };
+
+    let agent_roles = collect_agent_roles(event_entries);
+    let mut plan_ids = plan_states.keys().cloned().collect::<Vec<_>>();
+    plan_ids.sort();
+    let mut plan_gate_results = 0usize;
+
+    for plan_id in plan_ids {
+        if let Some(plan_state) = plan_states.get(&plan_id) {
+            bootstrap_plan_state(
+                &mut snapshot,
+                &plan_id,
+                plan_state,
+                task_trackers.get(&plan_id),
+                &agent_roles,
+                &mut plan_gate_results,
+            );
+        }
+    }
+
+    if plan_gate_results == 0 {
+        for gate in signal_gates {
+            push_gate(&mut snapshot, gate.clone());
+        }
+    }
+    append_event_errors(&mut snapshot, event_entries);
+    snapshot
+}
+
+fn bootstrap_plan_state(
+    snapshot: &mut DashboardSnapshot,
+    plan_id: &str,
+    plan_state: &serde_json::Value,
+    task_tracker: Option<&TaskTrackerSnapshot>,
+    agent_roles: &HashMap<String, String>,
+    plan_gate_results: &mut usize,
+) {
+    let phase = current_phase_label(plan_state).unwrap_or_else(|| String::from("pending"));
+    let terminal = is_terminal_phase(&phase);
+    let paused = plan_state
+        .get("paused")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let active = !terminal && !paused;
+    let active_task_id = plan_state
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| plan_state.get("id").and_then(serde_json::Value::as_str))
+        .filter(|task_id| !task_id.trim().is_empty());
+    let completed_tasks = task_tracker
+        .map(|tracker| tracker.completed.clone())
+        .unwrap_or_default();
+    let failed_tasks = task_tracker
+        .map(|tracker| tracker.failed.clone())
+        .unwrap_or_default();
+    let mut seen_task_ids = HashSet::new();
+    let mut tasks_done = 0usize;
+    let mut tasks_failed = 0usize;
+
+    for task_id in completed_tasks {
+        if !seen_task_ids.insert(task_id.clone()) {
+            continue;
+        }
+        tasks_done += 1;
+        snapshot.stats.tasks_completed += 1;
+        snapshot.tasks.insert(
+            format!("{plan_id}/{task_id}"),
+            TaskState {
+                task_id,
+                plan_id: plan_id.to_string(),
+                phase: String::from("completed"),
+                outcome: Some(String::from("success")),
+            },
+        );
+    }
+
+    for task_id in failed_tasks {
+        if !seen_task_ids.insert(task_id.clone()) {
+            continue;
+        }
+        tasks_failed += 1;
+        snapshot.stats.tasks_failed += 1;
+        snapshot.tasks.insert(
+            format!("{plan_id}/{task_id}"),
+            TaskState {
+                task_id,
+                plan_id: plan_id.to_string(),
+                phase: String::from("completed"),
+                outcome: Some(String::from("failed")),
+            },
+        );
+    }
+
+    if active {
+        if let Some(task_id) = active_task_id {
+            if seen_task_ids.insert(task_id.to_string()) {
+                snapshot.stats.tasks_active += 1;
+                snapshot.tasks.insert(
+                    format!("{plan_id}/{task_id}"),
+                    TaskState {
+                        task_id: task_id.to_string(),
+                        plan_id: plan_id.to_string(),
+                        phase: phase.clone(),
+                        outcome: None,
+                    },
+                );
+            }
+        }
+    } else if terminal {
+        if let Some(task_id) = active_task_id {
+            if seen_task_ids.insert(task_id.to_string()) {
+                let failed =
+                    phase.eq_ignore_ascii_case("failed") || phase.eq_ignore_ascii_case("error");
+                if failed {
+                    tasks_failed += 1;
+                    snapshot.stats.tasks_failed += 1;
+                } else {
+                    tasks_done += 1;
+                    snapshot.stats.tasks_completed += 1;
+                }
+                snapshot.tasks.insert(
+                    format!("{plan_id}/{task_id}"),
+                    TaskState {
+                        task_id: task_id.to_string(),
+                        plan_id: plan_id.to_string(),
+                        phase: String::from("completed"),
+                        outcome: Some(if failed {
+                            String::from("failed")
+                        } else {
+                            String::from("success")
+                        }),
+                    },
+                );
+            }
+        }
+    }
+
+    snapshot.plans.insert(
+        plan_id.to_string(),
+        PlanState {
+            plan_id: plan_id.to_string(),
+            phase: phase.clone(),
+            tasks_total: seen_task_ids.len(),
+            tasks_done,
+            tasks_failed,
+            active,
+        },
+    );
+
+    if active {
+        snapshot.stats.plans_active += 1;
+    } else if phase.eq_ignore_ascii_case("failed") || phase.eq_ignore_ascii_case("error") {
+        snapshot.stats.plans_failed += 1;
+    } else if terminal {
+        snapshot.stats.plans_completed += 1;
+    }
+
+    if let Some(agents) = plan_state
+        .get("assigned_agents")
+        .and_then(serde_json::Value::as_array)
+    {
+        for agent in agents {
+            let Some(agent_id) = agent.as_str() else {
+                continue;
+            };
+            let role = agent_roles
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_else(|| String::from("unknown"));
+            let entry = snapshot
+                .agents
+                .entry(agent_id.to_string())
+                .or_insert_with(|| AgentState {
+                    agent_id: agent_id.to_string(),
+                    role: role.clone(),
+                    active: false,
+                    output_bytes: 0,
+                });
+            if entry.role == "unknown" && role != "unknown" {
+                entry.role = role;
+            }
+            if active && !entry.active {
+                entry.active = true;
+                snapshot.stats.agents_active += 1;
+            }
+        }
+    }
+
+    if let Some(results) = plan_state
+        .get("gate_results")
+        .and_then(serde_json::Value::as_array)
+    {
+        for result in results {
+            *plan_gate_results += 1;
+            push_gate(
+                snapshot,
+                GateVerdict {
+                    plan_id: plan_id.to_string(),
+                    task_id: result
+                        .get("task_id")
+                        .and_then(serde_json::Value::as_str)
+                        .or(active_task_id)
+                        .unwrap_or(plan_id)
+                        .to_string(),
+                    gate: result
+                        .get("gate_name")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| result.get("gate").and_then(serde_json::Value::as_str))
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    passed: result
+                        .get("passed")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    ts_millis: result
+                        .get("timestamp_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default(),
+                },
+            );
+        }
+    }
+
+    if let Some(message) = plan_state
+        .get("last_error")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            plan_state
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| plan_state.get("error").and_then(serde_json::Value::as_str))
+        .filter(|message| !message.trim().is_empty())
+    {
+        push_error(
+            snapshot,
+            ErrorEntry {
+                message: message.to_string(),
+                ts_millis: plan_state
+                    .get("timestamp_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            },
+        );
+    }
+}
+
+fn current_phase_label(plan_state: &serde_json::Value) -> Option<String> {
+    plan_state
+        .pointer("/current_phase/kind")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            plan_state
+                .get("current_phase")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            plan_state
+                .pointer("/phase/kind")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            plan_state
+                .get("phase")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn is_terminal_phase(phase: &str) -> bool {
+    matches!(
+        phase.trim().to_ascii_lowercase().as_str(),
+        "done" | "completed" | "complete" | "failed" | "error" | "skipped"
+    )
+}
+
+fn resolve_snapshot_root(start: &Path) -> PathBuf {
+    let mut cursor = Some(start);
+    while let Some(dir) = cursor {
+        if dir.join(".roko").is_dir() {
+            return dir.to_path_buf();
+        }
+        cursor = dir.parent();
+    }
+    start.to_path_buf()
+}
+
+fn read_task_trackers(path: &Path) -> Result<HashMap<String, TaskTrackerSnapshot>, io::Error> {
+    let mut trackers = HashMap::new();
+    let Some(value) = read_json_value(path)? else {
+        return Ok(trackers);
+    };
+    let Some(entries) = value.as_array() else {
+        return Ok(trackers);
+    };
+
+    for entry in entries {
+        let Some(plan_id) = entry.get("plan_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if plan_id.trim().is_empty() {
+            continue;
+        }
+        let completed = entry
+            .get("completed")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| string_array(values))
+            .unwrap_or_default();
+        let failed = entry
+            .get("failed")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| string_array(values))
+            .unwrap_or_default();
+        trackers.insert(
+            plan_id.to_string(),
+            TaskTrackerSnapshot { completed, failed },
+        );
+    }
+
+    Ok(trackers)
+}
+
+fn read_signal_gates(path: &Path) -> Result<Vec<GateVerdict>, io::Error> {
+    let Some(values) = read_jsonl_values(path)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut gates = Vec::new();
+    for value in values {
+        let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !is_gate_result_kind(kind) {
+            continue;
+        }
+        let Some(gate) = extract_gate_name(&value) else {
+            continue;
+        };
+        let Some(passed) = extract_gate_passed(&value) else {
+            continue;
+        };
+        gates.push(GateVerdict {
+            plan_id: value
+                .pointer("/tags/plan_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    value
+                        .pointer("/body/data/plan_id")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/body/plan_id")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("unknown")
+                .to_string(),
+            task_id: value
+                .pointer("/tags/task_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    value
+                        .pointer("/body/data/task_id")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| {
+                    value
+                        .pointer("/body/task_id")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or_default()
+                .to_string(),
+            gate,
+            passed,
+            ts_millis: entry_timestamp_ms(&value).unwrap_or_default(),
+        });
+    }
+
+    Ok(gates)
+}
+
+fn read_jsonl_values(path: &Path) -> Result<Option<Vec<serde_json::Value>>, io::Error> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("parse {}: {err}", path.display()),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn read_event_entries(path: &Path) -> Result<Vec<serde_json::Value>, io::Error> {
+    let Some(value) = read_json_value(path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(extract_event_entries(&value))
+}
+
+fn extract_event_entries(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(entries) = value.get("entries").and_then(serde_json::Value::as_array) {
+        return entries.clone();
+    }
+    if let Some(entries) = value.as_array() {
+        return entries.clone();
+    }
+    vec![value.clone()]
+}
+
+fn collect_agent_roles(event_entries: &[serde_json::Value]) -> HashMap<String, String> {
+    let mut roles = HashMap::new();
+
+    for entry in event_entries {
+        let event_kind = event_kind_label(entry);
+        if !matches!(
+            event_kind.as_deref(),
+            Some("AgentSpawned" | "agent.spawned" | "agent_spawned")
+        ) {
+            continue;
+        }
+
+        let payload = entry.get("payload").unwrap_or(entry);
+        let plan_id = payload
+            .get("plan_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let task = payload
+            .get("task")
+            .or_else(|| payload.get("task_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let agent_id = payload
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|agent_id| !agent_id.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                if plan_id.is_empty() || task.is_empty() {
+                    None
+                } else {
+                    Some(format!("{plan_id}:{task}"))
+                }
+            });
+        let role = payload
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .filter(|role| !role.trim().is_empty());
+
+        if let (Some(agent_id), Some(role)) = (agent_id, role) {
+            roles.insert(agent_id, role.to_string());
+        }
+    }
+
+    roles
+}
+
+fn append_event_errors(snapshot: &mut DashboardSnapshot, event_entries: &[serde_json::Value]) {
+    for entry in event_entries {
+        let event_kind = event_kind_label(entry);
+        if !matches!(
+            event_kind.as_deref(),
+            Some("ErrorOccurred" | "error.occurred" | "error_occurred" | "error")
+        ) {
+            continue;
+        }
+        let payload = entry.get("payload").unwrap_or(entry);
+        let message = payload
+            .get("message")
+            .or_else(|| payload.get("detail"))
+            .or_else(|| payload.get("description"))
+            .or_else(|| payload.get("reason"))
+            .or_else(|| payload.get("err"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|message| !message.trim().is_empty());
+        if let Some(message) = message {
+            push_error(
+                snapshot,
+                ErrorEntry {
+                    message: message.to_string(),
+                    ts_millis: event_timestamp_ms(entry),
+                },
+            );
+        }
+    }
+}
+
+fn event_kind_label(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .get("event_kind")
+        .or_else(|| entry.get("event_type"))
+        .or_else(|| entry.get("type"))
+        .or_else(|| entry.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn event_timestamp_ms(entry: &serde_json::Value) -> u64 {
+    entry
+        .get("timestamp_ms")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| entry.get("timestamp").and_then(serde_json::Value::as_u64))
+        .unwrap_or_default()
+}
+
+fn push_gate(snapshot: &mut DashboardSnapshot, gate: GateVerdict) {
+    if gate.passed {
+        snapshot.stats.gates_passed += 1;
+    } else {
+        snapshot.stats.gates_failed += 1;
+    }
+    if snapshot.gates.len() >= MAX_GATES {
+        snapshot.gates.remove(0);
+    }
+    snapshot.gates.push(gate);
+}
+
+fn push_error(snapshot: &mut DashboardSnapshot, error: ErrorEntry) {
+    snapshot.stats.errors_total += 1;
+    if snapshot.errors.len() >= MAX_ERRORS {
+        snapshot.errors.remove(0);
+    }
+    snapshot.errors.push(error);
+}
+
+fn string_array(values: &[serde_json::Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_gate_result_kind(kind: &str) -> bool {
+    kind == "gate_verdict" || kind.starts_with("gate:") || kind.starts_with("gate_")
+}
+
+fn extract_gate_name(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .pointer("/tags/gate")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            entry
+                .pointer("/body/data/gate")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            entry
+                .pointer("/body/gate")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            entry
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|kind| kind.strip_prefix("gate:").or(kind.strip_prefix("gate_")))
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn extract_gate_passed(entry: &serde_json::Value) -> Option<bool> {
+    entry
+        .pointer("/tags/passed")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| match value {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+        .or_else(|| {
+            entry
+                .pointer("/body/data/passed")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .or_else(|| {
+            entry
+                .pointer("/body/passed")
+                .and_then(serde_json::Value::as_bool)
+        })
+}
+
+fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<u64> {
+    entry
+        .get("created_at_ms")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            entry
+                .get("created_at_ms")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn plan_lifecycle() {
@@ -448,5 +1119,119 @@ mod tests {
             content: "hello world".into(),
         });
         assert_eq!(snap.agents["a1"].output_bytes, 11);
+    }
+
+    #[test]
+    fn load_from_workdir_bootstraps_executor_trackers_and_events() {
+        let dir = tempdir().unwrap();
+        let roko_dir = dir.path().join(".roko");
+        let state_dir = roko_dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        std::fs::write(
+            state_dir.join("executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "plan_states": {
+                    "plan-1": {
+                        "current_phase": { "kind": "implementing" },
+                        "task_id": "task-2",
+                        "assigned_agents": ["plan-1:task-2"],
+                        "gate_results": [
+                            { "gate_name": "compile", "passed": true, "timestamp_ms": 42 }
+                        ]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            state_dir.join("task-trackers.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {
+                    "plan_id": "plan-1",
+                    "completed": ["task-0"],
+                    "failed": ["task-1"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            state_dir.join("events.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "entries": [
+                    {
+                        "timestamp_ms": 99,
+                        "event_kind": "AgentSpawned",
+                        "payload": { "plan_id": "plan-1", "task": "task-2", "role": "Implementer" }
+                    },
+                    {
+                        "timestamp_ms": 100,
+                        "event_kind": "ErrorOccurred",
+                        "payload": { "message": "boom" }
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = DashboardSnapshot::load_from_workdir(dir.path()).unwrap();
+        assert_eq!(snapshot.stats.plans_active, 1);
+        assert_eq!(snapshot.stats.tasks_active, 1);
+        assert_eq!(snapshot.stats.tasks_completed, 1);
+        assert_eq!(snapshot.stats.tasks_failed, 1);
+        assert_eq!(snapshot.stats.agents_active, 1);
+        assert_eq!(snapshot.stats.gates_passed, 1);
+        assert_eq!(snapshot.stats.errors_total, 1);
+        assert_eq!(snapshot.plans["plan-1"].tasks_total, 3);
+        assert_eq!(snapshot.agents["plan-1:task-2"].role, "Implementer");
+        assert_eq!(snapshot.tasks["plan-1/task-2"].phase, "implementing");
+        assert_eq!(snapshot.errors[0].message, "boom");
+    }
+
+    #[test]
+    fn load_from_workdir_uses_signal_gates_when_executor_has_none() {
+        let dir = tempdir().unwrap();
+        let roko_dir = dir.path().join(".roko");
+        let state_dir = roko_dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        std::fs::write(
+            state_dir.join("executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "plan_states": {
+                    "plan-1": {
+                        "current_phase": { "kind": "failed" },
+                        "task_id": "task-1"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            roko_dir.join("signals.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "kind": "gate:compile",
+                    "created_at_ms": 7,
+                    "tags": {
+                        "plan_id": "plan-1",
+                        "task_id": "task-1",
+                        "passed": "false"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+
+        let snapshot = DashboardSnapshot::load_from_workdir(dir.path()).unwrap();
+        assert_eq!(snapshot.stats.plans_failed, 1);
+        assert_eq!(snapshot.stats.gates_failed, 1);
+        assert_eq!(snapshot.gates.len(), 1);
+        assert_eq!(snapshot.gates[0].gate, "compile");
     }
 }
