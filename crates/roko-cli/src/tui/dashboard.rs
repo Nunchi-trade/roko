@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -24,6 +24,7 @@ use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
+use roko_learn::aggregate::{EfficiencyBucket, efficiency_trend};
 use roko_learn::cascade_router::{CascadeStage, StageTransition};
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -331,6 +332,8 @@ pub struct DashboardData {
     pub efficiency: EfficiencySummary,
     /// Raw efficiency events from `.roko/learn/efficiency.jsonl`.
     pub efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Hourly efficiency trend over the last 24 hours.
+    pub efficiency_trend: Vec<EfficiencyBucket>,
     /// Last observed efficiency file metadata.
     efficiency_stamp: FileStamp,
     /// Cascade router state from `.roko/learn/cascade-router.json`.
@@ -434,6 +437,7 @@ impl DashboardData {
         let gate_results = load_gate_results(&state, &signal_gate_results);
         let efficiency_events = read_efficiency_events_sync(&efficiency_path);
         let efficiency = load_efficiency_summary(&efficiency_path);
+        let efficiency_trend = load_efficiency_trend(&efficiency_path);
         let cascade_router =
             load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
         let cascade_router_stamp = file_stamp(&cascade_router_path);
@@ -498,6 +502,7 @@ impl DashboardData {
             gate_results,
             efficiency,
             efficiency_events,
+            efficiency_trend,
             efficiency_stamp,
             cascade_router,
             experiment_store,
@@ -578,6 +583,7 @@ impl DashboardData {
             self.efficiency_stamp = stamp;
             self.efficiency_events = read_efficiency_events_sync(&efficiency_path);
             self.efficiency = load_efficiency_summary(&efficiency_path);
+            self.efficiency_trend = load_efficiency_trend(&efficiency_path);
             generation_changed = true;
         }
 
@@ -2555,6 +2561,10 @@ fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
     }
 }
 
+fn load_efficiency_trend(path: &Path) -> Vec<EfficiencyBucket> {
+    efficiency_trend(path, Duration::hours(1), 24).unwrap_or_default()
+}
+
 fn load_recent_signals(path: &Path, limit: usize) -> Vec<SignalSummary> {
     let mut signals = read_jsonl_values(path)
         .into_iter()
@@ -2969,6 +2979,8 @@ pub struct DashboardSnapshot {
     headlines: Headlines,
     /// Raw efficiency events from `.roko/learn/efficiency.jsonl`.
     efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Hourly efficiency trend over the last 24 hours.
+    efficiency_trend: Vec<EfficiencyBucket>,
     /// Prompt experiment store from `.roko/learn/experiments.json`.
     experiments: Option<ExperimentStore>,
     /// Adaptive gate thresholds from `.roko/learn/gate-thresholds.json`.
@@ -3094,7 +3106,9 @@ impl DashboardSnapshot {
         let task_metrics = read_task_metrics(&task_metrics_path).await?;
 
         // Load learning subsystem data (best-effort).
-        let efficiency_events = read_efficiency_events(&learn_dir.join(EFFICIENCY_FILE)).await;
+        let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
+        let efficiency_events = read_efficiency_events(&efficiency_path).await;
+        let efficiency_trend = load_efficiency_trend(&efficiency_path);
         let experiments = load_json_opt::<ExperimentStore>(&learn_dir.join(EXPERIMENTS_FILE));
         let adaptive_thresholds =
             load_json_opt::<AdaptiveThresholds>(&learn_dir.join(GATE_THRESHOLDS_FILE));
@@ -3127,6 +3141,7 @@ impl DashboardSnapshot {
             &episodes,
             &task_metrics,
             efficiency_events,
+            efficiency_trend,
             experiments,
             adaptive_thresholds,
             gate_results_page,
@@ -3141,6 +3156,7 @@ impl DashboardSnapshot {
             root,
             &[],
             &[],
+            Vec::new(),
             Vec::new(),
             None,
             None,
@@ -3157,6 +3173,7 @@ impl DashboardSnapshot {
         episodes: &[Episode],
         task_metrics: &[TaskMetric],
         efficiency_events: Vec<AgentEfficiencyEvent>,
+        efficiency_trend: Vec<EfficiencyBucket>,
         experiments: Option<ExperimentStore>,
         adaptive_thresholds: Option<AdaptiveThresholds>,
         gate_results_page: GateResultsPageData,
@@ -3228,6 +3245,7 @@ impl DashboardSnapshot {
             cache_hit_rate,
             headlines,
             efficiency_events,
+            efficiency_trend,
             experiments,
             adaptive_thresholds,
             gate_results_page,
@@ -3780,6 +3798,7 @@ impl DashboardSnapshot {
                 row.subsystem, row.updates, row.last, row.health
             )
         }));
+        lines.extend(render_learning_trend_lines(&self.efficiency_trend));
         lines.extend([
             String::new(),
             String::from("  Feedback Loops:  6/8 connected"),
@@ -4282,6 +4301,86 @@ fn render_boxed_panel(title: &str, lines: &[String]) -> String {
     }
     let _ = write!(out, "╚{}╝", "═".repeat(width));
     out
+}
+
+fn render_learning_trend_lines(buckets: &[EfficiencyBucket]) -> Vec<String> {
+    let tokens = buckets
+        .iter()
+        .map(|bucket| bucket.tokens_in.saturating_add(bucket.tokens_out))
+        .collect::<Vec<_>>();
+    let latency = buckets
+        .iter()
+        .map(|bucket| bucket.latency_ms_avg.round() as u64)
+        .collect::<Vec<_>>();
+    let cost = buckets
+        .iter()
+        .map(|bucket| bucket.cost_usd_cents)
+        .collect::<Vec<_>>();
+    let has_data = buckets.iter().any(|bucket| bucket.turns > 0);
+
+    if !has_data {
+        return vec![
+            String::new(),
+            String::from("  24h Efficiency Trends"),
+            String::from("  tok/h   no efficiency events yet"),
+            String::from("  lat/h   no efficiency events yet"),
+            String::from("  cost/h  no efficiency events yet"),
+        ];
+    }
+
+    vec![
+        String::new(),
+        String::from("  24h Efficiency Trends"),
+        format!(
+            "  tok/h   {} {}",
+            learning_sparkline(&tokens),
+            format_compact_count(tokens.iter().copied().max().unwrap_or(0))
+        ),
+        format!(
+            "  lat/h   {} {}ms",
+            learning_sparkline(&latency),
+            latency.iter().copied().max().unwrap_or(0)
+        ),
+        format!(
+            "  cost/h  {} {}",
+            learning_sparkline(&cost),
+            format_usd(cost.iter().copied().max().unwrap_or(0) as f64 / 100.0)
+        ),
+    ]
+}
+
+fn learning_sparkline(series: &[u64]) -> String {
+    if series.is_empty() {
+        return String::new();
+    }
+
+    let max = series.iter().copied().max().unwrap_or(0);
+    series
+        .iter()
+        .map(|value| learning_sparkline_char(*value, max))
+        .collect()
+}
+
+fn learning_sparkline_char(value: u64, max: u64) -> char {
+    const LEVELS: &[char; 8] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if max == 0 {
+        return '·';
+    }
+
+    let idx = ((value.saturating_mul((LEVELS.len() - 1) as u64)) + (max / 2)) / max;
+    LEVELS[idx as usize]
+}
+
+fn format_compact_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 10_000 {
+        format!("{}k", value / 1_000)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
 }
 
 /// Truncate a string to `max` chars, adding "..." if truncated.
@@ -5221,6 +5320,8 @@ mod tests {
         assert!(rendered.contains("PatternMiner"));
         assert!(rendered.contains("ProviderHealth"));
         assert!(rendered.contains("KnowledgeStore"));
+        assert!(rendered.contains("24h Efficiency Trends"));
+        assert!(rendered.contains("tok/h"));
         assert!(rendered.contains("Feedback Loops:  6/8 connected"));
         assert!(rendered.contains("Missing: GateFail->Replan, SectionEffect->Prompt"));
     }

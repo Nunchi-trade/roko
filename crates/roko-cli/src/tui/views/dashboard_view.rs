@@ -1,17 +1,17 @@
-//! F1 Dashboard view -- master-detail layout with 7 sub-tabs.
+//! F1 Dashboard view -- master-detail layout with 8 sub-tabs.
 //!
 //! Left panel (38%): plan tree + phase compact + task progress.
 //! Right panel (62%): sub-tabbed detail view (Agents, Output, Diff,
-//! Errors, Git, Context/MCP, Processes).
+//! Errors, Git, Context/MCP, Learning, Processes).
 //! Bottom ribbon: wave progress + token sparkline + sys metrics.
 //!
 //! Delegates to compiled widgets for all panels.
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -38,6 +38,7 @@ const SUB_TAB_LABELS: &[(&str, &str)] = &[
     ("e", "Errors"),
     ("g", "Git"),
     ("m", "MCP"),
+    ("L", "Learning"),
     ("P", "Procs"),
 ];
 
@@ -175,7 +176,8 @@ fn render_right_panel_content(
         3 => render_sub_errors(frame, area, data, theme),
         4 => render_sub_git(frame, area, tui_state, theme),
         5 => render_sub_mcp(frame, area, data, tui_state, theme),
-        6 => render_sub_processes(frame, area, data, tui_state, focused, theme),
+        6 => render_sub_learning(frame, area, data, focused, theme),
+        7 => render_sub_processes(frame, area, data, tui_state, focused, theme),
         _ => {}
     }
 }
@@ -1023,6 +1025,149 @@ fn render_diagnosis_panel(
         .column_spacing(1),
         inner,
     );
+}
+
+fn render_sub_learning(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Learning ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 12 || inner.height < 8 {
+        frame.render_widget(
+            Paragraph::new(" learning trend data needs more space").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let trends = build_learning_trends(data);
+    if !trends.has_data {
+        frame.render_widget(
+            Paragraph::new(" waiting for efficiency events").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .split(inner);
+
+    render_learning_sparkline(
+        frame,
+        sections[0],
+        " Tokens / hr (tok) ",
+        &trends.tokens_per_hour,
+        theme.info(),
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        sections[1],
+        " Latency / hr (ms) ",
+        &trends.latency_per_hour_ms,
+        theme.warning(),
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        sections[2],
+        " Cost / hr (c) ",
+        &trends.cost_per_hour_cents,
+        theme.danger(),
+        theme,
+        focused,
+    );
+}
+
+fn render_learning_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    series: &[u64],
+    color: Style,
+    theme: &Theme,
+    focused: bool,
+) {
+    if area.width < 8 || area.height < 2 {
+        return;
+    }
+
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = color.add_modifier(Modifier::BOLD);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(title.to_string(), title_style))
+        .border_style(border)
+        .style(Theme::block_style());
+    let max = series.iter().copied().max().unwrap_or(0).max(1);
+    let sparkline = Sparkline::default().data(series).max(max).style(color);
+    frame.render_widget(sparkline.block(block), area);
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningTrends {
+    tokens_per_hour: Vec<u64>,
+    latency_per_hour_ms: Vec<u64>,
+    cost_per_hour_cents: Vec<u64>,
+    has_data: bool,
+}
+
+fn build_learning_trends(data: &DashboardData) -> LearningTrends {
+    if data.efficiency_trend.is_empty() {
+        return LearningTrends::default();
+    }
+    let tokens_per_hour = data
+        .efficiency_trend
+        .iter()
+        .map(|bucket| bucket.tokens_in.saturating_add(bucket.tokens_out))
+        .collect();
+    let latency_per_hour_ms = data
+        .efficiency_trend
+        .iter()
+        .map(|bucket| bucket.latency_ms_avg.round() as u64)
+        .collect();
+    let cost_per_hour_cents = data
+        .efficiency_trend
+        .iter()
+        .map(|bucket| bucket.cost_usd_cents)
+        .collect();
+    let has_data = data.efficiency_trend.iter().any(|bucket| bucket.turns > 0);
+
+    LearningTrends {
+        tokens_per_hour,
+        latency_per_hour_ms,
+        cost_per_hour_cents,
+        has_data,
+    }
 }
 
 fn format_mem_bytes(bytes: u64) -> String {

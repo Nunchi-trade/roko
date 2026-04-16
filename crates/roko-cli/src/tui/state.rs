@@ -3570,6 +3570,7 @@ tier = "focused"
                 },
             ],
             diagnoses: Default::default(),
+            efficiency_trend: Vec::new(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),

@@ -203,6 +203,42 @@ impl Default for DiagnosisSummary {
     }
 }
 
+/// One bucket of aggregated efficiency telemetry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfficiencyBucket {
+    /// Bucket start timestamp in UTC.
+    #[serde(default = "default_diagnosis_timestamp")]
+    pub start: DateTime<Utc>,
+    /// Number of turns recorded in the bucket.
+    #[serde(default)]
+    pub turns: u64,
+    /// Sum of input tokens across the bucket.
+    #[serde(default)]
+    pub tokens_in: u64,
+    /// Sum of output tokens across the bucket.
+    #[serde(default)]
+    pub tokens_out: u64,
+    /// Sum of recorded cost in USD cents.
+    #[serde(default)]
+    pub cost_usd_cents: u64,
+    /// Average latency in milliseconds for turns in the bucket.
+    #[serde(default)]
+    pub latency_ms_avg: f64,
+}
+
+impl Default for EfficiencyBucket {
+    fn default() -> Self {
+        Self {
+            start: default_diagnosis_timestamp(),
+            turns: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd_cents: 0,
+            latency_ms_avg: 0.0,
+        }
+    }
+}
+
 /// The full materialized dashboard state.
 ///
 /// Updated atomically by [`StateHub`](super::state_hub::StateHub) via
@@ -221,6 +257,9 @@ pub struct DashboardSnapshot {
     /// Recent conductor diagnoses (ring of last 50).
     #[serde(default)]
     pub diagnoses: VecDeque<DiagnosisSummary>,
+    /// Recent efficiency trend buckets for dashboard charts.
+    #[serde(default)]
+    pub efficiency_trend: Vec<EfficiencyBucket>,
     /// Recent errors (ring of last 64).
     pub errors: Vec<ErrorEntry>,
     /// Overall counts.

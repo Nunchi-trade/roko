@@ -124,7 +124,7 @@ pub use task::{
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
 pub use dashboard_snapshot::{
-    DashboardEvent, DashboardSnapshot, DiagnosisSeverity, DiagnosisSummary,
+    DashboardEvent, DashboardSnapshot, DiagnosisSeverity, DiagnosisSummary, EfficiencyBucket,
 };
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use tool::{

@@ -3018,7 +3018,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_subtab_keybindings_include_procs() {
+    fn dashboard_subtab_keybindings_include_learning_and_procs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempdir().unwrap();
@@ -3040,8 +3040,11 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 5); // switched to MCP
 
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        assert_eq!(app.tui_state.plan_detail_tab, 6); // switched to Learning
+
         app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
-        assert_eq!(app.tui_state.plan_detail_tab, 6); // switched to Procs
+        assert_eq!(app.tui_state.plan_detail_tab, 7); // switched to Procs
 
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 0); // back to Agents
