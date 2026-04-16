@@ -2761,6 +2761,7 @@ fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
         || !snapshot.tasks.is_empty()
         || !snapshot.agents.is_empty()
         || !snapshot.gates.is_empty()
+        || !snapshot.experiment_winners.is_empty()
         || !snapshot.errors.is_empty()
 }
 

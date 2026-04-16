@@ -135,6 +135,7 @@ pub use task::{
 // `roko_core::tool::FailureKind`.
 pub use dashboard_snapshot::{
     DashboardEvent, DashboardSnapshot, DiagnosisSeverity, DiagnosisSummary, EfficiencyBucket,
+    ExperimentWinnerSummary,
 };
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use tool::{

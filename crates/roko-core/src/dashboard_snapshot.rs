@@ -75,6 +75,11 @@ pub enum DashboardEvent {
         /// The summarized diagnosis payload to append to the ring buffer.
         summary: DiagnosisSummary,
     },
+    /// Prompt experiment winners were refreshed from the learning store.
+    ExperimentWinnersUpdated {
+        /// Current concluded winners sorted for deterministic rendering.
+        winners: Vec<ExperimentWinnerSummary>,
+    },
     /// An error occurred.
     Error { message: String },
 }
@@ -203,6 +208,38 @@ impl Default for DiagnosisSummary {
     }
 }
 
+/// Summary row for one concluded prompt experiment winner.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentWinnerSummary {
+    /// Stable experiment identifier.
+    #[serde(default)]
+    pub experiment_id: String,
+    /// Parameter under test, typically a prompt section or role name.
+    #[serde(default)]
+    pub parameter: String,
+    /// Human-readable winner label shown to the operator.
+    #[serde(default)]
+    pub winner: String,
+    /// Variant identifier for the winning arm.
+    #[serde(default)]
+    pub winner_variant_id: String,
+    /// Winner empirical success rate in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub win_rate: f64,
+    /// Number of trials observed for the winning arm.
+    #[serde(default)]
+    pub sample_size: u64,
+    /// Lower 95% confidence bound for the winner success rate.
+    #[serde(default)]
+    pub ci_lower: f64,
+    /// Upper 95% confidence bound for the winner success rate.
+    #[serde(default)]
+    pub ci_upper: f64,
+    /// Confidence score used to conclude the experiment.
+    #[serde(default)]
+    pub confidence: f64,
+}
+
 /// One bucket of aggregated efficiency telemetry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EfficiencyBucket {
@@ -257,6 +294,9 @@ pub struct DashboardSnapshot {
     /// Recent conductor diagnoses (ring of last 50).
     #[serde(default)]
     pub diagnoses: VecDeque<DiagnosisSummary>,
+    /// Concluded prompt experiment winners rendered on the Learning tab.
+    #[serde(default)]
+    pub experiment_winners: Vec<ExperimentWinnerSummary>,
     /// Recent efficiency trend buckets for dashboard charts.
     #[serde(default)]
     pub efficiency_trend: Vec<EfficiencyBucket>,
@@ -448,6 +488,9 @@ impl DashboardSnapshot {
             DashboardEvent::Diagnosis { summary } => {
                 push_diagnosis(self, summary.clone());
             }
+            DashboardEvent::ExperimentWinnersUpdated { winners } => {
+                self.experiment_winners = winners.clone();
+            }
             DashboardEvent::Error { message } => {
                 self.stats.errors_total += 1;
                 if self.errors.len() >= MAX_ERRORS {
@@ -469,18 +512,21 @@ impl DashboardSnapshot {
         let root = resolve_snapshot_root(workdir);
         let roko_dir = root.join(".roko");
         let state_dir = roko_dir.join("state");
+        let learn_dir = roko_dir.join("learn");
 
         let state =
             read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
         let task_trackers = read_task_trackers(&state_dir.join("task-trackers.json"))?;
         let signal_gates = read_signal_gates(&roko_dir.join("signals.jsonl"))?;
         let event_entries = read_event_entries(&state_dir.join("events.json"))?;
+        let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
 
         Ok(snapshot_from_workdir_parts(
             &state,
             &task_trackers,
             &signal_gates,
             &event_entries,
+            &experiment_winners,
         ))
     }
 }
@@ -519,8 +565,12 @@ fn snapshot_from_workdir_parts(
     task_trackers: &HashMap<String, TaskTrackerSnapshot>,
     signal_gates: &[GateVerdict],
     event_entries: &[serde_json::Value],
+    experiment_winners: &[ExperimentWinnerSummary],
 ) -> DashboardSnapshot {
-    let mut snapshot = DashboardSnapshot::default();
+    let mut snapshot = DashboardSnapshot {
+        experiment_winners: experiment_winners.to_vec(),
+        ..DashboardSnapshot::default()
+    };
     let Some(plan_states) = state
         .get("plan_states")
         .and_then(serde_json::Value::as_object)
@@ -559,6 +609,201 @@ fn snapshot_from_workdir_parts(
     append_event_diagnoses(&mut snapshot, event_entries);
     append_event_errors(&mut snapshot, event_entries);
     snapshot
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PersistedExperimentStore {
+    #[serde(default)]
+    experiments: HashMap<String, PersistedPromptExperiment>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+enum PersistedExperimentStatus {
+    #[default]
+    Running,
+    Concluded,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PersistedPromptExperiment {
+    #[serde(default)]
+    experiment_id: String,
+    #[serde(default)]
+    section_name: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    variants: Vec<PersistedPromptVariant>,
+    #[serde(default)]
+    stats: HashMap<String, PersistedVariantStats>,
+    #[serde(default)]
+    status: PersistedExperimentStatus,
+    #[serde(default)]
+    winner_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PersistedPromptVariant {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    active: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PersistedVariantStats {
+    #[serde(default)]
+    trials: u64,
+    #[serde(default)]
+    successes: u64,
+}
+
+fn read_experiment_winners(path: &Path) -> Result<Vec<ExperimentWinnerSummary>, io::Error> {
+    let Some(value) = read_json_value(path)? else {
+        return Ok(Vec::new());
+    };
+    let store = serde_json::from_value::<PersistedExperimentStore>(value).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse {}: {err}", path.display()),
+        )
+    })?;
+    Ok(experiment_winner_summaries(&store))
+}
+
+fn experiment_winner_summaries(
+    store: &PersistedExperimentStore,
+) -> Vec<ExperimentWinnerSummary> {
+    let mut winners = store
+        .experiments
+        .values()
+        .filter_map(persisted_experiment_winner_summary)
+        .collect::<Vec<_>>();
+    winners.sort_by(|lhs, rhs| lhs.experiment_id.cmp(&rhs.experiment_id));
+    winners
+}
+
+fn persisted_experiment_winner_summary(
+    experiment: &PersistedPromptExperiment,
+) -> Option<ExperimentWinnerSummary> {
+    if experiment.status != PersistedExperimentStatus::Concluded {
+        return None;
+    }
+
+    let winner_id = experiment.winner_id.as_deref()?;
+    let winner_variant = experiment.variants.iter().find(|variant| variant.id == winner_id)?;
+    let winner_stats = experiment.stats.get(winner_id)?;
+    let confidence = persisted_winner_confidence(experiment, winner_id)?;
+    if confidence < 0.95 {
+        return None;
+    }
+
+    let (ci_lower, ci_upper) = wilson_confidence_interval(winner_stats);
+
+    Some(ExperimentWinnerSummary {
+        experiment_id: experiment.experiment_id.clone(),
+        parameter: experiment
+            .role
+            .clone()
+            .unwrap_or_else(|| experiment.section_name.clone()),
+        winner: winner_variant_label(winner_variant),
+        winner_variant_id: winner_variant.id.clone(),
+        win_rate: variant_success_rate(winner_stats),
+        sample_size: winner_stats.trials,
+        ci_lower,
+        ci_upper,
+        confidence,
+    })
+}
+
+fn winner_variant_label(variant: &PersistedPromptVariant) -> String {
+    variant
+        .slug
+        .clone()
+        .filter(|slug| !slug.trim().is_empty())
+        .or_else(|| {
+            (!variant.name.trim().is_empty()).then(|| variant.name.clone())
+        })
+        .unwrap_or_else(|| variant.id.clone())
+}
+
+fn persisted_winner_confidence(
+    experiment: &PersistedPromptExperiment,
+    winner_id: &str,
+) -> Option<f64> {
+    let mut ranked = experiment
+        .variants
+        .iter()
+        .filter(|variant| variant.active)
+        .filter_map(|variant| {
+            experiment
+                .stats
+                .get(&variant.id)
+                .map(|stats| (variant.id.as_str(), stats, variant_success_rate(stats)))
+        })
+        .collect::<Vec<_>>();
+    if ranked.is_empty() {
+        return None;
+    }
+
+    ranked.sort_by(|lhs, rhs| rhs.2.total_cmp(&lhs.2));
+    let (winner_ranked_id, winner_stats, winner_rate) = ranked
+        .iter()
+        .find(|(id, _, _)| *id == winner_id)
+        .copied()
+        .unwrap_or(ranked[0]);
+    let second = ranked.iter().find(|(id, _, _)| *id != winner_ranked_id);
+    let second_rate = second.map_or(0.0, |(_, _, rate)| *rate);
+    let second_stats = second.map(|(_, stats, _)| *stats);
+
+    let se = match second_stats {
+        Some(second_stats) => {
+            let winner_trials = winner_stats.trials.max(1) as f64;
+            let second_trials = second_stats.trials.max(1) as f64;
+            let winner_var = winner_rate * (1.0 - winner_rate) / winner_trials;
+            let second_var = second_rate * (1.0 - second_rate) / second_trials;
+            (winner_var + second_var).sqrt()
+        }
+        None => 0.0,
+    };
+    let gap = (winner_rate - second_rate).max(0.0);
+    if se == 0.0 {
+        Some(1.0)
+    } else {
+        Some((gap / (gap + se)).clamp(0.0, 1.0))
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn variant_success_rate(stats: &PersistedVariantStats) -> f64 {
+    if stats.trials == 0 {
+        0.0
+    } else {
+        stats.successes as f64 / stats.trials as f64
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn wilson_confidence_interval(stats: &PersistedVariantStats) -> (f64, f64) {
+    if stats.trials == 0 {
+        return (0.0, 0.0);
+    }
+
+    let n = stats.trials as f64;
+    let p = stats.successes as f64 / n;
+    let z = 1.96_f64;
+    let z_sq = z * z;
+    let denom = 1.0 + z_sq / n;
+    let center = (p + z_sq / (2.0 * n)) / denom;
+    let margin = (z / denom) * ((p * (1.0 - p) / n + z_sq / (4.0 * n * n)).sqrt());
+    (
+        (center - margin).clamp(0.0, 1.0),
+        (center + margin).clamp(0.0, 1.0),
+    )
 }
 
 fn bootstrap_plan_state(
@@ -1557,5 +1802,55 @@ mod tests {
         assert_eq!(snapshot.stats.gates_failed, 1);
         assert_eq!(snapshot.gates.len(), 1);
         assert_eq!(snapshot.gates[0].gate, "compile");
+    }
+
+    #[test]
+    fn load_from_workdir_bootstraps_experiment_winners() {
+        let dir = tempdir().unwrap();
+        let learn_dir = dir.path().join(".roko").join("learn");
+        std::fs::create_dir_all(&learn_dir).unwrap();
+
+        std::fs::write(
+            learn_dir.join("experiments.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "experiments": {
+                    "exp-01": {
+                        "experiment_id": "exp-01",
+                        "section_name": "constraints",
+                        "role": "implementer",
+                        "variants": [
+                            {
+                                "id": "winner",
+                                "name": "Winner",
+                                "slug": "claude-opus-4-6",
+                                "active": true
+                            },
+                            {
+                                "id": "runner-up",
+                                "name": "Runner Up",
+                                "slug": "gpt-5.4",
+                                "active": true
+                            }
+                        ],
+                        "stats": {
+                            "winner": { "trials": 120, "successes": 114 },
+                            "runner-up": { "trials": 120, "successes": 18 }
+                        },
+                        "status": "Concluded",
+                        "winner_id": "winner"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = DashboardSnapshot::load_from_workdir(dir.path()).unwrap();
+        assert_eq!(snapshot.experiment_winners.len(), 1);
+        assert_eq!(snapshot.experiment_winners[0].experiment_id, "exp-01");
+        assert_eq!(snapshot.experiment_winners[0].winner, "claude-opus-4-6");
+        assert_eq!(snapshot.experiment_winners[0].sample_size, 120);
+        assert!(snapshot.experiment_winners[0].ci_lower <= snapshot.experiment_winners[0].win_rate);
+        assert!(snapshot.experiment_winners[0].ci_upper >= snapshot.experiment_winners[0].win_rate);
     }
 }

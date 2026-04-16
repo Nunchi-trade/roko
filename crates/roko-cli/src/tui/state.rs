@@ -766,6 +766,8 @@ pub struct TuiState {
     pub gate_results: Vec<GateResultEntry>,
     /// Recent conductor diagnoses from the live dashboard snapshot.
     pub diagnoses: Vec<roko_core::dashboard_snapshot::DiagnosisSummary>,
+    /// Concluded prompt experiment winners for the Learning tab.
+    pub experiment_winners: Vec<roko_core::ExperimentWinnerSummary>,
 
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
@@ -936,6 +938,7 @@ impl Default for TuiState {
             current_task_checklist: Vec::new(),
             gate_results: Vec::new(),
             diagnoses: Vec::new(),
+            experiment_winners: Vec::new(),
 
             agents: Vec::new(),
             route_metrics: HashMap::new(),
@@ -1132,6 +1135,7 @@ impl TuiState {
         self.current_phase = executor_summary.current_phase;
         let latest_events = latest_agent_events(&data.efficiency_events);
         let latest_route_metrics = latest_route_metrics(&data.efficiency_events, data);
+        self.experiment_winners = data.experiment_winners.clone();
 
         let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
         for task in &data.active_tasks {
@@ -1667,6 +1671,7 @@ impl TuiState {
             })
             .collect();
         self.diagnoses = snap.diagnoses.iter().cloned().collect();
+        self.experiment_winners = snap.experiment_winners.clone();
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
@@ -3570,6 +3575,7 @@ tier = "focused"
                 },
             ],
             diagnoses: Default::default(),
+            experiment_winners: Vec::new(),
             efficiency_trend: Vec::new(),
             errors: vec![
                 ErrorEntry {
@@ -3852,6 +3858,18 @@ tier = "focused"
                 suggested_action: Some("Restart Agent".into()),
                 intervention_taken: Some("Paused plan".into()),
             });
+        snap.experiment_winners
+            .push(roko_core::ExperimentWinnerSummary {
+                experiment_id: "exp-01".into(),
+                parameter: "constraints".into(),
+                winner: "claude-opus-4-6".into(),
+                winner_variant_id: "opus".into(),
+                win_rate: 0.71,
+                sample_size: 142,
+                ci_lower: 0.63,
+                ci_upper: 0.78,
+                confidence: 0.97,
+            });
         snap.errors.push(roko_core::dashboard_snapshot::ErrorEntry {
             message: "compile failed once".into(),
             ts_millis: 2,
@@ -3885,6 +3903,8 @@ tier = "focused"
         assert_eq!(state.gate_results[0].output, "task task-2");
         assert_eq!(state.diagnoses.len(), 1);
         assert_eq!(state.diagnoses[0].subject, "Circuit Breaker: Loop Detected");
+        assert_eq!(state.experiment_winners.len(), 1);
+        assert_eq!(state.experiment_winners[0].experiment_id, "exp-01");
         assert_eq!(state.execution_waves.len(), 1);
         assert_eq!(state.execution_waves[0].plans, vec![String::from("plan-a")]);
         assert_eq!(state.phase_pipeline.len(), 9);

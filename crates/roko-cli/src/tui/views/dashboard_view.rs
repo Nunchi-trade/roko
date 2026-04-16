@@ -7,16 +7,17 @@
 //!
 //! Delegates to compiled widgets for all panels.
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use roko_core::dashboard_snapshot::{
-    DiagnosisSeverity, DiagnosisSummary, ErrorEntry, GateVerdict, SnapshotStats,
+    DiagnosisSeverity, DiagnosisSummary, ErrorEntry, ExperimentWinnerSummary, GateVerdict,
+    SnapshotStats,
 };
 
 use super::ViewState;
@@ -176,7 +177,7 @@ fn render_right_panel_content(
         3 => render_sub_errors(frame, area, data, theme),
         4 => render_sub_git(frame, area, tui_state, theme),
         5 => render_sub_mcp(frame, area, data, tui_state, theme),
-        6 => render_sub_learning(frame, area, data, focused, theme),
+        6 => render_sub_learning(frame, area, data, tui_state, focused, theme),
         7 => render_sub_processes(frame, area, data, tui_state, focused, theme),
         _ => {}
     }
@@ -1031,6 +1032,7 @@ fn render_sub_learning(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
@@ -1060,48 +1062,52 @@ fn render_sub_learning(
     }
 
     let trends = build_learning_trends(data);
-    if !trends.has_data {
+    let sections =
+        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(inner);
+
+    if trends.has_data {
+        let trend_sections = Layout::vertical([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(sections[0]);
+
+        render_learning_sparkline(
+            frame,
+            trend_sections[0],
+            " Tokens / hr (tok) ",
+            &trends.tokens_per_hour,
+            theme.info(),
+            theme,
+            focused,
+        );
+        render_learning_sparkline(
+            frame,
+            trend_sections[1],
+            " Latency / hr (ms) ",
+            &trends.latency_per_hour_ms,
+            theme.warning(),
+            theme,
+            focused,
+        );
+        render_learning_sparkline(
+            frame,
+            trend_sections[2],
+            " Cost / hr (c) ",
+            &trends.cost_per_hour_cents,
+            theme.danger(),
+            theme,
+            focused,
+        );
+    } else {
         frame.render_widget(
             Paragraph::new(" waiting for efficiency events").style(theme.muted()),
-            inner,
+            sections[0],
         );
-        return;
     }
 
-    let sections = Layout::vertical([
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-    ])
-    .split(inner);
-
-    render_learning_sparkline(
-        frame,
-        sections[0],
-        " Tokens / hr (tok) ",
-        &trends.tokens_per_hour,
-        theme.info(),
-        theme,
-        focused,
-    );
-    render_learning_sparkline(
-        frame,
-        sections[1],
-        " Latency / hr (ms) ",
-        &trends.latency_per_hour_ms,
-        theme.warning(),
-        theme,
-        focused,
-    );
-    render_learning_sparkline(
-        frame,
-        sections[2],
-        " Cost / hr (c) ",
-        &trends.cost_per_hour_cents,
-        theme.danger(),
-        theme,
-        focused,
-    );
+    render_concluded_experiments_panel(frame, sections[1], data, tui_state, focused, theme);
 }
 
 fn render_learning_sparkline(
@@ -1131,6 +1137,193 @@ fn render_learning_sparkline(
     let max = series.iter().copied().max().unwrap_or(0).max(1);
     let sparkline = Sparkline::default().data(series).max(max).style(color);
     frame.render_widget(sparkline.block(block), area);
+}
+
+fn render_concluded_experiments_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Concluded Experiments ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 30 || inner.height < 3 {
+        return;
+    }
+
+    let rows = concluded_experiment_rows(data, tui_state);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" no concluded experiments yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let rows = rows
+        .into_iter()
+        .take(visible_rows.max(1))
+        .collect::<Vec<_>>();
+    let bar_width = concluded_experiment_bar_width(inner.width);
+    let id_width = concluded_experiment_id_width(inner.width);
+    let winner_width = concluded_experiment_winner_width(inner.width);
+
+    frame.render_widget(
+        Table::new(
+            rows.into_iter()
+                .map(|row| {
+                    Row::new(vec![
+                        Cell::from(Span::styled(
+                            truncate(&row.experiment_id, id_width),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            truncate(&row.winner_label, winner_width),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            format!("{:>3.0}%", row.win_rate * 100.0),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            render_rate_bar(row.win_rate, bar_width),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            format!("n={}", row.sample_size),
+                            theme.muted(),
+                        )),
+                        Cell::from(Span::styled(
+                            format_ci_range(row.ci_lower, row.ci_upper),
+                            rate_style(row.win_rate, theme),
+                        )),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            [
+                Constraint::Length(id_width as u16),
+                Constraint::Length(winner_width as u16),
+                Constraint::Length(7),
+                Constraint::Length(bar_width as u16),
+                Constraint::Length(8),
+                Constraint::Min(13),
+            ],
+        )
+        .header(
+            Row::new(["Experiment", "Winner", "Rate", "Win bar", "n", "95% CI"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+#[derive(Debug, Clone)]
+struct ConcludedExperimentRow {
+    experiment_id: String,
+    winner_label: String,
+    win_rate: f64,
+    sample_size: u64,
+    ci_lower: f64,
+    ci_upper: f64,
+}
+
+fn concluded_experiment_rows(data: &DashboardData, tui_state: &TuiState) -> Vec<ConcludedExperimentRow> {
+    let winners = if tui_state.experiment_winners.is_empty() {
+        &data.experiment_winners
+    } else {
+        &tui_state.experiment_winners
+    };
+
+    winners
+        .into_iter()
+        .map(concluded_experiment_row)
+        .collect()
+}
+
+fn concluded_experiment_row(summary: &ExperimentWinnerSummary) -> ConcludedExperimentRow {
+    ConcludedExperimentRow {
+        experiment_id: summary.experiment_id.clone(),
+        winner_label: summary.winner.clone(),
+        win_rate: summary.win_rate,
+        sample_size: summary.sample_size,
+        ci_lower: summary.ci_lower,
+        ci_upper: summary.ci_upper,
+    }
+}
+
+fn concluded_experiment_id_width(width: u16) -> usize {
+    if width >= 110 {
+        20
+    } else if width >= 90 {
+        16
+    } else {
+        12
+    }
+}
+
+fn concluded_experiment_winner_width(width: u16) -> usize {
+    if width >= 110 {
+        22
+    } else if width >= 90 {
+        18
+    } else {
+        14
+    }
+}
+
+fn concluded_experiment_bar_width(width: u16) -> usize {
+    width
+        .saturating_sub(
+            concluded_experiment_id_width(width) as u16
+                + concluded_experiment_winner_width(width) as u16
+                + 7
+                + 8
+                + 8
+                + 13
+                + 5,
+        )
+        .max(12) as usize
+}
+
+fn render_rate_bar(rate: f64, width: usize) -> String {
+    let width = width.max(4);
+    let filled = (rate.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let empty = width.saturating_sub(filled);
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
+fn format_ci_range(lower: f64, upper: f64) -> String {
+    format!("{:.0}%..{:.0}%", lower * 100.0, upper * 100.0)
+}
+
+fn rate_style(rate: f64, theme: &Theme) -> Style {
+    if rate >= 0.75 {
+        theme.success()
+    } else if rate >= 0.5 {
+        theme.warning()
+    } else {
+        theme.danger()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1458,4 +1651,128 @@ fn diagnosis_kind_width(width: u16) -> usize {
 
 fn diagnosis_message_width(width: u16) -> usize {
     width.saturating_sub(diagnosis_kind_width(width) as u16 + 16) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tempfile::tempdir;
+
+    use crate::tui::pages::PageId;
+    use crate::tui::state::TuiState;
+    use crate::tui::views::ViewState;
+
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_learning_dashboard(data: &DashboardData) -> String {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let tui_state = TuiState::default();
+        let view_state = ViewState {
+            sub_tab: 6,
+            ..ViewState::default()
+        };
+        let theme = Theme::dark();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                assert_eq!(PageId::Learning.group(), "efficiency");
+                render(frame, area, data, &tui_state, &view_state, &theme);
+            })
+            .unwrap();
+        rendered_text(&terminal)
+    }
+
+    fn concluded_experiment_store() -> DashboardData {
+        let dir = tempdir().unwrap();
+        let learn_dir = dir.path().join(".roko").join("learn");
+        std::fs::create_dir_all(&learn_dir).unwrap();
+        std::fs::write(
+            learn_dir.join("experiments.json"),
+            r#"{
+  "experiments": {
+    "exp-02": {
+      "experiment_id": "exp-02",
+      "section_name": "prompt-style",
+      "role": "implementer",
+      "variants": [
+        {
+          "id": "claude-opus",
+          "name": "Claude Opus",
+          "section_name": "prompt-style",
+          "content": "use concise directives",
+          "slug": "claude-opus-4-6",
+          "active": true
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "section_name": "prompt-style",
+          "content": "use broad directives",
+          "slug": "gpt-5.4",
+          "active": true
+        }
+      ],
+        "stats": {
+        "claude-opus": {
+          "trials": 142,
+          "successes": 136,
+          "total_cost_usd": 0.0,
+          "total_tokens": 0,
+          "total_duration_ms": 0,
+          "pass_rate": 0.0,
+          "avg_cost_usd": 0.0,
+          "cost_per_success": 0.0,
+          "avg_duration_ms": 0.0
+        },
+        "gpt-5.4": {
+          "trials": 88,
+          "successes": 8,
+          "total_cost_usd": 0.0,
+          "total_tokens": 0,
+          "total_duration_ms": 0,
+          "pass_rate": 0.0,
+          "avg_cost_usd": 0.0,
+          "cost_per_success": 0.0,
+          "avg_duration_ms": 0.0
+        }
+      },
+      "status": "Concluded",
+      "winner_id": "claude-opus",
+      "min_trials_per_variant": 5,
+      "min_effect_size": 0.1,
+      "created_at": "2026-04-16T00:00:00Z"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        DashboardData::load_best_effort(dir.path())
+    }
+
+    #[test]
+    fn learning_tab_renders_concluded_experiments_panel() {
+        let data = concluded_experiment_store();
+        let rendered = render_learning_dashboard(&data);
+
+        assert!(rendered.contains("Concluded Experiments"));
+        assert!(rendered.contains("exp-02"));
+        assert!(rendered.contains("claude-opus"));
+        assert!(rendered.contains("n=142"));
+        assert!(rendered.contains("95% CI"));
+        assert!(rendered.contains("████"));
+    }
 }

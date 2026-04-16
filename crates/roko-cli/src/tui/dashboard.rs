@@ -22,6 +22,7 @@ use ratatui::style::Color;
 
 use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
+use roko_core::ExperimentWinnerSummary;
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::aggregate::{EfficiencyBucket, efficiency_trend};
@@ -342,6 +343,8 @@ pub struct DashboardData {
     pub experiment_store: ExperimentStore,
     /// Experiments from `.roko/learn/experiments.json`.
     pub experiments: Vec<ExperimentSummary>,
+    /// Concluded experiment winners from `.roko/learn/experiments.json`.
+    pub experiment_winners: Vec<ExperimentWinnerSummary>,
     /// Last observed experiments file metadata.
     experiments_stamp: FileStamp,
     /// Gate-results page data derived from signals and adaptive thresholds.
@@ -449,6 +452,7 @@ impl DashboardData {
             .map(ExperimentSummary::from_experiment)
             .collect::<Vec<_>>();
         experiments.sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+        let experiment_winners = experiment_store.winner_summaries();
         let adaptive_thresholds = load_json_opt::<AdaptiveThresholds>(&gate_thresholds_path);
         let gate_thresholds_stamp = file_stamp(&gate_thresholds_path);
         let gate_results_page =
@@ -507,6 +511,7 @@ impl DashboardData {
             cascade_router,
             experiment_store,
             experiments,
+            experiment_winners,
             experiments_stamp,
             gate_results_page,
             adaptive_thresholds,
@@ -599,6 +604,7 @@ impl DashboardData {
                 .collect::<Vec<_>>();
             self.experiments
                 .sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+            self.experiment_winners = self.experiment_store.winner_summaries();
             generation_changed = true;
         }
 
