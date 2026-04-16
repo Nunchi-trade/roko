@@ -290,7 +290,7 @@ impl ParallelExecutor {
 
     /// Inspect the attached audit chain, if any.
     #[must_use]
-    pub fn audit_chain(&self) -> Option<&AuditChain> {
+    pub const fn audit_chain(&self) -> Option<&AuditChain> {
         self.audit_chain.as_ref()
     }
 
@@ -534,7 +534,7 @@ fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
-            duration.as_millis().min(u128::from(u64::MAX)) as u64
+            u64::try_from(duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
         })
 }
 

@@ -247,6 +247,9 @@ fn convert_learning(m: &MoriConfig) -> LearningConfig {
             .unwrap_or(d.learning_min_occurrences),
         file_intel_max_entries: m.file_intel_max_entries.unwrap_or(d.file_intel_max_entries),
         warning_max_entries: m.warning_max_entries.unwrap_or(d.warning_max_entries),
+        replan_on_gate_failure: d.replan_on_gate_failure,
+        replan_max_per_plan: d.replan_max_per_plan,
+        replan_gate_attempts: d.replan_gate_attempts,
     }
 }
 

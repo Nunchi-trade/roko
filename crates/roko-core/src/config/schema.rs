@@ -356,6 +356,21 @@ impl RokoConfig {
             "learning_min_occurrences = {}\n",
             cfg.learning.learning_min_occurrences
         );
+        let _ = writeln!(
+            out,
+            "replan_on_gate_failure = {}",
+            cfg.learning.replan_on_gate_failure
+        );
+        let _ = writeln!(
+            out,
+            "replan_max_per_plan = {}",
+            cfg.learning.replan_max_per_plan
+        );
+        let _ = writeln!(
+            out,
+            "replan_gate_attempts = {}\n",
+            cfg.learning.replan_gate_attempts
+        );
     }
 
     fn write_example_tui_and_server(out: &mut String, cfg: &Self) {
@@ -1988,6 +2003,15 @@ pub struct LearningConfig {
     /// Max warning entries to inject per task.
     #[serde(default = "default_warning_max")]
     pub warning_max_entries: usize,
+    /// Whether repeated gate failures should trigger a plan revision.
+    #[serde(default = "default_true")]
+    pub replan_on_gate_failure: bool,
+    /// Maximum number of gate-failure-triggered plan revisions per plan.
+    #[serde(default = "default_replan_max_per_plan")]
+    pub replan_max_per_plan: u32,
+    /// Consecutive gate failures required before emitting a plan revision.
+    #[serde(default = "default_replan_gate_attempts")]
+    pub replan_gate_attempts: u32,
 }
 
 const fn default_learning_min_occ() -> usize {
@@ -2002,6 +2026,14 @@ const fn default_warning_max() -> usize {
     5
 }
 
+const fn default_replan_max_per_plan() -> u32 {
+    2
+}
+
+const fn default_replan_gate_attempts() -> u32 {
+    3
+}
+
 impl Default for LearningConfig {
     fn default() -> Self {
         Self {
@@ -2013,6 +2045,9 @@ impl Default for LearningConfig {
             learning_min_occurrences: default_learning_min_occ(),
             file_intel_max_entries: default_file_intel_max(),
             warning_max_entries: default_warning_max(),
+            replan_on_gate_failure: true,
+            replan_max_per_plan: default_replan_max_per_plan(),
+            replan_gate_attempts: default_replan_gate_attempts(),
         }
     }
 }
@@ -3595,10 +3630,16 @@ critic = false
 [learning]
 auto_playbook_refresh = false
 learning_min_occurrences = 5
+replan_on_gate_failure = false
+replan_max_per_plan = 4
+replan_gate_attempts = 6
 "#;
         let cfg = RokoConfig::from_toml(toml).expect("parse");
         assert!(!cfg.learning.auto_playbook_refresh);
         assert_eq!(cfg.learning.learning_min_occurrences, 5);
+        assert!(!cfg.learning.replan_on_gate_failure);
+        assert_eq!(cfg.learning.replan_max_per_plan, 4);
+        assert_eq!(cfg.learning.replan_gate_attempts, 6);
     }
 
     #[test]

@@ -96,13 +96,13 @@ impl ExecutorSnapshot {
 
         let timestamp_ms = value
             .get("timestamp_ms")
-            .and_then(|timestamp| timestamp.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         let mut plan_states: HashMap<String, PlanState> = HashMap::new();
         let mut queue_order: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
-        let mut plan_stats: HashMap<String, (usize, usize, bool)> = HashMap::new();
+        let mut plan_progress: HashMap<String, (usize, usize, bool)> = HashMap::new();
 
         for task in tasks {
             let plan_id = task
@@ -121,10 +121,10 @@ impl ExecutorSnapshot {
             let status = task
                 .get("status")
                 .and_then(|status| status.as_str())
-                .map(|status| status.to_ascii_lowercase())
+                .map(str::to_ascii_lowercase)
                 .unwrap_or_default();
 
-            let entry = plan_stats
+            let entry = plan_progress
                 .entry(plan_id.to_string())
                 .or_insert((0usize, 0usize, false));
             entry.0 += 1;
@@ -135,7 +135,7 @@ impl ExecutorSnapshot {
             }
         }
 
-        for (plan_id, (total, done, has_active)) in plan_stats {
+        for (plan_id, (total, done, has_active)) in plan_progress {
             let mut plan_state = PlanState::new(plan_id.clone());
             if total > 0 && done == total {
                 plan_state.current_phase = PlanPhase::Complete;

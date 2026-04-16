@@ -39,7 +39,7 @@ use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
-use roko_core::config::schema::RokoConfig;
+use roko_core::config::schema::{LearningConfig as RuntimeLearningConfig, RokoConfig};
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -79,7 +79,7 @@ use roko_learn::costs_log::CostsLog;
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
-use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
@@ -109,13 +109,17 @@ use roko_orchestrator::{
     discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
+use roko_runtime::event_bus::{
+    Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
+    PlanRevisionReason, RokoEvent,
+};
 use roko_runtime::process::ProcessSupervisor;
 use roko_std::StaticToolRegistry;
 use roko_std::SumScorer;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
@@ -2218,8 +2222,16 @@ pub struct PlanRunner {
     latency_registry: LatencyRegistry,
     /// Event bus used to publish post-turn learning signals.
     learning_event_bus: LearningEventBus,
+    /// Runtime-wide event bus for cross-crate orchestration fan-out.
+    runtime_event_bus: RuntimeEventBus<RokoEvent>,
+    /// Local subscriber used to consume runtime events emitted by this runner.
+    runtime_event_rx: broadcast::Receiver<RuntimeEventEnvelope<RokoEvent>>,
     /// In-memory efficiency events collected during this run.
     efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Persistent dedupe/cap ledger for gate-failure-triggered plan revisions.
+    replan_ledger: ReplanLedger,
+    /// Learning settings loaded from `roko.toml`.
+    learning_config: RuntimeLearningConfig,
     /// Optional event bus sender for HTTP API event streaming.
     server_event_bus: Option<roko_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
     /// Optional state hub sender for unified dashboard snapshot updates.
@@ -2260,6 +2272,8 @@ struct TaskTracker {
     last_context_knowledge_ids: Vec<String>,
     /// Last detailed gate verdicts emitted for this plan.
     last_gate_verdicts: Vec<GateVerdict>,
+    /// Last runtime-facing gate verdict summaries emitted for this plan.
+    last_gate_verdict_summaries: Vec<GateVerdictSummary>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -2274,6 +2288,29 @@ struct TaskTracker {
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ReplanLedger {
+    seen_failure_keys: HashSet<String>,
+    replans_seen: HashMap<String, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanRevisionClaim {
+    Trigger { dedupe_key: String },
+    Duplicate { dedupe_key: String },
+    CapReached { dedupe_key: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanRevisionOutcome {
+    Regenerated,
+    Duplicate,
+    CapReached,
+    RegenerationFailed,
+    Disabled,
+    NotEligible,
 }
 
 #[derive(Debug, Clone)]
@@ -2305,6 +2342,25 @@ fn role_hash_features(role: &str) -> [f64; 4] {
         ((h >> 32) & 0xFFFF) as f64 / 65535.0,
         ((h >> 48) & 0xFFFF) as f64 / 65535.0,
     ]
+}
+
+impl ReplanLedger {
+    fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let rendered = serde_json::to_vec_pretty(self)?;
+        std::fs::write(path, rendered).with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
 }
 
 fn cascade_routing_context(
@@ -2464,6 +2520,7 @@ impl TaskTracker {
             last_impl_output_hash: None,
             last_context_knowledge_ids: Vec::new(),
             last_gate_verdicts: Vec::new(),
+            last_gate_verdict_summaries: Vec::new(),
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -2600,6 +2657,7 @@ impl TaskTracker {
         self.completed.retain(|task_id| task_ids.contains(task_id));
         self.current_group_index = 0;
         self.ready_since_ms.clear();
+        self.last_gate_verdict_summaries.clear();
         self.impl_round += 1;
         self.advance_group_index();
         Ok(())
@@ -2647,6 +2705,7 @@ impl TaskTracker {
         self.skipped.clear();
         self.current_group_index = 0;
         self.ready_since_ms.clear();
+        self.last_gate_verdict_summaries.clear();
         self.impl_round += 1;
     }
 
@@ -3234,6 +3293,10 @@ impl PlanRunner {
             .context("initialize observability sinks")?;
         roko_core::obs::register_standard_metrics(&metrics);
         let health_probes = Self::build_health_probes(&config);
+        let learning_config = runtime_learning_config(workdir);
+        let runtime_event_bus = RuntimeEventBus::new(256);
+        let runtime_event_rx = runtime_event_bus.subscribe();
+        let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -3297,7 +3360,11 @@ impl PlanRunner {
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
+            runtime_event_bus,
+            runtime_event_rx,
             efficiency_events: Vec::new(),
+            replan_ledger,
+            learning_config,
             server_event_bus: None,
             state_hub_sender: None,
             approval_tx: None,
@@ -3353,6 +3420,10 @@ impl PlanRunner {
             .context("initialize observability sinks")?;
         roko_core::obs::register_standard_metrics(&metrics);
         let health_probes = Self::build_health_probes(&config);
+        let learning_config = runtime_learning_config(workdir);
+        let runtime_event_bus = RuntimeEventBus::new(256);
+        let runtime_event_rx = runtime_event_bus.subscribe();
+        let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -3416,7 +3487,11 @@ impl PlanRunner {
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
+            runtime_event_bus,
+            runtime_event_rx,
             efficiency_events: Vec::new(),
+            replan_ledger,
+            learning_config,
             server_event_bus: None,
             state_hub_sender: None,
             approval_tx: None,
@@ -3476,6 +3551,10 @@ impl PlanRunner {
             .context("initialize observability sinks")?;
         roko_core::obs::register_standard_metrics(&metrics);
         let health_probes = Self::build_health_probes(&config);
+        let learning_config = runtime_learning_config(workdir);
+        let runtime_event_bus = RuntimeEventBus::new(256);
+        let runtime_event_rx = runtime_event_bus.subscribe();
+        let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -3539,7 +3618,11 @@ impl PlanRunner {
             ),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
+            runtime_event_bus,
+            runtime_event_rx,
             efficiency_events: Vec::new(),
+            replan_ledger,
+            learning_config,
             server_event_bus: None,
             state_hub_sender: None,
             approval_tx: None,
@@ -3579,6 +3662,259 @@ impl PlanRunner {
     /// Enable cloud execution behavior for the current plan run.
     pub fn enable_cloud_execution(&mut self, cloud_execution: CloudExecution) {
         self.cloud_execution = Some(cloud_execution);
+    }
+
+    fn gate_failure_replan_enabled(&self) -> bool {
+        self.learning_config.replan_on_gate_failure
+            && !self.no_replan
+            && self.executor.config().auto_replan
+    }
+
+    fn gate_failure_replan_attempt_limit(&self) -> u32 {
+        self.learning_config.replan_gate_attempts.max(1)
+    }
+
+    fn gate_failure_replan_cap(&self) -> u32 {
+        self.learning_config.replan_max_per_plan.max(1)
+    }
+
+    fn task_log_tail(&self, task_id: &str, fallback: &str, line_count: usize) -> String {
+        let path = self
+            .workdir
+            .join(".roko")
+            .join("task-outputs")
+            .join(format!("{task_id}.txt"));
+        let source = std::fs::read_to_string(path).unwrap_or_else(|_| fallback.to_string());
+        tail_output_lines(&source, line_count)
+    }
+
+    fn format_plan_revision_prompt(
+        task_id: &str,
+        reason: &PlanRevisionReason,
+        failing_verdicts: &[GateVerdictSummary],
+        log_tail: &str,
+    ) -> String {
+        let reason_line = match reason {
+            PlanRevisionReason::GateFailureLimit { attempts } => {
+                format!("gate failure (attempts={attempts})")
+            }
+        };
+        let gates = failing_verdicts
+            .iter()
+            .map(|verdict| match verdict.details.as_deref() {
+                Some(details) if !details.is_empty() => {
+                    format!(
+                        "- {}: passed={}, details={details}",
+                        verdict.gate, verdict.passed
+                    )
+                }
+                _ => format!("- {}: passed={}", verdict.gate, verdict.passed),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "## Previous plan failed at task `{task_id}`\n\n\
+             Reason: {reason_line}.\n\
+             Failing gates:\n\
+             {gates}\n\n\
+             Log tail (last 40 lines):\n```\n{log_tail}\n```\n\n\
+             Design the revised plan to address this specific failure mode first. \
+             Do not just re-propose the same task shape."
+        )
+    }
+
+    fn plan_revision_failure_hash(
+        reason: &PlanRevisionReason,
+        failing_verdicts: &[GateVerdictSummary],
+        log_tail: &str,
+    ) -> String {
+        let payload = serde_json::json!({
+            "reason": reason,
+            "failing_verdicts": failing_verdicts,
+            "log_tail": log_tail,
+        });
+        ContentHash::of(payload.to_string().as_bytes()).to_hex()
+    }
+
+    fn plan_revision_dedupe_key(plan_id: &str, task_id: &str, failure_hash: &str) -> String {
+        format!("{plan_id}:{task_id}:{failure_hash}")
+    }
+
+    fn claim_plan_revision(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        reason: &PlanRevisionReason,
+        failing_verdicts: &[GateVerdictSummary],
+        log_tail: &str,
+    ) -> Result<PlanRevisionClaim> {
+        let failure_hash = Self::plan_revision_failure_hash(reason, failing_verdicts, log_tail);
+        let dedupe_key = Self::plan_revision_dedupe_key(plan_id, task_id, &failure_hash);
+        if self.replan_ledger.seen_failure_keys.contains(&dedupe_key) {
+            return Ok(PlanRevisionClaim::Duplicate { dedupe_key });
+        }
+
+        let seen = self
+            .replan_ledger
+            .replans_seen
+            .get(plan_id)
+            .copied()
+            .unwrap_or_default();
+        if seen >= self.gate_failure_replan_cap() {
+            return Ok(PlanRevisionClaim::CapReached { dedupe_key });
+        }
+
+        self.replan_ledger
+            .seen_failure_keys
+            .insert(dedupe_key.clone());
+        self.replan_ledger
+            .replans_seen
+            .insert(plan_id.to_string(), seen.saturating_add(1));
+        self.replan_ledger
+            .save(&replan_ledger_path(&self.workdir))?;
+        Ok(PlanRevisionClaim::Trigger { dedupe_key })
+    }
+
+    fn build_gate_failure_plan_revision(&self, plan_id: &str, task_id: &str) -> Option<RokoEvent> {
+        let tracker = self.task_trackers.get(plan_id)?;
+        if tracker.gate_failure_count < self.gate_failure_replan_attempt_limit() {
+            return None;
+        }
+
+        let failing_verdicts = tracker
+            .last_gate_verdict_summaries
+            .iter()
+            .filter(|verdict| !verdict.passed)
+            .cloned()
+            .collect::<Vec<_>>();
+        if failing_verdicts.is_empty() {
+            return None;
+        }
+
+        let failure_context = tracker.last_gate_failure.clone().unwrap_or_default();
+        let log_tail = self.task_log_tail(task_id, &failure_context, 40);
+        Some(RokoEvent::PlanRevision {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            reason: PlanRevisionReason::GateFailureLimit {
+                attempts: tracker.gate_failure_count,
+            },
+            failing_verdicts,
+            log_tail,
+            issued_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn drain_runtime_events(&mut self) -> bool {
+        let mut regenerated = false;
+        loop {
+            match self.runtime_event_rx.try_recv() {
+                Ok(envelope) => {
+                    if self.handle_runtime_event(envelope.payload).await {
+                        regenerated = true;
+                    }
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        skipped,
+                        "runtime event subscriber lagged behind event stream"
+                    );
+                }
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        regenerated
+    }
+
+    async fn handle_runtime_event(&mut self, event: RokoEvent) -> bool {
+        match event {
+            RokoEvent::PlanRevision {
+                plan_id,
+                task_id,
+                reason,
+                failing_verdicts,
+                log_tail,
+                ..
+            } => {
+                let failure_summary = Self::format_plan_revision_prompt(
+                    &task_id,
+                    &reason,
+                    &failing_verdicts,
+                    &log_tail,
+                );
+                let architectural_model = self
+                    .config
+                    .agent
+                    .tier_models
+                    .get("architectural")
+                    .cloned()
+                    .unwrap_or_else(|| "claude-opus-4-6".into());
+                self.replan_plan(&plan_id, &task_id, &failure_summary, &architectural_model)
+                    .await
+            }
+        }
+    }
+
+    async fn maybe_emit_gate_failure_plan_revision(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+    ) -> PlanRevisionOutcome {
+        if !self.gate_failure_replan_enabled() {
+            return PlanRevisionOutcome::Disabled;
+        }
+
+        let Some(event) = self.build_gate_failure_plan_revision(plan_id, task_id) else {
+            return PlanRevisionOutcome::NotEligible;
+        };
+
+        let RokoEvent::PlanRevision {
+            reason,
+            failing_verdicts,
+            log_tail,
+            ..
+        } = &event;
+
+        match self.claim_plan_revision(plan_id, task_id, reason, failing_verdicts, log_tail) {
+            Ok(PlanRevisionClaim::Duplicate { dedupe_key }) => {
+                tracing::info!(
+                    plan_id,
+                    task_id,
+                    dedupe_key,
+                    "duplicate gate failure; skipping plan revision"
+                );
+                PlanRevisionOutcome::Duplicate
+            }
+            Ok(PlanRevisionClaim::CapReached { dedupe_key }) => {
+                tracing::warn!(
+                    plan_id,
+                    task_id,
+                    dedupe_key,
+                    cap = self.gate_failure_replan_cap(),
+                    "plan revision cap reached; leaving task failed"
+                );
+                PlanRevisionOutcome::CapReached
+            }
+            Ok(PlanRevisionClaim::Trigger { dedupe_key }) => {
+                tracing::info!(
+                    plan_id,
+                    task_id,
+                    dedupe_key,
+                    "emitting gate-failure plan revision"
+                );
+                self.runtime_event_bus.emit(event);
+                if self.drain_runtime_events().await {
+                    PlanRevisionOutcome::Regenerated
+                } else {
+                    PlanRevisionOutcome::RegenerationFailed
+                }
+            }
+            Err(error) => {
+                tracing::error!(plan_id, task_id, %error, "failed to persist plan revision ledger");
+                PlanRevisionOutcome::RegenerationFailed
+            }
+        }
     }
 
     /// Emit a server event if a bus is attached, and publish to the state hub.
@@ -5499,7 +5835,10 @@ impl PlanRunner {
                                 .get(&plan_id)
                                 .map(|t| t.gate_failure_count)
                                 .unwrap_or(0);
-                            if failure_count >= 1 && self.executor.config().auto_replan {
+                            if failure_count >= 1
+                                && self.executor.config().auto_replan
+                                && !self.gate_failure_replan_enabled()
+                            {
                                 self.emit_execution_event(
                                     &plan_id,
                                     crate::serve::events::ExecutionEvent::ReplanTriggered {
@@ -6018,6 +6357,7 @@ impl PlanRunner {
             tracker.last_impl_output_hash = None;
             tracker.last_context_knowledge_ids.clear();
             tracker.last_gate_verdicts.clear();
+            tracker.last_gate_verdict_summaries.clear();
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -6298,7 +6638,15 @@ impl PlanRunner {
                 None,
             )
             .await;
-            if self.should_replan_after_task_failure()
+            let plan_revision_outcome = self
+                .maybe_emit_gate_failure_plan_revision(plan_id, task_id)
+                .await;
+            if matches!(plan_revision_outcome, PlanRevisionOutcome::Regenerated) {
+                terminal_failure_handled = true;
+            } else if matches!(
+                plan_revision_outcome,
+                PlanRevisionOutcome::Disabled | PlanRevisionOutcome::NotEligible
+            ) && self.should_replan_after_task_failure()
                 && !self.no_replan
                 && self.executor.config().auto_replan
             {
@@ -7621,6 +7969,18 @@ impl PlanRunner {
                 "failed to append re-plan episode"
             );
         }
+
+        let root_episode_log =
+            EpisodeLogger::new(self.workdir.join(".roko").join("episodes.jsonl"));
+        if let Err(e) = root_episode_log.append(&ep).await {
+            tracing::error!(
+                plan_id = %plan_id,
+                task_id = %original_task_id,
+                strategy = %strategy,
+                error = %e,
+                "failed to append re-plan episode to root audit log"
+            );
+        }
     }
 
     /// Attempt to re-plan after gate failures (§9).
@@ -8212,6 +8572,7 @@ impl PlanRunner {
                             tracker.last_gate_failure_phase = None;
                             tracker.last_impl_task_id = None;
                             tracker.last_impl_model_slug = None;
+                            tracker.last_gate_verdict_summaries.clear();
                         }
                         let result = ReplanResult::Decompose {
                             plan_id: plan_id.to_string(),
@@ -8266,6 +8627,7 @@ impl PlanRunner {
                     tracker.gate_failure_count = 0;
                     tracker.last_gate_failure = None;
                     tracker.last_gate_failure_phase = None;
+                    tracker.last_gate_verdict_summaries.clear();
                 }
                 self.emit_execution_event(
                     plan_id,
@@ -8361,10 +8723,10 @@ impl PlanRunner {
         task_id: &str,
         failure_summary: &str,
         model: &str,
-    ) {
+    ) -> bool {
         let Some(tracker_snapshot) = self.task_trackers.get(plan_id) else {
             tracing::warn!("[orchestrate] regenerate requested for unknown plan {plan_id}");
-            return;
+            return false;
         };
 
         let plan_dir = tracker_snapshot._plan_dir.clone();
@@ -8405,7 +8767,7 @@ impl PlanRunner {
                 Some("could not find matching PRD".to_string()),
             )
             .await;
-            return;
+            return false;
         };
 
         let prd_slug = prd_path
@@ -8430,14 +8792,32 @@ impl PlanRunner {
                     Some(e.to_string()),
                 )
                 .await;
-                return;
+                return false;
             }
         };
 
         let tasks_path = plan_dir.join("tasks.toml");
         let existing_tasks = std::fs::read_to_string(&tasks_path).unwrap_or_default();
-        let system_prompt =
-            crate::plan_generate::build_generation_prompt(&self.workdir, &prd_content, "prd");
+        #[cfg(test)]
+        if let Some(result) = self
+            .try_synthetic_replan_fixture(
+                plan_id,
+                task_id,
+                failure_summary,
+                &tasks_path,
+                &old_tasks,
+                &completed_tasks,
+                original_task.as_ref(),
+                replan_attempt_number,
+            )
+            .await
+        {
+            return result;
+        }
+        let system_prompt = crate::prd::augment_generator_system_prompt(
+            crate::plan_generate::build_generator_system_prompt(&self.workdir),
+            Some(failure_summary),
+        );
         let prompt = format!(
             "{failure_summary}\n\n\
              Regenerate the implementation plan from the PRD at {}.\
@@ -8486,7 +8866,7 @@ impl PlanRunner {
                                 "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
                             );
                         }
-                        return;
+                        return false;
                     }
                 };
                 let regenerated_subtasks = regenerated_tasks.tasks.clone();
@@ -8519,7 +8899,7 @@ impl PlanRunner {
                                 "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
                             );
                         }
-                        return;
+                        return false;
                     }
                 };
 
@@ -8543,7 +8923,7 @@ impl PlanRunner {
                             "[orchestrate] failed to restore original tasks for {plan_id}: {write_err}"
                         );
                     }
-                    return;
+                    return false;
                 }
 
                 tracing::info!("[orchestrate] plan regeneration completed for {plan_id}");
@@ -8569,6 +8949,7 @@ impl PlanRunner {
                     tracker.last_gate_failure_phase = None;
                     tracker.last_impl_task_id = None;
                     tracker.last_impl_model_slug = None;
+                    tracker.last_gate_verdict_summaries.clear();
                 }
                 let result = ReplanResult::RegeneratePlan {
                     plan_id: plan_id.to_string(),
@@ -8579,6 +8960,7 @@ impl PlanRunner {
                         .collect(),
                 };
                 self.apply_replan_result(&result);
+                true
             }
             Err(e) => {
                 tracing::error!("[orchestrate] plan regeneration failed for {plan_id}: {e}");
@@ -8593,8 +8975,147 @@ impl PlanRunner {
                     Some(e.to_string()),
                 )
                 .await;
+                false
             }
         }
+    }
+
+    #[cfg(test)]
+    async fn try_synthetic_replan_fixture(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        _failure_summary: &str,
+        tasks_path: &Path,
+        old_tasks: &TasksFile,
+        completed_tasks: &[crate::task_parser::TaskDef],
+        original_task: Option<&crate::task_parser::TaskDef>,
+        replan_attempt_number: u32,
+    ) -> Option<bool> {
+        let fixture_path = self.workdir.join(".roko").join("test-synthetic-replan");
+        if !fixture_path.exists() {
+            return None;
+        }
+
+        let template_task = original_task
+            .cloned()
+            .or_else(|| {
+                old_tasks
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .cloned()
+            })
+            .unwrap_or(crate::task_parser::TaskDef {
+                id: task_id.to_string(),
+                title: format!("Synthetic recovery for {task_id}"),
+                description: None,
+                role: None,
+                status: "ready".to_string(),
+                tier: "focused".to_string(),
+                frequency: None,
+                model_hint: None,
+                replan_strategy: None,
+                max_loc: None,
+                files: Vec::new(),
+                allowed_tools: None,
+                denied_tools: None,
+                mcp_servers: None,
+                depends_on: Vec::new(),
+                depends_on_plan: Vec::new(),
+                split_into: None,
+                context: None,
+                verify: Vec::new(),
+                timeout_secs: 30,
+                max_retries: 0,
+                acceptance: Vec::new(),
+            });
+        let mut regenerated_task = template_task.clone();
+        regenerated_task.id = format!("{task_id}-replan-{replan_attempt_number}");
+        regenerated_task.title =
+            format!("Address gate failure for {task_id} (replan {replan_attempt_number})");
+        regenerated_task.status = "ready".to_string();
+        regenerated_task.depends_on.clear();
+        regenerated_task.depends_on_plan.clear();
+        regenerated_task.split_into = None;
+
+        let regenerated_tasks = TasksFile {
+            meta: crate::task_parser::TaskMeta {
+                plan: plan_id.to_string(),
+                iteration: old_tasks.meta.iteration.saturating_add(1),
+                total: 1,
+                done: 0,
+                status: "ready".to_string(),
+                max_parallel: old_tasks.meta.max_parallel,
+                estimated_total_minutes: old_tasks.meta.estimated_total_minutes,
+            },
+            tasks: vec![regenerated_task.clone()],
+        };
+        let merged_tasks =
+            merge_regenerated_plan(plan_id, old_tasks, regenerated_tasks, completed_tasks);
+        let rendered = match toml::to_string_pretty(&merged_tasks) {
+            Ok(text) => text,
+            Err(error) => {
+                self.record_replan_episode(
+                    plan_id,
+                    task_id,
+                    original_task,
+                    ReplanStrategy::RegeneratePlan,
+                    replan_attempt_number,
+                    &[regenerated_task],
+                    false,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Some(false);
+            }
+        };
+
+        if let Err(error) = std::fs::write(tasks_path, rendered) {
+            self.record_replan_episode(
+                plan_id,
+                task_id,
+                original_task,
+                ReplanStrategy::RegeneratePlan,
+                replan_attempt_number,
+                &[regenerated_task],
+                false,
+                Some(error.to_string()),
+            )
+            .await;
+            return Some(false);
+        }
+
+        self.record_replan_episode(
+            plan_id,
+            task_id,
+            original_task,
+            ReplanStrategy::RegeneratePlan,
+            replan_attempt_number,
+            &[regenerated_task.clone()],
+            true,
+            None,
+        )
+        .await;
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            if let Err(error) = tracker.reload_tasks_file() {
+                tracing::error!(
+                    "[orchestrate] failed to reload synthetic regenerated tasks for {plan_id}: {error}"
+                );
+            }
+            tracker.gate_failure_count = 0;
+            tracker.last_gate_failure = None;
+            tracker.last_gate_failure_phase = None;
+            tracker.last_impl_task_id = None;
+            tracker.last_impl_model_slug = None;
+            tracker.last_gate_verdict_summaries.clear();
+        }
+        self.apply_replan_result(&ReplanResult::RegeneratePlan {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            new_task_ids: vec![regenerated_task.id.clone()],
+        });
+        Some(true)
     }
 
     /// Select the next tier up in the haiku → sonnet → opus chain.
@@ -8668,6 +9189,24 @@ impl PlanRunner {
         } else {
             sections.join("\n\n---\n\n")
         }
+    }
+
+    fn summarize_runtime_verdicts(verdicts: &[Verdict]) -> Vec<GateVerdictSummary> {
+        verdicts
+            .iter()
+            .map(|verdict| {
+                let details = verdict
+                    .error_digest
+                    .clone()
+                    .or_else(|| verdict.detail.clone())
+                    .or_else(|| (!verdict.reason.is_empty()).then(|| verdict.reason.clone()));
+                GateVerdictSummary {
+                    gate: verdict.gate.clone(),
+                    passed: verdict.passed,
+                    details,
+                }
+            })
+            .collect()
     }
 
     /// Extract the most relevant compile failure summary from a gate run.
@@ -11165,6 +11704,7 @@ impl PlanRunner {
                 .iter()
                 .map(|verdict| GateVerdict::new(verdict.gate.clone(), verdict.passed))
                 .collect();
+            tracker.last_gate_verdict_summaries = Self::summarize_runtime_verdicts(&verdicts);
         }
 
         // Persist verdicts.
@@ -12620,6 +13160,19 @@ fn mechanical_tier_model(config: &Config) -> Option<String> {
     config.agent.tier_models.get("mechanical").cloned()
 }
 
+fn runtime_learning_config(workdir: &Path) -> RuntimeLearningConfig {
+    let path = workdir.join("roko.toml");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<RokoConfig>(&text).ok())
+        .map(|cfg| cfg.learning)
+        .unwrap_or_default()
+}
+
+fn replan_ledger_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("learn").join("replans.json")
+}
+
 fn detect_cost_anomaly_override(
     detector: &mut AnomalyDetector,
     turn_cost: f64,
@@ -13770,6 +14323,72 @@ mod tests {
         .expect("plan runner")
     }
 
+    fn write_plan_revision_fixture(workdir: &Path) -> PathBuf {
+        std::fs::write(
+            workdir.join("roko.toml"),
+            r#"[learning]
+replan_on_gate_failure = true
+replan_max_per_plan = 2
+replan_gate_attempts = 3
+"#,
+        )
+        .expect("write roko.toml");
+        std::fs::create_dir_all(workdir.join(".roko")).expect("create roko dir");
+        std::fs::write(workdir.join(".roko").join("test-synthetic-replan"), "1\n")
+            .expect("write synthetic replan fixture");
+
+        let prd_dir = workdir.join(".roko").join("prd").join("published");
+        std::fs::create_dir_all(&prd_dir).expect("create prd dir");
+        std::fs::write(
+            prd_dir.join("plan-1.md"),
+            "# plan-1\n\n## Goal\n\nExercise gate-failure replanning.\n",
+        )
+        .expect("write prd");
+
+        let plan_dir = workdir.join(".roko").join("plans").join("plan-1");
+        std::fs::create_dir_all(&plan_dir).expect("create plan dir");
+        std::fs::write(
+            plan_dir.join("tasks.toml"),
+            r#"[meta]
+plan = "plan-1"
+iteration = 1
+total = 1
+done = 0
+status = "ready"
+
+[[task]]
+id = "T1"
+title = "Fix compile failure"
+status = "ready"
+tier = "focused"
+files = ["src/lib.rs"]
+depends_on = []
+verify = []
+timeout_secs = 30
+max_retries = 0
+acceptance = []
+"#,
+        )
+        .expect("write tasks.toml");
+        plan_dir
+    }
+
+    fn install_gate_failure_state(runner: &mut PlanRunner, detail: &str) {
+        let tracker = runner
+            .task_trackers
+            .get_mut("plan-1")
+            .expect("tracker should exist");
+        tracker.gate_failure_count = 3;
+        tracker.last_gate_failure = Some(format!("compile: {detail}"));
+        tracker.last_gate_failure_phase = Some("compile".to_string());
+        tracker.last_impl_task_id = Some("T1".to_string());
+        tracker.last_gate_verdict_summaries = vec![GateVerdictSummary {
+            gate: "compile".to_string(),
+            passed: false,
+            details: Some(detail.to_string()),
+        }];
+    }
+
     #[test]
     fn scrub_signal_redacts_text_and_rehashes_identity() {
         let policy = ScrubPolicy::default();
@@ -13812,6 +14431,61 @@ mod tests {
             scrubbed.trace[0].body.as_text().expect("trace text"),
             "[REDACTED]"
         );
+    }
+
+    #[tokio::test]
+    async fn gate_failure_plan_revision_dedupes_and_caps_replans() {
+        let tmp = TempDir::new().expect("tempdir");
+        let plan_dir = write_plan_revision_fixture(tmp.path());
+        let tasks = TasksFile::parse(&plan_dir.join("tasks.toml")).expect("parse tasks");
+
+        let mut runner = runner_for_repo(tmp.path(), false).await;
+        runner.learning_config = runtime_learning_config(tmp.path());
+        assert!(runner.executor.add_plan(PlanState::new("plan-1")));
+        runner
+            .task_trackers
+            .insert("plan-1".to_string(), TaskTracker::new(tasks, plan_dir));
+
+        install_gate_failure_state(&mut runner, "E0425 first failure");
+        let first = runner
+            .maybe_emit_gate_failure_plan_revision("plan-1", "T1")
+            .await;
+        assert_eq!(first, PlanRevisionOutcome::Regenerated);
+        assert_eq!(runner.runtime_event_bus.replay_from(0).len(), 1);
+
+        install_gate_failure_state(&mut runner, "E0425 first failure");
+        let duplicate = runner
+            .maybe_emit_gate_failure_plan_revision("plan-1", "T1")
+            .await;
+        assert_eq!(duplicate, PlanRevisionOutcome::Duplicate);
+        assert_eq!(runner.runtime_event_bus.replay_from(0).len(), 1);
+
+        install_gate_failure_state(&mut runner, "E0599 second failure");
+        let second = runner
+            .maybe_emit_gate_failure_plan_revision("plan-1", "T1")
+            .await;
+        assert_eq!(second, PlanRevisionOutcome::Regenerated);
+        assert_eq!(runner.runtime_event_bus.replay_from(0).len(), 2);
+
+        install_gate_failure_state(&mut runner, "E0308 third failure");
+        let capped = runner
+            .maybe_emit_gate_failure_plan_revision("plan-1", "T1")
+            .await;
+        assert_eq!(capped, PlanRevisionOutcome::CapReached);
+        assert_eq!(runner.runtime_event_bus.replay_from(0).len(), 2);
+
+        let root_episodes =
+            std::fs::read_to_string(tmp.path().join(".roko").join("episodes.jsonl"))
+                .expect("read root episodes");
+        let replan_lines = root_episodes
+            .lines()
+            .filter(|line| line.contains(r#""kind":"replan""#))
+            .count();
+        assert_eq!(replan_lines, 2);
+
+        let ledger_json =
+            std::fs::read_to_string(replan_ledger_path(tmp.path())).expect("read replans ledger");
+        assert!(ledger_json.contains("\"plan-1\": 2"));
     }
 
     #[test]

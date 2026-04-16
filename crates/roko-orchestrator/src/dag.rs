@@ -437,8 +437,7 @@ impl UnifiedTaskDag {
         let edge_count: usize = self.edges.values().map(BTreeSet::len).sum();
         let critical = self
             .cpm_analysis()
-            .map(|(_, _, total, _)| duration_to_minutes(total))
-            .unwrap_or(0);
+            .map_or(0, |(_, _, total, _)| duration_to_minutes(total));
         let wave_count = self.waves().map(|w| w.len()).unwrap_or(0);
         DagStats {
             nodes: self.nodes.len(),
@@ -534,6 +533,7 @@ impl UnifiedTaskDag {
     ///
     /// The mutation is validated against the current graph and rejected if
     /// it would introduce a cycle or touch a completed task.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
         let mut next = self.clone();
         let result = match mutation {
@@ -562,14 +562,14 @@ impl UnifiedTaskDag {
                 let Some(task) = next.tasks.get(&task_id).cloned() else {
                     return Err(DagMutationError::UnknownTask(task_id));
                 };
-                let deps = task.depends_on.clone();
+                let deps = task.depends_on;
                 let dependents: Vec<_> = next.dependents_of(&task_id).iter().cloned().collect();
                 let task_key = task_id.to_string();
                 for dependent in dependents {
                     if let Some(dep_task) = next.tasks.get_mut(&dependent) {
                         remove_dep(&mut dep_task.depends_on, &task_key);
                         for dep in &deps {
-                            let dep_key = dep.to_string();
+                            let dep_key = dep.clone();
                             if !dep_task.depends_on.iter().any(|raw| raw == &dep_key) {
                                 dep_task.depends_on.push(dep_key);
                             }
@@ -590,7 +590,7 @@ impl UnifiedTaskDag {
                     return Err(DagMutationError::UnknownTask(task_id));
                 };
                 let dependents: Vec<_> = next.dependents_of(&task_id).iter().cloned().collect();
-                let original_deps = original.depends_on.clone();
+                let original_deps = original.depends_on;
                 let mut chain: Vec<GlobalTaskId> = Vec::with_capacity(into.len());
                 for (index, mut task) in into.into_iter().enumerate() {
                     if index == 0 && task.id != task_id.task {
@@ -661,7 +661,7 @@ impl UnifiedTaskDag {
                     .tasks
                     .get(&task_id)
                     .map(|current| current.depends_on.clone())
-                    .ok_or(DagMutationError::UnknownTask(task_id.clone()))?;
+                    .ok_or_else(|| DagMutationError::UnknownTask(task_id.clone()))?;
                 next.tasks.insert(task_id, task);
                 Ok(())
             }
@@ -767,6 +767,7 @@ impl UnifiedTaskDag {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     fn cpm_analysis(
         &self,
     ) -> Option<(
@@ -817,8 +818,9 @@ impl UnifiedTaskDag {
         self.tasks
             .get(id)
             .and_then(|task| task.estimated_minutes)
-            .map(|minutes| Duration::from_secs(u64::from(minutes).saturating_mul(60)))
-            .unwrap_or(Duration::ZERO)
+            .map_or(Duration::ZERO, |minutes| {
+                Duration::from_secs(u64::from(minutes).saturating_mul(60))
+            })
     }
 }
 
@@ -856,12 +858,12 @@ impl IncrementalDag {
 
     /// Read-only access to the underlying DAG.
     #[must_use]
-    pub fn dag(&self) -> &UnifiedTaskDag {
+    pub const fn dag(&self) -> &UnifiedTaskDag {
         &self.dag
     }
 
     /// Mutable access to the underlying DAG.
-    pub fn dag_mut(&mut self) -> &mut UnifiedTaskDag {
+    pub const fn dag_mut(&mut self) -> &mut UnifiedTaskDag {
         &mut self.dag
     }
 
@@ -986,7 +988,7 @@ fn merge_task_specs(target: &mut Task, merged: &Task) {
     append_unique(&mut target.acceptance, &merged.acceptance);
     target.exclusive_files |= merged.exclusive_files;
     if target.role.is_none() {
-        target.role = merged.role.clone();
+        target.role.clone_from(&merged.role);
     }
     if target.category.is_none() {
         target.category = merged.category;
@@ -1007,10 +1009,12 @@ fn merge_task_specs(target: &mut Task, merged: &Task) {
         target.complexity_band = merged.complexity_band;
     }
     if target.preferred_model.is_none() {
-        target.preferred_model = merged.preferred_model.clone();
+        target.preferred_model.clone_from(&merged.preferred_model);
     }
     if target.preferred_provider.is_none() {
-        target.preferred_provider = merged.preferred_provider.clone();
+        target
+            .preferred_provider
+            .clone_from(&merged.preferred_provider);
     }
 }
 

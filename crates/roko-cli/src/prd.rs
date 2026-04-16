@@ -710,6 +710,17 @@ fn auto_plan_enabled(workdir: &Path) -> Result<bool> {
 
 /// Generate implementation plans from a published PRD file.
 pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) -> Result<PathBuf> {
+    generate_plan_from_prd_with_failure_context(slug, prd_path, dry_run, None).await
+}
+
+/// Generate implementation plans from a published PRD file with optional
+/// failure context injected into the planning prompt.
+pub async fn generate_plan_from_prd_with_failure_context(
+    slug: &str,
+    prd_path: &Path,
+    dry_run: bool,
+    failure_context: Option<&str>,
+) -> Result<PathBuf> {
     let workdir = prd_workdir(prd_path)?;
     let result = async {
         let content = std::fs::read_to_string(prd_path)
@@ -730,7 +741,10 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             .map_or(workdir.as_path(), |temp| temp.path());
 
         let resolved = crate::load_layered(workdir_ref)?;
-        let system = crate::plan_generate::build_generator_system_prompt(workdir_ref);
+        let system = augment_generator_system_prompt(
+            crate::plan_generate::build_generator_system_prompt(workdir_ref),
+            failure_context,
+        );
         let plans_root = workspace_plans_dir(workdir_ref);
         let tasks_before = dry_run_fs::snapshot_tasks_files(&plans_root);
         let task_prompt = format!(
@@ -849,6 +863,22 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             Err(err)
         }
     }
+}
+
+pub(crate) fn augment_generator_system_prompt(
+    mut system_prompt: String,
+    failure_context: Option<&str>,
+) -> String {
+    let Some(failure_context) = failure_context.map(str::trim).filter(|ctx| !ctx.is_empty()) else {
+        return system_prompt;
+    };
+
+    system_prompt.push_str("\n\n## Failure context for replanning\n");
+    system_prompt.push_str(failure_context);
+    system_prompt.push_str(
+        "\n\nUse this failure context to revise the plan first. Do not reproduce the same task shape.\n",
+    );
+    system_prompt
 }
 
 /// Build the system prompt for agent-assisted PRD commands.
@@ -1108,6 +1138,25 @@ mod tests {
         .unwrap();
 
         assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn augment_generator_system_prompt_skips_empty_context() {
+        let prompt = augment_generator_system_prompt("base prompt".to_string(), Some("   "));
+        assert_eq!(prompt, "base prompt");
+    }
+
+    #[test]
+    fn augment_generator_system_prompt_includes_failure_context() {
+        let prompt = augment_generator_system_prompt(
+            "base prompt".to_string(),
+            Some("task_id = \"demo\"\nreason = \"gate failure\""),
+        );
+        assert!(prompt.starts_with("base prompt"));
+        assert!(prompt.contains("## Failure context for replanning"));
+        assert!(prompt.contains("task_id = \"demo\""));
+        assert!(prompt.contains("gate failure"));
+        assert!(prompt.contains("Do not reproduce the same task shape."));
     }
 
     #[test]
