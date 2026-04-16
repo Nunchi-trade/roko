@@ -168,6 +168,7 @@ pub struct AgentTokenStatus {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Cached JSON payload stored for short-lived aggregator responses.
 #[derive(Debug, Clone)]
 pub struct CachedJsonValue {
     expires_at: Instant,

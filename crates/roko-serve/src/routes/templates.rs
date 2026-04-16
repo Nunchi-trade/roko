@@ -276,3 +276,286 @@ async fn deploy_template_cloud(
         Json(json!({ "id": dep_id, "type": "cloud_deployment" })),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode, header};
+    use tempfile::tempdir;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    use crate::deploy::manual::ManualBackend;
+    use crate::runtime::{CliRuntime, DashboardInfo, NoOpRuntime, RunResult, SessionStatusInfo};
+
+    #[tokio::test]
+    async fn templates_create_and_get_roundtrip() {
+        let state = test_state(Arc::new(NoOpRuntime));
+        let router = test_router(state);
+        let payload = json!({
+            "name": "demo",
+            "description": "Demo template",
+            "model": "sonnet",
+            "role": "implementer",
+            "system_prompt": "Hello from demo",
+            "max_turns": 3,
+            "output_format": "markdown",
+            "mcp_servers": [],
+            "allowed_tools": [],
+            "denied_tools": [],
+        });
+
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/templates")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .expect("build create request"),
+            )
+            .await
+            .expect("create template response");
+
+        assert_eq!(
+            create_response.status(),
+            StatusCode::CREATED,
+            "creating a valid template should return 201"
+        );
+
+        let create_body = to_bytes(create_response.into_body(), usize::MAX)
+            .await
+            .expect("read create response body");
+        let create_json: Value =
+            serde_json::from_slice(&create_body).expect("parse create response json");
+        assert_eq!(
+            create_json["name"],
+            "demo",
+            "create response should echo the inserted template name"
+        );
+
+        let get_response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/templates/demo")
+                    .body(Body::empty())
+                    .expect("build get request"),
+            )
+            .await
+            .expect("get template response");
+
+        assert_eq!(
+            get_response.status(),
+            StatusCode::OK,
+            "fetching a created template should return 200"
+        );
+
+        let get_body = to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .expect("read get response body");
+        let template_json: Value =
+            serde_json::from_slice(&get_body).expect("parse get response json");
+        assert_eq!(
+            template_json["name"],
+            "demo",
+            "GET /api/templates/demo should return the created template"
+        );
+        assert_eq!(
+            template_json["system_prompt"],
+            "Hello from demo",
+            "GET /api/templates/demo should preserve the system prompt"
+        );
+        assert_eq!(
+            template_json["output_format"],
+            "markdown",
+            "GET /api/templates/demo should preserve the template output format"
+        );
+    }
+
+    #[tokio::test]
+    async fn templates_interpolate_replaces_placeholders() {
+        let runtime = Arc::new(RecordingRuntime::new());
+        let state = test_state(Arc::clone(&runtime) as Arc<dyn CliRuntime>);
+        let router = test_router(state);
+
+        let create_payload = json!({
+            "name": "interpolate",
+            "description": "Interpolation demo",
+            "role": "implementer",
+            "system_prompt": "Investigate {{subject}}",
+            "max_turns": 2,
+        });
+
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/templates")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_payload.to_string()))
+                    .expect("build interpolation create request"),
+            )
+            .await
+            .expect("create interpolation template response");
+        assert_eq!(
+            create_response.status(),
+            StatusCode::CREATED,
+            "template setup for interpolation test should succeed"
+        );
+
+        let deploy_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/templates/interpolate/deploy")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "params": {
+                                "subject": "codebase"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build deploy request"),
+            )
+            .await
+            .expect("deploy template response");
+
+        assert_eq!(
+            deploy_response.status(),
+            StatusCode::ACCEPTED,
+            "deploying a template should enqueue work"
+        );
+
+        let deploy_body = to_bytes(deploy_response.into_body(), usize::MAX)
+            .await
+            .expect("read deploy response body");
+        let deploy_json: Value =
+            serde_json::from_slice(&deploy_body).expect("parse deploy response json");
+        assert!(
+            deploy_json["id"].as_str().is_some(),
+            "deploy response should include a run id"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.notified.notified())
+            .await
+            .expect("deploy task did not invoke the runtime");
+
+        let prompt = runtime
+            .prompt
+            .lock()
+            .expect("lock recorded prompt")
+            .clone()
+            .expect("runtime should capture the rendered prompt");
+        assert_eq!(
+            prompt,
+            "Investigate codebase",
+            "template deployment should interpolate request params into the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn templates_bad_syntax_returns_400() {
+        let state = test_state(Arc::new(NoOpRuntime));
+        let router = test_router(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/templates")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .expect("build malformed create request"),
+            )
+            .await
+            .expect("malformed template response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed template JSON should be rejected with 400"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read malformed response body");
+        let body_text = String::from_utf8(body.to_vec()).expect("decode malformed response body");
+        assert!(
+            body_text.contains("Failed to parse the request body as JSON"),
+            "malformed template response should explain the JSON parse failure: {body_text}"
+        );
+    }
+
+    fn test_state(runtime: Arc<dyn CliRuntime>) -> Arc<AppState> {
+        let dir = tempdir().expect("create tempdir for template tests");
+        Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            runtime,
+            roko_core::config::schema::RokoConfig::default(),
+            Arc::new(ManualBackend::default()),
+        ))
+    }
+
+    fn test_router(state: Arc<AppState>) -> Router {
+        Router::new().nest("/api", routes()).with_state(state)
+    }
+
+    struct RecordingRuntime {
+        prompt: Arc<Mutex<Option<String>>>,
+        notified: Arc<Notify>,
+    }
+
+    impl RecordingRuntime {
+        fn new() -> Self {
+            Self {
+                prompt: Arc::new(Mutex::new(None)),
+                notified: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CliRuntime for RecordingRuntime {
+        async fn run_once(
+            &self,
+            _workdir: &std::path::Path,
+            prompt: &str,
+        ) -> anyhow::Result<RunResult> {
+            *self
+                .prompt
+                .lock()
+                .expect("lock prompt recorder for template deployment") = Some(prompt.to_owned());
+            self.notified.notify_one();
+            Ok(RunResult { success: true })
+        }
+
+        fn session_status(&self, workdir: std::path::PathBuf) -> SessionStatusInfo {
+            SessionStatusInfo {
+                session_id: None,
+                workdir,
+                daemon_running: false,
+                signal_count: None,
+                episode_count: None,
+                last_episode_passed: None,
+            }
+        }
+
+        fn dashboard_scaffold(&self, _workdir: &std::path::Path) -> DashboardInfo {
+            DashboardInfo {
+                rendered: String::new(),
+            }
+        }
+    }
+}

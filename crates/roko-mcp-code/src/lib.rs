@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use roko_index::WorkspaceIndex;
-use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};
+use roko_mcp_stdio::{serve_stdio, JsonRpcError, JsonRpcRequest};
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::io;
 use std::path::PathBuf;
@@ -55,9 +55,7 @@ pub fn run() -> Result<()> {
 }
 
 fn load_workspace_index() -> Result<WorkspaceIndex> {
-    let root = env::var_os("ROKO_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or(env::current_dir()?);
+    let root = env::var_os("ROKO_WORKSPACE_ROOT").map_or(env::current_dir()?, PathBuf::from);
     WorkspaceIndex::load(root)
 }
 
@@ -89,7 +87,7 @@ fn handle_tools_list() -> Value {
             tool_spec(
                 "symbol_lookup",
                 "Look up symbol definitions by exact name.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "Symbol name to resolve."}
@@ -101,7 +99,7 @@ fn handle_tools_list() -> Value {
             tool_spec(
                 "call_graph",
                 "Return callers and callees around a function name.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "function": {"type": "string", "description": "Function name to inspect."},
@@ -114,7 +112,7 @@ fn handle_tools_list() -> Value {
             tool_spec(
                 "imports",
                 "Return a file's parsed import list.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "file": {"type": "string", "description": "Workspace-relative file path."}
@@ -126,7 +124,7 @@ fn handle_tools_list() -> Value {
             tool_spec(
                 "semantic_search",
                 "Search code semantically using HDC fingerprints.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query text."},
@@ -203,7 +201,7 @@ fn handle_semantic_search(arguments: Value, index: &WorkspaceIndex) -> Result<Va
     }))
 }
 
-fn tool_spec(name: &str, description: &str, input_schema: Value) -> Value {
+fn tool_spec(name: &str, description: &str, input_schema: &Value) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -224,13 +222,15 @@ fn tool_result<T: Serialize>(payload: T) -> Result<Value, JsonRpcError> {
 }
 
 fn empty_json_object() -> Value {
-    Value::Object(Default::default())
+    Value::Object(serde_json::Map::default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use roko_core::language::{Symbol, SymbolKind, Visibility};
+    use serde_json::json;
+    use std::io::Cursor;
 
     fn make_index() -> WorkspaceIndex {
         WorkspaceIndex::from_source_files(vec![roko_index::SourceFile {
@@ -297,5 +297,116 @@ mod tests {
                 .expect("json payload");
         assert_eq!(payload["function"], "main");
         assert_eq!(payload["callees"].as_array().expect("callees").len(), 1);
+    }
+
+    #[test]
+    fn tools_call_missing_arguments_field_returns_error() {
+        let index = make_index();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: json!({ "arguments": {} }),
+            id: json!(1),
+        };
+
+        let err = match handle_request(request, &index) {
+            Ok(value) => panic!(
+                "expected invalid tools/call params error for missing arguments field, got success: {value}"
+            ),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err.code,
+            JsonRpcError::INVALID_REQUEST,
+            "missing arguments field should be reported as an invalid request"
+        );
+        assert!(
+            err.message.contains("invalid tools/call params"),
+            "error message should identify the tools/call parameter shape problem: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("name"),
+            "error message should mention the missing name field: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn symbol_lookup_missing_required_arg_returns_error() {
+        let index = make_index();
+        let err = match dispatch_tool_call("symbol_lookup", json!({}), &index) {
+            Ok(value) => panic!(
+                "expected invalid symbol_lookup args error for missing name field, got success: {value}"
+            ),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err.code,
+            JsonRpcError::INVALID_REQUEST,
+            "missing symbol_lookup.name should be reported as an invalid request"
+        );
+        assert!(
+            err.message.contains("invalid symbol_lookup args"),
+            "error message should identify the symbol_lookup argument parsing problem: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("name"),
+            "error message should mention the missing name field: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn imports_missing_file_returns_error() {
+        let index = make_index();
+        let err = match dispatch_tool_call("imports", json!({ "file": "missing.rs" }), &index) {
+            Ok(value) => panic!(
+                "expected invalid imports args error for nonexistent file, got success: {value}"
+            ),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err.code,
+            JsonRpcError::INVALID_REQUEST,
+            "nonexistent imports file should be reported as an invalid request"
+        );
+        assert!(
+            err.message.contains("resolve workspace file missing.rs")
+                || err.message.contains("file 'missing.rs' was not indexed"),
+            "error message should mention the missing file path: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn malformed_json_returns_parse_error() {
+        let mut output = Vec::new();
+
+        serve_stdio(Cursor::new(b"{not json}\n"), &mut output, |_request| {
+            panic!("handler should not be called for malformed JSON input");
+        })
+        .expect("stdio transport");
+
+        let response: Value = serde_json::from_slice(&output)
+            .expect("malformed JSON should still produce a structured response");
+        assert_eq!(
+            response["jsonrpc"], "2.0",
+            "malformed JSON should produce a JSON-RPC 2.0 response"
+        );
+        assert_eq!(
+            response["id"],
+            Value::Null,
+            "parse errors should use a null request id"
+        );
+        assert_eq!(
+            response["error"]["code"],
+            JsonRpcError::PARSE_ERROR,
+            "malformed JSON should surface as a parse error"
+        );
     }
 }

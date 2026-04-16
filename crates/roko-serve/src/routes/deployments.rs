@@ -307,6 +307,13 @@ async fn get_logs(
     Path(id): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    {
+        let deps = state.deployments.read().await;
+        if !deps.contains_key(&id) {
+            return Err(ApiError::not_found("deployment not found"));
+        }
+    }
+
     let logs = state
         .deploy_backend
         .logs(&id, query.tail)
@@ -416,4 +423,423 @@ async fn receive_callback(
     });
 
     Ok(Json(json!({ "received": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::error::Error;
+
+    use anyhow::{Result, anyhow};
+    use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tempfile::{TempDir, tempdir};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    use crate::deploy::{DeployBackend, Deployment};
+    use crate::runtime::NoOpRuntime;
+    use crate::templates::{AgentTemplate, TemplateOutputFormat};
+
+    struct RecordingDeployBackend {
+        next_url: Option<String>,
+        deployed_specs: Mutex<Vec<DeploySpec>>,
+    }
+
+    impl RecordingDeployBackend {
+        fn with_url(next_url: Option<String>) -> Self {
+            Self {
+                next_url,
+                deployed_specs: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DeployBackend for RecordingDeployBackend {
+        async fn deploy(&self, spec: &DeploySpec) -> Result<Deployment> {
+            self.deployed_specs.lock().await.push(spec.clone());
+
+            Ok(Deployment {
+                id: "dep-1".to_string(),
+                name: spec.name.clone(),
+                status: DeploymentStatus::Ready {
+                    url: self
+                        .next_url
+                        .clone()
+                        .unwrap_or_else(|| "http://worker.invalid".to_string()),
+                },
+                url: self.next_url.clone(),
+                created_at: chrono::Utc::now(),
+            })
+        }
+
+        async fn status(&self, deployment_id: &str) -> Result<DeploymentStatus> {
+            Ok(DeploymentStatus::Ready {
+                url: self
+                    .next_url
+                    .clone()
+                    .unwrap_or_else(|| format!("http://worker.invalid/{deployment_id}")),
+            })
+        }
+
+        async fn teardown(&self, _deployment_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn logs(&self, deployment_id: &str, tail: usize) -> Result<Vec<String>> {
+            Ok(vec![format!("log line for {deployment_id} tail={tail}")])
+        }
+    }
+
+    async fn record_task(
+        State(recorded): State<Arc<Mutex<Vec<Value>>>>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        recorded.lock().await.push(payload.clone());
+        Json(json!({
+            "forwarded": true,
+            "received": payload,
+        }))
+    }
+
+    async fn spawn_mock_worker_server() -> Result<(String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>)> {
+        let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let router = Router::new()
+            .route("/task", post(record_task))
+            .with_state(Arc::clone(&recorded));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| anyhow!("failed to bind mock worker listener: {err}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|err| anyhow!("failed to read mock worker address: {err}"))?;
+        let handle = tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, router).await {
+                panic!("mock worker server stopped unexpectedly: {err}");
+            }
+        });
+        Ok((format!("http://{addr}"), recorded, handle))
+    }
+
+    fn test_template(name: &str, prompt: &str) -> AgentTemplate {
+        AgentTemplate {
+            name: name.to_string(),
+            description: format!("template for {name}"),
+            model: "claude-sonnet-4-5".to_string(),
+            role: "implementer".to_string(),
+            system_prompt: prompt.to_string(),
+            max_turns: 3,
+            output_format: TemplateOutputFormat::Markdown,
+            mcp_servers: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            experiment: None,
+        }
+    }
+
+    fn test_state(backend: Arc<dyn DeployBackend>) -> Result<(TempDir, Arc<AppState>)> {
+        let dir = tempdir().map_err(|err| anyhow!("failed to create tempdir: {err}"))?;
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            roko_core::config::schema::RokoConfig::default(),
+            backend,
+        ));
+        Ok((dir, state))
+    }
+
+    async fn insert_template(state: &Arc<AppState>, template: AgentTemplate) -> Result<()> {
+        state
+            .templates
+            .write()
+            .await
+            .insert(template)
+            .map_err(|err| anyhow!("failed to insert template into registry: {err}"))?;
+        Ok(())
+    }
+
+    fn router(state: Arc<AppState>) -> Router {
+        Router::new().nest("/api", routes()).with_state(state)
+    }
+
+    async fn json_body(response: axum::response::Response) -> Result<Value> {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| anyhow!("failed to read response body bytes: {err}"))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|err| anyhow!("failed to parse JSON response body: {err}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deployments_create_returns_id() -> std::result::Result<(), Box<dyn Error>> {
+        let backend: Arc<dyn DeployBackend> = Arc::new(RecordingDeployBackend::with_url(Some(
+            "http://worker.invalid".to_string(),
+        )));
+        let (_dir, state) = test_state(backend)?;
+        insert_template(&state, test_template("reviewer", "Review {{subject}}")).await?;
+        let app = router(Arc::clone(&state));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "template": "reviewer",
+                            "params": { "subject": "batch T18" }
+                        })
+                        .to_string(),
+                    ))
+                    .map_err(|err| anyhow!("failed to build deployments create request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("deployments create request failed: {err}"))?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "POST /api/deployments should return 201 Created for a successful deployment"
+        );
+
+        let payload = json_body(response).await?;
+        assert_eq!(
+            payload["id"], "dep-1",
+            "POST /api/deployments should return the created deployment id"
+        );
+        assert_eq!(
+            payload["status"], "creating",
+            "POST /api/deployments should report the new deployment as creating"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deployments_list_after_create() -> std::result::Result<(), Box<dyn Error>> {
+        let backend: Arc<dyn DeployBackend> = Arc::new(RecordingDeployBackend::with_url(Some(
+            "http://worker.invalid".to_string(),
+        )));
+        let (_dir, state) = test_state(backend)?;
+        insert_template(&state, test_template("reviewer", "Review {{subject}}")).await?;
+        let app = router(Arc::clone(&state));
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "template": "reviewer",
+                            "params": { "subject": "batch T18" }
+                        })
+                        .to_string(),
+                    ))
+                    .map_err(|err| anyhow!("failed to build deployment create request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("deployment create request failed: {err}"))?;
+        assert_eq!(
+            create_response.status(),
+            StatusCode::CREATED,
+            "setup create request should succeed before listing deployments"
+        );
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/deployments")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build deployments list request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("deployments list request failed: {err}"))?;
+        assert_eq!(
+            list_response.status(),
+            StatusCode::OK,
+            "GET /api/deployments should return 200 OK after a deployment is created"
+        );
+
+        let payload = json_body(list_response).await?;
+        let deployments = payload["deployments"]
+            .as_array()
+            .ok_or_else(|| anyhow!("deployments list response should contain a deployments array"))?;
+        assert!(
+            deployments.iter().any(|deployment| deployment["id"] == "dep-1"),
+            "GET /api/deployments should include the id of the deployment created earlier"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deployments_get_logs_missing_returns_404() -> std::result::Result<(), Box<dyn Error>> {
+        let backend: Arc<dyn DeployBackend> =
+            Arc::new(RecordingDeployBackend::with_url(Some("http://worker.invalid".to_string())));
+        let (_dir, state) = test_state(backend)?;
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/deployments/unknown/logs")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build deployment logs request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("deployment logs request failed: {err}"))?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "GET /api/deployments/unknown/logs should return 404 for an unknown deployment id"
+        );
+
+        let payload = json_body(response).await?;
+        assert_eq!(
+            payload["error"]["code"], "not_found",
+            "missing deployment logs should return the structured not_found error code"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deployments_task_proxy_forwards() -> std::result::Result<(), Box<dyn Error>> {
+        let backend: Arc<dyn DeployBackend> =
+            Arc::new(RecordingDeployBackend::with_url(Some("http://worker.invalid".to_string())));
+        let (_dir, state) = test_state(backend)?;
+        let (worker_url, recorded, worker_handle) = spawn_mock_worker_server().await?;
+
+        state.deployments.write().await.insert(
+            "dep-1".to_string(),
+            Deployment {
+                id: "dep-1".to_string(),
+                name: "roko-worker-reviewer".to_string(),
+                status: DeploymentStatus::Ready {
+                    url: worker_url.clone(),
+                },
+                url: Some(worker_url),
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/dep-1/task")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "task": "ship tests" }).to_string()))
+                    .map_err(|err| anyhow!("failed to build worker proxy request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("worker proxy request failed: {err}"))?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "POST /api/deployments/:id/task should succeed when the worker endpoint accepts the payload"
+        );
+
+        let payload = json_body(response).await?;
+        assert_eq!(
+            payload["forwarded"], true,
+            "POST /api/deployments/:id/task should return the worker response payload"
+        );
+        assert_eq!(
+            payload["received"]["task"], "ship tests",
+            "POST /api/deployments/:id/task should forward the original task payload to the worker"
+        );
+
+        let forwarded_payloads = recorded.lock().await;
+        assert_eq!(
+            forwarded_payloads.len(),
+            1,
+            "mock worker should record exactly one forwarded task request"
+        );
+        assert_eq!(
+            forwarded_payloads[0]["task"], "ship tests",
+            "mock worker should record the forwarded task body without mutation"
+        );
+        drop(forwarded_payloads);
+        worker_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deployments_callback_accepted() -> std::result::Result<(), Box<dyn Error>> {
+        let backend: Arc<dyn DeployBackend> =
+            Arc::new(RecordingDeployBackend::with_url(Some("http://worker.invalid".to_string())));
+        let (_dir, state) = test_state(backend)?;
+        state.deployments.write().await.insert(
+            "dep-1".to_string(),
+            Deployment {
+                id: "dep-1".to_string(),
+                name: "roko-worker-reviewer".to_string(),
+                status: DeploymentStatus::Ready {
+                    url: "http://worker.invalid".to_string(),
+                },
+                url: Some("http://worker.invalid".to_string()),
+                created_at: chrono::Utc::now(),
+            },
+        );
+        let app = router(Arc::clone(&state));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/dep-1/callback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "task_id": "task-123",
+                            "success": true
+                        })
+                        .to_string(),
+                    ))
+                    .map_err(|err| anyhow!("failed to build deployment callback request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("deployment callback request failed: {err}"))?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "POST /api/deployments/:id/callback should return 200 OK for a valid worker callback"
+        );
+
+        let payload = json_body(response).await?;
+        assert_eq!(
+            payload["received"], true,
+            "POST /api/deployments/:id/callback should acknowledge that the callback was recorded"
+        );
+
+        let template_runs = state.template_runs.read().await;
+        let reviewer_runs = template_runs
+            .get("reviewer")
+            .ok_or_else(|| anyhow!("worker callback should create a template run record for the backing template"))?;
+        assert_eq!(
+            reviewer_runs.len(),
+            1,
+            "worker callback should record exactly one template run for the deployment template"
+        );
+        assert_eq!(
+            reviewer_runs[0].trigger_kind, "worker_callback",
+            "worker callback should tag the recorded template run with trigger_kind=worker_callback"
+        );
+        assert!(
+            reviewer_runs[0].success,
+            "worker callback should store the success flag from the callback payload"
+        );
+        Ok(())
+    }
 }

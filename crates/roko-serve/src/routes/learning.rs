@@ -882,7 +882,9 @@ struct RungThresholdSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
     use roko_core::OperatingFrequency;
+    use std::error::Error;
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -966,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn cascade_response_summarizes_weights_and_recommendations() {
+    fn cascade_response_summarizes_weights_and_recommendations() -> Result<(), Box<dyn Error>> {
         let response = build_cascade_response(
             std::path::Path::new("/tmp/.roko/learn/cascade-router.json"),
             Some(snapshot()),
@@ -991,7 +993,7 @@ mod tests {
             .recommended_models
             .iter()
             .find(|rec| rec.task_category == "docs")
-            .expect("docs recommendation");
+            .ok_or_else(|| anyhow!("expected docs recommendation in cascade response"))?;
         assert_eq!(docs.complexity_band, "fast");
         assert_eq!(docs.recommended_model, "claude-haiku-3-5");
 
@@ -999,7 +1001,7 @@ mod tests {
             .recommended_models
             .iter()
             .find(|rec| rec.task_category == "implementation")
-            .expect("implementation recommendation");
+            .ok_or_else(|| anyhow!("expected implementation recommendation in cascade response"))?;
         assert_eq!(implementation.complexity_band, "standard");
         assert_eq!(implementation.recommended_model, "claude-sonnet-4-5");
 
@@ -1007,9 +1009,10 @@ mod tests {
             .recommended_models
             .iter()
             .find(|rec| rec.task_category == "research")
-            .expect("research recommendation");
+            .ok_or_else(|| anyhow!("expected research recommendation in cascade response"))?;
         assert_eq!(research.complexity_band, "complex");
         assert_eq!(research.recommended_model, "claude-opus-4");
+        Ok(())
     }
 
     #[test]
@@ -1092,27 +1095,29 @@ mod tests {
         }
     }
 
-    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
-        let dir = tempdir().expect("tempdir");
+    fn test_state() -> Result<(tempfile::TempDir, Arc<AppState>), Box<dyn Error>> {
+        let dir = tempdir().map_err(|err| anyhow!("failed to create tempdir: {err}"))?;
         let workdir = dir.path().to_path_buf();
-        let deploy_backend =
-            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let deploy_backend = Arc::from(
+            create_backend("manual", None, None, None)
+                .map_err(|err| anyhow!("failed to create manual backend: {err}"))?,
+        );
         let state = Arc::new(AppState::new(
             workdir,
             Arc::new(NoOpRuntime),
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
         ));
-        (dir, state)
+        Ok((dir, state))
     }
 
-    #[tokio::test]
-    async fn cascade_alias_is_served_under_api_grouping() {
-        let (dir, state) = test_state();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cascade_alias_is_served_under_api_grouping() -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
         let learn_dir = dir.path().join(".roko").join("learn");
         tokio::fs::create_dir_all(&learn_dir)
             .await
-            .expect("create learn dir");
+            .map_err(|err| anyhow!("failed to create learn dir for cascade alias test: {err}"))?;
         let cascade_path = learn_dir.join("cascade-router.json");
         tokio::fs::write(
             &cascade_path,
@@ -1125,7 +1130,7 @@ mod tests {
             .to_string(),
         )
         .await
-        .expect("write cascade snapshot");
+        .map_err(|err| anyhow!("failed to write cascade snapshot fixture: {err}"))?;
 
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
         let response = app
@@ -1134,28 +1139,33 @@ mod tests {
                     .method("GET")
                     .uri("/api/learning/cascade")
                     .body(Body::empty())
-                    .expect("request"),
+                    .map_err(|err| anyhow!("failed to build cascade alias request: {err}"))?,
             )
             .await
-            .expect("cascade response");
+            .map_err(|err| anyhow!("cascade alias request failed: {err}"))?;
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("read body");
-        let payload: Value = serde_json::from_slice(&body).expect("parse cascade response");
+            .map_err(|err| anyhow!("failed to read cascade alias response body: {err}"))?;
+        let payload: Value = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse cascade alias response body: {err}"))?;
         assert_eq!(payload["source"], cascade_path.display().to_string());
         assert_eq!(payload["routing_stats"]["total_observations"], 50);
         assert_eq!(payload["model_weights"][0]["model"], "claude-sonnet-4-5");
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn gates_history_collection_is_served_under_api_grouping() {
-        let (dir, state) = test_state();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gates_history_collection_is_served_under_api_grouping() -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
         let signals = dir.path().join(".roko").join("signals.jsonl");
-        tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
+        let signals_parent = signals
+            .parent()
+            .ok_or_else(|| anyhow!("signals path should have a parent directory"))?;
+        tokio::fs::create_dir_all(signals_parent)
             .await
-            .expect("create signals dir");
+            .map_err(|err| anyhow!("failed to create signals dir for history test: {err}"))?;
         tokio::fs::write(
             &signals,
             [
@@ -1186,7 +1196,7 @@ mod tests {
                 + "\n",
         )
         .await
-        .expect("write gate history");
+        .map_err(|err| anyhow!("failed to write gate history fixture: {err}"))?;
 
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
         let response = app
@@ -1195,45 +1205,49 @@ mod tests {
                     .method("GET")
                     .uri("/api/gates/history?limit=1")
                     .body(Body::empty())
-                    .expect("request"),
+                    .map_err(|err| anyhow!("failed to build gate history request: {err}"))?,
             )
             .await
-            .expect("gate history response");
+            .map_err(|err| anyhow!("gate history request failed: {err}"))?;
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("read body");
-        let payload: Value = serde_json::from_slice(&body).expect("parse gate history response");
+            .map_err(|err| anyhow!("failed to read gate history response body: {err}"))?;
+        let payload: Value = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse gate history response body: {err}"))?;
         assert_eq!(payload["source"], signals.display().to_string());
         assert_eq!(payload["total"], 2);
         assert_eq!(payload["limit"], 1);
         assert_eq!(payload["history"].as_array().unwrap().len(), 1);
         assert_eq!(payload["history"][0]["gate"], "test");
         assert_eq!(payload["history"][0]["passed"], false);
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn experiments_returns_empty_store_when_missing() {
-        let (_dir, state) = test_state();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn experiments_returns_empty_store_when_missing() -> Result<(), Box<dyn Error>> {
+        let (_dir, state) = test_state()?;
 
         let response = experiments(State(state))
             .await
-            .expect("missing experiments should return empty store");
+            .map_err(|err| anyhow!("missing experiments endpoint should succeed: {}", err.message))?;
         let body = response.0;
 
         assert_eq!(body.running_experiments, 0);
         assert_eq!(body.concluded_experiments, 0);
         assert!(body.active_experiments.is_empty());
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn learn_alias_routes_expose_cascade_router_cost_tiers_and_gate_thresholds() {
-        let (dir, state) = test_state();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn learn_alias_routes_expose_cascade_router_cost_tiers_and_gate_thresholds(
+    ) -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
         let learn_dir = dir.path().join(".roko").join("learn");
         tokio::fs::create_dir_all(&learn_dir)
             .await
-            .expect("create learn dir");
+            .map_err(|err| anyhow!("failed to create learn dir for alias routes test: {err}"))?;
 
         let cascade_path = learn_dir.join("cascade-router.json");
         tokio::fs::write(
@@ -1248,7 +1262,7 @@ mod tests {
             .to_string(),
         )
         .await
-        .expect("write cascade snapshot");
+        .map_err(|err| anyhow!("failed to write cascade snapshot fixture: {err}"))?;
 
         let gate_thresholds_path = learn_dir.join("gate-thresholds.json");
         tokio::fs::write(
@@ -1256,7 +1270,7 @@ mod tests {
             serde_json::json!({"hello": "world"}).to_string(),
         )
         .await
-        .expect("write gate thresholds");
+        .map_err(|err| anyhow!("failed to write gate thresholds fixture: {err}"))?;
 
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
 
@@ -1267,16 +1281,16 @@ mod tests {
                     .method("GET")
                     .uri("/api/learn/cascade-router")
                     .body(Body::empty())
-                    .expect("request"),
+                    .map_err(|err| anyhow!("failed to build cascade-router alias request: {err}"))?,
             )
             .await
-            .expect("cascade router response");
+            .map_err(|err| anyhow!("cascade-router alias request failed: {err}"))?;
         assert_eq!(cascade_response.status(), axum::http::StatusCode::OK);
         let cascade_body = axum::body::to_bytes(cascade_response.into_body(), usize::MAX)
             .await
-            .expect("read cascade body");
-        let cascade_payload: Value =
-            serde_json::from_slice(&cascade_body).expect("parse cascade router response");
+            .map_err(|err| anyhow!("failed to read cascade-router alias response body: {err}"))?;
+        let cascade_payload: Value = serde_json::from_slice(&cascade_body)
+            .map_err(|err| anyhow!("failed to parse cascade-router alias response body: {err}"))?;
         assert_eq!(cascade_payload["model_slugs"].as_array().unwrap().len(), 2);
 
         let cost_tiers_response = app
@@ -1286,16 +1300,16 @@ mod tests {
                     .method("GET")
                     .uri("/api/learn/cost-tiers")
                     .body(Body::empty())
-                    .expect("request"),
+                    .map_err(|err| anyhow!("failed to build cost-tiers alias request: {err}"))?,
             )
             .await
-            .expect("cost tiers response");
+            .map_err(|err| anyhow!("cost-tiers alias request failed: {err}"))?;
         assert_eq!(cost_tiers_response.status(), axum::http::StatusCode::OK);
         let cost_tiers_body = axum::body::to_bytes(cost_tiers_response.into_body(), usize::MAX)
             .await
-            .expect("read cost tiers body");
-        let cost_tiers_payload: Value =
-            serde_json::from_slice(&cost_tiers_body).expect("parse cost tiers response");
+            .map_err(|err| anyhow!("failed to read cost-tiers alias response body: {err}"))?;
+        let cost_tiers_payload: Value = serde_json::from_slice(&cost_tiers_body)
+            .map_err(|err| anyhow!("failed to parse cost-tiers alias response body: {err}"))?;
         assert_eq!(cost_tiers_payload["total"], 60);
         assert_eq!(cost_tiers_payload["T0"], 10);
         assert_eq!(cost_tiers_payload["T1"], 50);
@@ -1306,35 +1320,42 @@ mod tests {
                     .method("GET")
                     .uri("/api/learn/gate-thresholds")
                     .body(Body::empty())
-                    .expect("request"),
+                    .map_err(|err| anyhow!("failed to build gate-thresholds alias request: {err}"))?,
             )
             .await
-            .expect("gate thresholds response");
+            .map_err(|err| anyhow!("gate-thresholds alias request failed: {err}"))?;
         assert_eq!(thresholds_response.status(), axum::http::StatusCode::OK);
         let thresholds_body = axum::body::to_bytes(thresholds_response.into_body(), usize::MAX)
             .await
-            .expect("read gate thresholds body");
-        let thresholds_payload: Value =
-            serde_json::from_slice(&thresholds_body).expect("parse gate thresholds response");
+            .map_err(|err| anyhow!("failed to read gate-thresholds alias response body: {err}"))?;
+        let thresholds_payload: Value = serde_json::from_slice(&thresholds_body).map_err(
+            |err| anyhow!("failed to parse gate-thresholds alias response body: {err}"),
+        )?;
         assert_eq!(thresholds_payload["hello"], "world");
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn experiments_returns_500_for_invalid_json() {
-        let (dir, state) = test_state();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn experiments_returns_500_for_invalid_json() -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
         let path = dir.path().join(".roko/learn/experiments.json");
-        tokio::fs::create_dir_all(path.parent().expect("experiments parent"))
+        let path_parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("experiments fixture path should have a parent directory"))?;
+        tokio::fs::create_dir_all(path_parent)
             .await
-            .expect("create learn dir");
+            .map_err(|err| anyhow!("failed to create learn dir for experiments test: {err}"))?;
         tokio::fs::write(&path, "{not-json}")
             .await
-            .expect("write corrupt experiments");
+            .map_err(|err| anyhow!("failed to write corrupt experiments fixture: {err}"))?;
 
-        let err = experiments(State(state))
-            .await
-            .expect_err("corrupt experiments should fail");
+        let err = match experiments(State(state)).await {
+            Ok(_) => return Err(anyhow!("corrupt experiments should fail").into()),
+            Err(err) => err,
+        };
 
         assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        Ok(())
     }
 
     #[test]

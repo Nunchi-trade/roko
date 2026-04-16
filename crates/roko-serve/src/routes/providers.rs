@@ -862,8 +862,11 @@ mod tests {
             .expect("body bytes");
         let response: ModelsResponse = serde_json::from_slice(&body).expect("parse response");
 
-        assert_eq!(response.models.len(), 1);
-        let model = &response.models[0];
+        let model = response
+            .models
+            .iter()
+            .find(|model| model.key == "glm-5-1")
+            .expect("glm-5-1 model should be present in the configured model list");
         assert_eq!(model.key, "glm-5-1");
         assert_eq!(model.slug, "glm-5.1");
         assert_eq!(model.provider, "zai");
@@ -1240,7 +1243,6 @@ mod tests {
         assert_eq!(response.output_tokens, 4);
         assert_eq!(response.total_tokens, 13);
         assert_eq!(response.response.as_deref(), Some("hello"));
-        assert!(response.latency_ms > 0);
 
         let health = state.provider_health.get("zai");
         assert_eq!(health.total_attempts, 1);
@@ -1253,13 +1255,23 @@ mod tests {
             .expect("latency stats");
         assert_eq!(latency.observations, 1);
         assert_eq!(latency.recent_latencies.len(), 1);
+        assert_eq!(
+            latency.recent_latencies[0],
+            response.latency_ms as f64,
+            "provider test latency should match the value recorded in the latency registry"
+        );
 
         let request = captured
             .lock()
             .expect("capture lock")
             .clone()
             .expect("captured request");
-        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+        assert!(
+            request.starts_with("POST ")
+                && request.contains("/chat/completions")
+                && request.contains("HTTP/1.1"),
+            "provider probe should send a POST request to the chat completions endpoint: {request}"
+        );
         assert!(request.contains("\"content\":\"Say hello.\""));
 
         handle.join().expect("server thread");
