@@ -60,6 +60,8 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy = "0.15"
 dirs = "6"
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-full = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

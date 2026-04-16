@@ -13,6 +13,7 @@ pub mod config_meta;
 pub mod dashboard;
 pub mod effects_config;
 pub mod event;
+pub mod fs_watch;
 pub mod hit_test;
 pub mod input;
 pub mod layout;

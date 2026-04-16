@@ -32,6 +32,7 @@ use super::approval_ipc::ApprovalRequest;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
+use super::fs_watch::{self, FsRefresh, FsWatchHandle};
 use super::input::{self, ConfirmAction, FocusZone, InputMode, TuiAction};
 use super::modals::{
     self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry,
@@ -87,8 +88,8 @@ pub struct App {
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
     sys_rx: Option<std::sync::mpsc::Receiver<SysSnapshot>>,
-    /// Background data refresh receiver (file reads off main thread).
-    data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
+    /// Filesystem watcher handle for debounced `.roko/` refresh events.
+    fs_watch: Option<FsWatchHandle>,
     /// Background git data receiver (git commands off main thread).
     git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
     /// Optional live process supervisor used for per-agent process sampling.
@@ -413,7 +414,7 @@ impl App {
             signal_selection: 0,
             gate_failure_selection: 0,
             sys_rx: None,
-            data_rx: None,
+            fs_watch: None,
             git_rx: None,
             process_supervisor: None,
             approval_rx: None,
@@ -539,32 +540,9 @@ impl App {
         self.sys_rx = Some(sys_rx);
 
         // ---------------------------------------------------------------
-        // Spawn background data refresh thread
+        // Start debounced `.roko/` watcher with polling fallback
         // ---------------------------------------------------------------
-        let (data_tx, data_rx) = std::sync::mpsc::channel::<DashboardData>();
-        let data_workdir = self.workdir.clone();
-        let data_log_dispatch = log_dispatch.clone();
-        std::thread::Builder::new()
-            .name("tui-data-refresh".into())
-            .spawn(move || {
-                let _log_guard = tracing::dispatcher::set_default(&data_log_dispatch);
-                loop {
-                    let data = DashboardData::load_best_effort(&data_workdir);
-                    if data_tx.send(data).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            })
-            .inspect_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    thread = "tui-data-refresh",
-                    "failed to spawn background thread"
-                );
-            })
-            .ok();
-        self.data_rx = Some(data_rx);
+        self.fs_watch = Some(fs_watch::watch_roko_dir_with_fallback(&self.workdir));
 
         // ---------------------------------------------------------------
         // Spawn background git data collector thread
@@ -2178,13 +2156,15 @@ impl App {
         }
     }
 
-    /// Manual refresh triggered by Ctrl-R.  Loads data synchronously as a
-    /// one-shot fallback (the normal path uses background threads).
+    /// Manual refresh triggered by Ctrl-R or a debounced filesystem event.
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.last_data_gen = self.data.generation;
         self.tui_state.update_from_snapshot(&self.data);
+        if let Some(state_hub) = &self._state_hub {
+            let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+        }
         self.fx_config = EffectsConfig::load_from_root(&self.workdir);
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
@@ -2206,9 +2186,7 @@ impl App {
         {
             Ok(()) => {
                 self.tui_state.config_pending.clear();
-                self.data = DashboardData::load_best_effort(&self.workdir);
-                self.tui_state.update_from_snapshot(&self.data);
-                self.fx_config = EffectsConfig::load_from_root(&self.workdir);
+                self.refresh_snapshot();
                 self.notifications.push(super::modals::Notification::info(
                     "Config saved and reloaded",
                 ));
@@ -2346,34 +2324,19 @@ impl App {
             self.merge_process_metrics(snap.process_metrics);
         }
 
-        // -- dashboard data --
-        if let Some(rx) = &self.data_rx {
-            let mut got_data = false;
-            let mut rebuild_scaffold = false;
+        // -- debounced filesystem refresh --
+        if let Some(fs_watch) = &self.fs_watch {
+            let mut got_refresh = false;
             let mut count = 0;
-            while let Ok(new_data) = rx.try_recv() {
-                if new_data.generation != self.last_data_gen {
-                    rebuild_scaffold = true;
-                }
-                self.last_data_gen = new_data.generation;
-                self.data = new_data;
-                got_data = true;
-
+            while let Ok(FsRefresh::Coalesced) = fs_watch.try_recv() {
+                got_refresh = true;
                 count += 1;
                 if count >= MAX_MESSAGES_PER_DRAIN {
                     break;
                 }
             }
-            if got_data {
-                if rebuild_scaffold {
-                    self.scaffold = DashboardScaffold::new_in(&self.workdir);
-                }
-                self.last_refresh = Instant::now();
-                self.clamp_signal_selection();
-                self.clamp_gate_failure_selection();
-                if self.pages().scaffold(self.current_page).is_none() {
-                    self.current_page = self.scaffold.active_page();
-                }
+            if got_refresh {
+                self.refresh_snapshot();
             }
         }
 
