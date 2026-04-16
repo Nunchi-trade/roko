@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+use roko_agent::dispatcher::ToolDispatcher;
 use roko_agent::tool_loop::LlmBackend;
 use roko_chain::ChainClient;
 use roko_neuro::KnowledgeStore;
@@ -160,12 +161,13 @@ pub struct ResearchResponse {
 }
 
 /// Task priority labels.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskPriority {
     /// Low priority.
     Low,
     /// Medium priority.
+    #[default]
     Medium,
     /// High priority.
     High,
@@ -173,28 +175,17 @@ pub enum TaskPriority {
     Critical,
 }
 
-impl Default for TaskPriority {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
 /// Task lifecycle labels.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     /// Open for work.
+    #[default]
     Open,
     /// Accepted by the agent.
     Accepted,
     /// Completed successfully.
     Completed,
-}
-
-impl Default for TaskState {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 /// Task artifact payload.
@@ -280,6 +271,7 @@ pub struct AgentState {
     chain_client: Option<Arc<dyn ChainClient>>,
     #[allow(dead_code)]
     llm_backend: Option<Arc<dyn LlmBackend>>,
+    dispatcher: Option<Arc<ToolDispatcher>>,
     #[allow(dead_code)]
     knowledge_store: Option<Arc<KnowledgeStore>>,
     predictions: Mutex<Vec<AgentPrediction>>,
@@ -311,6 +303,7 @@ impl AgentState {
             registered_at: now_secs(),
             chain_client,
             llm_backend,
+            dispatcher: None,
             knowledge_store,
             predictions: Mutex::new(Vec::new()),
             tasks: Mutex::new(VecDeque::new()),
@@ -335,6 +328,25 @@ impl AgentState {
     #[must_use]
     pub const fn metrics(&self) -> &AgentMetrics {
         &self.metrics
+    }
+
+    /// Borrow the configured LLM backend, if one is attached.
+    #[must_use]
+    pub fn llm_backend(&self) -> Option<&Arc<dyn LlmBackend>> {
+        self.llm_backend.as_ref()
+    }
+
+    /// Attach a dispatcher used to service agent messages.
+    #[must_use]
+    pub fn with_dispatcher(mut self, dispatcher: Arc<ToolDispatcher>) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Borrow the configured dispatcher, if one is attached.
+    #[must_use]
+    pub const fn dispatcher(&self) -> Option<&Arc<ToolDispatcher>> {
+        self.dispatcher.as_ref()
     }
 
     /// Build the public capabilities manifest.
@@ -413,6 +425,7 @@ impl AgentState {
     }
 
     /// Create a prediction entry.
+    #[allow(clippy::unused_async)]
     pub async fn create_prediction(&self, request: PredictionCreateRequest) -> AgentPrediction {
         self.metrics.record_request();
         let prediction = AgentPrediction {
@@ -432,12 +445,14 @@ impl AgentState {
     }
 
     /// Return all stored predictions.
+    #[allow(clippy::unused_async)]
     pub async fn list_predictions(&self) -> Vec<AgentPrediction> {
         self.metrics.record_request();
         self.predictions.lock().clone()
     }
 
     /// Fetch a prediction by identifier.
+    #[allow(clippy::unused_async)]
     pub async fn get_prediction(&self, id: &str) -> Option<AgentPrediction> {
         self.metrics.record_request();
         self.predictions
@@ -448,6 +463,11 @@ impl AgentState {
     }
 
     /// Summarize prediction residuals.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::significant_drop_tightening,
+        clippy::unused_async
+    )]
     pub async fn prediction_residuals(&self) -> serde_json::Value {
         self.metrics.record_request();
         let predictions = self.predictions.lock();
@@ -488,6 +508,7 @@ impl AgentState {
     }
 
     /// Execute a simple research request against the local state.
+    #[allow(clippy::unused_async)]
     pub async fn research(&self, request: ResearchRequest) -> ResearchResponse {
         self.metrics.record_request();
         let depth = request.depth;
@@ -507,12 +528,14 @@ impl AgentState {
     }
 
     /// Return the current task queue.
+    #[allow(clippy::unused_async)]
     pub async fn list_tasks(&self) -> Vec<TaskEntry> {
         self.metrics.record_request();
         self.tasks.lock().iter().cloned().collect()
     }
 
     /// Accept a task by identifier.
+    #[allow(clippy::significant_drop_tightening, clippy::unused_async)]
     pub async fn accept_task(&self, id: u64) -> Option<TaskEntry> {
         self.metrics.record_request();
         let mut tasks = self.tasks.lock();
@@ -523,6 +546,7 @@ impl AgentState {
     }
 
     /// Complete a task by identifier.
+    #[allow(clippy::significant_drop_tightening, clippy::unused_async)]
     pub async fn complete_task(
         &self,
         id: u64,
@@ -596,7 +620,7 @@ fn build_routes(capabilities: &[String]) -> Vec<String> {
     routes
 }
 
-fn operating_frequency(task_count: u64) -> &'static str {
+const fn operating_frequency(task_count: u64) -> &'static str {
     match task_count {
         0 => "idle",
         1..=2 => "reactive",

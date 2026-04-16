@@ -36,4 +36,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+roko-core = { path = "../roko-core" }
 tower = { workspace = true, features = ["limit", "load-shed", "util"] }

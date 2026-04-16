@@ -13,6 +13,7 @@ use axum::{Router, middleware};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
+use roko_agent::dispatcher::ToolDispatcher;
 use roko_agent::tool_loop::LlmBackend;
 use roko_chain::ChainClient;
 use roko_neuro::KnowledgeStore;
@@ -35,6 +36,7 @@ pub use state::{
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 type StartHook = Arc<dyn Fn(SocketAddr, AgentCard) -> BoxFutureResult + Send + Sync>;
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 struct FeatureFlags {
     messaging: bool,
@@ -67,7 +69,6 @@ impl AgentServer {
     }
 
     /// Build the axum router for this server.
-    #[must_use]
     pub fn router(&self) -> Router {
         let public = Router::new().merge(features::health::router());
         let protected = self.protected_router();
@@ -149,6 +150,7 @@ pub struct AgentServerBuilder {
     chain_client: Option<Arc<dyn ChainClient>>,
     llm_backend: Option<Arc<dyn LlmBackend>>,
     knowledge_store: Option<Arc<KnowledgeStore>>,
+    dispatcher: Option<Arc<ToolDispatcher>>,
     features: FeatureFlags,
     on_start: Option<StartHook>,
     registration: Option<AgentRegistration>,
@@ -192,6 +194,7 @@ impl AgentServerBuilder {
 
     /// Attach bearer auth to all non-public routes.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn auth(mut self, auth: BearerAuth) -> Self {
         self.auth = Some(auth);
         self
@@ -201,6 +204,13 @@ impl AgentServerBuilder {
     #[must_use]
     pub fn chain_client(mut self, client: Arc<dyn ChainClient>) -> Self {
         self.chain_client = Some(client);
+        self
+    }
+
+    /// Attach an optional tool dispatcher for message handling.
+    #[must_use]
+    pub fn with_dispatcher(mut self, dispatcher: Arc<ToolDispatcher>) -> Self {
+        self.dispatcher = Some(dispatcher);
         self
     }
 
@@ -274,7 +284,7 @@ impl AgentServerBuilder {
             .agent_id
             .ok_or_else(|| anyhow!("agent_id is required"))?;
         let bind = self.bind.unwrap_or_else(|| "0.0.0.0:0".to_string());
-        let state = Arc::new(AgentState::new(
+        let mut state = AgentState::new(
             agent_id,
             self.owner,
             self.version.unwrap_or_else(|| "0.1.0".to_string()),
@@ -282,7 +292,11 @@ impl AgentServerBuilder {
             self.chain_client,
             self.llm_backend,
             self.knowledge_store,
-        ));
+        );
+        if let Some(dispatcher) = self.dispatcher {
+            state = state.with_dispatcher(dispatcher);
+        }
+        let state = Arc::new(state);
 
         Ok(AgentServer {
             bind,
