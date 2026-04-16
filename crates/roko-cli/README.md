@@ -1,6 +1,13 @@
 # roko-cli
 
-The `roko` binary — a minimal CLI that drives Roko's universal loop (prompt → compose → agent → gate → persist → policy) against any working directory. It does not orchestrate plans or DAGs; it runs a single prompt through every primitive and writes the resulting signals to disk with full lineage.
+The `roko` binary. Drives every Roko subsystem from the terminal: the
+universal loop (`roko run`), plan execution (`roko plan run`), PRD
+lifecycle (`roko prd …`), research (`roko research …`), HTTP control
+plane (`roko serve`), per-agent chat (`roko chat`), and an interactive
+ratatui dashboard (`roko dashboard`).
+
+If it's a Roko feature, `roko-cli` is the way you reach it from a
+command line.
 
 ## Install
 
@@ -24,6 +31,8 @@ roko() {
 
 ## Subcommands
 
+### Core loop
+
 ```
 roko init [path]              # create .roko/signals.jsonl and a starter roko.toml
 roko run <prompt>             # run the universal loop once; prints prompt id, verdicts, episode id
@@ -32,7 +41,60 @@ roko replay <hash>            # walk the lineage DAG rooted at a signal hash
 roko config <cmd>             # manage global + project config (see below)
 ```
 
-Every subcommand except `init` reads config from the layered global+project chain described below.
+### Plan execution (orchestrator)
+
+```
+roko plan list                 # list discovered plans
+roko plan show <id>            # show plan details
+roko plan create               # scaffold a new plan
+roko plan run <dir>            # execute plans end-to-end
+roko plan run <dir> --resume .roko/state/executor.json   # resume after interruption
+```
+
+### PRD lifecycle (self-hosting workflow)
+
+```
+roko prd idea "<text>"         # capture an idea
+roko prd list                  # list PRDs
+roko prd status                # coverage report (plans/tasks/done ratio)
+roko prd draft new "<title>"   # agent-assisted draft
+roko prd draft promote         # promote draft to published
+roko prd plan <slug>           # generate implementation plan + tasks.toml
+roko prd consolidate           # consolidate overlapping PRDs
+```
+
+### Research
+
+```
+roko research topic "<topic>"            # deep research with citations
+roko research enhance-prd <slug>         # enrich a PRD with research
+roko research enhance-plan <plan>        # optimise a plan
+roko research enhance-tasks <plan>       # split / rebalance tasks
+roko research analyze                    # analyse execution data
+```
+
+### HTTP control plane + chat
+
+```
+roko serve                     # start HTTP API on :6677 (see crates/roko-serve/README.md)
+roko serve --bind 0.0.0.0 --port 9090
+roko chat --agent <id>         # interactive REPL with a running agent (via sidecar)
+roko chat --agent <id> --serve-url http://localhost:6677
+```
+
+### Dashboard
+
+```
+roko dashboard                 # interactive ratatui TUI: 7 tabs, F1–F7
+```
+
+Tabs: **F1** Dashboard — **F2** Plans — **F3** Agents — **F4** Git —
+**F5** Logs — **F6** Config — **F7** Inspect. Keys: `q` quit, `?` help,
+`Tab`/`Shift+Tab` cycle panels, `Enter` drill in, `i` inject, `Ctrl-C`
+force-quit (always, even through modals — see T17).
+
+Every subcommand except `init` reads config from the layered
+global+project chain described below.
 
 ## Config system
 
@@ -426,8 +488,10 @@ from more sophisticated SWE-bench agents.
 
 ## What it is not
 
-- **Not a plan/DAG runner.** There is no task scheduler, no worktree manager, no merge queue. `roko-orchestrator` exposes plan discovery + DAG-layer primitives, but this CLI only drives a single prompt.
-- **Not Mori.** Roko is a ground-up redesign around 7 primitives; Mori-style parallel batch orchestration is future work.
+- **Not the only entry point.** `roko-serve` exposes the same feature
+  surface over HTTP for dashboards and external integrations.
+- **Not a generic MCP client.** MCP integration happens inside the agent
+  crate via `agent.mcp_config`; the CLI just passes the file through.
 
 ## Exit codes
 
@@ -449,11 +513,10 @@ cover:
 
 ## Known limitations
 
-- **Single-prompt loop.** No DAG runner, no multi-turn agent loop, no
-  worktree manager. For plan execution see the (not-yet-wired)
-  `roko-orchestrator` crate.
 - **Approximate tokenization.** Budgets use a 4-bytes/token heuristic; real
   tokenizers aren't hooked in.
-- **No cost/latency aggregation in the CLI.** The `Usage` struct is
-  populated by `ExecAgent` but the summary isn't surfaced yet.
-- **No patch application.** See "What it does not yet cover" above.
+- **No patch application in `roko run`.** See "What it does not yet cover"
+  above. `roko plan run` *does* apply patches via the worktree manager.
+- **Outstanding gaps catalogued.** ~67 follow-up items from the
+  post-PR-13 audit live in `tmp/ux-followup/` at the workspace root;
+  start with `00-INDEX.md` for a severity-sorted view.
