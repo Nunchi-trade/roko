@@ -11,10 +11,10 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::braille;
 use super::rosedust::brighten;
+use crate::tui::Theme;
 use crate::tui::dashboard::DashboardData;
 use crate::tui::pages::efficiency::build_efficiency_snapshot;
 use crate::tui::state::TuiState;
-use crate::tui::Theme;
 
 fn fmt_tokens(n: u64) -> String {
     if n == 0 {
@@ -154,10 +154,7 @@ pub fn render_token_sparkline(
                 Style::default().fg(Theme::TEXT),
             ),
             Span::styled(" window ", Style::default().fg(Theme::BONE_DIM)),
-            Span::styled(
-                format!("{window}"),
-                Style::default().fg(Theme::TEXT_DIM),
-            ),
+            Span::styled(format!("{window}"), Style::default().fg(Theme::TEXT_DIM)),
         ]);
         lines.push(summary2);
     }

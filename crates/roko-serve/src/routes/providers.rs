@@ -1256,8 +1256,7 @@ mod tests {
         assert_eq!(latency.observations, 1);
         assert_eq!(latency.recent_latencies.len(), 1);
         assert_eq!(
-            latency.recent_latencies[0],
-            response.latency_ms as f64,
+            latency.recent_latencies[0], response.latency_ms as f64,
             "provider test latency should match the value recorded in the latency registry"
         );
 

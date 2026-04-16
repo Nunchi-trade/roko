@@ -113,7 +113,11 @@ fn render_plan(
         Line::from(vec![
             Span::styled("Title:  ", theme.muted()),
             Span::styled(
-                if plan.name.is_empty() { plan.id.as_str() } else { plan.name.as_str() },
+                if plan.name.is_empty() {
+                    plan.id.as_str()
+                } else {
+                    plan.name.as_str()
+                },
                 theme.text().add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -219,12 +223,7 @@ fn render_plan(
     frame.render_widget(paragraph, chunks[1]);
 }
 
-fn render_missing_plan(
-    frame: &mut Frame<'_>,
-    chunks: &[Rect],
-    plan_id: &str,
-    theme: &Theme,
-) {
+fn render_missing_plan(frame: &mut Frame<'_>, chunks: &[Rect], plan_id: &str, theme: &Theme) {
     let body = Paragraph::new(vec![
         Line::from(Span::styled("Plan not found", theme.danger())),
         Line::from(""),

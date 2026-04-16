@@ -155,10 +155,7 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
 
     // Border styling
     let (border_style, title_style) = if focused {
-        (
-            Theme::focused_border_style(),
-            Theme::focused_title_style(),
-        )
+        (Theme::focused_border_style(), Theme::focused_title_style())
     } else {
         (
             Theme::unfocused_border_style(),
@@ -589,9 +586,7 @@ fn render_plan_line(
         if plan.tasks_total > 0 {
             detail_spans.push(Span::styled(
                 compact_progress_glyphs(8, fill_pct),
-                Style::default()
-                    .fg(Theme::semantic_color(fill_pct))
-                    .bg(bg),
+                Style::default().fg(Theme::semantic_color(fill_pct)).bg(bg),
             ));
             detail_spans.push(Span::styled(
                 "  ",

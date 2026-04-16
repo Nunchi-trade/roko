@@ -322,9 +322,7 @@ fn content_style(kind: SegmentKind, theme: &Theme) -> Style {
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
         SegmentKind::ToolUse => Style::default().fg(theme.info),
-        SegmentKind::Code => Style::default()
-            .fg(theme.success)
-            .bg(Theme::BG_SECONDARY),
+        SegmentKind::Code => Style::default().fg(theme.success).bg(Theme::BG_SECONDARY),
         SegmentKind::Success => Style::default()
             .fg(theme.success)
             .add_modifier(Modifier::BOLD),

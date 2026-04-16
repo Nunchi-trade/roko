@@ -7,11 +7,11 @@
 //!
 //! Delegates to compiled widgets for all panels.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -256,13 +256,18 @@ fn render_output_panel(
     theme: &Theme,
 ) {
     let border = if focused {
-        theme.accent()
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Output ")
+        .title(Span::styled(" Output ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -489,13 +494,18 @@ fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, th
 fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
     let border = if focused {
-        theme.accent()
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Git ")
+        .title(Span::styled(" Git ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -604,13 +614,18 @@ fn render_sub_mcp(
 ) {
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
     let border = if focused {
-        theme.accent()
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" MCP / Context ")
+        .title(Span::styled(" MCP / Context ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -806,13 +821,18 @@ fn render_sub_processes(
     theme: &Theme,
 ) {
     let border = if focused {
-        theme.accent()
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Processes ")
+        .title(Span::styled(" Processes ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);

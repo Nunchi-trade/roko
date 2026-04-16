@@ -329,9 +329,18 @@ pub enum TuiAction {
     WavePrev,
 
     // -- mouse events --
-    MouseClick { x: u16, y: u16 },
-    MouseScrollUp { x: u16, y: u16 },
-    MouseScrollDown { x: u16, y: u16 },
+    MouseClick {
+        x: u16,
+        y: u16,
+    },
+    MouseScrollUp {
+        x: u16,
+        y: u16,
+    },
+    MouseScrollDown {
+        x: u16,
+        y: u16,
+    },
 
     // -- refresh --
     Refresh,
@@ -535,11 +544,6 @@ fn handle_filter_key(key: KeyEvent) -> TuiAction {
 // ---------------------------------------------------------------------------
 
 fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
-    // Ctrl-C force quits and bypasses confirmation.
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Some(TuiAction::QuitConfirmed);
-    }
-
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
@@ -747,7 +751,7 @@ fn handle_logs_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::PageUp => TuiAction::ScrollPageUp,
         KeyCode::PageDown => TuiAction::ScrollPageDown,
         KeyCode::Home => TuiAction::ScrollFocusedHome,
-        KeyCode::End => TuiAction::ScrollFocusedEnd,
+        KeyCode::End => TuiAction::ScrollLogEnd,
         KeyCode::Char('G') => TuiAction::ScrollLogEnd,
         KeyCode::Char('1') => TuiAction::ToggleLogFilter(LogFilterLevel::Info),
         KeyCode::Char('2') => TuiAction::ToggleLogFilter(LogFilterLevel::Warn),
@@ -1015,7 +1019,10 @@ mod tests {
             command: "cargo check".to_string(),
         };
         let vis = ModalVisibility::from_active_modal(Some(&approval));
-        assert!(matches!(vis.active_modal, Some(ModalState::Approval { .. })));
+        assert!(matches!(
+            vis.active_modal,
+            Some(ModalState::Approval { .. })
+        ));
 
         let task_picker = ModalState::TaskPicker {
             tasks: Vec::new(),
@@ -1023,14 +1030,20 @@ mod tests {
             scroll_offset: 0,
         };
         let vis = ModalVisibility::from_active_modal(Some(&task_picker));
-        assert!(matches!(vis.active_modal, Some(ModalState::TaskPicker { .. })));
+        assert!(matches!(
+            vis.active_modal,
+            Some(ModalState::TaskPicker { .. })
+        ));
 
         let agent_pool = ModalState::AgentPool {
             agents: Vec::new(),
             scroll_offset: 0,
         };
         let vis = ModalVisibility::from_active_modal(Some(&agent_pool));
-        assert!(matches!(vis.active_modal, Some(ModalState::AgentPool { .. })));
+        assert!(matches!(
+            vis.active_modal,
+            Some(ModalState::AgentPool { .. })
+        ));
     }
 
     #[test]
@@ -1220,6 +1233,24 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_takes_precedence_over_modal_and_mode_intercepts() {
+        let modal = ModalState::Approval {
+            role: "implementer".to_string(),
+            command: "cargo check".to_string(),
+        };
+        let vis = modals(Some(&modal));
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            InputMode::Confirm,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::QuitConfirmed);
+    }
+
+    #[test]
     fn plans_tab_focus_routing() {
         let action = handle_key(
             key(KeyCode::Up),
@@ -1274,6 +1305,27 @@ mod tests {
     }
 
     #[test]
+    fn page_keys_keep_page_scroll_actions_on_logs_tab() {
+        let action = handle_key(
+            key(KeyCode::PageUp),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(None),
+        );
+        assert_eq!(action, TuiAction::ScrollPageUp);
+
+        let action = handle_key(
+            key(KeyCode::PageDown),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(None),
+        );
+        assert_eq!(action, TuiAction::ScrollPageDown);
+    }
+
+    #[test]
     fn logs_tab_slash_starts_filter() {
         let action = handle_key(
             key(KeyCode::Char('/')),
@@ -1306,13 +1358,22 @@ mod tests {
         assert_eq!(action, TuiAction::ScrollFocusedEnd);
 
         let action = handle_key(
+            key(KeyCode::End),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::CommandOutput,
+            &modals(None),
+        );
+        assert_eq!(action, TuiAction::ScrollLogEnd);
+
+        let action = handle_key(
             key(KeyCode::Char('G')),
             InputMode::Normal,
-            Tab::Agents,
+            Tab::Logs,
             FocusZone::AgentOutput,
             &modals(None),
         );
-        assert_eq!(action, TuiAction::ScrollAgentEnd);
+        assert_eq!(action, TuiAction::ScrollLogEnd);
     }
 
     #[test]

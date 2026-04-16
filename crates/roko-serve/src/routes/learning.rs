@@ -1229,9 +1229,12 @@ mod tests {
     async fn experiments_returns_empty_store_when_missing() -> Result<(), Box<dyn Error>> {
         let (_dir, state) = test_state()?;
 
-        let response = experiments(State(state))
-            .await
-            .map_err(|err| anyhow!("missing experiments endpoint should succeed: {}", err.message))?;
+        let response = experiments(State(state)).await.map_err(|err| {
+            anyhow!(
+                "missing experiments endpoint should succeed: {}",
+                err.message
+            )
+        })?;
         let body = response.0;
 
         assert_eq!(body.running_experiments, 0);
@@ -1241,8 +1244,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn learn_alias_routes_expose_cascade_router_cost_tiers_and_gate_thresholds(
-    ) -> Result<(), Box<dyn Error>> {
+    async fn learn_alias_routes_expose_cascade_router_cost_tiers_and_gate_thresholds()
+    -> Result<(), Box<dyn Error>> {
         let (dir, state) = test_state()?;
         let learn_dir = dir.path().join(".roko").join("learn");
         tokio::fs::create_dir_all(&learn_dir)
@@ -1281,7 +1284,9 @@ mod tests {
                     .method("GET")
                     .uri("/api/learn/cascade-router")
                     .body(Body::empty())
-                    .map_err(|err| anyhow!("failed to build cascade-router alias request: {err}"))?,
+                    .map_err(|err| {
+                        anyhow!("failed to build cascade-router alias request: {err}")
+                    })?,
             )
             .await
             .map_err(|err| anyhow!("cascade-router alias request failed: {err}"))?;
@@ -1320,7 +1325,9 @@ mod tests {
                     .method("GET")
                     .uri("/api/learn/gate-thresholds")
                     .body(Body::empty())
-                    .map_err(|err| anyhow!("failed to build gate-thresholds alias request: {err}"))?,
+                    .map_err(|err| {
+                        anyhow!("failed to build gate-thresholds alias request: {err}")
+                    })?,
             )
             .await
             .map_err(|err| anyhow!("gate-thresholds alias request failed: {err}"))?;
@@ -1328,9 +1335,8 @@ mod tests {
         let thresholds_body = axum::body::to_bytes(thresholds_response.into_body(), usize::MAX)
             .await
             .map_err(|err| anyhow!("failed to read gate-thresholds alias response body: {err}"))?;
-        let thresholds_payload: Value = serde_json::from_slice(&thresholds_body).map_err(
-            |err| anyhow!("failed to parse gate-thresholds alias response body: {err}"),
-        )?;
+        let thresholds_payload: Value = serde_json::from_slice(&thresholds_body)
+            .map_err(|err| anyhow!("failed to parse gate-thresholds alias response body: {err}"))?;
         assert_eq!(thresholds_payload["hello"], "world");
         Ok(())
     }

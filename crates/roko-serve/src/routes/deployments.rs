@@ -507,7 +507,8 @@ mod tests {
         }))
     }
 
-    async fn spawn_mock_worker_server() -> Result<(String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>)> {
+    async fn spawn_mock_worker_server()
+    -> Result<(String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>)> {
         let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
         let router = Router::new()
             .route("/task", post(record_task))
@@ -669,11 +670,13 @@ mod tests {
         );
 
         let payload = json_body(list_response).await?;
-        let deployments = payload["deployments"]
-            .as_array()
-            .ok_or_else(|| anyhow!("deployments list response should contain a deployments array"))?;
+        let deployments = payload["deployments"].as_array().ok_or_else(|| {
+            anyhow!("deployments list response should contain a deployments array")
+        })?;
         assert!(
-            deployments.iter().any(|deployment| deployment["id"] == "dep-1"),
+            deployments
+                .iter()
+                .any(|deployment| deployment["id"] == "dep-1"),
             "GET /api/deployments should include the id of the deployment created earlier"
         );
         Ok(())
@@ -681,8 +684,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deployments_get_logs_missing_returns_404() -> std::result::Result<(), Box<dyn Error>> {
-        let backend: Arc<dyn DeployBackend> =
-            Arc::new(RecordingDeployBackend::with_url(Some("http://worker.invalid".to_string())));
+        let backend: Arc<dyn DeployBackend> = Arc::new(RecordingDeployBackend::with_url(Some(
+            "http://worker.invalid".to_string(),
+        )));
         let (_dir, state) = test_state(backend)?;
         let app = router(state);
 
@@ -712,8 +716,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deployments_task_proxy_forwards() -> std::result::Result<(), Box<dyn Error>> {
-        let backend: Arc<dyn DeployBackend> =
-            Arc::new(RecordingDeployBackend::with_url(Some("http://worker.invalid".to_string())));
+        let backend: Arc<dyn DeployBackend> = Arc::new(RecordingDeployBackend::with_url(Some(
+            "http://worker.invalid".to_string(),
+        )));
         let (_dir, state) = test_state(backend)?;
         let (worker_url, recorded, worker_handle) = spawn_mock_worker_server().await?;
 
@@ -776,8 +781,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deployments_callback_accepted() -> std::result::Result<(), Box<dyn Error>> {
-        let backend: Arc<dyn DeployBackend> =
-            Arc::new(RecordingDeployBackend::with_url(Some("http://worker.invalid".to_string())));
+        let backend: Arc<dyn DeployBackend> = Arc::new(RecordingDeployBackend::with_url(Some(
+            "http://worker.invalid".to_string(),
+        )));
         let (_dir, state) = test_state(backend)?;
         state.deployments.write().await.insert(
             "dep-1".to_string(),
@@ -824,9 +830,9 @@ mod tests {
         );
 
         let template_runs = state.template_runs.read().await;
-        let reviewer_runs = template_runs
-            .get("reviewer")
-            .ok_or_else(|| anyhow!("worker callback should create a template run record for the backing template"))?;
+        let reviewer_runs = template_runs.get("reviewer").ok_or_else(|| {
+            anyhow!("worker callback should create a template run record for the backing template")
+        })?;
         assert_eq!(
             reviewer_runs.len(),
             1,

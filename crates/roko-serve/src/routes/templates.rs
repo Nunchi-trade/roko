@@ -336,8 +336,7 @@ mod tests {
         let create_json: Value =
             serde_json::from_slice(&create_body).expect("parse create response json");
         assert_eq!(
-            create_json["name"],
-            "demo",
+            create_json["name"], "demo",
             "create response should echo the inserted template name"
         );
 
@@ -364,18 +363,15 @@ mod tests {
         let template_json: Value =
             serde_json::from_slice(&get_body).expect("parse get response json");
         assert_eq!(
-            template_json["name"],
-            "demo",
+            template_json["name"], "demo",
             "GET /api/templates/demo should return the created template"
         );
         assert_eq!(
-            template_json["system_prompt"],
-            "Hello from demo",
+            template_json["system_prompt"], "Hello from demo",
             "GET /api/templates/demo should preserve the system prompt"
         );
         assert_eq!(
-            template_json["output_format"],
-            "markdown",
+            template_json["output_format"], "markdown",
             "GET /api/templates/demo should preserve the template output format"
         );
     }
@@ -459,8 +455,7 @@ mod tests {
             .clone()
             .expect("runtime should capture the rendered prompt");
         assert_eq!(
-            prompt,
-            "Investigate codebase",
+            prompt, "Investigate codebase",
             "template deployment should interpolate request params into the prompt"
         );
     }

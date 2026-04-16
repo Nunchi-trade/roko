@@ -49,10 +49,7 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     };
 
     let (border_style, ttl_style) = if focused {
-        (
-            Theme::focused_border_style(),
-            Theme::focused_title_style(),
-        )
+        (Theme::focused_border_style(), Theme::focused_title_style())
     } else {
         (
             Theme::unfocused_border_style(),
@@ -115,10 +112,7 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
             }
             PhaseStatus::Pending => {
                 let fill: String = "\u{2500}".repeat(w);
-                bar_spans.push(Span::styled(
-                    fill,
-                    Style::default().fg(Theme::TEXT_GHOST),
-                ));
+                bar_spans.push(Span::styled(fill, Style::default().fg(Theme::TEXT_GHOST)));
             }
         }
     }

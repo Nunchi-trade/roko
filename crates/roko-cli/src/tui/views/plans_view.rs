@@ -68,7 +68,12 @@ fn render_left_panel(
     ])
     .split(area);
 
-    render_pipeline_header(frame, sections[0], data, tui_state, theme);
+    let focused = matches!(
+        tui_state.focus,
+        FocusZone::PlanTree | FocusZone::TaskProgress
+    );
+
+    render_pipeline_header(frame, sections[0], data, tui_state, focused, theme);
     if let Some(plan) = tui_state.plans.get(tui_state.selected_plan_idx) {
         let plan_summary = data
             .plans
@@ -102,6 +107,7 @@ fn render_pipeline_header(
     area: Rect,
     data: &DashboardData,
     tui_state: &TuiState,
+    focused: bool,
     theme: &Theme,
 ) {
     let total_plans = data.plans.len();
@@ -135,24 +141,30 @@ fn render_pipeline_header(
         ),
     ]);
 
-    let border_color = if completed == total_plans && total_plans > 0 {
-        theme.success
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else if completed == total_plans && total_plans > 0 {
+        theme.success()
     } else if active_count > 0 {
-        theme.accent
+        theme.accent()
     } else {
-        theme.muted
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else if completed == total_plans && total_plans > 0 {
+        theme.success().add_modifier(Modifier::BOLD)
+    } else if active_count > 0 {
+        theme.accent().add_modifier(Modifier::BOLD)
+    } else {
+        theme.muted()
     };
 
     let header = Paragraph::new(header_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(
-                " Pipeline ",
-                Style::default()
-                    .fg(border_color)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .border_style(Style::default().fg(border_color)),
+            .title(Span::styled(" Pipeline ", title_style))
+            .border_style(border_style),
     );
     frame.render_widget(header, area);
 }
@@ -194,14 +206,18 @@ fn render_wave_tree(
     let title = format!(" Plans ({completed}/{total_plans}{health_suffix}) ");
 
     let border_style = if focused {
-        Style::default().fg(theme.accent)
+        Theme::focused_border_style()
     } else {
         theme.muted()
     };
     let title_style = if focused || active > 0 {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
+        if focused {
+            Theme::focused_title_style()
+        } else {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        }
     } else {
         theme.muted()
     };
@@ -692,14 +708,12 @@ fn render_right_panel(
 ) {
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
     let border_style = if focused {
-        Style::default().fg(theme.accent)
+        Theme::focused_border_style()
     } else {
         theme.muted()
     };
     let title_style = if focused {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };

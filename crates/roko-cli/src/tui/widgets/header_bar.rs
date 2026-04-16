@@ -114,9 +114,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let wave_idx = state.current_wave() + 1;
         spans.push(Span::styled(
             format!("  Wave {wave_idx}/{total_waves}"),
-            Style::default()
-                .fg(Theme::BONE)
-                .bg(Theme::BG_SECONDARY),
+            Style::default().fg(Theme::BONE).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -195,9 +193,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     if in_flight > 0 && !(all_done && !has_failures) {
         spans.push(Span::styled(
             format!("  {in_flight}\u{25b8}"),
-            Style::default()
-                .fg(Theme::ROSE_DIM)
-                .bg(Theme::BG_SECONDARY),
+            Style::default().fg(Theme::ROSE_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -211,18 +207,14 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let eta_str = format_elapsed(remaining.max(1));
         spans.push(Span::styled(
             format!("  ETA:{eta_str}"),
-            Style::default()
-                .fg(Theme::DREAM)
-                .bg(Theme::BG_SECONDARY),
+            Style::default().fg(Theme::DREAM).bg(Theme::BG_SECONDARY),
         ));
     }
 
     // Elapsed
     spans.push(Span::styled(
         format!("  {elapsed_str}"),
-        Style::default()
-            .fg(Theme::FG_DIM)
-            .bg(Theme::BG_SECONDARY),
+        Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
     ));
 
     // Cost
@@ -234,9 +226,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         };
         spans.push(Span::styled(
             format!("  {cost_str}"),
-            Style::default()
-                .fg(Theme::BONE_DIM)
-                .bg(Theme::BG_SECONDARY),
+            Style::default().fg(Theme::BONE_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -251,9 +241,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         };
         spans.push(Span::styled(
             tok_display,
-            Style::default()
-                .fg(Theme::FG_DIM)
-                .bg(Theme::BG_SECONDARY),
+            Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -347,9 +335,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
             ));
             fkey_spans.push(Span::styled(
                 format!(":{label}"),
-                Style::default()
-                    .fg(Theme::FG_DIM)
-                    .bg(Theme::BG_SECONDARY),
+                Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
             ));
         }
     }

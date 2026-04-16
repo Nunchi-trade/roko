@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use roko_index::WorkspaceIndex;
-use roko_mcp_stdio::{serve_stdio, JsonRpcError, JsonRpcRequest};
+use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 use std::io;
 use std::path::PathBuf;

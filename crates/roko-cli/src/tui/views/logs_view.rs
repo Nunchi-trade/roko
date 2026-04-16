@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
 use crate::tui::input::LogFilterLevel;
 use crate::tui::state::{LogEntry, LogEntryLevel, TuiState};
 
@@ -32,6 +33,14 @@ pub(crate) fn render(
 ) {
     let entries = build_unified_log(data);
     render_with_entries(frame, area, &entries, data, tui_state, view_state, theme);
+}
+
+/// Count visible log entries after applying the active level filter.
+pub(crate) fn filtered_entry_count(data: &DashboardData, tui_state: &TuiState) -> usize {
+    build_unified_log(data)
+        .into_iter()
+        .filter(|entry| tui_state.log_level_visible(entry.level.filter_level()))
+        .count()
 }
 
 /// Render the logs view with explicit log entries (for integration layer).
@@ -62,6 +71,7 @@ fn render_with_entries(
     } else {
         "SCROLL"
     };
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
     let entry_label = if filtered_entries.len() == entries.len() {
         format!(" {} entries ", entries.len())
     } else {
@@ -98,10 +108,20 @@ fn render_with_entries(
     frame.render_widget(status, sections[0]);
 
     // Log content
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.accent()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.accent()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Logs ")
-        .border_style(theme.accent());
+        .title(Span::styled(" Logs ", title_style))
+        .border_style(border_style);
     let inner = block.inner(sections[1]);
     frame.render_widget(block, sections[1]);
 
@@ -208,7 +228,12 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
 
         entries.insert(
             (signal.created_at_ms, seq),
-            LogEntry::new(ts, level, format!("signal:{}", truncate_kind(&signal.kind)), message),
+            LogEntry::new(
+                ts,
+                level,
+                format!("signal:{}", truncate_kind(&signal.kind)),
+                message,
+            ),
         );
         seq += 1;
     }

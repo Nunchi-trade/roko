@@ -1864,8 +1864,8 @@ fn build_plan_task_snapshots(
 fn parse_plan_tasks_file(path: &Path) -> Result<ParsedPlanTasksFile> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let tasks_file =
-        toml::from_str::<TasksFile>(&content).with_context(|| format!("parse {}", path.display()))?;
+    let tasks_file = toml::from_str::<TasksFile>(&content)
+        .with_context(|| format!("parse {}", path.display()))?;
     let raw = toml::from_str::<toml::Value>(&content)
         .with_context(|| format!("parse runtime metadata from {}", path.display()))?;
     let raw_tasks = raw.get("task").and_then(toml::Value::as_array);
@@ -1943,11 +1943,15 @@ fn toml_scalar_to_string(value: &toml::Value) -> Option<String> {
 }
 
 fn toml_value_to_u64(value: &toml::Value) -> Option<u64> {
-    value.as_integer().and_then(|value| u64::try_from(value).ok())
+    value
+        .as_integer()
+        .and_then(|value| u64::try_from(value).ok())
 }
 
 fn toml_value_to_u32(value: &toml::Value) -> Option<u32> {
-    value.as_integer().and_then(|value| u32::try_from(value).ok())
+    value
+        .as_integer()
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn is_task_done_status(status: &str) -> bool {
@@ -1961,7 +1965,10 @@ fn is_task_failed_status(status: &str) -> bool {
 
     let normalized = status.trim().to_ascii_lowercase();
     let compact = normalized.replace(['-', '_', ' '], "");
-    matches!(compact.as_str(), "gaterejected" | "reviewrejected" | "rejected")
+    matches!(
+        compact.as_str(),
+        "gaterejected" | "reviewrejected" | "rejected"
+    )
 }
 
 fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
@@ -5711,7 +5718,10 @@ tier = "focused"
         assert!((snapshot.elapsed_secs - 7.0).abs() < f64::EPSILON);
         assert_eq!(snapshot.wave, 4);
         assert_eq!(snapshot.tasks.len(), 3);
-        assert_eq!(snapshot.tasks[1].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            snapshot.tasks[1].model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
         assert_eq!(snapshot.tasks[1].started_at.as_deref(), Some("111"));
         assert_eq!(snapshot.tasks[1].wave, Some(2));
         assert_eq!(snapshot.tasks[2].status, "failed");

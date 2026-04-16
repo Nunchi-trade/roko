@@ -18,9 +18,9 @@ use super::atmosphere::Atmosphere;
 use super::dashboard::{DashboardData, GateResultSummary, PlanTaskListSnapshot, Theme};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
 use super::modals::ModalState;
-use super::segment::{output_byte_len, render_cached_output, CachedRender};
+use super::segment::{CachedRender, output_byte_len, render_cached_output};
 use super::tabs::Tab;
-use crate::plan::{plans_dir, PlanSummary};
+use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
 
 // ---------------------------------------------------------------------------
@@ -571,12 +571,7 @@ pub struct LogEntry {
 impl LogEntry {
     /// Construct a display-ready log entry.
     #[must_use]
-    pub fn new(
-        timestamp: String,
-        level: LogEntryLevel,
-        source: String,
-        message: String,
-    ) -> Self {
+    pub fn new(timestamp: String, level: LogEntryLevel, source: String, message: String) -> Self {
         Self {
             timestamp,
             level,
@@ -1773,6 +1768,42 @@ impl TuiState {
         self.plan_scroll_offset = 0;
         self.log_scroll = 0;
         self.log_auto_tail = true;
+    }
+
+    /// Clamp the plan tree scroll offset to the current rendered maximum.
+    pub fn clamp_plan_scroll(&mut self, max: usize) {
+        self.plan_scroll_offset = self.plan_scroll_offset.min(max);
+    }
+
+    /// Clamp the pinned agent-output scroll offset to the current rendered maximum.
+    pub fn clamp_agent_scroll(&mut self, max: usize) {
+        if let Some(scroll) = self.agent_scroll.as_mut() {
+            *scroll = (*scroll).min(max);
+        }
+    }
+
+    /// Clamp the log scroll offset to the current rendered maximum.
+    pub fn clamp_log_scroll(&mut self, max: usize) {
+        if self.log_auto_tail {
+            self.log_scroll = 0;
+        } else {
+            self.log_scroll = self.log_scroll.min(max);
+        }
+    }
+
+    /// Clamp the right-panel scroll offset to the current rendered maximum.
+    pub fn clamp_diff_scroll(&mut self, max: usize) {
+        self.diff_scroll = self.diff_scroll.min(max);
+    }
+
+    /// Clamp the task list scroll offset to the current rendered maximum.
+    pub fn clamp_task_scroll(&mut self, max: usize) {
+        self.task_scroll = self.task_scroll.min(max);
+    }
+
+    /// Clamp the command-output scroll offset to the current rendered maximum.
+    pub fn clamp_command_output_scroll(&mut self, max: usize) {
+        self.command_output_scroll = self.command_output_scroll.min(max);
     }
 
     /// Toggle visibility for a single log level in the Logs tab.

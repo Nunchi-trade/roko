@@ -41,8 +41,6 @@ use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
-const PAGE_SCROLL_LINES: i32 = 20;
-
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
 /// Supports two rendering paths:
@@ -657,7 +655,7 @@ impl App {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut Frame<'_>) {
+    fn draw(&mut self, frame: &mut Frame<'_>) {
         let theme = Theme::from_env();
         let full_area = frame.area();
 
@@ -696,6 +694,7 @@ impl App {
         let footer_idx = 3;
         let (content_area, input_area) = self.split_content_area(main_layout[content_idx]);
 
+        self.clamp_scroll_state_to_view();
         let view_state = self.current_view_state();
         views::render_tab_content(
             frame,
@@ -752,6 +751,10 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if key.code == crossterm::event::KeyCode::Esc {
+            self.scroll_accel.reset();
+        }
+
         // Route through the full TuiAction dispatch
         let action = input::handle_key(
             key,
@@ -851,55 +854,24 @@ impl App {
                 }
             }
             TuiAction::ScrollFocusedUp => {
-                let delta = i32::from(self.scroll_accel.push(-1));
+                let delta = i32::from(self.scroll_accel.tick(-1));
                 self.scroll_focused(delta);
             }
             TuiAction::ScrollFocusedDown => {
-                let delta = i32::from(self.scroll_accel.push(1));
+                let delta = i32::from(self.scroll_accel.tick(1));
                 self.scroll_focused(delta);
             }
-            TuiAction::ScrollPageUp => self.scroll_focused(-PAGE_SCROLL_LINES),
-            TuiAction::ScrollPageDown => self.scroll_focused(PAGE_SCROLL_LINES),
-            TuiAction::ScrollFocusedHome => match (self.tui_state.active_tab, self.tui_state.focus)
-            {
-                (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
-                    self.tui_state.agent_scroll = Some(usize::MAX);
-                }
-                (Tab::Logs, _) => {
-                    self.tui_state.log_auto_tail = false;
-                    self.tui_state.log_scroll = usize::MAX;
-                }
-                _ => self.set_focused_scroll(0),
-            },
-            TuiAction::ScrollFocusedEnd => {
-                match (self.tui_state.active_tab, self.tui_state.focus) {
-                    (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
-                        self.tui_state.agent_scroll = None;
-                    }
-                    (Tab::Logs, _) => {
-                        self.tui_state.log_auto_tail = true;
-                        self.tui_state.log_scroll = 0;
-                    }
-                    _ => self.set_focused_scroll(usize::MAX),
-                }
-            }
+            TuiAction::ScrollPageUp => self.scroll_focused(-self.page_scroll_lines()),
+            TuiAction::ScrollPageDown => self.scroll_focused(self.page_scroll_lines()),
+            TuiAction::ScrollFocusedHome => self.set_focused_scroll(0),
+            TuiAction::ScrollFocusedEnd => self.set_focused_scroll(usize::MAX),
             TuiAction::ScrollLogUp => {
-                if self.tui_state.log_auto_tail {
-                    self.tui_state.log_auto_tail = false;
-                    self.tui_state.log_scroll = 1;
-                } else {
-                    self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_add(1);
-                }
+                let delta = i32::from(self.scroll_accel.tick(-1));
+                self.scroll_logs_by(delta);
             }
             TuiAction::ScrollLogDown => {
-                if !self.tui_state.log_auto_tail {
-                    if self.tui_state.log_scroll > 0 {
-                        self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_sub(1);
-                    }
-                    if self.tui_state.log_scroll == 0 {
-                        self.tui_state.log_auto_tail = true;
-                    }
-                }
+                let delta = i32::from(self.scroll_accel.tick(1));
+                self.scroll_logs_by(delta);
             }
             TuiAction::ScrollLogEnd => {
                 self.tui_state.log_auto_tail = true;
@@ -912,30 +884,31 @@ impl App {
                 self.tui_state.show_all_log_filter_levels();
             }
             TuiAction::ScrollAgentUp => {
-                let current = self.current_agent_scroll_offset();
-                let delta = self.scroll_accel.push(-1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                let delta = i32::from(self.scroll_accel.tick(-1));
+                self.scroll_agent_output_by(delta);
             }
             TuiAction::ScrollAgentDown => {
-                let current = self.current_agent_scroll_offset();
-                let delta = self.scroll_accel.push(1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                let delta = i32::from(self.scroll_accel.tick(1));
+                self.scroll_agent_output_by(delta);
             }
             TuiAction::ScrollAgentEnd => {
                 self.tui_state.agent_scroll = None; // Resume auto-tail
             }
             TuiAction::ScrollDiffUp => {
-                let delta = self.scroll_accel.push(-1);
+                let delta = self.scroll_accel.tick(-1);
                 self.tui_state.diff_scroll =
                     Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDiffDown => {
-                let delta = self.scroll_accel.push(1);
+                let delta = self.scroll_accel.tick(1);
                 self.tui_state.diff_scroll =
                     Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDetailUp => {
-                if matches!(self.tui_state.active_modal, Some(ModalState::PlanDetail { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::PlanDetail { .. })
+                ) {
                     self.tui_state.plan_detail_scroll =
                         self.tui_state.plan_detail_scroll.saturating_sub(1);
                 } else if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
@@ -948,7 +921,10 @@ impl App {
                 }
             }
             TuiAction::ScrollDetailDown => {
-                if matches!(self.tui_state.active_modal, Some(ModalState::PlanDetail { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::PlanDetail { .. })
+                ) {
                     self.tui_state.plan_detail_scroll =
                         self.tui_state.plan_detail_scroll.saturating_add(1);
                 } else if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
@@ -1011,14 +987,12 @@ impl App {
                 }
             }
             TuiAction::ShowHelp => {
-                self.tui_state.active_modal = if matches!(
-                    self.tui_state.active_modal,
-                    Some(ModalState::Help)
-                ) {
-                    None
-                } else {
-                    Some(ModalState::Help)
-                };
+                self.tui_state.active_modal =
+                    if matches!(self.tui_state.active_modal, Some(ModalState::Help)) {
+                        None
+                    } else {
+                        Some(ModalState::Help)
+                    };
             }
             TuiAction::ToggleScreenPostFx => {
                 self.fx_config.screen_postfx = !self.fx_config.screen_postfx;
@@ -1091,12 +1065,18 @@ impl App {
                 }
             }
             TuiAction::CloseTaskDetail => {
-                if matches!(self.tui_state.active_modal, Some(ModalState::TaskDetail { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::TaskDetail { .. })
+                ) {
                     self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ShowWaveOverview => {
-                if matches!(self.tui_state.active_modal, Some(ModalState::WaveOverview { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::WaveOverview { .. })
+                ) {
                     self.tui_state.active_modal = None;
                 } else {
                     self.tui_state.active_modal = Some(ModalState::WaveOverview {
@@ -1106,7 +1086,10 @@ impl App {
                 }
             }
             TuiAction::ShowQueueOverview => {
-                if matches!(self.tui_state.active_modal, Some(ModalState::QueueOverview { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::QueueOverview { .. })
+                ) {
                     self.tui_state.active_modal = None;
                 } else {
                     let milestones = queue_overview_milestones(&self.tui_state);
@@ -1133,7 +1116,10 @@ impl App {
                 });
             }
             TuiAction::CloseTaskPicker => {
-                if matches!(self.tui_state.active_modal, Some(ModalState::TaskPicker { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::TaskPicker { .. })
+                ) {
                     self.tui_state.active_modal = None;
                 }
             }
@@ -1333,10 +1319,9 @@ impl App {
                 self.tui_state.active_modal = None;
             }
             TuiAction::ConfirmNo => {
-                if self.resolve_active_approval(false) {
-                    return;
+                if !self.resolve_active_approval(false) {
+                    self.dismiss_all_modals();
                 }
-                self.dismiss_all_modals();
             }
             TuiAction::DismissNotification => {
                 if !self.notifications.is_empty() {
@@ -1619,6 +1604,8 @@ impl App {
             TuiAction::Refresh => self.refresh_snapshot(),
             TuiAction::None => {}
         }
+
+        self.clamp_scroll_state_to_view();
     }
 
     fn open_confirm_modal(&mut self, action: ConfirmAction) {
@@ -1633,7 +1620,10 @@ impl App {
     }
 
     fn resolve_active_approval(&mut self, approved: bool) -> bool {
-        if !matches!(self.tui_state.active_modal, Some(ModalState::Approval { .. })) {
+        if !matches!(
+            self.tui_state.active_modal,
+            Some(ModalState::Approval { .. })
+        ) {
             return false;
         }
 
@@ -1755,35 +1745,13 @@ impl App {
 
     fn scroll_focused(&mut self, delta: i32) {
         match (self.tui_state.active_tab, self.tui_state.focus) {
-            (Tab::Logs, _) => {
-                if self.tui_state.log_auto_tail {
-                    self.tui_state.log_auto_tail = false;
-                    self.tui_state.log_scroll = delta.unsigned_abs() as usize;
-                } else {
-                    let current = self.tui_state.log_scroll as i32;
-                    let next = (current + delta).max(0) as usize;
-                    self.tui_state.log_scroll = next;
-                    if next == 0 {
-                        self.tui_state.log_auto_tail = true;
-                    }
-                }
-            }
+            (Tab::Logs, _) => self.scroll_logs_by(delta),
             (Tab::Agents, FocusZone::PlanTree) => {
                 let max = self.tui_state.agents.len().saturating_sub(1);
                 let next = (self.tui_state.selected_agent as i32 + delta).clamp(0, max as i32);
                 self.tui_state.selected_agent = next as usize;
             }
-            (Tab::Agents, FocusZone::AgentOutput) => {
-                let current = self.tui_state.agent_scroll.unwrap_or(0);
-                if delta < 0 {
-                    self.tui_state.agent_scroll =
-                        Some(current.saturating_add(delta.unsigned_abs() as usize));
-                } else if current == 0 {
-                    self.tui_state.agent_scroll = None;
-                } else {
-                    self.tui_state.agent_scroll = Some(current.saturating_sub(delta as usize));
-                }
-            }
+            (Tab::Agents, FocusZone::AgentOutput) => self.scroll_agent_output_by(delta),
             (_, FocusZone::PlanTree) => {
                 let current = self.tui_state.plan_scroll_offset as i32;
                 self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
@@ -1792,10 +1760,7 @@ impl App {
                 let current = self.tui_state.task_scroll as i32;
                 self.tui_state.task_scroll = (current + delta).max(0) as usize;
             }
-            (_, FocusZone::AgentOutput) => {
-                let current = self.current_agent_scroll_offset() as i32;
-                self.tui_state.agent_scroll = Some((current + delta).max(0) as usize);
-            }
+            (_, FocusZone::AgentOutput) => self.scroll_agent_output_by(delta),
             (_, FocusZone::CommandOutput) => {
                 let current = self.tui_state.command_output_scroll as i32;
                 self.tui_state.command_output_scroll = (current + delta).max(0) as usize;
@@ -1818,7 +1783,11 @@ impl App {
                 };
             }
             (Tab::Agents, FocusZone::AgentOutput) => {
-                self.tui_state.agent_scroll = Some(offset);
+                if offset == usize::MAX {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(offset);
+                }
             }
             (_, FocusZone::PlanTree) => {
                 self.tui_state.plan_scroll_offset = offset;
@@ -1826,8 +1795,21 @@ impl App {
             (_, FocusZone::TaskProgress) => {
                 self.tui_state.task_scroll = offset;
             }
+            (Tab::Logs, _) => {
+                if offset == usize::MAX {
+                    self.tui_state.log_auto_tail = true;
+                    self.tui_state.log_scroll = 0;
+                } else {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = offset;
+                }
+            }
             (_, FocusZone::AgentOutput) => {
-                self.tui_state.agent_scroll = Some(offset);
+                if offset == usize::MAX {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(offset);
+                }
             }
             (_, FocusZone::CommandOutput) => {
                 self.tui_state.command_output_scroll = offset;
@@ -1846,6 +1828,10 @@ impl App {
         }
     }
 
+    fn page_scroll_lines(&self) -> i32 {
+        i32::from(self.terminal_size.1.saturating_sub(4).max(1))
+    }
+
     fn merge_process_metrics(&mut self, samples: Vec<ProcessMetricSample>) {
         const PROCESS_HISTORY_LIMIT: usize = 60;
 
@@ -1853,16 +1839,16 @@ impl App {
         let mut merged = Vec::with_capacity(samples.len());
 
         for sample in samples {
-            let mut metric = if let Some(index) = existing.iter().position(|entry| entry.pid == sample.pid)
-            {
-                existing.swap_remove(index)
-            } else {
-                super::state::ProcessMetrics {
-                    pid: sample.pid,
-                    role: sample.role.clone(),
-                    ..Default::default()
-                }
-            };
+            let mut metric =
+                if let Some(index) = existing.iter().position(|entry| entry.pid == sample.pid) {
+                    existing.swap_remove(index)
+                } else {
+                    super::state::ProcessMetrics {
+                        pid: sample.pid,
+                        role: sample.role.clone(),
+                        ..Default::default()
+                    }
+                };
 
             metric.pid = sample.pid;
             metric.role = sample.role;
@@ -1870,8 +1856,16 @@ impl App {
             metric.mem_bytes = sample.mem_bytes;
             metric.state = sample.state;
             metric.uptime_secs = sample.uptime_secs;
-            push_bounded_history(&mut metric.cpu_history, sample.cpu_pct, PROCESS_HISTORY_LIMIT);
-            push_bounded_history(&mut metric.mem_history, sample.mem_bytes, PROCESS_HISTORY_LIMIT);
+            push_bounded_history(
+                &mut metric.cpu_history,
+                sample.cpu_pct,
+                PROCESS_HISTORY_LIMIT,
+            );
+            push_bounded_history(
+                &mut metric.mem_history,
+                sample.mem_bytes,
+                PROCESS_HISTORY_LIMIT,
+            );
             merged.push(metric);
         }
 
@@ -1879,11 +1873,118 @@ impl App {
     }
 
     fn current_agent_scroll_offset(&self) -> usize {
-        self.tui_state.agent_scroll.unwrap_or_else(|| {
-            self.current_agent_output_line_count()
-                .saturating_sub(self.current_agent_output_viewport_height())
-                .min(u16::MAX as usize)
-        })
+        self.tui_state
+            .agent_scroll
+            .unwrap_or_else(|| self.current_agent_max_scroll())
+    }
+
+    fn current_agent_max_scroll(&self) -> usize {
+        self.current_agent_output_line_count()
+            .saturating_sub(self.current_agent_output_viewport_height())
+            .min(u16::MAX as usize)
+    }
+
+    fn current_log_max_scroll(&self) -> usize {
+        let content_area = self.current_content_area();
+        let sections =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(content_area);
+        let viewport_height = sections[1].height.saturating_sub(2) as usize;
+        super::views::logs_view::filtered_entry_count(&self.data, &self.tui_state)
+            .saturating_sub(viewport_height)
+            .min(u16::MAX as usize)
+    }
+
+    fn current_git_max_scroll(&self) -> usize {
+        let content_area = self.current_content_area();
+        let panels = Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(content_area);
+        let sections = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(panels[1]);
+        let viewport_height = sections[0].height.saturating_sub(2) as usize;
+        self.tui_state
+            .git_view_data
+            .as_ref()
+            .map_or(0, |git| git.commits.len().saturating_sub(viewport_height))
+            .min(u16::MAX as usize)
+    }
+
+    fn scroll_agent_output_by(&mut self, delta: i32) {
+        let max_scroll = self.current_agent_max_scroll();
+        let current = self.current_agent_scroll_offset().min(max_scroll);
+
+        if delta < 0 {
+            let next = current.saturating_sub(delta.unsigned_abs() as usize);
+            self.tui_state.agent_scroll = Some(next);
+        } else {
+            let next = current.saturating_add(delta as usize).min(max_scroll);
+            if next >= max_scroll {
+                self.tui_state.agent_scroll = None;
+            } else {
+                self.tui_state.agent_scroll = Some(next);
+            }
+        }
+
+        self.tui_state.clamp_agent_scroll(max_scroll);
+    }
+
+    fn scroll_logs_by(&mut self, delta: i32) {
+        let max_scroll = self.current_log_max_scroll();
+        let current = if self.tui_state.log_auto_tail {
+            max_scroll
+        } else {
+            self.tui_state.log_scroll.min(max_scroll)
+        };
+
+        if delta < 0 {
+            self.tui_state.log_auto_tail = false;
+            self.tui_state.log_scroll = current.saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            let next = current.saturating_add(delta as usize).min(max_scroll);
+            if next >= max_scroll {
+                self.tui_state.log_auto_tail = true;
+                self.tui_state.log_scroll = 0;
+            } else {
+                self.tui_state.log_auto_tail = false;
+                self.tui_state.log_scroll = next;
+            }
+        }
+
+        self.tui_state.clamp_log_scroll(max_scroll);
+    }
+
+    fn current_content_area(&self) -> Rect {
+        let full_area = Rect::new(0, 0, self.terminal_size.0, self.terminal_size.1);
+        let content_area = super::layout::responsive_outer_margin(full_area);
+        let has_waves = !self.tui_state.execution_waves.is_empty();
+        let wave_row_height = if has_waves { 1 } else { 0 };
+        let main_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(wave_row_height),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(content_area);
+        self.split_content_area(main_layout[2]).0
+    }
+
+    fn clamp_scroll_state_to_view(&mut self) {
+        match self.tui_state.active_tab {
+            Tab::Dashboard | Tab::Agents => {
+                let max_scroll = self.current_agent_max_scroll();
+                self.tui_state.clamp_agent_scroll(max_scroll);
+            }
+            Tab::Git => {
+                self.tui_state
+                    .clamp_diff_scroll(self.current_git_max_scroll());
+            }
+            Tab::Logs => {
+                self.tui_state
+                    .clamp_log_scroll(self.current_log_max_scroll());
+            }
+            Tab::Plans | Tab::Config | Tab::Inspect => {}
+        }
     }
 
     fn current_agent_output_line_count(&self) -> usize {
@@ -1927,24 +2028,7 @@ impl App {
     }
 
     fn current_agent_output_viewport_height(&self) -> usize {
-        let Ok((width, height)) = crossterm::terminal::size() else {
-            return 0;
-        };
-
-        let full_area = Rect::new(0, 0, width, height);
-        let content_area = super::layout::responsive_outer_margin(full_area);
-        let has_waves = !self.tui_state.execution_waves.is_empty();
-        let wave_row_height = if has_waves { 1 } else { 0 };
-        let main_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(wave_row_height),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
-        let (content_area, _) = self.split_content_area(main_layout[2]);
+        let content_area = self.current_content_area();
 
         match self.tui_state.active_tab {
             Tab::Agents => {
@@ -2050,7 +2134,10 @@ impl App {
     }
 
     fn dismiss_all_modals(&mut self) {
-        if matches!(self.tui_state.active_modal, Some(ModalState::Approval { .. })) {
+        if matches!(
+            self.tui_state.active_modal,
+            Some(ModalState::Approval { .. })
+        ) {
             let _ = self.resolve_active_approval(false);
         }
         self.tui_state.active_modal = None;
@@ -2141,7 +2228,7 @@ impl App {
                 auto_tail: self.tui_state.agent_scroll.is_none(),
             },
             Tab::Git => ViewState {
-                scroll: self.tui_state.plan_scroll_offset as u16,
+                scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: self.tui_state.git_branch_cursor,
                 sub_tab: 0,
                 secondary_selected: 0,
@@ -2162,7 +2249,7 @@ impl App {
                 auto_tail: false,
             },
             Tab::Inspect => ViewState {
-                scroll: 0,
+                scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: 0,
                 sub_tab: 0,
                 secondary_selected: 0,
@@ -2561,9 +2648,9 @@ fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::config::RokoConfig;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use roko_core::config::RokoConfig;
     use tempfile::tempdir;
 
     fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
@@ -2781,7 +2868,7 @@ mod tests {
     #[test]
     fn full_frame_render_no_panic() {
         let dir = tempdir().unwrap();
-        let app = App::new(dir.path());
+        let mut app = App::new(dir.path());
         let backend = TestBackend::new(160, 50);
         let mut terminal = Terminal::new(backend).unwrap();
         // The real test: does a full frame render without panicking?
@@ -2869,13 +2956,19 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        assert!(!matches!(app.tui_state.active_modal, Some(ModalState::Help)));
+        assert!(!matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::Help)
+        ));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(matches!(app.tui_state.active_modal, Some(ModalState::Help)));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(!matches!(app.tui_state.active_modal, Some(ModalState::Help)));
+        assert!(!matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::Help)
+        ));
     }
 
     #[test]
@@ -2916,7 +3009,10 @@ mod tests {
 
         assert!(matches!(
             app.tui_state.active_modal,
-            Some(ModalState::WaveOverview { scroll_offset: 3, .. })
+            Some(ModalState::WaveOverview {
+                scroll_offset: 3,
+                ..
+            })
         ));
         assert_eq!(app.tui_state.plan_scroll_offset, 9);
 
@@ -2929,7 +3025,10 @@ mod tests {
 
         assert!(matches!(
             app.tui_state.active_modal,
-            Some(ModalState::AgentPool { scroll_offset: 3, .. })
+            Some(ModalState::AgentPool {
+                scroll_offset: 3,
+                ..
+            })
         ));
     }
 
@@ -3067,8 +3166,8 @@ mod tests {
 
     #[test]
     fn v_cycles_effects_presets_and_persists_without_touching_screen_postfx() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use super::super::effects_config::EffectsPreset;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempdir().unwrap();
         std::fs::write(
@@ -3194,17 +3293,18 @@ mod tests {
     }
 
     #[test]
-    fn page_scroll_moves_focused_panel_by_twenty_lines() {
+    fn page_scroll_moves_focused_panel_by_terminal_height_minus_chrome() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
+        app.terminal_size = (120, 50);
         app.tui_state.focus = FocusZone::PlanTree;
         app.tui_state.plan_scroll_offset = 40;
 
         app.dispatch_action(TuiAction::ScrollPageUp);
-        assert_eq!(app.tui_state.plan_scroll_offset, 20);
+        assert_eq!(app.tui_state.plan_scroll_offset, 0);
 
         app.dispatch_action(TuiAction::ScrollPageDown);
-        assert_eq!(app.tui_state.plan_scroll_offset, 40);
+        assert_eq!(app.tui_state.plan_scroll_offset, 46);
     }
 
     #[test]
@@ -3259,6 +3359,13 @@ mod tests {
         assert_eq!(view.scroll, 7);
         assert_eq!(view.selected, 0);
         assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Git;
+        app.tui_state.diff_scroll = 11;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 11);
+        assert_eq!(view.selected, app.tui_state.git_branch_cursor);
+        assert!(!view.auto_tail);
     }
 
     #[test]
@@ -3285,18 +3392,14 @@ mod tests {
     }
 
     #[test]
-    fn logs_tail_toggle_and_filter_input_work() {
+    fn log_end_action_resumes_tail_mode() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
         app.tui_state.active_tab = Tab::Logs;
-        app.tui_state.log_auto_tail = true;
-        app.tui_state.log_scroll = 0;
+        app.tui_state.log_auto_tail = false;
+        app.tui_state.log_scroll = 9;
 
-        // Scrolling up pins the view (disables auto-tail).
-        app.dispatch_action(TuiAction::ScrollLogUp);
-        assert_eq!(app.tui_state.log_scroll, 1);
-
-        app.dispatch_action(TuiAction::ScrollLogDown);
+        app.dispatch_action(TuiAction::ScrollLogEnd);
         assert!(app.tui_state.log_auto_tail);
         assert_eq!(app.tui_state.log_scroll, 0);
     }

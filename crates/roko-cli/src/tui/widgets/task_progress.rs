@@ -60,10 +60,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     let mut title = format!("Tasks ({}/{})", done, total);
 
     let (border_style, ttl_style) = if focused {
-        (
-            Theme::focused_border_style(),
-            Theme::focused_title_style(),
-        )
+        (Theme::focused_border_style(), Theme::focused_title_style())
     } else {
         (
             Theme::unfocused_border_style(),
@@ -198,10 +195,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
             ),
         ];
         if !time_tag.is_empty() {
-            task_spans.push(Span::styled(
-                time_tag,
-                Style::default().fg(Theme::TEXT_DIM),
-            ));
+            task_spans.push(Span::styled(time_tag, Style::default().fg(Theme::TEXT_DIM)));
         }
         task_spans.push(Span::styled(title_display, text_style));
 
