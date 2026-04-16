@@ -10,6 +10,12 @@ has its own folder with multiple sub-docs. For naming conventions, reframe rules
 and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 `/Users/will/dev/nunchi/roko/refactoring-prd/`.
 
+See also `tmp/refinements/01-critique-one-noun.md`; REF02-REF05 and REF07 continue the
+reframing from the retired "one noun, six verbs" mnemonic into the current two-medium,
+two-fabric architecture story, and `tmp/refinements/06-refactoring-plan.md` records the
+phased landing sequence now summarized in
+[`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-plan-phases.md).
+
 ## Start Here
 
 - **[EXECUTIVE-SUMMARY.md](EXECUTIVE-SUMMARY.md)** — 10-minute overview: thesis, section summaries, innovations, roadmap
@@ -17,12 +23,12 @@ and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 - **[STATUS.md](STATUS.md)** — Implementation status matrix (what's shipping vs. specified)
 - **[COMPARISON.md](COMPARISON.md)** — How Roko compares to LangChain, CrewAI, SWE-Agent, AutoGPT
 
-## Signal / Engram Naming
+## Current Framing
 
-> **Code ↔ Docs:** The universal data type is called **`Signal`** in the Rust codebase
-> (`crates/roko-core/src/signal.rs`) and **Engram** in these PRD documents. They are the
-> same concept. `Signal` = Engram. See [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md)
-> for the full naming map including all legacy-to-current renames.
+> **Kernel framing:** Roko's architecture is best read as two mediums (durable Engram and
+> ephemeral Pulse) moving through two fabrics (Substrate and Bus), acted on by six operators.
+> See [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md)
+> for the canonical terminology map and retired-code guidance.
 
 ## Topics
 
@@ -54,7 +60,7 @@ and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 - Each topic folder contains multiple sub-docs broken down for easy navigation and maintenance.
 - Content is generated from three source layers:
   1. `/Users/will/dev/nunchi/roko/refactoring-prd/` — canonical new-architecture spec
-  2. `/Users/will/dev/nunchi/roko/bardo-backup/prd/` and `bardo-backup/tmp/` — legacy research and PRDs
+  2. historical archive: legacy research notes and PRDs from the pre-refactor source corpus
   3. `/Users/will/dev/nunchi/roko/roko/tmp/implementation-plans/` — active work items
 - Every academic citation from the sources is preserved.
 - See `tmp/prd-migration/SOURCE-INDEX.md` for the full source mapping per topic.
