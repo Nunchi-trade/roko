@@ -1,0 +1,12 @@
+{
+  "reply": "Reviewed the gate feedback and left the smoke-test workspace in a consistent state.",
+  "name": "self-host-fixture-turn-08",
+  "usage": {
+    "input_tokens": 11,
+    "output_tokens": 13,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

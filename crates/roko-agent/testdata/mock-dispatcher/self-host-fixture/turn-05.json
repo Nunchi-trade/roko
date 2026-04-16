@@ -1,0 +1,12 @@
+{
+  "reply": "T1 review: Run the offline smoke-test task is complete. Cargo.toml, Cargo.lock, src/main.rs, and .roko are in scope, compile passed, and cargo check stayed green. verdict = \"approve\".",
+  "name": "self-host-fixture-turn-05",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 11,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

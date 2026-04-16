@@ -42,6 +42,7 @@
 use crate::SafetyLayer;
 use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::gemini::GeminiAdapter;
+use crate::mock::MockAgent;
 use crate::{Agent, ExecAgent};
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
@@ -50,6 +51,7 @@ use roko_core::tool::ToolRegistry;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +107,9 @@ pub fn create_agent_for_model(
     options: AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
     let mut options = options;
+    if let Some(mock_agent) = mock_agent_from_env(&options)? {
+        return Ok(mock_agent);
+    }
     let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
     let resolved = resolve_model(config, model_key);
     let profile = resolved
@@ -193,6 +198,34 @@ pub fn create_agent_for_model(
     with_safety_layer(safety_layer, || {
         adapter.create_agent(&provider_config, &profile, &options)
     })
+}
+
+fn mock_agent_from_env(
+    options: &AgentOptions,
+) -> Result<Option<Box<dyn Agent>>, AgentCreationError> {
+    let Ok(dispatcher) = env::var("ROKO_DISPATCHER") else {
+        return Ok(None);
+    };
+    let fixture = match dispatcher.strip_prefix("mock-") {
+        Some(fixture) if !fixture.trim().is_empty() => fixture,
+        _ => return Ok(None),
+    };
+
+    let mut agent = MockAgent::scripted_from_fixture(fixture)
+        .map_err(|err| AgentCreationError::FixtureLoad(err.to_string()))?;
+    if let Some(working_dir) = options.working_dir.clone() {
+        agent = agent.with_working_dir(working_dir);
+    }
+    if let Ok(state_path) = env::var("ROKO_MOCK_STATE_PATH") {
+        let state_path = state_path.trim();
+        if !state_path.is_empty() {
+            agent = agent.with_state_path(state_path);
+        }
+    }
+    if !options.name.is_empty() {
+        agent = agent.with_name(options.name.clone());
+    }
+    Ok(Some(Box::new(agent)))
 }
 
 /// Run `f` with an optional safety layer attached to provider-backed agent construction.
@@ -445,6 +478,8 @@ pub enum AgentCreationError {
     MissingConfig(String),
     #[error("Invalid provider kind: {0:?}")]
     InvalidKind(ProviderKind),
+    #[error("Failed to load mock fixture: {0}")]
+    FixtureLoad(String),
 }
 
 #[cfg(test)]

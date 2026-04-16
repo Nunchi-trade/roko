@@ -1,0 +1,12 @@
+{
+  "reply": "Prepared the plan for gate review after the mock implementation step completed.",
+  "name": "self-host-fixture-turn-07",
+  "usage": {
+    "input_tokens": 11,
+    "output_tokens": 12,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

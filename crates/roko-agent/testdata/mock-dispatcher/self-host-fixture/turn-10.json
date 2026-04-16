@@ -1,0 +1,12 @@
+{
+  "reply": "Finalized the mock self-hosting task and left the plan ready to report success.",
+  "name": "self-host-fixture-turn-10",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 12,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "reply": "---\nid: prd-test-wire-xyz\ntitle: test-wire-xyz\nstatus: draft\nversion: 1\ncreated: 2026-04-16\nupdated: 2026-04-16\ndepends_on: []\ncrates: [\"crates/roko-cli\"]\nplans_generated: []\ncoverage: 0\ntags: [\"smoke-test\"]\n---\n\n# Test Wire XYZ\n\n## Summary\nCreate a minimal smoke-test PRD for the self-hosting workflow.\n\n## Requirements\n- REQ-001: Generate a single runnable plan.\n- REQ-002: Keep the workflow offline and deterministic.\n\n## Acceptance Criteria\n- `roko plan validate plans/` succeeds\n- `roko plan run plans/` succeeds\n",
+  "name": "self-host-fixture-turn-01",
+  "usage": {
+    "input_tokens": 13,
+    "output_tokens": 24,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}
