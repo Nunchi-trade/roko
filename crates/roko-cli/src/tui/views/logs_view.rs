@@ -19,45 +19,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::LogFilterLevel;
-use crate::tui::state::TuiState;
-
-/// A parsed log entry.
-#[derive(Debug, Clone)]
-struct LogEntry {
-    pub timestamp: String,
-    pub level: LogLevel,
-    pub source: String,
-    pub message: String,
-}
-
-/// Log severity levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogLevel {
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-impl LogLevel {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Debug => "DBG",
-            Self::Info => "INF",
-            Self::Warn => "WRN",
-            Self::Error => "ERR",
-        }
-    }
-
-    fn filter_level(self) -> LogFilterLevel {
-        match self {
-            Self::Info => LogFilterLevel::Info,
-            Self::Warn => LogFilterLevel::Warn,
-            Self::Error => LogFilterLevel::Error,
-            Self::Debug => LogFilterLevel::Debug,
-        }
-    }
-}
+use crate::tui::state::{LogEntry, LogEntryLevel, TuiState};
 
 /// Render the full logs view.
 pub(crate) fn render(
@@ -222,19 +184,19 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
     // 1. Signals
     for signal in &data.recent_signals {
         let level = if signal.kind.contains("error") || signal.kind.contains("fail") {
-            LogLevel::Error
+            LogEntryLevel::Error
         } else if signal.kind.contains("warn") {
-            LogLevel::Warn
+            LogEntryLevel::Warn
         } else if signal.kind.contains("gate:") {
             if signal.payload_preview.contains("passed") {
-                LogLevel::Info
+                LogEntryLevel::Info
             } else {
-                LogLevel::Warn
+                LogEntryLevel::Warn
             }
         } else if signal.kind.contains("debug") {
-            LogLevel::Debug
+            LogEntryLevel::Debug
         } else {
-            LogLevel::Info
+            LogEntryLevel::Info
         };
 
         let ts = format_timestamp_ms(signal.created_at_ms);
@@ -246,12 +208,7 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
 
         entries.insert(
             (signal.created_at_ms, seq),
-            LogEntry {
-                timestamp: ts,
-                level,
-                source: format!("signal:{}", truncate_kind(&signal.kind)),
-                message,
-            },
+            LogEntry::new(ts, level, format!("signal:{}", truncate_kind(&signal.kind)), message),
         );
         seq += 1;
     }
@@ -260,11 +217,11 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
     for episode in data.episodes() {
         let ts_ms = episode.timestamp.timestamp_millis();
         let level = if !episode.success {
-            LogLevel::Error
+            LogEntryLevel::Error
         } else if episode.kind == "gate" {
-            LogLevel::Warn
+            LogEntryLevel::Warn
         } else {
-            LogLevel::Info
+            LogEntryLevel::Info
         };
 
         let duration_str = if episode.duration_secs > 0.0 {
@@ -297,12 +254,12 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
 
         entries.insert(
             (ts_ms, seq),
-            LogEntry {
-                timestamp: episode.timestamp.format("%H:%M:%S").to_string(),
+            LogEntry::new(
+                episode.timestamp.format("%H:%M:%S").to_string(),
                 level,
-                source: format!("episode:{}", truncate_kind(&episode.kind)),
+                format!("episode:{}", truncate_kind(&episode.kind)),
                 message,
-            },
+            ),
         );
         seq += 1;
     }
@@ -315,9 +272,9 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
         let ts = format_timestamp_ms(ts_ms);
         let duration_ms = event.duration_ms;
         let level = if event.cost_usd > 1.0 {
-            LogLevel::Warn
+            LogEntryLevel::Warn
         } else {
-            LogLevel::Debug
+            LogEntryLevel::Debug
         };
 
         let cache_pct = if event.input_tokens > 0 {
@@ -342,12 +299,12 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
 
         entries.insert(
             (ts_ms, seq),
-            LogEntry {
-                timestamp: ts,
+            LogEntry::new(
+                ts,
                 level,
-                source: format!("efficiency:{}", truncate(&event.agent_id, 12)),
+                format!("efficiency:{}", truncate(&event.agent_id, 12)),
                 message,
-            },
+            ),
         );
         seq += 1;
     }
@@ -357,16 +314,16 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
         let ts = format_timestamp_ms(failure.created_at_ms);
         entries.insert(
             (failure.created_at_ms, seq),
-            LogEntry {
-                timestamp: ts,
-                level: LogLevel::Error,
-                source: format!("gate:{}", failure.gate_name),
-                message: format!(
+            LogEntry::new(
+                ts,
+                LogEntryLevel::Error,
+                format!("gate:{}", failure.gate_name),
+                format!(
                     "FAILED task={} {}",
                     failure.task_id,
                     truncate(&failure.error_excerpt, 80),
                 ),
-            },
+            ),
         );
         seq += 1;
     }
@@ -376,10 +333,10 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
         let ts_ms = event.timestamp_ms as i64;
         let ts = format_timestamp_ms(ts_ms);
         let level = match event.event_type.as_str() {
-            "error" | "task_failed" | "gate_failed" => LogLevel::Error,
-            "warning" | "retry" => LogLevel::Warn,
-            "debug" => LogLevel::Debug,
-            _ => LogLevel::Info,
+            "error" | "task_failed" | "gate_failed" => LogEntryLevel::Error,
+            "warning" | "retry" => LogEntryLevel::Warn,
+            "debug" => LogEntryLevel::Debug,
+            _ => LogEntryLevel::Info,
         };
         let detail = if event.task_id.is_empty() {
             event.message.clone()
@@ -388,12 +345,12 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
         };
         entries.insert(
             (ts_ms, seq),
-            LogEntry {
-                timestamp: ts,
+            LogEntry::new(
+                ts,
                 level,
-                source: format!("event:{}", truncate(&event.event_type, 16)),
-                message: detail,
-            },
+                format!("event:{}", truncate(&event.event_type, 16)),
+                detail,
+            ),
         );
         seq += 1;
     }
@@ -403,12 +360,12 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
 }
 
 /// Color style for log levels.
-fn level_style(level: LogLevel, theme: &Theme) -> ratatui::style::Style {
+fn level_style(level: LogEntryLevel, theme: &Theme) -> ratatui::style::Style {
     match level {
-        LogLevel::Debug => theme.muted(),
-        LogLevel::Info => theme.text(),
-        LogLevel::Warn => theme.warning(),
-        LogLevel::Error => theme.danger(),
+        LogEntryLevel::Debug => theme.muted(),
+        LogEntryLevel::Info => theme.text(),
+        LogEntryLevel::Warn => theme.warning(),
+        LogEntryLevel::Error => theme.danger(),
     }
 }
 

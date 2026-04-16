@@ -492,10 +492,19 @@ pub struct TaskEntry {
 /// Git branch tree node.
 #[derive(Debug, Clone, Default)]
 pub struct GitBranchNode {
+    /// Branch name.
     pub name: String,
+    /// Whether this branch is currently checked out.
     pub is_current: bool,
+    /// Upstream tracking branch, if configured.
+    pub tracking: Option<String>,
+    /// Number of commits ahead of the upstream branch.
     pub ahead: usize,
+    /// Number of commits behind the upstream branch.
     pub behind: usize,
+    /// Display indentation depth derived from the branch path.
+    pub depth: u16,
+    /// Nested child branches when rendered hierarchically.
     pub children: Vec<GitBranchNode>,
 }
 
@@ -508,6 +517,72 @@ pub struct GitCommitEntry {
     pub author: String,
     pub timestamp_ms: i64,
     pub branch: Option<String>,
+}
+
+/// Severity level for a unified TUI log entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogEntryLevel {
+    /// Debug-level event.
+    Debug,
+    /// Informational event.
+    Info,
+    /// Warning event.
+    Warn,
+    /// Error event.
+    Error,
+}
+
+impl LogEntryLevel {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Debug => "DBG",
+            Self::Info => "INF",
+            Self::Warn => "WRN",
+            Self::Error => "ERR",
+        }
+    }
+
+    #[must_use]
+    pub const fn filter_level(self) -> LogFilterLevel {
+        match self {
+            Self::Info => LogFilterLevel::Info,
+            Self::Warn => LogFilterLevel::Warn,
+            Self::Error => LogFilterLevel::Error,
+            Self::Debug => LogFilterLevel::Debug,
+        }
+    }
+}
+
+/// A parsed, display-ready log row for the Logs tab.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    /// Human-readable timestamp for the rendered row.
+    pub timestamp: String,
+    /// Severity level used for filtering and styling.
+    pub level: LogEntryLevel,
+    /// Compact source label such as `signal:gate`.
+    pub source: String,
+    /// Main message body shown in the Logs tab.
+    pub message: String,
+}
+
+impl LogEntry {
+    /// Construct a display-ready log entry.
+    #[must_use]
+    pub fn new(
+        timestamp: String,
+        level: LogEntryLevel,
+        source: String,
+        message: String,
+    ) -> Self {
+        Self {
+            timestamp,
+            level,
+            source,
+            message,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

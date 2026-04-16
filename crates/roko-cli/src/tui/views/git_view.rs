@@ -17,23 +17,7 @@ use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Tab
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::state::TuiState;
-
-/// A node in the branch tree display.
-#[derive(Debug, Clone)]
-pub(crate) struct GitBranchNode {
-    /// Branch name (e.g. "main", "feature/foo").
-    pub name: String,
-    /// Whether this is the currently checked-out branch.
-    pub is_current: bool,
-    /// Remote tracking branch, if any.
-    pub tracking: Option<String>,
-    /// Commits ahead of tracking branch.
-    pub ahead: u32,
-    /// Commits behind tracking branch.
-    pub behind: u32,
-    /// Indent depth for hierarchical display (e.g. feature/ prefix).
-    pub depth: u16,
-}
+pub(crate) use crate::tui::state::GitBranchNode;
 
 /// A worktree entry.
 #[derive(Debug, Clone)]
@@ -341,9 +325,8 @@ fn render_branch_info(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData,
     };
 
     let current_node = git_data.branches.iter().find(|b| b.is_current);
-
     let tracking_display = current_node
-        .and_then(|n| n.tracking.as_deref())
+        .and_then(|node| node.tracking.as_deref())
         .unwrap_or("(none)");
 
     let lines = vec![
@@ -468,7 +451,6 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
         let (ahead, behind) = parse_ahead_behind(track_info);
 
         let is_current = name == current_branch;
-        // Compute depth from path segments (e.g. feature/foo -> depth 1)
         let depth = name.matches('/').count().min(3) as u16;
 
         branches.push(GitBranchNode {
@@ -478,6 +460,7 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
             ahead,
             behind,
             depth,
+            children: Vec::new(),
         });
     }
 
@@ -487,9 +470,9 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
 }
 
 /// Parse "[ahead N, behind M]" from git tracking info.
-fn parse_ahead_behind(s: &str) -> (u32, u32) {
-    let mut ahead = 0u32;
-    let mut behind = 0u32;
+fn parse_ahead_behind(s: &str) -> (usize, usize) {
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
     if s.contains("ahead") {
         if let Some(n) = s
             .split("ahead ")

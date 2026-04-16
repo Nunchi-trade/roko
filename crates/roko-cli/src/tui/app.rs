@@ -272,21 +272,6 @@ fn task_picker_rows(state: &TuiState) -> Vec<TaskPickerRow> {
         .collect()
 }
 
-fn convert_git_branch_tree(
-    branches: &[super::views::git_view::GitBranchNode],
-) -> Vec<super::state::GitBranchNode> {
-    branches
-        .iter()
-        .map(|branch| super::state::GitBranchNode {
-            name: branch.name.clone(),
-            is_current: branch.is_current,
-            ahead: branch.ahead as usize,
-            behind: branch.behind as usize,
-            children: Vec::new(),
-        })
-        .collect()
-}
-
 fn convert_git_commit_graph(
     commits: &[super::views::git_view::CommitEntry],
 ) -> Vec<super::state::GitCommitEntry> {
@@ -2214,7 +2199,7 @@ impl App {
         if let Some(rx) = &self.git_rx {
             let mut count = 0;
             while let Ok(bg) = rx.try_recv() {
-                self.tui_state.git_branch_tree = convert_git_branch_tree(&bg.view_data.branches);
+                self.tui_state.git_branch_tree = bg.view_data.branches.clone();
                 self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
                 self.tui_state.git_worktree_list =
                     convert_git_worktree_list(&bg.view_data.worktrees);
