@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -29,6 +29,11 @@ use roko_agent::task_runner::{
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, SafetyLayer};
+use roko_compose::enrichment::{
+    ALL_ORDERED, EnrichStep, EnrichmentConfig, EnrichmentPipeline,
+    LlmBackend as EnrichmentLlmBackend, LlmClient as EnrichmentLlmClient, PlanInfo, SkipReason,
+    StepOutcome, StepSelector, estimate_enrichment,
+};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
     PromptSection, SectionPriority, SectionScorer, TaskContext,
@@ -51,7 +56,7 @@ use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Kind, OperatingFrequency,
     OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, TaskCategory,
-    TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
+    TaskComplexityBand, TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -1181,6 +1186,130 @@ struct AgentRunConfig {
     skip_permissions: bool,
 }
 
+#[derive(Clone, Default)]
+struct EnrichmentRunStats {
+    calls: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+}
+
+#[derive(Clone)]
+struct EnrichmentRuntimeClient {
+    command: String,
+    exec_dir: PathBuf,
+    role: String,
+    timeout_ms: u64,
+    bare_mode: bool,
+    effort: String,
+    fallback_model: Option<String>,
+    env_vars: Vec<(String, String)>,
+    extra_args: Vec<String>,
+    skip_permissions: bool,
+    stats: Arc<Mutex<EnrichmentRunStats>>,
+}
+
+impl EnrichmentRuntimeClient {
+    fn snapshot(&self) -> EnrichmentRunStats {
+        self.stats.lock().expect("enrichment stats lock").clone()
+    }
+
+    fn record_usage(&self, usage: &roko_agent::Usage) {
+        let mut stats = self.stats.lock().expect("enrichment stats lock");
+        stats.calls += 1;
+        stats.input_tokens += u64::from(usage.input_tokens);
+        stats.output_tokens += u64::from(usage.output_tokens);
+        stats.cost_usd += f64::from(usage.cost_usd);
+    }
+}
+
+#[async_trait::async_trait]
+impl EnrichmentLlmClient for EnrichmentRuntimeClient {
+    async fn call(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        _max_tokens: u32,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let result = run_prepared_agent(AgentRunConfig {
+            command: self.command.clone(),
+            exec_dir: self.exec_dir.clone(),
+            model: model.to_string(),
+            role: self.role.clone(),
+            timeout_ms: self.timeout_ms,
+            bare_mode: self.bare_mode,
+            effort: self.effort.clone(),
+            system_prompt: system.to_string(),
+            allowed_tools_csv: String::new(),
+            mcp_config: None,
+            fallback_model: self.fallback_model.clone(),
+            env_vars: self.env_vars.clone(),
+            read_args: Vec::new(),
+            extra_args: self.extra_args.clone(),
+            resume_session: None,
+            prompt: user.to_string(),
+            skip_permissions: self.skip_permissions,
+        })
+        .await;
+        self.record_usage(&result.usage);
+
+        if !result.success {
+            let reason = result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("enrichment agent call failed");
+            return Err(anyhow!("enrichment model {model} failed: {reason}").into());
+        }
+
+        let text = result.output.body.as_text().unwrap_or_default().to_string();
+        if text.trim().is_empty() {
+            return Err(anyhow!("enrichment model {model} returned empty output").into());
+        }
+        Ok(text)
+    }
+}
+
+struct EnrichmentPhaseSummary {
+    complexity: TaskComplexityBand,
+    backend: EnrichmentLlmBackend,
+    model: String,
+    selected_steps: Vec<EnrichStep>,
+    outcomes: Vec<StepOutcome>,
+    estimated_tokens: u32,
+    estimated_cost_usd: f64,
+    estimated_duration_secs: f64,
+    agent_calls: usize,
+}
+
+impl EnrichmentPhaseSummary {
+    fn prompt_summary(&self) -> String {
+        let selected_steps = self
+            .selected_steps
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut summary = format!(
+            "Complexity: {}\nBackend: {:?}\nModel: {}\nSelected steps: {}\nEstimated tokens: {}\nEstimated cost USD: {:.4}\nEstimated duration secs: {:.1}\nPipeline agent calls: {}\nOutcomes:\n{}",
+            enrichment_complexity_label(self.complexity),
+            self.backend,
+            self.model,
+            selected_steps,
+            self.estimated_tokens,
+            self.estimated_cost_usd,
+            self.estimated_duration_secs,
+            self.agent_calls,
+            render_enrichment_outcomes(&self.outcomes),
+        );
+        if !summary.ends_with('\n') {
+            summary.push('\n');
+        }
+        summary
+    }
+}
+
 /// Result bundle returned from a parallel task execution.
 struct ParallelTaskResult {
     task_id: String,
@@ -1374,6 +1503,142 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     }
+}
+
+fn enrichment_complexity_label(complexity: TaskComplexityBand) -> &'static str {
+    match complexity {
+        TaskComplexityBand::Fast => "fast",
+        TaskComplexityBand::Standard => "standard",
+        TaskComplexityBand::Complex => "complex",
+        _ => "complex",
+    }
+}
+
+fn enrichment_complexity_from_tasks(tasks_file: Option<&TasksFile>) -> TaskComplexityBand {
+    let mut saw_standard = false;
+    let mut saw_fast = false;
+
+    for tier in tasks_file
+        .into_iter()
+        .flat_map(|tasks_file| tasks_file.tasks.iter().map(|task| task.tier.as_str()))
+    {
+        match tier {
+            "mechanical" | "fast" => saw_fast = true,
+            "architectural" | "complex" | "premium" => return TaskComplexityBand::Complex,
+            _ => saw_standard = true,
+        }
+    }
+
+    if saw_standard {
+        TaskComplexityBand::Standard
+    } else if saw_fast {
+        TaskComplexityBand::Fast
+    } else {
+        TaskComplexityBand::Standard
+    }
+}
+
+fn selected_enrichment_steps(complexity: TaskComplexityBand) -> Vec<EnrichStep> {
+    StepSelector::new().select_steps(complexity, ALL_ORDERED)
+}
+
+fn resolve_enrichment_backend(command: &str, model: &str, provider: &str) -> EnrichmentLlmBackend {
+    let command = command.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    let provider = provider.to_ascii_lowercase();
+
+    if command.contains("cursor") || provider.contains("cursor") || model.contains("composer") {
+        EnrichmentLlmBackend::Cursor
+    } else if command.contains("ollama")
+        || provider.contains("ollama")
+        || model.contains("gemma")
+        || model.contains("llama")
+        || model.contains("qwen")
+    {
+        EnrichmentLlmBackend::Ollama
+    } else if command.contains("codex")
+        || command.contains("openai")
+        || provider.contains("openai")
+        || provider.contains("zai")
+        || provider.contains("gemini")
+        || model.contains("gpt")
+        || model.contains("o3")
+        || model.contains("o4")
+        || model.contains("gemini")
+    {
+        EnrichmentLlmBackend::Codex
+    } else {
+        EnrichmentLlmBackend::Claude
+    }
+}
+
+fn render_enrichment_outcomes(outcomes: &[StepOutcome]) -> String {
+    outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            StepOutcome::Generated { step, llm_calls } => {
+                format!("- {step}: generated ({llm_calls} llm call(s))")
+            }
+            StepOutcome::Skipped { step, reason } => {
+                let reason = match reason {
+                    SkipReason::DryRun => "dry-run",
+                    SkipReason::Fresh => "fresh output",
+                };
+                format!("- {step}: skipped ({reason})")
+            }
+            StepOutcome::Failed { step, message } => format!("- {step}: failed ({message})"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_for_enrichment_prompt(text: &str, max_chars: usize) -> String {
+    let mut truncated = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        truncated.push_str("\n...[truncated]");
+    }
+    truncated
+}
+
+fn render_enrichment_artifact_context(plan_dir: &Path, include_tasks_toml: bool) -> String {
+    const PER_FILE_LIMIT: usize = 1200;
+    const TOTAL_LIMIT: usize = 6000;
+
+    let mut rendered = String::new();
+    let mut used = 0usize;
+
+    for &step in ALL_ORDERED {
+        if !include_tasks_toml && step == EnrichStep::Tasks {
+            continue;
+        }
+
+        let artifact_path = plan_dir.join(step.output_filename());
+        let Ok(contents) = std::fs::read_to_string(&artifact_path) else {
+            continue;
+        };
+        let contents = contents.trim();
+        if contents.is_empty() {
+            continue;
+        }
+
+        let excerpt = truncate_for_enrichment_prompt(contents, PER_FILE_LIMIT);
+        used += excerpt.len();
+        if used > TOTAL_LIMIT {
+            break;
+        }
+
+        rendered.push_str(&format!(
+            "\n## Artifact {} ({})\n{}\n",
+            step,
+            artifact_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(step.output_filename()),
+            excerpt
+        ));
+    }
+
+    rendered
 }
 
 // ─── Report types ─────────────────────────────────────────────────────────
@@ -2555,6 +2820,28 @@ impl TaskTracker {
         };
         tracker.advance_group_index();
         tracker
+    }
+
+    fn refresh_tasks(&mut self, tasks_file: TasksFile) {
+        let task_ids = tasks_file
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<HashSet<_>>();
+        self.tasks_file = tasks_file;
+        self.completed.retain(|task_id| task_ids.contains(task_id));
+        self.failed.retain(|task_id| task_ids.contains(task_id));
+        self.skipped = self
+            .tasks_file
+            .tasks
+            .iter()
+            .filter(|task| task.status.eq_ignore_ascii_case("skipped"))
+            .map(|task| task.id.clone())
+            .collect();
+        self.ready_since_ms
+            .retain(|task_id, _| task_ids.contains(task_id));
+        self.current_group_index = 0;
+        self.advance_group_index();
     }
 
     /// Find the next unfinished task that has all deps satisfied.
@@ -6183,6 +6470,131 @@ impl PlanRunner {
 
     // ── Phase handlers ─────────────────────────────────────────────────
 
+    fn refresh_task_tracker(&mut self, plan_id: &str) {
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
+        let tasks_path = plan_dir.join("tasks.toml");
+        if !tasks_path.exists() {
+            return;
+        }
+
+        match TasksFile::parse(&tasks_path) {
+            Ok(tasks_file) => {
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.refresh_tasks(tasks_file);
+                } else {
+                    self.task_trackers
+                        .insert(plan_id.to_string(), TaskTracker::new(tasks_file, plan_dir));
+                }
+            }
+            Err(err) => {
+                tracing::warn!("[orchestrate] failed to refresh task tracker for {plan_id}: {err}");
+            }
+        }
+    }
+
+    async fn run_enrichment_pipeline(&mut self, plan_id: &str) -> Result<EnrichmentPhaseSummary> {
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
+        let tasks_file = plan_dir
+            .join("tasks.toml")
+            .exists()
+            .then(|| TasksFile::parse(&plan_dir.join("tasks.toml")))
+            .transpose()
+            .ok()
+            .flatten();
+        let complexity = enrichment_complexity_from_tasks(tasks_file.as_ref());
+        let selected_steps = selected_enrichment_steps(complexity);
+        let model = self.effective_model();
+        let provider = self.provider_id_for_model(&model);
+        let backend =
+            resolve_enrichment_backend(self.config.agent.command.as_str(), &model, &provider);
+        let plan_size_chars = std::fs::read_to_string(plan_dir.join("plan.md"))
+            .map(|contents| contents.len())
+            .unwrap_or_default();
+        let plan_info = if let Some(tasks_file) = tasks_file.as_ref() {
+            PlanInfo::new(plan_size_chars).with_task_count(tasks_file.tasks.len())
+        } else {
+            PlanInfo::new(plan_size_chars)
+        };
+        let estimate = estimate_enrichment(&plan_info, complexity, &selected_steps, &model, false);
+        let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
+        let client = EnrichmentRuntimeClient {
+            command: self.config.agent.command.clone(),
+            exec_dir,
+            role: AgentRole::Strategist.label().to_string(),
+            timeout_ms: self.config.agent.timeout_ms,
+            bare_mode: self.config.agent.bare_mode,
+            effort: self.config.agent.effort.clone(),
+            fallback_model: self.config.agent.fallback_model.clone(),
+            env_vars: self.config.agent.env.clone(),
+            extra_args: self.config.agent.args.clone(),
+            skip_permissions: claude_skip_permissions_for_role(AgentRole::Strategist),
+            stats: Arc::new(Mutex::new(EnrichmentRunStats::default())),
+        };
+        let pipeline = EnrichmentPipeline::new(
+            EnrichmentConfig {
+                repo_root: self.workdir.clone(),
+                backend,
+                gateway_url: None,
+                gateway_key: None,
+                batch_mode: false,
+                model_override: Some(model.clone()),
+                force: false,
+                dry_run: false,
+                quiet: true,
+            },
+            client.clone(),
+        );
+
+        tracing::info!(
+            "[orchestrate] Enriching {plan_id}: pipeline complexity={} backend={backend:?} model={} selected_steps=[{}] est_tokens={} est_cost_usd={:.4} est_duration_secs={:.1}",
+            enrichment_complexity_label(complexity),
+            model,
+            selected_steps
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            estimate.estimated_tokens,
+            estimate.estimated_cost_usd,
+            estimate.estimated_duration_secs,
+        );
+
+        let outcomes = pipeline.run_steps(plan_id, &selected_steps).await;
+        for outcome in &outcomes {
+            match outcome {
+                StepOutcome::Generated { step, llm_calls } => tracing::info!(
+                    "[orchestrate] Enriching {plan_id}: step {step} generated ({llm_calls} llm call(s))"
+                ),
+                StepOutcome::Skipped { step, reason } => tracing::info!(
+                    "[orchestrate] Enriching {plan_id}: step {step} skipped ({reason:?})"
+                ),
+                StepOutcome::Failed { step, message } => tracing::warn!(
+                    "[orchestrate] Enriching {plan_id}: step {step} failed: {message}"
+                ),
+            }
+        }
+
+        self.refresh_task_tracker(plan_id);
+
+        let stats = client.snapshot();
+        if stats.calls > 0 {
+            *self.per_plan_agents.entry(plan_id.to_string()).or_default() += stats.calls;
+            self.agent_calls += stats.calls;
+        }
+
+        Ok(EnrichmentPhaseSummary {
+            complexity,
+            backend,
+            model,
+            selected_steps,
+            outcomes,
+            estimated_tokens: estimate.estimated_tokens,
+            estimated_cost_usd: estimate.estimated_cost_usd,
+            estimated_duration_secs: estimate.estimated_duration_secs,
+            agent_calls: stats.calls,
+        })
+    }
+
     /// Enriching phase: build the strategist enrichment prompt, dispatch the agent,
     /// and advance only after enrichment completes successfully.
     async fn handle_enriching(&mut self, plan_id: &str) {
@@ -6190,9 +6602,24 @@ impl PlanRunner {
         self.ensure_task_tracker(plan_id);
 
         let started = std::time::Instant::now();
+        let pipeline_summary = match self.run_enrichment_pipeline(plan_id).await {
+            Ok(summary) => Some(summary),
+            Err(err) => {
+                tracing::warn!(
+                    "[orchestrate] Enriching {plan_id}: pipeline setup failed, continuing with strategist summary only: {err}"
+                );
+                None
+            }
+        };
         let enrichment_user_prompt = format!(
             "Enrich plan {plan_id}: analyze the supplied plan context, read_files, and task constraints. \
-            Return execution-ready notes that preserve task dependencies, blockers, and role constraints."
+            Return execution-ready notes that preserve task dependencies, blockers, and role constraints.\n\n\
+            Existing enrichment artifacts are now part of the plan context. Treat them as the current draft outputs and call out any contradictions or missing follow-through.\n\n\
+            {}",
+            pipeline_summary.as_ref().map_or_else(
+                || "Pipeline summary: not available.".to_string(),
+                |summary| { format!("Pipeline summary:\n{}", summary.prompt_summary()) }
+            )
         );
         let enrichment_system_prompt = self.build_enrichment_system_prompt(plan_id);
         let role = AgentRole::Strategist;
@@ -13818,6 +14245,14 @@ impl PlanRunner {
             ));
         }
 
+        let artifact_context = render_enrichment_artifact_context(&plan_dir, tasks_file.is_none());
+        if !artifact_context.is_empty() {
+            context_summary.push_str(
+                "\n\nGenerated enrichment artifacts are available below. Use them as current plan drafts and resolve any inconsistencies.\n",
+            );
+            context_summary.push_str(&artifact_context);
+        }
+
         let tools_csv =
             claude_tool_allowlist_with(AgentRole::Strategist, self.tool_registry.as_deref());
         build_role_system_prompt(
@@ -14432,6 +14867,7 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::Arc;
@@ -14577,6 +15013,37 @@ acceptance = []
         plan_dir
     }
 
+    fn write_tasks_fixture(path: &Path, tasks: &[(&str, &str, &str)]) {
+        let mut rendered = String::from(
+            r#"[meta]
+plan = "plan-1"
+iteration = 1
+total = 1
+done = 0
+status = "ready"
+"#,
+        );
+        for (task_id, title, tier) in tasks {
+            rendered.push_str(&format!(
+                r#"
+
+[[task]]
+id = "{task_id}"
+title = "{title}"
+status = "ready"
+tier = "{tier}"
+files = ["src/lib.rs"]
+depends_on = []
+verify = []
+timeout_secs = 30
+max_retries = 0
+acceptance = []
+"#
+            ));
+        }
+        fs::write(path, rendered).expect("write tasks fixture");
+    }
+
     fn install_gate_failure_state(runner: &mut PlanRunner, detail: &str) {
         let tracker = runner
             .task_trackers
@@ -14607,6 +15074,59 @@ acceptance = []
             "token=[REDACTED]"
         );
         assert_ne!(scrubbed.id, signal.id);
+    }
+
+    #[test]
+    fn enrichment_backend_uses_runtime_command_and_provider_hints() {
+        assert_eq!(
+            resolve_enrichment_backend("cursor", "composer-2-fast", "cursor"),
+            EnrichmentLlmBackend::Cursor
+        );
+        assert_eq!(
+            resolve_enrichment_backend("ollama", "gemma4:27b", "ollama"),
+            EnrichmentLlmBackend::Ollama
+        );
+        assert_eq!(
+            resolve_enrichment_backend("codex", "gpt-5.4", "openai"),
+            EnrichmentLlmBackend::Codex
+        );
+        assert_eq!(
+            resolve_enrichment_backend("claude", "claude-sonnet-4-6", "anthropic"),
+            EnrichmentLlmBackend::Claude
+        );
+    }
+
+    #[test]
+    fn selected_enrichment_steps_fast_plan_skips_heavy_steps() {
+        let selected = selected_enrichment_steps(TaskComplexityBand::Fast);
+        assert!(selected.contains(&EnrichStep::Tasks));
+        assert!(selected.contains(&EnrichStep::Verify));
+        assert!(!selected.contains(&EnrichStep::Research));
+        assert!(!selected.contains(&EnrichStep::Invariants));
+    }
+
+    #[test]
+    fn task_tracker_refresh_tasks_reloads_generated_inventory() {
+        let tmp = TempDir::new().expect("tempdir");
+        let plan_dir = tmp.path().join(".roko").join("plans").join("plan-1");
+        fs::create_dir_all(&plan_dir).expect("create plan dir");
+        let tasks_path = plan_dir.join("tasks.toml");
+        write_tasks_fixture(&tasks_path, &[("T1", "Initial task", "focused")]);
+        let initial = TasksFile::parse(&tasks_path).expect("parse initial tasks");
+        let mut tracker = TaskTracker::new(initial, plan_dir.clone());
+
+        write_tasks_fixture(
+            &tasks_path,
+            &[
+                ("T1", "Initial task", "focused"),
+                ("T2", "Generated follow-up", "fast"),
+            ],
+        );
+        let updated = TasksFile::parse(&tasks_path).expect("parse updated tasks");
+        tracker.refresh_tasks(updated);
+
+        assert_eq!(tracker.tasks_file.tasks.len(), 2);
+        assert!(tracker.tasks_file.tasks.iter().any(|task| task.id == "T2"));
     }
 
     #[test]

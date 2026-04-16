@@ -897,11 +897,7 @@ impl SystemPromptBuilder {
             return None;
         }
 
-        let mut pheromones = self
-            .pheromones
-            .iter()
-            .cloned()
-            .collect::<Vec<ContextChunk>>();
+        let mut pheromones = self.pheromones.to_vec();
         pheromones.sort_by(|left, right| {
             right
                 .relevance

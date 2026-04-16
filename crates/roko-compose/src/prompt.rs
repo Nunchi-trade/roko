@@ -754,11 +754,11 @@ fn bidder_affect_multiplier(section: &PromptSection, affect: Option<&AuctionAffe
 }
 
 fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
-    keywords
-        .iter()
-        .any(|keyword| text.contains(keyword))
-        .then_some(1.0)
-        .unwrap_or(0.0)
+    if keywords.iter().any(|keyword| text.contains(keyword)) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn candidate_bid_density(

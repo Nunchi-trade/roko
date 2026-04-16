@@ -347,7 +347,6 @@ impl RoleSystemPromptSpec {
     }
 
     /// Compose the section form under a token budget using an explicit scorer/context pair.
-    #[must_use]
     pub fn compose_with_budget_and_scorer(
         &self,
         token_budget: usize,
