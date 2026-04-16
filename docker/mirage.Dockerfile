@@ -10,10 +10,7 @@
 # The `mirage-rs` crate's binary is named `mirage-rs` (see apps/mirage-rs/Cargo.toml).
 # Build context is expected to be the `roko/` workspace root.
 
-ARG BUILDPLATFORM
-ARG TARGETPLATFORM
-
-FROM --platform=$BUILDPLATFORM rust:1.85-bookworm-slim AS builder
+FROM rust:1.88.0-slim-bookworm AS builder
 WORKDIR /src
 
 RUN apt-get update \
@@ -29,9 +26,7 @@ COPY . .
 # resulting image exposes: chain_* JSON-RPC methods, the /api/* REST router
 # (health, stats, pheromones, knowledge, agents, tasks), and WebSocket streaming
 # at /api/ws. Without `roko`, the REST API + WebSocket layer is not fully mounted.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" && \
+RUN cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" && \
     cp target/release/mirage-rs /mirage-rs
 
 FROM gcr.io/distroless/cc-debian12:nonroot

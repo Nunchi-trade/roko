@@ -1,7 +1,7 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "docker/roko.Dockerfile"
-watchPatterns = ["crates/**", "Cargo.toml", "Cargo.lock", "docker/roko.Dockerfile"]
+dockerfilePath = "docker/mirage.Dockerfile"
+watchPatterns = ["crates/**", "Cargo.toml", "Cargo.lock", "docker/mirage.Dockerfile"]
 
 [deploy]
 restartPolicyType = "ON_FAILURE"
