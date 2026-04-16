@@ -35,6 +35,7 @@ use roko_learn::skill_library::Skill;
 
 use super::cursors::{EpisodeCursor, EventLogCursor, SignalCursor};
 use super::pages::{PageId, PageScaffold, efficiency, operations};
+use super::task_outputs::TaskOutputCursors;
 use super::state::{PlanPhase, TaskStatus};
 pub use super::theme::Theme;
 
@@ -89,7 +90,7 @@ struct DashboardDataStamps {
     episodes: FileStamp,
     cfactor: FileStamp,
     cascade_router: FileStamp,
-    task_outputs: FileStamp,
+    task_outputs: u64,
     event_log: FileStamp,
 }
 
@@ -364,10 +365,10 @@ pub struct DashboardData {
     cfactor_stamp: FileStamp,
     /// Cascade router file metadata.
     cascade_router_stamp: FileStamp,
-    /// Per-task agent output tail (last 50 lines per task) from `.roko/task-outputs/`.
+    /// Incremental task-output cursors keyed by task ID.
+    task_output_cursors: TaskOutputCursors,
+    /// Per-task agent output tail cache derived from `.roko/task-outputs/`.
     pub task_outputs: HashMap<String, Vec<String>>,
-    /// Last observed task-outputs directory metadata.
-    task_outputs_stamp: FileStamp,
     /// Cached git diff shown in the Dashboard Diff sub-tab.
     pub git_diff: String,
     /// Whether the cached git diff came from staged changes.
@@ -452,17 +453,18 @@ impl DashboardData {
         let cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
         let cfactor_stamp = file_stamp(&cfactor_path);
 
-        // Load task outputs before plan execution so backfill can use them
         let task_outputs_dir = roko_dir.join("task-outputs");
-        let task_outputs = load_task_outputs(&task_outputs_dir);
-        let task_outputs_stamp = file_stamp(&task_outputs_dir);
+        let mut task_output_cursors = TaskOutputCursors::new(&task_outputs_dir);
+        let _ = task_output_cursors.reconcile();
+        let _ = task_output_cursors.tick();
+        let task_outputs = task_output_cursors.snapshot();
 
         let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
         let efficiency_stamp = file_stamp(&efficiency_path);
 
-        // Backfill agent_output_tail from task-outputs if episode didn't provide it
+        // Backfill agent_output_tail from task-outputs if episode didn't provide it.
         let current_plan_execution =
-            backfill_agent_output_tail(current_plan_execution, &task_outputs);
+            backfill_agent_output_tail(current_plan_execution, &task_output_cursors);
 
         let (git_diff, git_diff_is_staged) = load_dashboard_git_diff(&root);
         let generation = next_dashboard_data_generation(
@@ -476,7 +478,7 @@ impl DashboardData {
                 episodes: episodes_stamp,
                 cfactor: cfactor_stamp,
                 cascade_router: cascade_router_stamp,
-                task_outputs: task_outputs_stamp,
+                task_outputs: task_output_cursors.revision(),
                 event_log: event_log_stamp,
             },
         );
@@ -511,8 +513,8 @@ impl DashboardData {
             cfactor,
             cfactor_stamp,
             cascade_router_stamp,
+            task_output_cursors,
             task_outputs,
-            task_outputs_stamp,
             git_diff,
             git_diff_is_staged,
             event_log,
@@ -613,12 +615,15 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        // Refresh task outputs
-        let task_outputs_dir = roko_dir.join("task-outputs");
-        let stamp = file_stamp(&task_outputs_dir);
-        if stamp != self.task_outputs_stamp {
-            self.task_outputs_stamp = stamp;
-            self.task_outputs = load_task_outputs(&task_outputs_dir);
+        let mut task_outputs_changed = false;
+        if self.task_output_cursors.reconcile()? {
+            task_outputs_changed = true;
+        }
+        if self.task_output_cursors.tick()? {
+            task_outputs_changed = true;
+        }
+        if task_outputs_changed {
+            self.task_outputs = self.task_output_cursors.snapshot();
             generation_changed = true;
         }
 
@@ -631,19 +636,14 @@ impl DashboardData {
         self.git_diff = git_diff;
         self.git_diff_is_staged = git_diff_is_staged;
 
-        if state_changed {
+        if state_changed || episodes_changed || task_outputs_changed {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
             self.active_tasks = load_active_tasks(&self.executor_state);
             self.agents = load_agents(&self.executor_state);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
             self.current_plan_execution = backfill_agent_output_tail(
                 load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
-                &self.task_outputs,
-            );
-        } else if episodes_changed {
-            self.current_plan_execution = backfill_agent_output_tail(
-                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
-                &self.task_outputs,
+                &self.task_output_cursors,
             );
         }
 
@@ -1408,40 +1408,6 @@ impl ExperimentSummary {
     }
 }
 
-/// Load per-task agent output from `.roko/task-outputs/*.txt` (last 50 lines each).
-fn load_task_outputs(task_outputs_dir: &Path) -> HashMap<String, Vec<String>> {
-    let mut task_outputs = HashMap::new();
-    if !task_outputs_dir.is_dir() {
-        return task_outputs;
-    }
-    let Ok(entries) = std::fs::read_dir(task_outputs_dir) else {
-        return task_outputs;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map_or(false, |e| e == "txt") {
-            let task_id = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let lines: Vec<String> = content
-                    .lines()
-                    .rev()
-                    .take(50)
-                    .map(String::from)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                task_outputs.insert(task_id, lines);
-            }
-        }
-    }
-    task_outputs
-}
-
 /// Load orchestrator event log from `.roko/state/events.json`.
 pub(crate) fn load_event_log(events_path: &Path) -> Vec<EventLogEntry> {
     let Some(value) = read_json_value(events_path) else {
@@ -1491,22 +1457,22 @@ fn parse_event_entry(value: &Value) -> Option<EventLogEntry> {
 /// Backfill `agent_output_tail` from task-outputs when episodes didn't provide it.
 fn backfill_agent_output_tail(
     mut snapshot: Option<PlanExecutionSnapshot>,
-    task_outputs: &HashMap<String, Vec<String>>,
+    task_outputs: &TaskOutputCursors,
 ) -> Option<PlanExecutionSnapshot> {
     let exec = snapshot.as_mut()?;
     if exec.agent_output_tail.is_empty() {
         // Try current task first
         if let Some(detail) = &exec.current_task {
-            if let Some(output) = task_outputs.get(&detail.task_id) {
-                exec.agent_output_tail = output.clone();
+            if let Some(output) = task_outputs.tail_for(&detail.task_id) {
+                exec.agent_output_tail = output.to_vec();
             }
         }
         // If still empty, try any task in the execution that has output
         if exec.agent_output_tail.is_empty() {
             for task_row in exec.tasks.iter().rev() {
-                if let Some(output) = task_outputs.get(&task_row.task_id) {
+                if let Some(output) = task_outputs.tail_for(&task_row.task_id) {
                     if !output.is_empty() {
-                        exec.agent_output_tail = output.clone();
+                        exec.agent_output_tail = output.to_vec();
                         break;
                     }
                 }
@@ -5481,6 +5447,75 @@ files = ["src/dashboard.rs"]
                 "stderr line 25"
             );
         }
+    }
+
+    #[test]
+    fn task_output_cursors_tail_incrementally_and_drop_stale_files() {
+        let tmpdir = tempdir().expect("tempdir");
+        let task_outputs_dir = tmpdir.path().join(".roko/task-outputs");
+        fs::create_dir_all(&task_outputs_dir).expect("task outputs dir");
+
+        let path = task_outputs_dir.join("task-1.txt");
+        fs::write(&path, "").expect("seed empty task output");
+
+        let mut cursors = TaskOutputCursors::new(&task_outputs_dir);
+        assert!(cursors.reconcile().expect("reconcile new file"));
+        assert!(!cursors.tick().expect("initial empty tick"));
+
+        for n in 1..=5 {
+            append_raw(&path, &format!("line-{n}\n"));
+            assert!(cursors.tick().expect("append tick"));
+        }
+
+        let tail = cursors.tail_for("task-1").expect("task tail");
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail.first().expect("tail head"), "line-1");
+        assert_eq!(tail.last().expect("tail last"), "line-5");
+
+        fs::remove_file(&path).expect("remove task output");
+        assert!(cursors.reconcile().expect("reconcile stale file"));
+        assert!(cursors.tail_for("task-1").is_none());
+    }
+
+    #[test]
+    fn dashboard_data_tick_updates_task_outputs_and_generation() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let state_dir = root.join(".roko/state");
+        let task_outputs_dir = root.join(".roko/task-outputs");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&task_outputs_dir).expect("task outputs dir");
+
+        write_json(&state_dir.join("executor.json"), &serde_json::json!({}));
+
+        let path = task_outputs_dir.join("task-1.txt");
+        fs::write(&path, "").expect("seed empty task output");
+
+        let mut data = DashboardData::load_best_effort(root);
+        let initial_generation = data.generation;
+        assert!(data.task_outputs().contains_key("task-1"));
+        assert!(
+            data.task_outputs()
+                .get("task-1")
+                .expect("task output cache")
+                .is_empty()
+        );
+
+        append_raw(&path, "line-1\n");
+        data.tick().expect("append tick");
+        assert!(data.generation > initial_generation);
+        assert_eq!(
+            data.task_outputs()
+                .get("task-1")
+                .expect("task output cache"),
+            &vec![String::from("line-1")]
+        );
+
+        let generation_after_append = data.generation;
+        fs::remove_file(&path).expect("remove task output");
+        data.tick().expect("stale removal tick");
+        assert!(data.generation > generation_after_append);
+        assert!(!data.task_outputs().contains_key("task-1"));
     }
 
     #[test]
