@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::state::TuiState;
 use super::braille;
-use super::rosedust::MoriTheme;
+use crate::tui::Theme;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,11 +47,11 @@ fn fmt_rate(bps: f64) -> String {
 
 fn pct_color(pct: f64) -> Color {
     if pct >= 0.8 {
-        MoriTheme::EMBER
+        Theme::EMBER
     } else if pct >= 0.5 {
-        MoriTheme::WARNING
+        Theme::WARNING
     } else {
-        MoriTheme::SAGE
+        Theme::SAGE
     }
 }
 
@@ -101,7 +101,7 @@ fn render_mini_gauge(
     if empty > 0 {
         spans.push(Span::styled(
             "\u{2500}".repeat(empty),
-            Style::default().fg(MoriTheme::TEXT_GHOST),
+            Style::default().fg(Theme::TEXT_GHOST),
         ));
     }
 
@@ -117,9 +117,9 @@ pub fn render_sys_metrics(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("System")
-        .style(MoriTheme::block_style())
-        .border_style(Style::default().fg(MoriTheme::TEXT_GHOST))
-        .title_style(MoriTheme::title_style());
+        .style(Theme::block_style())
+        .border_style(Style::default().fg(Theme::TEXT_GHOST))
+        .title_style(Theme::title_style());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -142,7 +142,7 @@ pub fn render_sys_metrics(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let color = pct_color(pct);
         let data: Vec<f32> = state.sys.cpu_history.iter().copied().collect();
         let mut spans = vec![
-            Span::styled("CPU ", Style::default().fg(MoriTheme::TEXT_DIM)),
+            Span::styled("CPU ", Style::default().fg(Theme::TEXT_DIM)),
             Span::styled(val, Style::default().fg(color)),
             Span::styled(" ", Style::default()),
         ];
@@ -163,7 +163,7 @@ pub fn render_sys_metrics(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let color = pct_color(mem_frac);
         let data: Vec<f32> = state.sys.mem_history.iter().copied().collect();
         let mut spans = vec![
-            Span::styled("MEM ", Style::default().fg(MoriTheme::TEXT_DIM)),
+            Span::styled("MEM ", Style::default().fg(Theme::TEXT_DIM)),
             Span::styled(val, Style::default().fg(color)),
             Span::styled(" ", Style::default()),
         ];
@@ -178,8 +178,8 @@ pub fn render_sys_metrics(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let down = state.sys.net_down_bytes_sec;
         let val = format!("\u{2193}{:>4}", fmt_rate(down as f64));
         let spans = vec![
-            Span::styled("NET ", Style::default().fg(MoriTheme::TEXT_DIM)),
-            Span::styled(val, Style::default().fg(MoriTheme::DREAM)),
+            Span::styled("NET ", Style::default().fg(Theme::TEXT_DIM)),
+            Span::styled(val, Style::default().fg(Theme::DREAM)),
         ];
         lines.push(Line::from(spans));
     }
@@ -189,8 +189,8 @@ pub fn render_sys_metrics(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let read = state.sys.disk_read_bytes_sec;
         let val = format!("R{:>4}", fmt_rate(read as f64));
         let spans = vec![
-            Span::styled("DSK ", Style::default().fg(MoriTheme::TEXT_DIM)),
-            Span::styled(val, Style::default().fg(MoriTheme::BONE_DIM)),
+            Span::styled("DSK ", Style::default().fg(Theme::TEXT_DIM)),
+            Span::styled(val, Style::default().fg(Theme::BONE_DIM)),
         ];
         lines.push(Line::from(spans));
     }
@@ -199,14 +199,14 @@ pub fn render_sys_metrics(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     if inner.height >= 5 {
         let fps = state.atmosphere.fps();
         let fps_color = if fps >= 50.0 {
-            MoriTheme::SAGE
+            Theme::SAGE
         } else if fps >= 25.0 {
-            MoriTheme::WARNING
+            Theme::WARNING
         } else {
-            MoriTheme::EMBER
+            Theme::EMBER
         };
         lines.push(Line::from(vec![
-            Span::styled("FPS ", Style::default().fg(MoriTheme::TEXT_DIM)),
+            Span::styled("FPS ", Style::default().fg(Theme::TEXT_DIM)),
             Span::styled(format!("{:>5.1}", fps), Style::default().fg(fps_color)),
         ]));
     }

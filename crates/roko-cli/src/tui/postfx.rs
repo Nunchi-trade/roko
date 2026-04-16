@@ -7,7 +7,7 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use super::widgets::rosedust::MoriTheme;
+use super::theme::Theme;
 
 // ---------------------------------------------------------------------------
 // Public NervViz state
@@ -142,11 +142,11 @@ fn rose_violet(t: f64) -> Color {
     let t = clamp01(t);
     if t < 0.5 {
         lerp_rgb(
-            match MoriTheme::ROSE_DIM {
+            match Theme::ROSE_DIM {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (140, 96, 112),
             },
-            match MoriTheme::ROSE {
+            match Theme::ROSE {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (185, 120, 148),
             },
@@ -154,11 +154,11 @@ fn rose_violet(t: f64) -> Color {
         )
     } else {
         lerp_rgb(
-            match MoriTheme::ROSE {
+            match Theme::ROSE {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (185, 120, 148),
             },
-            match MoriTheme::DREAM {
+            match Theme::DREAM {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (120, 115, 165),
             },

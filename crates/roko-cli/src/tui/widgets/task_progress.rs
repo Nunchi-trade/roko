@@ -25,7 +25,7 @@ use ratatui::widgets::{
 };
 
 use super::super::state::{TaskRowStatus, TuiState};
-use super::rosedust::MoriTheme;
+use crate::tui::Theme;
 
 // ---------------------------------------------------------------------------
 // Public render entry-point
@@ -61,13 +61,13 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
 
     let (border_style, ttl_style) = if focused {
         (
-            MoriTheme::focused_border_style(),
-            MoriTheme::focused_title_style(),
+            Theme::focused_border_style(),
+            Theme::focused_title_style(),
         )
     } else {
         (
-            MoriTheme::unfocused_border_style(),
-            MoriTheme::unfocused_title_style(),
+            Theme::unfocused_border_style(),
+            Theme::unfocused_title_style(),
         )
     };
 
@@ -91,7 +91,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(MoriTheme::block_style())
+        .style(Theme::block_style())
         .border_style(border_style)
         .title_style(ttl_style);
 
@@ -111,7 +111,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
         let suffix = format!("  {}/{}", done, total);
         let mut bar_line = vec![Span::styled(" ", Style::default())];
         bar_line.extend(bar_spans);
-        bar_line.push(Span::styled(suffix, Style::default().fg(MoriTheme::FG_DIM)));
+        bar_line.push(Span::styled(suffix, Style::default().fg(Theme::FG_DIM)));
         lines.push(Line::from(bar_line));
     }
 
@@ -123,7 +123,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     if start > 0 {
         lines.push(Line::from(Span::styled(
             " \u{25b2} more",
-            Style::default().fg(MoriTheme::TEXT_DIM),
+            Style::default().fg(Theme::TEXT_DIM),
         )));
     }
 
@@ -133,7 +133,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
         let is_selected = global_idx == scroll && focused;
 
         let (icon, icon_style) = match task.status {
-            TaskRowStatus::Done => ("\u{2713}", Style::default().fg(MoriTheme::STATUS_OK)),
+            TaskRowStatus::Done => ("\u{2713}", Style::default().fg(Theme::STATUS_OK)),
             TaskRowStatus::Active => {
                 let pulse_color = pulse_rose(atm.heartbeat());
                 (
@@ -143,21 +143,21 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
                         .add_modifier(Modifier::BOLD),
                 )
             }
-            TaskRowStatus::Blocked => ("\u{2717}", Style::default().fg(MoriTheme::STATUS_ERROR)),
-            TaskRowStatus::Failed => ("\u{2717}", Style::default().fg(MoriTheme::EMBER)),
-            TaskRowStatus::Pending => ("\u{00b7}", Style::default().fg(MoriTheme::TEXT_DIM)),
+            TaskRowStatus::Blocked => ("\u{2717}", Style::default().fg(Theme::STATUS_ERROR)),
+            TaskRowStatus::Failed => ("\u{2717}", Style::default().fg(Theme::EMBER)),
+            TaskRowStatus::Pending => ("\u{00b7}", Style::default().fg(Theme::TEXT_DIM)),
         };
 
         let (text_style, bg) = if is_selected {
             (
                 Style::default()
-                    .fg(MoriTheme::BONE)
+                    .fg(Theme::BONE)
                     .add_modifier(Modifier::BOLD)
-                    .bg(MoriTheme::BG_HIGHLIGHT),
-                Some(MoriTheme::BG_HIGHLIGHT),
+                    .bg(Theme::BG_HIGHLIGHT),
+                Some(Theme::BG_HIGHLIGHT),
             )
         } else {
-            (Style::default().fg(MoriTheme::TEXT), None)
+            (Style::default().fg(Theme::TEXT), None)
         };
 
         let effective_icon_style = if let Some(bg_color) = bg {
@@ -194,13 +194,13 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
             Span::styled(format!(" {icon} "), effective_icon_style),
             Span::styled(
                 format!("{}  ", &task.id),
-                Style::default().fg(MoriTheme::ROSE_DIM),
+                Style::default().fg(Theme::ROSE_DIM),
             ),
         ];
         if !time_tag.is_empty() {
             task_spans.push(Span::styled(
                 time_tag,
-                Style::default().fg(MoriTheme::TEXT_DIM),
+                Style::default().fg(Theme::TEXT_DIM),
             ));
         }
         task_spans.push(Span::styled(title_display, text_style));
@@ -212,7 +212,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     if end < tasks.len() {
         lines.push(Line::from(Span::styled(
             " \u{25bc} more",
-            Style::default().fg(MoriTheme::TEXT_DIM),
+            Style::default().fg(Theme::TEXT_DIM),
         )));
     }
 
@@ -220,7 +220,7 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     if tasks.is_empty() {
         lines.push(Line::from(Span::styled(
             format!(" {} waiting for tasks...", atm.spinner()),
-            Style::default().fg(MoriTheme::TEXT_DIM),
+            Style::default().fg(Theme::TEXT_DIM),
         )));
     }
 
@@ -237,8 +237,8 @@ pub fn render_task_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
         );
         let mut sb_state = ScrollbarState::new(tasks.len()).position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(MoriTheme::ROSE))
-            .track_style(Style::default().fg(MoriTheme::TEXT_PHANTOM))
+            .thumb_style(Style::default().fg(Theme::ROSE))
+            .track_style(Style::default().fg(Theme::TEXT_PHANTOM))
             .begin_symbol(Some("\u{25b2}"))
             .end_symbol(Some("\u{25bc}"));
         frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
@@ -259,7 +259,7 @@ fn semantic_bar(width: usize, pct: f64, heartbeat: Option<f64>) -> Vec<Span<'sta
 
     // Filled portion with semantic color gradient
     if filled > 0 {
-        let color = MoriTheme::semantic_color(pct);
+        let color = Theme::semantic_color(pct);
         let fill_style = if let Some(hb) = heartbeat {
             // Pulse the leading edge
             let scale = hb.clamp(0.9, 1.1);
@@ -281,7 +281,7 @@ fn semantic_bar(width: usize, pct: f64, heartbeat: Option<f64>) -> Vec<Span<'sta
     if empty > 0 {
         spans.push(Span::styled(
             "\u{2591}".repeat(empty),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ));
     }
 
@@ -299,13 +299,13 @@ fn build_summary_line(
     width: usize,
 ) -> Line<'static> {
     let (status_text, status_color) = if done == total && total > 0 {
-        ("DONE", MoriTheme::SAGE)
+        ("DONE", Theme::SAGE)
     } else if failed > 0 {
-        ("FAIL", MoriTheme::EMBER)
+        ("FAIL", Theme::EMBER)
     } else if active > 0 {
-        ("RUN", MoriTheme::WARNING)
+        ("RUN", Theme::WARNING)
     } else {
-        ("WAIT", MoriTheme::ROSE_DIM)
+        ("WAIT", Theme::ROSE_DIM)
     };
 
     let mut details = Vec::new();
@@ -342,13 +342,13 @@ fn build_summary_line(
         Span::styled(
             format!(" {} ", status_text),
             Style::default()
-                .fg(MoriTheme::VOID)
+                .fg(Theme::VOID)
                 .bg(status_color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" {summary}"),
-            Style::default().fg(MoriTheme::TEXT_GHOST),
+            Style::default().fg(Theme::TEXT_GHOST),
         ),
     ])
 }

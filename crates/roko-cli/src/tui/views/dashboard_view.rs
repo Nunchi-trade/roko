@@ -1110,20 +1110,6 @@ fn shorten_model(slug: &str) -> String {
         .replace("haiku-", "h")
 }
 
-fn fmt_tokens(n: u64) -> String {
-    if n == 0 {
-        "-".to_string()
-    } else if n < 1_000 {
-        format!("{n}")
-    } else if n < 10_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else if n < 1_000_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    }
-}
-
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
