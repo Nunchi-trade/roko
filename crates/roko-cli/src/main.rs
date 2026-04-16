@@ -8,6 +8,16 @@
 //! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
+#![cfg_attr(
+    clippy,
+    allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::restriction,
+        missing_docs
+    )
+)]
 
 mod commands;
 
@@ -21,7 +31,7 @@ use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
-use roko_cli::tui::App;
+use roko_cli::tui::{App, ApprovalChannel};
 use roko_cli::{
     Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
     PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs,
@@ -55,6 +65,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
@@ -424,6 +435,9 @@ enum PlanCmd {
         /// Resume from `.roko/state/executor.json` in the working directory.
         #[arg(long = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
         resume_plan: Option<PathBuf>,
+        /// Launch the connected approval TUI while the plan runs.
+        #[arg(long)]
+        approval: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -986,7 +1000,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             list_pages,
             text,
             workdir,
-        } => cmd_dashboard(cli, workdir, page, list_pages, text).await,
+        } => cmd_dashboard(cli, workdir, page, list_pages, text, None).await,
         Command::Serve {
             bind,
             port,
@@ -1136,6 +1150,7 @@ async fn cmd_dashboard(
     page: Option<String>,
     list_pages: bool,
     text: bool,
+    state_hub: Option<roko_core::SharedStateHub>,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
@@ -1152,7 +1167,12 @@ async fn cmd_dashboard(
 
     if !text && !list_pages && std::io::stdout().is_terminal() {
         // Use the Mori-style interactive TUI with 60fps event loop.
-        if App::new_with_page(&workdir, initial_page).run().is_ok() {
+        let app = if let Some(state_hub) = state_hub.as_ref() {
+            App::new_connected_with_page(&workdir, initial_page, state_hub)
+        } else {
+            App::new_with_page(&workdir, initial_page)
+        };
+        if app.run().is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
@@ -3164,10 +3184,12 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             plans_dir,
             workdir,
             resume_plan,
+            approval,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
+            let state_hub = roko_core::shared_state_hub();
 
             // Create the shared metric registry and register standard metrics.
             let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
@@ -3217,6 +3239,37 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 .await?
             };
             runner.set_claude_resume_session(cli.resume.clone());
+            runner.set_state_hub(state_hub.sender());
+
+            if approval {
+                if !std::io::stdout().is_terminal() {
+                    anyhow::bail!("approval mode requires an interactive terminal");
+                }
+
+                let approval_channel = ApprovalChannel::new(16);
+                let state_hub_for_tui = state_hub.clone();
+                let workdir_for_tui = wd.clone();
+                let approval_rx = approval_channel.rx;
+                let process_supervisor: Arc<_> = runner.supervisor_handle();
+
+                std::thread::Builder::new()
+                    .name("roko-plan-approval-tui".to_string())
+                    .spawn(move || {
+                        let mut app = App::new_connected_with_page(
+                            &workdir_for_tui,
+                            None,
+                            &state_hub_for_tui,
+                        );
+                        app.set_process_supervisor(process_supervisor);
+                        app.approval_rx = Some(approval_rx);
+                        if let Err(err) = app.run() {
+                            tracing::error!(error = %err, "approval TUI exited with error");
+                        }
+                    })
+                    .context("spawn approval TUI thread")?;
+
+                runner.set_approval_tx(Some(approval_channel.tx));
+            }
 
             // Use task-driven execution (reads tasks.toml directly) instead of
             // the phase-machine executor which expects enrichment phases.

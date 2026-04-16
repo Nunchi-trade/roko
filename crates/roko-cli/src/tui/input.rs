@@ -230,6 +230,8 @@ pub enum TuiAction {
 
     // -- help --
     ShowHelp,
+    /// Cycle the visual-effects preset.
+    CycleEffectsPreset,
     ToggleScreenPostFx,
 
     // -- focus --
@@ -340,12 +342,10 @@ pub enum TuiAction {
 /// Top-level key dispatch with modal intercept priority.
 ///
 /// Priority order (highest first):
-/// 1. Task picker modal
-/// 2. Task detail modal
-/// 3. Queue overview modal
-/// 4. Confirm dialog
-/// 5. Inject / filter text input
-/// 6. Normal per-tab navigation
+/// 1. Help / approval / detail modals
+/// 2. Confirm dialog
+/// 3. Inject / filter text input
+/// 4. Normal per-tab navigation
 pub fn handle_key(
     key: KeyEvent,
     mode: InputMode,
@@ -360,6 +360,9 @@ pub fn handle_key(
     // Modal intercepts (highest priority first)
     if modals.show_help {
         return handle_help_key(key);
+    }
+    if modals.show_approval {
+        return handle_approval_key(key);
     }
     if modals.show_wave_overview {
         return handle_wave_overview_key(key);
@@ -413,6 +416,7 @@ pub fn handle_key(
 /// Subset of TuiState modal flags needed by key dispatch.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModalVisibility {
+    pub show_approval: bool,
     pub show_task_picker: bool,
     pub show_task_detail: bool,
     pub show_queue_overview: bool,
@@ -428,6 +432,7 @@ impl ModalVisibility {
 
         match active_modal {
             Some(ModalState::Help) => visibility.show_help = true,
+            Some(ModalState::Approval { .. }) => visibility.show_approval = true,
             Some(ModalState::PlanDetail { .. }) => visibility.show_plan_detail = true,
             Some(ModalState::WaveOverview { .. }) => visibility.show_wave_overview = true,
             Some(ModalState::QueueOverview { .. }) => visibility.show_queue_overview = true,
@@ -446,7 +451,19 @@ impl ModalVisibility {
 
 fn handle_help_key(key: KeyEvent) -> TuiAction {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => TuiAction::ShowHelp,
+        KeyCode::Esc | KeyCode::Char('?' | 'q') => TuiAction::ShowHelp,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_approval_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => TuiAction::ApproveCommand,
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => TuiAction::RejectCommand,
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            TuiAction::ApproveAll
+        }
+        KeyCode::Char('A') => TuiAction::ApproveAll,
         _ => TuiAction::None,
     }
 }
@@ -500,8 +517,8 @@ fn handle_queue_overview_key(key: KeyEvent) -> TuiAction {
 
 fn handle_confirm_key(key: KeyEvent) -> TuiAction {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => TuiAction::ConfirmYes,
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => TuiAction::ConfirmNo,
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => TuiAction::ConfirmYes,
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => TuiAction::ConfirmNo,
         _ => TuiAction::None,
     }
 }
@@ -536,7 +553,6 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         return Some(TuiAction::QuitConfirmed);
     }
 
-
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
@@ -569,6 +585,7 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ToggleScreenPostFx)
         }
+        KeyCode::Char('v') => Some(TuiAction::CycleEffectsPreset),
         // Ctrl-g: reconcile git state (confirm)
         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::RequestConfirm(ConfirmAction::GitReconcile))
@@ -606,6 +623,8 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         // Plan tree operations
         KeyCode::Enter => TuiAction::ShowPlanDetail,
         KeyCode::Esc => TuiAction::ClosePlanDetail,
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WavePrev,
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WaveNext,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
 
@@ -623,8 +642,6 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('p') => TuiAction::TogglePause,
         KeyCode::Char('i') => TuiAction::StartInject,
         KeyCode::Char('y') => TuiAction::ApproveCommand,
-        KeyCode::Char('v') => TuiAction::ReverifyPlan,
-
         // Agent role tabs (backtick cycles, Alt+N selects)
         KeyCode::Char('`') => TuiAction::SwitchAgentTab(usize::MAX), // cycle
 
@@ -650,6 +667,8 @@ fn handle_plans_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('t') => TuiAction::OpenTaskPicker,
         KeyCode::Char('[') => TuiAction::WavePrev,
         KeyCode::Char(']') => TuiAction::WaveNext,
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WavePrev,
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => TuiAction::WaveNext,
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
         KeyCode::PageUp => TuiAction::ScrollPageUp,
@@ -918,6 +937,30 @@ mod tests {
     }
 
     #[test]
+    fn v_cycles_effects_presets_outside_plans_tab() {
+        let action = handle_key(
+            key(KeyCode::Char('v')),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::CycleEffectsPreset);
+    }
+
+    #[test]
+    fn v_cycles_effects_presets_on_plans_tab() {
+        let action = handle_key(
+            key(KeyCode::Char('v')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::CycleEffectsPreset);
+    }
+
+    #[test]
     fn logs_tab_a_restores_all_levels() {
         let action = handle_key(
             key(KeyCode::Char('a')),
@@ -944,10 +987,42 @@ mod tests {
     }
 
     #[test]
+    fn approval_modal_intercepts_yes_and_no() {
+        let mut m = modals();
+        m.show_approval = true;
+
+        let approve = handle_key(
+            key(KeyCode::Char('y')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &m,
+        );
+        assert_eq!(approve, TuiAction::ApproveCommand);
+
+        let reject = handle_key(
+            key(KeyCode::Char('n')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &m,
+        );
+        assert_eq!(reject, TuiAction::RejectCommand);
+    }
+
+    #[test]
     fn modal_visibility_reads_active_modal() {
         let vis = ModalVisibility::from_active_modal(Some(&ModalState::Help));
         assert!(vis.show_help);
+        assert!(!vis.show_approval);
         assert!(!vis.show_task_detail);
+
+        let vis = ModalVisibility::from_active_modal(Some(&ModalState::Approval {
+            role: "implementer".to_string(),
+            command: "cargo check".to_string(),
+        }));
+        assert!(vis.show_approval);
+        assert!(!vis.show_help);
 
         let vis = ModalVisibility::from_active_modal(Some(&ModalState::TaskPicker {
             tasks: Vec::new(),
@@ -1054,6 +1129,44 @@ mod tests {
         assert_eq!(action, TuiAction::ScrollAgentEnd);
     }
 
+    #[test]
+    fn shift_arrow_keys_navigate_waves() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Left, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WavePrev);
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Right, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WaveNext);
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Left, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WavePrev);
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Right, KeyModifiers::SHIFT),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &modals(),
+        );
+        assert_eq!(action, TuiAction::WaveNext);
+    }
 
     fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
         let action = handle_key(

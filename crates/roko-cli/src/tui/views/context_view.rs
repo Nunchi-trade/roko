@@ -18,55 +18,20 @@ use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::state::TuiState;
 
-/// MCP server status entry.
-#[derive(Debug, Clone)]
-pub struct McpServerEntry {
-    pub name: String,
-    pub status: McpStatus,
-    pub tool_count: usize,
-    pub total_calls: u64,
-    pub errors: u64,
-}
-
-/// MCP connection status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpStatus {
-    Connected,
-    Disconnected,
-    Error,
-}
-
 /// Token burn data for sparkline rendering.
 #[derive(Debug, Clone)]
-pub struct TokenBurnData {
+struct TokenBurnData {
+    /// Agent identifier for the burn series.
     pub agent_id: String,
+    /// Cumulative token count over time.
     pub cumulative: Vec<u64>,
-}
-
-/// Code index status entry.
-#[derive(Debug, Clone)]
-pub struct IndexEntry {
-    pub name: String,
-    pub files_indexed: usize,
-    pub status: String,
-}
-
-/// Tool usage stats entry.
-#[derive(Debug, Clone)]
-pub struct ToolUsageEntry {
-    pub tool_name: String,
-    pub call_count: u64,
-    pub avg_duration_ms: f64,
-    pub error_count: u64,
 }
 
 /// Context view data container, populated externally.
 #[derive(Debug, Clone, Default)]
-pub struct ContextViewData {
-    pub mcp_servers: Vec<McpServerEntry>,
+struct ContextViewData {
+    /// Per-agent token burn series used by the sparkline panel.
     pub token_burns: Vec<TokenBurnData>,
-    pub index_entries: Vec<IndexEntry>,
-    pub tool_usage: Vec<ToolUsageEntry>,
 }
 
 /// Per-role token/cost aggregate.
@@ -90,7 +55,7 @@ struct ModelCostAggregate {
 }
 
 /// Render the full context/inspect view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -103,7 +68,7 @@ pub fn render(
 }
 
 /// Render the context view with explicit context data (for integration layer).
-pub fn render_with_context_data(
+fn render_with_context_data(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -700,12 +665,7 @@ fn build_context_data(data: &DashboardData) -> ContextViewData {
         b_total.cmp(&a_total)
     });
 
-    ContextViewData {
-        mcp_servers: Vec::new(),
-        token_burns,
-        index_entries: Vec::new(),
-        tool_usage: Vec::new(),
-    }
+    ContextViewData { token_burns }
 }
 
 fn format_count(n: u64) -> String {

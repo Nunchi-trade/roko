@@ -3,7 +3,7 @@
 //! Integrates the Mori-style tab system (F1-F7), modal dialogs, TuiState,
 //! TuiAction dispatch, PostFX pipeline, and atmosphere animations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
@@ -24,8 +24,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use sysinfo::System;
+use roko_runtime::process::ProcessSupervisor;
+use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
+use tokio::sync::{mpsc, oneshot};
 
+use super::approval_ipc::ApprovalRequest;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
@@ -34,7 +37,7 @@ use super::modals::{
     self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry,
 };
 use super::pages::{PageId, PageRegistry};
-use super::state::{PlanEntry, TaskRowStatus, TuiState};
+use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
@@ -87,11 +90,21 @@ pub struct App {
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
-    sys_rx: Option<std::sync::mpsc::Receiver<super::state::SysMetrics>>,
+    sys_rx: Option<std::sync::mpsc::Receiver<SysSnapshot>>,
     /// Background data refresh receiver (file reads off main thread).
     data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
     /// Background git data receiver (git commands off main thread).
     git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    /// Optional live process supervisor used for per-agent process sampling.
+    process_supervisor: Option<Arc<ProcessSupervisor>>,
+    /// Optional approval request receiver from the orchestrator.
+    pub approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
+    /// Pending response channel for the active approval modal.
+    pending_approval_response: Option<oneshot::Sender<bool>>,
+    /// Live dashboard snapshot receiver from `StateHub` when connected.
+    pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
+    /// Last error entry surfaced from the live snapshot stream.
+    last_snapshot_error_marker: Option<(String, u64)>,
     /// Frame counter for adaptive frame rate.
     frame_counter: u64,
     /// Last user input time for adaptive frame rate.
@@ -112,6 +125,30 @@ struct GitBgData {
     commit_short: String,
     /// Commit age string (e.g. "3 hours ago").
     age: String,
+}
+
+/// Combined host + process metrics snapshot emitted by the background sampler.
+struct SysSnapshot {
+    /// Host-level system metrics.
+    sys: super::state::SysMetrics,
+    /// Per-process point-in-time samples.
+    process_metrics: Vec<ProcessMetricSample>,
+}
+
+/// One sampled process row before history is merged into `TuiState`.
+struct ProcessMetricSample {
+    /// OS process identifier.
+    pid: u32,
+    /// Human-readable role or label.
+    role: String,
+    /// Current CPU usage percentage.
+    cpu_pct: f32,
+    /// Resident memory in bytes.
+    mem_bytes: u64,
+    /// Compact process state label.
+    state: String,
+    /// Process uptime in seconds.
+    uptime_secs: f64,
 }
 
 fn plan_status_label(plan: &PlanEntry) -> String {
@@ -235,17 +272,6 @@ fn task_picker_rows(state: &TuiState) -> Vec<TaskPickerRow> {
         .collect()
 }
 
-fn collect_git_age(workdir: &Path) -> String {
-    std::process::Command::new("git")
-        .args(["log", "-1", "--format=%cr"])
-        .current_dir(workdir)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 fn convert_git_branch_tree(
     branches: &[super::views::git_view::GitBranchNode],
 ) -> Vec<super::state::GitBranchNode> {
@@ -345,7 +371,9 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
                 _ => {}
             }
         }
-        if app.last_refresh.elapsed() > Duration::from_secs(1) {
+        app.drain_snapshot_channel();
+        app.drain_approval_requests();
+        if app.snapshot_rx.is_none() && app.last_refresh.elapsed() > Duration::from_secs(1) {
             app.data.refresh().await?;
             app.tui_state.update_from_snapshot(&app.data);
             app.last_refresh = Instant::now();
@@ -398,14 +426,50 @@ impl App {
             sys_rx: None,
             data_rx: None,
             git_rx: None,
+            process_supervisor: None,
+            approval_rx: None,
+            pending_approval_response: None,
+            snapshot_rx: None,
+            last_snapshot_error_marker: None,
             frame_counter: 0,
             last_input: Instant::now(),
             terminal_size,
         };
         app.fx_config = EffectsConfig::load_from_root(&app.workdir);
-        // Populate git info synchronously on first load (fast enough for startup).
-        app.populate_git_info();
         app
+    }
+
+    /// Build a new app connected to a shared `StateHub`.
+    #[must_use]
+    pub fn new_connected(root: impl AsRef<Path>, state_hub: &roko_core::SharedStateHub) -> Self {
+        Self::new_connected_with_page(root, None, state_hub)
+    }
+
+    /// Build a new connected app with an optional initial page selection.
+    #[must_use]
+    pub fn new_connected_with_page(
+        root: impl AsRef<Path>,
+        initial_page: Option<PageId>,
+        state_hub: &roko_core::SharedStateHub,
+    ) -> Self {
+        let mut app = Self::new_with_page(root, initial_page);
+        let snapshot_rx = state_hub.snapshot();
+        if snapshot_has_content(&snapshot_rx.borrow()) {
+            let snapshot = snapshot_rx.borrow();
+            apply_dashboard_snapshot(
+                &mut app.tui_state,
+                &mut app.notifications,
+                &mut app.last_snapshot_error_marker,
+                &snapshot,
+            );
+        }
+        app.snapshot_rx = Some(snapshot_rx);
+        app
+    }
+
+    /// Install a live process supervisor used for per-agent process metrics.
+    pub fn set_process_supervisor(&mut self, supervisor: Arc<ProcessSupervisor>) {
+        self.process_supervisor = Some(supervisor);
     }
 
     /// Return the active page (legacy).
@@ -457,13 +521,14 @@ impl App {
         // ---------------------------------------------------------------
         // Spawn background sys metrics collector thread
         // ---------------------------------------------------------------
-        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<super::state::SysMetrics>();
+        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<SysSnapshot>();
         let sys_log_dispatch = log_dispatch.clone();
+        let process_supervisor = self.process_supervisor.clone();
         std::thread::Builder::new()
             .name("tui-sys-metrics".into())
             .spawn(move || {
                 let _log_guard = tracing::dispatcher::set_default(&sys_log_dispatch);
-                collect_sys_metrics_bg(sys_tx);
+                collect_sys_metrics_bg(sys_tx, process_supervisor);
             })
             .inspect_err(|err| {
                 tracing::warn!(
@@ -507,7 +572,6 @@ impl App {
         // Spawn background git data collector thread
         // ---------------------------------------------------------------
         let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
-        let git_workdir = self.workdir.clone();
         let git_log_dispatch = log_dispatch;
         std::thread::Builder::new()
             .name("tui-git-refresh".into())
@@ -515,14 +579,19 @@ impl App {
                 let _log_guard = tracing::dispatcher::set_default(&git_log_dispatch);
                 loop {
                     let view_data = super::views::git_view::collect_git_data();
-                    let summary_lines = super::views::dashboard_view::collect_git_summary();
                     let branch = view_data.current_branch.clone();
                     let commit_short = view_data
                         .commits
                         .first()
                         .map(|c| c.hash_short.clone())
                         .unwrap_or_default();
-                    let age = collect_git_age(&git_workdir);
+                    let age = view_data
+                        .commits
+                        .first()
+                        .map(|commit| commit.age.clone())
+                        .unwrap_or_default();
+                    let summary_lines =
+                        super::views::dashboard_view::collect_git_summary(&view_data, &age);
                     let bg = GitBgData {
                         view_data,
                         summary_lines,
@@ -557,10 +626,12 @@ impl App {
         // Event loop
         // ---------------------------------------------------------------
         while self.running {
+            self.drain_snapshot_channel();
             match events.next().context("poll TUI event")? {
                 Event::Key(key) => {
                     self.last_input = Instant::now();
                     self.handle_key(key);
+                    self.drain_snapshot_channel();
                     // Drain background channels before immediate redraw
                     self.drain_background_channels();
                     terminal
@@ -577,6 +648,8 @@ impl App {
                 }
                 Event::Tick => {
                     self.tui_state.atmosphere.tick();
+                    self.drain_snapshot_channel();
+                    self.drain_approval_requests();
                     self.drain_background_channels();
                     self.expire_notifications();
                 }
@@ -704,7 +777,7 @@ impl App {
         );
 
         // PostFX pipeline
-        if self.fx_config.screen_postfx {
+        if self.fx_config.screen_postfx || self.fx_config.nerv_viz || self.fx_config.particles {
             let buf = frame.buffer_mut();
             super::postfx_pipeline::apply_pipeline(
                 self.tui_state.active_tab as usize,
@@ -713,6 +786,7 @@ impl App {
                 self.tui_state.atmosphere.elapsed,
                 self.tui_state.atmosphere.frame_count,
                 &self.fx_config,
+                &self.tui_state,
             );
         }
     }
@@ -943,6 +1017,24 @@ impl App {
                         "Screen postfx {state}"
                     )));
             }
+            TuiAction::CycleEffectsPreset => {
+                let preset = self.fx_config.cycle_preset();
+                match self.fx_config.save_preset(&self.workdir) {
+                    Ok(()) => {
+                        self.notifications
+                            .push(super::modals::Notification::info(&format!(
+                                "Effects: {}",
+                                preset.label()
+                            )));
+                    }
+                    Err(error) => {
+                        self.notifications
+                            .push(super::modals::Notification::error(&format!(
+                                "Effects preset save failed: {error}"
+                            )));
+                    }
+                }
+            }
             TuiAction::ShowPlanDetail => {
                 self.active_modal = self
                     .tui_state
@@ -1050,13 +1142,19 @@ impl App {
                 self.tui_state.plan_detail_tab = idx;
             }
             TuiAction::ApproveCommand => {
-                self.tui_state.pending_approval = None;
+                if !self.resolve_active_approval(true) {
+                    self.tui_state.pending_approval = None;
+                }
             }
             TuiAction::ApproveAll => {
-                self.tui_state.pending_approval = None;
+                if !self.resolve_active_approval(true) {
+                    self.tui_state.pending_approval = None;
+                }
             }
             TuiAction::RejectCommand => {
-                self.tui_state.pending_approval = None;
+                if !self.resolve_active_approval(false) {
+                    self.tui_state.pending_approval = None;
+                }
             }
             TuiAction::StartInject => {
                 self.tui_state.input_mode = InputMode::Inject;
@@ -1151,6 +1249,9 @@ impl App {
                 self.open_confirm_modal(self.resolve_confirm_action(action));
             }
             TuiAction::ConfirmYes => {
+                if self.resolve_active_approval(true) {
+                    return;
+                }
                 self.tui_state.input_mode = InputMode::Normal;
                 if matches!(self.active_modal, Some(ModalState::Quit)) {
                     self.dismiss_all_modals();
@@ -1205,6 +1306,9 @@ impl App {
                 self.active_modal = None;
             }
             TuiAction::ConfirmNo => {
+                if self.resolve_active_approval(false) {
+                    return;
+                }
                 self.dismiss_all_modals();
             }
             TuiAction::DismissNotification => {
@@ -1501,6 +1605,68 @@ impl App {
         });
     }
 
+    fn resolve_active_approval(&mut self, approved: bool) -> bool {
+        if !matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+            return false;
+        }
+
+        if let Some(response_tx) = self.pending_approval_response.take() {
+            let _ = response_tx.send(approved);
+        }
+
+        self.tui_state.pending_approval = None;
+        self.active_modal = None;
+        if self.tui_state.input_mode == InputMode::Confirm {
+            self.tui_state.input_mode = InputMode::Normal;
+        }
+        true
+    }
+
+    fn accept_approval_request(&mut self, request: ApprovalRequest) {
+        let ApprovalRequest {
+            role,
+            command,
+            approval_id,
+            response_tx,
+        } = request;
+
+        if self.pending_approval_response.is_some() {
+            let _ = response_tx.send(false);
+            return;
+        }
+
+        self.tui_state.pending_approval = Some(PendingApproval {
+            agent_id: role.clone(),
+            description: approval_id,
+            command: command.clone(),
+        });
+        self.pending_approval_response = Some(response_tx);
+        self.tui_state.input_mode = InputMode::Confirm;
+        self.active_modal = Some(ModalState::Approval { role, command });
+    }
+
+    fn drain_approval_requests(&mut self) {
+        let Some(mut rx) = self.approval_rx.take() else {
+            return;
+        };
+
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok(request) => self.accept_approval_request(request),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if !disconnected {
+            self.approval_rx = Some(rx);
+        }
+    }
+
     fn resolve_confirm_action(&self, action: ConfirmAction) -> ConfirmAction {
         match action {
             ConfirmAction::DiagnosePlan(plan_id) if plan_id.is_empty() => {
@@ -1645,13 +1811,44 @@ impl App {
         }
     }
 
-
     fn apply_signed_scroll(current: usize, delta: i16) -> usize {
         if delta < 0 {
             current.saturating_sub(delta.saturating_abs() as usize)
         } else {
             current.saturating_add(delta as usize)
         }
+    }
+
+    fn merge_process_metrics(&mut self, samples: Vec<ProcessMetricSample>) {
+        const PROCESS_HISTORY_LIMIT: usize = 60;
+
+        let mut existing = std::mem::take(&mut self.tui_state.process_metrics);
+        let mut merged = Vec::with_capacity(samples.len());
+
+        for sample in samples {
+            let mut metric = if let Some(index) = existing.iter().position(|entry| entry.pid == sample.pid)
+            {
+                existing.swap_remove(index)
+            } else {
+                super::state::ProcessMetrics {
+                    pid: sample.pid,
+                    role: sample.role.clone(),
+                    ..Default::default()
+                }
+            };
+
+            metric.pid = sample.pid;
+            metric.role = sample.role;
+            metric.cpu_pct = sample.cpu_pct;
+            metric.mem_bytes = sample.mem_bytes;
+            metric.state = sample.state;
+            metric.uptime_secs = sample.uptime_secs;
+            push_bounded_history(&mut metric.cpu_history, sample.cpu_pct, PROCESS_HISTORY_LIMIT);
+            push_bounded_history(&mut metric.mem_history, sample.mem_bytes, PROCESS_HISTORY_LIMIT);
+            merged.push(metric);
+        }
+
+        self.tui_state.process_metrics = merged;
     }
 
     fn current_agent_scroll_offset(&self) -> usize {
@@ -1682,12 +1879,11 @@ impl App {
                     return collected.len();
                 }
 
-                if let Some(agent) = self
-                    .tui_state
-                    .agents_by_id
-                    .values()
-                    .nth(self.tui_state.selected_agent_tab)
-                {
+                if let Some(agent) = self.tui_state.agents.get(
+                    self.tui_state
+                        .selected_agent
+                        .min(self.tui_state.agents.len().saturating_sub(1)),
+                ) {
                     if !agent.output_lines.is_empty() {
                         return agent.output_lines.len();
                     }
@@ -1789,6 +1985,9 @@ impl App {
     }
 
     fn dismiss_all_modals(&mut self) {
+        if matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+            let _ = self.resolve_active_approval(false);
+        }
         self.active_modal = None;
         self.tui_state.pending_confirm = None;
         if self.tui_state.input_mode == InputMode::Confirm {
@@ -1799,7 +1998,6 @@ impl App {
     // -----------------------------------------------------------------------
     // Legacy compatibility
     // -----------------------------------------------------------------------
-
 
     #[allow(dead_code)]
     fn select_page_by_slot(&mut self, slot: usize) {
@@ -1818,9 +2016,6 @@ impl App {
         self.last_data_gen = self.data.generation;
         self.tui_state.update_from_snapshot(&self.data);
         self.fx_config = EffectsConfig::load_from_root(&self.workdir);
-        // Git info is refreshed by the background git thread; only
-        // populate synchronously on first load (when fields are empty).
-        self.populate_git_info();
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
         self.clamp_gate_failure_selection();
@@ -1844,57 +2039,15 @@ impl App {
                 self.data = DashboardData::load_best_effort(&self.workdir);
                 self.tui_state.update_from_snapshot(&self.data);
                 self.fx_config = EffectsConfig::load_from_root(&self.workdir);
-                self.notifications
-                    .push(super::modals::Notification::info("Config saved and reloaded"));
+                self.notifications.push(super::modals::Notification::info(
+                    "Config saved and reloaded",
+                ));
             }
             Err(error) => {
                 self.notifications
                     .push(super::modals::Notification::error(&format!(
                         "Save failed: {error}"
                     )));
-            }
-        }
-    }
-
-    /// Populate TuiState git fields from actual git commands.
-    fn populate_git_info(&mut self) {
-        // Branch
-        if self.tui_state.git_branch.is_empty() {
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(&self.workdir)
-                .output()
-            {
-                if out.status.success() {
-                    self.tui_state.git_branch =
-                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                }
-            }
-        }
-        // Short commit hash
-        if self.tui_state.git_commit_short.is_empty() {
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["rev-parse", "--short", "HEAD"])
-                .current_dir(&self.workdir)
-                .output()
-            {
-                if out.status.success() {
-                    self.tui_state.git_commit_short =
-                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                }
-            }
-        }
-        // Commit age
-        if self.tui_state.git_age.is_empty() {
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["log", "-1", "--format=%cr"])
-                .current_dir(&self.workdir)
-                .output()
-            {
-                if out.status.success() {
-                    self.tui_state.git_age =
-                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                }
             }
         }
     }
@@ -1962,7 +2115,6 @@ impl App {
             })
     }
 
-
     // `update_sys_metrics` removed -- see `collect_sys_metrics_bg()` standalone
     // function below, called from the background thread.
 
@@ -1972,50 +2124,56 @@ impl App {
     fn drain_background_channels(&mut self) {
         const MAX_MESSAGES_PER_DRAIN: usize = 20;
 
+        self.drain_snapshot_channel();
+
         // -- sys metrics (merge, don't replace — keep history) --
+        let mut sys_snaps = Vec::new();
         if let Some(rx) = &self.sys_rx {
             let mut count = 0;
             while let Ok(snap) = rx.try_recv() {
-                // CPU
-                let cpu_pct = self.tui_state.update_cpu_pct(snap.cpu_pct);
-                let sys = &mut self.tui_state.sys;
-                sys.cpu_history.push(cpu_pct);
-                if sys.cpu_history.len() > 60 {
-                    sys.cpu_history.remove(0);
-                }
-
-                // Memory
-                sys.mem_used_bytes = snap.mem_used_bytes;
-                sys.mem_total_bytes = snap.mem_total_bytes;
-                let mem_frac = if snap.mem_total_bytes > 0 {
-                    snap.mem_used_bytes as f32 / snap.mem_total_bytes as f32
-                } else {
-                    0.0
-                };
-                sys.mem_history.push(mem_frac);
-                if sys.mem_history.len() > 60 {
-                    sys.mem_history.remove(0);
-                }
-
-                // Network: compute rate from delta of cumulative totals
-                if sys.prev_net_in > 0 && snap.net_down_bytes_sec > sys.prev_net_in {
-                    sys.net_down_bytes_sec = snap.net_down_bytes_sec - sys.prev_net_in;
-                }
-                sys.prev_net_in = snap.net_down_bytes_sec;
-                sys.net_out_bytes_total = snap.net_out_bytes_total;
-
-                // Disk: compute rate from delta of cumulative totals
-                if sys.prev_disk_read > 0 && snap.disk_read_bytes_sec > sys.prev_disk_read {
-                    sys.disk_read_bytes_sec = snap.disk_read_bytes_sec - sys.prev_disk_read;
-                }
-                sys.prev_disk_read = snap.disk_read_bytes_sec;
-                sys.disk_write_bytes_total = snap.disk_write_bytes_total;
-
+                sys_snaps.push(snap);
                 count += 1;
                 if count >= MAX_MESSAGES_PER_DRAIN {
                     break;
                 }
             }
+        }
+        for snap in sys_snaps {
+            // CPU
+            let cpu_pct = self.tui_state.update_cpu_pct(snap.sys.cpu_pct);
+            let sys = &mut self.tui_state.sys;
+            sys.cpu_history.push(cpu_pct);
+            if sys.cpu_history.len() > 60 {
+                sys.cpu_history.remove(0);
+            }
+
+            // Memory
+            sys.mem_used_bytes = snap.sys.mem_used_bytes;
+            sys.mem_total_bytes = snap.sys.mem_total_bytes;
+            let mem_frac = if snap.sys.mem_total_bytes > 0 {
+                snap.sys.mem_used_bytes as f32 / snap.sys.mem_total_bytes as f32
+            } else {
+                0.0
+            };
+            sys.mem_history.push(mem_frac);
+            if sys.mem_history.len() > 60 {
+                sys.mem_history.remove(0);
+            }
+
+            // Network: compute rate from delta of cumulative totals
+            if sys.prev_net_in > 0 && snap.sys.net_down_bytes_sec > sys.prev_net_in {
+                sys.net_down_bytes_sec = snap.sys.net_down_bytes_sec - sys.prev_net_in;
+            }
+            sys.prev_net_in = snap.sys.net_down_bytes_sec;
+            sys.net_out_bytes_total = snap.sys.net_out_bytes_total;
+
+            // Disk: compute rate from delta of cumulative totals
+            if sys.prev_disk_read > 0 && snap.sys.disk_read_bytes_sec > sys.prev_disk_read {
+                sys.disk_read_bytes_sec = snap.sys.disk_read_bytes_sec - sys.prev_disk_read;
+            }
+            sys.prev_disk_read = snap.sys.disk_read_bytes_sec;
+            sys.disk_write_bytes_total = snap.sys.disk_write_bytes_total;
+            self.merge_process_metrics(snap.process_metrics);
         }
 
         // -- dashboard data --
@@ -2037,7 +2195,9 @@ impl App {
                 }
             }
             if got_data {
-                self.tui_state.update_from_snapshot(&self.data);
+                if self.snapshot_rx.is_none() {
+                    self.tui_state.update_from_snapshot(&self.data);
+                }
                 if rebuild_scaffold {
                     self.scaffold = DashboardScaffold::new_in(&self.workdir);
                 }
@@ -2076,6 +2236,26 @@ impl App {
                 }
             }
         }
+    }
+
+    fn drain_snapshot_channel(&mut self) {
+        let (snapshot_rx, tui_state, notifications, last_marker) = (
+            &mut self.snapshot_rx,
+            &mut self.tui_state,
+            &mut self.notifications,
+            &mut self.last_snapshot_error_marker,
+        );
+
+        let Some(rx) = snapshot_rx.as_mut() else {
+            return;
+        };
+
+        if !rx.has_changed().unwrap_or(false) {
+            return;
+        }
+
+        let snapshot = rx.borrow_and_update();
+        apply_dashboard_snapshot(tui_state, notifications, last_marker, &snapshot);
     }
 
     fn pages(&self) -> PageRegistry {
@@ -2167,26 +2347,92 @@ fn cycle_field_value(
 // ---------------------------------------------------------------------------
 
 /// Collect system metrics on a background thread using `sysinfo`.
-fn collect_sys_metrics_bg(tx: std::sync::mpsc::Sender<super::state::SysMetrics>) {
-    let mut sys = System::new();
+fn collect_sys_metrics_bg(
+    tx: std::sync::mpsc::Sender<SysSnapshot>,
+    process_supervisor: Option<Arc<ProcessSupervisor>>,
+) {
+    let mut sys = System::new_all();
 
     loop {
         sys.refresh_cpu_usage();
         sys.refresh_memory();
 
-        let metrics = super::state::SysMetrics {
-            cpu_pct: sys.global_cpu_usage(),
-            mem_used_bytes: sys.used_memory(),
-            mem_total_bytes: sys.total_memory(),
-            ..Default::default()
+        let snapshot = SysSnapshot {
+            sys: super::state::SysMetrics {
+                cpu_pct: sys.global_cpu_usage(),
+                mem_used_bytes: sys.used_memory(),
+                mem_total_bytes: sys.total_memory(),
+                ..Default::default()
+            },
+            process_metrics: collect_process_metrics(&mut sys, process_supervisor.as_deref()),
         };
 
-        if tx.send(metrics).is_err() {
+        if tx.send(snapshot).is_err() {
             break;
         }
 
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+fn collect_process_metrics(
+    sys: &mut System,
+    process_supervisor: Option<&ProcessSupervisor>,
+) -> Vec<ProcessMetricSample> {
+    let Some(process_supervisor) = process_supervisor else {
+        return Vec::new();
+    };
+
+    let active_pids = futures::executor::block_on(process_supervisor.active_pids());
+    if active_pids.is_empty() {
+        return Vec::new();
+    }
+
+    let pids: Vec<Pid> = active_pids
+        .iter()
+        .map(|(pid, _)| Pid::from_u32(*pid))
+        .collect();
+    sys.refresh_processes(ProcessesToUpdate::Some(&pids), true);
+
+    active_pids
+        .into_iter()
+        .filter_map(|(pid, role)| {
+            let proc = sys.process(Pid::from_u32(pid))?;
+            Some(ProcessMetricSample {
+                pid,
+                role,
+                cpu_pct: proc.cpu_usage(),
+                mem_bytes: proc.memory(),
+                state: process_state_label(proc.status()).to_string(),
+                uptime_secs: proc.run_time() as f64,
+            })
+        })
+        .collect()
+}
+
+fn process_state_label(status: ProcessStatus) -> &'static str {
+    match status {
+        ProcessStatus::Run => "running",
+        ProcessStatus::Sleep
+        | ProcessStatus::Idle
+        | ProcessStatus::Waking
+        | ProcessStatus::Parked => "sleeping",
+        ProcessStatus::Stop
+        | ProcessStatus::Tracing
+        | ProcessStatus::Dead
+        | ProcessStatus::Wakekill
+        | ProcessStatus::LockBlocked
+        | ProcessStatus::UninterruptibleDiskSleep
+        | ProcessStatus::Zombie => "stopped",
+        ProcessStatus::Unknown(_) => "unknown",
+    }
+}
+
+fn push_bounded_history<T>(history: &mut VecDeque<T>, value: T, max_len: usize) {
+    if history.len() >= max_len {
+        history.pop_front();
+    }
+    history.push_back(value);
 }
 
 /// Map a Mori-style Tab to a legacy PageId (best effort).
@@ -2201,97 +2447,50 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
     }
 }
 
-fn help_lines() -> Vec<Line<'static>> {
-    let theme = Theme::from_env();
-    vec![
-        Line::from(Span::styled(
-            "roko dashboard keybindings",
-            theme.accent_bold(),
-        )),
-        Line::from(""),
-        Line::from(Span::styled("Navigation", theme.accent_bold())),
-        Line::from("F1-F7      switch tabs (Dashboard/Plans/Agents/Git/Logs/Config/Inspect)"),
-        Line::from("F8 / u     queue overview modal"),
-        Line::from("Tab        cycle focus between panels"),
-        Line::from("Shift+Tab  cycle focus backward"),
-        Line::from("j/k up/dn  scroll focused panel"),
-        Line::from("PgUp/PgDn  page scroll"),
-        Line::from("Home/End   jump to top/bottom"),
-        Line::from("Enter      expand/drill into selection"),
-        Line::from("Esc        close overlay / drill out"),
-        Line::from("q          close overlay or quit"),
-        Line::from(""),
-        Line::from(Span::styled("Dashboard Sub-Tabs (F1)", theme.accent_bold())),
-        Line::from("a          Agents panel"),
-        Line::from("o          Output panel"),
-        Line::from("d          Diff panel"),
-        Line::from("e          Errors panel"),
-        Line::from("g          Git panel"),
-        Line::from("m          MCP / Context panel"),
-        Line::from("P          Processes panel"),
-        Line::from(""),
-        Line::from(Span::styled("Modals & Modes", theme.accent_bold())),
-        Line::from("?          toggle this help"),
-        Line::from("w          wave overview"),
-        Line::from("p          pause/resume pipeline"),
-        Line::from("i          inject message to agent"),
-        Line::from("/          filter mode (Plans/Logs)"),
-        Line::from("Ctrl-t     task picker"),
-        Line::from("Ctrl-a     approve all pending"),
-        Line::from("Ctrl-x     force advance (confirm)"),
-        Line::from("Ctrl-d     reset selected plan (confirm)"),
-        Line::from("Ctrl-e     toggle screen effects"),
-        Line::from(""),
-        Line::from(Span::styled("Agent Controls (F3)", theme.accent_bold())),
-        Line::from("y          approve pending command"),
-        Line::from("A          approve all pending"),
-        Line::from("x          reject pending command"),
-        Line::from("`          cycle agent tabs"),
-        Line::from("1-7        switch agent tab directly"),
-        Line::from("G          resume auto-scroll"),
-        Line::from(""),
-        Line::from(Span::styled("Plans (F2)", theme.accent_bold())),
-        Line::from("e          expand/collapse plan"),
-        Line::from("[/]        wave prev/next"),
-        Line::from("h/l left/right drill out/in"),
-        Line::from("s          soft retry plan"),
-        Line::from("R          restart phase"),
-        Line::from("F          force advance"),
-        Line::from("V / c      re-verify plan"),
-        Line::from("S          repair (preserve completed)"),
-        Line::from("t          task picker"),
-        Line::from("o          queue overview"),
-        Line::from(""),
-        Line::from(Span::styled("Logs (F5)", theme.accent_bold())),
-        Line::from("1-4        toggle level filter (INF/WRN/ERR/DBG)"),
-        Line::from("a          show all log levels"),
-        Line::from(""),
-        Line::from(Span::styled("General", theme.accent_bold())),
-        Line::from("Ctrl-r     refresh data"),
-        Line::from("Ctrl-C     quit immediately"),
-    ]
-}
-
-/// Extract a numeric value from a vm_stat line like "Pages active:    123456."
-#[cfg(target_os = "macos")]
-fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
-    if !line.contains(key) {
-        return None;
-    }
-    line.split(':')
-        .nth(1)?
-        .trim()
-        .trim_end_matches('.')
-        .parse::<u64>()
-        .ok()
-}
-
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
+}
+
+fn apply_dashboard_snapshot(
+    tui_state: &mut TuiState,
+    notifications: &mut Vec<super::modals::Notification>,
+    last_snapshot_error_marker: &mut Option<(String, u64)>,
+    snapshot: &roko_core::DashboardSnapshot,
+) {
+    tui_state.update_from_dashboard_snapshot(snapshot);
+
+    if !snapshot.errors.is_empty() {
+        let start_idx = last_snapshot_error_marker
+            .as_ref()
+            .and_then(|marker| {
+                snapshot
+                    .errors
+                    .iter()
+                    .position(|error| error.message == marker.0 && error.ts_millis == marker.1)
+                    .map(|idx| idx + 1)
+            })
+            .unwrap_or(0);
+
+        for error in snapshot.errors.iter().skip(start_idx) {
+            notifications.push(super::modals::Notification::error(error.message.clone()));
+        }
+
+        if let Some(last_error) = snapshot.errors.last() {
+            *last_snapshot_error_marker = Some((last_error.message.clone(), last_error.ts_millis));
+        }
+    }
+}
+
+fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
+    !snapshot.plans.is_empty()
+        || !snapshot.tasks.is_empty()
+        || !snapshot.agents.is_empty()
+        || !snapshot.gates.is_empty()
+        || !snapshot.errors.is_empty()
 }
 
 #[cfg(test)]
@@ -2313,6 +2512,192 @@ mod tests {
         let app = App::new(dir.path());
         assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn app_new_connected_installs_snapshot_receiver() {
+        let dir = tempdir().unwrap();
+        let hub = roko_core::shared_state_hub();
+        let app = App::new_connected(dir.path(), &hub);
+        assert!(app.snapshot_rx.is_some());
+    }
+
+    #[test]
+    fn approval_request_opens_modal_and_resolves_response() {
+        use super::super::approval_ipc::ApprovalChannel;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        let channel = ApprovalChannel::new(1);
+        let ApprovalChannel { tx, rx } = channel;
+        let (response_tx, response_rx) = oneshot::channel();
+
+        app.approval_rx = Some(rx);
+        tx.try_send(ApprovalRequest {
+            role: "reviewer".to_string(),
+            command: "echo hello".to_string(),
+            approval_id: "approval-42".to_string(),
+            response_tx,
+        })
+        .unwrap();
+
+        app.drain_approval_requests();
+
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::Approval { ref role, ref command })
+                if role == "reviewer" && command == "echo hello"
+        ));
+        assert_eq!(
+            app.tui_state.pending_approval.as_ref().map(|pending| (
+                pending.agent_id.as_str(),
+                pending.description.as_str(),
+                pending.command.as_str(),
+            )),
+            Some(("reviewer", "approval-42", "echo hello"))
+        );
+        assert_eq!(app.tui_state.input_mode, InputMode::Confirm);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let approved = rt.block_on(async move { response_rx.await.unwrap() });
+
+        assert!(approved);
+        assert!(app.active_modal.is_none());
+        assert!(app.pending_approval_response.is_none());
+        assert!(app.tui_state.pending_approval.is_none());
+        assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn dashboard_snapshot_updates_preserve_navigation_state() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plans = vec![
+            super::super::state::PlanEntry {
+                id: "plan-a".to_string(),
+                expanded: true,
+                ..Default::default()
+            },
+            super::super::state::PlanEntry {
+                id: "plan-b".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.tui_state.agents = vec![
+            super::super::state::AgentRow {
+                id: "agent-a".to_string(),
+                ..Default::default()
+            },
+            super::super::state::AgentRow {
+                id: "agent-b".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.tui_state.selected_plan_idx = 0;
+        app.tui_state.current_plan_idx = 1;
+        app.tui_state.selected_agent = 1;
+        app.tui_state.active_tab = Tab::Agents;
+        app.tui_state.plan_scroll_offset = 17;
+        app.tui_state.agent_scroll = Some(9);
+
+        let snapshot = roko_core::DashboardSnapshot {
+            plans: [
+                (
+                    "plan-b".to_string(),
+                    roko_core::dashboard_snapshot::PlanState {
+                        plan_id: "plan-b".to_string(),
+                        phase: "done".to_string(),
+                        tasks_total: 2,
+                        tasks_done: 2,
+                        tasks_failed: 0,
+                        active: false,
+                    },
+                ),
+                (
+                    "plan-c".to_string(),
+                    roko_core::dashboard_snapshot::PlanState {
+                        plan_id: "plan-c".to_string(),
+                        phase: "active".to_string(),
+                        tasks_total: 1,
+                        tasks_done: 0,
+                        tasks_failed: 0,
+                        active: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            agents: [
+                (
+                    "agent-b".to_string(),
+                    roko_core::dashboard_snapshot::AgentState {
+                        agent_id: "agent-b".to_string(),
+                        role: "reviewer".to_string(),
+                        active: true,
+                        output_bytes: 0,
+                    },
+                ),
+                (
+                    "agent-c".to_string(),
+                    roko_core::dashboard_snapshot::AgentState {
+                        agent_id: "agent-c".to_string(),
+                        role: "planner".to_string(),
+                        active: false,
+                        output_bytes: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            gates: vec![roko_core::dashboard_snapshot::GateVerdict {
+                plan_id: "plan-b".to_string(),
+                task_id: "task-1".to_string(),
+                gate: "compile".to_string(),
+                passed: true,
+                ts_millis: 42,
+            }],
+            errors: vec![roko_core::dashboard_snapshot::ErrorEntry {
+                message: "boom".to_string(),
+                ts_millis: 7,
+            }],
+            ..Default::default()
+        };
+
+        apply_dashboard_snapshot(
+            &mut app.tui_state,
+            &mut app.notifications,
+            &mut app.last_snapshot_error_marker,
+            &snapshot,
+        );
+
+        assert_eq!(app.tui_state.active_tab, Tab::Agents);
+        assert_eq!(app.tui_state.plan_scroll_offset, 17);
+        assert_eq!(app.tui_state.agent_scroll, Some(9));
+        assert_eq!(app.tui_state.plans[0].id, "plan-b");
+        assert_eq!(
+            app.tui_state.plans[0].status,
+            super::super::state::PlanPhase::Done
+        );
+        assert_eq!(app.tui_state.plans[1].id, "plan-c");
+        assert!(!app.tui_state.plans[0].expanded);
+        assert_eq!(app.tui_state.selected_plan_idx, 0);
+        assert_eq!(app.tui_state.current_plan_idx, 0);
+        assert_eq!(app.tui_state.agents[0].id, "agent-b");
+        assert!(app.tui_state.agents[0].active);
+        assert_eq!(app.tui_state.selected_agent, 0);
+        assert_eq!(app.tui_state.gate_results.len(), 1);
+        assert_eq!(app.tui_state.gate_results[0].output, "task task-1");
+        assert!(
+            app.notifications
+                .iter()
+                .any(|notification| notification.message == "boom")
+        );
     }
 
     #[test]
@@ -2347,7 +2732,7 @@ mod tests {
     }
 
     #[test]
-    fn keybinding_o_switches_to_output_subtab() {
+    fn dashboard_subtab_keybindings_include_procs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempdir().unwrap();
@@ -2368,6 +2753,9 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 5); // switched to MCP
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+        assert_eq!(app.tui_state.plan_detail_tab, 6); // switched to Procs
 
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 0); // back to Agents
@@ -2511,6 +2899,43 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert!(!app.fx_config.screen_postfx);
+    }
+
+    #[test]
+    fn v_cycles_effects_presets_and_persists_without_touching_screen_postfx() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use super::super::effects_config::EffectsPreset;
+
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("roko.toml"),
+            RokoConfig::default().to_toml().unwrap(),
+        )
+        .unwrap();
+
+        let mut app = App::new(dir.path());
+        app.fx_config.screen_postfx = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.fx_config.preset, EffectsPreset::Minimal);
+        assert!(app.fx_config.screen_postfx);
+        assert!(!app.fx_config.nerv_viz);
+        assert!(app.fx_config.particles);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.fx_config.preset, EffectsPreset::Full);
+        assert!(app.fx_config.screen_postfx);
+        assert!(app.fx_config.nerv_viz);
+        assert!(app.fx_config.particles);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.fx_config.preset, EffectsPreset::Off);
+        assert!(app.fx_config.screen_postfx);
+        assert!(!app.fx_config.nerv_viz);
+        assert!(!app.fx_config.particles);
+
+        let saved = std::fs::read_to_string(dir.path().join("roko.toml")).unwrap();
+        assert!(saved.contains("preset = \"off\""));
     }
 
     #[test]

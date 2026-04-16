@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::state::{PlanEntry, TuiState};
-use crate::tui::util::truncate_middle;
 use super::rosedust::{MoriTheme, gradient_ocean};
+use crate::tui::util::truncate_middle;
 
 // ---------------------------------------------------------------------------
 // Fixed column widths (chars)
@@ -212,6 +212,11 @@ fn render_wave_tree(
     selected_plan_id: Option<&str>,
     filter_lower: Option<&str>,
 ) {
+    let selected_wave = state
+        .execution_waves
+        .get(state.current_wave())
+        .map(|wave| wave.index);
+
     for wave in &state.execution_waves {
         let wave_plans: Vec<&PlanEntry> = wave
             .plans
@@ -254,22 +259,29 @@ fn render_wave_tree(
         } else {
             "\u{25b8}"
         }; // ▾ / ▸
+        let wave_selected = selected_wave == Some(wave.index);
+        let header_bg = if wave_selected {
+            MoriTheme::BG_SECONDARY
+        } else {
+            MoriTheme::BG
+        };
 
         let mut wave_spans = vec![
             Span::styled(
                 format!(" {collapse_icon} "),
-                Style::default().fg(MoriTheme::FG_DIM),
+                Style::default().fg(MoriTheme::FG_DIM).bg(header_bg),
             ),
-            Span::styled(format!("{wave_icon} "), wave_style),
+            Span::styled(format!("{wave_icon} "), wave_style.bg(header_bg)),
             Span::styled(
                 format!("Wave {} ", wave.index),
                 Style::default()
                     .fg(MoriTheme::BONE_DIM)
+                    .bg(header_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("({}/{}) ", wave.done, wave.total),
-                Style::default().fg(MoriTheme::FG_DIM),
+                Style::default().fg(MoriTheme::FG_DIM).bg(header_bg),
             ),
         ];
 
@@ -309,7 +321,7 @@ fn render_wave_tree(
         if avail > used + 1 {
             wave_spans.push(Span::styled(
                 format!(" {}", "\u{2500}".repeat(avail - used - 1)),
-                Style::default().fg(MoriTheme::TEXT_GHOST),
+                Style::default().fg(MoriTheme::TEXT_GHOST).bg(header_bg),
             ));
         }
         lines.push(Line::from(wave_spans));
@@ -320,7 +332,15 @@ fn render_wave_tree(
 
         // Plans within wave
         for plan in wave_plans {
-            render_plan_line(lines, plan, focused, area, true, selected_plan_id);
+            render_plan_line(
+                lines,
+                plan,
+                focused,
+                area,
+                true,
+                selected_plan_id,
+                wave_selected,
+            );
         }
     }
 }
@@ -339,7 +359,7 @@ fn render_flat_plans(
 ) {
     for plan in &state.plans {
         if matches_filter(plan, filter_lower) {
-            render_plan_line(lines, plan, focused, area, false, selected_plan_id);
+            render_plan_line(lines, plan, focused, area, false, selected_plan_id, false);
         }
     }
 }
@@ -355,6 +375,7 @@ fn render_plan_line(
     area: Rect,
     indented: bool,
     selected_plan_id: Option<&str>,
+    wave_selected: bool,
 ) {
     let is_selected = focused && selected_plan_id == Some(plan.id.as_str());
 
@@ -375,6 +396,8 @@ fn render_plan_line(
 
     let bg = if is_selected {
         MoriTheme::BG_HIGHLIGHT
+    } else if wave_selected {
+        MoriTheme::BG_SECONDARY
     } else {
         MoriTheme::BG
     };

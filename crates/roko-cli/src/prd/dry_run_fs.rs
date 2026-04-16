@@ -124,20 +124,21 @@ fn copy_workspace_dir(src: &Path, dst: &Path) -> Result<()> {
             continue;
         }
 
-        let dest = dst.join(name.as_ref());
+        let dest_path = dst.join(name.as_ref());
         let ty = entry
             .file_type()
             .with_context(|| format!("inspect {}", path.display()))?;
         if ty.is_dir() {
-            std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
-            copy_workspace_dir(&path, &dest)?;
+            std::fs::create_dir_all(&dest_path)
+                .with_context(|| format!("create {}", dest_path.display()))?;
+            copy_workspace_dir(&path, &dest_path)?;
         } else if ty.is_file() {
-            if let Some(parent) = dest.parent() {
+            if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create {}", parent.display()))?;
             }
-            std::fs::copy(&path, &dest)
-                .with_context(|| format!("copy {} -> {}", path.display(), dest.display()))?;
+            std::fs::copy(&path, &dest_path)
+                .with_context(|| format!("copy {} -> {}", path.display(), dest_path.display()))?;
         }
     }
     Ok(())

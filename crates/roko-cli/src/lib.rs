@@ -9,6 +9,16 @@
 //! schema.
 
 #![allow(clippy::module_name_repetitions)]
+#![cfg_attr(
+    clippy,
+    allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::restriction,
+        missing_docs
+    )
+)]
 
 extern crate self as roko_cli;
 

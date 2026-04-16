@@ -1762,11 +1762,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             .unwrap_or_default();
         let phase_status = PlanPhase::from(phase.as_str());
         let completed = phase_status.is_done() || phase_status.is_failed();
-        if task_count > 0
-            && tasks_done == 0
-            && tasks_failed == 0
-            && phase_status.is_done()
-        {
+        if task_count > 0 && tasks_done == 0 && tasks_failed == 0 && phase_status.is_done() {
             tasks_done = task_count;
         }
 
@@ -1780,7 +1776,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
                     .and_then(Value::as_u64)
                     .or_else(|| plan_state.get("tasks_done").and_then(Value::as_u64))
             })
-            .unwrap_or(0) as usize;
+            .unwrap_or(tasks_done as u64) as usize;
 
         let tasks_failed = state
             .get("plan_states")
@@ -1792,7 +1788,7 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
                     .and_then(Value::as_u64)
                     .or_else(|| plan_state.get("tasks_failed").and_then(Value::as_u64))
             })
-            .unwrap_or(0) as usize;
+            .unwrap_or(tasks_failed as u64) as usize;
 
         let last_error = state
             .get("plan_states")

@@ -4,17 +4,23 @@
 //! needs: navigation, scroll positions, modal visibility, agent/plan data,
 //! cost tracking, git state, and more.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::path::Path;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use ratatui::text::Line;
+use roko_core::OperatingFrequency;
 
 use super::atmosphere::Atmosphere;
-use super::dashboard::{DashboardData, PlanTaskListSnapshot};
+use super::dashboard::{DashboardData, PlanTaskListSnapshot, Theme};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
+use super::segment::{CachedRender, output_byte_len, render_cached_output};
 use super::tabs::Tab;
-use crate::plan::PlanSummary;
+use crate::plan::{PlanSummary, plans_dir};
+use crate::task_parser::{TaskDef, TasksFile};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -216,28 +222,10 @@ impl From<&str> for PlanPhase {
             "done" | "completed" | "complete" | "passed" | "skipped" => Self::Done,
             "failed" | "error" => Self::Failed,
             "pending" | "queued" | "" => Self::Pending,
-            "running"
-            | "active"
-            | "executing"
-            | "preflight"
-            | "strategist"
-            | "implementer"
-            | "compile-gate"
-            | "compile_gate"
-            | "test-gate"
-            | "test_gate"
-            | "reviewing"
-            | "critic-review"
-            | "critic_review"
-            | "verdict"
-            | "committing"
-            | "implementing"
-            | "gating"
-            | "verifying"
-            | "review"
-            | "merge"
-            | "merging"
-            | "commit" => Self::Active,
+            "running" | "active" | "executing" | "preflight" | "strategist" | "implementer"
+            | "compile-gate" | "compile_gate" | "test-gate" | "test_gate" | "reviewing"
+            | "critic-review" | "critic_review" | "verdict" | "committing" | "implementing"
+            | "gating" | "verifying" | "review" | "merge" | "merging" | "commit" => Self::Active,
             _ => Self::Pending,
         }
     }
@@ -249,36 +237,11 @@ impl fmt::Display for PlanPhase {
     }
 }
 
-/// Agent state tracked per active agent (legacy HashMap-based tracking).
-#[derive(Debug, Clone, Default)]
-pub struct AgentState {
-    /// Agent identifier.
-    pub id: String,
-    /// Display name.
-    pub name: String,
-    /// Current status label (e.g. "running", "waiting", "done").
-    pub status: AgentStatus,
-    /// Accumulated output lines.
-    pub output_lines: Vec<String>,
-    /// Latest diff content, if any.
-    pub diff_content: String,
-    /// Cumulative input tokens.
-    pub input_tokens: u64,
-    /// Cumulative output tokens.
-    pub output_tokens: u64,
-    /// Cached rendered output (invalidated on new output).
-    pub render_cache: Option<String>,
-    /// Plan this agent is working on, if known.
-    pub plan_id: Option<String>,
-    /// Task this agent is working on, if known.
-    pub task_id: Option<String>,
-}
-
 /// Agent row for the Vec-based agent roster used by widgets.
 ///
 /// Widgets index into `TuiState::agents` by position, and read fields
 /// like `.active`, `.role`, `.model`, `.current_plan`, `.current_task`,
-/// `.context_limit`, `.last_output_line` etc.
+/// `.context_limit`, `.output_lines`, `.last_output_line` etc.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRow {
     /// Agent identifier.
@@ -301,18 +264,46 @@ pub struct AgentRow {
     pub current_plan: String,
     /// Task this agent is working on.
     pub current_task: String,
+    /// Accumulated output lines for the output pane.
+    pub output_lines: Vec<String>,
     /// Last line of agent output (for the output pane).
     pub last_output_line: String,
 }
 
-/// State for parallel agent display.
+/// Per-agent routing and context metrics shown in the TUI.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteMetrics {
+    /// Routed or observed model slug (for example `claude-sonnet-4-5`).
+    pub model: String,
+    /// Compact routing tier label such as `fast`, `balanced`, or `deep`.
+    pub tier: String,
+    /// Total tokens consumed for the latest observed turn.
+    pub context_used: u64,
+    /// Model context window in tokens.
+    pub context_limit: u64,
+    /// Prompt-focus score in the range `0.0..=1.0`.
+    pub focus_score: f64,
+}
+
+/// Live system metrics for a supervised agent process.
 #[derive(Debug, Clone, Default)]
-pub struct ParallelAgentState {
-    pub agent_id: String,
-    pub plan_id: String,
-    pub task_id: String,
-    pub status: AgentStatus,
-    pub progress_pct: f64,
+pub struct ProcessMetrics {
+    /// OS process identifier.
+    pub pid: u32,
+    /// Human-readable process role or label.
+    pub role: String,
+    /// Current CPU usage percentage.
+    pub cpu_pct: f32,
+    /// Resident memory in bytes.
+    pub mem_bytes: u64,
+    /// Compact state label such as `running`, `sleeping`, or `stopped`.
+    pub state: String,
+    /// Process uptime in seconds.
+    pub uptime_secs: f64,
+    /// Rolling CPU samples used for inline sparklines.
+    pub cpu_history: VecDeque<f32>,
+    /// Rolling memory samples used for inline sparklines.
+    pub mem_history: VecDeque<u64>,
 }
 
 /// Resolve a model slug to its known context window in tokens.
@@ -331,6 +322,128 @@ pub fn model_context_limit(model: &str) -> u64 {
         200_000
     } else {
         200_000
+    }
+}
+
+#[must_use]
+fn route_tier_label_for_frequency(frequency: OperatingFrequency) -> &'static str {
+    match frequency {
+        OperatingFrequency::Gamma => "fast",
+        OperatingFrequency::Theta => "balanced",
+        OperatingFrequency::Delta => "deep",
+    }
+}
+
+#[must_use]
+fn route_tier_label_for_model(model: &str) -> &'static str {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        "balanced"
+    } else if lower.contains("haiku")
+        || lower.contains("flash-lite")
+        || lower.contains("flash lite")
+        || lower.contains("mini")
+        || lower.contains("nano")
+    {
+        "fast"
+    } else if lower.contains("opus")
+        || lower.contains("pro-preview")
+        || lower.contains("pro preview")
+        || lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("r1")
+    {
+        "deep"
+    } else {
+        "balanced"
+    }
+}
+
+#[must_use]
+fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
+    if event.model.trim().is_empty() {
+        event.model_used.trim().to_string()
+    } else {
+        event.model.trim().to_string()
+    }
+}
+
+#[must_use]
+fn prompt_focus_score(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> f64 {
+    if event.prompt_sections.is_empty() {
+        return if event.total_prompt_tokens > 0 { 1.0 } else { 0.0 };
+    }
+
+    let mut max_weighted = 0.0;
+    let mut retained_weighted = 0.0;
+    for section in &event.prompt_sections {
+        let priority_weight = 1.0 / (1.0 + f64::from(section.priority));
+        let weighted_tokens = section.tokens as f64 * priority_weight;
+        max_weighted += weighted_tokens;
+
+        let retention = if section.was_dropped {
+            0.0
+        } else if section.was_truncated {
+            0.5
+        } else {
+            1.0
+        };
+        retained_weighted += weighted_tokens * retention;
+    }
+
+    if max_weighted > 0.0 {
+        (retained_weighted / max_weighted).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+#[must_use]
+fn route_focus_score(
+    event: &roko_learn::efficiency::AgentEfficiencyEvent,
+    data: &DashboardData,
+    model: &str,
+) -> f64 {
+    if let Some(stats) = data.cascade_router.confidence_stats.get(model) {
+        if stats.trials > 0 {
+            return (stats.successes as f64 / stats.trials as f64).clamp(0.0, 1.0);
+        }
+    }
+    prompt_focus_score(event)
+}
+
+#[must_use]
+fn route_metrics_from_event(
+    event: &roko_learn::efficiency::AgentEfficiencyEvent,
+    data: &DashboardData,
+) -> RouteMetrics {
+    let model = event_model_slug(event);
+    let context_limit = model_context_limit(&model);
+    let focus_score = route_focus_score(event, data, &model);
+    RouteMetrics {
+        tier: if model.is_empty() {
+            route_tier_label_for_frequency(event.frequency).to_string()
+        } else {
+            route_tier_label_for_model(&model).to_string()
+        },
+        model,
+        context_used: event.total_tokens(),
+        context_limit,
+        focus_score,
+    }
+}
+
+#[must_use]
+fn fallback_route_metrics_for_agent(agent: &AgentRow) -> RouteMetrics {
+    let context_limit = agent
+        .context_limit
+        .max(model_context_limit(agent.model.as_str()));
+    RouteMetrics {
+        model: agent.model.clone(),
+        tier: route_tier_label_for_model(&agent.model).to_string(),
+        context_used: agent.input_tokens.saturating_add(agent.output_tokens),
+        context_limit,
+        focus_score: 0.0,
     }
 }
 
@@ -357,11 +470,6 @@ pub struct PlanEntry {
     pub elapsed_secs: f64,
     /// Wave index this plan belongs to, if any.
     pub wave: Option<usize>,
-    // -- legacy aliases (kept for backward compatibility) --
-    /// Legacy: total tasks (alias for tasks_total).
-    pub task_total: usize,
-    /// Legacy: done tasks (alias for tasks_done).
-    pub task_done: usize,
     /// Whether the plan tree node is expanded.
     pub expanded: bool,
     /// Nested task entries (for plan detail view).
@@ -396,16 +504,6 @@ pub struct GitCommitEntry {
     pub author: String,
     pub timestamp_ms: i64,
     pub branch: Option<String>,
-}
-
-/// Token burn history entry for cost tracking.
-#[derive(Debug, Clone, Default)]
-pub struct TokenBurnEntry {
-    pub timestamp_ms: i64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_usd: f64,
-    pub role: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -569,11 +667,10 @@ pub struct TuiState {
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
     pub agents: Vec<AgentRow>,
-    /// Legacy per-agent state keyed by agent ID.
-    pub agents_by_id: HashMap<String, AgentState>,
-    /// Parallel agents currently executing.
-    pub parallel_agents: Vec<ParallelAgentState>,
-
+    /// Per-agent route and context metrics keyed by agent identifier.
+    pub route_metrics: HashMap<String, RouteMetrics>,
+    /// Cached styled agent output keyed by agent identifier.
+    pub agent_output_cache: RefCell<HashMap<String, CachedRender>>,
     // -- navigation --
     /// Active top-level tab.
     pub active_tab: Tab,
@@ -646,21 +743,15 @@ pub struct TuiState {
     /// Cached git summary lines for the dashboard sub-tab (populated by background thread).
     pub git_summary_lines: Vec<String>,
     /// Cached full git view data for F4 Git tab (populated by background thread).
-    pub git_view_data: Option<super::views::git_view::GitViewData>,
+    pub(crate) git_view_data: Option<super::views::git_view::GitViewData>,
 
     // -- plan detail --
-    /// Content for the plan detail overlay.
-    pub plan_detail_content: String,
     /// Active sub-tab in the plan detail overlay.
     pub plan_detail_tab: usize,
-    /// Content for the plan summary view.
-    pub plan_summary_content: String,
 
     // -- pipeline --
     /// Whether pipeline execution is currently paused.
     pub is_paused: bool,
-    /// Whether parallel execution is active.
-    pub parallel_run: bool,
 
     // -- cost / tokens --
     /// Cost per plan (plan_id -> USD).
@@ -679,12 +770,8 @@ pub struct TuiState {
     pub cost_rate: f64,
     /// Cumulative cost in USD for header_bar display.
     pub cost_dollars: f64,
-
-    // -- token history --
-    /// Token burn history per role (role -> entries) — legacy.
-    pub token_burn_history: HashMap<String, Vec<TokenBurnEntry>>,
-    /// Per-role token time-series for sparkline rendering (role -> sample ring).
-    pub token_history: HashMap<String, VecDeque<u64>>,
+    /// Per-process metrics for the dashboard Procs sub-tab.
+    pub process_metrics: Vec<ProcessMetrics>,
 
     // -- system metrics --
     /// System resource metrics snapshot.
@@ -741,9 +828,8 @@ impl Default for TuiState {
             gate_results: Vec::new(),
 
             agents: Vec::new(),
-            agents_by_id: HashMap::new(),
-            parallel_agents: Vec::new(),
-
+            route_metrics: HashMap::new(),
+            agent_output_cache: RefCell::new(HashMap::new()),
             active_tab: Tab::default(),
             selected_plan_idx: 0,
             selected_agent: 0,
@@ -781,12 +867,9 @@ impl Default for TuiState {
             git_summary_lines: Vec::new(),
             git_view_data: None,
 
-            plan_detail_content: String::new(),
             plan_detail_tab: 0,
-            plan_summary_content: String::new(),
 
             is_paused: false,
-            parallel_run: false,
 
             cost_per_plan: HashMap::new(),
             cost_per_task: HashMap::new(),
@@ -796,9 +879,7 @@ impl Default for TuiState {
             token_rate: 0.0,
             cost_rate: 0.0,
             cost_dollars: 0.0,
-
-            token_burn_history: HashMap::new(),
-            token_history: HashMap::new(),
+            process_metrics: Vec::new(),
 
             sys: SysMetrics::default(),
 
@@ -925,12 +1006,8 @@ impl TuiState {
         }
         self.current_iteration = executor_summary.current_iteration;
         self.current_phase = executor_summary.current_phase;
-        let expanded_by_plan: HashMap<String, bool> = self
-            .plans
-            .iter()
-            .map(|plan| (plan.id.clone(), plan.expanded))
-            .collect();
         let latest_events = latest_agent_events(&data.efficiency_events);
+        let latest_route_metrics = latest_route_metrics(&data.efficiency_events, data);
 
         let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
         for task in &data.active_tasks {
@@ -970,6 +1047,7 @@ impl TuiState {
             .iter()
             .map(|plan| (plan.id.clone(), plan.expanded))
             .collect();
+        let plan_waves = derive_plan_waves(data.root(), &data.plans);
         let plan_snapshots = data.plan_task_snapshots();
         self.plans = data
             .plans
@@ -1000,9 +1078,7 @@ impl TuiState {
                     tasks_done,
                     tasks_failed,
                     elapsed_secs: snapshot.map(|plan| plan.elapsed_secs).unwrap_or(0.0),
-                    wave: None,
-                    task_total: tasks_total,
-                    task_done: tasks_done,
+                    wave: plan_waves.get(&p.id).copied(),
                     expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
                     tasks: snapshot
                         .map(|plan| {
@@ -1021,9 +1097,8 @@ impl TuiState {
             })
             .collect();
 
-        // Agents — populate both Vec and HashMap
+        // Agents
         self.agents.clear();
-        self.agents_by_id.clear();
         let mut agent_ids = data
             .agents
             .iter()
@@ -1057,7 +1132,7 @@ impl TuiState {
             self.agents.push(AgentRow {
                 id: agent_id.clone(),
                 active: is_active,
-                status: if is_active { AgentStatus::Active } else { AgentStatus::Idle },
+                status: AgentStatus::from(status.as_str()),
                 role: label.clone(),
                 model: latest.map(|event| event.model.clone()).unwrap_or_default(),
                 input_tokens: latest.map_or(0, |event| event.input_tokens),
@@ -1065,35 +1140,18 @@ impl TuiState {
                 context_limit: model_context_limit(latest.map(|e| e.model.as_str()).unwrap_or("")),
                 current_plan: current_plan.clone(),
                 current_task: current_task.clone(),
+                output_lines: Vec::new(),
                 last_output_line: String::new(),
             });
-            self.agents_by_id.insert(
-                agent_id.clone(),
-                AgentState {
-                    id: agent_id,
-                    name: label,
-                    status: AgentStatus::from(status.as_str()),
-                    input_tokens: latest.map_or(0, |event| event.input_tokens),
-                    output_tokens: latest.map_or(0, |event| event.output_tokens),
-                    plan_id: (!current_plan.is_empty()).then_some(current_plan),
-                    task_id: (!current_task.is_empty()).then_some(current_task),
-                    ..AgentState::default()
-                },
-            );
         }
 
         // Populate agent output from episodes (Task 2)
         for episode in data.episodes() {
-            // Populate the HashMap-based agent state
-            if let Some(agent) = self.agents_by_id.get_mut(&episode.agent_id) {
-                let output_text = extract_episode_output(episode);
-                if !output_text.is_empty() {
-                    agent.output_lines = output_text.lines().map(String::from).collect();
-                }
-            }
-            // Populate the Vec-based agent roster last_output_line
             if let Some(row) = self.agents.iter_mut().find(|a| a.id == episode.agent_id) {
                 let output_text = extract_episode_output(episode);
+                if !output_text.is_empty() {
+                    row.output_lines = output_text.lines().map(String::from).collect();
+                }
                 if let Some(last_line) = output_text.lines().last() {
                     row.last_output_line = last_line.to_string();
                 }
@@ -1114,6 +1172,9 @@ impl TuiState {
         for (task_id, lines) in data.task_outputs() {
             // Find agent working on this task and add output if empty
             if let Some(row) = self.agents.iter_mut().find(|a| a.current_task == *task_id) {
+                if row.output_lines.is_empty() && !lines.is_empty() {
+                    row.output_lines = lines.clone();
+                }
                 if row.last_output_line.is_empty() {
                     if let Some(last) = lines.last() {
                         row.last_output_line = last.clone();
@@ -1121,25 +1182,32 @@ impl TuiState {
                 }
             }
         }
-
-        self.parallel_agents = self
+        self.route_metrics = self
             .agents
             .iter()
-            .filter(|a| a.active)
-            .map(|a| ParallelAgentState {
-                agent_id: a.id.clone(),
-                plan_id: a.current_plan.clone(),
-                task_id: a.current_task.clone(),
-                status: AgentStatus::Active,
-                progress_pct: 0.0,
+            .map(|agent| {
+                let metrics = latest_route_metrics
+                    .get(&agent.id)
+                    .cloned()
+                    .map(|mut metrics| {
+                        if metrics.model.is_empty() && !agent.model.is_empty() {
+                            metrics.model = agent.model.clone();
+                        }
+                        if metrics.context_limit == 0 {
+                            metrics.context_limit = agent.context_limit.max(1);
+                        }
+                        metrics
+                    })
+                    .unwrap_or_else(|| fallback_route_metrics_for_agent(agent));
+                (agent.id.clone(), metrics)
             })
             .collect();
+        self.prune_agent_output_cache();
 
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
         self.token_total = self.cumulative_input_tokens + self.cumulative_output_tokens;
-        self.token_history = build_token_history(&data.efficiency_events);
         if self.token_rate == 0.0 {
             self.token_rate = compute_token_rate(&data.efficiency_events);
         }
@@ -1156,7 +1224,6 @@ impl TuiState {
             .collect();
         sum_costs(data, &mut self.cost_per_plan, &mut self.cost_per_task);
 
-
         self.phase_pipeline = build_phase_pipeline(&data.active_tasks);
 
         // Populate phase elapsed times from episodes (Task 7)
@@ -1165,18 +1232,7 @@ impl TuiState {
         // Build current_task_checklist from active_tasks + task-trackers (Task 3)
         self.current_task_checklist = build_task_checklist_from_execution(data);
 
-        // Build execution_waves — group plans by wave if available, else wave 0
-        let prev_wave_expanded: std::collections::HashMap<usize, bool> = self
-            .execution_waves
-            .iter()
-            .map(|w| (w.index, w.expanded))
-            .collect();
-        self.execution_waves = build_execution_waves(&self.plans);
-        for wave in &mut self.execution_waves {
-            if let Some(&exp) = prev_wave_expanded.get(&wave.index) {
-                wave.expanded = exp;
-            }
-        }
+        self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
 
         // Sync filter alias
         self.filter = self.filter_text.clone();
@@ -1198,6 +1254,335 @@ impl TuiState {
             self.selected_agent = self.agents.len() - 1;
         }
         self.selected_agent_tab = self.selected_agent_tab.min(6);
+        self.selected_wave_idx =
+            clamp_selected_wave_idx(self.selected_wave_idx, self.execution_waves.len());
+    }
+
+    /// Populate state from a connected-mode `DashboardSnapshot`.
+    ///
+    /// This mirrors the live state published by `StateHub` without touching
+    /// navigation or scroll state.
+    pub fn update_from_dashboard_snapshot(&mut self, snap: &roko_core::DashboardSnapshot) {
+        let prev_selected_plan_id = self
+            .plans
+            .get(self.selected_plan_idx)
+            .map(|plan| plan.id.clone());
+        let prev_current_plan_id = self
+            .plans
+            .get(self.current_plan_idx)
+            .map(|plan| plan.id.clone());
+        let prev_selected_agent_id = self
+            .agents
+            .get(self.selected_agent)
+            .map(|agent| agent.id.clone());
+        let prev_plan_order: HashMap<String, usize> = self
+            .plans
+            .iter()
+            .enumerate()
+            .map(|(idx, plan)| (plan.id.clone(), idx))
+            .collect();
+        let prev_agent_order: HashMap<String, usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(idx, agent)| (agent.id.clone(), idx))
+            .collect();
+        let prev_plan_expanded: HashMap<String, bool> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.expanded))
+            .collect();
+        let prev_plan_elapsed: HashMap<String, f64> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.elapsed_secs))
+            .collect();
+        let prev_plan_wave: HashMap<String, Option<usize>> = self
+            .plans
+            .iter()
+            .map(|plan| (plan.id.clone(), plan.wave))
+            .collect();
+        let prev_task_elapsed: HashMap<String, f64> = self
+            .current_task_checklist
+            .iter()
+            .map(|task| (task.id.clone(), task.elapsed_secs))
+            .collect();
+        let prev_agent_rows: HashMap<String, AgentRow> = self
+            .agents
+            .iter()
+            .cloned()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect();
+        let prev_route_metrics = self.route_metrics.clone();
+        let mut snapshot_tasks: Vec<&roko_core::dashboard_snapshot::TaskState> =
+            snap.tasks.values().collect();
+        snapshot_tasks.sort_by(|lhs, rhs| {
+            lhs.plan_id
+                .cmp(&rhs.plan_id)
+                .then_with(|| lhs.task_id.cmp(&rhs.task_id))
+        });
+
+        let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
+        self.current_task_checklist = snapshot_tasks
+            .iter()
+            .map(|task| {
+                let status = snapshot_task_status(task);
+                tasks_by_plan
+                    .entry(task.plan_id.clone())
+                    .or_default()
+                    .push(TaskEntry {
+                        id: task.task_id.clone(),
+                        name: task.task_id.clone(),
+                        status,
+                        agent_id: None,
+                    });
+                TaskRow {
+                    id: task.task_id.clone(),
+                    title: task.task_id.clone(),
+                    status,
+                    elapsed_secs: prev_task_elapsed.get(&task.task_id).copied().unwrap_or(0.0),
+                }
+            })
+            .collect();
+
+        let mut plan_ids: Vec<String> = snap.plans.keys().cloned().collect();
+        plan_ids.sort_by(|lhs, rhs| {
+            prev_plan_order
+                .get(lhs)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&prev_plan_order.get(rhs).copied().unwrap_or(usize::MAX))
+                .then_with(|| lhs.cmp(rhs))
+        });
+
+        self.plans = plan_ids
+            .iter()
+            .map(|plan_id| {
+                let plan = &snap.plans[plan_id];
+                let tasks = tasks_by_plan.remove(plan_id).unwrap_or_default();
+                let tasks_total = plan.tasks_total.max(tasks.len());
+                PlanEntry {
+                    id: plan.plan_id.clone(),
+                    name: plan.plan_id.clone(),
+                    status: snapshot_plan_status(plan),
+                    active: plan.active,
+                    phase: snapshot_plan_phase(plan),
+                    tasks_total,
+                    tasks_done: plan.tasks_done.min(tasks_total),
+                    tasks_failed: plan.tasks_failed.min(tasks_total),
+                    elapsed_secs: prev_plan_elapsed.get(plan_id).copied().unwrap_or(0.0),
+                    wave: prev_plan_wave.get(plan_id).copied().flatten(),
+                    expanded: prev_plan_expanded.get(plan_id).copied().unwrap_or(false),
+                    tasks,
+                }
+            })
+            .collect();
+
+        let mut orphaned_plan_ids: Vec<String> = tasks_by_plan.keys().cloned().collect();
+        orphaned_plan_ids.sort();
+        for plan_id in orphaned_plan_ids {
+            let tasks = tasks_by_plan.remove(&plan_id).unwrap_or_default();
+            let tasks_total = tasks.len();
+            let tasks_done = tasks.iter().filter(|task| task.status.is_done()).count();
+            let tasks_failed = tasks.iter().filter(|task| task.status.is_failed()).count();
+            let active = tasks.iter().any(|task| task.status.is_active());
+            self.plans.push(PlanEntry {
+                id: plan_id.clone(),
+                name: plan_id.clone(),
+                status: if active {
+                    PlanPhase::Active
+                } else if tasks_failed > 0 {
+                    PlanPhase::Failed
+                } else if tasks_total > 0 && tasks_done == tasks_total {
+                    PlanPhase::Done
+                } else {
+                    PlanPhase::Pending
+                },
+                active,
+                phase: if active {
+                    String::from("active")
+                } else if tasks_failed > 0 {
+                    String::from("failed")
+                } else if tasks_total > 0 && tasks_done == tasks_total {
+                    String::from("completed")
+                } else {
+                    String::from("pending")
+                },
+                tasks_total,
+                tasks_done,
+                tasks_failed,
+                elapsed_secs: prev_plan_elapsed.get(&plan_id).copied().unwrap_or(0.0),
+                wave: prev_plan_wave.get(&plan_id).copied().flatten(),
+                expanded: prev_plan_expanded.get(&plan_id).copied().unwrap_or(false),
+                tasks,
+            });
+        }
+
+        let mut agent_ids: Vec<String> = snap.agents.keys().cloned().collect();
+        agent_ids.sort_by(|lhs, rhs| {
+            prev_agent_order
+                .get(lhs)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&prev_agent_order.get(rhs).copied().unwrap_or(usize::MAX))
+                .then_with(|| lhs.cmp(rhs))
+        });
+
+        self.agents = agent_ids
+            .iter()
+            .map(|agent_id| {
+                let agent = &snap.agents[agent_id];
+                let prev_row = prev_agent_rows.get(agent_id);
+                let model = prev_row.map(|row| row.model.clone()).unwrap_or_default();
+                let context_limit = prev_row
+                    .map(|row| row.context_limit)
+                    .filter(|limit| *limit > 0)
+                    .unwrap_or_else(|| model_context_limit(&model));
+
+                AgentRow {
+                    id: agent.agent_id.clone(),
+                    active: agent.active,
+                    status: if agent.active {
+                        AgentStatus::Active
+                    } else {
+                        AgentStatus::Idle
+                    },
+                    role: agent.role.clone(),
+                    model,
+                    input_tokens: prev_row.map(|row| row.input_tokens).unwrap_or(0),
+                    output_tokens: prev_row
+                        .map(|row| row.output_tokens)
+                        .unwrap_or(0)
+                        .max(agent.output_bytes as u64),
+                    context_limit,
+                    current_plan: prev_row
+                        .map(|row| row.current_plan.clone())
+                        .unwrap_or_default(),
+                    current_task: prev_row
+                        .map(|row| row.current_task.clone())
+                        .unwrap_or_default(),
+                    output_lines: prev_row
+                        .map(|row| row.output_lines.clone())
+                        .unwrap_or_default(),
+                    last_output_line: prev_row
+                        .map(|row| row.last_output_line.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        self.route_metrics = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let metrics = prev_route_metrics
+                    .get(&agent.id)
+                    .cloned()
+                    .map(|mut metrics| {
+                        if metrics.model.is_empty() && !agent.model.is_empty() {
+                            metrics.model = agent.model.clone();
+                        }
+                        metrics.context_used = agent.input_tokens.saturating_add(agent.output_tokens);
+                        if metrics.context_limit == 0 {
+                            metrics.context_limit = agent.context_limit.max(1);
+                        }
+                        if metrics.tier.is_empty() {
+                            metrics.tier = route_tier_label_for_model(&metrics.model).to_string();
+                        }
+                        metrics
+                    })
+                    .unwrap_or_else(|| fallback_route_metrics_for_agent(agent));
+                (agent.id.clone(), metrics)
+            })
+            .collect();
+        self.prune_agent_output_cache();
+
+        self.gate_results = snap
+            .gates
+            .iter()
+            .map(|gate_result| GateResultEntry {
+                gate: gate_result.gate.clone(),
+                plan_id: gate_result.plan_id.clone(),
+                passed: gate_result.passed,
+                output: if gate_result.task_id.is_empty() {
+                    String::new()
+                } else {
+                    format!("task {}", gate_result.task_id)
+                },
+            })
+            .collect();
+
+        self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
+        self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
+
+        self.orchestrator_state = if snap.stats.plans_active > 0 {
+            String::from("running")
+        } else if snap.stats.plans_failed > 0 {
+            String::from("failed")
+        } else if self.orchestrator_state.is_empty() {
+            String::from("idle")
+        } else {
+            self.orchestrator_state.clone()
+        };
+        self.current_phase = self
+            .plans
+            .iter()
+            .find(|plan| plan.active)
+            .or_else(|| self.plans.first())
+            .map(|plan| plan.phase.clone())
+            .unwrap_or_default();
+        self.filter = self.filter_text.clone();
+
+        restore_selected_plan_idx(
+            &self.plans,
+            &mut self.selected_plan_idx,
+            prev_selected_plan_id,
+        );
+        restore_selected_plan_idx(
+            &self.plans,
+            &mut self.current_plan_idx,
+            prev_current_plan_id,
+        );
+        restore_selected_agent_idx(
+            &self.agents,
+            &mut self.selected_agent,
+            prev_selected_agent_id,
+        );
+        self.selected_agent_tab = self.selected_agent_tab.min(6);
+        self.selected_wave_idx =
+            clamp_selected_wave_idx(self.selected_wave_idx, self.execution_waves.len());
+    }
+
+    /// Return cached, styled agent output lines for the selected agent pane.
+    #[must_use]
+    pub fn render_agent_output_lines(
+        &self,
+        cache_key: &str,
+        raw_output: &[String],
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        if raw_output.is_empty() {
+            if !cache_key.is_empty() {
+                self.agent_output_cache.borrow_mut().remove(cache_key);
+            }
+            return Vec::new();
+        }
+
+        let cache_key = if cache_key.is_empty() {
+            "__agent-output__"
+        } else {
+            cache_key
+        };
+        let output_len = output_byte_len(raw_output);
+        let mut cache = self.agent_output_cache.borrow_mut();
+        let cached = cache
+            .entry(cache_key.to_string())
+            .or_insert_with(CachedRender::default);
+
+        if cached.last_len != output_len {
+            *cached = render_cached_output(raw_output, theme);
+        }
+
+        cached.styled_lines.clone()
     }
 
     fn update_efficiency_rates(&mut self) {
@@ -1269,6 +1654,17 @@ impl TuiState {
     pub fn log_level_visible(&self, level: LogFilterLevel) -> bool {
         self.log_filter_levels.contains(&level)
     }
+
+    fn prune_agent_output_cache(&self) {
+        let valid_ids = self
+            .agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<HashSet<_>>();
+        self.agent_output_cache
+            .borrow_mut()
+            .retain(|key, _| key == "__agent-output__" || valid_ids.contains(key.as_str()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,6 +1687,181 @@ fn plan_task_counts(
         summary.tasks_done.min(tasks_total),
         summary.tasks_failed.min(tasks_total),
     )
+}
+
+fn snapshot_plan_phase(plan: &roko_core::dashboard_snapshot::PlanState) -> String {
+    if plan.phase.is_empty() {
+        if plan.active {
+            String::from("active")
+        } else if plan.tasks_failed > 0 {
+            String::from("failed")
+        } else if plan.tasks_done >= plan.tasks_total && plan.tasks_total > 0 {
+            String::from("completed")
+        } else {
+            String::from("pending")
+        }
+    } else {
+        plan.phase.clone()
+    }
+}
+
+fn snapshot_plan_status(plan: &roko_core::dashboard_snapshot::PlanState) -> PlanPhase {
+    if plan.active {
+        PlanPhase::Active
+    } else if plan.tasks_failed > 0 {
+        PlanPhase::Failed
+    } else {
+        match snapshot_plan_phase(plan).as_str() {
+            "completed" | "done" => PlanPhase::Done,
+            "failed" | "error" => PlanPhase::Failed,
+            phase => PlanPhase::from(phase),
+        }
+    }
+}
+
+fn snapshot_task_status(task: &roko_core::dashboard_snapshot::TaskState) -> TaskStatus {
+    match task.outcome.as_deref() {
+        Some(outcome)
+            if outcome.contains("fail")
+                || outcome.contains("error")
+                || outcome.contains("Fail")
+                || outcome.contains("Error") =>
+        {
+            TaskStatus::Failed
+        }
+        Some(_) => TaskStatus::Done,
+        None => TaskStatus::from(task.phase.as_str()),
+    }
+}
+
+fn canonical_phase_index_for_snapshot_task(
+    task: &roko_core::dashboard_snapshot::TaskState,
+) -> Option<usize> {
+    let phase = task.phase.trim().to_ascii_lowercase();
+    if phase.is_empty() {
+        return None;
+    }
+
+    if matches!(phase.as_str(), "completed" | "done") {
+        return Some(CANONICAL_PHASES.len().saturating_sub(1));
+    }
+
+    CANONICAL_PHASES.iter().position(|candidate| {
+        *candidate == phase
+            || (*candidate == "compile-gate" && phase.contains("compile"))
+            || (*candidate == "test-gate" && (phase.contains("test") || phase.contains("verif")))
+            || (*candidate == "critic-review" && phase.contains("critic"))
+    })
+}
+
+fn build_phase_pipeline_from_dashboard_snapshot(
+    snap: &roko_core::dashboard_snapshot::DashboardSnapshot,
+) -> Vec<PhaseStep> {
+    #[derive(Clone, Copy, Default)]
+    struct PhaseTaskCounts {
+        total: usize,
+        done: usize,
+        active: usize,
+        failed: usize,
+    }
+
+    let mut counts = vec![PhaseTaskCounts::default(); CANONICAL_PHASES.len()];
+
+    for task in snap.tasks.values() {
+        let Some(current_idx) = canonical_phase_index_for_snapshot_task(task) else {
+            continue;
+        };
+
+        let failed = snapshot_task_status(task).is_failed();
+        let done = snapshot_task_status(task).is_done();
+
+        for (phase_idx, phase_counts) in counts.iter_mut().enumerate() {
+            phase_counts.total += 1;
+
+            if phase_idx < current_idx {
+                phase_counts.done += 1;
+            } else if phase_idx == current_idx {
+                if failed {
+                    phase_counts.failed += 1;
+                } else if done {
+                    phase_counts.done += 1;
+                } else {
+                    phase_counts.active += 1;
+                }
+            }
+        }
+    }
+
+    CANONICAL_PHASES
+        .iter()
+        .enumerate()
+        .map(|(idx, phase)| {
+            let counts = counts[idx];
+            let status = if counts.failed > 0 {
+                PlanPhase::Failed
+            } else if counts.active > 0 {
+                PlanPhase::Active
+            } else if counts.total > 0 && counts.done == counts.total {
+                PlanPhase::Done
+            } else {
+                PlanPhase::Pending
+            };
+            let pct = if counts.total == 0 {
+                0.0
+            } else {
+                (counts.done as f64 / counts.total as f64) * 100.0
+            };
+
+            PhaseStep {
+                name: (*phase).to_string(),
+                status,
+                elapsed_secs: 0.0,
+                pct,
+            }
+        })
+        .collect()
+}
+
+fn restore_selected_plan_idx(
+    plans: &[PlanEntry],
+    selected: &mut usize,
+    previous_id: Option<String>,
+) {
+    match previous_id {
+        Some(previous_id) => {
+            if let Some(idx) = plans.iter().position(|plan| plan.id == previous_id) {
+                *selected = idx;
+            } else if plans.is_empty() {
+                *selected = 0;
+            } else {
+                *selected = (*selected).min(plans.len() - 1);
+            }
+        }
+        None if plans.is_empty() => *selected = 0,
+        None if *selected >= plans.len() => *selected = plans.len() - 1,
+        None => {}
+    }
+}
+
+fn restore_selected_agent_idx(
+    agents: &[AgentRow],
+    selected: &mut usize,
+    previous_id: Option<String>,
+) {
+    match previous_id {
+        Some(previous_id) => {
+            if let Some(idx) = agents.iter().position(|agent| agent.id == previous_id) {
+                *selected = idx;
+            } else if agents.is_empty() {
+                *selected = 0;
+            } else {
+                *selected = (*selected).min(agents.len() - 1);
+            }
+        }
+        None if agents.is_empty() => *selected = 0,
+        None if *selected >= agents.len() => *selected = agents.len() - 1,
+        None => {}
+    }
 }
 
 /// Build the canonical 9-phase pipeline, inferring status from active tasks.
@@ -1487,8 +2058,9 @@ fn task_status_is_done(status: &str) -> bool {
     TaskStatus::from(status).is_done()
 }
 
-/// Build execution waves from plan entries. Groups by `wave` field if set,
-/// otherwise places all plans in wave 0.
+/// Build execution waves from plan entries.
+///
+/// Groups by `wave` field if set, otherwise places all plans in wave 0.
 fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
     if plans.is_empty() {
         return Vec::new();
@@ -1496,48 +2068,163 @@ fn build_execution_waves(plans: &[PlanEntry]) -> Vec<Wave> {
 
     let has_waves = plans.iter().any(|p| p.wave.is_some());
     if !has_waves {
-        // All plans in a single wave
-        let done = plans
-            .iter()
-            .filter(|p| !p.active && !p.status.is_failed())
-            .count();
+        let done = plans.iter().filter(|plan| plan_is_complete(plan)).count();
         return vec![Wave {
             index: 0,
-            plans: plans.iter().map(|p| p.id.clone()).collect(),
+            plans: plans.iter().map(|plan| plan.id.clone()).collect(),
             done,
             total: plans.len(),
             expanded: true,
         }];
     }
 
-    // Group by wave index
-    let mut wave_map: std::collections::BTreeMap<usize, Vec<String>> =
+    let mut wave_map: std::collections::BTreeMap<usize, Vec<&PlanEntry>> =
         std::collections::BTreeMap::new();
     for plan in plans {
-        let wi = plan.wave.unwrap_or(0);
-        wave_map.entry(wi).or_default().push(plan.id.clone());
+        let wave_index = plan.wave.unwrap_or(0);
+        wave_map.entry(wave_index).or_default().push(plan);
     }
 
     wave_map
         .into_iter()
-        .map(|(idx, plan_ids)| {
-            let done = plan_ids
+        .map(|(idx, wave_plans)| {
+            let done = wave_plans
                 .iter()
-                .filter(|pid| {
-                    plans
-                        .iter()
-                        .any(|p| &p.id == *pid && !p.active && !p.status.is_failed())
-                })
+                .filter(|plan| plan_is_complete(plan))
                 .count();
             Wave {
                 index: idx,
-                plans: plan_ids.clone(),
+                plans: wave_plans.iter().map(|plan| plan.id.clone()).collect(),
                 done,
-                total: plan_ids.len(),
+                total: wave_plans.len(),
                 expanded: true,
             }
         })
         .collect()
+}
+
+fn rebuild_execution_waves(plans: &[PlanEntry], previous: &[Wave]) -> Vec<Wave> {
+    let prev_wave_expanded: std::collections::HashMap<usize, bool> = previous
+        .iter()
+        .map(|wave| (wave.index, wave.expanded))
+        .collect();
+
+    let mut waves = build_execution_waves(plans);
+    for wave in &mut waves {
+        if let Some(expanded) = prev_wave_expanded.get(&wave.index).copied() {
+            wave.expanded = expanded;
+        }
+    }
+
+    waves
+}
+
+fn clamp_selected_wave_idx(selected_wave_idx: usize, wave_count: usize) -> usize {
+    if wave_count == 0 {
+        0
+    } else {
+        selected_wave_idx.min(wave_count - 1)
+    }
+}
+
+fn plan_is_complete(plan: &PlanEntry) -> bool {
+    !plan.active && !plan.status.is_failed()
+}
+
+fn derive_plan_waves(root: &Path, plans: &[PlanSummary]) -> HashMap<String, usize> {
+    if plans.is_empty() {
+        return HashMap::new();
+    }
+
+    let known_plan_ids: HashSet<String> = plans.iter().map(|plan| plan.id.clone()).collect();
+    let mut deps_by_plan: HashMap<String, Vec<String>> = HashMap::new();
+    let mut saw_dependency = false;
+
+    for plan in plans {
+        let tasks_path = plans_dir(root).join(&plan.id).join("tasks.toml");
+        let mut deps: HashSet<String> = HashSet::new();
+
+        if let Ok(tasks_file) = TasksFile::parse(&tasks_path) {
+            for task in &tasks_file.tasks {
+                deps.extend(task_plan_dependencies(task, &plan.id, &known_plan_ids));
+            }
+        }
+
+        let mut deps = deps.into_iter().collect::<Vec<_>>();
+        deps.sort();
+        saw_dependency |= !deps.is_empty();
+        deps_by_plan.insert(plan.id.clone(), deps);
+    }
+
+    if !saw_dependency {
+        return HashMap::new();
+    }
+
+    let mut plan_waves = HashMap::new();
+    for plan in plans {
+        let mut visiting = HashSet::new();
+        let wave = resolve_plan_wave(&plan.id, &deps_by_plan, &mut plan_waves, &mut visiting);
+        plan_waves.insert(plan.id.clone(), wave);
+    }
+    plan_waves
+}
+
+fn task_plan_dependencies(
+    task: &TaskDef,
+    current_plan_id: &str,
+    known_plan_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut deps = HashSet::new();
+
+    for dep in &task.depends_on_plan {
+        let plan_id = dep.trim();
+        if !plan_id.is_empty() && plan_id != current_plan_id && known_plan_ids.contains(plan_id) {
+            deps.insert(plan_id.to_string());
+        }
+    }
+
+    for dep in &task.depends_on {
+        let Some((plan_id, _task_id)) = dep.split_once(':') else {
+            continue;
+        };
+        let plan_id = plan_id.trim();
+        if !plan_id.is_empty() && plan_id != current_plan_id && known_plan_ids.contains(plan_id) {
+            deps.insert(plan_id.to_string());
+        }
+    }
+
+    let mut deps = deps.into_iter().collect::<Vec<_>>();
+    deps.sort();
+    deps
+}
+
+fn resolve_plan_wave(
+    plan_id: &str,
+    deps_by_plan: &HashMap<String, Vec<String>>,
+    cache: &mut HashMap<String, usize>,
+    visiting: &mut HashSet<String>,
+) -> usize {
+    if let Some(&wave) = cache.get(plan_id) {
+        return wave;
+    }
+
+    if !visiting.insert(plan_id.to_string()) {
+        return 0;
+    }
+
+    let wave = deps_by_plan
+        .get(plan_id)
+        .map(|deps| {
+            deps.iter()
+                .map(|dep| resolve_plan_wave(dep, deps_by_plan, cache, visiting) + 1)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    visiting.remove(plan_id);
+    cache.insert(plan_id.to_string(), wave);
+    wave
 }
 
 /// Extract output text from an episode's extra fields.
@@ -1630,6 +2317,37 @@ fn latest_agent_events(
     latest
 }
 
+fn latest_route_metrics(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+    data: &DashboardData,
+) -> HashMap<String, RouteMetrics> {
+    let mut latest: HashMap<String, (Option<DateTime<Utc>>, RouteMetrics)> = HashMap::new();
+
+    for event in events {
+        let timestamp = parse_efficiency_timestamp(&event.timestamp);
+        let should_replace = latest
+            .get(&event.agent_id)
+            .map(|(existing, _)| match (*existing, timestamp) {
+                (Some(lhs), Some(rhs)) => rhs >= lhs,
+                (None, Some(_)) => true,
+                (None, None) => true,
+                _ => false,
+            })
+            .unwrap_or(true);
+        if should_replace {
+            latest.insert(
+                event.agent_id.clone(),
+                (timestamp, route_metrics_from_event(event, data)),
+            );
+        }
+    }
+
+    latest
+        .into_iter()
+        .map(|(agent_id, (_, metrics))| (agent_id, metrics))
+        .collect()
+}
+
 fn plan_is_active(status: &str) -> bool {
     matches!(
         status.to_ascii_lowercase().as_str(),
@@ -1645,24 +2363,6 @@ fn plan_is_active(status: &str) -> bool {
             | "implementer"
             | "preflight"
     )
-}
-
-fn build_token_history(
-    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
-) -> HashMap<String, VecDeque<u64>> {
-    let mut history = HashMap::new();
-
-    for event in events {
-        let series = history
-            .entry(event.role.clone())
-            .or_insert_with(VecDeque::new);
-        if series.len() >= 60 {
-            series.pop_front();
-        }
-        series.push_back(event.total_tokens());
-    }
-
-    history
 }
 
 fn compute_token_rate(events: &[roko_learn::efficiency::AgentEfficiencyEvent]) -> f64 {
@@ -1955,6 +2655,135 @@ mod tests {
     }
 
     #[test]
+    fn derive_plan_waves_uses_cross_plan_dependencies() {
+        let tmpdir = tempdir().expect("tempdir");
+        let plans_root = tmpdir.path().join("plans");
+        fs::create_dir_all(plans_root.join("plan-a")).expect("create plan-a");
+        fs::create_dir_all(plans_root.join("plan-b")).expect("create plan-b");
+        fs::create_dir_all(plans_root.join("plan-c")).expect("create plan-c");
+
+        fs::write(
+            plans_root.join("plan-a").join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan A"
+total = 1
+
+[[task]]
+id = "T1"
+title = "start"
+depends_on = []
+"#,
+        )
+        .expect("write plan-a");
+
+        fs::write(
+            plans_root.join("plan-b").join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan B"
+total = 1
+
+[[task]]
+id = "T1"
+title = "after a"
+depends_on = []
+depends_on_plan = ["plan-a"]
+"#,
+        )
+        .expect("write plan-b");
+
+        fs::write(
+            plans_root.join("plan-c").join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan C"
+total = 1
+
+[[task]]
+id = "T1"
+title = "after b"
+depends_on = ["plan-b:T1"]
+"#,
+        )
+        .expect("write plan-c");
+
+        let plans = vec![
+            PlanSummary {
+                id: "plan-a".into(),
+                title: "Plan A".into(),
+                task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                completed: false,
+                old_format: false,
+                last_error: None,
+            },
+            PlanSummary {
+                id: "plan-b".into(),
+                title: "Plan B".into(),
+                task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                completed: false,
+                old_format: false,
+                last_error: None,
+            },
+            PlanSummary {
+                id: "plan-c".into(),
+                title: "Plan C".into(),
+                task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                completed: false,
+                old_format: false,
+                last_error: None,
+            },
+        ];
+
+        let plan_waves = derive_plan_waves(tmpdir.path(), &plans);
+        assert_eq!(plan_waves.get("plan-a"), Some(&0));
+        assert_eq!(plan_waves.get("plan-b"), Some(&1));
+        assert_eq!(plan_waves.get("plan-c"), Some(&2));
+    }
+
+    #[test]
+    fn rebuild_execution_waves_preserves_expanded_state_by_index() {
+        let plans = vec![
+            PlanEntry {
+                id: "plan-a".into(),
+                wave: Some(1),
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-b".into(),
+                wave: Some(2),
+                ..PlanEntry::default()
+            },
+        ];
+        let previous = vec![
+            Wave {
+                index: 1,
+                expanded: false,
+                ..Wave::default()
+            },
+            Wave {
+                index: 2,
+                expanded: true,
+                ..Wave::default()
+            },
+        ];
+
+        let waves = rebuild_execution_waves(&plans, &previous);
+
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].index, 1);
+        assert!(!waves[0].expanded);
+        assert_eq!(waves[1].index, 2);
+        assert!(waves[1].expanded);
+    }
+
+    #[test]
     fn active_agent_count_filters_correctly() {
         let mut state = TuiState::default();
         state.agents = vec![
@@ -2232,7 +3061,6 @@ tier = "focused"
         assert!(state.execution_waves.is_empty());
         assert!(state.current_task_checklist.is_empty());
         assert_eq!(state.sys.cpu_pct, 0.0);
-        assert!(state.token_history.is_empty());
         assert_eq!(state.token_total, 0);
         assert_eq!(state.token_rate, 0.0);
         assert_eq!(state.cost_rate, 0.0);
@@ -2248,7 +3076,222 @@ tier = "focused"
     }
 
     #[test]
-    fn update_from_snapshot_populates_token_history_and_rate() {
+    fn update_from_dashboard_snapshot_maps_connected_state_and_preserves_navigation() {
+        use roko_core::dashboard_snapshot::{
+            AgentState as SnapshotAgentState, DashboardSnapshot, ErrorEntry, GateVerdict, PlanState,
+        };
+
+        let mut state = TuiState::default();
+        state.active_tab = Tab::Git;
+        state.selected_plan_idx = 1;
+        state.current_plan_idx = 0;
+        state.selected_agent = 1;
+        state.selected_agent_tab = 4;
+        state.focus = FocusZone::AgentOutput;
+        state.agent_scroll = Some(12);
+        state.diff_scroll = 7;
+        state.task_scroll = 9;
+        state.command_output_scroll = 11;
+        state.plan_detail_scroll = 13;
+        state.plan_scroll_offset = 15;
+        state.log_scroll = 17;
+        state.log_auto_tail = false;
+
+        state.plans = vec![
+            PlanEntry {
+                id: "plan-b".into(),
+                expanded: false,
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-a".into(),
+                expanded: true,
+                ..PlanEntry::default()
+            },
+        ];
+        state.agents = vec![
+            AgentRow {
+                id: "agent-b".into(),
+                active: false,
+                ..AgentRow::default()
+            },
+            AgentRow {
+                id: "agent-a".into(),
+                active: true,
+                ..AgentRow::default()
+            },
+        ];
+
+        let snap = DashboardSnapshot {
+            plans: [
+                (
+                    "plan-a".to_string(),
+                    PlanState {
+                        plan_id: "plan-a".into(),
+                        phase: "started".into(),
+                        tasks_total: 4,
+                        tasks_done: 1,
+                        tasks_failed: 0,
+                        active: true,
+                    },
+                ),
+                (
+                    "plan-b".to_string(),
+                    PlanState {
+                        plan_id: "plan-b".into(),
+                        phase: "failed".into(),
+                        tasks_total: 2,
+                        tasks_done: 1,
+                        tasks_failed: 1,
+                        active: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            tasks: Default::default(),
+            agents: [
+                (
+                    "agent-a".to_string(),
+                    SnapshotAgentState {
+                        agent_id: "agent-a".into(),
+                        role: "implementer".into(),
+                        active: true,
+                        output_bytes: 128,
+                    },
+                ),
+                (
+                    "agent-b".to_string(),
+                    SnapshotAgentState {
+                        agent_id: "agent-b".into(),
+                        role: "reviewer".into(),
+                        active: false,
+                        output_bytes: 0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            gates: vec![
+                GateVerdict {
+                    plan_id: "plan-a".into(),
+                    task_id: "task-1".into(),
+                    gate: "compile".into(),
+                    passed: true,
+                    ts_millis: 1_000,
+                },
+                GateVerdict {
+                    plan_id: "plan-b".into(),
+                    task_id: "task-2".into(),
+                    gate: "test".into(),
+                    passed: false,
+                    ts_millis: 2_000,
+                },
+            ],
+            errors: vec![
+                ErrorEntry {
+                    message: "compile failed".into(),
+                    ts_millis: 3_000,
+                },
+                ErrorEntry {
+                    message: "timeout".into(),
+                    ts_millis: 4_000,
+                },
+            ],
+            stats: Default::default(),
+        };
+
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.plans.len(), 2);
+        let plan_a = state.plans.iter().find(|plan| plan.id == "plan-a").unwrap();
+        let plan_b = state.plans.iter().find(|plan| plan.id == "plan-b").unwrap();
+        assert_eq!(plan_a.status, PlanPhase::Active);
+        assert!(plan_a.active);
+        assert!(plan_a.expanded);
+        assert_eq!(plan_b.status, PlanPhase::Failed);
+        assert_eq!(plan_b.tasks_failed, 1);
+
+        assert_eq!(state.agents.len(), 2);
+        let agent_a = state
+            .agents
+            .iter()
+            .find(|agent| agent.id == "agent-a")
+            .unwrap();
+        let agent_b = state
+            .agents
+            .iter()
+            .find(|agent| agent.id == "agent-b")
+            .unwrap();
+        assert!(agent_a.active);
+        assert_eq!(agent_a.role, "implementer");
+        assert!(!agent_b.active);
+
+        assert_eq!(state.gate_results.len(), 2);
+        assert_eq!(state.gate_results[0].gate, "compile");
+        assert_eq!(state.gate_results[1].plan_id, "plan-b");
+        assert!(!state.gate_results[1].passed);
+
+        assert_eq!(state.active_tab, Tab::Git);
+        assert_eq!(state.plans[state.selected_plan_idx].id, "plan-a");
+        assert_eq!(state.plans[state.current_plan_idx].id, "plan-b");
+        assert_eq!(state.agents[state.selected_agent].id, "agent-a");
+        assert_eq!(state.selected_agent_tab, 4);
+        assert_eq!(state.focus, FocusZone::AgentOutput);
+        assert_eq!(state.agent_scroll, Some(12));
+        assert_eq!(state.diff_scroll, 7);
+        assert_eq!(state.task_scroll, 9);
+        assert_eq!(state.command_output_scroll, 11);
+        assert_eq!(state.plan_detail_scroll, 13);
+        assert_eq!(state.plan_scroll_offset, 15);
+        assert_eq!(state.log_scroll, 17);
+        assert!(!state.log_auto_tail);
+    }
+
+    #[test]
+    fn update_from_dashboard_snapshot_keeps_expanded_state_when_matching_plan_remains() {
+        use roko_core::dashboard_snapshot::{DashboardSnapshot, PlanState};
+
+        let mut state = TuiState::default();
+        state.plans = vec![
+            PlanEntry {
+                id: "plan-a".into(),
+                expanded: false,
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-b".into(),
+                expanded: true,
+                ..PlanEntry::default()
+            },
+        ];
+
+        let snap = DashboardSnapshot {
+            plans: [(
+                "plan-b".to_string(),
+                PlanState {
+                    plan_id: "plan-b".into(),
+                    phase: "completed".into(),
+                    tasks_total: 1,
+                    tasks_done: 1,
+                    tasks_failed: 0,
+                    active: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.plans.len(), 1);
+        assert_eq!(state.plans[0].id, "plan-b");
+        assert!(state.plans[0].expanded);
+    }
+
+    #[test]
+    fn update_from_snapshot_populates_token_rate() {
         let mut data = DashboardData::default();
         data.efficiency_events = vec![
             efficiency_event("impl", 100, 50, "2026-04-14T12:00:00Z"),
@@ -2259,35 +3302,241 @@ tier = "focused"
         let mut state = TuiState::default();
         state.update_from_snapshot(&data);
 
-        assert_eq!(
-            state.token_history.get("impl").cloned().unwrap_or_default(),
-            VecDeque::from([150, 50])
-        );
-        assert_eq!(
-            state
-                .token_history
-                .get("review")
-                .cloned()
-                .unwrap_or_default(),
-            VecDeque::from([30])
-        );
         assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn update_from_snapshot_caps_token_history_at_sixty_samples() {
+    fn update_from_snapshot_populates_route_metrics() {
         let mut data = DashboardData::default();
-        data.efficiency_events = (0..61)
-            .map(|i| efficiency_event("impl", i, 1, &format!("2026-04-14T12:{:02}:00Z", i % 60)))
-            .collect();
+        data.efficiency_events = vec![AgentEfficiencyEvent {
+            agent_id: "agent-a".to_string(),
+            role: "implementer".to_string(),
+            model: "claude-haiku-4-5".to_string(),
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            prompt_sections: vec![roko_learn::efficiency::PromptSectionMeta {
+                name: "workspace_map".to_string(),
+                tokens: 800,
+                priority: 0,
+                was_truncated: false,
+                was_dropped: false,
+            }],
+            frequency: OperatingFrequency::Gamma,
+            timestamp: "2026-04-14T12:00:00Z".to_string(),
+            ..AgentEfficiencyEvent::default()
+        }];
+        data.cascade_router.confidence_stats.insert(
+            "claude-haiku-4-5".to_string(),
+            crate::tui::dashboard::CascadeRouterModelStats {
+                trials: 10,
+                successes: 8,
+            },
+        );
 
         let mut state = TuiState::default();
         state.update_from_snapshot(&data);
 
-        let history = state.token_history.get("impl").cloned().unwrap_or_default();
-        assert_eq!(history.len(), 60);
-        assert_eq!(history.front().copied(), Some(2));
-        assert_eq!(history.back().copied(), Some(61));
+        let metrics = state.route_metrics.get("agent-a").expect("route metrics");
+        assert_eq!(metrics.model, "claude-haiku-4-5");
+        assert_eq!(metrics.tier, "fast");
+        assert_eq!(metrics.context_used, 15_000);
+        assert_eq!(metrics.context_limit, 200_000);
+        assert!((metrics.focus_score - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_from_dashboard_snapshot_maps_streaming_fields() {
+        let mut snap = roko_core::DashboardSnapshot::default();
+        snap.plans.insert(
+            "plan-a".into(),
+            roko_core::dashboard_snapshot::PlanState {
+                plan_id: "plan-a".into(),
+                phase: "implementer".into(),
+                tasks_total: 2,
+                tasks_done: 1,
+                tasks_failed: 0,
+                active: true,
+            },
+        );
+        snap.tasks.insert(
+            "plan-a/task-1".into(),
+            roko_core::dashboard_snapshot::TaskState {
+                task_id: "task-1".into(),
+                plan_id: "plan-a".into(),
+                phase: "implementer".into(),
+                outcome: None,
+            },
+        );
+        snap.tasks.insert(
+            "plan-a/task-2".into(),
+            roko_core::dashboard_snapshot::TaskState {
+                task_id: "task-2".into(),
+                plan_id: "plan-a".into(),
+                phase: "completed".into(),
+                outcome: Some("success".into()),
+            },
+        );
+        snap.agents.insert(
+            "agent-1".into(),
+            roko_core::dashboard_snapshot::AgentState {
+                agent_id: "agent-1".into(),
+                role: "implementer".into(),
+                active: true,
+                output_bytes: 42,
+            },
+        );
+        snap.gates.push(roko_core::dashboard_snapshot::GateVerdict {
+            plan_id: "plan-a".into(),
+            task_id: "task-2".into(),
+            gate: "compile".into(),
+            passed: true,
+            ts_millis: 1,
+        });
+        snap.errors.push(roko_core::dashboard_snapshot::ErrorEntry {
+            message: "compile failed once".into(),
+            ts_millis: 2,
+        });
+        snap.stats.plans_active = 1;
+        snap.stats.tasks_active = 1;
+        snap.stats.gates_passed = 1;
+        snap.stats.errors_total = 1;
+
+        let mut state = TuiState::default();
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.orchestrator_state, "running");
+        assert_eq!(state.current_phase, "implementer");
+        assert_eq!(state.plans.len(), 1);
+        assert_eq!(state.plans[0].id, "plan-a");
+        assert_eq!(state.plans[0].tasks_total, 2);
+        assert_eq!(state.plans[0].tasks_done, 1);
+        assert_eq!(state.plans[0].phase, "implementer");
+        assert_eq!(state.plans[0].tasks.len(), 2);
+        assert_eq!(state.current_task_checklist.len(), 2);
+        assert_eq!(state.current_task_checklist[0].id, "task-1");
+        assert_eq!(state.current_task_checklist[0].status, TaskStatus::Active);
+        assert_eq!(state.current_task_checklist[1].status, TaskStatus::Done);
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].id, "agent-1");
+        assert_eq!(state.agents[0].role, "implementer");
+        assert_eq!(state.agents[0].output_tokens, 42);
+        assert_eq!(state.gate_results.len(), 1);
+        assert_eq!(state.gate_results[0].gate, "compile");
+        assert_eq!(state.gate_results[0].output, "task task-2");
+        assert_eq!(state.execution_waves.len(), 1);
+        assert_eq!(state.execution_waves[0].plans, vec![String::from("plan-a")]);
+        assert_eq!(state.phase_pipeline.len(), 9);
+        assert_eq!(state.phase_pipeline[2].status, PhaseStatus::Active);
+    }
+
+    #[test]
+    fn update_from_dashboard_snapshot_preserves_navigation_state_by_id() {
+        let mut state = TuiState::default();
+        state.active_tab = Tab::Agents;
+        state.focus = FocusZone::RightPanel;
+        state.selected_plan_idx = 1;
+        state.current_plan_idx = 1;
+        state.selected_agent = 1;
+        state.selected_agent_tab = 4;
+        state.agent_scroll = Some(9);
+        state.plan_scroll_offset = 12;
+        state.log_scroll = 7;
+        state.plans = vec![
+            PlanEntry {
+                id: "plan-a".into(),
+                expanded: false,
+                ..PlanEntry::default()
+            },
+            PlanEntry {
+                id: "plan-b".into(),
+                expanded: true,
+                ..PlanEntry::default()
+            },
+        ];
+        state.agents = vec![
+            AgentRow {
+                id: "agent-1".into(),
+                ..AgentRow::default()
+            },
+            AgentRow {
+                id: "agent-2".into(),
+                ..AgentRow::default()
+            },
+        ];
+        state.current_task_checklist = vec![TaskRow {
+            id: "task-2".into(),
+            title: "task-2".into(),
+            status: TaskStatus::Active,
+            elapsed_secs: 15.0,
+        }];
+
+        let mut snap = roko_core::DashboardSnapshot::default();
+        snap.plans.insert(
+            "plan-b".into(),
+            roko_core::dashboard_snapshot::PlanState {
+                plan_id: "plan-b".into(),
+                phase: "implementer".into(),
+                tasks_total: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
+                active: true,
+            },
+        );
+        snap.plans.insert(
+            "plan-a".into(),
+            roko_core::dashboard_snapshot::PlanState {
+                plan_id: "plan-a".into(),
+                phase: "pending".into(),
+                tasks_total: 0,
+                tasks_done: 0,
+                tasks_failed: 0,
+                active: false,
+            },
+        );
+        snap.tasks.insert(
+            "plan-b/task-2".into(),
+            roko_core::dashboard_snapshot::TaskState {
+                task_id: "task-2".into(),
+                plan_id: "plan-b".into(),
+                phase: "implementer".into(),
+                outcome: None,
+            },
+        );
+        snap.agents.insert(
+            "agent-2".into(),
+            roko_core::dashboard_snapshot::AgentState {
+                agent_id: "agent-2".into(),
+                role: "reviewer".into(),
+                active: true,
+                output_bytes: 3,
+            },
+        );
+        snap.agents.insert(
+            "agent-1".into(),
+            roko_core::dashboard_snapshot::AgentState {
+                agent_id: "agent-1".into(),
+                role: "implementer".into(),
+                active: false,
+                output_bytes: 0,
+            },
+        );
+        snap.stats.plans_active = 1;
+
+        state.update_from_dashboard_snapshot(&snap);
+
+        assert_eq!(state.active_tab, Tab::Agents);
+        assert_eq!(state.focus, FocusZone::RightPanel);
+        assert_eq!(state.agent_scroll, Some(9));
+        assert_eq!(state.plan_scroll_offset, 12);
+        assert_eq!(state.log_scroll, 7);
+        assert_eq!(state.selected_plan_idx, 1);
+        assert_eq!(state.current_plan_idx, 1);
+        assert_eq!(state.plans[state.selected_plan_idx].id, "plan-b");
+        assert_eq!(state.selected_agent, 1);
+        assert_eq!(state.agents[state.selected_agent].id, "agent-2");
+        assert_eq!(state.selected_agent_tab, 4);
+        assert!(state.plans[1].expanded);
+        assert_eq!(state.current_task_checklist[0].elapsed_secs, 15.0);
     }
 
     #[test]

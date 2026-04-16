@@ -71,10 +71,9 @@ impl EventHandler {
                     }
                     _ => continue,
                 }
-            } else {
-                self.last_tick = Instant::now();
-                return Ok(Event::Tick);
             }
+            self.last_tick = Instant::now();
+            return Ok(Event::Tick);
         }
     }
 }

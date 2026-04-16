@@ -71,7 +71,12 @@ pub fn render_plan_detail_modal(
         Line::from(vec![
             Span::styled("Progress: ", theme.muted()),
             Span::styled(
-                format!("{}/{} ({:.0}%)", plan.tasks_done, plan.tasks_total, pct * 100.0),
+                format!(
+                    "{}/{} ({:.0}%)",
+                    plan.tasks_done,
+                    plan.tasks_total,
+                    pct * 100.0
+                ),
                 theme.text(),
             ),
         ]),

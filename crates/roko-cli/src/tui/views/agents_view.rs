@@ -13,7 +13,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::ViewState;
-use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
 use crate::tui::state::{AgentStatus, TuiState, model_context_limit};
@@ -38,7 +37,7 @@ const ROLE_TABS: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 /// Render the full agents view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -291,7 +290,7 @@ fn render_agent_roster(
         } else {
             " idle "
         };
-        let state_bg = if is_active {
+        let status_color = if is_active {
             accent
         } else if is_done {
             theme.success
@@ -299,11 +298,6 @@ fn render_agent_roster(
             theme.danger
         } else {
             Color::Reset
-        };
-        let state_fg = if state_bg == Color::Reset {
-            theme.muted
-        } else {
-            Color::Black
         };
 
         let mut spans = vec![
@@ -330,8 +324,12 @@ fn render_agent_roster(
             Span::styled(
                 format!("{:<7}", state_label),
                 Style::default()
-                    .fg(state_fg)
-                    .bg(state_bg)
+                    .fg(if status_color == Color::Reset {
+                        theme.muted
+                    } else {
+                        Color::Black
+                    })
+                    .bg(status_color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default().bg(bg)),
@@ -381,12 +379,15 @@ fn render_agent_roster(
                     Style::default().fg(theme.muted).bg(bg),
                 ));
             }
-            if let Some(agent_state) = tui_state.agents_by_id.get(&agent.id) {
-                if let Some(last_line) = agent_state.output_lines.last() {
+            if let Some(agent_row) = tui_state.agents.iter().find(|row| row.id == agent.id) {
+                if !agent_row.last_output_line.is_empty() {
                     detail.push(Span::styled(
                         format!(
                             "  last: {}",
-                            truncate_middle(last_line, content_width.saturating_sub(30))
+                            truncate_middle(
+                                &agent_row.last_output_line,
+                                content_width.saturating_sub(30)
+                            )
                         ),
                         Style::default().fg(theme.muted).bg(bg),
                     ));
@@ -459,164 +460,6 @@ fn render_summary_line(
 
     let para = Paragraph::new(vec![line1, line2]);
     frame.render_widget(para, area);
-}
-
-// ---------------------------------------------------------------------------
-// Token sparkline (6 lines, braille-style inline rendering)
-// ---------------------------------------------------------------------------
-
-fn render_token_sparkline(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    tui_state: &TuiState,
-    theme: &Theme,
-) {
-    let total_tokens = tui_state.cumulative_input_tokens + tui_state.cumulative_output_tokens;
-    let total_str = format_tokens(total_tokens);
-
-    let border_style = if total_tokens > 0 {
-        Style::default().fg(Color::Rgb(100, 65, 85))
-    } else {
-        theme.muted()
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Token Burn ",
-            Style::default().fg(theme.accent),
-        ))
-        .border_style(border_style);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width < 10 || inner.height < 2 {
-        return;
-    }
-
-    let inner_w = inner.width as usize;
-
-    // Build sparkline from efficiency events (aggregate by 10-event buckets)
-    let mut buckets: Vec<u64> = Vec::new();
-    let bucket_size = 10usize.max(1);
-    let mut bucket_accum: u64 = 0;
-    let mut bucket_count: usize = 0;
-    for event in &data.efficiency_events {
-        bucket_accum += event.input_tokens + event.output_tokens;
-        bucket_count += 1;
-        if bucket_count >= bucket_size {
-            buckets.push(bucket_accum);
-            bucket_accum = 0;
-            bucket_count = 0;
-        }
-    }
-    if bucket_count > 0 {
-        buckets.push(bucket_accum);
-    }
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    if buckets.len() >= 2 {
-        // Simple block chart sparkline
-        let max_val = buckets.iter().copied().max().unwrap_or(1).max(1);
-        let display: Vec<u64> = if buckets.len() > inner_w {
-            buckets[buckets.len() - inner_w..].to_vec()
-        } else {
-            buckets.clone()
-        };
-
-        let spark_chars = [
-            ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
-            '\u{2587}', '\u{2588}',
-        ];
-
-        let label_w = total_str.len() + 2;
-        let bar_w = inner_w.saturating_sub(label_w);
-
-        let mut spans: Vec<Span<'_>> = vec![Span::styled(
-            format!(" {} ", total_str),
-            Style::default().fg(theme.foreground),
-        )];
-
-        for i in 0..bar_w {
-            let idx = if display.len() > bar_w {
-                display.len() - bar_w + i
-            } else if i < display.len() {
-                i
-            } else {
-                continue;
-            };
-            if idx < display.len() {
-                let val = display[idx];
-                let frac = val as f64 / max_val as f64;
-                let ch_idx = (frac * 8.0).round() as usize;
-                let ch = spark_chars[ch_idx.min(8)];
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(theme.accent),
-                ));
-            }
-        }
-
-        lines.push(Line::from(spans));
-    } else {
-        lines.push(Line::from(Span::styled(
-            format!(" {} total tokens  waiting for data...", total_str),
-            Style::default().fg(theme.muted),
-        )));
-    }
-
-    // Per-role token breakdown
-    let mut role_tokens: Vec<(String, u64)> = Vec::new();
-    for event in &data.efficiency_events {
-        let role = event.role.clone();
-        let tokens = event.input_tokens + event.output_tokens;
-        if let Some(existing) = role_tokens.iter_mut().find(|(r, _)| *r == role) {
-            existing.1 += tokens;
-        } else {
-            role_tokens.push((role, tokens));
-        }
-    }
-    role_tokens.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let remaining_rows = (inner.height as usize).saturating_sub(lines.len());
-    for (role, tokens) in role_tokens.iter().take(remaining_rows) {
-        let accent = role_accent(role, theme);
-        let label = format!(" {:>5} ", &role[..role.len().min(5)]);
-        let pct = if total_tokens > 0 {
-            (*tokens as f64 / total_tokens as f64 * 100.0).round() as u64
-        } else {
-            0
-        };
-
-        let bar_budget = inner_w.saturating_sub(label.len() + 12);
-        let fill_pct = if total_tokens > 0 {
-            (*tokens as f64 / total_tokens as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let filled = (fill_pct * bar_budget as f64).round() as usize;
-        let empty = bar_budget.saturating_sub(filled);
-
-        lines.push(Line::from(vec![
-            Span::styled(label, Style::default().fg(accent)),
-            Span::styled(
-                "\u{2588}".repeat(filled.min(bar_budget)),
-                Style::default().fg(accent),
-            ),
-            Span::styled(
-                "\u{2500}".repeat(empty),
-                Style::default().fg(Color::Rgb(40, 35, 42)),
-            ),
-            Span::styled(
-                format!(" {} ({}%)", format_tokens(*tokens), pct),
-                Style::default().fg(theme.muted),
-            ),
-        ]));
-    }
-
-    let para = Paragraph::new(lines);
-    frame.render_widget(para, inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -733,12 +576,29 @@ fn render_output_body(
     };
 
     let collected = collect_agent_output_lines(data, tui_state, view_state.selected);
-    let total_lines = collected.len();
+    let output_lines = if collected.is_empty() {
+        Vec::new()
+    } else {
+        tui_state.render_agent_output_lines(selected_id, &collected, theme)
+    };
+    let total_lines = output_lines.len();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(area);
-    let visible_height = inner.height as usize;
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    render_route_metrics_bar(frame, layout[0], data, tui_state, view_state, theme);
+
+    if layout[1].width == 0 || layout[1].height == 0 {
+        return;
+    }
+
+    let visible_height = layout[1].height as usize;
     let max_scroll = total_lines
         .saturating_sub(visible_height)
         .min(u16::MAX as usize);
@@ -748,25 +608,24 @@ fn render_output_body(
     } else {
         format!("[PINNED line {}]", scroll.saturating_add(1))
     };
-
-    let block = block.title(vec![
-        Span::styled(format!(" {title_label}"), title_style),
-        Span::styled(
-            format!(" {tail_indicator} "),
-            if tui_state.agent_scroll.is_none() {
-                Style::default().fg(theme.success)
-            } else {
-                Style::default().fg(theme.warning)
-            },
-        ),
-    ]);
+    let block = block
+        .border_style(border_style)
+        .title(vec![
+            Span::styled(format!(" {title_label}"), title_style),
+            Span::styled(
+                format!(" {tail_indicator} "),
+                if tui_state.agent_scroll.is_none() {
+                    Style::default().fg(theme.success)
+                } else {
+                    Style::default().fg(theme.warning)
+                },
+            ),
+        ]);
     frame.render_widget(block, area);
-
-    let output_lines: Vec<&str> = collected.iter().map(String::as_str).collect();
 
     if output_lines.is_empty() {
         // Centered empty state
-        let v_pad = inner.height / 2;
+        let v_pad = layout[1].height / 2;
         let mut empty_lines: Vec<Line<'_>> = Vec::new();
         for _ in 0..v_pad.saturating_sub(2) {
             empty_lines.push(Line::from(""));
@@ -785,25 +644,15 @@ fn render_output_body(
         let empty = Paragraph::new(empty_lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
-        frame.render_widget(empty, inner);
+        frame.render_widget(empty, layout[1]);
         return;
     }
 
-    let text: Vec<Line<'static>> = output_lines
-        .iter()
-        .map(|line| {
-            let mut spans = Vec::with_capacity(2);
-            spans.push(Span::raw(" "));
-            spans.extend(parse_ansi_line(line));
-            Line::from(spans)
-        })
-        .collect();
-
-    let paragraph = Paragraph::new(text)
+    let paragraph = Paragraph::new(output_lines)
         .style(theme.text())
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, layout[1]);
 }
 
 pub(crate) fn collect_agent_output_lines(
@@ -815,7 +664,7 @@ pub(crate) fn collect_agent_output_lines(
 
     // Priority:
     //   1. current_plan_execution.agent_output_tail
-    //   2. selected agent output from tui_state.agents_by_id
+    //   2. selected agent's live row data from tui_state.agents
     //   3. task_outputs for the agent's current task
     //   4. episode output text
     let collected: Vec<String> = data
@@ -829,12 +678,23 @@ pub(crate) fn collect_agent_output_lines(
     }
 
     if let Some(agent_summary) = selected_agent {
-        if let Some(agent_state) = tui_state.agents_by_id.get(&agent_summary.id) {
-            if !agent_state.output_lines.is_empty() {
-                return agent_state.output_lines.clone();
+        if let Some(agent_row) = tui_state
+            .agents
+            .iter()
+            .find(|row| row.id == agent_summary.id)
+        {
+            if !agent_row.output_lines.is_empty() {
+                return agent_row.output_lines.clone();
             }
-            if let Some(task_id) = &agent_state.task_id {
-                let task_output = data.task_outputs.get(task_id).cloned().unwrap_or_default();
+            if !agent_row.last_output_line.is_empty() {
+                return vec![agent_row.last_output_line.clone()];
+            }
+            if !agent_row.current_task.is_empty() {
+                let task_output = data
+                    .task_outputs
+                    .get(&agent_row.current_task)
+                    .cloned()
+                    .unwrap_or_default();
                 if !task_output.is_empty() {
                     return task_output;
                 }
@@ -991,6 +851,112 @@ fn format_uptime(ms: u64) -> String {
     }
 }
 
+fn render_route_metrics_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let selected_agent = data.agents.get(view_state.selected);
+    let selected_id = selected_agent
+        .map(|a| a.id.as_str())
+        .or_else(|| {
+            tui_state
+                .agents
+                .get(view_state.selected)
+                .map(|agent| agent.id.as_str())
+        })
+        .unwrap_or("");
+    let agent_row = tui_state.agents.iter().find(|row| row.id == selected_id);
+    let metrics = tui_state.route_metrics.get(selected_id);
+
+    let model = metrics
+        .map(|metric| metric.model.as_str())
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            agent_row
+                .map(|row| row.model.as_str())
+                .filter(|model| !model.is_empty())
+        })
+        .unwrap_or("");
+    let model_label = if model.is_empty() || model == "-" {
+        "unknown".to_string()
+    } else {
+        shorten_model(model)
+    };
+    let context_used = metrics
+        .map(|metric| metric.context_used)
+        .unwrap_or_else(|| agent_row.map_or(0, |row| row.input_tokens + row.output_tokens));
+    let context_limit = metrics
+        .map(|metric| metric.context_limit)
+        .filter(|limit| *limit > 0)
+        .or_else(|| agent_row.map(|row| row.context_limit).filter(|limit| *limit > 0))
+        .unwrap_or_else(|| model_context_limit(model));
+    let utilization = if context_limit > 0 {
+        (context_used as f64 / context_limit as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let focus_score = metrics.map_or(0.0, |metric| metric.focus_score);
+    let tier = metrics
+        .map(|metric| metric.tier.as_str())
+        .filter(|tier| !tier.is_empty())
+        .unwrap_or("balanced");
+
+    let usage_color = if utilization >= 0.8 {
+        theme.danger
+    } else if utilization >= 0.5 {
+        theme.warning
+    } else {
+        theme.success
+    };
+    let focus_color = if focus_score >= 0.75 {
+        theme.foreground
+    } else if focus_score >= 0.4 {
+        theme.muted
+    } else {
+        Color::Rgb(110, 95, 115)
+    };
+
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            format!("[{}]", model_label),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default()),
+        Span::styled("ctx:", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {}/{}", format_tokens(context_used), format_tokens(context_limit)),
+            Style::default().fg(usage_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(theme.muted)),
+        Span::styled("focus:", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {:.2}", focus_score),
+            Style::default().fg(focus_color).add_modifier(if focus_score >= 0.75 {
+                Modifier::BOLD
+            } else {
+                Modifier::DIM
+            }),
+        ),
+        Span::styled(" │ ", Style::default().fg(theme.muted)),
+        Span::styled("tier:", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {}", tier),
+            Style::default().fg(theme.foreground),
+        ),
+    ]);
+
+    frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);
+}
+
 fn is_agent_active(status: &str) -> bool {
     matches!(status, "running" | "active")
 }
@@ -1014,40 +980,6 @@ fn agent_status_rank(status: &str) -> u8 {
         3
     } else {
         4
-    }
-}
-
-fn agent_status_color(status: &str, theme: &Theme) -> Color {
-    if is_agent_active(status) {
-        theme.accent
-    } else if is_agent_done(status) {
-        theme.success
-    } else if is_agent_failed(status) {
-        theme.danger
-    } else {
-        theme.muted
-    }
-}
-
-fn agent_status_icon(status: &str, theme: &Theme) -> (&'static str, Style) {
-    if is_agent_active(status) {
-        (
-            "\u{25b6}",
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else if is_agent_done(status) {
-        ("\u{2713}", Style::default().fg(theme.success))
-    } else if is_agent_failed(status) {
-        (
-            "\u{2717}",
-            Style::default()
-                .fg(theme.danger)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        ("\u{00b7}", Style::default().fg(theme.muted))
     }
 }
 

@@ -494,6 +494,18 @@ impl ProcessSupervisor {
             .collect()
     }
 
+    /// List all tracked OS process IDs and their labels.
+    ///
+    /// Entries without an assigned OS PID are skipped.
+    pub async fn active_pids(&self) -> Vec<(u32, String)> {
+        self.handles
+            .lock()
+            .await
+            .values()
+            .filter_map(|handle| handle.os_pid.map(|pid| (pid, handle.label.clone())))
+            .collect()
+    }
+
     /// Restart one process according to the configured strategy.
     pub async fn restart_process(&self, id: ProcessId) -> Option<ProcessId> {
         let mut handle = self.handles.lock().await.remove(&id)?;
@@ -628,6 +640,28 @@ mod tests {
         let outcomes = supervisor.shutdown_all().await;
         assert_eq!(outcomes.len(), 1);
         assert_eq!(supervisor.count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn active_pids_reports_spawned_processes() {
+        let cancel = CancelToken::new();
+        let supervisor = ProcessSupervisor::new(cancel);
+
+        let id = supervisor
+            .spawn(SpawnConfig {
+                program: "sleep".into(),
+                args: vec!["60".into()],
+                label: "test-active-pids".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("spawn should succeed");
+
+        let active_pids = supervisor.active_pids().await;
+        assert_eq!(active_pids.len(), 1);
+        assert_eq!(supervisor.list().await, vec![(id, "test-active-pids".into())]);
+        assert_eq!(active_pids[0].1, "test-active-pids");
+        assert!(active_pids[0].0 > 0);
     }
 
     #[test]

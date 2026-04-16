@@ -34,7 +34,7 @@ const BLOCKS: &[char] = &[
 // ---------------------------------------------------------------------------
 
 /// Render the full plans view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -120,33 +120,6 @@ fn render_pipeline_header(
     let bar_w = (area.width.saturating_sub(24)) as usize;
     let bar = build_progress_bar(pct, bar_w);
     let bar_color = progress_color(pct, total_plans, completed, theme);
-
-    // Health suffix
-    let mut health_parts: Vec<Span<'_>> = Vec::new();
-    if active_count > 0 {
-        health_parts.push(Span::styled(
-            format!(" {active_count}\u{25b8}"),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if tui_state.wave_count() > 0 {
-        health_parts.push(Span::styled(
-            format!(
-                " wave {}/{}",
-                tui_state.current_wave().saturating_add(1),
-                tui_state.wave_count()
-            ),
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    let mut title_spans = vec![Span::styled(
-        format!(" {completed}/{total_plans}"),
-        Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
-    )];
-    title_spans.extend(health_parts);
 
     let header_line = Line::from(vec![
         Span::raw(" "),
@@ -487,14 +460,13 @@ fn render_plan_line(
 ) {
     let is_selected = idx == view_state.selected;
     let tui_plan = tui_state.plans.get(idx);
-    let is_active = tui_plan
-        .map(|p| p.status.is_active())
-        .unwrap_or(false);
-    let is_failed = tui_plan
-        .map(|p| p.status.is_failed())
-        .unwrap_or(false);
-    let task_done = tui_plan.map(|p| p.task_done).unwrap_or(0);
-    let task_total = plan.task_count;
+    let is_active = tui_plan.map(|p| p.status.is_active()).unwrap_or(false);
+    let is_failed = tui_plan.map(|p| p.status.is_failed()).unwrap_or(false);
+    let task_total = tui_plan.map(|p| p.tasks_total).unwrap_or(plan.task_count);
+    let task_done =
+        tui_plan
+            .map(|p| p.tasks_done)
+            .unwrap_or(if plan.completed { task_total } else { 0 });
 
     // Status icon
     let (icon, icon_style) = if plan.completed {
@@ -807,9 +779,8 @@ fn render_plan_summary(
         .unwrap_or(false);
     let tasks_total = plan
         .tasks_total
-        .max(plan.task_total)
         .max(plan_summary.map_or(0, |summary| summary.task_count));
-    let tasks_done = plan.tasks_done.max(plan.task_done).min(tasks_total);
+    let tasks_done = plan.tasks_done.min(tasks_total);
     let pct = if tasks_total > 0 {
         tasks_done as f64 / tasks_total as f64
     } else if summary_completed {
@@ -1142,7 +1113,7 @@ fn build_timing_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let tasks_done = plan.tasks_done.max(plan.task_done);
+    let tasks_done = plan.tasks_done;
 
     if plan.elapsed_secs > 0.0 {
         lines.push(Line::from(vec![

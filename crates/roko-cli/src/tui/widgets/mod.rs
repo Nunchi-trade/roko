@@ -4,7 +4,6 @@
 pub mod rosedust;
 
 pub mod braille;
-pub mod branch_tree;
 pub mod diff_panel;
 pub mod error_digest;
 pub mod header_bar;
