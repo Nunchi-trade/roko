@@ -25,7 +25,7 @@ pub mod worktree;
 
 pub use dag::{
     DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability, ExecutionWave,
-    IncrementalDag, UnifiedTaskDag,
+    IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{

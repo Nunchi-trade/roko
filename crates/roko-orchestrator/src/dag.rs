@@ -26,6 +26,71 @@ use roko_core::{GlobalTaskId, Task};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Detect every node that participates in a cycle.
+///
+/// Input edges are expressed as `node -> direct dependencies`.
+/// The returned node list is sorted for deterministic diagnostics.
+#[must_use]
+pub fn detect_cycle_nodes<N>(deps: &BTreeMap<N, BTreeSet<N>>) -> Vec<N>
+where
+    N: Clone + Ord,
+{
+    fn dfs<'a, N>(
+        node: &'a N,
+        deps: &'a BTreeMap<N, BTreeSet<N>>,
+        state: &mut BTreeMap<&'a N, u8>,
+        stack: &mut Vec<&'a N>,
+        positions: &mut BTreeMap<&'a N, usize>,
+        cycle_nodes: &mut BTreeSet<N>,
+    ) where
+        N: Clone + Ord,
+    {
+        state.insert(node, 1);
+        positions.insert(node, stack.len());
+        stack.push(node);
+
+        if let Some(children) = deps.get(node) {
+            for child in children {
+                match state.get(child).copied().unwrap_or(0) {
+                    0 => dfs(child, deps, state, stack, positions, cycle_nodes),
+                    1 => {
+                        if let Some(start) = positions.get(child).copied() {
+                            for entry in &stack[start..] {
+                                cycle_nodes.insert((*entry).clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        stack.pop();
+        positions.remove(node);
+        state.insert(node, 2);
+    }
+
+    let mut state: BTreeMap<&N, u8> = BTreeMap::new();
+    let mut stack: Vec<&N> = Vec::new();
+    let mut positions: BTreeMap<&N, usize> = BTreeMap::new();
+    let mut cycle_nodes: BTreeSet<N> = BTreeSet::new();
+
+    for node in deps.keys() {
+        if state.get(node).copied().unwrap_or(0) == 0 {
+            dfs(
+                node,
+                deps,
+                &mut state,
+                &mut stack,
+                &mut positions,
+                &mut cycle_nodes,
+            );
+        }
+    }
+
+    cycle_nodes.into_iter().collect()
+}
+
 /// A single wave: every task in `tasks` has no open dependencies and
 /// can run in parallel with its peers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,11 +401,22 @@ impl UnifiedTaskDag {
             }
         }
         if out.len() != self.nodes.len() {
-            let stuck: Vec<GlobalTaskId> = remaining_deps
+            let cycle_graph = self
+                .edges
+                .iter()
+                .map(|(node, deps)| (node.clone(), deps.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let cycle_nodes = detect_cycle_nodes(&cycle_graph);
+            if !cycle_nodes.is_empty() {
+                return Err(DagError::Cycle(cycle_nodes));
+            }
+
+            let mut stuck: Vec<GlobalTaskId> = remaining_deps
                 .into_iter()
                 .filter(|(_, n)| *n > 0)
                 .map(|(k, _)| k)
                 .collect();
+            stuck.sort();
             return Err(DagError::Cycle(stuck));
         }
         Ok(out)
