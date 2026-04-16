@@ -9,7 +9,7 @@ use std::fmt::{self, Write as _};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
@@ -34,6 +34,7 @@ use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::skill_library::Skill;
 
 use super::cursors::{EpisodeCursor, EventLogCursor, SignalCursor};
+use super::dashboard_gen::DurableDashboardGenerationCounter;
 use super::pages::{PageId, PageScaffold, efficiency, operations};
 use super::state::{PlanPhase, TaskStatus};
 use super::task_outputs::TaskOutputCursors;
@@ -94,14 +95,17 @@ struct DashboardDataStamps {
     event_log: FileStamp,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct DashboardGenerationState {
-    fingerprint: u64,
-    generation: u64,
+impl DashboardDataStamps {
+    fn fingerprint(self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
-static DASHBOARD_DATA_GENERATIONS: OnceLock<Mutex<HashMap<PathBuf, DashboardGenerationState>>> =
-    OnceLock::new();
+static DASHBOARD_GENERATION_COUNTERS: OnceLock<
+    Mutex<HashMap<PathBuf, Arc<DurableDashboardGenerationCounter>>>,
+> = OnceLock::new();
 
 /// In-memory scaffold of all placeholder dashboard pages.
 #[derive(Debug, Clone)]
@@ -2671,25 +2675,18 @@ fn file_stamp(path: &Path) -> FileStamp {
 }
 
 fn next_dashboard_data_generation(root: &Path, stamps: DashboardDataStamps) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    stamps.hash(&mut hasher);
-    let fingerprint = hasher.finish();
+    let counters = DASHBOARD_GENERATION_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let counter = {
+        let mut counters = counters
+            .lock()
+            .expect("dashboard generation counter registry lock poisoned");
+        counters
+            .entry(root.to_path_buf())
+            .or_insert_with(|| Arc::new(DurableDashboardGenerationCounter::load(root)))
+            .clone()
+    };
 
-    let states = DASHBOARD_DATA_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut states = states.lock().expect("dashboard generation lock poisoned");
-    let entry = states
-        .entry(root.to_path_buf())
-        .or_insert(DashboardGenerationState {
-            fingerprint,
-            generation: 0,
-        });
-
-    if entry.fingerprint != fingerprint {
-        entry.fingerprint = fingerprint;
-        entry.generation = entry.generation.saturating_add(1);
-    }
-
-    entry.generation
+    counter.next(root, stamps.fingerprint())
 }
 
 pub(crate) fn signal_gate_result_from_value(value: &Value) -> Option<GateResultSummary> {

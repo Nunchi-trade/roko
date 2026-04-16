@@ -26,7 +26,7 @@ use ratatui::{Frame, Terminal};
 
 use roko_runtime::process::ProcessSupervisor;
 use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::approval_ipc::ApprovalRequest;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
@@ -90,7 +90,7 @@ pub struct App {
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
-    sys_rx: Option<std::sync::mpsc::Receiver<SysSnapshot>>,
+    sys_rx: Option<watch::Receiver<SysSnapshot>>,
     /// Filesystem watcher handle for debounced `.roko/` refresh events.
     fs_watch: Option<FsWatchHandle>,
     /// Debounced git watcher for repo metadata refreshes.
@@ -136,6 +136,7 @@ struct GitBgData {
 }
 
 /// Combined host + process metrics snapshot emitted by the background sampler.
+#[derive(Debug, Clone, Default)]
 struct SysSnapshot {
     /// Host-level system metrics.
     sys: super::state::SysMetrics,
@@ -144,6 +145,7 @@ struct SysSnapshot {
 }
 
 /// One sampled process row before history is merged into `TuiState`.
+#[derive(Debug, Clone)]
 struct ProcessMetricSample {
     /// OS process identifier.
     pid: u32,
@@ -556,7 +558,7 @@ impl App {
         // ---------------------------------------------------------------
         // Spawn background sys metrics collector thread
         // ---------------------------------------------------------------
-        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<SysSnapshot>();
+        let (sys_tx, sys_rx) = watch::channel(SysSnapshot::default());
         let sys_log_dispatch = log_dispatch.clone();
         let process_supervisor = self.process_supervisor.clone();
         std::thread::Builder::new()
@@ -2289,53 +2291,45 @@ impl App {
         self.drain_agent_stream_clients();
 
         // -- sys metrics (merge, don't replace — keep history) --
-        let mut sys_snaps = Vec::new();
-        if let Some(rx) = &self.sys_rx {
-            let mut count = 0;
-            while let Ok(snap) = rx.try_recv() {
-                sys_snaps.push(snap);
-                count += 1;
-                if count >= MAX_MESSAGES_PER_DRAIN {
-                    break;
+        if let Some(rx) = &mut self.sys_rx {
+            if rx.has_changed().unwrap_or(false) {
+                let snap = rx.borrow_and_update().clone();
+                // CPU
+                let cpu_pct = self.tui_state.update_cpu_pct(snap.sys.cpu_pct);
+                let sys = &mut self.tui_state.sys;
+                sys.cpu_history.push(cpu_pct);
+                if sys.cpu_history.len() > 60 {
+                    sys.cpu_history.remove(0);
                 }
-            }
-        }
-        for snap in sys_snaps {
-            // CPU
-            let cpu_pct = self.tui_state.update_cpu_pct(snap.sys.cpu_pct);
-            let sys = &mut self.tui_state.sys;
-            sys.cpu_history.push(cpu_pct);
-            if sys.cpu_history.len() > 60 {
-                sys.cpu_history.remove(0);
-            }
 
-            // Memory
-            sys.mem_used_bytes = snap.sys.mem_used_bytes;
-            sys.mem_total_bytes = snap.sys.mem_total_bytes;
-            let mem_frac = if snap.sys.mem_total_bytes > 0 {
-                snap.sys.mem_used_bytes as f32 / snap.sys.mem_total_bytes as f32
-            } else {
-                0.0
-            };
-            sys.mem_history.push(mem_frac);
-            if sys.mem_history.len() > 60 {
-                sys.mem_history.remove(0);
-            }
+                // Memory
+                sys.mem_used_bytes = snap.sys.mem_used_bytes;
+                sys.mem_total_bytes = snap.sys.mem_total_bytes;
+                let mem_frac = if snap.sys.mem_total_bytes > 0 {
+                    snap.sys.mem_used_bytes as f32 / snap.sys.mem_total_bytes as f32
+                } else {
+                    0.0
+                };
+                sys.mem_history.push(mem_frac);
+                if sys.mem_history.len() > 60 {
+                    sys.mem_history.remove(0);
+                }
 
-            // Network: compute rate from delta of cumulative totals
-            if sys.prev_net_in > 0 && snap.sys.net_down_bytes_sec > sys.prev_net_in {
-                sys.net_down_bytes_sec = snap.sys.net_down_bytes_sec - sys.prev_net_in;
-            }
-            sys.prev_net_in = snap.sys.net_down_bytes_sec;
-            sys.net_out_bytes_total = snap.sys.net_out_bytes_total;
+                // Network: compute rate from delta of cumulative totals
+                if sys.prev_net_in > 0 && snap.sys.net_down_bytes_sec > sys.prev_net_in {
+                    sys.net_down_bytes_sec = snap.sys.net_down_bytes_sec - sys.prev_net_in;
+                }
+                sys.prev_net_in = snap.sys.net_down_bytes_sec;
+                sys.net_out_bytes_total = snap.sys.net_out_bytes_total;
 
-            // Disk: compute rate from delta of cumulative totals
-            if sys.prev_disk_read > 0 && snap.sys.disk_read_bytes_sec > sys.prev_disk_read {
-                sys.disk_read_bytes_sec = snap.sys.disk_read_bytes_sec - sys.prev_disk_read;
+                // Disk: compute rate from delta of cumulative totals
+                if sys.prev_disk_read > 0 && snap.sys.disk_read_bytes_sec > sys.prev_disk_read {
+                    sys.disk_read_bytes_sec = snap.sys.disk_read_bytes_sec - sys.prev_disk_read;
+                }
+                sys.prev_disk_read = snap.sys.disk_read_bytes_sec;
+                sys.disk_write_bytes_total = snap.sys.disk_write_bytes_total;
+                self.merge_process_metrics(snap.process_metrics);
             }
-            sys.prev_disk_read = snap.sys.disk_read_bytes_sec;
-            sys.disk_write_bytes_total = snap.sys.disk_write_bytes_total;
-            self.merge_process_metrics(snap.process_metrics);
         }
 
         // -- debounced filesystem refresh --
@@ -2607,7 +2601,7 @@ fn cycle_field_value(
 
 /// Collect system metrics on a background thread using `sysinfo`.
 fn collect_sys_metrics_bg(
-    tx: std::sync::mpsc::Sender<SysSnapshot>,
+    tx: watch::Sender<SysSnapshot>,
     process_supervisor: Option<Arc<ProcessSupervisor>>,
 ) {
     let mut sys = System::new_all();
