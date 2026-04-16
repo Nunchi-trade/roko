@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use roko_cli::orchestrate::save_snapshot_atomic;
 use roko_cli::snapshot_migrate;
-use roko_orchestrator::{CURRENT_SCHEMA_VERSION, ExecutorSnapshot};
+use roko_cli::snapshot_reconcile::{SnapshotReconcileError, reconcile_snapshot_vs_plans};
+use roko_orchestrator::{CURRENT_SCHEMA_VERSION, ExecutorSnapshot, PlanInfo, PlanState};
 use tempfile::TempDir;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -23,6 +24,27 @@ fn read_fixture(name: &str) -> serde_json::Value {
     serde_json::from_str(&body).unwrap_or_else(|err| {
         panic!("parse fixture {}: {err}", path.display());
     })
+}
+
+fn plan_info(id: &str) -> PlanInfo {
+    let num = id.split_once('-').map_or(id, |(prefix, _)| prefix);
+    PlanInfo {
+        base: id.to_owned(),
+        num: num.to_owned(),
+        path: Path::new("plans").join(id).join("plan.md"),
+        frontmatter: None,
+    }
+}
+
+fn snapshot_with_plan_ids(plan_ids: &[&str]) -> ExecutorSnapshot {
+    let mut snapshot = ExecutorSnapshot::new(123);
+    snapshot.queue_order = plan_ids.iter().map(|id| (*id).to_owned()).collect();
+    for plan_id in plan_ids {
+        snapshot
+            .plan_states
+            .insert((*plan_id).to_owned(), PlanState::new(*plan_id));
+    }
+    snapshot
 }
 
 #[test]
@@ -74,4 +96,69 @@ fn save_writes_current_version() {
             .and_then(serde_json::Value::as_u64),
         Some(u64::from(CURRENT_SCHEMA_VERSION))
     );
+}
+
+#[test]
+fn reconcile_noop_on_match() {
+    let snapshot = snapshot_with_plan_ids(&["foo", "bar"]);
+    let discovered = vec![plan_info("foo"), plan_info("bar")];
+
+    reconcile_snapshot_vs_plans(
+        &snapshot,
+        &discovered,
+        Path::new(".roko/state/executor.json"),
+        Path::new("plans"),
+    )
+    .expect("matching plans should reconcile");
+}
+
+#[test]
+fn reconcile_reports_missing() {
+    let snapshot = snapshot_with_plan_ids(&["foo", "bar"]);
+    let discovered = vec![plan_info("baz"), plan_info("qux")];
+
+    let err = reconcile_snapshot_vs_plans(
+        &snapshot,
+        &discovered,
+        Path::new(".roko/state/executor.json"),
+        Path::new("plans"),
+    )
+    .expect_err("missing plans should fail");
+
+    let message = err.to_string();
+
+    match err {
+        SnapshotReconcileError::PlanIdsMissing {
+            missing,
+            discovered,
+            snapshot_path,
+            plans_root,
+        } => {
+            assert_eq!(missing, vec!["foo".to_owned(), "bar".to_owned()]);
+            assert_eq!(discovered, vec!["baz".to_owned(), "qux".to_owned()]);
+            assert_eq!(snapshot_path, PathBuf::from(".roko/state/executor.json"));
+            assert_eq!(plans_root, PathBuf::from("plans"));
+        }
+    }
+
+    assert!(message.contains("resume snapshot references plans [foo, bar]"));
+    assert!(message.contains("plans/ at plans has [baz, qux]"));
+    assert!(message.contains("Rename or prune the snapshot before resuming."));
+    assert!(message.contains("Snapshot path: .roko/state/executor.json"));
+    assert!(message.contains("Plans root: plans"));
+    assert!(message.contains("Missing: foo, bar"));
+}
+
+#[test]
+fn reconcile_noop_on_superset() {
+    let snapshot = snapshot_with_plan_ids(&["foo"]);
+    let discovered = vec![plan_info("foo"), plan_info("bar"), plan_info("baz")];
+
+    reconcile_snapshot_vs_plans(
+        &snapshot,
+        &discovered,
+        Path::new(".roko/state/executor.json"),
+        Path::new("plans"),
+    )
+    .expect("additional discovered plans should be allowed");
 }

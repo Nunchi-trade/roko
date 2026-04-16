@@ -3195,6 +3195,16 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 let state_dir = wd.join(".roko").join("state");
                 let exec_json = std::fs::read_to_string(&snap_path)
                     .map_err(|e| anyhow!("read snapshot {}: {e}", snap_path.display()))?;
+                let snapshot = roko_cli::snapshot_migrate::load_executor_snapshot(&exec_json)
+                    .map_err(|e| anyhow!("bad snapshot {}: {e}", snap_path.display()))?;
+                let discovered_plans = roko_orchestrator::discover_plans(&plans_dir)
+                    .map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+                roko_cli::snapshot_reconcile::reconcile_snapshot_vs_plans(
+                    &snapshot,
+                    &discovered_plans,
+                    &snap_path,
+                    &plans_dir,
+                )?;
                 // Try to load the event log from alongside the executor snapshot.
                 let events_path = state_dir.join("events.json");
                 if events_path.exists() {
