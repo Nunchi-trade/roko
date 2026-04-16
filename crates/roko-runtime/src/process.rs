@@ -18,19 +18,30 @@ use std::{
     fmt,
     path::PathBuf,
     process::ExitStatus,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use nix::{
+    errno::Errno,
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
+use parking_lot::Mutex;
 use tokio::{
     process::{Child, Command},
-    sync::Mutex,
     task::JoinSet,
     time::timeout,
 };
 use tracing::{debug, info, warn};
 
 use crate::cancel::CancelToken;
+
+const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Monotonically increasing process identifier, unique within a single runtime.
 #[derive(
@@ -66,6 +77,8 @@ pub struct SpawnConfig {
     pub env: HashMap<String, String>,
     /// How long to wait after asking the process to stop before force-killing it.
     pub grace_period: Duration,
+    /// Optional external cancellation trigger for this specific child process.
+    pub cancellation: Option<CancelToken>,
     /// Human-readable label for logging.
     pub label: String,
 }
@@ -106,7 +119,7 @@ impl Default for SupervisionStrategy {
 }
 
 impl SupervisionStrategy {
-    fn max_restarts(&self) -> u32 {
+    const fn max_restarts(&self) -> u32 {
         match self {
             Self::OneForOne { max_restarts, .. }
             | Self::OneForAll { max_restarts }
@@ -114,7 +127,7 @@ impl SupervisionStrategy {
         }
     }
 
-    fn within_ms(&self) -> u64 {
+    const fn within_ms(&self) -> u64 {
         match self {
             Self::OneForOne { within_ms, .. } => *within_ms,
             Self::OneForAll { .. } | Self::RestForOne { .. } => 0,
@@ -136,7 +149,8 @@ impl Default for SpawnConfig {
             args: Vec::new(),
             working_dir: None,
             env: HashMap::new(),
-            grace_period: Duration::from_secs(5),
+            grace_period: DEFAULT_GRACE_PERIOD,
+            cancellation: None,
             label: String::from("unnamed"),
         }
     }
@@ -196,11 +210,74 @@ impl ProcessHandle {
         }
     }
 
+    fn try_wait_outcome(&mut self, was_killed: bool) -> Option<ProcessOutcome> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(self.outcome(Some(status), was_killed)),
+            Ok(None) => None,
+            Err(err) => {
+                warn!(id = %self.id, label = %self.label, error = %err, "error checking process status");
+                None
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn send_signal(&mut self, signal: Signal) {
+        match self.child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(err) => {
+                warn!(id = %self.id, label = %self.label, error = %err, "error checking process status before signalling");
+            }
+        }
+
+        let Some(pid) = self.os_pid else {
+            return;
+        };
+
+        let Ok(raw_pid) = i32::try_from(pid) else {
+            warn!(id = %self.id, label = %self.label, os_pid = pid, "child pid does not fit into a platform pid_t");
+            return;
+        };
+
+        match kill(Pid::from_raw(raw_pid), signal) {
+            Ok(()) => {
+                debug!(id = %self.id, label = %self.label, signal = ?signal, "sent signal to child process");
+            }
+            Err(Errno::ESRCH) => {
+                debug!(id = %self.id, label = %self.label, signal = ?signal, "child already exited before signalling");
+            }
+            Err(err) => {
+                warn!(id = %self.id, label = %self.label, signal = ?signal, error = %err, "failed to send signal to child process");
+            }
+        }
+    }
+
     async fn force_kill(&mut self) -> ProcessOutcome {
-        let _ = self.child.kill().await;
+        if let Some(outcome) = self.try_wait_outcome(false) {
+            return outcome;
+        }
+
+        self.cancel.cancel();
+        drop(self.child.stdin.take());
+
+        #[cfg(unix)]
+        self.send_signal(Signal::SIGKILL);
+
+        let _ = self.child.start_kill();
         let status = self.child.wait().await.ok();
         warn!(id = %self.id, label = %self.label, "process force-killed");
         self.outcome(status, true)
+    }
+
+    fn force_kill_sync(&mut self) {
+        self.cancel.cancel();
+        drop(self.child.stdin.take());
+
+        #[cfg(unix)]
+        self.send_signal(Signal::SIGKILL);
+
+        let _ = self.child.start_kill();
     }
 
     /// The OS-level PID, if available.
@@ -236,14 +313,21 @@ impl ProcessHandle {
         self.child.stdin.take()
     }
 
-    /// Gracefully shut down: attempt clean exit via `kill()`, wait `grace_period`,
-    /// then force kill.
-    ///
-    /// On Unix, Tokio's `Child::kill()` sends SIGKILL. For a gentler approach,
-    /// callers should write a shutdown command to stdin before calling this.
+    /// Gracefully shut down: on Unix send `SIGTERM`, wait `grace_period`, then
+    /// escalate to a force kill. On Windows the supervisor waits for the grace
+    /// period and then uses `Child::kill()`.
     pub async fn shutdown(&mut self) -> ProcessOutcome {
         debug!(id = %self.id, label = %self.label, "shutting down process");
         self.cancel.cancel();
+        drop(self.child.stdin.take());
+
+        if let Some(outcome) = self.try_wait_outcome(false) {
+            return outcome;
+        }
+
+        #[cfg(unix)]
+        self.send_signal(Signal::SIGTERM);
+
         if let Some(outcome) = self.wait_for_graceful_exit().await {
             return outcome;
         }
@@ -263,7 +347,7 @@ impl ProcessHandle {
 
 enum WaitResult {
     Completed(ProcessOutcome),
-    TimedOut(ProcessHandle),
+    TimedOut(Box<ProcessHandle>),
 }
 
 impl fmt::Debug for ProcessHandle {
@@ -278,7 +362,7 @@ impl fmt::Debug for ProcessHandle {
 
 /// Manages a pool of child processes with bulk lifecycle operations.
 pub struct ProcessSupervisor {
-    handles: Mutex<HashMap<ProcessId, ProcessHandle>>,
+    handles: Arc<Mutex<HashMap<ProcessId, ProcessHandle>>>,
     restart_history: Mutex<HashMap<String, Vec<Instant>>>,
     cancel: CancelToken,
     strategy: SupervisionStrategy,
@@ -288,7 +372,7 @@ impl ProcessSupervisor {
     /// Create a new supervisor with a root cancellation token.
     pub fn new(cancel: CancelToken) -> Self {
         Self {
-            handles: Mutex::new(HashMap::new()),
+            handles: Arc::new(Mutex::new(HashMap::new())),
             restart_history: Mutex::new(HashMap::new()),
             cancel,
             strategy: SupervisionStrategy::default(),
@@ -309,9 +393,11 @@ impl ProcessSupervisor {
     }
 
     /// Spawn a new managed process.
+    #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
     pub async fn spawn(&self, config: SpawnConfig) -> std::io::Result<ProcessId> {
         let id = ProcessId::next();
         let child_cancel = self.cancel.child();
+        let external_cancellation = config.cancellation.clone();
         let spawn_config = config.clone();
         let label = config.label.clone();
 
@@ -351,18 +437,31 @@ impl ProcessSupervisor {
             started_at: Instant::now(),
         };
 
-        self.handles.lock().await.insert(id, handle);
+        self.handles.lock().insert(id, handle);
+
+        if let Some(token) = external_cancellation {
+            let handles = Arc::clone(&self.handles);
+            std::mem::drop(tokio::spawn(async move {
+                token.cancelled().await;
+                let mut handle = { handles.lock().remove(&id) };
+                if let Some(mut handle) = handle.take() {
+                    let _ = handle.shutdown().await;
+                }
+            }));
+        }
+
         Ok(id)
     }
 
     /// Remove and return a process handle (for exclusive ownership).
+    #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
     pub async fn take(&self, id: ProcessId) -> Option<ProcessHandle> {
-        self.handles.lock().await.remove(&id)
+        self.handles.lock().remove(&id)
     }
 
     /// Shut down a single process by ID.
     pub async fn shutdown(&self, id: ProcessId) -> Option<ProcessOutcome> {
-        let mut handle = self.handles.lock().await.remove(&id)?;
+        let mut handle = self.handles.lock().remove(&id)?;
         Some(handle.shutdown().await)
     }
 
@@ -370,7 +469,7 @@ impl ProcessSupervisor {
     pub async fn shutdown_all(&self) -> Vec<ProcessOutcome> {
         self.cancel.cancel();
         let handles: Vec<_> = {
-            let mut map = self.handles.lock().await;
+            let mut map = self.handles.lock();
             map.drain().map(|(_, h)| h).collect()
         };
 
@@ -388,7 +487,7 @@ impl ProcessSupervisor {
     /// forcefully terminate it.
     pub async fn wait_all(&self, wait_timeout: Duration) -> Vec<ProcessOutcome> {
         let handles: Vec<_> = {
-            let mut map = self.handles.lock().await;
+            let mut map = self.handles.lock();
             map.drain().map(|(_, handle)| handle).collect()
         };
 
@@ -400,11 +499,11 @@ impl ProcessSupervisor {
                     Ok(Ok(status)) => WaitResult::Completed(handle.outcome(Some(status), false)),
                     Ok(Err(err)) => {
                         warn!(id = %id, label = %handle.label, error = %err, "error waiting for process during shutdown");
-                        WaitResult::TimedOut(handle)
+                        WaitResult::TimedOut(Box::new(handle))
                     }
                     Err(_) => {
                         debug!(id = %id, label = %handle.label, "process wait timed out during shutdown");
-                        WaitResult::TimedOut(handle)
+                        WaitResult::TimedOut(Box::new(handle))
                     }
                 }
             });
@@ -415,7 +514,7 @@ impl ProcessSupervisor {
         while let Some(result) = waiters.join_next().await {
             match result {
                 Ok(WaitResult::Completed(outcome)) => completed.push(outcome),
-                Ok(WaitResult::TimedOut(handle)) => timed_out.push(handle),
+                Ok(WaitResult::TimedOut(handle)) => timed_out.push(*handle),
                 Err(err) => {
                     warn!(error = %err, "process shutdown wait task failed");
                 }
@@ -423,7 +522,7 @@ impl ProcessSupervisor {
         }
 
         if !timed_out.is_empty() {
-            let mut map = self.handles.lock().await;
+            let mut map = self.handles.lock();
             for handle in timed_out {
                 map.insert(handle.id, handle);
             }
@@ -436,7 +535,7 @@ impl ProcessSupervisor {
     pub async fn kill_all(&self) -> Vec<ProcessOutcome> {
         self.cancel.cancel();
         let handles: Vec<_> = {
-            let mut map = self.handles.lock().await;
+            let mut map = self.handles.lock();
             map.drain().map(|(_, handle)| handle).collect()
         };
 
@@ -448,8 +547,9 @@ impl ProcessSupervisor {
     }
 
     /// Reap processes that have already exited (non-blocking).
+    #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
     pub async fn reap_exited(&self) -> Vec<ProcessOutcome> {
-        let mut map = self.handles.lock().await;
+        let mut map = self.handles.lock();
         let mut exited_ids = Vec::new();
 
         for (id, handle) in map.iter_mut() {
@@ -480,15 +580,16 @@ impl ProcessSupervisor {
     }
 
     /// Number of currently tracked processes.
+    #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
     pub async fn count(&self) -> usize {
-        self.handles.lock().await.len()
+        self.handles.lock().len()
     }
 
     /// List all tracked process IDs and their labels.
+    #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
     pub async fn list(&self) -> Vec<(ProcessId, String)> {
         self.handles
             .lock()
-            .await
             .iter()
             .map(|(id, h)| (*id, h.label.clone()))
             .collect()
@@ -497,10 +598,10 @@ impl ProcessSupervisor {
     /// List all tracked OS process IDs and their labels.
     ///
     /// Entries without an assigned OS PID are skipped.
+    #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
     pub async fn active_pids(&self) -> Vec<(u32, String)> {
         self.handles
             .lock()
-            .await
             .values()
             .filter_map(|handle| handle.os_pid.map(|pid| (pid, handle.label.clone())))
             .collect()
@@ -508,15 +609,12 @@ impl ProcessSupervisor {
 
     /// Restart one process according to the configured strategy.
     pub async fn restart_process(&self, id: ProcessId) -> Option<ProcessId> {
-        let mut handle = self.handles.lock().await.remove(&id)?;
+        let mut handle = self.handles.lock().remove(&id)?;
         let label = handle.label.clone();
         let strategy = self.strategy.clone();
         let fallback_tier = strategy.fallback_tier().unwrap_or("standard");
 
-        if !self
-            .allow_restart(&label, strategy.max_restarts(), strategy.within_ms())
-            .await
-        {
+        if !self.allow_restart(&label, strategy.max_restarts(), strategy.within_ms()) {
             warn!(
                 id = %id,
                 label = %label,
@@ -543,7 +641,7 @@ impl ProcessSupervisor {
 
     /// Restart the failed process and any peers selected by the strategy.
     pub async fn restart_wave(&self, failed: ProcessId) -> Vec<ProcessId> {
-        let ids = self.recovery_targets(failed).await;
+        let ids = self.recovery_targets(failed);
         let mut restarted = Vec::new();
         for id in ids {
             if let Some(new_id) = self.restart_process(id).await {
@@ -553,8 +651,8 @@ impl ProcessSupervisor {
         restarted
     }
 
-    async fn recovery_targets(&self, failed: ProcessId) -> Vec<ProcessId> {
-        let mut ids: Vec<ProcessId> = self.handles.lock().await.keys().copied().collect();
+    fn recovery_targets(&self, failed: ProcessId) -> Vec<ProcessId> {
+        let mut ids: Vec<ProcessId> = self.handles.lock().keys().copied().collect();
         ids.sort_by_key(|id| id.0);
 
         match self.strategy {
@@ -568,12 +666,12 @@ impl ProcessSupervisor {
         }
     }
 
-    async fn allow_restart(&self, label: &str, max_restarts: u32, within_ms: u64) -> bool {
+    fn allow_restart(&self, label: &str, max_restarts: u32, within_ms: u64) -> bool {
         if max_restarts == 0 {
             return false;
         }
 
-        let mut history = self.restart_history.lock().await;
+        let mut history = self.restart_history.lock();
         let entries = history.entry(label.to_string()).or_default();
         let now = Instant::now();
         if within_ms > 0 {
@@ -581,12 +679,38 @@ impl ProcessSupervisor {
             entries.retain(|ts| now.duration_since(*ts) <= window);
         }
 
-        if entries.len() as u32 >= max_restarts {
+        let max_restarts = usize::try_from(max_restarts).unwrap_or(usize::MAX);
+        if entries.len() >= max_restarts {
+            drop(history);
             return false;
         }
 
         entries.push(now);
+        drop(history);
         true
+    }
+}
+
+impl Drop for ProcessSupervisor {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+
+        let children = {
+            let mut handles = self.handles.lock();
+            if handles.is_empty() {
+                return;
+            }
+
+            warn!(
+                count = handles.len(),
+                "ProcessSupervisor dropped with live children; force-killing"
+            );
+            std::mem::take(&mut *handles)
+        };
+
+        for (_, mut handle) in children {
+            handle.force_kill_sync();
+        }
     }
 }
 
