@@ -562,9 +562,7 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
             Some(TuiAction::ApproveAll)
         }
         // Ctrl-t: toggle the agent-topology panel from anywhere.
-        KeyCode::Char('t') if is_ctrl_t(key) => {
-            Some(TuiAction::ToggleAgentTopology)
-        }
+        KeyCode::Char('t') if is_ctrl_t(key) => Some(TuiAction::ToggleAgentTopology),
         // Ctrl-x: force advance (confirm)
         KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ForceAdvance)

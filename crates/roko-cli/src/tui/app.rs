@@ -2500,8 +2500,7 @@ impl App {
             .spawn(move || {
                 let result = fetch_agent_topology(&base_url);
                 let _ = tx.send(result);
-            })
-        {
+            }) {
             Ok(_) => {}
             Err(err) => {
                 tracing::warn!(

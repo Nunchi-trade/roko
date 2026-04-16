@@ -80,6 +80,11 @@ pub enum DashboardEvent {
         /// Current concluded winners sorted for deterministic rendering.
         winners: Vec<ExperimentWinnerSummary>,
     },
+    /// Recent c-factor trend buckets were refreshed from the learning store.
+    CFactorTrendUpdated {
+        /// Current rolling c-factor buckets for the Learning tab.
+        buckets: Vec<CFactorBucket>,
+    },
     /// An error occurred.
     Error { message: String },
 }
@@ -338,6 +343,38 @@ impl Default for EfficiencyBucket {
     }
 }
 
+/// One bucket of aggregated c-factor telemetry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CFactorBucket {
+    /// Bucket start timestamp in UTC.
+    #[serde(default = "default_diagnosis_timestamp")]
+    pub start: DateTime<Utc>,
+    /// Number of c-factor snapshots recorded in the bucket.
+    #[serde(default)]
+    pub samples: u32,
+    /// Average overall c-factor score across snapshots in the bucket.
+    #[serde(default)]
+    pub avg: f64,
+    /// Median overall c-factor score across snapshots in the bucket.
+    #[serde(default)]
+    pub p50: f64,
+    /// p95 overall c-factor score across snapshots in the bucket.
+    #[serde(default)]
+    pub p95: f64,
+}
+
+impl Default for CFactorBucket {
+    fn default() -> Self {
+        Self {
+            start: default_diagnosis_timestamp(),
+            samples: 0,
+            avg: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+        }
+    }
+}
+
 /// The full materialized dashboard state.
 ///
 /// Updated atomically by [`StateHub`](super::state_hub::StateHub) via
@@ -365,6 +402,9 @@ pub struct DashboardSnapshot {
     /// Recent efficiency trend buckets for dashboard charts.
     #[serde(default)]
     pub efficiency_trend: Vec<EfficiencyBucket>,
+    /// Recent c-factor trend buckets for dashboard charts.
+    #[serde(default)]
+    pub cfactor_trend: Vec<CFactorBucket>,
     /// Recent errors (ring of last 64).
     pub errors: Vec<ErrorEntry>,
     /// Overall counts.
@@ -556,6 +596,9 @@ impl DashboardSnapshot {
             DashboardEvent::ExperimentWinnersUpdated { winners } => {
                 self.experiment_winners = winners.clone();
             }
+            DashboardEvent::CFactorTrendUpdated { buckets } => {
+                self.cfactor_trend = buckets.clone();
+            }
             DashboardEvent::Error { message } => {
                 self.stats.errors_total += 1;
                 if self.errors.len() >= MAX_ERRORS {
@@ -585,6 +628,7 @@ impl DashboardSnapshot {
         let signal_gates = read_signal_gates(&roko_dir.join("signals.jsonl"))?;
         let event_entries = read_event_entries(&state_dir.join("events.json"))?;
         let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
+        let cfactor_trend = read_cfactor_trend(&learn_dir.join("c-factor.jsonl"))?;
 
         Ok(snapshot_from_workdir_parts(
             &state,
@@ -592,6 +636,7 @@ impl DashboardSnapshot {
             &signal_gates,
             &event_entries,
             &experiment_winners,
+            &cfactor_trend,
         ))
     }
 }
@@ -631,9 +676,11 @@ fn snapshot_from_workdir_parts(
     signal_gates: &[GateVerdict],
     event_entries: &[serde_json::Value],
     experiment_winners: &[ExperimentWinnerSummary],
+    cfactor_trend: &[CFactorBucket],
 ) -> DashboardSnapshot {
     let mut snapshot = DashboardSnapshot {
         experiment_winners: experiment_winners.to_vec(),
+        cfactor_trend: cfactor_trend.to_vec(),
         ..DashboardSnapshot::default()
     };
     let Some(plan_states) = state
@@ -740,9 +787,114 @@ fn read_experiment_winners(path: &Path) -> Result<Vec<ExperimentWinnerSummary>, 
     Ok(experiment_winner_summaries(&store))
 }
 
-fn experiment_winner_summaries(
-    store: &PersistedExperimentStore,
-) -> Vec<ExperimentWinnerSummary> {
+fn read_cfactor_trend(path: &Path) -> Result<Vec<CFactorBucket>, io::Error> {
+    const CFACTOR_TREND_BUCKETS: usize = 24;
+    const CFACTOR_TREND_BUCKET_MS: i64 = 60 * 60 * 1000;
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    let now = Utc::now();
+    let oldest_start_ms = current_bucket_start_ms(now.timestamp_millis(), CFACTOR_TREND_BUCKET_MS)
+        - i64::try_from(CFACTOR_TREND_BUCKETS.saturating_sub(1)).unwrap_or(0)
+            * CFACTOR_TREND_BUCKET_MS;
+    let mut buckets = (0..CFACTOR_TREND_BUCKETS)
+        .map(|idx| CFactorBucket {
+            start: timestamp_from_millis(
+                oldest_start_ms + i64::try_from(idx).unwrap_or(0) * CFACTOR_TREND_BUCKET_MS,
+            ),
+            ..CFactorBucket::default()
+        })
+        .collect::<Vec<_>>();
+    let mut bucket_values = vec![Vec::new(); CFACTOR_TREND_BUCKETS];
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(snapshot) = serde_json::from_str::<PersistedCFactorSnapshot>(trimmed) else {
+            continue;
+        };
+        let bucket_start_ms = current_bucket_start_ms(
+            snapshot.computed_at.timestamp_millis(),
+            CFACTOR_TREND_BUCKET_MS,
+        );
+        if bucket_start_ms < oldest_start_ms {
+            continue;
+        }
+        let idx = usize::try_from((bucket_start_ms - oldest_start_ms) / CFACTOR_TREND_BUCKET_MS)
+            .unwrap_or(usize::MAX);
+        let Some(values) = bucket_values.get_mut(idx) else {
+            continue;
+        };
+        values.push(snapshot.overall);
+    }
+
+    for (bucket, values) in buckets.iter_mut().zip(bucket_values.iter_mut()) {
+        finalize_cfactor_bucket(bucket, values);
+    }
+
+    Ok(buckets)
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedCFactorSnapshot {
+    computed_at: DateTime<Utc>,
+    overall: f64,
+}
+
+fn finalize_cfactor_bucket(bucket: &mut CFactorBucket, values: &mut [f64]) {
+    if values.is_empty() {
+        return;
+    }
+
+    values.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+    let sample_count = values.len();
+    let sum = values.iter().sum::<f64>();
+
+    bucket.samples = u32::try_from(sample_count).unwrap_or(u32::MAX);
+    bucket.avg = sum / sample_count as f64;
+    bucket.p50 = quantile(values, 0.50);
+    bucket.p95 = quantile(values, 0.95);
+}
+
+fn quantile(sorted_values: &[f64], quantile: f64) -> f64 {
+    if sorted_values.is_empty() {
+        return 0.0;
+    }
+
+    let clamped = quantile.clamp(0.0, 1.0);
+    let last_idx = sorted_values.len().saturating_sub(1);
+    let position = clamped * last_idx as f64;
+    let lower_idx = position.floor() as usize;
+    let upper_idx = position.ceil() as usize;
+
+    if lower_idx == upper_idx {
+        return sorted_values[lower_idx];
+    }
+
+    let lower = sorted_values[lower_idx];
+    let upper = sorted_values[upper_idx];
+    let weight = position - lower_idx as f64;
+    lower + (upper - lower) * weight
+}
+
+fn current_bucket_start_ms(timestamp_ms: i64, bucket_ms: i64) -> i64 {
+    timestamp_ms.div_euclid(bucket_ms) * bucket_ms
+}
+
+fn timestamp_from_millis(timestamp_ms: i64) -> DateTime<Utc> {
+    Utc.timestamp_millis_opt(timestamp_ms)
+        .single()
+        .unwrap_or_else(default_diagnosis_timestamp)
+}
+
+fn experiment_winner_summaries(store: &PersistedExperimentStore) -> Vec<ExperimentWinnerSummary> {
     let mut winners = store
         .experiments
         .values()
@@ -760,7 +912,10 @@ fn persisted_experiment_winner_summary(
     }
 
     let winner_id = experiment.winner_id.as_deref()?;
-    let winner_variant = experiment.variants.iter().find(|variant| variant.id == winner_id)?;
+    let winner_variant = experiment
+        .variants
+        .iter()
+        .find(|variant| variant.id == winner_id)?;
     let winner_stats = experiment.stats.get(winner_id)?;
     let confidence = persisted_winner_confidence(experiment, winner_id)?;
     if confidence < 0.95 {
@@ -790,9 +945,7 @@ fn winner_variant_label(variant: &PersistedPromptVariant) -> String {
         .slug
         .clone()
         .filter(|slug| !slug.trim().is_empty())
-        .or_else(|| {
-            (!variant.name.trim().is_empty()).then(|| variant.name.clone())
-        })
+        .or_else(|| (!variant.name.trim().is_empty()).then(|| variant.name.clone()))
         .unwrap_or_else(|| variant.id.clone())
 }
 

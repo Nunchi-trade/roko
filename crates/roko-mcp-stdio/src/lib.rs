@@ -24,7 +24,7 @@ pub struct JsonRpcRequest {
 }
 
 /// A JSON-RPC 2.0 error object.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JsonRpcError {
     /// Numeric error code.
     pub code: i64,
@@ -190,7 +190,7 @@ where
     Ok(())
 }
 
-fn write_response<W: Write>(writer: &mut W, response: JsonRpcResponse) -> anyhow::Result<()> {
+fn write_response<W: Write>(writer: &mut W, response: &JsonRpcResponse) -> anyhow::Result<()> {
     serde_json::to_writer(&mut *writer, &response).context("serialize JSON-RPC response")?;
     writer.write_all(b"\n").context("write JSON-RPC newline")?;
     writer.flush().context("flush JSON-RPC response")?;

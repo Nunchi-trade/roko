@@ -1,7 +1,8 @@
-//! Efficiency trend aggregation helpers for JSONL telemetry.
+//! Efficiency and C-Factor trend aggregation helpers for JSONL telemetry.
 //!
-//! This module folds `.roko/learn/efficiency.jsonl` into fixed-width time
-//! buckets suitable for dashboards and lightweight sparklines.
+//! This module folds `.roko/learn/efficiency.jsonl` and
+//! `.roko/learn/c-factor.jsonl` into fixed-width time buckets suitable for
+//! dashboards and lightweight sparklines.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Seek, SeekFrom};
@@ -156,6 +157,33 @@ impl Default for EfficiencyBucket {
     }
 }
 
+/// One bucket of aggregated c-factor telemetry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CFactorBucket {
+    /// Bucket start timestamp in UTC.
+    pub start: DateTime<Utc>,
+    /// Number of C-Factor snapshots recorded in the bucket.
+    pub samples: u32,
+    /// Average overall C-Factor score across snapshots in the bucket.
+    pub avg: f64,
+    /// Median overall C-Factor score across snapshots in the bucket.
+    pub p50: f64,
+    /// p95 overall C-Factor score across snapshots in the bucket.
+    pub p95: f64,
+}
+
+impl Default for CFactorBucket {
+    fn default() -> Self {
+        Self {
+            start: default_bucket_start(),
+            samples: 0,
+            avg: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+        }
+    }
+}
+
 /// Aggregate the full efficiency JSONL file into a fixed-width time series.
 ///
 /// Missing files return an empty-count series of `n_buckets` buckets. Malformed
@@ -166,6 +194,18 @@ pub fn efficiency_trend(
     n_buckets: usize,
 ) -> io::Result<Vec<EfficiencyBucket>> {
     efficiency_trend_at(path, bucket, n_buckets, Utc::now())
+}
+
+/// Aggregate the full c-factor JSONL file into a fixed-width time series.
+///
+/// Missing files return an empty-count series of `n_buckets` buckets.
+/// Malformed lines are skipped.
+pub fn cfactor_trend(
+    path: &Path,
+    bucket: Duration,
+    n_buckets: usize,
+) -> io::Result<Vec<CFactorBucket>> {
+    cfactor_trend_at(path, bucket, n_buckets, Utc::now())
 }
 
 /// Incrementally update a time series using only newly appended JSONL lines.
@@ -238,6 +278,62 @@ fn efficiency_trend_at(
     Ok(buckets)
 }
 
+fn cfactor_trend_at(
+    path: &Path,
+    bucket: Duration,
+    n_buckets: usize,
+    now: DateTime<Utc>,
+) -> io::Result<Vec<CFactorBucket>> {
+    let bucket_ms = validate_bucket(bucket)?;
+    let normalized = normalize_bucket_count(n_buckets);
+    if normalized == 0 {
+        return Ok(Vec::new());
+    }
+
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Ok(empty_cfactor_buckets(now, bucket_ms, normalized));
+        }
+        Err(err) => return Err(err),
+    };
+
+    let oldest_start_ms = oldest_bucket_start_ms(now, bucket_ms, normalized);
+    let mut buckets = empty_cfactor_buckets(now, bucket_ms, normalized);
+    let mut bucket_samples = vec![Vec::new(); normalized];
+    let mut reader = BufReader::new(file);
+    let mut buf = String::new();
+
+    loop {
+        buf.clear();
+        let read = reader.read_line(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+
+        let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(snapshot) = serde_json::from_str::<ParsedCFactorSnapshot>(trimmed) else {
+            continue;
+        };
+        apply_cfactor_snapshot_to_buckets(
+            &mut bucket_samples,
+            &snapshot,
+            oldest_start_ms,
+            bucket_ms,
+        );
+    }
+
+    for (bucket, values) in buckets.iter_mut().zip(bucket_samples.iter_mut()) {
+        finalize_cfactor_bucket(bucket, values);
+    }
+
+    Ok(buckets)
+}
+
 #[derive(Debug, Clone)]
 struct ParsedEfficiencyEvent {
     timestamp: DateTime<Utc>,
@@ -301,12 +397,91 @@ fn apply_event_to_buckets(
     bucket.latency_ms_avg = (total_latency_before + event.latency_ms as f64) / turns_after as f64;
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ParsedCFactorSnapshot {
+    computed_at: DateTime<Utc>,
+    overall: f64,
+}
+
+fn apply_cfactor_snapshot_to_buckets(
+    buckets: &mut [Vec<f64>],
+    snapshot: &ParsedCFactorSnapshot,
+    oldest_start_ms: i64,
+    bucket_ms: i64,
+) {
+    let snapshot_bucket_ms =
+        floor_bucket_start_ms(snapshot.computed_at.timestamp_millis(), bucket_ms);
+    if snapshot_bucket_ms < oldest_start_ms {
+        return;
+    }
+
+    let idx =
+        usize::try_from((snapshot_bucket_ms - oldest_start_ms) / bucket_ms).unwrap_or(usize::MAX);
+    let Some(bucket) = buckets.get_mut(idx) else {
+        return;
+    };
+
+    bucket.push(snapshot.overall);
+}
+
+fn finalize_cfactor_bucket(bucket: &mut CFactorBucket, values: &mut [f64]) {
+    if values.is_empty() {
+        return;
+    }
+
+    values.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+    let sample_count = values.len();
+    let sum = values.iter().sum::<f64>();
+
+    bucket.samples = u32::try_from(sample_count).unwrap_or(u32::MAX);
+    bucket.avg = sum / sample_count as f64;
+    bucket.p50 = quantile(values, 0.50);
+    bucket.p95 = quantile(values, 0.95);
+}
+
+fn quantile(sorted_values: &[f64], quantile: f64) -> f64 {
+    if sorted_values.is_empty() {
+        return 0.0;
+    }
+
+    let clamped = quantile.clamp(0.0, 1.0);
+    let last_idx = sorted_values.len().saturating_sub(1);
+    let position = clamped * last_idx as f64;
+    let lower_idx = position.floor() as usize;
+    let upper_idx = position.ceil() as usize;
+
+    if lower_idx == upper_idx {
+        return sorted_values[lower_idx];
+    }
+
+    let lower = sorted_values[lower_idx];
+    let upper = sorted_values[upper_idx];
+    let weight = position - lower_idx as f64;
+    lower + (upper - lower) * weight
+}
+
 fn overlay_existing_buckets(target: &mut [EfficiencyBucket], existing: &[EfficiencyBucket]) {
     for bucket in existing {
         if let Some(target_bucket) = target.iter_mut().find(|item| item.start == bucket.start) {
             *target_bucket = bucket.clone();
         }
     }
+}
+
+fn empty_cfactor_buckets(
+    now: DateTime<Utc>,
+    bucket_ms: i64,
+    n_buckets: usize,
+) -> Vec<CFactorBucket> {
+    let oldest_start_ms = oldest_bucket_start_ms(now, bucket_ms, n_buckets);
+    (0..n_buckets)
+        .map(|idx| CFactorBucket {
+            start: timestamp_from_millis(
+                oldest_start_ms + i64::try_from(idx).unwrap_or(0) * bucket_ms,
+            ),
+            ..CFactorBucket::default()
+        })
+        .collect()
 }
 
 fn empty_buckets(now: DateTime<Utc>, bucket_ms: i64, n_buckets: usize) -> Vec<EfficiencyBucket> {
@@ -425,6 +600,23 @@ mod tests {
             strategy_attempted: String::new(),
             timestamp: timestamp.to_rfc3339(),
         }
+    }
+
+    fn append_cfactor_snapshot(path: &Path, timestamp: DateTime<Utc>, overall: f64) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open file for append");
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "computed_at": timestamp.to_rfc3339(),
+                "overall": overall,
+            })
+        )
+        .expect("write c-factor snapshot");
     }
 
     fn append_event(path: &Path, event: &AgentEfficiencyEvent) {
@@ -562,5 +754,109 @@ mod tests {
         );
         assert_eq!(cursor.offset(), 0);
         assert_eq!(cursor.last_line_number(), 0);
+    }
+
+    #[test]
+    fn cfactor_trend_groups_snapshots_and_averages_overall() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".roko/learn/c-factor.jsonl");
+        fs::create_dir_all(path.parent().expect("parent dir")).expect("create dirs");
+
+        let start = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .expect("parse start")
+            .with_timezone(&Utc);
+        append_cfactor_snapshot(&path, start + Duration::minutes(10), 0.20);
+        append_cfactor_snapshot(&path, start + Duration::minutes(40), 0.60);
+        append_cfactor_snapshot(
+            &path,
+            start + Duration::hours(1) + Duration::minutes(5),
+            0.90,
+        );
+        append_cfactor_snapshot(
+            &path,
+            start + Duration::hours(1) + Duration::minutes(35),
+            0.30,
+        );
+
+        let buckets = cfactor_trend_at(
+            &path,
+            Duration::hours(1),
+            4,
+            start + Duration::hours(3) + Duration::minutes(30),
+        )
+        .expect("trend");
+
+        assert_eq!(buckets.len(), 4);
+        assert_eq!(buckets[0].samples, 2);
+        assert!((buckets[0].avg - 0.40).abs() < f64::EPSILON);
+        assert!((buckets[0].p50 - 0.40).abs() < f64::EPSILON);
+        assert!((buckets[0].p95 - 0.58).abs() < f64::EPSILON);
+        assert_eq!(buckets[1].samples, 2);
+        assert!((buckets[1].avg - 0.60).abs() < f64::EPSILON);
+        assert!((buckets[1].p50 - 0.60).abs() < f64::EPSILON);
+        assert!((buckets[1].p95 - 0.87).abs() < 1e-9);
+        assert_eq!(buckets[2].samples, 0);
+        assert_eq!(buckets[3].samples, 0);
+    }
+
+    #[test]
+    fn cfactor_trend_skips_malformed_lines() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".roko/learn/c-factor.jsonl");
+        fs::create_dir_all(path.parent().expect("parent dir")).expect("create dirs");
+
+        let start = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .expect("parse start")
+            .with_timezone(&Utc);
+        append_cfactor_snapshot(&path, start + Duration::minutes(5), 0.25);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open snapshot file")
+            .write_all(b"not-json\n")
+            .expect("write malformed line");
+        append_cfactor_snapshot(
+            &path,
+            start + Duration::hours(1) + Duration::minutes(5),
+            0.75,
+        );
+
+        let buckets = cfactor_trend_at(
+            &path,
+            Duration::hours(1),
+            4,
+            start + Duration::hours(3) + Duration::minutes(30),
+        )
+        .expect("trend");
+
+        assert_eq!(buckets.iter().map(|bucket| bucket.samples).sum::<u32>(), 2);
+        assert!((buckets[0].avg - 0.25).abs() < f64::EPSILON);
+        assert!((buckets[1].avg - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cfactor_trend_returns_empty_buckets_for_missing_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(".roko/learn/c-factor.jsonl");
+
+        let buckets = cfactor_trend(&path, Duration::hours(1), 3).expect("trend");
+
+        assert_eq!(buckets.len(), 3);
+        assert!(buckets.iter().all(|bucket| bucket.samples == 0));
+        assert!(
+            buckets
+                .iter()
+                .all(|bucket| (bucket.avg - 0.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            buckets
+                .iter()
+                .all(|bucket| (bucket.p50 - 0.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            buckets
+                .iter()
+                .all(|bucket| (bucket.p95 - 0.0).abs() < f64::EPSILON)
+        );
     }
 }

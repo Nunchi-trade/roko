@@ -3673,6 +3673,7 @@ tier = "focused"
             experiment_winners: Vec::new(),
             agent_topology: roko_core::AgentTopology::default(),
             efficiency_trend: Vec::new(),
+            cfactor_trend: Vec::new(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),

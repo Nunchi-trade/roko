@@ -324,7 +324,10 @@ impl PromptExperiment {
     pub fn winner_summary(&self) -> Option<ExperimentWinnerSummary> {
         let winner = self.concluded_winner()?;
         let winner_id = self.winner_id.as_deref()?;
-        let winner_variant = self.variants.iter().find(|variant| variant.id == winner_id)?;
+        let winner_variant = self
+            .variants
+            .iter()
+            .find(|variant| variant.id == winner_id)?;
         let winner_stats = self.stats.get(winner_id)?;
         let (ci_lower, ci_upper) = winner_stats.confidence_interval_95();
 

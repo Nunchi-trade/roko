@@ -601,15 +601,11 @@ pub fn register_standard_metrics(registry: &MetricRegistry) {
     for descriptor in STANDARD_METRICS {
         match descriptor.kind {
             MetricKind::Counter => {
-                let _ = registry.register_counter(
-                    descriptor.name,
-                    descriptor.help,
-                    LabelSet::new(),
-                );
+                let _ =
+                    registry.register_counter(descriptor.name, descriptor.help, LabelSet::new());
             }
             MetricKind::Gauge => {
-                let _ =
-                    registry.register_gauge(descriptor.name, descriptor.help, LabelSet::new());
+                let _ = registry.register_gauge(descriptor.name, descriptor.help, LabelSet::new());
             }
             MetricKind::Histogram => {
                 let _ = registry.register_histogram(

@@ -811,8 +811,16 @@ fn build_agent_topology_lines(data: &DashboardData, tui_state: &TuiState) -> Vec
     let mut lines = vec!["└── pool: default".to_string()];
     for (idx, node) in nodes.iter().enumerate() {
         let is_last_node = idx + 1 == nodes.len();
-        let node_branch = if is_last_node { "    └──" } else { "    ├──" };
-        let child_prefix = if is_last_node { "        " } else { "    │   " };
+        let node_branch = if is_last_node {
+            "    └──"
+        } else {
+            "    ├──"
+        };
+        let child_prefix = if is_last_node {
+            "        "
+        } else {
+            "    │   "
+        };
         let status = tui_state
             .agents
             .iter()

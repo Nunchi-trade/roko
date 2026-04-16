@@ -25,7 +25,7 @@ use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::ExperimentWinnerSummary;
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
-use roko_learn::aggregate::{EfficiencyBucket, efficiency_trend};
+use roko_learn::aggregate::{CFactorBucket, EfficiencyBucket, cfactor_trend, efficiency_trend};
 use roko_learn::cascade_router::{CascadeStage, StageTransition};
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
@@ -335,6 +335,8 @@ pub struct DashboardData {
     pub efficiency_events: Vec<AgentEfficiencyEvent>,
     /// Hourly efficiency trend over the last 24 hours.
     pub efficiency_trend: Vec<EfficiencyBucket>,
+    /// Hourly c-factor trend over the last 24 hours.
+    pub cfactor_trend: Vec<CFactorBucket>,
     /// Last observed efficiency file metadata.
     efficiency_stamp: FileStamp,
     /// Cascade router state from `.roko/learn/cascade-router.json`.
@@ -441,6 +443,7 @@ impl DashboardData {
         let efficiency_events = read_efficiency_events_sync(&efficiency_path);
         let efficiency = load_efficiency_summary(&efficiency_path);
         let efficiency_trend = load_efficiency_trend(&efficiency_path);
+        let cfactor_trend = load_cfactor_trend(&cfactor_path);
         let cascade_router =
             load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
         let cascade_router_stamp = file_stamp(&cascade_router_path);
@@ -507,6 +510,7 @@ impl DashboardData {
             efficiency,
             efficiency_events,
             efficiency_trend,
+            cfactor_trend,
             efficiency_stamp,
             cascade_router,
             experiment_store,
@@ -628,6 +632,7 @@ impl DashboardData {
         if stamp != self.cfactor_stamp {
             self.cfactor_stamp = stamp;
             self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+            self.cfactor_trend = load_cfactor_trend(&cfactor_path);
             generation_changed = true;
         }
 
@@ -2569,6 +2574,10 @@ fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
 
 fn load_efficiency_trend(path: &Path) -> Vec<EfficiencyBucket> {
     efficiency_trend(path, Duration::hours(1), 24).unwrap_or_default()
+}
+
+fn load_cfactor_trend(path: &Path) -> Vec<CFactorBucket> {
+    cfactor_trend(path, Duration::hours(1), 24).unwrap_or_default()
 }
 
 fn load_recent_signals(path: &Path, limit: usize) -> Vec<SignalSummary> {

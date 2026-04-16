@@ -7,11 +7,11 @@
 //!
 //! Delegates to compiled widgets for all panels.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Wrap};
-use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -1053,7 +1053,7 @@ fn render_sub_learning(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.width < 12 || inner.height < 8 {
+    if inner.width < 12 || inner.height < 12 {
         frame.render_widget(
             Paragraph::new(" learning trend data needs more space").style(theme.muted()),
             inner,
@@ -1063,49 +1063,57 @@ fn render_sub_learning(
 
     let trends = build_learning_trends(data);
     let sections =
-        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(inner);
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(inner);
 
-    if trends.has_data {
-        let trend_sections = Layout::vertical([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(sections[0]);
+    let trend_sections = Layout::vertical([
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+    ])
+    .split(sections[0]);
 
-        render_learning_sparkline(
-            frame,
-            trend_sections[0],
-            " Tokens / hr (tok) ",
-            &trends.tokens_per_hour,
-            theme.info(),
-            theme,
-            focused,
-        );
-        render_learning_sparkline(
-            frame,
-            trend_sections[1],
-            " Latency / hr (ms) ",
-            &trends.latency_per_hour_ms,
-            theme.warning(),
-            theme,
-            focused,
-        );
-        render_learning_sparkline(
-            frame,
-            trend_sections[2],
-            " Cost / hr (c) ",
-            &trends.cost_per_hour_cents,
-            theme.danger(),
-            theme,
-            focused,
-        );
-    } else {
-        frame.render_widget(
-            Paragraph::new(" waiting for efficiency events").style(theme.muted()),
-            sections[0],
-        );
-    }
+    let c_factor_title = cfactor_trend_title(&trends, data);
+    let c_factor_style = trends
+        .cfactor_latest
+        .map(|score| rate_style(score, theme))
+        .unwrap_or_else(|| theme.muted());
+    render_learning_sparkline(
+        frame,
+        trend_sections[0],
+        &c_factor_title,
+        &trends.cfactor_overall,
+        c_factor_style,
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        trend_sections[1],
+        " Tokens / hr (tok) ",
+        &trends.tokens_per_hour,
+        theme.info(),
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        trend_sections[2],
+        " Latency / hr (ms) ",
+        &trends.latency_per_hour_ms,
+        theme.warning(),
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        trend_sections[3],
+        " Cost / hr (c) ",
+        &trends.cost_per_hour_cents,
+        theme.danger(),
+        theme,
+        focused,
+    );
 
     render_concluded_experiments_panel(frame, sections[1], data, tui_state, focused, theme);
 }
@@ -1134,9 +1142,20 @@ fn render_learning_sparkline(
         .title(Span::styled(title.to_string(), title_style))
         .border_style(border)
         .style(Theme::block_style());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if series.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" waiting for trend data").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
     let max = series.iter().copied().max().unwrap_or(0).max(1);
     let sparkline = Sparkline::default().data(series).max(max).style(color);
-    frame.render_widget(sparkline.block(block), area);
+    frame.render_widget(sparkline, inner);
 }
 
 fn render_concluded_experiments_panel(
@@ -1246,17 +1265,17 @@ struct ConcludedExperimentRow {
     ci_upper: f64,
 }
 
-fn concluded_experiment_rows(data: &DashboardData, tui_state: &TuiState) -> Vec<ConcludedExperimentRow> {
+fn concluded_experiment_rows(
+    data: &DashboardData,
+    tui_state: &TuiState,
+) -> Vec<ConcludedExperimentRow> {
     let winners = if tui_state.experiment_winners.is_empty() {
         &data.experiment_winners
     } else {
         &tui_state.experiment_winners
     };
 
-    winners
-        .into_iter()
-        .map(concluded_experiment_row)
-        .collect()
+    winners.into_iter().map(concluded_experiment_row).collect()
 }
 
 fn concluded_experiment_row(summary: &ExperimentWinnerSummary) -> ConcludedExperimentRow {
@@ -1328,16 +1347,28 @@ fn rate_style(rate: f64, theme: &Theme) -> Style {
 
 #[derive(Debug, Clone, Default)]
 struct LearningTrends {
+    cfactor_overall: Vec<u64>,
     tokens_per_hour: Vec<u64>,
     latency_per_hour_ms: Vec<u64>,
     cost_per_hour_cents: Vec<u64>,
-    has_data: bool,
+    cfactor_latest: Option<f64>,
 }
 
 fn build_learning_trends(data: &DashboardData) -> LearningTrends {
-    if data.efficiency_trend.is_empty() {
-        return LearningTrends::default();
-    }
+    let cfactor_latest = data
+        .cfactor_trend
+        .iter()
+        .rev()
+        .find(|bucket| bucket.samples > 0)
+        .map(|bucket| bucket.avg)
+        .or_else(|| data.cfactor.as_ref().map(|cfactor| cfactor.overall));
+
+    let cfactor_overall = data
+        .cfactor_trend
+        .iter()
+        .map(|bucket| (bucket.avg.clamp(0.0, 1.0) * 100.0).round() as u64)
+        .collect();
+
     let tokens_per_hour = data
         .efficiency_trend
         .iter()
@@ -1353,13 +1384,24 @@ fn build_learning_trends(data: &DashboardData) -> LearningTrends {
         .iter()
         .map(|bucket| bucket.cost_usd_cents)
         .collect();
-    let has_data = data.efficiency_trend.iter().any(|bucket| bucket.turns > 0);
 
     LearningTrends {
+        cfactor_overall,
         tokens_per_hour,
         latency_per_hour_ms,
         cost_per_hour_cents,
-        has_data,
+        cfactor_latest,
+    }
+}
+
+fn cfactor_trend_title(trends: &LearningTrends, data: &DashboardData) -> String {
+    let latest = trends
+        .cfactor_latest
+        .or_else(|| data.cfactor.as_ref().map(|cfactor| cfactor.overall));
+
+    match latest {
+        Some(score) => format!(" C-Factor / hr (%) {:>3.0} ", score * 100.0),
+        None => String::from(" C-Factor / hr (%) "),
     }
 }
 
@@ -1656,8 +1698,8 @@ fn diagnosis_message_width(width: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tempfile::tempdir;
 
     use crate::tui::pages::PageId;
