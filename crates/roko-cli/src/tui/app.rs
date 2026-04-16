@@ -830,21 +830,27 @@ impl App {
                 }
             }
             TuiAction::TaskPickerUp => {
-                if let Some(ModalState::TaskPicker { selected_index, .. }) =
-                    self.active_modal.as_mut()
+                if let Some(ModalState::TaskPicker {
+                    selected_index,
+                    scroll_offset,
+                    ..
+                }) = self.active_modal.as_mut()
                 {
                     *selected_index = selected_index.saturating_sub(1);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
                 }
             }
             TuiAction::TaskPickerDown => {
                 if let Some(ModalState::TaskPicker {
                     selected_index,
+                    scroll_offset,
                     tasks,
                     ..
                 }) = self.active_modal.as_mut()
                 {
                     let max = tasks.len().saturating_sub(1);
                     *selected_index = selected_index.saturating_add(1).min(max);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
                 }
             }
             TuiAction::ScrollFocusedUp => {
@@ -957,6 +963,56 @@ impl App {
                         self.tui_state.plan_detail_scroll.saturating_add(1);
                 }
             }
+            TuiAction::ModalScrollUp => {
+                if let Some(modal) = self.active_modal.as_mut() {
+                    match modal {
+                        ModalState::WaveOverview { scroll_offset, .. }
+                        | ModalState::AgentPool { scroll_offset, .. } => {
+                            *scroll_offset = scroll_offset.saturating_sub(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TuiAction::ModalScrollDown => {
+                if let Some(modal) = self.active_modal.as_mut() {
+                    match modal {
+                        ModalState::WaveOverview { scroll_offset, .. }
+                        | ModalState::AgentPool { scroll_offset, .. } => {
+                            *scroll_offset = scroll_offset.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TuiAction::QueueOverviewUp => {
+                if let Some(ModalState::QueueOverview {
+                    selected_index,
+                    scroll_offset,
+                    ..
+                }) = self.active_modal.as_mut()
+                {
+                    *selected_index = selected_index.saturating_sub(1);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
+                }
+            }
+            TuiAction::QueueOverviewDown => {
+                if let Some(ModalState::QueueOverview {
+                    selected_index,
+                    scroll_offset,
+                    milestones,
+                }) = self.active_modal.as_mut()
+                {
+                    let max = milestones.len().saturating_sub(1);
+                    *selected_index = selected_index.saturating_add(1).min(max);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
+                }
+            }
+            TuiAction::CloseModal => {
+                if self.has_modal() {
+                    self.dismiss_all_modals();
+                }
+            }
             TuiAction::ShowHelp => {
                 self.active_modal = if matches!(self.active_modal, Some(ModalState::Help)) {
                     None
@@ -995,23 +1051,25 @@ impl App {
                 }
             }
             TuiAction::ShowPlanDetail => {
-                self.active_modal = self
+                let plan_id = self
                     .tui_state
                     .plans
                     .get(self.tui_state.selected_plan_idx)
-                    .map(|plan| plan.id.clone())
-                    .and_then(|plan_id| {
-                        if matches!(
-                            self.active_modal.as_ref(),
-                            Some(ModalState::PlanDetail {
-                                plan_id: active_plan_id
-                            }) if active_plan_id == &plan_id
-                        ) {
-                            None
-                        } else {
-                            Some(ModalState::PlanDetail { plan_id })
-                        }
-                    });
+                    .map(|plan| plan.id.clone());
+
+                self.active_modal = plan_id.and_then(|plan_id| {
+                    if matches!(
+                        self.active_modal.as_ref(),
+                        Some(ModalState::PlanDetail {
+                            plan_id: active_plan_id
+                        }) if active_plan_id == &plan_id
+                    ) {
+                        None
+                    } else {
+                        self.tui_state.plan_detail_scroll = 0;
+                        Some(ModalState::PlanDetail { plan_id })
+                    }
+                });
             }
             TuiAction::ClosePlanDetail => {
                 if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
@@ -2814,6 +2872,98 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+    }
+
+    #[test]
+    fn show_plan_detail_opens_selected_plan_and_resets_scroll() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plans = vec![super::super::state::PlanEntry {
+            id: "plan-1".to_string(),
+            name: "Plan One".to_string(),
+            ..Default::default()
+        }];
+        app.tui_state.selected_plan_idx = 0;
+        app.tui_state.plan_detail_scroll = 7;
+
+        app.dispatch_action(TuiAction::ShowPlanDetail);
+
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::PlanDetail { ref plan_id }) if plan_id == "plan-1"
+        ));
+        assert_eq!(app.tui_state.plan_detail_scroll, 0);
+
+        app.dispatch_action(TuiAction::ShowPlanDetail);
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn modal_scroll_actions_update_modal_snapshot_only() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plan_scroll_offset = 9;
+        app.active_modal = Some(ModalState::WaveOverview {
+            waves: Vec::new(),
+            scroll_offset: 2,
+        });
+
+        app.dispatch_action(TuiAction::ModalScrollDown);
+
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::WaveOverview { scroll_offset: 3, .. })
+        ));
+        assert_eq!(app.tui_state.plan_scroll_offset, 9);
+
+        app.active_modal = Some(ModalState::AgentPool {
+            agents: Vec::new(),
+            scroll_offset: 4,
+        });
+
+        app.dispatch_action(TuiAction::ModalScrollUp);
+
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::AgentPool { scroll_offset: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn queue_overview_actions_update_modal_state() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plan_scroll_offset = 5;
+        app.active_modal = Some(ModalState::QueueOverview {
+            milestones: vec![
+                Milestone {
+                    name: "Wave 0".to_string(),
+                    tasks: Vec::new(),
+                    completed: 0,
+                    total: 1,
+                },
+                Milestone {
+                    name: "Wave 1".to_string(),
+                    tasks: Vec::new(),
+                    completed: 0,
+                    total: 1,
+                },
+            ],
+            selected_index: 0,
+            scroll_offset: 0,
+        });
+
+        app.dispatch_action(TuiAction::QueueOverviewDown);
+
+        assert!(matches!(
+            app.active_modal,
+            Some(ModalState::QueueOverview {
+                selected_index: 1,
+                scroll_offset: 1,
+                ..
+            })
+        ));
+        assert_eq!(app.tui_state.plan_scroll_offset, 5);
     }
 
     #[test]

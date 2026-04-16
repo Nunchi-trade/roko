@@ -252,6 +252,11 @@ pub enum TuiAction {
     ClosePlanDetail,
     ScrollDetailUp,
     ScrollDetailDown,
+    ModalScrollUp,
+    ModalScrollDown,
+    QueueOverviewUp,
+    QueueOverviewDown,
+    CloseModal,
 
     // -- agent scrolling --
     ScrollAgentUp,
@@ -379,6 +384,9 @@ pub fn handle_key(
     if modals.show_queue_overview {
         return handle_queue_overview_key(key);
     }
+    if modals.show_agent_pool {
+        return handle_agent_pool_key(key);
+    }
 
     // Confirm dialog
     if mode == InputMode::Confirm {
@@ -417,6 +425,7 @@ pub fn handle_key(
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModalVisibility {
     pub show_approval: bool,
+    pub show_agent_pool: bool,
     pub show_task_picker: bool,
     pub show_task_detail: bool,
     pub show_queue_overview: bool,
@@ -433,6 +442,7 @@ impl ModalVisibility {
         match active_modal {
             Some(ModalState::Help) => visibility.show_help = true,
             Some(ModalState::Approval { .. }) => visibility.show_approval = true,
+            Some(ModalState::AgentPool { .. }) => visibility.show_agent_pool = true,
             Some(ModalState::PlanDetail { .. }) => visibility.show_plan_detail = true,
             Some(ModalState::WaveOverview { .. }) => visibility.show_wave_overview = true,
             Some(ModalState::QueueOverview { .. }) => visibility.show_queue_overview = true,
@@ -471,8 +481,8 @@ fn handle_approval_key(key: KeyEvent) -> TuiAction {
 fn handle_wave_overview_key(key: KeyEvent) -> TuiAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('w') => TuiAction::ShowWaveOverview,
-        KeyCode::Up => TuiAction::ScrollFocusedUp,
-        KeyCode::Down => TuiAction::ScrollFocusedDown,
+        KeyCode::Up | KeyCode::Char('k') => TuiAction::ModalScrollUp,
+        KeyCode::Down | KeyCode::Char('j') => TuiAction::ModalScrollDown,
         _ => TuiAction::None,
     }
 }
@@ -509,8 +519,17 @@ fn handle_task_detail_key(key: KeyEvent) -> TuiAction {
 fn handle_queue_overview_key(key: KeyEvent) -> TuiAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => TuiAction::ShowQueueOverview, // toggle off
-        KeyCode::Up | KeyCode::Char('k') => TuiAction::ScrollFocusedUp,
-        KeyCode::Down | KeyCode::Char('j') => TuiAction::ScrollFocusedDown,
+        KeyCode::Up | KeyCode::Char('k') => TuiAction::QueueOverviewUp,
+        KeyCode::Down | KeyCode::Char('j') => TuiAction::QueueOverviewDown,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_agent_pool_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => TuiAction::CloseModal,
+        KeyCode::Up | KeyCode::Char('k') => TuiAction::ModalScrollUp,
+        KeyCode::Down | KeyCode::Char('j') => TuiAction::ModalScrollDown,
         _ => TuiAction::None,
     }
 }
@@ -1031,6 +1050,183 @@ mod tests {
         }));
         assert!(vis.show_task_picker);
         assert!(!vis.show_plan_detail);
+
+        let vis = ModalVisibility::from_active_modal(Some(&ModalState::AgentPool {
+            agents: Vec::new(),
+            scroll_offset: 0,
+        }));
+        assert!(vis.show_agent_pool);
+    }
+
+    #[test]
+    fn modal_open_keys_do_not_fall_through_to_background_navigation() {
+        let mut vis = modals();
+        vis.show_help = true;
+
+        let action = handle_key(
+            key(KeyCode::Tab),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::None);
+
+        let action = handle_key(
+            key(KeyCode::Down),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::None);
+    }
+
+    #[test]
+    fn modal_specific_navigation_stays_local() {
+        let mut vis = modals();
+        vis.show_plan_detail = true;
+
+        let action = handle_key(
+            key(KeyCode::Char('k')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::ScrollDetailUp);
+
+        let action = handle_key(
+            key(KeyCode::Char('j')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::ScrollDetailDown);
+
+        let action = handle_key(
+            key(KeyCode::Tab),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::None);
+    }
+
+    #[test]
+    fn wave_overview_modal_still_handles_local_scroll() {
+        let mut vis = modals();
+        vis.show_wave_overview = true;
+
+        let action = handle_key(
+            key(KeyCode::Up),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::ModalScrollUp);
+
+        let action = handle_key(
+            key(KeyCode::Char('j')),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::ModalScrollDown);
+
+        let action = handle_key(
+            key(KeyCode::Tab),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::None);
+    }
+
+    #[test]
+    fn queue_overview_modal_uses_local_navigation() {
+        let mut vis = modals();
+        vis.show_queue_overview = true;
+
+        let action = handle_key(
+            key(KeyCode::Up),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::QueueOverviewUp);
+
+        let action = handle_key(
+            key(KeyCode::Char('j')),
+            InputMode::Normal,
+            Tab::Plans,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::QueueOverviewDown);
+    }
+
+    #[test]
+    fn agent_pool_modal_blocks_navigation_keys() {
+        let mut vis = modals();
+        vis.show_agent_pool = true;
+
+        let action = handle_key(
+            key(KeyCode::Up),
+            InputMode::Normal,
+            Tab::Agents,
+            FocusZone::AgentOutput,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::ModalScrollUp);
+
+        let action = handle_key(
+            key(KeyCode::Char('j')),
+            InputMode::Normal,
+            Tab::Agents,
+            FocusZone::AgentOutput,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::ModalScrollDown);
+
+        let action = handle_key(
+            key(KeyCode::Tab),
+            InputMode::Normal,
+            Tab::Agents,
+            FocusZone::AgentOutput,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::None);
+
+        let action = handle_key(
+            key(KeyCode::Esc),
+            InputMode::Normal,
+            Tab::Agents,
+            FocusZone::AgentOutput,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::CloseModal);
+    }
+
+    #[test]
+    fn ctrl_c_takes_precedence_over_open_modal() {
+        let mut vis = modals();
+        vis.show_wave_overview = true;
+
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &vis,
+        );
+        assert_eq!(action, TuiAction::QuitConfirmed);
     }
 
     #[test]
