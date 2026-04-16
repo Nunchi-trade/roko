@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use roko_agent::provider::{AgentOptions, with_safety_layer};
-use roko_agent::{Agent, SafetyLayer, create_agent_for_model, with_scoped_safety_layer};
+use roko_agent::provider::{AgentOptions, current_safety_layer, with_safety_layer};
+use roko_agent::{Agent, SafetyLayer, create_agent_for_model};
 use roko_core::config::schema::RokoConfig;
 
 /// Owned spec for creating a direct agent through provider-backed routing.
@@ -37,6 +37,8 @@ pub struct SpawnAgentSpec {
     pub dangerously_skip_permissions: bool,
     /// Optional logical agent name.
     pub name: String,
+    /// Optional logical role used to scope the safety contract.
+    pub role: Option<String>,
 }
 
 impl SpawnAgentSpec {
@@ -60,6 +62,15 @@ impl SpawnAgentSpec {
     }
 }
 
+fn role_scoped_safety_layer(role: Option<&str>, layer: Option<SafetyLayer>) -> Option<SafetyLayer> {
+    let role = role.map(str::trim).filter(|role| !role.is_empty());
+    match (layer, role) {
+        (Some(layer), Some(role)) => Some(layer.with_role(role)),
+        (None, Some(role)) => Some(SafetyLayer::with_defaults().with_role(role)),
+        (layer, None) => layer,
+    }
+}
+
 /// Create an agent under the current scoped safety layer.
 pub fn spawn_agent_scoped(
     config: &RokoConfig,
@@ -67,11 +78,15 @@ pub fn spawn_agent_scoped(
     error_context: impl Into<String>,
 ) -> Result<Box<dyn Agent>> {
     let model = spec.model.clone();
+    let role = spec.role.clone();
     let context = error_context.into();
-    with_scoped_safety_layer(|| {
-        create_agent_for_model(config, &model, spec.into_agent_options())
-            .with_context(|| context.clone())
-    })
+    with_safety_layer(
+        role_scoped_safety_layer(role.as_deref(), current_safety_layer()),
+        || {
+            create_agent_for_model(config, &model, spec.into_agent_options())
+                .with_context(|| context.clone())
+        },
+    )
 }
 
 /// Create an agent under an explicit safety layer.
@@ -82,9 +97,13 @@ pub fn spawn_agent_with_layer(
     error_context: impl Into<String>,
 ) -> Result<Box<dyn Agent>> {
     let model = spec.model.clone();
+    let role = spec.role.clone();
     let context = error_context.into();
-    with_safety_layer(safety_layer, || {
-        create_agent_for_model(config, &model, spec.into_agent_options())
-            .with_context(|| context.clone())
-    })
+    with_safety_layer(
+        role_scoped_safety_layer(role.as_deref(), safety_layer),
+        || {
+            create_agent_for_model(config, &model, spec.into_agent_options())
+                .with_context(|| context.clone())
+        },
+    )
 }

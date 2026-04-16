@@ -41,6 +41,7 @@ use std::sync::Arc;
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
+use self::contract::AgentContract;
 use self::git::GitPolicy;
 use self::network::NetworkPolicy;
 use self::path::PathPolicy;
@@ -90,6 +91,8 @@ pub struct SafetyLayer {
     /// Role name used as part of the rate-limit key.
     /// Defaults to `"default"`.
     pub role: String,
+    /// Declarative contract enforced for this role.
+    pub contract: AgentContract,
     /// Optional OCaps-style warrant for tool execution.
     pub warrant: Option<AgentWarrant>,
 }
@@ -111,6 +114,7 @@ impl SafetyLayer {
             scrub_policy: ScrubPolicy::default(),
             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
             role: "default".into(),
+            contract: AgentContract::permissive("default"),
             warrant: None,
         }
     }
@@ -118,7 +122,24 @@ impl SafetyLayer {
     /// Override the role label used in rate-limit keys.
     #[must_use]
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
-        self.role = role.into();
+        let role = role.into();
+        self.contract = AgentContract::load_for_role(&role).unwrap_or_else(|err| {
+            tracing::warn!(
+                %role,
+                %err,
+                "no contract for role; using permissive default"
+            );
+            AgentContract::permissive(role.clone())
+        });
+        self.role = role;
+        self
+    }
+
+    /// Override the contract attached to the safety layer.
+    #[must_use]
+    pub fn with_contract(mut self, contract: AgentContract) -> Self {
+        self.role = contract.role.clone();
+        self.contract = contract;
         self
     }
 
@@ -190,6 +211,13 @@ impl SafetyLayer {
         Ok(())
     }
 
+    /// Run declarative contract checks for `call` + `ctx`.
+    pub fn check_contract(&self, call: &ToolCall, ctx: &ToolContext) -> Result<(), ToolError> {
+        self.contract
+            .check_pre_execution(call, ctx)
+            .map_err(|violation| violation.into_tool_error())
+    }
+
     /// Run the subset of safety checks that can be applied to a raw subprocess launch.
     ///
     /// This is intentionally narrower than [`Self::check_pre_execution`]: generic
@@ -235,6 +263,14 @@ impl SafetyLayer {
                 }
             }
             err @ ToolResult::Err(_) => err,
+        }
+    }
+
+    /// Apply any configured recovery rule after tool execution.
+    pub fn check_recovery(&self, result: &ToolResult) -> Result<(), ToolError> {
+        match self.contract.applicable_recovery(result) {
+            Some(recovery) => Err(recovery.into_tool_error(&self.contract.role)),
+            None => Ok(()),
         }
     }
 

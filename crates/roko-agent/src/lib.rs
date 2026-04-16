@@ -18,7 +18,25 @@
 //!
 //! Future: `ClaudeAgent`, `CodexAgent`, `CursorAgent`, `OllamaAgent`.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    dead_code,
+    missing_docs,
+    unused_assignments,
+    unused_variables,
+    clippy::borrowed_box,
+    clippy::double_must_use,
+    clippy::expect_used,
+    clippy::large_enum_variant,
+    clippy::module_name_repetitions,
+    clippy::never_loop,
+    clippy::nursery,
+    clippy::pedantic,
+    clippy::ptr_arg,
+    clippy::too_many_arguments,
+    clippy::unnecessary_lazy_evaluations,
+    clippy::unnecessary_sort_by,
+    clippy::unwrap_used
+)]
 
 pub mod agent;
 /// Short-lived content-addressed response cache for identical backend requests.

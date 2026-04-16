@@ -1165,6 +1165,7 @@ struct AgentRunConfig {
     command: String,
     exec_dir: PathBuf,
     model: String,
+    role: String,
     timeout_ms: u64,
     bare_mode: bool,
     effort: String,
@@ -1230,6 +1231,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 bare_mode: cfg.bare_mode,
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
+                role: Some(cfg.role.clone()),
             },
             format!("create prepared agent for {}", cfg.model),
         ) {
@@ -1278,6 +1280,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 bare_mode: cfg.bare_mode,
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
+                role: Some(cfg.role.clone()),
             },
             format!("create synthesized claude agent for {}", cfg.model),
         ) {
@@ -1315,6 +1318,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 bare_mode: cfg.bare_mode,
                 dangerously_skip_permissions: false,
                 name: String::new(),
+                role: Some(cfg.role.clone()),
             },
             format!("create known-protocol subprocess agent for {}", cfg.command),
         ) {
@@ -1352,6 +1356,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 bare_mode: cfg.bare_mode,
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
+                role: Some(cfg.role.clone()),
             },
             format!("create generic subprocess agent for {}", cfg.command),
         ) {
@@ -6907,6 +6912,7 @@ impl PlanRunner {
                     command: self.config.agent.command.clone(),
                     exec_dir: dir.clone(),
                     model,
+                    role: role.to_string(),
                     timeout_ms: self.effective_task_timeout_ms(task_def.as_ref()),
                     bare_mode: self.config.agent.bare_mode,
                     effort: self.config.agent.effort.clone(),
@@ -11214,6 +11220,7 @@ impl PlanRunner {
                     bare_mode: self.config.agent.bare_mode,
                     dangerously_skip_permissions: claude_skip_permissions_for_role(role),
                     name: String::new(),
+                    role: Some(role.label().to_string()),
                 },
                 format!("create agent for model {selected_model}"),
             )?;
@@ -11295,6 +11302,7 @@ impl PlanRunner {
                         bare_mode: self.config.agent.bare_mode,
                         dangerously_skip_permissions: false,
                         name: String::new(),
+                        role: Some(role.label().to_string()),
                     },
                     format!(
                         "create known-protocol subprocess agent for {}",
@@ -11322,6 +11330,7 @@ impl PlanRunner {
                         bare_mode: self.config.agent.bare_mode,
                         dangerously_skip_permissions: false,
                         name: String::new(),
+                        role: Some(role.label().to_string()),
                     },
                     format!(
                         "create generic subprocess agent for {}",
