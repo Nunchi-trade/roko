@@ -271,6 +271,21 @@ pub struct AgentRow {
     pub last_output_line: String,
 }
 
+const MAX_AGENT_STREAM_CHUNKS: usize = 200;
+
+/// Live websocket-backed tail for one agent.
+#[derive(Debug, Clone, Default)]
+pub struct AgentStream {
+    /// Recent streamed chunks for the Agents tab detail panel.
+    pub chunks: VecDeque<String>,
+    /// Whether the backing websocket is currently connected.
+    pub connected: bool,
+    /// Whether the latest observed stream has completed.
+    pub completed: bool,
+    /// When the most recent chunk arrived.
+    pub last_chunk_at: Option<Instant>,
+}
+
 /// Per-agent routing and context metrics shown in the TUI.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RouteMetrics {
@@ -757,6 +772,8 @@ pub struct TuiState {
     pub route_metrics: HashMap<String, RouteMetrics>,
     /// Cached styled agent output keyed by agent identifier.
     pub agent_output_cache: RefCell<HashMap<String, CachedRender>>,
+    /// Live websocket tails keyed by agent identifier.
+    pub agent_streams: HashMap<String, AgentStream>,
     // -- navigation --
     /// Active top-level tab.
     pub active_tab: Tab,
@@ -920,6 +937,7 @@ impl Default for TuiState {
             agents: Vec::new(),
             route_metrics: HashMap::new(),
             agent_output_cache: RefCell::new(HashMap::new()),
+            agent_streams: HashMap::new(),
             active_tab: Tab::default(),
             selected_plan_idx: 0,
             selected_agent: 0,
@@ -1324,6 +1342,7 @@ impl TuiState {
             })
             .collect();
         self.prune_agent_output_cache();
+        self.prune_agent_streams();
 
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
@@ -1628,6 +1647,7 @@ impl TuiState {
             })
             .collect();
         self.prune_agent_output_cache();
+        self.prune_agent_streams();
 
         self.gate_results = snap
             .gates
@@ -1716,6 +1736,37 @@ impl TuiState {
         }
 
         cached.styled_lines.clone()
+    }
+
+    /// Append one streamed chunk for the given agent, trimming to the last 200 entries.
+    pub fn push_agent_chunk(&mut self, agent_id: &str, chunk: String) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        while stream.chunks.len() >= MAX_AGENT_STREAM_CHUNKS {
+            stream.chunks.pop_front();
+        }
+        stream.chunks.push_back(chunk);
+        stream.connected = true;
+        stream.completed = false;
+        stream.last_chunk_at = Some(Instant::now());
+    }
+
+    /// Mark the agent's live stream as connected.
+    pub fn mark_agent_stream_connected(&mut self, agent_id: &str) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        stream.connected = true;
+    }
+
+    /// Mark the agent's live stream as disconnected.
+    pub fn mark_agent_stream_disconnected(&mut self, agent_id: &str) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        stream.connected = false;
+    }
+
+    /// Mark the agent's live stream as complete.
+    pub fn mark_agent_stream_done(&mut self, agent_id: &str) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        stream.connected = false;
+        stream.completed = true;
     }
 
     fn update_efficiency_rates(&mut self) {
@@ -1833,6 +1884,16 @@ impl TuiState {
         self.agent_output_cache
             .borrow_mut()
             .retain(|key, _| key == "__agent-output__" || valid_ids.contains(key.as_str()));
+    }
+
+    fn prune_agent_streams(&mut self) {
+        let valid_ids = self
+            .agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<HashSet<_>>();
+        self.agent_streams
+            .retain(|agent_id, _| valid_ids.contains(agent_id.as_str()));
     }
 }
 

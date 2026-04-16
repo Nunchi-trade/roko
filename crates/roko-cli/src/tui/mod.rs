@@ -32,6 +32,7 @@ pub mod theme;
 pub mod util;
 pub mod views;
 pub mod widgets;
+pub mod ws_client;
 
 pub use app::App;
 pub use approval_ipc::{ApprovalChannel, ApprovalRequest};

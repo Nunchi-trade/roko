@@ -547,11 +547,20 @@ fn render_output_body(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    // Get selected agent's output
     let selected_agent = data.agents.get(view_state.selected);
-    let selected_id = selected_agent.map(|a| a.id.as_str()).unwrap_or("");
-    let selected_status = selected_agent.map(|a| a.status.as_str()).unwrap_or("idle");
-    let selected_role = selected_agent.map(|a| a.label.as_str()).unwrap_or("");
+    let selected_row = tui_state.agents.get(view_state.selected);
+    let selected_id = selected_agent
+        .map(|agent| agent.id.as_str())
+        .or_else(|| selected_row.map(|row| row.id.as_str()))
+        .unwrap_or("");
+    let selected_status = selected_agent
+        .map(|agent| agent.status.as_str())
+        .or_else(|| selected_row.map(|row| row.status.label()))
+        .unwrap_or("idle");
+    let selected_role = selected_agent
+        .map(|agent| agent.label.as_str())
+        .or_else(|| selected_row.map(|row| row.role.as_str()))
+        .unwrap_or("");
     let accent = role_accent(selected_role, theme);
     let focused = matches!(
         tui_state.focus,
@@ -596,14 +605,27 @@ fn render_output_body(
         return;
     }
 
-    let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    let show_stream_panel = inner.height >= 11;
+    let layout = if show_stream_panel {
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(4),
+            Constraint::Length(7),
+        ])
+        .split(inner)
+    } else {
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner)
+    };
+    let output_area = layout[1];
+    let stream_area = show_stream_panel.then_some(layout[2]);
+
     render_route_metrics_bar(frame, layout[0], data, tui_state, view_state, theme);
 
-    if layout[1].width == 0 || layout[1].height == 0 {
+    if output_area.width == 0 || output_area.height == 0 {
         return;
     }
 
-    let visible_height = layout[1].height as usize;
+    let visible_height = output_area.height as usize;
     let max_scroll = total_lines
         .saturating_sub(visible_height)
         .min(u16::MAX as usize);
@@ -628,7 +650,7 @@ fn render_output_body(
 
     if output_lines.is_empty() {
         // Centered empty state
-        let v_pad = layout[1].height / 2;
+        let v_pad = output_area.height / 2;
         let mut empty_lines: Vec<Line<'_>> = Vec::new();
         for _ in 0..v_pad.saturating_sub(2) {
             empty_lines.push(Line::from(""));
@@ -647,15 +669,82 @@ fn render_output_body(
         let empty = Paragraph::new(empty_lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
-        frame.render_widget(empty, layout[1]);
+        frame.render_widget(empty, output_area);
+    } else {
+        let paragraph = Paragraph::new(output_lines)
+            .style(theme.text())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0));
+        frame.render_widget(paragraph, output_area);
+    }
+
+    if let Some(stream_area) = stream_area {
+        render_live_stream_panel(frame, stream_area, selected_id, tui_state, theme);
+    }
+}
+
+fn render_live_stream_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    agent_id: &str,
+    tui_state: &TuiState,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let paragraph = Paragraph::new(output_lines)
+    let stream = (!agent_id.is_empty())
+        .then(|| tui_state.agent_streams.get(agent_id))
+        .flatten();
+    let (status_label, title_style) = match stream {
+        Some(stream) if stream.connected => (
+            "connected",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(stream) if stream.completed => ("done", Style::default().fg(theme.success)),
+        Some(_) => ("connecting...", Style::default().fg(theme.warning)),
+        None => ("connecting...", Style::default().fg(theme.muted)),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.muted())
+        .title(vec![
+            Span::styled(" Live Stream ", title_style),
+            Span::styled(format!(" {status_label} "), Style::default().fg(theme.muted)),
+        ]);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let body = if agent_id.is_empty() {
+        "select an agent to view the live tail".to_string()
+    } else if let Some(stream) = stream {
+        let chunks = stream.chunks.iter().cloned().collect::<Vec<_>>();
+        if chunks.is_empty() {
+            if stream.connected {
+                "waiting for live chunks...".to_string()
+            } else {
+                "connecting...".to_string()
+            }
+        } else {
+            let visible_lines = inner.height as usize;
+            let start = chunks.len().saturating_sub(visible_lines);
+            chunks[start..].join("\n")
+        }
+    } else {
+        "connecting...".to_string()
+    };
+
+    let paragraph = Paragraph::new(body)
         .style(theme.text())
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
-    frame.render_widget(paragraph, layout[1]);
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
 }
 
 pub(crate) fn collect_agent_output_lines(

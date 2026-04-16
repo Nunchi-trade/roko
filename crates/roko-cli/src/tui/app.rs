@@ -3,7 +3,7 @@
 //! Integrates the Mori-style tab system (F1-F7), modal dialogs, TuiState,
 //! TuiAction dispatch, PostFX pipeline, and atmosphere animations.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,7 @@ use super::pages::{PageId, PageRegistry};
 use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
 use super::views::{self, ViewState};
+use super::ws_client::{AgentStreamClient, StreamChunk};
 
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
@@ -104,6 +105,12 @@ pub struct App {
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
     last_snapshot_error_marker: Option<(String, u64)>,
+    /// Live websocket consumers for the Agents tab.
+    agent_stream_clients: HashMap<String, AgentStreamClient>,
+    /// Base URL for the `roko-serve` websocket event bus.
+    agent_stream_server_url: String,
+    /// Optional bearer token for authenticated websocket handshakes.
+    agent_stream_auth_token: Option<String>,
     /// Frame counter for adaptive frame rate.
     frame_counter: u64,
     /// Last user input time for adaptive frame rate.
@@ -422,6 +429,9 @@ impl App {
             _state_hub: state_hub,
             snapshot_rx: None,
             last_snapshot_error_marker: None,
+            agent_stream_clients: HashMap::new(),
+            agent_stream_server_url: resolve_agent_stream_server_url(),
+            agent_stream_auth_token: resolve_agent_stream_auth_token(),
             frame_counter: 0,
             last_input: Instant::now(),
             terminal_size,
@@ -2290,6 +2300,8 @@ impl App {
         const MAX_MESSAGES_PER_DRAIN: usize = 20;
 
         self.drain_snapshot_channel();
+        self.sync_agent_stream_clients();
+        self.drain_agent_stream_clients();
 
         // -- sys metrics (merge, don't replace — keep history) --
         let mut sys_snaps = Vec::new();
@@ -2403,6 +2415,113 @@ impl App {
 
         let snapshot = rx.borrow_and_update();
         apply_dashboard_snapshot(tui_state, notifications, last_marker, &snapshot);
+    }
+
+    fn sync_agent_stream_clients(&mut self) {
+        if !matches!(self.tui_state.active_tab, Tab::Agents) {
+            self.clear_agent_stream_clients();
+            return;
+        }
+
+        let mut desired_ids = self
+            .data
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        desired_ids.extend(self.tui_state.agents.iter().map(|agent| agent.id.clone()));
+
+        let stale_ids = self
+            .agent_stream_clients
+            .keys()
+            .filter(|agent_id| !desired_ids.contains(*agent_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for agent_id in stale_ids {
+            self.agent_stream_clients.remove(&agent_id);
+            self.tui_state.mark_agent_stream_disconnected(&agent_id);
+        }
+
+        let server_url = self.agent_stream_server_url.clone();
+        let auth_token = self.agent_stream_auth_token.clone();
+        for agent_id in desired_ids {
+            if self.agent_stream_clients.contains_key(&agent_id) {
+                continue;
+            }
+            self.agent_stream_clients.insert(
+                agent_id.clone(),
+                AgentStreamClient::connect(agent_id, &server_url, auth_token.clone()),
+            );
+        }
+    }
+
+    fn clear_agent_stream_clients(&mut self) {
+        if self.agent_stream_clients.is_empty() {
+            return;
+        }
+
+        let active_ids = self.agent_stream_clients.keys().cloned().collect::<Vec<_>>();
+        self.agent_stream_clients.clear();
+        for agent_id in active_ids {
+            self.tui_state.mark_agent_stream_disconnected(&agent_id);
+        }
+    }
+
+    fn drain_agent_stream_clients(&mut self) {
+        let agent_ids = self.agent_stream_clients.keys().cloned().collect::<Vec<_>>();
+        for agent_id in agent_ids {
+            let Some(client) = self.agent_stream_clients.get_mut(&agent_id) else {
+                continue;
+            };
+
+            loop {
+                match client.try_recv() {
+                    Ok(StreamChunk::Connected) => {
+                        self.tui_state.mark_agent_stream_connected(&agent_id);
+                    }
+                    Ok(StreamChunk::Text(text)) => {
+                        self.tui_state.push_agent_chunk(&agent_id, text);
+                    }
+                    Ok(StreamChunk::Reasoning(text)) => {
+                        self.tui_state
+                            .push_agent_chunk(&agent_id, format!("[reasoning] {text}"));
+                    }
+                    Ok(StreamChunk::ToolCall(tool_call)) => {
+                        if let Ok(text) = serde_json::to_string(&tool_call) {
+                            self.tui_state
+                                .push_agent_chunk(&agent_id, format!("[tool_call] {text}"));
+                        }
+                    }
+                    Ok(StreamChunk::Usage(usage)) => {
+                        if let Ok(text) = serde_json::to_string(&usage) {
+                            self.tui_state
+                                .push_agent_chunk(&agent_id, format!("[usage] {text}"));
+                        }
+                    }
+                    Ok(StreamChunk::Error(error)) => {
+                        self.tui_state
+                            .push_agent_chunk(&agent_id, format!("[error] {error}"));
+                    }
+                    Ok(StreamChunk::Done { session }) => {
+                        if let Some(session_id) = session {
+                            self.tui_state.push_agent_chunk(
+                                &agent_id,
+                                format!("[done] session {session_id}"),
+                            );
+                        }
+                        self.tui_state.mark_agent_stream_done(&agent_id);
+                    }
+                    Ok(StreamChunk::Disconnected) => {
+                        self.tui_state.mark_agent_stream_disconnected(&agent_id);
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        self.tui_state.mark_agent_stream_disconnected(&agent_id);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn pages(&self) -> PageRegistry {
@@ -2580,6 +2699,24 @@ fn push_bounded_history<T>(history: &mut VecDeque<T>, value: T, max_len: usize) 
         history.pop_front();
     }
     history.push_back(value);
+}
+
+fn resolve_agent_stream_server_url() -> String {
+    std::env::var("ROKO_SERVE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("ROKO_SERVER_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "http://localhost:6677".to_string())
+}
+
+fn resolve_agent_stream_auth_token() -> Option<String> {
+    std::env::var("ROKO_SERVER_AUTH_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Map a Mori-style Tab to a legacy PageId (best effort).
