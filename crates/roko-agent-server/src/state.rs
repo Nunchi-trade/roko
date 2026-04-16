@@ -15,6 +15,8 @@ use roko_agent::streaming::StreamChunk;
 use roko_agent::tool_loop::LlmBackend;
 use roko_agent::translate::{BackendResponse, RenderedTools, normalize_finish_reason};
 use roko_chain::ChainClient;
+use roko_core::obs::metrics::{MetricSnapshot, MetricValue};
+use roko_core::obs::schema::{self, CanonicalMetricSchema, MetricDescriptor, MetricSchema};
 use roko_neuro::KnowledgeStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -176,10 +178,35 @@ impl AgentMetrics {
     /// Export current counters.
     #[must_use]
     pub fn snapshot(&self) -> serde_json::Value {
+        let request_count = self.request_count.load(Ordering::Relaxed);
+        let message_count = self.message_count.load(Ordering::Relaxed);
         serde_json::json!({
-            "requests": self.request_count.load(Ordering::Relaxed),
-            "messages": self.message_count.load(Ordering::Relaxed),
+            "schema_version": CanonicalMetricSchema::schema_version(),
+            "families": [
+                counter_snapshot(
+                    &schema::ROKO_AGENT_SERVER_REQUESTS_TOTAL_DESCRIPTOR,
+                    request_count,
+                ),
+                counter_snapshot(
+                    &schema::ROKO_AGENT_SERVER_MESSAGE_REQUESTS_TOTAL_DESCRIPTOR,
+                    message_count,
+                ),
+            ],
+            "requests": request_count,
+            "messages": message_count,
         })
+    }
+}
+
+fn counter_snapshot(descriptor: &MetricDescriptor, value: u64) -> MetricSnapshot {
+    debug_assert_eq!(descriptor.kind, roko_core::obs::MetricKind::Counter);
+    debug_assert!(descriptor.labels.is_empty());
+    MetricSnapshot {
+        name: descriptor.name.to_string(),
+        help: descriptor.help.to_string(),
+        kind: descriptor.kind,
+        labels: Vec::new(),
+        value: MetricValue::Counter(value),
     }
 }
 

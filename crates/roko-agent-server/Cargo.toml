@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 roko-agent = { path = "../roko-agent" }
 roko-chain = { path = "../roko-chain" }
+roko-core = { path = "../roko-core" }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
 
@@ -36,6 +37,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-roko-core = { path = "../roko-core" }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true, features = ["limit", "load-shed", "util"] }

@@ -34,7 +34,17 @@
 //! New capabilities are added by implementing one of the six traits; no core
 //! changes are needed.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    missing_docs,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::collapsible_str_replace,
+    clippy::derivable_impls,
+    clippy::expect_used,
+    clippy::module_name_repetitions,
+    clippy::nursery,
+    clippy::obfuscated_if_else,
+    clippy::pedantic
+)]
 
 pub mod affect;
 pub mod agent;

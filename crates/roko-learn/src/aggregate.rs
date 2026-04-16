@@ -284,15 +284,14 @@ fn apply_event_to_buckets(
         return;
     }
 
-    let idx = usize::try_from((event_bucket_ms - oldest_start_ms) / bucket_ms).unwrap_or(usize::MAX);
+    let idx =
+        usize::try_from((event_bucket_ms - oldest_start_ms) / bucket_ms).unwrap_or(usize::MAX);
     let Some(bucket) = buckets.get_mut(idx) else {
         return;
     };
 
     let turns_before = bucket.turns;
-    let total_latency_before = bucket
-        .latency_ms_avg
-        .mul_add(turns_before as f64, 0.0);
+    let total_latency_before = bucket.latency_ms_avg.mul_add(turns_before as f64, 0.0);
     let turns_after = turns_before.saturating_add(1);
 
     bucket.turns = turns_after;
@@ -434,8 +433,12 @@ mod tests {
             .append(true)
             .open(path)
             .expect("open file for append");
-        writeln!(file, "{}", serde_json::to_string(event).expect("serialize event"))
-            .expect("write event");
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(event).expect("serialize event")
+        )
+        .expect("write event");
     }
 
     #[test]
@@ -449,7 +452,10 @@ mod tests {
         for hour in 0..10 {
             for turn in 0..10 {
                 let timestamp = start + Duration::hours(hour) + Duration::minutes(turn * 6);
-                append_event(&path, &sample_event(timestamp, hour as usize * 10 + turn as usize));
+                append_event(
+                    &path,
+                    &sample_event(timestamp, hour as usize * 10 + turn as usize),
+                );
             }
         }
 
@@ -536,11 +542,17 @@ mod tests {
         fs::write(&path, "one\ntwo\n").expect("seed file");
 
         let mut cursor = JsonlCursor::new(&path);
-        assert_eq!(cursor.read_new_lines().expect("initial read"), vec!["one", "two"]);
+        assert_eq!(
+            cursor.read_new_lines().expect("initial read"),
+            vec!["one", "two"]
+        );
         assert_eq!(cursor.last_line_number(), 2);
 
         fs::write(&path, "reset\n").expect("truncate file");
-        assert_eq!(cursor.read_new_lines().expect("after truncation"), vec!["reset"]);
+        assert_eq!(
+            cursor.read_new_lines().expect("after truncation"),
+            vec!["reset"]
+        );
         assert_eq!(cursor.last_line_number(), 1);
 
         fs::remove_file(&path).expect("remove file");

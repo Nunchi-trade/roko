@@ -22,6 +22,8 @@
 
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
+/// Efficiency trend aggregation helpers for JSONL telemetry.
+pub mod aggregate;
 pub mod anomaly;
 pub mod bandits;
 pub mod baseline;
@@ -46,8 +48,6 @@ pub mod error_enrichment;
 pub mod event_subscriber;
 /// Unified learning events emitted by routing, evaluation, and runtime feedback.
 pub mod events;
-/// Efficiency trend aggregation helpers for JSONL telemetry.
-pub mod aggregate;
 pub mod hdc_clustering;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
