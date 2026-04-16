@@ -29,8 +29,9 @@ pub use registration::{
 };
 pub use state::{
     AgentMetrics, AgentPrediction, AgentPredictionResidual, AgentRuntimeStats, AgentState,
-    MessageContext, PredictionCreateRequest, ResearchRequest, ResearchResponse, TaskArtifact,
-    TaskCompletionRequest, TaskEntry, TaskPriority, TaskState, TaskSummary,
+    DispatchError, DispatchLike, MessageContext, PredictionCreateRequest, ResearchRequest,
+    ResearchResponse, TaskArtifact, TaskCompletionRequest, TaskEntry, TaskPriority, TaskState,
+    TaskSummary,
 };
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -151,6 +152,7 @@ pub struct AgentServerBuilder {
     llm_backend: Option<Arc<dyn LlmBackend>>,
     knowledge_store: Option<Arc<KnowledgeStore>>,
     dispatcher: Option<Arc<ToolDispatcher>>,
+    message_dispatcher: Option<Arc<dyn DispatchLike>>,
     features: FeatureFlags,
     on_start: Option<StartHook>,
     registration: Option<AgentRegistration>,
@@ -211,6 +213,13 @@ impl AgentServerBuilder {
     #[must_use]
     pub fn with_dispatcher(mut self, dispatcher: Arc<ToolDispatcher>) -> Self {
         self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach an optional message dispatcher for the messaging routes.
+    #[must_use]
+    pub fn with_message_dispatcher(mut self, dispatcher: Arc<dyn DispatchLike>) -> Self {
+        self.message_dispatcher = Some(dispatcher);
         self
     }
 
@@ -295,6 +304,9 @@ impl AgentServerBuilder {
         );
         if let Some(dispatcher) = self.dispatcher {
             state = state.with_dispatcher(dispatcher);
+        }
+        if let Some(dispatcher) = self.message_dispatcher {
+            state = state.with_message_dispatcher(dispatcher);
         }
         let state = Arc::new(state);
 
