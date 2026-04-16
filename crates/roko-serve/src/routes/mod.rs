@@ -11,7 +11,7 @@ mod deployments;
 mod learning;
 mod middleware;
 mod plans;
-mod prds;
+pub(crate) mod prds;
 mod providers;
 mod research;
 mod run;
@@ -30,6 +30,7 @@ use roko_core::config::ServeAuthConfig;
 use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
+pub(crate) use self::prds::start_prd_publish_subscriber;
 
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(

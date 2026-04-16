@@ -379,6 +379,8 @@ impl RokoConfig {
         let _ = writeln!(out, "refresh_rate_ms = {}\n", cfg.tui.refresh_rate_ms);
 
         let _ = writeln!(out, "# -- API auth --");
+        let _ = writeln!(out, "[serve]");
+        let _ = writeln!(out, "auto_orchestrate = {}", cfg.serve.auto_orchestrate);
         let _ = writeln!(out, "[serve.auth]");
         let _ = writeln!(out, "enabled = {}", cfg.serve.auth.enabled);
         let _ = writeln!(out, "api_key = \"{}\"\n", cfg.serve.auth.api_key);
@@ -2079,6 +2081,9 @@ impl Default for TuiConfig {
 /// API serving options.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServeConfig {
+    /// Automatically orchestrate follow-up work when publish events arrive.
+    #[serde(default = "default_true")]
+    pub auto_orchestrate: bool,
     /// Authentication settings for `/api/*`.
     #[serde(default)]
     pub auth: ServeAuthConfig,
@@ -2090,6 +2095,7 @@ pub struct ServeConfig {
 impl Default for ServeConfig {
     fn default() -> Self {
         Self {
+            auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),
         }
@@ -3667,11 +3673,15 @@ port = 8080
     #[test]
     fn serve_auth_section_parses() {
         let toml = r#"
+[serve]
+auto_orchestrate = false
+
 [serve.auth]
 enabled = true
 api_key = "secret"
 "#;
         let cfg = RokoConfig::from_toml(toml).expect("parse");
+        assert!(!cfg.serve.auto_orchestrate);
         assert!(cfg.serve.auth.enabled);
         assert_eq!(cfg.serve.auth.api_key, "secret");
     }
@@ -3826,6 +3836,7 @@ port = 3000
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
         assert!(example.contains("[tui]"));
+        assert!(example.contains("[serve]"));
         assert!(example.contains("[serve.auth]"));
         assert!(example.contains("[serve.deploy]"));
         assert!(example.contains("[[serve.deploy.webhooks]]"));

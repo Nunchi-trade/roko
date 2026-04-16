@@ -186,6 +186,7 @@ impl ServerBuilder {
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
+        let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let router = routes::build_router(
             Arc::clone(&state),
@@ -235,9 +236,16 @@ pub async fn run_server(
     ServerBuilder::new(config).run().await
 }
 
+/// Start the PRD-publish auto-orchestration background tasks for an existing state.
+#[doc(hidden)]
+pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
+    routes::start_prd_publish_subscriber(state)
+}
+
 /// Run the HTTP server against an already constructed [`AppState`].
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
     let roko_config = state.load_roko_config().as_ref().clone();
+    let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let router = routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,

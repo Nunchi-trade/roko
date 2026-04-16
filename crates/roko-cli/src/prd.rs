@@ -30,6 +30,8 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
 use roko_core::{Body, Engram, Kind, Provenance, Substrate};
 use roko_fs::FileSubstrate;
+use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_runtime::event_bus::{PublishOrigin, RokoEvent, global_event_bus};
 
 fn tier_rank(tier: &str) -> u8 {
     match tier {
@@ -318,6 +320,41 @@ async fn emit_prd_plan_signal(workdir: &Path, kind: Kind, body: serde_json::Valu
         .provenance(Provenance::trusted("roko.prd"))
         .build();
     substrate.put(signal).await?;
+    Ok(())
+}
+
+async fn append_prd_published_episode(
+    workdir: &Path,
+    slug: &str,
+    path: &Path,
+    published_at: chrono::DateTime<chrono::Utc>,
+    origin: PublishOrigin,
+) -> Result<()> {
+    let logger = EpisodeLogger::new(workdir.join(".roko").join("episodes.jsonl"));
+    let mut episode = Episode::new("roko-cli", slug);
+    episode.kind = "prd_published".to_string();
+    episode.agent_template = "cli".to_string();
+    episode.trigger_kind = "prd_publish".to_string();
+    episode.timestamp = published_at;
+    episode.started_at = published_at;
+    episode.completed_at = published_at;
+    episode.success = true;
+    episode
+        .extra
+        .insert("slug".to_string(), serde_json::json!(slug));
+    episode.extra.insert(
+        "path".to_string(),
+        serde_json::json!(path.display().to_string()),
+    );
+    episode.extra.insert(
+        "origin".to_string(),
+        serde_json::to_value(origin).unwrap_or(serde_json::Value::Null),
+    );
+    episode.extra.insert(
+        "published_at".to_string(),
+        serde_json::json!(published_at.to_rfc3339()),
+    );
+    logger.append(&episode).await?;
     Ok(())
 }
 
@@ -625,6 +662,18 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
     std::fs::write(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
+    let published_at = chrono::Utc::now();
+    if let Err(err) =
+        append_prd_published_episode(workdir, slug, &dst, published_at, PublishOrigin::Cli).await
+    {
+        eprintln!("warning: failed to append PRD publish audit event: {err:#}");
+    }
+    global_event_bus().emit(RokoEvent::PrdPublished {
+        slug: slug.to_string(),
+        path: dst.clone(),
+        published_at,
+        origin: PublishOrigin::Cli,
+    });
     let _ = maybe_generate_plan_after_promote(workdir, slug, &dst, auto_execute).await?;
     Ok(())
 }

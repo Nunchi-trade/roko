@@ -1149,6 +1149,10 @@ impl ConfigLayer {
             Some(s) => {
                 let defaults = ServeConfig::default();
                 ServeConfig {
+                    auto_orchestrate: match s.auto_orchestrate {
+                        Some(auto_orchestrate) => auto_orchestrate,
+                        None => defaults.auto_orchestrate,
+                    },
                     auth: match s.auth {
                         Some(auth) => auth.resolve(defaults.auth),
                         None => defaults.auth,
@@ -2240,6 +2244,9 @@ pub struct ExecutorLayer {
 /// Partial `ServeConfig` — every field optional.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServeLayer {
+    /// Whether serve-side publish events trigger orchestration automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_orchestrate: Option<bool>,
     /// API auth settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ServeAuthLayer>,
@@ -2253,6 +2260,7 @@ impl ServeLayer {
     #[must_use]
     pub fn merge(self, overlay: Self) -> Self {
         Self {
+            auto_orchestrate: overlay.auto_orchestrate.or(self.auto_orchestrate),
             auth: match (self.auth, overlay.auth) {
                 (Some(base), Some(overlay)) => Some(base.merge(overlay)),
                 (_, Some(overlay)) => Some(overlay),

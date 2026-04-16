@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -87,6 +87,17 @@ pub enum PlanRevisionReason {
     },
 }
 
+/// Why a PRD publish event was emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishOrigin {
+    /// The publish happened through the CLI.
+    Cli,
+    /// The publish happened through HTTP.
+    Http,
+    /// The publish happened while importing content.
+    Import,
+}
+
 /// Events shared across the runtime event bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RokoEvent {
@@ -104,6 +115,17 @@ pub enum RokoEvent {
         log_tail: String,
         /// UTC timestamp for when the revision event was emitted.
         issued_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Emitted when a PRD is promoted into the published state.
+    PrdPublished {
+        /// The published PRD slug.
+        slug: String,
+        /// The published PRD path.
+        path: std::path::PathBuf,
+        /// UTC timestamp for when the PRD was published.
+        published_at: chrono::DateTime<chrono::Utc>,
+        /// Where the publish originated.
+        origin: PublishOrigin,
     },
 }
 
@@ -230,6 +252,13 @@ impl<E: Clone + Send + Sync + 'static> BusSender<E> {
     }
 }
 
+static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
+
+/// Returns the process-local shared runtime event bus for `RokoEvent`.
+pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+    ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn current_ts_millis() -> u64 {
     SystemTime::now()
@@ -349,6 +378,38 @@ mod tests {
             }],
             log_tail: "tail".into(),
             issued_at: chrono::Utc::now(),
+        };
+
+        bus.emit(event.clone());
+
+        let replayed = bus.replay_from(0);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, event);
+    }
+
+    #[test]
+    fn prd_published_event_round_trips_through_json() {
+        let event = RokoEvent::PrdPublished {
+            slug: "demo".into(),
+            path: std::path::PathBuf::from(".roko/prd/published/demo.md"),
+            published_at: chrono::Utc::now(),
+            origin: PublishOrigin::Cli,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: RokoEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn prd_published_event_flows_through_bus() {
+        let bus = EventBus::new(8);
+        let event = RokoEvent::PrdPublished {
+            slug: "demo".into(),
+            path: std::path::PathBuf::from(".roko/prd/published/demo.md"),
+            published_at: chrono::Utc::now(),
+            origin: PublishOrigin::Http,
         };
 
         bus.emit(event.clone());

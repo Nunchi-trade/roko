@@ -3853,6 +3853,7 @@ impl PlanRunner {
                 self.replan_plan(&plan_id, &task_id, &failure_summary, &architectural_model)
                     .await
             }
+            RokoEvent::PrdPublished { .. } => false,
         }
     }
 
@@ -3874,7 +3875,10 @@ impl PlanRunner {
             failing_verdicts,
             log_tail,
             ..
-        } = &event;
+        } = &event
+        else {
+            return PlanRevisionOutcome::NotEligible;
+        };
 
         match self.claim_plan_revision(plan_id, task_id, reason, failing_verdicts, log_tail) {
             Ok(PlanRevisionClaim::Duplicate { dedupe_key }) => {
