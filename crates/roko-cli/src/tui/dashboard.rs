@@ -6,9 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fmt::{self, Write as _};
-use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead as _, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -35,6 +33,7 @@ use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::skill_library::Skill;
 
+use super::cursors::{EpisodeCursor, EventLogCursor, SignalCursor};
 use super::pages::{PageId, PageScaffold, efficiency, operations};
 use super::state::{PlanPhase, TaskStatus};
 pub use super::theme::Theme;
@@ -81,19 +80,13 @@ impl FileStamp {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-struct JsonlState {
-    stamp: FileStamp,
-    offset: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct DashboardDataStamps {
     executor_state: FileStamp,
     efficiency: FileStamp,
     experiments: FileStamp,
     gate_thresholds: FileStamp,
-    signals: JsonlState,
-    episodes: JsonlState,
+    signals: FileStamp,
+    episodes: FileStamp,
     cfactor: FileStamp,
     cascade_router: FileStamp,
     task_outputs: FileStamp,
@@ -296,7 +289,7 @@ pub struct DashboardSummary {
 }
 
 /// An entry in the orchestrator event log.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventLogEntry {
     /// Epoch milliseconds when the event occurred.
     pub timestamp_ms: u64,
@@ -355,12 +348,12 @@ pub struct DashboardData {
     signal_gate_results: Vec<GateResultSummary>,
     /// Parsed gate-related signals for the gate-results page.
     gate_signal_summaries: Vec<GateSignalSummary>,
-    /// Last observed signals file metadata and offset.
-    signals_state: JsonlState,
+    /// Incremental cursor over `.roko/signals.jsonl`.
+    signal_cursor: SignalCursor,
     /// Snapshot of the currently executing plan for the Plan Execution page.
     pub current_plan_execution: Option<PlanExecutionSnapshot>,
-    /// Last observed episodes file metadata and offset.
-    episodes_state: JsonlState,
+    /// Incremental cursor over `.roko/episodes.jsonl`.
+    episode_cursor: EpisodeCursor,
     /// Cached episodes for plan execution rendering.
     episodes: Vec<Episode>,
     /// Conductor alerts filtered from signals.
@@ -381,8 +374,8 @@ pub struct DashboardData {
     pub git_diff_is_staged: bool,
     /// Orchestrator event log from `.roko/state/events.json`.
     pub event_log: Vec<EventLogEntry>,
-    /// Last observed events file metadata.
-    event_log_stamp: FileStamp,
+    /// Whole-file reload cursor over `.roko/state/events.json`.
+    event_log_cursor: EventLogCursor,
 }
 
 /// Derived executor snapshot fields used by TUI orchestration chrome.
@@ -408,13 +401,27 @@ impl DashboardData {
         let gate_thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
         let cascade_router_path = learn_dir.join(CASCADE_ROUTER_FILE);
         let cfactor_path = learn_dir.join("c-factor.jsonl");
+        let events_path = roko_dir.join("state").join("events.json");
 
         let state = read_json_value(&state_path).unwrap_or(Value::Null);
         let state_stamp = file_stamp(&state_path);
-        let (recent_signals, gate_signal_summaries, signal_gate_results, signals_state) =
-            load_signal_state(&signals_path);
-        let episodes_state = load_episodes_state(&episodes_path);
-        let episodes = load_episodes_from_path(&episodes_path);
+        let signals_stamp = file_stamp(&signals_path);
+        let episodes_stamp = file_stamp(&episodes_path);
+        let event_log_stamp = file_stamp(&events_path);
+
+        let mut signal_cursor = SignalCursor::new(&signals_path);
+        let _ = signal_cursor.tick();
+        let recent_signals = signal_cursor.recent_signals().to_vec();
+        let gate_signal_summaries = signal_cursor.gate_signal_summaries().to_vec();
+        let signal_gate_results = signal_cursor.signal_gate_results().to_vec();
+
+        let mut episode_cursor = EpisodeCursor::new(&episodes_path);
+        let _ = episode_cursor.tick();
+        let episodes = episode_cursor.episodes().to_vec();
+
+        let mut event_log_cursor = EventLogCursor::new(&events_path);
+        let _ = event_log_cursor.tick();
+        let event_log = event_log_cursor.event_log().to_vec();
 
         let plans = load_plan_summaries(&root, &state);
         let active_tasks = load_active_tasks(&state);
@@ -457,10 +464,6 @@ impl DashboardData {
         let current_plan_execution =
             backfill_agent_output_tail(current_plan_execution, &task_outputs);
 
-        // Load event log from .roko/state/events.json
-        let events_path = roko_dir.join("state").join("events.json");
-        let event_log = load_event_log(&events_path);
-        let event_log_stamp = file_stamp(&events_path);
         let (git_diff, git_diff_is_staged) = load_dashboard_git_diff(&root);
         let generation = next_dashboard_data_generation(
             &root,
@@ -469,8 +472,8 @@ impl DashboardData {
                 efficiency: efficiency_stamp,
                 experiments: experiments_stamp,
                 gate_thresholds: gate_thresholds_stamp,
-                signals: signals_state,
-                episodes: episodes_state,
+                signals: signals_stamp,
+                episodes: episodes_stamp,
                 cfactor: cfactor_stamp,
                 cascade_router: cascade_router_stamp,
                 task_outputs: task_outputs_stamp,
@@ -500,9 +503,9 @@ impl DashboardData {
             recent_signals,
             signal_gate_results,
             gate_signal_summaries,
-            signals_state,
+            signal_cursor,
             current_plan_execution,
-            episodes_state,
+            episode_cursor,
             episodes,
             conductor_alerts,
             cfactor,
@@ -513,7 +516,7 @@ impl DashboardData {
             git_diff,
             git_diff_is_staged,
             event_log,
-            event_log_stamp,
+            event_log_cursor,
         }
     }
 
@@ -521,7 +524,7 @@ impl DashboardData {
     pub async fn refresh(&mut self) -> Result<()> {
         let mut snapshot = std::mem::take(self);
         let refreshed = tokio::task::spawn_blocking(move || -> Result<Self> {
-            snapshot.refresh_sync()?;
+            snapshot.tick()?;
             Ok(snapshot)
         })
         .await??;
@@ -529,11 +532,10 @@ impl DashboardData {
         Ok(())
     }
 
-    fn refresh_sync(&mut self) -> Result<()> {
+    /// Advance cursor-backed dashboard artifacts and refresh stamp-backed files once.
+    pub fn tick(&mut self) -> Result<()> {
         let roko_dir = self.root.join(".roko");
         let state_path = roko_dir.join("state").join("executor.json");
-        let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = resolve_episodes_path(&self.root);
         let efficiency_path = roko_dir.join("learn").join(EFFICIENCY_FILE);
         let experiments_path = roko_dir.join("learn").join(EXPERIMENTS_FILE);
         let gate_thresholds_path = roko_dir.join("learn").join(GATE_THRESHOLDS_FILE);
@@ -542,6 +544,7 @@ impl DashboardData {
 
         let mut state_changed = false;
         let mut generation_changed = false;
+        let mut episodes_changed = false;
         let stamp = file_stamp(&state_path);
         if stamp != self.executor_state_stamp {
             self.executor_state_stamp = stamp;
@@ -550,15 +553,17 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        let stamp = file_stamp(&signals_path);
-        if stamp != self.signals_state.stamp {
-            self.refresh_signals(&signals_path, stamp);
+        if self.signal_cursor.tick()? {
+            self.recent_signals = self.signal_cursor.recent_signals().to_vec();
+            self.gate_signal_summaries = self.signal_cursor.gate_signal_summaries().to_vec();
+            self.signal_gate_results = self.signal_cursor.signal_gate_results().to_vec();
+            self.rebuild_signal_dependent_fields();
             generation_changed = true;
         }
 
-        let stamp = file_stamp(&episodes_path);
-        if stamp != self.episodes_state.stamp {
-            self.refresh_episodes(&episodes_path, stamp);
+        if self.episode_cursor.tick()? {
+            self.episodes = self.episode_cursor.episodes().to_vec();
+            episodes_changed = true;
             generation_changed = true;
         }
 
@@ -617,12 +622,8 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        // Refresh event log
-        let events_path = roko_dir.join("state").join("events.json");
-        let stamp = file_stamp(&events_path);
-        if stamp != self.event_log_stamp {
-            self.event_log_stamp = stamp;
-            self.event_log = load_event_log(&events_path);
+        if self.event_log_cursor.tick()? {
+            self.event_log = self.event_log_cursor.event_log().to_vec();
             generation_changed = true;
         }
 
@@ -639,6 +640,11 @@ impl DashboardData {
                 load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
                 &self.task_outputs,
             );
+        } else if episodes_changed {
+            self.current_plan_execution = backfill_agent_output_tail(
+                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
+                &self.task_outputs,
+            );
         }
 
         if generation_changed {
@@ -646,78 +652,6 @@ impl DashboardData {
         }
 
         Ok(())
-    }
-
-    fn refresh_signals(&mut self, signals_path: &Path, stamp: FileStamp) {
-        let should_reset = stamp.len < self.signals_state.offset
-            || (stamp.modified != self.signals_state.stamp.modified
-                && stamp.len <= self.signals_state.offset);
-        if should_reset {
-            self.recent_signals.clear();
-            self.signal_gate_results.clear();
-            self.gate_signal_summaries.clear();
-            self.signals_state.offset = 0;
-        }
-
-        let values = if should_reset {
-            read_jsonl_values(signals_path)
-        } else {
-            read_jsonl_values_from_offset(signals_path, self.signals_state.offset)
-        };
-
-        for value in values {
-            if let Some(signal) = SignalSummary::from_value(&value) {
-                self.recent_signals.push(signal);
-            }
-            if let Some(gate_signal) = GateSignalSummary::from_value(&value) {
-                self.gate_signal_summaries.push(gate_signal);
-            }
-            if let Some(gate_result) = signal_gate_result_from_value(&value) {
-                self.signal_gate_results.push(gate_result);
-            }
-        }
-
-        if self.recent_signals.len() > 100 {
-            let keep_from = self.recent_signals.len() - 100;
-            self.recent_signals.drain(0..keep_from);
-        }
-
-        self.signals_state = JsonlState {
-            stamp,
-            offset: stamp.len,
-        };
-        self.rebuild_signal_dependent_fields();
-    }
-
-    fn refresh_episodes(&mut self, episodes_path: &Path, stamp: FileStamp) {
-        let should_reset = stamp.len < self.episodes_state.offset
-            || (stamp.modified != self.episodes_state.stamp.modified
-                && stamp.len <= self.episodes_state.offset);
-        if should_reset {
-            self.episodes.clear();
-            self.episodes_state.offset = 0;
-        }
-
-        let episodes = if should_reset {
-            load_episodes_from_path(episodes_path)
-        } else {
-            load_episodes_from_offset(episodes_path, self.episodes_state.offset)
-        };
-
-        if should_reset {
-            self.episodes = episodes;
-        } else {
-            self.episodes.extend(episodes);
-        }
-
-        self.episodes_state = JsonlState {
-            stamp,
-            offset: stamp.len,
-        };
-        self.current_plan_execution = backfill_agent_output_tail(
-            load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
-            &self.task_outputs,
-        );
     }
 
     fn rebuild_signal_dependent_fields(&mut self) {
@@ -1342,7 +1276,7 @@ fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
 // CFactor and CFactorComponents are imported from roko_learn::cfactor (line 26).
 
 impl SignalSummary {
-    fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         Some(Self {
             id: value.get("id")?.as_str()?.to_string(),
             kind: value.get("kind")?.as_str()?.to_string(),
@@ -1375,7 +1309,7 @@ impl SignalSummary {
 }
 
 impl GateResultSummary {
-    fn from_signal(value: &Value, plan_id: &str) -> Option<Self> {
+    pub(crate) fn from_signal(value: &Value, plan_id: &str) -> Option<Self> {
         let gate_name = extract_gate_name(value)?;
         let passed = extract_gate_passed(value)?;
         let duration_ms = extract_gate_duration_ms(value).unwrap_or(0);
@@ -1403,7 +1337,7 @@ impl GateResultSummary {
 }
 
 impl GateSignalSummary {
-    fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         if !value
             .get("kind")
             .and_then(Value::as_str)
@@ -1509,7 +1443,7 @@ fn load_task_outputs(task_outputs_dir: &Path) -> HashMap<String, Vec<String>> {
 }
 
 /// Load orchestrator event log from `.roko/state/events.json`.
-fn load_event_log(events_path: &Path) -> Vec<EventLogEntry> {
+pub(crate) fn load_event_log(events_path: &Path) -> Vec<EventLogEntry> {
     let Some(value) = read_json_value(events_path) else {
         return Vec::new();
     };
@@ -2505,13 +2439,6 @@ fn default_model_for_tier(tier: &str) -> String {
     }
 }
 
-fn load_episodes(path: &Path) -> Vec<Episode> {
-    read_jsonl_values(path)
-        .into_iter()
-        .filter_map(|entry| serde_json::from_value::<Episode>(entry).ok())
-        .collect()
-}
-
 fn latest_episode_for_plan(
     episodes: &[Episode],
     plan_id: &str,
@@ -2777,37 +2704,6 @@ fn file_stamp(path: &Path) -> FileStamp {
     FileStamp::from_path(path).unwrap_or_default()
 }
 
-fn load_signal_state(
-    path: &Path,
-) -> (
-    Vec<SignalSummary>,
-    Vec<GateSignalSummary>,
-    Vec<GateResultSummary>,
-    JsonlState,
-) {
-    let values = read_jsonl_values(path);
-    let (recent_signals, gate_signal_summaries, signal_gate_results) =
-        collect_signal_records(values);
-    let stamp = file_stamp(path);
-    (
-        recent_signals,
-        gate_signal_summaries,
-        signal_gate_results,
-        JsonlState {
-            stamp,
-            offset: stamp.len,
-        },
-    )
-}
-
-fn load_episodes_state(path: &Path) -> JsonlState {
-    let stamp = file_stamp(path);
-    JsonlState {
-        stamp,
-        offset: stamp.len,
-    }
-}
-
 fn next_dashboard_data_generation(root: &Path, stamps: DashboardDataStamps) -> u64 {
     let mut hasher = DefaultHasher::new();
     stamps.hash(&mut hasher);
@@ -2830,79 +2726,7 @@ fn next_dashboard_data_generation(root: &Path, stamps: DashboardDataStamps) -> u
     entry.generation
 }
 
-fn load_episodes_from_path(path: &Path) -> Vec<Episode> {
-    load_episodes(path)
-}
-
-fn load_episodes_from_offset(path: &Path, offset: u64) -> Vec<Episode> {
-    read_jsonl_values_from_offset(path, offset)
-        .into_iter()
-        .filter_map(|entry| serde_json::from_value::<Episode>(entry).ok())
-        .collect()
-}
-
-fn collect_signal_records(
-    values: Vec<Value>,
-) -> (
-    Vec<SignalSummary>,
-    Vec<GateSignalSummary>,
-    Vec<GateResultSummary>,
-) {
-    let mut recent_signals = Vec::new();
-    let mut gate_signal_summaries = Vec::new();
-    let mut signal_gate_results = Vec::new();
-    for value in values {
-        if let Some(signal) = SignalSummary::from_value(&value) {
-            recent_signals.push(signal);
-        }
-        if let Some(gate_signal) = GateSignalSummary::from_value(&value) {
-            gate_signal_summaries.push(gate_signal);
-        }
-        if let Some(gate_result) = signal_gate_result_from_value(&value) {
-            signal_gate_results.push(gate_result);
-        }
-    }
-
-    if recent_signals.len() > 100 {
-        let keep_from = recent_signals.len() - 100;
-        recent_signals = recent_signals.split_off(keep_from);
-    }
-
-    (recent_signals, gate_signal_summaries, signal_gate_results)
-}
-
-fn read_jsonl_values_from_offset(path: &Path, offset: u64) -> Vec<Value> {
-    let Ok(file) = File::open(path) else {
-        return Vec::new();
-    };
-    let mut reader = BufReader::new(file);
-    if reader.seek(SeekFrom::Start(offset)).is_err() {
-        return Vec::new();
-    }
-
-    let mut values = Vec::new();
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let Ok(bytes) = reader.read_line(&mut line) else {
-            break;
-        };
-        if bytes == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            values.push(value);
-        }
-    }
-
-    values
-}
-
-fn signal_gate_result_from_value(value: &Value) -> Option<GateResultSummary> {
+pub(crate) fn signal_gate_result_from_value(value: &Value) -> Option<GateResultSummary> {
     if !value
         .get("kind")
         .and_then(Value::as_str)
@@ -4837,7 +4661,8 @@ fn load_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 mod tests {
     use super::*;
 
-    use std::fs;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
 
     use tempfile::tempdir;
 
@@ -4845,6 +4670,15 @@ mod tests {
         fs::create_dir_all(path.parent().expect("file has parent"))
             .expect("should create parent dir");
         fs::write(path, lines.join("\n") + "\n").expect("should write jsonl");
+    }
+
+    fn append_raw(path: &Path, text: &str) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open append target");
+        file.write_all(text.as_bytes()).expect("append bytes");
     }
 
     fn sample_episode(
@@ -5755,6 +5589,163 @@ tier = "focused"
         assert!(snapshot.tasks.is_empty());
         assert_eq!(snapshot.tasks_done, 0);
         assert_eq!(snapshot.tasks_failed, 0);
+    }
+
+    #[test]
+    fn dashboard_data_tick_updates_jsonl_cursors_and_event_log() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let roko_dir = root.join(".roko");
+        let state_dir = roko_dir.join("state");
+        let memory_dir = root.join(MEMORY_DIR);
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+
+        write_json(
+            &state_dir.join("events.json"),
+            &vec![serde_json::json!({
+                "timestamp_ms": 1_u64,
+                "event_type": "started",
+                "plan_id": "plan-a",
+                "task_id": "task-a",
+                "message": "boot"
+            })],
+        );
+        write_jsonl(
+            &roko_dir.join("signals.jsonl"),
+            &[serde_json::json!({
+                "id": "sig-1",
+                "kind": "conductor:alert:warning",
+                "created_at_ms": 1_i64,
+            })
+            .to_string()],
+        );
+        write_jsonl(
+            &memory_dir.join(EPISODES_FILE),
+            &[
+                serde_json::to_string(&sample_episode("agent-a", "task-a", true, 0.5, 100))
+                    .expect("episode json"),
+            ],
+        );
+
+        let mut data = DashboardData::load_best_effort(root);
+        assert_eq!(data.recent_signals.len(), 1);
+        assert_eq!(data.episodes().len(), 1);
+        assert_eq!(data.event_log.len(), 1);
+
+        let appended_signal = serde_json::json!({
+            "id": "sig-2",
+            "kind": "gate:compile",
+            "created_at_ms": 2_i64,
+            "tags": {
+                "plan_id": "plan-a",
+                "task_id": "task-a",
+                "gate": "compile",
+                "passed": "true"
+            }
+        })
+        .to_string();
+        let appended_episode =
+            serde_json::to_string(&sample_episode("agent-b", "task-b", false, 0.8, 240))
+                .expect("episode json");
+
+        append_raw(&roko_dir.join("signals.jsonl"), &appended_signal);
+        append_raw(&memory_dir.join(EPISODES_FILE), &appended_episode);
+
+        data.tick().expect("partial tick should succeed");
+        assert_eq!(data.recent_signals.len(), 1);
+        assert_eq!(data.episodes().len(), 1);
+
+        append_raw(&roko_dir.join("signals.jsonl"), "\n");
+        append_raw(&memory_dir.join(EPISODES_FILE), "\n");
+        write_json(
+            &state_dir.join("events.json"),
+            &vec![
+                serde_json::json!({
+                    "timestamp_ms": 1_u64,
+                    "event_type": "started",
+                    "plan_id": "plan-a",
+                    "task_id": "task-a",
+                    "message": "boot"
+                }),
+                serde_json::json!({
+                    "timestamp_ms": 2_u64,
+                    "event_type": "finished",
+                    "plan_id": "plan-a",
+                    "task_id": "task-a",
+                    "message": "done"
+                }),
+            ],
+        );
+
+        data.tick().expect("append tick should succeed");
+        assert_eq!(data.recent_signals.len(), 2);
+        assert_eq!(data.episodes().len(), 2);
+        assert_eq!(data.event_log.len(), 2);
+        assert_eq!(data.event_log[1].event_type, "finished");
+    }
+
+    #[test]
+    fn dashboard_data_tick_resets_signal_and_episode_state_on_truncation() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let roko_dir = root.join(".roko");
+        let memory_dir = root.join(MEMORY_DIR);
+        fs::create_dir_all(&memory_dir).expect("memory dir");
+
+        write_jsonl(
+            &roko_dir.join("signals.jsonl"),
+            &[
+                serde_json::json!({
+                    "id": "sig-1",
+                    "kind": "gate:compile",
+                    "created_at_ms": 1_i64,
+                })
+                .to_string(),
+                serde_json::json!({
+                    "id": "sig-2",
+                    "kind": "conductor:alert:warning",
+                    "created_at_ms": 2_i64,
+                })
+                .to_string(),
+            ],
+        );
+        write_jsonl(
+            &memory_dir.join(EPISODES_FILE),
+            &[
+                serde_json::to_string(&sample_episode("agent-a", "task-a", true, 0.5, 100))
+                    .expect("episode json"),
+                serde_json::to_string(&sample_episode("agent-b", "task-b", false, 0.8, 240))
+                    .expect("episode json"),
+            ],
+        );
+
+        let mut data = DashboardData::load_best_effort(root);
+        assert_eq!(data.recent_signals.len(), 2);
+        assert_eq!(data.episodes().len(), 2);
+
+        write_jsonl(
+            &roko_dir.join("signals.jsonl"),
+            &[serde_json::json!({
+                "id": "sig-reset",
+                "kind": "conductor:alert:error",
+                "created_at_ms": 3_i64,
+            })
+            .to_string()],
+        );
+        write_jsonl(
+            &memory_dir.join(EPISODES_FILE),
+            &[
+                serde_json::to_string(&sample_episode("agent-c", "task-c", true, 0.2, 90))
+                    .expect("episode json"),
+            ],
+        );
+
+        data.tick().expect("truncation tick should succeed");
+        assert_eq!(data.recent_signals.len(), 1);
+        assert_eq!(data.recent_signals[0].id, "sig-reset");
+        assert_eq!(data.episodes().len(), 1);
+        assert_eq!(data.episodes()[0].task_id, "task-c");
     }
 
     #[test]

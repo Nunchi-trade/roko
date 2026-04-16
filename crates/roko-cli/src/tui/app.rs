@@ -2156,7 +2156,7 @@ impl App {
         }
     }
 
-    /// Manual refresh triggered by Ctrl-R or a debounced filesystem event.
+    /// Full refresh triggered by Ctrl-R and used as the fallback reload path.
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
@@ -2172,6 +2172,23 @@ impl App {
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
         }
+    }
+
+    fn tick_snapshot(&mut self) {
+        if let Err(error) = self.data.tick() {
+            tracing::warn!(
+                error = %error,
+                "dashboard incremental tick failed; falling back to full reload"
+            );
+            self.refresh_snapshot();
+            return;
+        }
+
+        self.last_data_gen = self.data.generation;
+        self.tui_state.update_from_snapshot(&self.data);
+        self.last_refresh = Instant::now();
+        self.clamp_signal_selection();
+        self.clamp_gate_failure_selection();
     }
 
     fn save_config_changes(&mut self) {
@@ -2336,7 +2353,7 @@ impl App {
                 }
             }
             if got_refresh {
-                self.refresh_snapshot();
+                self.tick_snapshot();
             }
         }
 
