@@ -8,6 +8,7 @@ mod agents;
 mod aggregator;
 mod config;
 mod deployments;
+mod diagnosis;
 mod learning;
 mod middleware;
 mod plans;
@@ -53,6 +54,7 @@ pub fn build_router(
         .merge(learning::routes())
         .merge(config::routes())
         .merge(deployments::routes())
+        .merge(diagnosis::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())

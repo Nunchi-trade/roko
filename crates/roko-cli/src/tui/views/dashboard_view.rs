@@ -12,10 +12,12 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
+use roko_core::dashboard_snapshot::{
+    DiagnosisSeverity, DiagnosisSummary, ErrorEntry, GateVerdict, SnapshotStats,
+};
 
 use super::ViewState;
 use crate::config::Config;
@@ -133,31 +135,47 @@ fn render_right_panel(
     render_sub_tab_bar(frame, sections[0], sub, theme);
 
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let diagnosis_height = diagnosis_panel_height(tui_state.diagnoses.len(), sections[1].height);
 
+    if diagnosis_height > 0 {
+        let split = Layout::vertical([Constraint::Min(0), Constraint::Length(diagnosis_height)])
+            .split(sections[1]);
+        render_right_panel_content(
+            frame, split[0], sub, data, tui_state, view_state, focused, theme,
+        );
+        render_diagnosis_panel(frame, split[1], &tui_state.diagnoses, focused, theme);
+    } else {
+        render_right_panel_content(
+            frame,
+            sections[1],
+            sub,
+            data,
+            tui_state,
+            view_state,
+            focused,
+            theme,
+        );
+    }
+}
+
+fn render_right_panel_content(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    sub: usize,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    focused: bool,
+    theme: &Theme,
+) {
     match sub {
-        0 => render_sub_agents(
-            frame,
-            sections[1],
-            data,
-            tui_state,
-            view_state,
-            focused,
-            theme,
-        ),
-        1 => render_output_panel(
-            frame,
-            sections[1],
-            data,
-            tui_state,
-            view_state,
-            focused,
-            theme,
-        ),
-        2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
-        3 => render_sub_errors(frame, sections[1], data, theme),
-        4 => render_sub_git(frame, sections[1], tui_state, theme),
-        5 => render_sub_mcp(frame, sections[1], data, tui_state, theme),
-        6 => render_sub_processes(frame, sections[1], data, tui_state, focused, theme),
+        0 => render_sub_agents(frame, area, data, tui_state, view_state, focused, theme),
+        1 => render_output_panel(frame, area, data, tui_state, view_state, focused, theme),
+        2 => render_sub_diff(frame, area, data, tui_state, theme),
+        3 => render_sub_errors(frame, area, data, theme),
+        4 => render_sub_git(frame, area, tui_state, theme),
+        5 => render_sub_mcp(frame, area, data, tui_state, theme),
+        6 => render_sub_processes(frame, area, data, tui_state, focused, theme),
         _ => {}
     }
 }
@@ -946,6 +964,67 @@ fn render_sub_processes(
     );
 }
 
+fn render_diagnosis_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    diagnoses: &[DiagnosisSummary],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Diagnosis ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = diagnosis_rows(diagnoses, inner.width, theme);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no conductor diagnoses yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let rows = rows
+        .into_iter()
+        .take(visible_rows.max(1))
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Min(20),
+                Constraint::Min(0),
+            ],
+        )
+        .header(
+            Row::new(["Severity", "Signal", "Message"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
 fn format_mem_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -1161,4 +1240,77 @@ fn route_tier_style(tier: &str, theme: &Theme) -> Style {
         "deep" => theme.warning(),
         _ => theme.muted(),
     }
+}
+
+fn diagnosis_panel_height(diagnosis_count: usize, available_height: u16) -> u16 {
+    if available_height < 8 {
+        return 0;
+    }
+
+    let desired = (diagnosis_count as u16).saturating_add(3).clamp(6, 9);
+    desired.min(available_height.saturating_sub(1))
+}
+
+fn diagnosis_rows(diagnoses: &[DiagnosisSummary], width: u16, theme: &Theme) -> Vec<Row<'static>> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+
+    for diagnosis in diagnoses.iter().rev() {
+        if !seen.insert(diagnosis.id.clone()) {
+            continue;
+        }
+
+        let style = diagnosis_severity_style(diagnosis.severity, theme);
+        let message = if let Some(intervention) = diagnosis.intervention_taken.as_deref() {
+            format!("{} [{}]", diagnosis.detail, intervention)
+        } else {
+            diagnosis.detail.clone()
+        };
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                truncate(&diagnosis_severity_label(diagnosis.severity), 9),
+                style,
+            )),
+            Cell::from(Span::styled(
+                truncate(&diagnosis.subject, diagnosis_kind_width(width)),
+                style,
+            )),
+            Cell::from(Span::styled(
+                truncate(&message, diagnosis_message_width(width)),
+                style,
+            )),
+        ]));
+    }
+
+    rows
+}
+
+fn diagnosis_severity_label(severity: DiagnosisSeverity) -> &'static str {
+    match severity {
+        DiagnosisSeverity::Info => "info",
+        DiagnosisSeverity::Warn => "warn",
+        DiagnosisSeverity::Alert => "alert",
+    }
+}
+
+fn diagnosis_severity_style(severity: DiagnosisSeverity, theme: &Theme) -> Style {
+    match severity {
+        DiagnosisSeverity::Alert => Theme::error_style(),
+        DiagnosisSeverity::Warn => theme.warning(),
+        DiagnosisSeverity::Info => theme.info(),
+    }
+}
+
+fn diagnosis_kind_width(width: u16) -> usize {
+    if width >= 110 {
+        30
+    } else if width >= 90 {
+        26
+    } else {
+        20
+    }
+}
+
+fn diagnosis_message_width(width: u16) -> usize {
+    width.saturating_sub(diagnosis_kind_width(width) as u16 + 16) as usize
 }

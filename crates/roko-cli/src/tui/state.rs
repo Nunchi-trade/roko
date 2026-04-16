@@ -764,6 +764,8 @@ pub struct TuiState {
     // -- gate results --
     /// Gate pipeline results for the command_output widget.
     pub gate_results: Vec<GateResultEntry>,
+    /// Recent conductor diagnoses from the live dashboard snapshot.
+    pub diagnoses: Vec<roko_core::dashboard_snapshot::DiagnosisSummary>,
 
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
@@ -933,6 +935,7 @@ impl Default for TuiState {
             execution_waves: Vec::new(),
             current_task_checklist: Vec::new(),
             gate_results: Vec::new(),
+            diagnoses: Vec::new(),
 
             agents: Vec::new(),
             route_metrics: HashMap::new(),
@@ -1663,6 +1666,7 @@ impl TuiState {
                 },
             })
             .collect();
+        self.diagnoses = snap.diagnoses.iter().cloned().collect();
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
@@ -3565,6 +3569,7 @@ tier = "focused"
                     ts_millis: 2_000,
                 },
             ],
+            diagnoses: Default::default(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),
@@ -3836,6 +3841,16 @@ tier = "focused"
             passed: true,
             ts_millis: 1,
         });
+        snap.diagnoses
+            .push_back(roko_core::dashboard_snapshot::DiagnosisSummary {
+                id: "plan:plan-a:watcher:circuit-breaker:pattern:loop-detected".into(),
+                ts: chrono::Utc::now(),
+                severity: roko_core::dashboard_snapshot::DiagnosisSeverity::Warn,
+                subject: "Circuit Breaker: Loop Detected".into(),
+                detail: "repeated identical output".into(),
+                suggested_action: Some("Restart Agent".into()),
+                intervention_taken: Some("Paused plan".into()),
+            });
         snap.errors.push(roko_core::dashboard_snapshot::ErrorEntry {
             message: "compile failed once".into(),
             ts_millis: 2,
@@ -3867,6 +3882,8 @@ tier = "focused"
         assert_eq!(state.gate_results.len(), 1);
         assert_eq!(state.gate_results[0].gate, "compile");
         assert_eq!(state.gate_results[0].output, "task task-2");
+        assert_eq!(state.diagnoses.len(), 1);
+        assert_eq!(state.diagnoses[0].subject, "Circuit Breaker: Loop Detected");
         assert_eq!(state.execution_waves.len(), 1);
         assert_eq!(state.execution_waves[0].plans, vec![String::from("plan-a")]);
         assert_eq!(state.phase_pipeline.len(), 9);

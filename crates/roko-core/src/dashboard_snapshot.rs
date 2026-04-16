@@ -4,10 +4,11 @@
 //! consumers (TUI, WebSocket, SSE, REST). It is updated atomically via
 //! [`apply`] when the [`StateHub`](super::state_hub::StateHub) receives events.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,11 @@ pub enum DashboardEvent {
         task_id: String,
         metric: String,
         value: f64,
+    },
+    /// A conductor diagnosis was recorded.
+    Diagnosis {
+        /// The summarized diagnosis payload to append to the ring buffer.
+        summary: DiagnosisSummary,
     },
     /// An error occurred.
     Error { message: String },
@@ -144,6 +150,59 @@ pub struct ErrorEntry {
     pub ts_millis: u64,
 }
 
+/// Operator-facing severity for conductor diagnoses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosisSeverity {
+    /// Informational guidance.
+    #[default]
+    Info,
+    /// Operator attention recommended.
+    Warn,
+    /// Immediate intervention recommended.
+    Alert,
+}
+
+/// A summarized conductor diagnosis surfaced to the dashboard and HTTP API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosisSummary {
+    /// Stable identifier for deduplication.
+    #[serde(default)]
+    pub id: String,
+    /// When the diagnosis was produced.
+    #[serde(default = "default_diagnosis_timestamp")]
+    pub ts: DateTime<Utc>,
+    /// Severity bucket for UI rendering.
+    #[serde(default)]
+    pub severity: DiagnosisSeverity,
+    /// Short subject line describing what was diagnosed.
+    #[serde(default)]
+    pub subject: String,
+    /// Human-readable detail or excerpt.
+    #[serde(default)]
+    pub detail: String,
+    /// Suggested next action from the conductor.
+    #[serde(default)]
+    pub suggested_action: Option<String>,
+    /// Action already taken automatically, if any.
+    #[serde(default)]
+    pub intervention_taken: Option<String>,
+}
+
+impl Default for DiagnosisSummary {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            ts: default_diagnosis_timestamp(),
+            severity: DiagnosisSeverity::default(),
+            subject: String::new(),
+            detail: String::new(),
+            suggested_action: None,
+            intervention_taken: None,
+        }
+    }
+}
+
 /// The full materialized dashboard state.
 ///
 /// Updated atomically by [`StateHub`](super::state_hub::StateHub) via
@@ -159,6 +218,9 @@ pub struct DashboardSnapshot {
     pub agents: HashMap<String, AgentState>,
     /// Recent gate verdicts (ring of last 256).
     pub gates: Vec<GateVerdict>,
+    /// Recent conductor diagnoses (ring of last 50).
+    #[serde(default)]
+    pub diagnoses: VecDeque<DiagnosisSummary>,
     /// Recent errors (ring of last 64).
     pub errors: Vec<ErrorEntry>,
     /// Overall counts.
@@ -195,6 +257,7 @@ pub struct SnapshotStats {
 // ---------------------------------------------------------------------------
 
 const MAX_GATES: usize = 256;
+const MAX_DIAGNOSES: usize = 50;
 const MAX_ERRORS: usize = 64;
 
 // ---------------------------------------------------------------------------
@@ -343,6 +406,9 @@ impl DashboardSnapshot {
             DashboardEvent::EfficiencyEvent { .. } => {
                 // Efficiency metrics are tracked separately by the learn subsystem.
             }
+            DashboardEvent::Diagnosis { summary } => {
+                push_diagnosis(self, summary.clone());
+            }
             DashboardEvent::Error { message } => {
                 self.stats.errors_total += 1;
                 if self.errors.len() >= MAX_ERRORS {
@@ -423,6 +489,7 @@ fn snapshot_from_workdir_parts(
         for gate in signal_gates {
             push_gate(&mut snapshot, gate.clone());
         }
+        append_event_diagnoses(&mut snapshot, event_entries);
         append_event_errors(&mut snapshot, event_entries);
         return snapshot;
     };
@@ -450,6 +517,7 @@ fn snapshot_from_workdir_parts(
             push_gate(&mut snapshot, gate.clone());
         }
     }
+    append_event_diagnoses(&mut snapshot, event_entries);
     append_event_errors(&mut snapshot, event_entries);
     snapshot
 }
@@ -923,6 +991,22 @@ fn append_event_errors(snapshot: &mut DashboardSnapshot, event_entries: &[serde_
     }
 }
 
+fn append_event_diagnoses(snapshot: &mut DashboardSnapshot, event_entries: &[serde_json::Value]) {
+    for entry in event_entries {
+        let event_kind = event_kind_label(entry);
+        if !matches!(
+            event_kind.as_deref(),
+            Some("InterventionFired" | "intervention.fired" | "intervention_fired")
+        ) {
+            continue;
+        }
+
+        if let Some(summary) = diagnosis_from_event_entry(entry) {
+            push_diagnosis(snapshot, summary);
+        }
+    }
+}
+
 fn event_kind_label(entry: &serde_json::Value) -> Option<String> {
     entry
         .get("event_kind")
@@ -959,6 +1043,157 @@ fn push_error(snapshot: &mut DashboardSnapshot, error: ErrorEntry) {
         snapshot.errors.remove(0);
     }
     snapshot.errors.push(error);
+}
+
+fn push_diagnosis(snapshot: &mut DashboardSnapshot, mut diagnosis: DiagnosisSummary) {
+    if diagnosis.id.trim().is_empty() {
+        diagnosis.id = format!(
+            "{}:{}:{}",
+            diagnosis.subject,
+            diagnosis.suggested_action.as_deref().unwrap_or_default(),
+            diagnosis.ts.timestamp_millis()
+        );
+    }
+
+    if let Some(existing_idx) = snapshot
+        .diagnoses
+        .iter()
+        .position(|existing| existing.id == diagnosis.id)
+    {
+        snapshot.diagnoses.remove(existing_idx);
+    }
+    while snapshot.diagnoses.len() >= MAX_DIAGNOSES {
+        snapshot.diagnoses.pop_front();
+    }
+    snapshot.diagnoses.push_back(diagnosis);
+}
+
+fn diagnosis_from_event_entry(entry: &serde_json::Value) -> Option<DiagnosisSummary> {
+    let payload = entry.get("payload").unwrap_or(entry);
+    let plan_id = payload
+        .get("plan_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let watcher = payload
+        .get("watcher")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("conductor");
+    let action = payload
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("observe");
+    let ts = diagnosis_timestamp_from_ms(event_timestamp_ms(entry));
+
+    if let Some(primary) = payload.get("primary_diagnosis") {
+        let pattern_name = primary
+            .get("pattern_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let detail = primary
+            .get("matched_excerpt")
+            .and_then(serde_json::Value::as_str)
+            .filter(|detail| !detail.trim().is_empty())
+            .or_else(|| {
+                payload
+                    .get("error_output")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|detail| !detail.trim().is_empty())
+            })
+            .unwrap_or_default()
+            .to_string();
+
+        return Some(DiagnosisSummary {
+            id: format!("plan:{plan_id}:watcher:{watcher}:pattern:{pattern_name}"),
+            ts,
+            severity: diagnosis_severity_from_payload(primary, action),
+            subject: format!(
+                "{}: {}",
+                titleize_token(watcher),
+                titleize_token(pattern_name)
+            ),
+            detail,
+            suggested_action: primary
+                .get("suggested_intervention")
+                .and_then(serde_json::Value::as_str)
+                .map(titleize_token),
+            intervention_taken: Some(titleize_token(action)),
+        });
+    }
+
+    let reason = payload
+        .get("reason")
+        .or_else(|| payload.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())?;
+
+    Some(DiagnosisSummary {
+        id: format!("plan:{plan_id}:watcher:{watcher}:action:{action}"),
+        ts,
+        severity: diagnosis_severity_from_action(action),
+        subject: titleize_token(watcher),
+        detail: reason.to_string(),
+        suggested_action: Some(titleize_token(action)),
+        intervention_taken: None,
+    })
+}
+
+fn diagnosis_severity_from_payload(
+    diagnosis: &serde_json::Value,
+    action: &str,
+) -> DiagnosisSeverity {
+    match diagnosis
+        .get("suggested_intervention")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "abort_plan" | "restart_agent" | "switch_model" | "merge_resolution" => {
+            DiagnosisSeverity::Alert
+        }
+        "autofix" | "backoff_retry" | "reduce_context" => DiagnosisSeverity::Warn,
+        _ => diagnosis_severity_from_action(action),
+    }
+}
+
+fn diagnosis_severity_from_action(action: &str) -> DiagnosisSeverity {
+    match action {
+        "fail" | "pause" | "abort" | "restart" => DiagnosisSeverity::Alert,
+        "retry" | "warn" | "backoff" => DiagnosisSeverity::Warn,
+        _ => DiagnosisSeverity::Info,
+    }
+}
+
+fn default_diagnosis_timestamp() -> DateTime<Utc> {
+    diagnosis_timestamp_from_ms(0)
+}
+
+fn diagnosis_timestamp_from_ms(ts_millis: u64) -> DateTime<Utc> {
+    Utc.timestamp_millis_opt(i64::try_from(ts_millis).unwrap_or_default())
+        .single()
+        .unwrap_or_else(default_epoch)
+}
+
+fn default_epoch() -> DateTime<Utc> {
+    Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now)
+}
+
+fn titleize_token(value: &str) -> String {
+    value
+        .split(['.', '-', '_', ':'])
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut title = String::new();
+                    title.extend(first.to_uppercase());
+                    title.push_str(chars.as_str());
+                    title
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn string_array(values: &[serde_json::Value]) -> Vec<String> {
@@ -1108,6 +1343,38 @@ mod tests {
     }
 
     #[test]
+    fn diagnosis_ring_dedupes_by_id_and_keeps_latest_copy() {
+        let mut snap = DashboardSnapshot::default();
+
+        snap.apply(&DashboardEvent::Diagnosis {
+            summary: DiagnosisSummary {
+                id: "diag-1".into(),
+                ts: diagnosis_timestamp_from_ms(10),
+                severity: DiagnosisSeverity::Warn,
+                subject: "Circuit Breaker".into(),
+                detail: "first copy".into(),
+                suggested_action: Some("Restart Agent".into()),
+                intervention_taken: Some("Paused plan".into()),
+            },
+        });
+        snap.apply(&DashboardEvent::Diagnosis {
+            summary: DiagnosisSummary {
+                id: "diag-1".into(),
+                ts: diagnosis_timestamp_from_ms(20),
+                severity: DiagnosisSeverity::Alert,
+                subject: "Circuit Breaker".into(),
+                detail: "latest copy".into(),
+                suggested_action: Some("Abort Plan".into()),
+                intervention_taken: Some("Paused plan".into()),
+            },
+        });
+
+        assert_eq!(snap.diagnoses.len(), 1);
+        assert_eq!(snap.diagnoses[0].detail, "latest copy");
+        assert_eq!(snap.diagnoses[0].severity, DiagnosisSeverity::Alert);
+    }
+
+    #[test]
     fn agent_output_accumulates() {
         let mut snap = DashboardSnapshot::default();
         snap.apply(&DashboardEvent::AgentSpawned {
@@ -1170,6 +1437,21 @@ mod tests {
                         "timestamp_ms": 100,
                         "event_kind": "ErrorOccurred",
                         "payload": { "message": "boom" }
+                    },
+                    {
+                        "timestamp_ms": 101,
+                        "event_kind": "intervention.fired",
+                        "payload": {
+                            "plan_id": "plan-1",
+                            "watcher": "circuit-breaker",
+                            "action": "pause",
+                            "error_output": "tool timeout",
+                            "primary_diagnosis": {
+                                "pattern_name": "timeout_error",
+                                "suggested_intervention": "restart_agent",
+                                "matched_excerpt": "tool timeout"
+                            }
+                        }
                     }
                 ]
             }))
@@ -1189,6 +1471,9 @@ mod tests {
         assert_eq!(snapshot.agents["plan-1:task-2"].role, "Implementer");
         assert_eq!(snapshot.tasks["plan-1/task-2"].phase, "implementing");
         assert_eq!(snapshot.errors[0].message, "boom");
+        assert_eq!(snapshot.diagnoses.len(), 1);
+        assert_eq!(snapshot.diagnoses[0].severity, DiagnosisSeverity::Alert);
+        assert!(snapshot.diagnoses[0].subject.contains("Circuit Breaker"));
     }
 
     #[test]

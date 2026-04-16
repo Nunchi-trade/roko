@@ -33,7 +33,9 @@ use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
     PromptSection, SectionPriority, SectionScorer, TaskContext,
 };
-use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
+use roko_conductor::diagnosis::{
+    DiagnosisEngine, DiagnosisResult, ErrorCategory, SuggestedIntervention,
+};
 use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::DaimonPolicy;
 use roko_core::Policy;
@@ -53,7 +55,7 @@ use roko_core::{
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
-    CatalystSignalSource, PredictionPolicy, PredictiveScorer,
+    CatalystSignalSource, DiagnosisSeverity, DiagnosisSummary, PredictionPolicy, PredictiveScorer,
 };
 use roko_daimon::{
     AffectEngine as _, AffectEvent, DaimonState, DispatchParams, SomaticSignal,
@@ -4214,6 +4216,14 @@ impl PlanRunner {
         let diagnosis_engine = DiagnosisEngine::default();
         let diagnosis_results = diagnosis_engine.diagnose(&error_output);
         let primary_diagnosis = diagnosis_results.first().cloned();
+        self.publish_conductor_diagnosis(
+            plan_id,
+            "circuit-breaker",
+            "pause",
+            &error_output,
+            primary_diagnosis.as_ref(),
+            Some(String::from("Paused plan")),
+        );
         let payload = serde_json::json!({
             "plan_id": plan_id,
             "action": "pause",
@@ -4268,6 +4278,7 @@ impl PlanRunner {
             ConductorDecision::Restart { watcher, reason } => {
                 tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
                 self.record_conductor_negative_feedback(plan_id, &decision);
+                self.publish_conductor_decision_summary(plan_id, watcher, "restart", reason);
                 self.emit_execution_event(
                     plan_id,
                     crate::serve::events::ExecutionEvent::WatcherAlert {
@@ -4279,6 +4290,7 @@ impl PlanRunner {
             ConductorDecision::Fail { watcher, reason } => {
                 tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
                 self.record_conductor_negative_feedback(plan_id, &decision);
+                self.publish_conductor_decision_summary(plan_id, watcher, "fail", reason);
                 self.emit_execution_event(
                     plan_id,
                     crate::serve::events::ExecutionEvent::WatcherAlert {
@@ -4290,6 +4302,80 @@ impl PlanRunner {
             _ => {}
         }
         decision
+    }
+
+    fn publish_conductor_diagnosis(
+        &self,
+        plan_id: &str,
+        watcher: &str,
+        action: &str,
+        detail: &str,
+        diagnosis: Option<&DiagnosisResult>,
+        intervention_taken: Option<String>,
+    ) {
+        let Some(hub) = &self.state_hub_sender else {
+            return;
+        };
+
+        let summary = if let Some(diagnosis) = diagnosis {
+            DiagnosisSummary {
+                id: format!(
+                    "plan:{plan_id}:watcher:{watcher}:pattern:{}",
+                    diagnosis.pattern_name
+                ),
+                ts: chrono::Utc::now(),
+                severity: diagnosis_severity(Some(&diagnosis.suggested_intervention), action),
+                subject: format!(
+                    "{}: {}",
+                    titleize_diagnosis_label(watcher),
+                    titleize_diagnosis_label(&diagnosis.pattern_name)
+                ),
+                detail: if diagnosis.matched_excerpt.trim().is_empty() {
+                    detail.to_string()
+                } else {
+                    diagnosis.matched_excerpt.clone()
+                },
+                suggested_action: Some(titleize_suggested_intervention(
+                    &diagnosis.suggested_intervention,
+                )),
+                intervention_taken,
+            }
+        } else {
+            DiagnosisSummary {
+                id: format!("plan:{plan_id}:watcher:{watcher}:action:{action}"),
+                ts: chrono::Utc::now(),
+                severity: diagnosis_severity(None, action),
+                subject: titleize_diagnosis_label(watcher),
+                detail: detail.to_string(),
+                suggested_action: Some(titleize_diagnosis_label(action)),
+                intervention_taken,
+            }
+        };
+
+        hub.publish(roko_core::DashboardEvent::Diagnosis { summary });
+    }
+
+    fn publish_conductor_decision_summary(
+        &self,
+        plan_id: &str,
+        watcher: &str,
+        action: &str,
+        reason: impl std::fmt::Display,
+    ) {
+        let reason = reason.to_string();
+        let intervention_taken = match action {
+            "restart" => Some(String::from("Requested restart")),
+            "fail" => Some(String::from("Marked plan failed")),
+            _ => None,
+        };
+        self.publish_conductor_diagnosis(
+            plan_id,
+            watcher,
+            action,
+            &reason,
+            None,
+            intervention_taken,
+        );
     }
 
     fn worktrees_enabled(&self) -> bool {
@@ -13175,6 +13261,69 @@ fn now_unix_ms_i64() -> i64 {
     }
 }
 
+fn diagnosis_severity(
+    suggested_intervention: Option<&SuggestedIntervention>,
+    action: &str,
+) -> DiagnosisSeverity {
+    match suggested_intervention {
+        Some(
+            SuggestedIntervention::AbortPlan
+            | SuggestedIntervention::RestartAgent
+            | SuggestedIntervention::SwitchModel
+            | SuggestedIntervention::MergeResolution,
+        ) => DiagnosisSeverity::Alert,
+        Some(
+            SuggestedIntervention::AutoFix
+            | SuggestedIntervention::BackoffRetry
+            | SuggestedIntervention::ReduceContext,
+        ) => DiagnosisSeverity::Warn,
+        Some(SuggestedIntervention::RetryWithContext | SuggestedIntervention::WarnAndContinue) => {
+            DiagnosisSeverity::Info
+        }
+        Some(_) => DiagnosisSeverity::Info,
+        None => match action {
+            "fail" | "pause" | "abort" => DiagnosisSeverity::Alert,
+            "restart" | "retry" | "warn" => DiagnosisSeverity::Warn,
+            _ => DiagnosisSeverity::Info,
+        },
+    }
+}
+
+fn titleize_suggested_intervention(intervention: &SuggestedIntervention) -> String {
+    match intervention {
+        SuggestedIntervention::RetryWithContext => String::from("Retry With Context"),
+        SuggestedIntervention::AutoFix => String::from("Auto Fix"),
+        SuggestedIntervention::RestartAgent => String::from("Restart Agent"),
+        SuggestedIntervention::AbortPlan => String::from("Abort Plan"),
+        SuggestedIntervention::BackoffRetry => String::from("Backoff Retry"),
+        SuggestedIntervention::MergeResolution => String::from("Merge Resolution"),
+        SuggestedIntervention::ReduceContext => String::from("Reduce Context"),
+        SuggestedIntervention::SwitchModel => String::from("Switch Model"),
+        SuggestedIntervention::WarnAndContinue => String::from("Warn And Continue"),
+        _ => String::from("Conductor Intervention"),
+    }
+}
+
+fn titleize_diagnosis_label(value: &str) -> String {
+    value
+        .split(['.', '-', '_', ':'])
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut title = String::new();
+                    title.extend(first.to_uppercase());
+                    title.push_str(chars.as_str());
+                    title
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn mechanical_tier_model(config: &Config) -> Option<String> {
     config.agent.tier_models.get("mechanical").cloned()
 }
@@ -14287,7 +14436,45 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    use axum::body::Body as AxumBody;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    struct TestServeRuntime;
+
+    #[async_trait::async_trait]
+    impl roko_serve::runtime::CliRuntime for TestServeRuntime {
+        async fn run_once(
+            &self,
+            _workdir: &std::path::Path,
+            _prompt: &str,
+        ) -> anyhow::Result<roko_serve::runtime::RunResult> {
+            Ok(roko_serve::runtime::RunResult { success: true })
+        }
+
+        fn session_status(&self, workdir: PathBuf) -> roko_serve::runtime::SessionStatusInfo {
+            roko_serve::runtime::SessionStatusInfo {
+                session_id: None,
+                workdir,
+                daemon_running: false,
+                signal_count: None,
+                episode_count: None,
+                last_episode_passed: None,
+            }
+        }
+
+        fn dashboard_scaffold(
+            &self,
+            _workdir: &std::path::Path,
+        ) -> roko_serve::runtime::DashboardInfo {
+            roko_serve::runtime::DashboardInfo {
+                rendered: String::new(),
+            }
+        }
+    }
 
     fn git_available() -> bool {
         Command::new("git")
@@ -14837,6 +15024,100 @@ depends_on = []
                 .plan_state("plan-1")
                 .is_some_and(|state| state.paused)
         );
+    }
+
+    #[tokio::test]
+    async fn diagnosis_endpoint_surfaces_conductor_circuit_breaker_summary() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan_states = HashMap::new();
+        plan_states.insert("plan-1".to_string(), PlanState::new("plan-1"));
+        let snapshot = ExecutorSnapshot {
+            plan_states,
+            queue_order: vec!["plan-1".to_string()],
+            ..ExecutorSnapshot::new(0)
+        };
+        let snapshot_json = snapshot.to_json().unwrap();
+        let mut runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            Config::default(),
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let deploy_backend = Arc::from(
+            roko_serve::deploy::create_backend("manual", None, None, None).expect("manual backend"),
+        );
+        let state = Arc::new(roko_serve::state::AppState::new(
+            tmp.path().to_path_buf(),
+            Arc::new(TestServeRuntime),
+            roko_core::config::schema::RokoConfig::default(),
+            deploy_backend,
+        ));
+        runner.set_state_hub(state.state_hub.sender());
+
+        let app = roko_serve::routes::build_router(
+            Arc::clone(&state),
+            &[],
+            roko_core::config::ServeAuthConfig::default(),
+        );
+
+        runner
+            .conductor
+            .circuit_breaker()
+            .record_failure("plan-1", "tool timeout", 1);
+        runner
+            .conductor
+            .circuit_breaker()
+            .record_failure("plan-1", "tool timeout", 2);
+
+        let err = runner
+            .dispatch_agent_with(
+                "plan-1",
+                AgentRole::Implementer,
+                "task-1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("circuit breaker tripped"));
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/diagnosis/recent")
+                        .body(AxumBody::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let diagnoses: Vec<roko_core::DiagnosisSummary> =
+                serde_json::from_slice(&body).unwrap();
+            if let Some(summary) = diagnoses.first() {
+                assert!(summary.id.contains("circuit-breaker"));
+                assert_eq!(summary.severity, DiagnosisSeverity::Alert);
+                assert!(summary.subject.contains("Circuit Breaker"));
+                break;
+            }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "diagnosis did not appear on /api/diagnosis/recent within 1s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 
     #[tokio::test]

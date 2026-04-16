@@ -123,7 +123,9 @@ pub use task::{
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
-pub use dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
+pub use dashboard_snapshot::{
+    DashboardEvent, DashboardSnapshot, DiagnosisSeverity, DiagnosisSummary,
+};
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
