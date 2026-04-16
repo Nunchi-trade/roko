@@ -46,4 +46,4 @@ EXPOSE 8545
 
 ENTRYPOINT ["/usr/local/bin/mirage-rs"]
 # Default CMD: bind all interfaces, enable full chain extension surface.
-CMD ["--host", "0.0.0.0", "--port", "8545", "--enable-hdc", "--enable-knowledge", "--enable-stigmergy"]
+CMD ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "88888", "--enable-hdc", "--enable-knowledge", "--enable-stigmergy"]
