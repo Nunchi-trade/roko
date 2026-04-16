@@ -521,7 +521,7 @@ impl LearningRuntime {
     {
         let healthy_models = self
             .provider_health
-            .filter_arms(all_model_slugs, provider_of);
+            .filter_arms_or_best(all_model_slugs, provider_of);
         if healthy_models.is_empty() {
             all_model_slugs.to_vec()
         } else {

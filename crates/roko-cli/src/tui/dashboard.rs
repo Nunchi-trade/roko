@@ -4,36 +4,40 @@
 //! best-effort learning snapshot on top so the health and trends pages
 //! can render real stats when the memory JSONL files are present.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fmt::{self, Write as _};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead as _, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
-use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[cfg(test)]
+use ratatui::style::Color;
 
 use crate::plan::{PlanSummary, plans_dir};
 use crate::task_parser::{TaskDef, TasksFile};
 use roko_core::metric::{Headlines, TaskMetric, compute_headlines};
-use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::cascade_router::{CascadeStage, StageTransition};
 pub use roko_learn::cfactor::{CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::pattern_discovery::CrossEpisodeConsolidator;
-use roko_learn::prompt_experiment::{
-    ExperimentStatus, ExperimentStore, PromptExperiment, PromptVariant, VariantStats,
-};
+use roko_learn::prompt_experiment::ExperimentStore;
 use roko_learn::provider_health::{CircuitState, ProviderHealth};
 use roko_learn::skill_library::Skill;
 
 use super::pages::{PageId, PageScaffold, efficiency, operations};
+use super::state::{PlanPhase, TaskStatus};
+pub use super::theme::Theme;
 
 const MEMORY_DIR: &str = ".roko/memory";
 const EPISODES_FILE: &str = "episodes.jsonl";
@@ -47,13 +51,20 @@ const CASCADE_ROUTER_FILE: &str = "cascade-router.json";
 const SKILLS_FILE: &str = "skills.json";
 const PROVIDER_HEALTH_FILE: &str = "provider-health.json";
 const LATENCY_STATS_FILE: &str = "latency-stats.json";
-const DAIMON_DIR: &str = "daimon";
-const AFFECT_FILE: &str = "affect.json";
 const NEURO_DIR: &str = ".roko/neuro";
 const KNOWLEDGE_FILE: &str = "knowledge.jsonl";
 const KNOWLEDGE_CONFIRMATIONS_FILE: &str = "knowledge-confirmations.jsonl";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+fn resolve_episodes_path(root: &Path) -> PathBuf {
+    let episodes_path = root.join(MEMORY_DIR).join(EPISODES_FILE);
+    if episodes_path.exists() {
+        episodes_path
+    } else {
+        root.join(".roko").join(EPISODES_FILE)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct FileStamp {
     modified: Option<SystemTime>,
     len: u64,
@@ -69,161 +80,34 @@ impl FileStamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct JsonlState {
     stamp: FileStamp,
     offset: u64,
 }
 
-/// Color palette for the dashboard TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Theme {
-    /// Primary foreground text color.
-    pub foreground: Color,
-    /// Secondary or muted text color.
-    pub muted: Color,
-    /// Default background color.
-    pub background: Color,
-    /// Primary accent color.
-    pub accent: Color,
-    /// Accent foreground color for contrast.
-    pub accent_foreground: Color,
-    /// Success or completed state color.
-    pub success: Color,
-    /// Warning or gating state color.
-    pub warning: Color,
-    /// Error or failed state color.
-    pub danger: Color,
-    /// Informational or active state color.
-    pub info: Color,
-    /// Selection background color.
-    pub selection_background: Color,
-    /// Selection foreground color.
-    pub selection_foreground: Color,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct DashboardDataStamps {
+    executor_state: FileStamp,
+    efficiency: FileStamp,
+    experiments: FileStamp,
+    gate_thresholds: FileStamp,
+    signals: JsonlState,
+    episodes: JsonlState,
+    cfactor: FileStamp,
+    cascade_router: FileStamp,
+    task_outputs: FileStamp,
+    event_log: FileStamp,
 }
 
-impl Theme {
-    /// ROSEDUST palette — warm rose/indigo aesthetic from Mori's design system.
-    #[must_use]
-    pub const fn dark() -> Self {
-        Self {
-            foreground: Color::Rgb(165, 142, 158), // #A58E9E — rose-tinted text
-            muted: Color::Rgb(110, 85, 105),       // #6E5569 — ghost text
-            background: Color::Rgb(0, 0, 0),       // #000000 — void
-            accent: Color::Rgb(185, 120, 148),     // #B97894 — primary rose
-            accent_foreground: Color::Rgb(0, 0, 0), // #000000 — contrast on rose
-            success: Color::Rgb(125, 158, 140),    // #7D9E8C — sage green
-            warning: Color::Rgb(195, 155, 95),     // #C39B5F — amber caution
-            danger: Color::Rgb(195, 110, 85),      // #C36E55 — ember red
-            info: Color::Rgb(120, 115, 165),       // #7873A5 — dream indigo
-            selection_background: Color::Rgb(34, 28, 36), // #221C24 — highlight
-            selection_foreground: Color::Rgb(215, 198, 158), // #D7C69E — bone bright
-        }
-    }
-
-    /// Build an uncolored palette for `NO_COLOR` environments.
-    #[must_use]
-    pub const fn no_color() -> Self {
-        Self {
-            foreground: Color::Reset,
-            muted: Color::Reset,
-            background: Color::Reset,
-            accent: Color::Reset,
-            accent_foreground: Color::Reset,
-            success: Color::Reset,
-            warning: Color::Reset,
-            danger: Color::Reset,
-            info: Color::Reset,
-            selection_background: Color::Reset,
-            selection_foreground: Color::Reset,
-        }
-    }
-
-    /// Build the active palette from the current environment.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self::from_no_color(std::env::var_os("NO_COLOR").is_some())
-    }
-
-    /// Build the active palette from an explicit `NO_COLOR` flag.
-    #[must_use]
-    pub const fn from_no_color(no_color: bool) -> Self {
-        if no_color {
-            Self::no_color()
-        } else {
-            Self::dark()
-        }
-    }
-
-    /// A plain foreground style.
-    #[must_use]
-    pub fn text(self) -> Style {
-        Style::default().fg(self.foreground)
-    }
-
-    /// A muted foreground style.
-    #[must_use]
-    pub fn muted(self) -> Style {
-        Style::default().fg(self.muted)
-    }
-
-    /// An accent style used for titles and highlights.
-    #[must_use]
-    pub fn accent(self) -> Style {
-        Style::default().fg(self.accent)
-    }
-
-    /// A bold accent style for selected content.
-    #[must_use]
-    pub fn accent_bold(self) -> Style {
-        self.accent().add_modifier(Modifier::BOLD)
-    }
-
-    /// A selected-item style with readable contrast.
-    #[must_use]
-    pub fn selection(self) -> Style {
-        Style::default()
-            .fg(self.selection_foreground)
-            .bg(self.selection_background)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// A success style for completed or healthy states.
-    #[must_use]
-    pub fn success(self) -> Style {
-        Style::default()
-            .fg(self.success)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// A warning style for gating or degraded states.
-    #[must_use]
-    pub fn warning(self) -> Style {
-        Style::default()
-            .fg(self.warning)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// A danger style for failed or critical states.
-    #[must_use]
-    pub fn danger(self) -> Style {
-        Style::default()
-            .fg(self.danger)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// An informational style for active or in-flight states.
-    #[must_use]
-    pub fn info(self) -> Style {
-        Style::default().fg(self.info).add_modifier(Modifier::BOLD)
-    }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DashboardGenerationState {
+    fingerprint: u64,
+    generation: u64,
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        Self::from_env()
-    }
-}
+static DASHBOARD_DATA_GENERATIONS: OnceLock<Mutex<HashMap<PathBuf, DashboardGenerationState>>> =
+    OnceLock::new();
 
 /// In-memory scaffold of all placeholder dashboard pages.
 #[derive(Debug, Clone)]
@@ -431,6 +315,8 @@ pub struct EventLogEntry {
 pub struct DashboardData {
     /// Workspace root used for refreshes.
     root: PathBuf,
+    /// Monotonic token advanced when tracked dashboard source files change.
+    pub generation: u64,
     /// Cached executor state from `.roko/state/executor.json`.
     executor_state: Value,
     /// Last observed state file metadata.
@@ -489,10 +375,22 @@ pub struct DashboardData {
     pub task_outputs: HashMap<String, Vec<String>>,
     /// Last observed task-outputs directory metadata.
     task_outputs_stamp: FileStamp,
+    /// Cached git diff shown in the Dashboard Diff sub-tab.
+    pub git_diff: String,
+    /// Whether the cached git diff came from staged changes.
+    pub git_diff_is_staged: bool,
     /// Orchestrator event log from `.roko/state/events.json`.
     pub event_log: Vec<EventLogEntry>,
     /// Last observed events file metadata.
     event_log_stamp: FileStamp,
+}
+
+/// Derived executor snapshot fields used by TUI orchestration chrome.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ExecutorSummary {
+    pub orchestrator_state: String,
+    pub current_iteration: usize,
+    pub current_phase: String,
 }
 
 impl DashboardData {
@@ -504,7 +402,7 @@ impl DashboardData {
         let learn_dir = roko_dir.join("learn");
         let state_path = roko_dir.join("state").join("executor.json");
         let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = roko_dir.join(MEMORY_DIR).join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&root);
         let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
         let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
         let gate_thresholds_path = learn_dir.join(GATE_THRESHOLDS_FILE);
@@ -552,8 +450,7 @@ impl DashboardData {
         let task_outputs = load_task_outputs(&task_outputs_dir);
         let task_outputs_stamp = file_stamp(&task_outputs_dir);
 
-        let current_plan_execution =
-            load_current_plan_execution(&root, &state, &episodes, &task_outputs);
+        let current_plan_execution = load_current_plan_execution(&root, &state, &episodes);
         let efficiency_stamp = file_stamp(&efficiency_path);
 
         // Backfill agent_output_tail from task-outputs if episode didn't provide it
@@ -564,9 +461,26 @@ impl DashboardData {
         let events_path = roko_dir.join("state").join("events.json");
         let event_log = load_event_log(&events_path);
         let event_log_stamp = file_stamp(&events_path);
+        let (git_diff, git_diff_is_staged) = load_dashboard_git_diff(&root);
+        let generation = next_dashboard_data_generation(
+            &root,
+            DashboardDataStamps {
+                executor_state: state_stamp,
+                efficiency: efficiency_stamp,
+                experiments: experiments_stamp,
+                gate_thresholds: gate_thresholds_stamp,
+                signals: signals_state,
+                episodes: episodes_state,
+                cfactor: cfactor_stamp,
+                cascade_router: cascade_router_stamp,
+                task_outputs: task_outputs_stamp,
+                event_log: event_log_stamp,
+            },
+        );
 
         Self {
             root,
+            generation,
             executor_state: state,
             executor_state_stamp: state_stamp,
             plans,
@@ -596,6 +510,8 @@ impl DashboardData {
             cascade_router_stamp,
             task_outputs,
             task_outputs_stamp,
+            git_diff,
+            git_diff_is_staged,
             event_log,
             event_log_stamp,
         }
@@ -617,7 +533,7 @@ impl DashboardData {
         let roko_dir = self.root.join(".roko");
         let state_path = roko_dir.join("state").join("executor.json");
         let signals_path = roko_dir.join("signals.jsonl");
-        let episodes_path = roko_dir.join(MEMORY_DIR).join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&self.root);
         let efficiency_path = roko_dir.join("learn").join(EFFICIENCY_FILE);
         let experiments_path = roko_dir.join("learn").join(EXPERIMENTS_FILE);
         let gate_thresholds_path = roko_dir.join("learn").join(GATE_THRESHOLDS_FILE);
@@ -625,21 +541,25 @@ impl DashboardData {
         let cfactor_path = roko_dir.join("learn").join("c-factor.jsonl");
 
         let mut state_changed = false;
+        let mut generation_changed = false;
         let stamp = file_stamp(&state_path);
         if stamp != self.executor_state_stamp {
             self.executor_state_stamp = stamp;
             self.executor_state = read_json_value(&state_path).unwrap_or(Value::Null);
             state_changed = true;
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&signals_path);
         if stamp != self.signals_state.stamp {
             self.refresh_signals(&signals_path, stamp);
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&episodes_path);
         if stamp != self.episodes_state.stamp {
             self.refresh_episodes(&episodes_path, stamp);
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&efficiency_path);
@@ -647,6 +567,7 @@ impl DashboardData {
             self.efficiency_stamp = stamp;
             self.efficiency_events = read_efficiency_events_sync(&efficiency_path);
             self.efficiency = load_efficiency_summary(&efficiency_path);
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&experiments_path);
@@ -661,6 +582,7 @@ impl DashboardData {
                 .collect::<Vec<_>>();
             self.experiments
                 .sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&gate_thresholds_path);
@@ -668,6 +590,7 @@ impl DashboardData {
             self.gate_thresholds_stamp = stamp;
             self.adaptive_thresholds = load_json_opt::<AdaptiveThresholds>(&gate_thresholds_path);
             self.rebuild_gate_results_page();
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&cascade_router_path);
@@ -675,12 +598,14 @@ impl DashboardData {
             self.cascade_router_stamp = stamp;
             self.cascade_router =
                 load_json_opt::<CascadeRouterState>(&cascade_router_path).unwrap_or_default();
+            generation_changed = true;
         }
 
         let stamp = file_stamp(&cfactor_path);
         if stamp != self.cfactor_stamp {
             self.cfactor_stamp = stamp;
             self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+            generation_changed = true;
         }
 
         // Refresh task outputs
@@ -689,6 +614,7 @@ impl DashboardData {
         if stamp != self.task_outputs_stamp {
             self.task_outputs_stamp = stamp;
             self.task_outputs = load_task_outputs(&task_outputs_dir);
+            generation_changed = true;
         }
 
         // Refresh event log
@@ -697,7 +623,12 @@ impl DashboardData {
         if stamp != self.event_log_stamp {
             self.event_log_stamp = stamp;
             self.event_log = load_event_log(&events_path);
+            generation_changed = true;
         }
+
+        let (git_diff, git_diff_is_staged) = load_dashboard_git_diff(&self.root);
+        self.git_diff = git_diff;
+        self.git_diff_is_staged = git_diff_is_staged;
 
         if state_changed {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
@@ -705,14 +636,13 @@ impl DashboardData {
             self.agents = load_agents(&self.executor_state);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
             self.current_plan_execution = backfill_agent_output_tail(
-                load_current_plan_execution(
-                    &self.root,
-                    &self.executor_state,
-                    &self.episodes,
-                    &self.task_outputs,
-                ),
+                load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
                 &self.task_outputs,
             );
+        }
+
+        if generation_changed {
+            self.generation = self.generation.saturating_add(1);
         }
 
         Ok(())
@@ -785,12 +715,7 @@ impl DashboardData {
             offset: stamp.len,
         };
         self.current_plan_execution = backfill_agent_output_tail(
-            load_current_plan_execution(
-                &self.root,
-                &self.executor_state,
-                &self.episodes,
-                &self.task_outputs,
-            ),
+            load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
             &self.task_outputs,
         );
     }
@@ -830,6 +755,59 @@ impl DashboardData {
     pub(crate) fn task_outputs(&self) -> &HashMap<String, Vec<String>> {
         &self.task_outputs
     }
+
+    /// Executor-level summary derived from `.roko/state/executor.json`.
+    #[must_use]
+    pub(crate) fn executor_summary(&self) -> ExecutorSummary {
+        summarize_executor_state(&self.executor_state)
+    }
+
+    #[must_use]
+    pub(crate) fn gate_signals_for_task(&self, task_id: &str) -> Vec<GateSignalSummary> {
+        self.gate_signal_summaries
+            .iter()
+            .filter(|signal| signal.task_id.as_deref() == Some(task_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Plan/task snapshots for the interactive plans tree and detail panes.
+    #[must_use]
+    pub(crate) fn plan_task_snapshots(&self) -> HashMap<String, PlanTaskListSnapshot> {
+        build_plan_task_snapshots(
+            &self.root,
+            &self.executor_state,
+            &self.plans,
+            &self.active_tasks,
+            &self.episodes,
+        )
+    }
+}
+
+fn load_dashboard_git_diff(root: &Path) -> (String, bool) {
+    let staged = run_dashboard_git_diff(root, true);
+    if !staged.is_empty() {
+        return (staged, true);
+    }
+
+    (run_dashboard_git_diff(root, false), false)
+}
+
+fn run_dashboard_git_diff(root: &Path, staged: bool) -> String {
+    let args: &[&str] = if staged {
+        &["diff", "--cached"]
+    } else {
+        &["diff", "HEAD"]
+    };
+
+    Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// Summary of a task that is currently active.
@@ -842,6 +820,8 @@ pub struct TaskSummary {
     pub iteration: u32,
     #[serde(default)]
     pub assigned_agents: Vec<String>,
+    #[serde(default)]
+    pub latest_gate: Option<String>,
 }
 
 /// Summary of an agent tracked by the process supervisor.
@@ -1000,6 +980,53 @@ pub struct ReadFileSnapshot {
     pub path: String,
     pub lines: Option<String>,
     pub why: String,
+}
+
+/// Lightweight task snapshot used by the interactive TUI plan views.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlanTaskSnapshot {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub agent_id: Option<String>,
+    pub model: Option<String>,
+    pub elapsed_ms: Option<u64>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub wave: Option<u32>,
+}
+
+/// Per-plan snapshot used to hydrate `TuiState::plans`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlanTaskListSnapshot {
+    pub phase: String,
+    pub active: bool,
+    pub tasks_done: usize,
+    pub tasks_failed: usize,
+    pub elapsed_ms: u64,
+    pub elapsed_secs: f64,
+    /// Current wave number for the plan.
+    pub wave: u32,
+    /// Count of failed tasks, including gate rejections.
+    pub failed_count: u32,
+    pub tasks: Vec<PlanTaskSnapshot>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlanTaskRuntimeFields {
+    model: Option<String>,
+    elapsed_ms: Option<u64>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    wave: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedPlanTasksFile {
+    tasks_file: TasksFile,
+    task_runtime_fields: Vec<PlanTaskRuntimeFields>,
+    plan_wave: Option<u32>,
 }
 
 /// Aggregate learning efficiency snapshot.
@@ -1557,6 +1584,7 @@ fn backfill_agent_output_tail(
 
 fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     let mut ids = std::collections::BTreeSet::new();
+    let trackers = load_task_trackers(root);
     if let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) {
         ids.extend(plan_states.keys().cloned());
     }
@@ -1578,6 +1606,8 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     for id in ids {
         let mut title = id.clone();
         let mut task_count = 0usize;
+        let mut tasks_done = 0usize;
+        let mut tasks_failed = 0usize;
         let plan_dir = plans_dir(root).join(&id);
         let tasks_path = plan_dir.join("tasks.toml");
         if let Ok(tasks_file) = TasksFile::parse(&tasks_path) {
@@ -1585,20 +1615,59 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
                 title = tasks_file.meta.plan.clone();
             }
             task_count = tasks_file.tasks.len();
+
+            let tracker = trackers.get(&id);
+            let completed: HashSet<String> = tracker
+                .map(|tracker| tracker.completed.iter().cloned().collect())
+                .unwrap_or_default();
+            let failed: HashSet<String> = tracker
+                .map(|tracker| tracker.failed.iter().cloned().collect())
+                .unwrap_or_default();
+
+            for task in &tasks_file.tasks {
+                if completed.contains(&task.id) || is_task_done_status(&task.status) {
+                    tasks_done += 1;
+                } else if failed.contains(&task.id) || is_task_failed_status(&task.status) {
+                    tasks_failed += 1;
+                }
+            }
         }
 
-        let completed = state
+        let phase = state
             .get("plan_states")
             .and_then(Value::as_object)
             .and_then(|plans| plans.get(&id))
             .and_then(current_phase_label)
-            .map(|phase| {
-                matches!(
-                    phase.to_ascii_lowercase().as_str(),
-                    "complete" | "done" | "failed" | "skipped"
-                )
+            .unwrap_or_default();
+        let phase_status = PlanPhase::from(phase.as_str());
+        let completed = phase_status.is_done() || phase_status.is_failed();
+        if task_count > 0 && tasks_done == 0 && tasks_failed == 0 && phase_status.is_done() {
+            tasks_done = task_count;
+        }
+
+        let tasks_done = state
+            .get("plan_states")
+            .and_then(Value::as_object)
+            .and_then(|plans| plans.get(&id))
+            .and_then(|plan_state| {
+                plan_state
+                    .get("done")
+                    .and_then(Value::as_u64)
+                    .or_else(|| plan_state.get("tasks_done").and_then(Value::as_u64))
             })
-            .unwrap_or(false);
+            .unwrap_or(tasks_done as u64) as usize;
+
+        let tasks_failed = state
+            .get("plan_states")
+            .and_then(Value::as_object)
+            .and_then(|plans| plans.get(&id))
+            .and_then(|plan_state| {
+                plan_state
+                    .get("failed")
+                    .and_then(Value::as_u64)
+                    .or_else(|| plan_state.get("tasks_failed").and_then(Value::as_u64))
+            })
+            .unwrap_or(tasks_failed as u64) as usize;
 
         let last_error = state
             .get("plan_states")
@@ -1617,6 +1686,8 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
             id,
             title,
             task_count,
+            tasks_done,
+            tasks_failed,
             completed,
             old_format: false,
             last_error,
@@ -1627,6 +1698,279 @@ fn load_plan_summaries(root: &Path, state: &Value) -> Vec<PlanSummary> {
     summaries
 }
 
+fn build_plan_task_snapshots(
+    root: &Path,
+    state: &Value,
+    plans: &[PlanSummary],
+    active_tasks: &[TaskSummary],
+    episodes: &[Episode],
+) -> HashMap<String, PlanTaskListSnapshot> {
+    let trackers = load_task_trackers(root);
+    let plan_states = state.get("plan_states").and_then(Value::as_object);
+    let active_by_key: HashMap<(String, String), &TaskSummary> = active_tasks
+        .iter()
+        .map(|task| ((task.plan_id.clone(), task.task_id.clone()), task))
+        .collect();
+    let current_task_by_plan: HashMap<&str, &str> = active_tasks
+        .iter()
+        .map(|task| (task.plan_id.as_str(), task.task_id.as_str()))
+        .collect();
+    let mut snapshots = HashMap::new();
+
+    for plan in plans {
+        let plan_state = plan_states.and_then(|states| states.get(&plan.id));
+        let phase = plan_state.and_then(current_phase_label).unwrap_or_else(|| {
+            if plan.completed {
+                String::from("done")
+            } else {
+                String::from("pending")
+            }
+        });
+        let plan_succeeded = PlanPhase::from(phase.as_str()).is_done();
+        let active = plan_state
+            .map(|state| !plan_state_is_terminal(state) && !plan_state_is_paused(state))
+            .unwrap_or(!plan.completed);
+        let elapsed_secs = episodes
+            .iter()
+            .filter(|episode| episode_matches_plan(episode, &plan.id, None))
+            .map(|episode| episode.usage.wall_ms as f64 / 1000.0)
+            .sum();
+        let mut snapshot = PlanTaskListSnapshot {
+            phase,
+            active,
+            elapsed_secs,
+            ..PlanTaskListSnapshot::default()
+        };
+
+        let tasks_path = plans_dir(root).join(&plan.id).join("tasks.toml");
+        let parsed = match parse_plan_tasks_file(&tasks_path) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %tasks_path.display(),
+                    plan_id = %plan.id,
+                    "failed to parse tasks.toml for TUI plan snapshot"
+                );
+                snapshots.insert(plan.id.clone(), snapshot);
+                continue;
+            }
+        };
+        let tasks_file = &parsed.tasks_file;
+        if parsed.task_runtime_fields.len() != tasks_file.tasks.len() {
+            tracing::warn!(
+                path = %tasks_path.display(),
+                plan_id = %plan.id,
+                runtime_fields = parsed.task_runtime_fields.len(),
+                parsed_tasks = tasks_file.tasks.len(),
+                "tasks.toml runtime metadata count did not match parsed task count"
+            );
+        }
+
+        let tracker = trackers.get(&plan.id);
+        let completed: HashSet<String> = tracker
+            .map(|tracker| tracker.completed.iter().cloned().collect())
+            .unwrap_or_default();
+        let failed: HashSet<String> = tracker
+            .map(|tracker| tracker.failed.iter().cloned().collect())
+            .unwrap_or_default();
+        let current_task_id = current_task_by_plan
+            .get(plan.id.as_str())
+            .map(|task_id| (*task_id).to_string())
+            .or_else(|| current_task_id(&tasks_file, tracker, &completed, &failed));
+
+        snapshot.tasks = tasks_file
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| {
+                let runtime = parsed.task_runtime_fields.get(index);
+                let active_task = active_by_key
+                    .get(&(plan.id.clone(), task.id.clone()))
+                    .copied();
+                let status = if completed.contains(&task.id) {
+                    String::from("done")
+                } else if failed.contains(&task.id) {
+                    String::from("failed")
+                } else if let Some(active_task) = active_task {
+                    active_task.status.clone()
+                } else if is_task_done_status(&task.status) {
+                    String::from("done")
+                } else if is_task_failed_status(&task.status) {
+                    String::from("failed")
+                } else if plan_succeeded {
+                    String::from("done")
+                } else {
+                    task_phase_label(
+                        task,
+                        &snapshot.phase,
+                        current_task_id.as_deref(),
+                        tracker,
+                        &completed,
+                        &failed,
+                    )
+                };
+
+                PlanTaskSnapshot {
+                    id: task.id.clone(),
+                    title: task.title.clone(),
+                    status,
+                    agent_id: active_task.and_then(|task| task.assigned_agents.first().cloned()),
+                    model: runtime
+                        .and_then(|runtime| runtime.model.clone())
+                        .or_else(|| task.model_hint.clone()),
+                    elapsed_ms: runtime.and_then(|runtime| runtime.elapsed_ms),
+                    started_at: runtime.and_then(|runtime| runtime.started_at.clone()),
+                    ended_at: runtime.and_then(|runtime| runtime.ended_at.clone()),
+                    wave: runtime.and_then(|runtime| runtime.wave),
+                }
+            })
+            .collect();
+        snapshot.tasks_done = snapshot
+            .tasks
+            .iter()
+            .filter(|task| is_task_done_status(&task.status))
+            .count();
+        snapshot.tasks_failed = snapshot
+            .tasks
+            .iter()
+            .filter(|task| is_task_failed_status(&task.status))
+            .count();
+        snapshot.elapsed_ms = snapshot
+            .tasks
+            .iter()
+            .map(|task| task.elapsed_ms.unwrap_or(0))
+            .sum();
+        if snapshot.elapsed_ms > 0 {
+            snapshot.elapsed_secs = snapshot.elapsed_ms as f64 / 1000.0;
+        }
+        snapshot.wave = parsed.plan_wave.unwrap_or_else(|| {
+            snapshot
+                .tasks
+                .iter()
+                .filter(|task| TaskStatus::from(task.status.as_str()).is_active())
+                .filter_map(|task| task.wave)
+                .max()
+                .unwrap_or_default()
+        });
+        snapshot.failed_count = snapshot.tasks_failed as u32;
+
+        snapshots.insert(plan.id.clone(), snapshot);
+    }
+
+    snapshots
+}
+
+fn parse_plan_tasks_file(path: &Path) -> Result<ParsedPlanTasksFile> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let tasks_file = toml::from_str::<TasksFile>(&content)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = toml::from_str::<toml::Value>(&content)
+        .with_context(|| format!("parse runtime metadata from {}", path.display()))?;
+    let raw_tasks = raw.get("task").and_then(toml::Value::as_array);
+
+    let task_runtime_fields = tasks_file
+        .tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let task_table = raw_tasks
+                .and_then(|tasks| tasks.get(index))
+                .and_then(toml::Value::as_table)
+                .or_else(|| {
+                    raw_tasks.and_then(|tasks| {
+                        tasks.iter().find_map(|task_value| {
+                            let table = task_value.as_table()?;
+                            let id = table.get("id").and_then(toml::Value::as_str)?;
+                            (id == task.id).then_some(table)
+                        })
+                    })
+                });
+
+            PlanTaskRuntimeFields {
+                model: task_table
+                    .and_then(|table| table.get("model"))
+                    .and_then(toml_scalar_to_string),
+                elapsed_ms: task_table
+                    .and_then(|table| table.get("elapsed_ms"))
+                    .and_then(toml_value_to_u64),
+                started_at: task_table
+                    .and_then(|table| {
+                        table
+                            .get("started_at")
+                            .or_else(|| table.get("started_at_ms"))
+                            .or_else(|| table.get("start_time"))
+                    })
+                    .and_then(toml_scalar_to_string),
+                ended_at: task_table
+                    .and_then(|table| {
+                        table
+                            .get("ended_at")
+                            .or_else(|| table.get("ended_at_ms"))
+                            .or_else(|| table.get("end_time"))
+                    })
+                    .and_then(toml_scalar_to_string),
+                wave: task_table
+                    .and_then(|table| table.get("wave"))
+                    .and_then(toml_value_to_u32),
+            }
+        })
+        .collect();
+
+    let plan_wave = raw
+        .get("meta")
+        .and_then(toml::Value::as_table)
+        .and_then(|meta| meta.get("wave"))
+        .and_then(toml_value_to_u32);
+
+    Ok(ParsedPlanTasksFile {
+        tasks_file,
+        task_runtime_fields,
+        plan_wave,
+    })
+}
+
+fn toml_scalar_to_string(value: &toml::Value) -> Option<String> {
+    match value {
+        toml::Value::String(value) => Some(value.clone()),
+        toml::Value::Integer(value) => Some(value.to_string()),
+        toml::Value::Float(value) => Some(value.to_string()),
+        toml::Value::Boolean(value) => Some(value.to_string()),
+        toml::Value::Datetime(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn toml_value_to_u64(value: &toml::Value) -> Option<u64> {
+    value
+        .as_integer()
+        .and_then(|value| u64::try_from(value).ok())
+}
+
+fn toml_value_to_u32(value: &toml::Value) -> Option<u32> {
+    value
+        .as_integer()
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn is_task_done_status(status: &str) -> bool {
+    TaskStatus::from(status).is_done()
+}
+
+fn is_task_failed_status(status: &str) -> bool {
+    if TaskStatus::from(status).is_failed() {
+        return true;
+    }
+
+    let normalized = status.trim().to_ascii_lowercase();
+    let compact = normalized.replace(['-', '_', ' '], "");
+    matches!(
+        compact.as_str(),
+        "gaterejected" | "reviewrejected" | "rejected"
+    )
+}
+
 fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
     let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) else {
         return Vec::new();
@@ -1635,10 +1979,7 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
     let mut tasks = Vec::new();
     for (plan_id, plan_state) in plan_states {
         let status = current_phase_label(plan_state).unwrap_or_else(|| "unknown".to_string());
-        if matches!(
-            status.to_ascii_lowercase().as_str(),
-            "complete" | "done" | "failed" | "skipped"
-        ) {
+        if matches!(status.to_ascii_lowercase().as_str(), "complete" | "skipped") {
             continue;
         }
         let task_id = plan_state
@@ -1662,6 +2003,13 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
                     .collect()
             })
             .unwrap_or_default();
+        let latest_gate = plan_state
+            .get("gate_results")
+            .and_then(Value::as_array)
+            .and_then(|results| results.last())
+            .and_then(|result| result.get("gate_name"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
 
         tasks.push(TaskSummary {
             plan_id: plan_id.clone(),
@@ -1669,6 +2017,7 @@ fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
             status,
             iteration,
             assigned_agents,
+            latest_gate,
         });
     }
 
@@ -1803,7 +2152,6 @@ fn load_current_plan_execution(
     root: &Path,
     state: &Value,
     episodes: &[Episode],
-    task_outputs: &HashMap<String, Vec<String>>,
 ) -> Option<PlanExecutionSnapshot> {
     let plan_states = state.get("plan_states").and_then(Value::as_object)?;
     let trackers = load_task_trackers(root);
@@ -1912,6 +2260,47 @@ fn load_current_plan_execution(
     })
 }
 
+fn summarize_executor_state(state: &Value) -> ExecutorSummary {
+    let Some(plan_states) = state.get("plan_states").and_then(Value::as_object) else {
+        return ExecutorSummary::default();
+    };
+
+    if plan_states.is_empty() {
+        return ExecutorSummary::default();
+    }
+
+    let has_running = plan_states
+        .values()
+        .any(|plan_state| !plan_state_is_terminal(plan_state) && !plan_state_is_paused(plan_state));
+    let has_paused = plan_states
+        .values()
+        .any(|plan_state| !plan_state_is_terminal(plan_state) && plan_state_is_paused(plan_state));
+    let has_error = plan_states.values().any(plan_state_has_error);
+
+    let mut summary = ExecutorSummary {
+        orchestrator_state: if has_running {
+            String::from("running")
+        } else if has_paused {
+            String::from("paused")
+        } else if has_error {
+            String::from("error")
+        } else {
+            String::from("idle")
+        },
+        ..ExecutorSummary::default()
+    };
+
+    if let Some((_, plan_state)) = most_advanced_active_plan_state(state) {
+        summary.current_iteration = plan_state
+            .get("iteration")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize;
+        summary.current_phase = current_phase_label(plan_state).unwrap_or_default();
+    }
+
+    summary
+}
+
 fn current_task_id(
     tasks_file: &TasksFile,
     tracker: Option<&TaskTrackerSnapshot>,
@@ -1998,6 +2387,42 @@ fn task_phase_label(
     String::from("Queued")
 }
 
+fn plan_state_is_terminal(plan_state: &Value) -> bool {
+    current_phase_label(plan_state)
+        .map(|phase| {
+            matches!(
+                phase.to_ascii_lowercase().as_str(),
+                "complete" | "done" | "failed" | "skipped"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn plan_state_is_paused(plan_state: &Value) -> bool {
+    plan_state
+        .get("paused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn plan_state_has_error(plan_state: &Value) -> bool {
+    current_phase_label(plan_state)
+        .map(|phase| phase.eq_ignore_ascii_case("failed"))
+        .unwrap_or(false)
+        || plan_state
+            .get("last_error")
+            .and_then(Value::as_str)
+            .is_some_and(|err| !err.trim().is_empty())
+        || plan_state
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|err| !err.trim().is_empty())
+        || plan_state
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|err| !err.trim().is_empty())
+}
+
 fn title_case_phase(phase: &str) -> String {
     let mut out = String::new();
     let mut capitalize = true;
@@ -2034,6 +2459,41 @@ fn execution_phase_priority(phase: &str) -> u8 {
         "queued" => 0,
         _ => 0,
     }
+}
+
+fn most_advanced_active_plan_state<'a>(state: &'a Value) -> Option<(&'a str, &'a Value)> {
+    let plan_states = state.get("plan_states").and_then(Value::as_object)?;
+
+    let mut candidates = plan_states
+        .iter()
+        .filter_map(|(plan_id, plan_state)| {
+            if plan_state_is_paused(plan_state) || plan_state_is_terminal(plan_state) {
+                return None;
+            }
+            let phase = current_phase_label(plan_state)?;
+            let started_at_ms = plan_state
+                .get("started_at_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            Some((
+                execution_phase_priority(&phase),
+                started_at_ms,
+                plan_id.as_str(),
+                plan_state,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(b.2))
+    });
+
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, _, plan_id, plan_state)| (plan_id, plan_state))
 }
 
 fn default_model_for_tier(tier: &str) -> String {
@@ -2346,6 +2806,28 @@ fn load_episodes_state(path: &Path) -> JsonlState {
         stamp,
         offset: stamp.len,
     }
+}
+
+fn next_dashboard_data_generation(root: &Path, stamps: DashboardDataStamps) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    stamps.hash(&mut hasher);
+    let fingerprint = hasher.finish();
+
+    let states = DASHBOARD_DATA_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut states = states.lock().expect("dashboard generation lock poisoned");
+    let entry = states
+        .entry(root.to_path_buf())
+        .or_insert(DashboardGenerationState {
+            fingerprint,
+            generation: 0,
+        });
+
+    if entry.fingerprint != fingerprint {
+        entry.fingerprint = fingerprint;
+        entry.generation = entry.generation.saturating_add(1);
+    }
+
+    entry.generation
 }
 
 fn load_episodes_from_path(path: &Path) -> Vec<Episode> {
@@ -2752,27 +3234,6 @@ struct PersistedModelStatsData {
     successes: u64,
 }
 
-/// Deserialized provider health snapshot from `.roko/learn/provider-health.json`.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct ProviderHealthData {
-    #[serde(default)]
-    providers: HashMap<String, ProviderEntryData>,
-}
-
-/// Per-provider circuit breaker entry.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ProviderEntryData {
-    #[serde(default)]
-    #[allow(dead_code)]
-    provider_id: String,
-    #[serde(default)]
-    state: String,
-    #[serde(default)]
-    total_requests: u64,
-    #[serde(default)]
-    total_failures: u64,
-}
-
 /// Deserialized latency stats from `.roko/learn/latency-stats.json`.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct LatencyStatsData {
@@ -2835,7 +3296,7 @@ impl DashboardSnapshot {
         let root = resolve_snapshot_root(root.as_ref());
         let memory_dir = root.join(MEMORY_DIR);
         let learn_dir = root.join(LEARN_DIR);
-        let episodes_path = memory_dir.join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&root);
         let task_metrics_path = memory_dir.join(TASK_METRICS_FILE);
         let signals_path = root.join(".roko").join("signals.jsonl");
 
@@ -3009,9 +3470,8 @@ impl DashboardSnapshot {
         let _ = writeln!(out, "intent: {}", page.intent);
         let _ = writeln!(
             out,
-            "source: {}/{}",
-            self.root.join(MEMORY_DIR).display(),
-            EPISODES_FILE
+            "source: {}",
+            resolve_episodes_path(&self.root).display()
         );
         let _ = writeln!(out, "episodes: {}", self.episode_count);
         let _ = writeln!(
@@ -3717,7 +4177,7 @@ impl DashboardSnapshot {
 
     fn render_log_view_page(&self, page: &PageScaffold) -> Option<String> {
         let signals_path = self.root.join(".roko").join("signals.jsonl");
-        let episodes_path = self.root.join(MEMORY_DIR).join(EPISODES_FILE);
+        let episodes_path = resolve_episodes_path(&self.root);
 
         let signals_exist = signals_path.exists();
         let episodes_exist = episodes_path.exists();
@@ -4013,460 +4473,6 @@ impl DashboardSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
-struct LearningCascadeRowSnapshot {
-    model: String,
-    weight: f64,
-    ucb_score: f64,
-}
-
-#[derive(Debug, Clone)]
-struct LearningExperimentRowSnapshot {
-    experiment: String,
-    variants: String,
-    sample_sizes: String,
-    winner: String,
-    significance: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LearningTrendSeriesSnapshot {
-    cost_per_task: Vec<u64>,
-    tokens_per_task: Vec<u64>,
-    success_rate: Vec<u64>,
-    first_try_rate: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LearningTaskAggregateSnapshot {
-    cost_usd: f64,
-    tokens: u64,
-    first_timestamp: Option<DateTime<Utc>>,
-    first_iteration: u32,
-    first_passed: bool,
-    latest_timestamp: Option<DateTime<Utc>>,
-    latest_passed: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LearningDayAggregateSnapshot {
-    tasks: u64,
-    cost_usd: f64,
-    tokens: u64,
-    successes: u64,
-    first_try_successes: u64,
-}
-
-fn learning_cascade_rows_snapshot(
-    snapshot: &CascadeSnapshotData,
-) -> Vec<LearningCascadeRowSnapshot> {
-    let mut rows = snapshot
-        .model_slugs
-        .iter()
-        .chain(snapshot.confidence_stats.keys())
-        .fold(Vec::<String>::new(), |mut acc, slug| {
-            if !acc.iter().any(|seen| seen == slug) {
-                acc.push(slug.clone());
-            }
-            acc
-        })
-        .into_iter()
-        .map(|model| {
-            let stats = snapshot.confidence_stats.get(&model);
-            let trials = stats.map(|stats| stats.trials).unwrap_or_default();
-            let successes = stats.map(|stats| stats.successes).unwrap_or_default();
-            let ucb_score = confidence_upper_bound_snapshot(trials, successes);
-            LearningCascadeRowSnapshot {
-                model,
-                weight: ucb_score,
-                ucb_score,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let total_weight = rows
-        .iter()
-        .map(|row| row.weight)
-        .sum::<f64>()
-        .max(f64::EPSILON);
-    for row in &mut rows {
-        row.weight /= total_weight;
-    }
-
-    rows.sort_by(|a, b| {
-        b.weight
-            .partial_cmp(&a.weight)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.model.cmp(&b.model))
-    });
-
-    rows
-}
-
-fn learning_recommendation_counts_snapshot(
-    rows: &[LearningCascadeRowSnapshot],
-) -> HashMap<String, u64> {
-    let mut counts = HashMap::new();
-    if rows.is_empty() {
-        return counts;
-    }
-
-    for category in [
-        TaskCategory::Scaffolding,
-        TaskCategory::Implementation,
-        TaskCategory::Integration,
-        TaskCategory::Verification,
-        TaskCategory::Research,
-        TaskCategory::Refactor,
-        TaskCategory::Infra,
-        TaskCategory::Docs,
-    ] {
-        let complexity = complexity_for_category_snapshot(category);
-        let tier = tier_for_complexity_snapshot(complexity);
-        let selected = select_model_for_tier_snapshot(rows, tier)
-            .or_else(|| rows.first())
-            .map(|row| row.model.clone());
-        if let Some(model) = selected {
-            *counts.entry(model).or_default() += 1;
-        }
-    }
-
-    counts
-}
-
-fn learning_experiment_rows_snapshot(
-    store: &ExperimentStore,
-) -> Vec<LearningExperimentRowSnapshot> {
-    let mut rows = store
-        .iter()
-        .filter(|experiment| experiment.status == ExperimentStatus::Running)
-        .map(|experiment| learning_experiment_row_snapshot(experiment))
-        .collect::<Vec<_>>();
-    rows.sort_by(|a, b| a.experiment.cmp(&b.experiment));
-    rows
-}
-
-fn learning_experiment_row_snapshot(
-    experiment: &PromptExperiment,
-) -> LearningExperimentRowSnapshot {
-    let mut variants = experiment
-        .variants
-        .iter()
-        .filter(|variant| variant.active)
-        .map(|variant| {
-            let stats = experiment
-                .stats
-                .get(&variant.id)
-                .cloned()
-                .unwrap_or_default();
-            (variant, stats)
-        })
-        .collect::<Vec<_>>();
-    variants.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
-
-    let sample_sizes = variants
-        .iter()
-        .map(|(variant, stats)| format!("{}={}", variant.id, stats.trials))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let variant_names = variants
-        .iter()
-        .map(|(variant, _)| variant.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let winner = experiment
-        .winner_id
-        .clone()
-        .or_else(|| {
-            variants
-                .iter()
-                .max_by(|(_, a), (_, b)| {
-                    a.success_rate()
-                        .partial_cmp(&b.success_rate())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| b.trials.cmp(&a.trials))
-                })
-                .map(|(variant, _)| variant.id.clone())
-        })
-        .unwrap_or_else(|| String::from("-"));
-    let significance = experiment_significance_label_snapshot(experiment, &variants);
-
-    LearningExperimentRowSnapshot {
-        experiment: experiment.section_name.clone(),
-        variants: if variant_names.is_empty() {
-            format!("{} variants", variants.len())
-        } else {
-            format!("{} variants: {}", variants.len(), variant_names)
-        },
-        sample_sizes: if sample_sizes.is_empty() {
-            String::from("-")
-        } else {
-            sample_sizes
-        },
-        winner,
-        significance,
-    }
-}
-
-fn experiment_significance_label_snapshot(
-    experiment: &PromptExperiment,
-    variants: &[(&PromptVariant, VariantStats)],
-) -> String {
-    if variants.len() < 2 {
-        return String::from("insufficient");
-    }
-
-    let mut ranked = variants
-        .iter()
-        .map(|(variant, stats)| (variant.id.as_str(), stats.clone()))
-        .collect::<Vec<_>>();
-    ranked.sort_by(|(_, a), (_, b)| {
-        b.success_rate()
-            .partial_cmp(&a.success_rate())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.trials.cmp(&a.trials))
-    });
-
-    let (best_id, best_stats) = &ranked[0];
-    let (runner_up_id, runner_up_stats) = &ranked[1];
-    let p_value = two_proportion_p_value_snapshot(
-        best_stats.successes,
-        best_stats.trials,
-        runner_up_stats.successes,
-        runner_up_stats.trials,
-    );
-    let gap = best_stats.success_rate() - runner_up_stats.success_rate();
-    let significant = p_value
-        .map(|p| p < 0.05 && gap >= experiment.min_effect_size)
-        .unwrap_or(false);
-
-    match p_value {
-        Some(p) if significant => format!("sig p={:.3}", p),
-        Some(p) => format!("p={:.3}", p),
-        None => format!("n.s. {best_id}/{runner_up_id}"),
-    }
-}
-
-fn learning_trend_series_snapshot(events: &[AgentEfficiencyEvent]) -> LearningTrendSeriesSnapshot {
-    let today = Utc::now().date_naive();
-    let mut tasks: HashMap<(String, String), LearningTaskAggregateSnapshot> = HashMap::new();
-    for event in events {
-        tasks
-            .entry((event.plan_id.clone(), event.task_id.clone()))
-            .or_default()
-            .record(event);
-    }
-
-    let mut buckets: BTreeMap<i64, LearningDayAggregateSnapshot> = BTreeMap::new();
-    for aggregate in tasks.values() {
-        let Some(day) = aggregate.latest_day() else {
-            continue;
-        };
-        let age = today.signed_duration_since(day).num_days();
-        if !(0..7).contains(&age) {
-            continue;
-        }
-        let bucket = buckets.entry(age).or_default();
-        bucket.tasks += 1;
-        bucket.cost_usd += aggregate.cost_usd;
-        bucket.tokens += aggregate.tokens;
-        if aggregate.latest_passed {
-            bucket.successes += 1;
-        }
-        if aggregate.first_try_passed() {
-            bucket.first_try_successes += 1;
-        }
-    }
-
-    LearningTrendSeriesSnapshot {
-        cost_per_task: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    ((bucket.cost_usd / bucket.tasks as f64) * 100.0)
-                        .round()
-                        .max(0.0) as u64
-                }
-            })
-            .collect(),
-        tokens_per_task: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    bucket.tokens / bucket.tasks
-                }
-            })
-            .collect(),
-        success_rate: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    ((bucket.successes as f64 / bucket.tasks as f64) * 100.0).round() as u64
-                }
-            })
-            .collect(),
-        first_try_rate: (0..7)
-            .rev()
-            .map(|age| {
-                let bucket = buckets.get(&age).cloned().unwrap_or_default();
-                if bucket.tasks == 0 {
-                    0
-                } else {
-                    ((bucket.first_try_successes as f64 / bucket.tasks as f64) * 100.0).round()
-                        as u64
-                }
-            })
-            .collect(),
-    }
-}
-
-impl LearningTaskAggregateSnapshot {
-    fn record(&mut self, event: &AgentEfficiencyEvent) {
-        self.cost_usd += event.cost_usd;
-        self.tokens += event.total_tokens();
-
-        let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
-            return;
-        };
-
-        if self.first_timestamp.map_or(true, |first| timestamp < first) {
-            self.first_timestamp = Some(timestamp);
-            self.first_iteration = event.iteration;
-            self.first_passed = event.gate_passed;
-        }
-
-        if self
-            .latest_timestamp
-            .map_or(true, |latest| timestamp > latest)
-        {
-            self.latest_timestamp = Some(timestamp);
-            self.latest_passed = event.gate_passed;
-        }
-    }
-
-    fn latest_day(&self) -> Option<chrono::NaiveDate> {
-        self.latest_timestamp
-            .map(|timestamp| timestamp.date_naive())
-    }
-
-    fn first_try_passed(&self) -> bool {
-        self.first_iteration == 1 && self.first_passed
-    }
-}
-
-fn confidence_upper_bound_snapshot(trials: u64, successes: u64) -> f64 {
-    if trials == 0 {
-        return 1.0;
-    }
-
-    let p = successes as f64 / trials as f64;
-    let width = 1.96 * (p * (1.0 - p) / trials as f64).sqrt();
-    (p + width).min(1.0)
-}
-
-fn select_model_for_tier_snapshot<'a>(
-    rows: &'a [LearningCascadeRowSnapshot],
-    tier: &str,
-) -> Option<&'a LearningCascadeRowSnapshot> {
-    rows.iter()
-        .filter(|row| tier_for_model_snapshot(&row.model) == tier)
-        .max_by(|a, b| {
-            a.weight
-                .partial_cmp(&b.weight)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.model.cmp(&b.model))
-        })
-}
-
-fn complexity_for_category_snapshot(category: TaskCategory) -> TaskComplexityBand {
-    match category {
-        TaskCategory::Scaffolding | TaskCategory::Docs => TaskComplexityBand::Fast,
-        TaskCategory::Research | TaskCategory::Refactor => TaskComplexityBand::Complex,
-        TaskCategory::Implementation
-        | TaskCategory::Integration
-        | TaskCategory::Verification
-        | TaskCategory::Infra => TaskComplexityBand::Standard,
-        _ => TaskComplexityBand::Standard,
-    }
-}
-
-fn tier_for_complexity_snapshot(complexity: TaskComplexityBand) -> &'static str {
-    match complexity {
-        TaskComplexityBand::Fast => "fast",
-        TaskComplexityBand::Complex => "premium",
-        _ => "standard",
-    }
-}
-
-fn tier_for_model_snapshot(model: &str) -> &'static str {
-    let lower = model.to_ascii_lowercase();
-    if lower.contains("haiku") {
-        "fast"
-    } else if lower.contains("opus") || lower.contains("premium") {
-        "premium"
-    } else {
-        "standard"
-    }
-}
-
-fn format_series(values: &[u64]) -> String {
-    values
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn two_proportion_p_value_snapshot(
-    successes_a: u64,
-    trials_a: u64,
-    successes_b: u64,
-    trials_b: u64,
-) -> Option<f64> {
-    let z = two_proportion_z_score_snapshot(successes_a, trials_a, successes_b, trials_b)?;
-    Some(2.0 * (1.0 - standard_normal_cdf_snapshot(z.abs())))
-}
-
-fn two_proportion_z_score_snapshot(
-    successes_a: u64,
-    trials_a: u64,
-    successes_b: u64,
-    trials_b: u64,
-) -> Option<f64> {
-    if trials_a == 0 || trials_b == 0 {
-        return None;
-    }
-
-    let p1 = successes_a as f64 / trials_a as f64;
-    let p2 = successes_b as f64 / trials_b as f64;
-    let pooled = (successes_a + successes_b) as f64 / (trials_a + trials_b) as f64;
-    let standard_error =
-        (pooled * (1.0 - pooled) * (1.0 / trials_a as f64 + 1.0 / trials_b as f64)).sqrt();
-    if standard_error == 0.0 {
-        return None;
-    }
-
-    Some((p1 - p2) / standard_error)
-}
-
-fn standard_normal_cdf_snapshot(x: f64) -> f64 {
-    let t = 1.0 / (1.0 + 0.231_641_9 * x.abs());
-    let d = 0.398_942_3 * (-0.5 * x * x).exp();
-    let prob = d
-        * t
-        * (0.319_381_5 + t * (-0.356_563_8 + t * (1.781_478 + t * (-1.821_256 + t * 1.330_274))));
-    if x >= 0.0 { 1.0 - prob } else { prob }
-}
-
 /// Per-agent aggregated stats.
 /// Render standard page header.
 fn page_header(page: &PageScaffold) -> String {
@@ -4714,7 +4720,7 @@ fn resolve_snapshot_root(start: &Path) -> PathBuf {
     let mut cursor = Some(start);
     while let Some(dir) = cursor {
         let memory_dir = dir.join(MEMORY_DIR);
-        if memory_dir.join(EPISODES_FILE).exists() || memory_dir.join(TASK_METRICS_FILE).exists() {
+        if resolve_episodes_path(dir).exists() || memory_dir.join(TASK_METRICS_FILE).exists() {
             return dir.to_path_buf();
         }
         cursor = dir.parent();
@@ -5523,9 +5529,7 @@ mod tests {
         let tmpdir = tempdir().expect("tempdir");
         let root = tmpdir.path();
         let state_dir = root.join(".roko/state");
-        let plan_dir = root.join(".roko/plans/plan-a");
-        let memory_dir = root.join(".roko");
-
+        let plan_dir = crate::workspace_paths::plans_dir(root).join("plan-a");
         fs::create_dir_all(&state_dir).expect("state dir");
         fs::create_dir_all(&plan_dir).expect("plan dir");
 
@@ -5643,6 +5647,114 @@ files = ["src/dashboard.rs"]
                 "stderr line 25"
             );
         }
+    }
+
+    #[test]
+    fn plan_task_snapshots_include_runtime_task_metadata() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let state_dir = root.join(".roko/state");
+        let plan_dir = crate::workspace_paths::plans_dir(root).join("plan-a");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&plan_dir).expect("plan dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "implementing" }
+                }
+            }
+        });
+        write_json(&state_dir.join("executor.json"), &executor_state);
+
+        fs::write(
+            plan_dir.join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan A"
+iteration = 1
+total = 3
+done = 1
+status = "running"
+wave = 4
+
+[[task]]
+id = "task-1"
+title = "Bootstrap"
+status = "done"
+model = "claude-haiku-4-5"
+elapsed_ms = 1000
+tier = "focused"
+
+[[task]]
+id = "task-2"
+title = "Wire dashboard"
+status = "implementing"
+model = "claude-sonnet-4-6"
+elapsed_ms = 2500
+started_at_ms = 111
+wave = 2
+tier = "focused"
+
+[[task]]
+id = "task-3"
+title = "Handle failures"
+status = "gate_rejected"
+model = "claude-sonnet-4-6"
+elapsed_ms = 3500
+ended_at_ms = 222
+tier = "focused"
+"#,
+        )
+        .expect("tasks.toml");
+
+        let data = DashboardData::load_best_effort(root);
+        let snapshots = data.plan_task_snapshots();
+        let snapshot = snapshots.get("plan-a").expect("plan snapshot");
+
+        assert_eq!(snapshot.tasks_done, 1);
+        assert_eq!(snapshot.tasks_failed, 1);
+        assert_eq!(snapshot.elapsed_ms, 7_000);
+        assert!((snapshot.elapsed_secs - 7.0).abs() < f64::EPSILON);
+        assert_eq!(snapshot.wave, 4);
+        assert_eq!(snapshot.tasks.len(), 3);
+        assert_eq!(
+            snapshot.tasks[1].model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(snapshot.tasks[1].started_at.as_deref(), Some("111"));
+        assert_eq!(snapshot.tasks[1].wave, Some(2));
+        assert_eq!(snapshot.tasks[2].status, "failed");
+        assert_eq!(snapshot.tasks[2].ended_at.as_deref(), Some("222"));
+        assert_eq!(snapshot.failed_count, 1);
+    }
+
+    #[test]
+    fn plan_task_snapshots_ignore_invalid_tasks_toml() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let state_dir = root.join(".roko/state");
+        let plan_dir = crate::workspace_paths::plans_dir(root).join("plan-a");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&plan_dir).expect("plan dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "implementing" }
+                }
+            }
+        });
+        write_json(&state_dir.join("executor.json"), &executor_state);
+        fs::write(plan_dir.join("tasks.toml"), "[meta]\nplan = ").expect("invalid tasks.toml");
+
+        let data = DashboardData::load_best_effort(root);
+        let snapshots = data.plan_task_snapshots();
+        let snapshot = snapshots.get("plan-a").expect("plan snapshot");
+
+        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.tasks_done, 0);
+        assert_eq!(snapshot.tasks_failed, 0);
     }
 
     #[test]

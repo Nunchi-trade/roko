@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::atmosphere::Atmosphere;
 use super::super::state::{PhaseStatus, TuiState};
-use super::rosedust::MoriTheme;
+use crate::tui::Theme;
 
 // ---------------------------------------------------------------------------
 // Phase labels
@@ -49,21 +49,18 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
     };
 
     let (border_style, ttl_style) = if focused {
-        (
-            MoriTheme::focused_border_style(),
-            MoriTheme::focused_title_style(),
-        )
+        (Theme::focused_border_style(), Theme::focused_title_style())
     } else {
         (
-            MoriTheme::unfocused_border_style(),
-            MoriTheme::unfocused_title_style(),
+            Theme::unfocused_border_style(),
+            Theme::unfocused_title_style(),
         )
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(MoriTheme::block_style())
+        .style(Theme::block_style())
         .border_style(border_style)
         .title_style(ttl_style);
 
@@ -94,31 +91,28 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
         match step.status {
             PhaseStatus::Done => {
                 let fill: String = "\u{2588}".repeat(w);
-                bar_spans.push(Span::styled(fill, Style::default().fg(MoriTheme::SAGE)));
+                bar_spans.push(Span::styled(fill, Style::default().fg(Theme::SAGE)));
             }
             PhaseStatus::Active => {
                 if w > 0 {
                     let fill_count = w.saturating_sub(1);
                     let fill: String = "\u{2588}".repeat(fill_count);
-                    bar_spans.push(Span::styled(fill, Style::default().fg(MoriTheme::WARNING)));
+                    bar_spans.push(Span::styled(fill, Style::default().fg(Theme::WARNING)));
                     bar_spans.push(Span::styled(
                         spinner_ch.to_string(),
                         Style::default()
-                            .fg(MoriTheme::WARNING)
+                            .fg(Theme::WARNING)
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
             }
             PhaseStatus::Failed => {
                 let fill: String = "\u{2588}".repeat(w);
-                bar_spans.push(Span::styled(fill, Style::default().fg(MoriTheme::EMBER)));
+                bar_spans.push(Span::styled(fill, Style::default().fg(Theme::EMBER)));
             }
             PhaseStatus::Pending => {
                 let fill: String = "\u{2500}".repeat(w);
-                bar_spans.push(Span::styled(
-                    fill,
-                    Style::default().fg(MoriTheme::TEXT_GHOST),
-                ));
+                bar_spans.push(Span::styled(fill, Style::default().fg(Theme::TEXT_GHOST)));
             }
         }
     }
@@ -144,10 +138,10 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
             Span::styled(
                 "HALTED ",
                 Style::default()
-                    .fg(MoriTheme::EMBER)
+                    .fg(Theme::EMBER)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("at {name}"), Style::default().fg(MoriTheme::EMBER)),
+            Span::styled(format!("at {name}"), Style::default().fg(Theme::EMBER)),
         ])
     } else if let Some(idx) = active_idx {
         build_active_detail(&state.phase_pipeline[idx], atm)
@@ -160,12 +154,12 @@ pub fn render_phase_compact(frame: &mut Frame<'_>, area: Rect, state: &TuiState,
         if all_done && !state.phase_pipeline.is_empty() {
             Line::from(Span::styled(
                 "all phases complete",
-                Style::default().fg(MoriTheme::SAGE),
+                Style::default().fg(Theme::SAGE),
             ))
         } else {
             Line::from(Span::styled(
                 "waiting...",
-                Style::default().fg(MoriTheme::TEXT_DIM),
+                Style::default().fg(Theme::TEXT_DIM),
             ))
         }
     };
@@ -195,7 +189,7 @@ fn build_active_detail(step: &super::super::state::PhaseStep, atm: &Atmosphere) 
         Span::styled(
             format!(" {}", step.name),
             Style::default()
-                .fg(MoriTheme::ROSE)
+                .fg(Theme::ROSE)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -204,7 +198,7 @@ fn build_active_detail(step: &super::super::state::PhaseStep, atm: &Atmosphere) 
     if step.pct > 0.0 {
         spans.push(Span::styled(
             format!(" {:.0}%", step.pct.min(99.0)),
-            Style::default().fg(MoriTheme::DREAM),
+            Style::default().fg(Theme::DREAM),
         ));
     }
 

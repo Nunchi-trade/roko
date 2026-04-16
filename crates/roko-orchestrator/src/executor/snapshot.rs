@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use roko_core::PlanPhase;
 
+use super::SpeculativeExecution;
 use super::plan_state::PlanState;
 
 /// Serializable snapshot of the entire executor state.
@@ -27,6 +28,9 @@ pub struct ExecutorSnapshot {
     /// Queue order: `plan_id`s in execution priority order.
     #[serde(default)]
     pub queue_order: Vec<String>,
+    /// Live speculative execution branches, keyed by `plan:task`.
+    #[serde(default)]
+    pub speculative_executions: HashMap<String, SpeculativeExecution>,
     /// Unix millisecond timestamp when the snapshot was taken.
     #[serde(default)]
     pub timestamp_ms: u64,
@@ -39,6 +43,7 @@ impl ExecutorSnapshot {
         Self {
             plan_states: HashMap::new(),
             queue_order: Vec::new(),
+            speculative_executions: HashMap::new(),
             timestamp_ms,
         }
     }
@@ -153,6 +158,7 @@ impl ExecutorSnapshot {
         Ok(Self {
             plan_states,
             queue_order,
+            speculative_executions: HashMap::new(),
             timestamp_ms,
         })
     }

@@ -1,10 +1,23 @@
 //! `roko plan` subcommand group — list, show, and create plans.
 //!
 //! Plans are declarative task graphs stored as TOML/JSON files under
-//! `.roko/plans/`. Each plan describes a set of tasks with dependencies,
+//! `plans/` or the legacy `.roko/plans/`. Each plan describes a set of tasks
+//! with dependencies,
 //! assigned agent roles, and gate requirements.
 
 use std::path::{Path, PathBuf};
+
+/// Resolve the plans directory, preferring the top-level layout and falling
+/// back to the legacy `.roko` location.
+#[must_use]
+pub fn plans_dir(workdir: &Path) -> PathBuf {
+    let top = workdir.join("plans");
+    if top.is_dir() {
+        return top;
+    }
+
+    workdir.join(".roko").join("plans")
+}
 
 /// A plan summary (used in list output).
 #[derive(Debug, Clone)]
@@ -15,6 +28,10 @@ pub struct PlanSummary {
     pub title: String,
     /// Number of tasks in the plan.
     pub task_count: usize,
+    /// Number of completed tasks observed for the plan.
+    pub tasks_done: usize,
+    /// Number of failed tasks observed for the plan.
+    pub tasks_failed: usize,
     /// Whether the plan has been completed.
     pub completed: bool,
     /// Whether the plan's `tasks.toml` is missing modern fields.
@@ -88,6 +105,8 @@ impl Plan {
             id: self.id.clone(),
             title: self.title.clone(),
             task_count: self.tasks.len(),
+            tasks_done: self.tasks.iter().filter(|task| task.completed).count(),
+            tasks_failed: 0,
             completed,
             old_format: false,
             last_error: None,
@@ -126,12 +145,6 @@ impl Plan {
             Err(errors)
         }
     }
-}
-
-/// Resolve the plans directory for a given workdir.
-#[must_use]
-pub fn plans_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("plans")
 }
 
 /// List plan files in the plans directory.
@@ -277,6 +290,8 @@ mod tests {
             id: "p1".into(),
             title: "Test".into(),
             task_count: 3,
+            tasks_done: 0,
+            tasks_failed: 0,
             completed: false,
             old_format: false,
             last_error: None,
@@ -294,6 +309,8 @@ mod tests {
                 id: "a".into(),
                 title: "Alpha".into(),
                 task_count: 1,
+                tasks_done: 0,
+                tasks_failed: 0,
                 completed: true,
                 old_format: false,
                 last_error: None,
@@ -302,6 +319,8 @@ mod tests {
                 id: "b".into(),
                 title: "Beta".into(),
                 task_count: 2,
+                tasks_done: 0,
+                tasks_failed: 0,
                 completed: false,
                 old_format: true,
                 last_error: None,
@@ -316,9 +335,27 @@ mod tests {
     }
 
     #[test]
-    fn plans_dir_location() {
+    fn uses_legacy_location_when_top_level_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".roko").join("plans");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(plans_dir(tmp.path()), dir);
+    }
+
+    #[test]
+    fn falls_back_to_legacy_location() {
         let dir = plans_dir(Path::new("/project"));
         assert_eq!(dir, PathBuf::from("/project/.roko/plans"));
+    }
+
+    #[test]
+    fn prefers_top_level_location_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top_level = tmp.path().join("plans");
+        std::fs::create_dir_all(&top_level).unwrap();
+
+        assert_eq!(plans_dir(tmp.path()), top_level);
     }
 
     #[test]
@@ -329,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn list_plan_files_finds_toml_and_json() {
+    fn list_plan_files_finds_toml_and_json_in_legacy_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".roko").join("plans");
         std::fs::create_dir_all(&dir).unwrap();
@@ -344,11 +381,25 @@ mod tests {
     }
 
     #[test]
+    fn list_plan_files_reads_top_level_dir_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plans");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plan1.toml"), "").unwrap();
+
+        let plans = list_plan_files(tmp.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].ends_with("plan1.toml"));
+    }
+
+    #[test]
     fn plan_summary_display() {
         let summary = PlanSummary {
             id: "p1".into(),
             title: "My Plan".into(),
             task_count: 5,
+            tasks_done: 0,
+            tasks_failed: 0,
             completed: true,
             old_format: true,
             last_error: None,

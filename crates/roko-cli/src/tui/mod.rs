@@ -5,7 +5,9 @@
 //! `pages`, and `widgets`. The Mori-style modal+focus+tab system is in
 //! `input`, `state`, and `tabs`.
 
+pub mod ansi;
 pub mod app;
+pub mod approval_ipc;
 pub mod atmosphere;
 pub mod config_meta;
 pub mod dashboard;
@@ -19,14 +21,18 @@ pub mod pages;
 pub mod postfx;
 pub mod postfx_pipeline;
 pub mod scroll;
+pub mod segment;
 pub mod state;
 pub mod tabs;
+pub mod theme;
+pub mod util;
 pub mod views;
 pub mod widgets;
 
 pub use app::App;
+pub use approval_ipc::{ApprovalChannel, ApprovalRequest};
 pub use atmosphere::Atmosphere;
-pub use dashboard::{DashboardData, DashboardScaffold, DashboardSummary, Theme};
+pub use dashboard::{DashboardData, DashboardScaffold, DashboardSummary};
 pub use effects_config::EffectsConfig;
 pub use event::{Event, EventHandler};
 pub use hit_test::HitZones;
@@ -37,3 +43,4 @@ pub use pages::{Page, PageId, PageRegistry, PageScaffold, WidgetScaffold};
 pub use scroll::ScrollAccel;
 pub use state::TuiState;
 pub use tabs::Tab;
+pub use theme::Theme;

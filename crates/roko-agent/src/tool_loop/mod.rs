@@ -26,6 +26,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
+use crate::introspection::{Intervention, MetacognitiveMonitor, Turn};
 use crate::provider::ProviderError;
 use crate::retry::RetryPolicy;
 use crate::streaming::StreamChunk;
@@ -164,6 +165,7 @@ pub struct ToolLoop {
     checkpoint_path: Option<PathBuf>,
     model_profile: Option<ModelProfile>,
     retry_policy: RetryPolicy,
+    monitor: Option<MetacognitiveMonitor>,
 }
 
 impl ToolLoop {
@@ -183,6 +185,7 @@ impl ToolLoop {
             checkpoint_path: None,
             model_profile: None,
             retry_policy: RetryPolicy::default(),
+            monitor: None,
         }
     }
 
@@ -218,6 +221,13 @@ impl ToolLoop {
     #[must_use]
     pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Attach a metacognitive monitor.
+    #[must_use]
+    pub fn with_monitor(mut self, monitor: MetacognitiveMonitor) -> Self {
+        self.monitor = Some(monitor);
         self
     }
 
@@ -307,6 +317,7 @@ impl ToolLoop {
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
         let mut session = SessionState::default();
+        let mut turn_history: Vec<Turn> = Vec::new();
 
         loop {
             self.prune_context_if_needed(&mut messages);
@@ -401,12 +412,45 @@ impl ToolLoop {
             }
 
             // Dispatch tool calls (§36.41 parallel/serial batching).
-            let results = self.dispatcher.dispatch_batch(calls.clone(), ctx).await;
-            all_calls.extend(calls);
+            let current_calls = calls.clone();
+            let results = self.dispatcher.dispatch_batch(calls, ctx).await;
+            all_calls.extend(current_calls.clone());
 
             // §36.56 — shape results into messages for the next turn.
             let rendered_results = self.translator.render_results(&results);
             result_msg::append_results(&mut messages, rendered_results);
+
+            // Metacognitive intervention point: analyze the turn before the
+            // conversation advances.
+            if let Some(monitor) = self.monitor.as_ref() {
+                let turn = Turn::from_response(iterations, &response, current_calls);
+                turn_history.push(turn);
+                if let Some(intervention) = monitor.check(&turn_history) {
+                    match intervention {
+                        Intervention::InjectReflection(message) => {
+                            messages.push(serde_json::json!({
+                                "role": "system",
+                                "content": message,
+                            }));
+                        }
+                        Intervention::EscalateModel
+                        | Intervention::HumanHandoff
+                        | Intervention::Abort => {
+                            let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                            return ToolLoopOutput {
+                                final_text: String::new(),
+                                iterations,
+                                tool_calls: all_calls,
+                                total_usage,
+                                stop_reason: StopReason::BackendError(format!(
+                                    "metacognitive intervention: {intervention:?}"
+                                )),
+                                checkpoint: Some(cp),
+                            };
+                        }
+                    }
+                }
+            }
 
             // §36.55 — context-growth guard.
             self.prune_context_if_needed(&mut messages);
@@ -550,6 +594,7 @@ impl std::fmt::Debug for ToolLoop {
                     .map(|model| (&model.provider, &model.slug, model.context_window)),
             )
             .field("retry_policy", &self.retry_policy)
+            .field("monitor", &self.monitor.is_some())
             .finish()
     }
 }

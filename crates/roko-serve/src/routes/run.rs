@@ -1,5 +1,6 @@
 //! Single-prompt run endpoints.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -31,54 +32,13 @@ async fn start_run(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RunRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let workdir = body
-        .workdir
-        .map_or_else(|| state.workdir.clone(), std::path::PathBuf::from);
-    let prompt = body.prompt.clone();
-    let bus = state.event_bus.clone();
-    let runtime = state.runtime.clone();
-
-    let handle = tokio::spawn({
-        let run_id = run_id.clone();
-        async move {
-            bus.publish(ServerEvent::RunStarted {
-                run_id: run_id.clone(),
-                prompt: prompt.clone(),
-            });
-
-            match runtime.run_once(&workdir, &prompt).await {
-                Ok(result) => {
-                    bus.publish(ServerEvent::RunCompleted {
-                        run_id,
-                        success: result.success,
-                    });
-                }
-                Err(e) => {
-                    bus.publish(ServerEvent::Error {
-                        message: format!("run failed: {e}"),
-                    });
-                    bus.publish(ServerEvent::RunCompleted {
-                        run_id,
-                        success: false,
-                    });
-                }
-            }
-        }
-    });
-
-    let run_handle = RunHandle {
-        id: run_id.clone(),
-        prompt: body.prompt,
-        status: OperationStatus::Running,
-        handle,
-    };
-
-    state
-        .active_runs
-        .write()
-        .await
-        .insert(run_id.clone(), run_handle);
+    let run_id = spawn_background_run(
+        &state,
+        body.prompt.clone(),
+        body.workdir.map(PathBuf::from),
+        None,
+    )
+    .await;
 
     Ok((
         axum::http::StatusCode::ACCEPTED,
@@ -105,4 +65,114 @@ async fn run_status(
     drop(runs);
 
     Ok(result)
+}
+
+pub(crate) async fn spawn_background_run(
+    state: &Arc<AppState>,
+    prompt: String,
+    workdir: Option<PathBuf>,
+    agent_target: Option<String>,
+) -> String {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let workdir = workdir.unwrap_or_else(|| state.workdir.clone());
+    let bus = state.event_bus.clone();
+    let runtime = state.runtime.clone();
+
+    let handle = tokio::spawn({
+        let run_id = run_id.clone();
+        let prompt_for_handle = prompt.clone();
+        async move {
+            publish_run_started(&bus, &run_id, &prompt_for_handle, agent_target.as_deref());
+
+            match runtime
+                .run_once(workdir.as_path(), &prompt_for_handle)
+                .await
+            {
+                Ok(result) => {
+                    publish_run_completed(
+                        &bus,
+                        &run_id,
+                        agent_target.as_deref(),
+                        result.success,
+                        None,
+                    );
+                }
+                Err(e) => {
+                    let error_message = format!("run failed: {e}");
+                    bus.publish(ServerEvent::Error {
+                        message: error_message.clone(),
+                    });
+                    publish_run_completed(
+                        &bus,
+                        &run_id,
+                        agent_target.as_deref(),
+                        false,
+                        Some(serde_json::json!({ "error": error_message })),
+                    );
+                }
+            }
+        }
+    });
+
+    let run_handle = RunHandle {
+        id: run_id.clone(),
+        prompt,
+        status: OperationStatus::Running,
+        handle,
+    };
+
+    state
+        .active_runs
+        .write()
+        .await
+        .insert(run_id.clone(), run_handle);
+    run_id
+}
+
+fn publish_run_started(
+    bus: &crate::event_bus::EventBus<ServerEvent>,
+    run_id: &str,
+    prompt: &str,
+    agent_target: Option<&str>,
+) {
+    bus.publish(ServerEvent::RunStarted {
+        run_id: run_id.to_owned(),
+        prompt: prompt.to_owned(),
+    });
+    if let Some(agent_id) = agent_target {
+        bus.publish(ServerEvent::AgentOutput {
+            agent_id: agent_id.to_owned(),
+            run_id: Some(run_id.to_owned()),
+            content: String::new(),
+            done: false,
+            metadata: Some(serde_json::json!({ "status": "started" })),
+        });
+    }
+}
+
+fn publish_run_completed(
+    bus: &crate::event_bus::EventBus<ServerEvent>,
+    run_id: &str,
+    agent_target: Option<&str>,
+    success: bool,
+    metadata: Option<Value>,
+) {
+    if let Some(agent_id) = agent_target {
+        bus.publish(ServerEvent::AgentOutput {
+            agent_id: agent_id.to_owned(),
+            run_id: Some(run_id.to_owned()),
+            content: String::new(),
+            done: true,
+            metadata: Some(serde_json::json!({
+                "status": if success { "completed" } else { "failed" },
+                "success": success,
+                "details": metadata.unwrap_or(Value::Null),
+            })),
+        });
+    }
+
+    bus.publish(ServerEvent::RunCompleted {
+        run_id: run_id.to_owned(),
+        success,
+    });
 }

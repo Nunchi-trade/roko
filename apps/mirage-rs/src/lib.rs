@@ -66,7 +66,7 @@ pub mod chain_rpc;
 
 /// HTTP REST API for dashboard consumption (pheromone field, knowledge graph,
 /// agent topology). Opt-in via the `chain` feature alongside HDC/knowledge/stigmergy.
-#[cfg(feature = "chain")]
+#[cfg(feature = "legacy-api")]
 pub mod http_api;
 
 /// Roko trait bridge: implements `roko_core::{Gate, Substrate}` over mirage.

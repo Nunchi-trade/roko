@@ -26,6 +26,7 @@ use parking_lot::Mutex;
 use roko_agent::provider::ProviderError;
 use roko_agent::{AgentResult, gemini::GeminiMetadata};
 use roko_core::OperatingFrequency;
+use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
@@ -35,8 +36,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
+use crate::active_inference::{BeliefState, select_tier as select_tier_with_belief};
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::costs_db::CostTable;
+use crate::latency::LatencyTracker;
 use crate::model_experiment::ModelExperimentStore;
 use crate::model_router::{
     COLD_START_THRESHOLD, CandidateArmScore, LinUCBRouter, RoutingContext,
@@ -215,6 +218,17 @@ pub struct CascadeRoutingCandidate {
     pub cache_affinity: bool,
     /// Whether the candidate is on the Pareto frontier, when known.
     pub pareto_optimal: Option<bool>,
+}
+
+/// Bias signal emitted by the conductor and applied at routing time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingBias {
+    /// Model slugs to deprioritize.
+    pub deprioritize: Vec<String>,
+    /// Prefer cheaper tiers when live load or budget pressure is high.
+    pub prefer_cheaper: bool,
+    /// Human-readable explanation for debugging and logging.
+    pub reason: String,
 }
 
 // ─── Confidence-stage stats ─────────────────────────────────────────────────
@@ -698,6 +712,48 @@ fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
     }
 }
 
+fn routing_tier_bias_factor(tier: ModelTier) -> f64 {
+    match tier {
+        ModelTier::Fast => 1.10,
+        ModelTier::Standard => 1.0,
+        ModelTier::Premium => 0.85,
+        _ => 1.0,
+    }
+}
+
+fn cost_pressure_factor(tier: ModelTier) -> f64 {
+    match tier {
+        ModelTier::Fast => 1.20,
+        ModelTier::Standard => 0.90,
+        ModelTier::Premium => 0.0,
+        _ => 0.90,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ProviderHealthSnapshotKey {
+    state_rank: u8,
+    consecutive_failures: u32,
+    total_failures: u64,
+    last_failure_at: i64,
+}
+
+impl From<&crate::provider_health::ProviderHealth> for ProviderHealthSnapshotKey {
+    fn from(health: &crate::provider_health::ProviderHealth) -> Self {
+        let state_rank = match health.state {
+            crate::provider_health::CircuitState::Closed => 0,
+            crate::provider_health::CircuitState::HalfOpen => 1,
+            crate::provider_health::CircuitState::Open => 2,
+        };
+        Self {
+            state_rank,
+            consecutive_failures: health.consecutive_failures,
+            total_failures: health.total_failures,
+            last_failure_at: health.last_failure_at.unwrap_or(i64::MIN),
+        }
+    }
+}
+
 fn behavioral_state_tier_shift(ctx: &RoutingContext) -> i8 {
     match ctx.daimon_policy.behavioral_state {
         BehavioralState::Struggling => 1,
@@ -864,6 +920,16 @@ fn target_tier_rank(current_rank: u8, shift: i8) -> u8 {
 
 fn slugs_match(lhs: &str, rhs: &str) -> bool {
     lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
+}
+
+fn parse_agent_role(raw: &str) -> Option<AgentRole> {
+    if let Ok(role) = serde_json::from_str::<AgentRole>(&format!("\"{raw}\"")) {
+        return Some(role);
+    }
+
+    std::iter::once(AgentRole::Conductor)
+        .chain(AgentRole::ALL_AGENTS.iter().copied())
+        .find(|role| raw == role.label() || raw == format!("{role:?}"))
 }
 
 /// Classify a model slug into a known model family.
@@ -1142,6 +1208,17 @@ impl CascadeRouter {
         }
     }
 
+    /// Select a tier using the active-inference belief state.
+    #[must_use]
+    pub fn select_tier_with_active_inference(
+        &self,
+        belief: &BeliefState,
+        requirements: &TaskRequirements,
+    ) -> ModelTier {
+        let _ = self;
+        select_tier_with_belief(belief, requirements)
+    }
+
     /// Return the strongest model currently available to the router.
     ///
     /// Preference order is premium > standard > fast. Within the same tier,
@@ -1386,6 +1463,155 @@ impl CascadeRouter {
             CascadeStage::Confidence => self.route_confidence_filtered(ctx, &available),
             CascadeStage::Ucb => self.route_ucb_filtered(ctx, &available),
         }
+    }
+
+    /// Remove candidates whose provider is currently unhealthy.
+    ///
+    /// If every candidate is unhealthy, the least-unhealthy candidate is
+    /// retained so callers never receive an empty set.
+    #[must_use]
+    pub fn filter_unhealthy(
+        &self,
+        candidates: &[String],
+        health: &ProviderHealthRegistry,
+        model_providers: &HashMap<String, String>,
+    ) -> Vec<String> {
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let available: Vec<String> = candidates
+            .iter()
+            .filter(|slug| {
+                let provider = model_providers
+                    .get(slug.as_str())
+                    .map_or(slug.as_str(), String::as_str);
+                health.is_healthy(provider)
+            })
+            .cloned()
+            .collect();
+        if !available.is_empty() {
+            return available;
+        }
+
+        let snapshot = health.snapshot();
+        let mut ranked: Vec<(String, ProviderHealthSnapshotKey)> = candidates
+            .iter()
+            .map(|slug| {
+                let provider = model_providers
+                    .get(slug.as_str())
+                    .map_or(slug.as_str(), String::as_str);
+                let health_record = snapshot
+                    .get(provider)
+                    .cloned()
+                    .unwrap_or_else(|| health.get(provider));
+                (
+                    slug.clone(),
+                    ProviderHealthSnapshotKey::from(&health_record),
+                )
+            })
+            .collect();
+
+        ranked.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        ranked
+            .first()
+            .map(|(slug, _)| vec![slug.clone()])
+            .unwrap_or_default()
+    }
+
+    /// Apply a routing bias to scored candidates.
+    pub fn apply_bias(&self, candidates: &mut [(String, f64)], bias: &RoutingBias) {
+        if bias.deprioritize.is_empty() && !bias.prefer_cheaper {
+            return;
+        }
+
+        for (slug, score) in candidates.iter_mut() {
+            if bias
+                .deprioritize
+                .iter()
+                .any(|blocked| slugs_match(slug, blocked))
+            {
+                *score *= 0.5;
+            }
+
+            if bias.prefer_cheaper {
+                *score *= routing_tier_bias_factor(slug_to_tier(slug));
+            }
+        }
+    }
+
+    /// Apply cost pressure to scored candidates.
+    ///
+    /// When `spike` is `true`, premium-tier models are heavily down-weighted
+    /// and fast models are nudged upward.
+    pub fn apply_cost_pressure(&self, candidates: &mut [(String, f64)], spike: bool) {
+        if !spike {
+            return;
+        }
+
+        for (slug, score) in candidates.iter_mut() {
+            *score *= cost_pressure_factor(slug_to_tier(slug));
+        }
+    }
+
+    /// Load static routing overrides from a JSON map of role labels to model slugs.
+    ///
+    /// Returns the number of overrides applied.
+    pub fn load_static_overrides(&self, path: &Path) -> std::io::Result<usize> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(err),
+        };
+        let overrides = serde_json::from_str::<HashMap<String, String>>(&contents)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+        let mut applied = 0usize;
+        for (parameter, winning_value) in overrides {
+            if let Some(role) = parse_agent_role(&parameter) {
+                if self.update_static_table(role, winning_value) {
+                    applied += 1;
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Compute a latency penalty using actual wall-clock latency.
+    #[must_use]
+    pub fn latency_penalty(actual_ms: f64, expected_ms: f64) -> f64 {
+        if expected_ms <= 0.0 {
+            return 0.0;
+        }
+        0.1 * (actual_ms / expected_ms - 1.0).max(0.0)
+    }
+
+    /// Convert a quality score into a latency-adjusted reward.
+    #[must_use]
+    pub fn reward_with_latency(
+        quality_score: f64,
+        actual_ms: Option<f64>,
+        expected_ms: f64,
+    ) -> f64 {
+        let penalty = actual_ms
+            .map(|actual_ms| Self::latency_penalty(actual_ms, expected_ms))
+            .unwrap_or(0.0);
+        (quality_score - penalty).max(0.0)
+    }
+
+    /// Convert a tracker-backed latency observation into a reward signal.
+    #[must_use]
+    pub fn reward_with_tracker_latency(
+        &self,
+        quality_score: f64,
+        model: &str,
+        tracker: &LatencyTracker,
+        expected_ms: f64,
+    ) -> f64 {
+        let actual_ms = tracker
+            .mean_latency(model)
+            .or_else(|| tracker.p95_latency(model));
+        Self::reward_with_latency(quality_score, actual_ms, expected_ms)
     }
 
     /// Route a context through the cascade, optionally biasing by C-Factor.
@@ -4473,5 +4699,68 @@ mod tests {
             !frontier.contains(&"claude-haiku-3-5".to_string()),
             "dominated models should be pruned from the frontier after refresh"
         );
+    }
+
+    #[test]
+    fn filter_unhealthy_retains_least_unhealthy_candidate() {
+        let cascade = CascadeRouter::new(vec![
+            "claude-haiku-3-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        ]);
+        let health = ProviderHealthRegistry::new();
+        for _ in 0..3 {
+            health.record_failure("bad-a", ErrorClass::Timeout);
+        }
+        for _ in 0..5 {
+            health.record_failure("bad-b", ErrorClass::Timeout);
+        }
+        let mut providers = HashMap::new();
+        providers.insert("claude-haiku-3-5".to_string(), "bad-a".to_string());
+        providers.insert("claude-sonnet-4-5".to_string(), "bad-b".to_string());
+
+        let filtered = cascade.filter_unhealthy(
+            &["claude-haiku-3-5".into(), "claude-sonnet-4-5".into()],
+            &health,
+            &providers,
+        );
+        assert_eq!(filtered, vec!["claude-haiku-3-5".to_string()]);
+    }
+
+    #[test]
+    fn apply_cost_pressure_prefers_cheaper_models() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let mut scores = vec![
+            ("claude-opus-4".to_string(), 1.0),
+            ("claude-sonnet-4-5".to_string(), 1.0),
+            ("claude-haiku-3-5".to_string(), 1.0),
+        ];
+
+        cascade.apply_cost_pressure(&mut scores, true);
+
+        assert!((scores[0].1 - 0.0).abs() < 1e-9);
+        assert!((scores[1].1 - 0.9).abs() < 1e-9);
+        assert!((scores[2].1 - 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_static_overrides_updates_role_defaults() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("static-overrides.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "implementer": "claude-sonnet-4-6"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut cascade = CascadeRouter::new(test_slugs());
+        let applied = cascade.load_static_overrides(&path).unwrap();
+        assert_eq!(applied, 1);
+
+        let mut ctx = default_ctx();
+        ctx.role = AgentRole::Implementer;
+        assert_eq!(cascade.route(&ctx).primary.slug, "claude-sonnet-4-6");
     }
 }

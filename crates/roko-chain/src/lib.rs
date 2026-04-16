@@ -27,4 +27,4 @@ pub use types::{
     TxRequest,
 };
 pub use wallet::ChainWallet;
-pub use witness::ChainWitnessEngine;
+pub use witness::{ChainWitnessEngine, verify_on_chain, witness_on_chain};

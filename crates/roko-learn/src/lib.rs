@@ -20,6 +20,8 @@
 #![deny(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
+/// Active inference helpers for tier routing support.
+pub mod active_inference;
 pub mod anomaly;
 pub mod bandits;
 pub mod baseline;
@@ -33,6 +35,8 @@ pub mod context_pack_cache;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
+/// Curriculum ordering helpers for task scheduling.
+pub mod curriculum;
 pub mod drift;
 pub mod efficiency;
 pub mod episode_logger;

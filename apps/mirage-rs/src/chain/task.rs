@@ -90,12 +90,73 @@ pub struct TaskEntry {
     pub reward_wei: u128,
     /// ID of the insight produced as a result.
     pub result_insight_id: Option<String>,
+    /// Parent task when this task is an improvement follow-up.
+    #[serde(default)]
+    pub parent_task_id: Option<TaskId>,
+    /// Task deliverables recorded on completion.
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
+    /// Human-readable completion summary.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Runtime metadata captured on completion.
+    #[serde(default)]
+    pub completion_metadata: Option<CompletionMetadata>,
     /// Topic tags for matching.
     pub tags: Vec<String>,
     /// Number of times this task was attempted.
     pub attempts: u32,
     /// Maximum attempts before auto-cancel.
     pub max_attempts: u32,
+}
+
+/// A deliverable produced by a completed task.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskArtifact {
+    /// Artifact category, e.g. `code`, `report`, or `data`.
+    #[serde(default)]
+    pub kind: String,
+    /// Human-readable artifact label.
+    #[serde(default, alias = "name")]
+    pub label: String,
+    /// Stable content hash.
+    #[serde(default, alias = "hash")]
+    pub content_hash: String,
+    /// Optional storage location for the artifact.
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// Optional byte size.
+    #[serde(default, alias = "size")]
+    pub size_bytes: Option<u64>,
+    /// Optional MIME-like content type.
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+/// Additional completion metadata for a task run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompletionMetadata {
+    /// End-to-end task duration in milliseconds.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Model used for the terminal completion path.
+    #[serde(default, alias = "model")]
+    pub model_used: Option<String>,
+    /// Input tokens consumed.
+    #[serde(default)]
+    pub tokens_in: Option<u64>,
+    /// Output tokens consumed.
+    #[serde(default)]
+    pub tokens_out: Option<u64>,
+    /// Approximate completion cost in USD.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Optional completion method label.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Optional chain snapshot block.
+    #[serde(default)]
+    pub snapshot_block: Option<u64>,
 }
 
 /// Task event for real-time streaming.
@@ -197,6 +258,9 @@ pub enum TaskError {
     /// Task has exceeded maximum attempts.
     #[error("task {0} exceeded max attempts")]
     MaxAttempts(TaskId),
+    /// Improvement tasks must inherit a concrete assignee from the parent.
+    #[error("task {0} has no assignee to reuse for improvement")]
+    ImprovementTargetUnassigned(TaskId),
 }
 
 /// In-memory task store with auto-incrementing IDs and lifecycle management.
@@ -246,12 +310,71 @@ impl TaskStore {
             stake_wei,
             reward_wei: 0,
             result_insight_id: None,
+            parent_task_id: None,
+            artifacts: Vec::new(),
+            summary: None,
+            completion_metadata: None,
             tags,
             attempts: 0,
             max_attempts: 3,
         };
         self.tasks.insert(id, entry);
         id
+    }
+
+    /// Create a follow-up improvement task for a completed parent task.
+    pub fn create_improvement(
+        &mut self,
+        parent_id: TaskId,
+        feedback: String,
+        creator: String,
+        now: u64,
+    ) -> Result<TaskId, TaskError> {
+        let parent = self
+            .tasks
+            .get(&parent_id)
+            .cloned()
+            .ok_or(TaskError::NotFound(parent_id))?;
+        if parent.state != TaskState::Completed {
+            return Err(TaskError::InvalidState {
+                id: parent_id,
+                current: parent.state,
+                expected: TaskState::Completed,
+            });
+        }
+
+        let Some(parent_assignee) = parent.assignee.clone() else {
+            return Err(TaskError::ImprovementTargetUnassigned(parent_id));
+        };
+
+        let id = self.next_id;
+        self.next_id += 1;
+        let entry = TaskEntry {
+            id,
+            title: format!("Improve: {}", parent.title),
+            description: feedback,
+            kind: "improvement".to_string(),
+            priority: parent.priority,
+            state: TaskState::Assigned,
+            creator,
+            assignee: Some(parent_assignee),
+            created_at: now,
+            assigned_at: Some(now),
+            started_at: None,
+            completed_at: None,
+            stake_wei: 0,
+            reward_wei: 0,
+            result_insight_id: None,
+            parent_task_id: Some(parent_id),
+            artifacts: Vec::new(),
+            summary: None,
+            completion_metadata: None,
+            tags: parent.tags,
+            attempts: 0,
+            max_attempts: parent.max_attempts,
+        };
+        self.tasks.insert(id, entry);
+        Ok(id)
     }
 
     /// Assign a task to an agent. Task must be in `Open` state.
@@ -296,6 +419,9 @@ impl TaskStore {
         &mut self,
         id: TaskId,
         result_insight_id: Option<String>,
+        artifacts: Vec<TaskArtifact>,
+        summary: Option<String>,
+        completion_metadata: Option<CompletionMetadata>,
         now: u64,
     ) -> Result<u128, TaskError> {
         let entry = self.tasks.get_mut(&id).ok_or(TaskError::NotFound(id))?;
@@ -309,6 +435,9 @@ impl TaskStore {
         entry.state = TaskState::Completed;
         entry.completed_at = Some(now);
         entry.result_insight_id = result_insight_id;
+        entry.artifacts = artifacts;
+        entry.summary = summary;
+        entry.completion_metadata = completion_metadata;
         entry.reward_wei = entry.stake_wei;
         Ok(entry.reward_wei)
     }
@@ -485,11 +614,44 @@ mod tests {
         assert_eq!(entry.state, TaskState::InProgress);
         assert_eq!(entry.attempts, 1);
 
-        let reward = store.complete(id, Some("insight-abc".into()), 130).unwrap();
+        let reward = store
+            .complete(
+                id,
+                Some("insight-abc".into()),
+                vec![TaskArtifact {
+                    kind: "report".into(),
+                    label: "deliverable.md".into(),
+                    content_hash: "sha256:abc".into(),
+                    uri: Some("ipfs://artifact".into()),
+                    size_bytes: Some(42),
+                    content_type: Some("text/markdown".into()),
+                }],
+                Some("found the answer".into()),
+                Some(CompletionMetadata {
+                    duration_ms: 500,
+                    model_used: Some("claude-sonnet-4-5".into()),
+                    tokens_in: Some(100),
+                    tokens_out: Some(50),
+                    cost_usd: Some(0.12),
+                    method: None,
+                    snapshot_block: None,
+                }),
+                130,
+            )
+            .unwrap();
         assert_eq!(reward, 1_000_000);
         let entry = store.get(id).unwrap();
         assert_eq!(entry.state, TaskState::Completed);
         assert_eq!(entry.result_insight_id.as_deref(), Some("insight-abc"));
+        assert_eq!(entry.artifacts.len(), 1);
+        assert_eq!(entry.summary.as_deref(), Some("found the answer"));
+        assert_eq!(
+            entry
+                .completion_metadata
+                .as_ref()
+                .and_then(|meta| meta.model_used.as_deref()),
+            Some("claude-sonnet-4-5")
+        );
     }
 
     #[test]
@@ -542,6 +704,63 @@ mod tests {
         );
         store.cancel(id, "no longer needed".into()).unwrap();
         assert_eq!(store.get(id).unwrap().state, TaskState::Cancelled);
+    }
+
+    #[test]
+    fn create_improvement_inherits_parent_assignment() {
+        let mut store = TaskStore::new();
+        let parent_id = store.create(
+            "ship report".into(),
+            "deliver first draft".into(),
+            "report".into(),
+            TaskPriority::High,
+            "user-1".into(),
+            vec!["defi".into()],
+            100,
+            10,
+        );
+        store.assign(parent_id, "agent-7".into(), 11).unwrap();
+        store.start(parent_id, 12).unwrap();
+        store
+            .complete(parent_id, None, Vec::new(), Some("draft".into()), None, 13)
+            .unwrap();
+
+        let child_id = store
+            .create_improvement(
+                parent_id,
+                "tighten the conclusions".into(),
+                "user-2".into(),
+                20,
+            )
+            .unwrap();
+
+        let child = store.get(child_id).unwrap();
+        assert_eq!(child.parent_task_id, Some(parent_id));
+        assert_eq!(child.kind, "improvement");
+        assert_eq!(child.state, TaskState::Assigned);
+        assert_eq!(child.assignee.as_deref(), Some("agent-7"));
+        assert_eq!(child.tags, vec!["defi"]);
+        assert_eq!(child.description, "tighten the conclusions");
+    }
+
+    #[test]
+    fn create_improvement_requires_completed_parent() {
+        let mut store = TaskStore::new();
+        let parent_id = store.create(
+            "ship report".into(),
+            "deliver first draft".into(),
+            "report".into(),
+            TaskPriority::High,
+            "user-1".into(),
+            vec![],
+            0,
+            10,
+        );
+
+        let err = store
+            .create_improvement(parent_id, "please revise".into(), "user-2".into(), 20)
+            .unwrap_err();
+        assert!(matches!(err, TaskError::InvalidState { .. }));
     }
 
     #[test]
@@ -645,7 +864,9 @@ mod tests {
 
         store.assign(id1, "b".into(), 1).unwrap();
         store.start(id1, 2).unwrap();
-        store.complete(id1, None, 3).unwrap();
+        store
+            .complete(id1, None, Vec::new(), None, None, 3)
+            .unwrap();
 
         let s = store.stats();
         assert_eq!(s.completed, 1);
@@ -670,11 +891,34 @@ mod tests {
         // Can't start before assigning.
         assert!(store.start(id, 1).is_err());
         // Can't complete before starting.
-        assert!(store.complete(id, None, 1).is_err());
+        assert!(store.complete(id, None, Vec::new(), None, None, 1).is_err());
         // Can't fail before starting.
         assert!(store.fail(id, "x".into(), 1).is_err());
 
         // Not found.
         assert!(store.assign(999, "b".into(), 0).is_err());
+    }
+
+    #[test]
+    fn completion_artifacts_default_to_empty() {
+        let mut store = TaskStore::new();
+        let id = store.create(
+            "t".into(),
+            "".into(),
+            "r".into(),
+            TaskPriority::Low,
+            "a".into(),
+            vec![],
+            0,
+            0,
+        );
+        store.assign(id, "b".into(), 1).unwrap();
+        store.start(id, 2).unwrap();
+        store.complete(id, None, Vec::new(), None, None, 3).unwrap();
+
+        let task = store.get(id).unwrap();
+        assert!(task.artifacts.is_empty());
+        assert!(task.summary.is_none());
+        assert!(task.completion_metadata.is_none());
     }
 }

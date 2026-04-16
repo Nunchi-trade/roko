@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::super::state::TuiState;
-use super::rosedust::{MoriTheme, gradient_ocean};
+use super::rosedust::gradient_ocean;
+use crate::tui::Theme;
 
 // ---------------------------------------------------------------------------
 // Public render
@@ -49,11 +50,11 @@ pub fn render_wave_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState)
 
         let is_current = idx == current_wave;
         let bar_color = if fraction >= 1.0 {
-            MoriTheme::SAGE
+            Theme::SAGE
         } else if is_current {
             gradient.sample(0.7)
         } else {
-            MoriTheme::TEXT_GHOST
+            Theme::TEXT_GHOST
         };
 
         let filled = (fraction * wave_width as f64) as usize;
@@ -66,9 +67,9 @@ pub fn render_wave_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState)
             spans.push(Span::styled(
                 format!("{label} "),
                 Style::default().fg(if is_current {
-                    MoriTheme::BONE
+                    Theme::BONE
                 } else {
-                    MoriTheme::FG_DIM
+                    Theme::FG_DIM
                 }),
             ));
             let bar_w = wave_width.saturating_sub(label_len + 1);
@@ -90,7 +91,7 @@ pub fn render_wave_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState)
             }
             spans.push(Span::styled(
                 "\u{2500}".repeat(empty_bar),
-                Style::default().fg(MoriTheme::TEXT_GHOST),
+                Style::default().fg(Theme::TEXT_GHOST),
             ));
         } else {
             let empty = wave_width.saturating_sub(filled);
@@ -108,7 +109,7 @@ pub fn render_wave_progress(frame: &mut Frame<'_>, area: Rect, state: &TuiState)
             }
             spans.push(Span::styled(
                 "\u{2500}".repeat(empty),
-                Style::default().fg(MoriTheme::TEXT_GHOST),
+                Style::default().fg(Theme::TEXT_GHOST),
             ));
         }
     }

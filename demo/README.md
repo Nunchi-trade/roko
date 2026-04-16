@@ -102,6 +102,16 @@ CMD:
   up <scenario> --no-agents
                        # deploy + seed, skip the spine
   verify <scenario>    # assert bytecode + expected events
+  benchmark c-factor [yield-routing] [--output file.json]
+                       # cold vs warm benchmark on the yield-routing spine
+  tournament [yield-routing] [--rounds N]
+                       # multi-round learning curve on one deployment
+  autonomous [yield-routing] [--agents N] [--jobs N]
+                       # concurrent poster/agent loop over the same spine
+  tui [--scenario yield-routing]
+                       # ratatui live demo view driven by emitted events
+  register-agent --wallet worker0 --name alpha --model gemma-7b
+                       # mint, stake, worker-register, and agent-register in one command
 ```
 
 Environment overrides (in precedence order):
@@ -109,6 +119,11 @@ Environment overrides (in precedence order):
 - `ROKO_MIRAGE_URL` env var
 - `[defaults].rpc_url` in `demo/manifest.toml`
 - fallback: `http://127.0.0.1:8545`
+
+Additional runtime flags:
+- `--llm-backend <stub|claude|ollama|multi>` selects the scenario provider
+- `--events <none|ndjson|ws|both>` chooses event sinks for dashboards/streaming
+- `--persist-reputation` restores and saves `demo/.runtime/reputation.json`
 
 All 4 scenarios run in **~240-700ms** each against mirage.
 

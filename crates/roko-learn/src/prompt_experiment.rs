@@ -8,8 +8,12 @@
 //! Persistence is a single JSON file managed by [`ExperimentStore`].
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::io;
 use std::path::Path;
+
+/// Default path for persisted static overrides derived from concluded experiments.
+pub const DEFAULT_STATIC_OVERRIDES_PATH: &str = ".roko/learn/static-overrides.json";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +33,19 @@ pub struct PromptVariant {
     pub slug: Option<String>,
     /// Whether this variant is still eligible for selection.
     pub active: bool,
+}
+
+/// Winner derived from a concluded prompt experiment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentWinner {
+    /// Experiment identifier that produced the winner.
+    pub experiment_id: String,
+    /// Parameter being overridden, typically a role or section name.
+    pub parameter: String,
+    /// Winning value that should become the new default.
+    pub winning_value: String,
+    /// Derived confidence in `[0.0, 1.0]`.
+    pub confidence: f64,
 }
 
 /// Per-variant outcome tracker.
@@ -249,6 +266,80 @@ impl PromptExperiment {
             None
         }
     }
+
+    /// Return a concluded winner when the experiment has enough evidence.
+    #[must_use]
+    pub fn concluded_winner(&self) -> Option<ExperimentWinner> {
+        if self.status != ExperimentStatus::Concluded {
+            return None;
+        }
+
+        let winner_id = self.winner_id.as_deref()?;
+        let winner = self
+            .variants
+            .iter()
+            .find(|variant| variant.id == winner_id)?;
+        let confidence = self.winner_confidence(winner_id)?;
+        if confidence < 0.95 {
+            return None;
+        }
+
+        Some(ExperimentWinner {
+            experiment_id: self.experiment_id.clone(),
+            parameter: self
+                .role
+                .clone()
+                .unwrap_or_else(|| self.section_name.clone()),
+            winning_value: winner
+                .slug
+                .clone()
+                .unwrap_or_else(|| winner.content.clone()),
+            confidence,
+        })
+    }
+
+    fn winner_confidence(&self, winner_id: &str) -> Option<f64> {
+        let mut ranked: Vec<(&str, &VariantStats, f64)> = self
+            .variants
+            .iter()
+            .filter(|variant| variant.active)
+            .filter_map(|variant| {
+                self.stats
+                    .get(&variant.id)
+                    .map(|stats| (variant.id.as_str(), stats, stats.success_rate()))
+            })
+            .collect();
+        if ranked.is_empty() {
+            return None;
+        }
+
+        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let (winner_ranked_id, winner_stats, winner_rate) = ranked
+            .iter()
+            .find(|(id, _, _)| *id == winner_id)
+            .copied()
+            .unwrap_or(ranked[0]);
+        let second = ranked.iter().find(|(id, _, _)| *id != winner_ranked_id);
+        let second_rate = second.map_or(0.0, |(_, _, rate)| *rate);
+
+        let second_stats = second.map(|(_, stats, _)| *stats);
+        let se = match second_stats {
+            Some(second_stats) => {
+                let winner_trials = winner_stats.trials.max(1) as f64;
+                let second_trials = second_stats.trials.max(1) as f64;
+                let winner_var = winner_rate * (1.0 - winner_rate) / winner_trials;
+                let second_var = second_rate * (1.0 - second_rate) / second_trials;
+                (winner_var + second_var).sqrt()
+            }
+            None => 0.0,
+        };
+        let gap = (winner_rate - second_rate).max(0.0);
+        if se == 0.0 {
+            Some(1.0)
+        } else {
+            Some((gap / (gap + se)).clamp(0.0, 1.0))
+        }
+    }
 }
 
 // ─── Store ──────────────────────────────────────────────────────────────────
@@ -326,6 +417,57 @@ impl ExperimentStore {
         self.assign_variant(section_name)
     }
 
+    /// Return all concluded experiments with sufficiently high confidence.
+    #[must_use]
+    pub fn concluded_winners(&self) -> Vec<ExperimentWinner> {
+        let mut winners: Vec<_> = self
+            .experiments
+            .values()
+            .filter_map(PromptExperiment::concluded_winner)
+            .collect();
+        winners.sort_by(|a, b| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then_with(|| a.experiment_id.cmp(&b.experiment_id))
+        });
+        winners
+    }
+
+    /// Write concluded winners to the static-overrides file.
+    pub fn apply_winners(&self, winners: &[ExperimentWinner]) -> io::Result<()> {
+        self.apply_winners_to(winners, Path::new(DEFAULT_STATIC_OVERRIDES_PATH))
+    }
+
+    /// Write concluded winners to `path`.
+    pub fn apply_winners_to(&self, winners: &[ExperimentWinner], path: &Path) -> io::Result<()> {
+        if winners.is_empty() {
+            return Ok(());
+        }
+
+        let mut overrides: BTreeMap<String, String> = self
+            .load_static_overrides_path(path)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        for winner in winners.iter().filter(|winner| winner.confidence >= 0.95) {
+            overrides.insert(winner.parameter.clone(), winner.winning_value.clone());
+        }
+
+        write_static_overrides(path, &overrides)
+    }
+
+    fn load_static_overrides_path(&self, path: &Path) -> io::Result<HashMap<String, String>> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            Err(err) => return Err(err),
+        };
+        let map = serde_json::from_str::<HashMap<String, String>>(&contents)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(map)
+    }
+
     /// Record an outcome by `variant_id` (searches all experiments).
     pub fn record_outcome(&mut self, variant_id: &str, success: bool) {
         for experiment in self.experiments.values_mut() {
@@ -375,6 +517,18 @@ impl Default for ExperimentStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn write_static_overrides(path: &Path, overrides: &BTreeMap<String, String>) -> io::Result<()> {
+    let json = serde_json::to_string_pretty(overrides)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -439,6 +593,55 @@ mod tests {
         let loaded = ExperimentStore::load_or_new(&path);
         assert_eq!(loaded.experiments().len(), 1);
         assert!(loaded.get("exp-1").is_some());
+    }
+
+    #[test]
+    fn concluded_winners_only_return_high_confidence_results() {
+        let mut store = ExperimentStore::new();
+        let mut exp = PromptExperiment::new(
+            "exp-role",
+            "model-routing",
+            vec![PromptVariant {
+                id: "winner".into(),
+                name: "Winner".into(),
+                section_name: "model-routing".into(),
+                content: "claude-sonnet-4-6".into(),
+                slug: Some("claude-sonnet-4-6".into()),
+                active: true,
+            }],
+        );
+        exp.role = Some("implementer".into());
+        exp.status = ExperimentStatus::Concluded;
+        exp.winner_id = Some("winner".into());
+        store.register(exp);
+
+        let winners = store.concluded_winners();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(winners[0].parameter, "implementer");
+        assert_eq!(winners[0].winning_value, "claude-sonnet-4-6");
+        assert!(winners[0].confidence >= 0.95);
+    }
+
+    #[test]
+    fn apply_winners_writes_static_overrides() {
+        let store = ExperimentStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("static-overrides.json");
+        let winners = vec![ExperimentWinner {
+            experiment_id: "exp-role".into(),
+            parameter: "implementer".into(),
+            winning_value: "claude-sonnet-4-6".into(),
+            confidence: 0.99,
+        }];
+
+        store.apply_winners_to(&winners, &path).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let overrides: HashMap<String, String> = serde_json::from_str(&contents).unwrap();
+        assert_eq!(
+            overrides.get("implementer"),
+            Some(&"claude-sonnet-4-6".to_string())
+        );
     }
 
     #[test]

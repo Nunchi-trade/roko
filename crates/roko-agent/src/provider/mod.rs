@@ -105,6 +105,7 @@ pub fn create_agent_for_model(
     options: AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
     let mut options = options;
+    let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
     let resolved = resolve_model(config, model_key);
     let profile = resolved
         .profile
@@ -163,6 +164,7 @@ pub fn create_agent_for_model(
 
             let mut agent =
                 ExecAgent::new(legacy_command.unwrap_or("cat"), options.extra_args.clone())
+                    .with_safety_layer(safety_layer)
                     .with_timeout_ms(options.timeout_ms.unwrap_or(120_000));
             if !options.name.is_empty() {
                 agent = agent.with_name(options.name.clone());
@@ -170,7 +172,7 @@ pub fn create_agent_for_model(
             if !options.env.is_empty() {
                 agent = agent.with_env(options.env.clone());
             }
-            return Ok(Box::new(agent));
+            return Ok(Box::new(agent) as Box<dyn Agent>);
         }
     };
 
@@ -188,7 +190,9 @@ pub fn create_agent_for_model(
     }
 
     let adapter = adapter_for_kind(provider_config.kind);
-    adapter.create_agent(&provider_config, &profile, &options)
+    with_safety_layer(safety_layer, || {
+        adapter.create_agent(&provider_config, &profile, &options)
+    })
 }
 
 /// Run `f` with an optional safety layer attached to provider-backed agent construction.
@@ -201,6 +205,16 @@ pub fn with_safety_layer<R>(layer: Option<SafetyLayer>, f: impl FnOnce() -> R) -
     let result = f();
     drop(scope);
     result
+}
+
+/// Run `f` with the current safety layer, or default to [`SafetyLayer::with_defaults()`].
+///
+/// This is the common case for direct agent construction paths that want the same
+/// safety scope behavior as orchestrated runs without having to duplicate the fallback.
+#[must_use]
+pub fn with_scoped_safety_layer<R>(f: impl FnOnce() -> R) -> R {
+    let layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
+    with_safety_layer(layer, f)
 }
 
 /// Build a `ToolDispatcher` and attach the active safety layer if one is present.
@@ -680,6 +694,20 @@ mod tests {
         assert!(dispatcher.safety().is_some());
     }
 
+    #[test]
+    fn with_scoped_safety_layer_defaults_when_unscoped() {
+        let layer = with_scoped_safety_layer(current_safety_layer);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn with_scoped_safety_layer_preserves_existing_scope() {
+        let observed = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+            with_scoped_safety_layer(current_safety_layer)
+        });
+        assert!(observed.is_some());
+    }
+
     #[tokio::test]
     async fn create_agent_for_model_returns_configured_agent() {
         let response = serde_json::json!({
@@ -868,6 +896,70 @@ mod tests {
     }
 
     #[test]
+    fn exec_agent_fallback_defaults_safety_layer_when_unscoped() {
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("sh".to_string());
+
+        let agent = create_agent_for_model(
+            &config,
+            "unknown-model",
+            AgentOptions {
+                timeout_ms: Some(250),
+                name: "fallback-agent".to_string(),
+                extra_args: vec!["-c".to_string(), "rm -rf /".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("fallback exec agent");
+        assert_eq!(agent.name(), "fallback-agent");
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(async { agent.run(&prompt(""), &Context::now()).await });
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("blocked by safety layer")
+        );
+    }
+
+    #[test]
+    fn exec_agent_fallback_uses_scoped_safety_layer_when_active() {
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("sh".to_string());
+
+        let agent = with_safety_layer(Some(SafetyLayer::with_defaults()), || {
+            create_agent_for_model(
+                &config,
+                "unknown-model",
+                AgentOptions {
+                    timeout_ms: Some(250),
+                    name: "fallback-agent".to_string(),
+                    extra_args: vec!["-c".to_string(), "rm -rf /".to_string()],
+                    ..Default::default()
+                },
+            )
+        })
+        .expect("fallback exec agent");
+        assert_eq!(agent.name(), "fallback-agent");
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(async { agent.run(&prompt(""), &Context::now()).await });
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap_or("")
+                .contains("blocked by safety layer")
+        );
+    }
+
+    #[test]
     fn known_protocol_command_detection_handles_paths() {
         assert!(is_known_protocol_command("claude"));
         assert!(is_known_protocol_command("/tmp/cursor-agent"));
@@ -894,7 +986,7 @@ mod tests {
             "claude",
             AgentOptions {
                 command: Some(script.display().to_string()),
-                timeout_ms: Some(1_500),
+                timeout_ms: Some(5_000),
                 name: "factory-claude".to_string(),
                 ..Default::default()
             },

@@ -19,10 +19,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::ContextChunk;
 use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
-use roko_core::OperatingFrequency;
+use roko_core::{Body, Engram, Kind, OperatingFrequency};
 pub use roko_neuro::{ContextSource, ReadFileSpec, TaskInput, VerifySpec};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -449,6 +450,8 @@ pub struct ContextProvider {
     brief_generator: TaskBriefGenerator,
     /// Rolling averages of context reference rates, loaded from `.roko/learn/`.
     context_average_tracker: ContextAverageTracker,
+    /// Recent pheromone signals available for enrichment.
+    pheromone_signals: Vec<Engram>,
 }
 
 impl ContextProvider {
@@ -469,6 +472,7 @@ impl ContextProvider {
             symbol_resolver,
             brief_generator,
             context_average_tracker,
+            pheromone_signals: Vec::new(),
         }
     }
 
@@ -476,6 +480,13 @@ impl ContextProvider {
     #[must_use]
     pub const fn with_budgets(mut self, budgets: ContextBudgets) -> Self {
         self.budgets = budgets;
+        self
+    }
+
+    /// Attach a snapshot of recent pheromone signals to enrich future context.
+    #[must_use]
+    pub fn with_pheromone_signals(mut self, pheromone_signals: Vec<Engram>) -> Self {
+        self.pheromone_signals = pheromone_signals;
         self
     }
 
@@ -753,6 +764,29 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
     }
 }
 
+/// Convert a snapshot of pheromone engrams into context chunks.
+///
+/// The `scope` filter accepts an exact plan/scope identifier or `all`.
+/// Signals without explicit scope metadata are treated as globally visible.
+#[must_use]
+pub fn pheromone_context(field: &[Engram], scope: &str) -> Vec<ContextChunk> {
+    let requested_scope = scope.to_ascii_lowercase();
+    let mut chunks = field
+        .iter()
+        .filter(|signal| signal.kind == Kind::Pheromone)
+        .filter(|signal| pheromone_matches_scope(signal, &requested_scope))
+        .map(|signal| pheromone_chunk(signal, &requested_scope))
+        .collect::<Vec<_>>();
+    chunks.sort_by(|left, right| {
+        right
+            .relevance
+            .partial_cmp(&left.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.content.cmp(&right.content))
+    });
+    chunks
+}
+
 impl ContextProvider {
     // ── Tier 2: Focused context ────────────────────────────────────────
 
@@ -765,7 +799,10 @@ impl ContextProvider {
         prior_outputs: &[PriorTaskOutput],
         _budget: usize,
     ) {
-        // 1. Task-scoped brief (What/Why/How)
+        // 1. Active pheromone field summary.
+        self.add_pheromone_context(sections, &plan_artifacts.plan_id);
+
+        // 2. Task-scoped brief (What/Why/How)
         let plan_doc = plan_artifacts.plan_doc();
         let brief = self
             .brief_generator
@@ -781,7 +818,7 @@ impl ContextProvider {
             });
         }
 
-        // 2. Sibling tasks (just IDs + titles for orientation)
+        // 3. Sibling tasks (just IDs + titles for orientation)
         if !siblings.is_empty() {
             let content = siblings
                 .iter()
@@ -814,7 +851,7 @@ impl ContextProvider {
             });
         }
 
-        // 3. Prior task outputs (from completed dependencies)
+        // 4. Prior task outputs (from completed dependencies)
         let relevant_outputs: Vec<_> = prior_outputs
             .iter()
             .filter(|o| task.depends_on.contains(&o.task_id))
@@ -843,7 +880,7 @@ impl ContextProvider {
             });
         }
 
-        // 4. PRD extract (scoped: only paragraphs mentioning this task's files)
+        // 5. PRD extract (scoped: only paragraphs mentioning this task's files)
         if let Some(prd) = plan_artifacts.prd_extract() {
             let scoped = scope_text_to_files(&prd, &task.files);
             if !scoped.is_empty() {
@@ -856,6 +893,29 @@ impl ContextProvider {
                     source: ContextSource::PrdExtract,
                 });
             }
+        }
+    }
+
+    fn add_pheromone_context(&self, sections: &mut Vec<ContextSection>, scope: &str) {
+        let pheromones = pheromone_context(&self.pheromone_signals, scope);
+        if pheromones.is_empty() {
+            return;
+        }
+
+        for (index, chunk) in pheromones.into_iter().enumerate() {
+            let priority = pheromone_priority(&chunk);
+            sections.push(ContextSection {
+                section: PromptSection::new(format!("pheromone_signal_{index}"), chunk.content)
+                    .with_priority(priority)
+                    .with_cache_layer(CacheLayer::Workspace)
+                    .with_placement(Placement::Middle)
+                    .with_hard_cap(800),
+                source: ContextSource::RecentSignal {
+                    signal_id: format!("pheromone-{scope}-{index}"),
+                    plan_id: scope.to_string(),
+                    kind: "pheromone".to_string(),
+                },
+            });
         }
     }
 
@@ -1009,6 +1069,96 @@ const fn context_source_type(source: &ContextSource) -> &'static str {
 /// The orchestrator could populate this if needed.
 const fn sibling_depends_on_me(_sibling: &SiblingTask, _task: &TaskInput) -> bool {
     false
+}
+
+fn pheromone_chunk(signal: &Engram, scope: &str) -> ContextChunk {
+    let kind = pheromone_kind(signal);
+    let intensity = signal
+        .tag("pheromone_intensity")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let confidence = signal
+        .tag("pheromone_confidence")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let decay_rate = signal
+        .tag("pheromone_decay_rate")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        .max(0.0);
+    let deposited_by = signal
+        .tag("pheromone_deposited_by")
+        .or_else(|| signal.tag("author"))
+        .unwrap_or(signal.provenance.author.as_str());
+    let body = render_signal_body(signal);
+    let content = format!(
+        "- [{kind}] scope={scope} intensity={intensity:.2} confidence={confidence:.2} decay={decay_rate:.2} by {deposited_by}\n  {body}"
+    );
+
+    ContextChunk {
+        content,
+        source: ContextSource::RecentSignal {
+            signal_id: signal.id.to_string(),
+            plan_id: scope.to_string(),
+            kind: "pheromone".to_string(),
+        },
+        relevance: intensity.max(confidence),
+        track_record: Some(intensity),
+        confidence: Some(confidence),
+        recency: Some(signal.created_at_ms.max(0) as f64),
+        emotional_tag: None,
+    }
+}
+
+fn pheromone_priority(chunk: &ContextChunk) -> SectionPriority {
+    let lower = chunk.content.to_ascii_lowercase();
+    if lower.contains("[threat]") || lower.contains("[warning]") || lower.contains("failure") {
+        SectionPriority::High
+    } else if lower.contains("[opportunity]") || lower.contains("success") {
+        SectionPriority::Normal
+    } else {
+        SectionPriority::Low
+    }
+}
+
+fn pheromone_kind(signal: &Engram) -> &'static str {
+    let from_tag = signal
+        .tag("pheromone_kind")
+        .or_else(|| signal.tag("kind"))
+        .unwrap_or(signal.kind.as_str());
+    let lower = from_tag.to_ascii_lowercase();
+    if lower.contains("threat") || lower.contains("warning") || lower.contains("failure") {
+        "Threat"
+    } else if lower.contains("opportunity") || lower.contains("success") {
+        "Opportunity"
+    } else if lower.contains("resource") {
+        "Resource"
+    } else {
+        "Signal"
+    }
+}
+
+fn pheromone_matches_scope(signal: &Engram, requested_scope: &str) -> bool {
+    let scope = signal
+        .tag("pheromone_scope")
+        .or_else(|| signal.tag("scope"))
+        .or_else(|| signal.tag("plan_id"))
+        .unwrap_or("global")
+        .to_ascii_lowercase();
+    requested_scope == "all" || scope == "global" || scope == requested_scope
+}
+
+fn render_signal_body(signal: &Engram) -> String {
+    match &signal.body {
+        Body::Text(text) => text.trim().to_string(),
+        Body::Json(value) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        Body::Bytes(bytes) => format!("<{} bytes>", bytes.len()),
+        Body::Empty => String::from("<empty>"),
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -1214,6 +1364,85 @@ mod tests {
 
         assert_eq!(sections[0].section.priority, SectionPriority::Low);
         assert_eq!(sections[1].section.priority, SectionPriority::High);
+    }
+
+    #[test]
+    fn pheromone_context_filters_by_scope_and_kind() {
+        let signals = vec![
+            Engram::builder(Kind::Pheromone)
+                .body(Body::text("Reduce routing latency"))
+                .tag("pheromone_kind", "threat")
+                .tag("pheromone_scope", "plan-alpha")
+                .tag("pheromone_intensity", "0.92")
+                .tag("pheromone_confidence", "0.81")
+                .build(),
+            Engram::builder(Kind::Pheromone)
+                .body(Body::text("Reuse known-good prompt paths"))
+                .tag("pheromone_kind", "opportunity")
+                .tag("pheromone_scope", "global")
+                .tag("pheromone_intensity", "0.72")
+                .tag("pheromone_confidence", "0.88")
+                .build(),
+            Engram::builder(Kind::Task)
+                .body(Body::text("Not a pheromone"))
+                .build(),
+        ];
+
+        let chunks = pheromone_context(&signals, "plan-alpha");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].content.contains("[Threat]"));
+        assert!(chunks[1].content.contains("[Opportunity]"));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| matches!(chunk.source, ContextSource::RecentSignal { .. }))
+        );
+    }
+
+    #[test]
+    fn resolve_includes_pheromone_sections_when_signals_are_present() {
+        let workdir = PathBuf::from("/tmp/test");
+        let provider = ContextProvider::new(workdir).with_pheromone_signals(vec![
+            Engram::builder(Kind::Pheromone)
+                .body(Body::text("Context assembly is too slow"))
+                .tag("pheromone_kind", "warning")
+                .tag("pheromone_scope", "plan-42")
+                .tag("pheromone_intensity", "0.9")
+                .build(),
+        ]);
+        let task = TaskInput {
+            id: "T1".to_string(),
+            title: "Make prompt assembly faster".to_string(),
+            description: None,
+            tier: "focused".to_string(),
+            files: vec![],
+            read_files: vec![],
+            symbols: vec![],
+            anti_patterns: vec![],
+            prior_failures: vec![],
+            verify_commands: vec![],
+            acceptance: vec![],
+            depends_on: vec![],
+            max_loc: None,
+        };
+        let plan_artifacts = PlanArtifacts::new(PathBuf::from("/tmp/plan"), "plan-42".to_string());
+
+        let resolved = provider.resolve(
+            OperatingFrequency::Theta,
+            &task,
+            "claude-sonnet-4-6",
+            &plan_artifacts,
+            &[],
+            &[],
+        );
+
+        assert!(
+            resolved
+                .sections
+                .iter()
+                .any(|section| section.section.name.starts_with("pheromone_signal"))
+        );
     }
 
     #[test]

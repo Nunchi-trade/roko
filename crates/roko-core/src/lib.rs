@@ -42,9 +42,9 @@ pub mod attestation;
 pub mod body;
 pub mod build;
 pub mod catalyst;
+pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;
-pub mod cfactor;
 pub mod conductor;
 pub mod config;
 pub mod context;
@@ -61,9 +61,9 @@ pub mod obs;
 pub mod operating_frequency;
 pub mod phase;
 pub mod polyglot;
+pub mod prediction;
 pub mod project;
 pub mod provenance;
-pub mod prediction;
 pub mod query;
 pub mod score;
 pub mod secrets;
@@ -85,10 +85,10 @@ pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
+pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
     ChatMessage, ContentBlock, ImageUrl, MessageContent, ToolCallFunction, ToolCallMessage,
 };
-pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
@@ -105,14 +105,14 @@ pub use operating_frequency::{
 };
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
 pub use polyglot::{PolyglotProject, detect_polyglot};
+pub use prediction::{
+    PredictionCalibrationSource, PredictionCalibrationSummary, PredictionPolicy, PredictiveScorer,
+};
 pub use project::{
     DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
     detect_from_files_with_cargo_toml,
 };
 pub use provenance::Provenance;
-pub use prediction::{
-    PredictiveScorer, PredictionCalibrationSource, PredictionCalibrationSummary, PredictionPolicy,
-};
 pub use query::{Budget, Query};
 pub use score::Score;
 pub use signal_kinds::*;

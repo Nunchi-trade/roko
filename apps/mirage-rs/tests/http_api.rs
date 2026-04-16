@@ -118,6 +118,7 @@ fn router_with_agents(n: usize) -> axum::Router {
             format!("agent-{i}"),
             format!("pubkey-{i}").into_bytes(),
             "watcher".into(),
+            String::new(),
             now,
         );
     }

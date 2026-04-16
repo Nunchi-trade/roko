@@ -25,6 +25,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/research/analyze", post(analyze))
 }
 
+const VALID_INTENTS: &[&str] = &["position", "evaluate", "monitor", "explore", "audit"];
+
 /// `GET /api/research` — list research artifacts from `.roko/research/`.
 async fn list_research(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let dir = state.workdir.join(".roko").join("research");
@@ -59,6 +61,12 @@ async fn list_research(State(state): State<Arc<AppState>>) -> Result<Json<Value>
 #[derive(Deserialize)]
 struct TopicRequest {
     topic: String,
+    #[serde(default = "default_intent")]
+    intent: String,
+}
+
+fn default_intent() -> String {
+    "explore".to_string()
 }
 
 /// `POST /api/research/topic` — spawn background topic research.
@@ -70,9 +78,28 @@ async fn research_topic(
     if topic.is_empty() {
         return Err(ApiError::bad_request("topic must not be empty"));
     }
+    if !VALID_INTENTS.contains(&body.intent.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "invalid intent: '{}'. Must be one of: {:?}",
+            body.intent, VALID_INTENTS
+        )));
+    }
 
-    let prompt = build_topic_prompt(&state.workdir, topic);
-    spawn_research_op(&state, ResearchMode::Topic, slug(topic), prompt).await
+    let prompt = build_topic_prompt(&state.workdir, topic, &body.intent);
+    let (status, payload) = spawn_research_op(
+        &state,
+        ResearchMode::Topic,
+        format!("{}:{topic}", body.intent),
+        prompt,
+    )
+    .await?;
+    Ok((
+        status,
+        Json(json!({
+            "id": payload.0["id"].clone(),
+            "intent": body.intent,
+        })),
+    ))
 }
 
 /// `POST /api/research/enhance-prd/:slug` — enhance a PRD with research.
@@ -222,7 +249,7 @@ async fn spawn_research_op(
     ))
 }
 
-fn build_topic_prompt(workdir: &FsPath, topic: &str) -> String {
+fn build_topic_prompt(workdir: &FsPath, topic: &str, intent: &str) -> String {
     let research_path = research_artifact_path(workdir, topic);
     let mut prompt = String::new();
     let _ = writeln!(
@@ -231,6 +258,7 @@ fn build_topic_prompt(workdir: &FsPath, topic: &str) -> String {
     );
     let _ = writeln!(prompt, "Workspace: {}", workdir.display());
     let _ = writeln!(prompt, "Research topic: {topic}\n");
+    let _ = writeln!(prompt, "Research intent: {intent}\n");
     let _ = writeln!(
         prompt,
         "Find real sources, synthesize them into actionable guidance, and write the report to {}.",
@@ -240,7 +268,19 @@ fn build_topic_prompt(workdir: &FsPath, topic: &str) -> String {
         prompt,
         "Use a findings / relevance / recommendation structure and keep the result specific to the workspace."
     );
+    let _ = writeln!(prompt, "Finish with this intent-specific ending:");
+    let _ = writeln!(prompt, "{}", intent_instructions(intent));
     prompt
+}
+
+fn intent_instructions(intent: &str) -> &'static str {
+    match intent {
+        "position" => "Directional recommendation, confidence level, and the single biggest risk.",
+        "evaluate" => "Risk scores, red flags, and comparison to the most relevant alternatives.",
+        "monitor" => "Timeline of changes, impact assessment, and concrete alerts to set.",
+        "audit" => "Checklist of verified claims, unverified gaps, and severity for each gap.",
+        _ => "Landscape map, key players, and the most important knowledge gaps.",
+    }
 }
 
 fn build_enhance_prd_prompt(
@@ -611,6 +651,7 @@ mod tests {
             State(Arc::clone(&state)),
             Json(TopicRequest {
                 topic: "Model Routing".into(),
+                intent: "position".into(),
             }),
         )
         .await
@@ -623,18 +664,40 @@ mod tests {
             .expect("read response body");
         let body: Value = serde_json::from_slice(&body).expect("parse json body");
         assert!(body["id"].is_string());
+        assert_eq!(body["intent"], "position");
 
         wait_for_runs(&runtime, 1).await;
         let runs = runtime.runs.lock().expect("lock runs");
         let (workdir, prompt) = &runs[0];
         assert_eq!(workdir, &state.workdir);
         assert!(prompt.contains("Research topic: Model Routing"));
+        assert!(prompt.contains("Research intent: position"));
         assert!(prompt.contains(".roko/research/model-routing.md"));
 
         let ops = state.operations.read().await;
         let op = ops.values().next().expect("operation stored");
         assert!(op.handle.is_finished());
-        assert_eq!(op.kind, "research_topic:model-routing");
+        assert_eq!(op.kind, "research_topic:position:Model Routing");
+    }
+
+    #[tokio::test]
+    async fn topic_research_rejects_invalid_intent() {
+        let (_dir, state, _runtime) = test_state_with_runtime();
+
+        let err = match research_topic(
+            State(Arc::clone(&state)),
+            Json(TopicRequest {
+                topic: "Model Routing".into(),
+                intent: "bogus".into(),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid intent should be rejected"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

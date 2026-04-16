@@ -1,21 +1,20 @@
-//! Token burn sparkline widget — multi-row braille sparklines showing
-//! cumulative and per-role token usage with rate suffix.
+//! Token burn sparkline widget.
 //!
-//! Ported from Mori's token_sparkline.rs.
+//! Shows an efficiency summary, a token-usage sparkline, and a compact model
+//! tier distribution using the live dashboard snapshot.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::super::state::TuiState;
 use super::braille;
-use super::rosedust::{MoriTheme, brighten};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+use super::rosedust::brighten;
+use crate::tui::Theme;
+use crate::tui::dashboard::DashboardData;
+use crate::tui::pages::efficiency::build_efficiency_snapshot;
+use crate::tui::state::TuiState;
 
 fn fmt_tokens(n: u64) -> String {
     if n == 0 {
@@ -31,153 +30,187 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-fn rate_color(rate: f64) -> ratatui::style::Color {
-    if rate > 100_000.0 {
-        MoriTheme::EMBER
-    } else if rate > 10_000.0 {
-        MoriTheme::WARNING
-    } else if rate > 0.5 {
-        MoriTheme::ROSE
+fn fmt_rate(rate: f64) -> String {
+    if rate <= 0.5 {
+        "idle".to_string()
+    } else if rate >= 1_000_000.0 {
+        format!("{:.1}M/min", rate / 1_000_000.0)
+    } else if rate >= 1_000.0 {
+        format!("{:.1}k/min", rate / 1_000.0)
     } else {
-        MoriTheme::TEXT_DIM
+        format!("{rate:.0}/min")
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public render
-// ---------------------------------------------------------------------------
+fn tier_color(tier: &str) -> Color {
+    match tier {
+        "T0" => Theme::SAGE,
+        "T1" => Theme::ROSE,
+        "T2" => Theme::WARNING,
+        _ => Theme::TEXT_DIM,
+    }
+}
+
+fn tier_label(tier: &str) -> &'static str {
+    match tier {
+        "T0" => "haiku",
+        "T1" => "sonnet",
+        "T2" => "opus",
+        _ => "other",
+    }
+}
+
+fn sparkline_window(width: usize, total_samples: usize) -> usize {
+    let preferred = if width >= 120 {
+        100
+    } else if width >= 80 {
+        50
+    } else {
+        10
+    };
+    preferred.min(total_samples.max(2))
+}
 
 /// Render the token burn sparkline widget.
-pub fn render_token_sparkline(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
+pub fn render_token_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    state: &TuiState,
+) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
     if inner_width < 10 || inner_height < 2 {
         return;
     }
 
-    // Aggregate cumulative tokens across all roles
-    let mut combined: Vec<u64> = Vec::new();
-    for history in state.token_history.values() {
-        if combined.is_empty() {
-            combined = history.iter().copied().collect();
-        } else {
-            for (i, &val) in history.iter().enumerate() {
-                if i < combined.len() {
-                    combined[i] = combined[i].saturating_add(val);
-                }
-            }
-        }
-    }
+    let snapshot = build_efficiency_snapshot(data);
+    let window = sparkline_window(inner_width, snapshot.token_series.len());
+    let display: Vec<u64> = snapshot
+        .token_series
+        .iter()
+        .rev()
+        .take(window)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
 
-    if combined.len() < 2 {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Token Burn")
-            .style(MoriTheme::block_style())
-            .border_style(Style::default().fg(MoriTheme::TEXT_GHOST))
-            .title_style(MoriTheme::title_style());
-        let p = Paragraph::new(Line::from(Span::styled(
-            format!(" {} waiting for data...", state.atmosphere.spinner()),
-            Style::default().fg(MoriTheme::TEXT_DIM),
-        )))
-        .block(block);
-        frame.render_widget(p, area);
+    let pulsed_color = brighten(Theme::ROSE, state.atmosphere.breathing_brightness());
+    let border_color = if snapshot.total_cost_usd > 0.0 {
+        Theme::ROSE_DIM
+    } else {
+        Theme::TEXT_GHOST
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Efficiency")
+        .style(Theme::block_style())
+        .border_style(Style::default().fg(border_color))
+        .title_style(Theme::title_style());
+    let inner = block.inner(area);
+
+    if inner.width < 8 || inner.height < 1 {
         return;
     }
 
-    let total_str = fmt_tokens(state.token_total);
-    let rate_str = if state.token_rate > 1_000_000.0 {
-        format!("{:.1}M/min", state.token_rate / 1_000_000.0)
-    } else if state.token_rate > 1_000.0 {
-        format!("{:.1}k/min", state.token_rate / 1_000.0)
-    } else if state.token_rate > 0.5 {
-        format!("{:.0}/min", state.token_rate)
-    } else {
-        "idle".to_string()
-    };
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let summary1 = Line::from(vec![
+        Span::styled(" tokens ", Style::default().fg(Theme::BONE_DIM)),
+        Span::styled(
+            fmt_tokens(snapshot.total_tokens),
+            Style::default().fg(Theme::BONE),
+        ),
+        Span::styled(" cost ", Style::default().fg(Theme::BONE_DIM)),
+        Span::styled(
+            format!("${:.2}", snapshot.total_cost_usd),
+            Style::default().fg(Theme::WARNING),
+        ),
+        Span::styled(" avg/task ", Style::default().fg(Theme::BONE_DIM)),
+        Span::styled(
+            fmt_tokens(snapshot.average_tokens_per_task.round() as u64),
+            Style::default().fg(Theme::FG),
+        ),
+    ]);
+    lines.push(summary1);
 
-    let rc = rate_color(state.token_rate);
-    let breathing_mod = state.atmosphere.breathing_brightness();
-    let pulsed_color = brighten(rc, breathing_mod);
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // -- Aggregate braille row --
-    let label_len = total_str.len() + 2;
-    let rate_len = rate_str.len() + 2;
-    let spark_w = inner_width.saturating_sub(label_len + rate_len);
-
-    let display: Vec<u64> = if combined.len() > spark_w * 2 {
-        combined[combined.len() - spark_w * 2..].to_vec()
-    } else {
-        combined.clone()
-    };
-
-    let mut spans: Vec<Span> = vec![Span::styled(
-        format!(" {} ", total_str),
-        Style::default().fg(MoriTheme::BONE_DIM),
-    )];
-    spans.extend(braille::braille_spans_u64(&display, spark_w, pulsed_color));
-    spans.push(Span::styled(
-        format!(" {} ", rate_str),
-        Style::default().fg(rc),
-    ));
-    lines.push(Line::from(spans));
-
-    // -- Per-role braille rows --
-    let mut roles: Vec<&String> = state.token_history.keys().collect();
-    roles.sort();
-    let remaining_rows = inner_height.saturating_sub(lines.len());
-
-    // Total from last sample for percentage calculation
-    let total_last: u64 = state
-        .token_history
-        .values()
-        .filter_map(|h| h.back().copied())
-        .sum();
-
-    for role in roles.into_iter().take(remaining_rows) {
-        if let Some(history) = state.token_history.get(role) {
-            if history.len() < 2 {
-                continue;
-            }
-            let accent = MoriTheme::role_accent(role);
-            let label = format!(" {:5} ", &role[..role.len().min(5)]);
-            let role_last = history.back().copied().unwrap_or(0);
-            let pct = if total_last > 0 {
-                (role_last as f64 / total_last as f64 * 100.0).round() as u64
-            } else {
-                0
-            };
-            let suffix = format!(" {} ({}%)", fmt_tokens(role_last), pct);
-            let agent_spark_w = inner_width
-                .saturating_sub(label.len())
-                .saturating_sub(suffix.len());
-
-            let values: Vec<u64> = history.iter().copied().collect();
-            let mut agent_spans = vec![Span::styled(label, Style::default().fg(accent))];
-            agent_spans.extend(braille::braille_spans_u64(&values, agent_spark_w, accent));
-            agent_spans.push(Span::styled(
-                suffix,
-                Style::default().fg(MoriTheme::BONE_DIM),
-            ));
-            lines.push(Line::from(agent_spans));
-        }
+    if inner.height > 3 {
+        let summary2 = Line::from(vec![
+            Span::styled(" succ ", Style::default().fg(Theme::BONE_DIM)),
+            Span::styled(
+                format!("{:.0}%", snapshot.success_rate * 100.0),
+                Style::default().fg(if snapshot.success_rate >= 0.9 {
+                    Theme::SAGE
+                } else if snapshot.success_rate >= 0.6 {
+                    Theme::WARNING
+                } else {
+                    Theme::EMBER
+                }),
+            ),
+            Span::styled(" events ", Style::default().fg(Theme::BONE_DIM)),
+            Span::styled(
+                format!("{}", snapshot.event_count),
+                Style::default().fg(Theme::TEXT),
+            ),
+            Span::styled(" window ", Style::default().fg(Theme::BONE_DIM)),
+            Span::styled(format!("{window}"), Style::default().fg(Theme::TEXT_DIM)),
+        ]);
+        lines.push(summary2);
     }
 
-    let border_color = if state.token_rate > 0.5 {
-        MoriTheme::ROSE_DIM
+    if display.len() >= 2 {
+        let rate = if snapshot.total_tokens > 0 {
+            display.iter().copied().sum::<u64>() as f64 / display.len() as f64
+        } else {
+            0.0
+        };
+        let spark_w = inner_width
+            .saturating_sub(fmt_tokens(snapshot.total_tokens).len() + fmt_rate(rate).len() + 4)
+            .max(8);
+        let mut spans = vec![Span::styled(
+            format!(" {} ", fmt_tokens(snapshot.total_tokens)),
+            Style::default().fg(Theme::BONE_DIM),
+        )];
+        spans.extend(braille::braille_spans_u64(&display, spark_w, pulsed_color));
+        spans.push(Span::styled(
+            format!(" {} ", fmt_rate(rate)),
+            Style::default().fg(Theme::ROSE),
+        ));
+        lines.push(Line::from(spans));
     } else {
-        MoriTheme::TEXT_GHOST
-    };
+        lines.push(Line::from(Span::styled(
+            format!(" {} waiting for data...", state.atmosphere.spinner()),
+            Style::default().fg(Theme::TEXT_DIM),
+        )));
+    }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Token Burn")
-        .style(MoriTheme::block_style())
-        .border_style(Style::default().fg(border_color))
-        .title_style(MoriTheme::title_style());
+    let remaining_rows = inner_height.saturating_sub(lines.len());
+    let event_count = snapshot.event_count.max(1) as f64;
+    for tier in ["T0", "T1", "T2"].into_iter().take(remaining_rows) {
+        let count = snapshot.tier_counts.get(tier).copied().unwrap_or_default();
+        let pct = count as f64 / event_count;
+        let label = format!(" {:>2} {:<6} ", tier, tier_label(tier));
+        let suffix = format!(" {} ({:.0}%)", count, pct * 100.0);
+        let bar_w = inner_width
+            .saturating_sub(label.len() + suffix.len())
+            .max(6);
+        let filled = (pct.clamp(0.0, 1.0) * bar_w as f64).round() as usize;
+        let empty = bar_w.saturating_sub(filled);
+        lines.push(Line::from(vec![
+            Span::styled(label, Style::default().fg(tier_color(tier))),
+            Span::styled(
+                "\u{2588}".repeat(filled.min(bar_w)),
+                Style::default().fg(tier_color(tier)),
+            ),
+            Span::styled(
+                "\u{2500}".repeat(empty),
+                Style::default().fg(Theme::TEXT_PHANTOM),
+            ),
+            Span::styled(suffix, Style::default().fg(Theme::BONE_DIM)),
+        ]));
+    }
 
-    let p = Paragraph::new(lines).block(block);
-    frame.render_widget(p, area);
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }

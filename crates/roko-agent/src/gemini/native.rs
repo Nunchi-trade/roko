@@ -3,10 +3,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::agent::derived_output;
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::AgentOptions;
+use crate::provider::current_safety_layer;
+use crate::safety::SafetyLayer;
 use crate::translate::{ChatResponse, FinishReason, ResponseMetadata, normalize_finish_reason};
 use crate::usage::Usage;
 use crate::{Agent, AgentResult};
@@ -27,6 +30,66 @@ use super::wire::{
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+pub(crate) fn system_instruction_from_segments(segments: Vec<String>) -> Option<Content> {
+    let segments: Vec<String> = segments
+        .into_iter()
+        .map(|segment| segment.trim().to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    (!segments.is_empty()).then(|| Content {
+        role: "system".to_string(),
+        parts: vec![Part::Text {
+            text: segments.join("\n\n"),
+        }],
+    })
+}
+
+pub(crate) fn build_generation_config(
+    model: &ModelProfile,
+    thinking_level: Option<&str>,
+) -> Option<GenerationConfig> {
+    let thinking_config = thinking_level
+        .map(str::trim)
+        .filter(|level| !level.is_empty())
+        .map(|thinking_level| ThinkingConfig {
+            thinking_level: thinking_level.to_string(),
+        });
+
+    if model.max_output.is_none() && thinking_config.is_none() {
+        return None;
+    }
+
+    Some(GenerationConfig {
+        temperature: None,
+        top_p: None,
+        max_output_tokens: model.max_output.and_then(|value| u32::try_from(value).ok()),
+        stop_sequences: None,
+        response_mime_type: None,
+        response_schema: None,
+        thinking_config,
+    })
+}
+
+pub(crate) fn build_generate_content_request(
+    contents: Vec<Content>,
+    system_instruction: Option<Content>,
+    tools: Option<Vec<GeminiTool>>,
+    generation_config: Option<GenerationConfig>,
+    safety_settings: Option<Vec<SafetySettingRequest>>,
+    cached_content: Option<String>,
+) -> GenerateContentRequest {
+    GenerateContentRequest {
+        contents,
+        system_instruction,
+        tools,
+        tool_config: None,
+        generation_config,
+        safety_settings,
+        cached_content,
+    }
+}
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +114,7 @@ pub struct GeminiNativeAgent {
     enable_grounding: bool,
     enable_code_execution: bool,
     safety_settings: Vec<SafetySettingRequest>,
+    safety: Option<SafetyLayer>,
     system_prompt: Option<String>,
     timeout_ms: u64,
     name: String,
@@ -83,12 +147,19 @@ impl GeminiNativeAgent {
             enable_grounding: model.supports_grounding,
             enable_code_execution: model.supports_code_execution,
             safety_settings: Vec::new(),
+            safety: current_safety_layer(),
             system_prompt: options.system_prompt.clone(),
             timeout_ms: options.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
             name,
             model,
             poster: Arc::new(ReqwestPoster::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_safety_layer(mut self, safety: Option<SafetyLayer>) -> Self {
+        self.safety = safety;
+        self
     }
 
     #[cfg(test)]
@@ -100,8 +171,7 @@ impl GeminiNativeAgent {
 
     fn failure(&self, input: &Engram, reason: String, started: &Instant) -> AgentResult {
         let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let output = input
-            .derive(Kind::AgentOutput, Body::text(reason))
+        let output = derived_output(input, Kind::AgentOutput, Body::text(reason))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("failed", "true")
@@ -118,16 +188,14 @@ impl GeminiNativeAgent {
         let tools = self.translate_tools(tools);
         let generation_config = self.generation_config();
 
-        GenerateContentRequest {
+        build_generate_content_request(
             contents,
             system_instruction,
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_config: None,
+            (!tools.is_empty()).then_some(tools),
             generation_config,
-            safety_settings: (!self.safety_settings.is_empty())
-                .then_some(self.safety_settings.clone()),
-            cached_content: self.cached_content.clone(),
-        }
+            (!self.safety_settings.is_empty()).then_some(self.safety_settings.clone()),
+            self.cached_content.clone(),
+        )
     }
 
     fn system_instruction(&self, messages: &[ChatMessage]) -> Option<Content> {
@@ -151,12 +219,7 @@ impl GeminiNativeAgent {
             }
         }
 
-        (!segments.is_empty()).then(|| Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text {
-                text: segments.join("\n\n"),
-            }],
-        })
+        system_instruction_from_segments(segments)
     }
 
     fn translate_messages(&self, messages: &[ChatMessage]) -> Vec<Content> {
@@ -223,31 +286,7 @@ impl GeminiNativeAgent {
     }
 
     fn generation_config(&self) -> Option<GenerationConfig> {
-        let thinking_config = self
-            .thinking_level
-            .as_deref()
-            .map(str::trim)
-            .filter(|level| !level.is_empty())
-            .map(|thinking_level| ThinkingConfig {
-                thinking_level: thinking_level.to_string(),
-            });
-
-        if self.model.max_output.is_none() && thinking_config.is_none() {
-            return None;
-        }
-
-        Some(GenerationConfig {
-            temperature: None,
-            top_p: None,
-            max_output_tokens: self
-                .model
-                .max_output
-                .and_then(|value| u32::try_from(value).ok()),
-            stop_sequences: None,
-            response_mime_type: None,
-            response_schema: None,
-            thinking_config,
-        })
+        build_generation_config(&self.model, self.thinking_level.as_deref())
     }
 
     fn parse_response(&self, response: &GenerateContentResponse) -> Result<ChatResponse, String> {
@@ -384,8 +423,12 @@ impl Agent for GeminiNativeAgent {
         let mut usage = parsed.usage;
         usage.wall_ms = wall_ms;
 
-        let mut builder = input
-            .derive(Kind::AgentOutput, Body::text(&parsed.content))
+        let content = self
+            .safety
+            .as_ref()
+            .map(|safety| safety.scrub_text(&parsed.content))
+            .unwrap_or_else(|| parsed.content.clone());
+        let mut builder = derived_output(input, Kind::AgentOutput, Body::text(content))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("model", &self.model.slug);
@@ -792,5 +835,49 @@ mod tests {
                 .iter()
                 .any(|tool| tool.get("code_execution").is_some())
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_native_agent_preserves_lineage_and_scrubs_output_when_safety_is_attached() {
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let poster = Arc::new(MockPoster::ok(
+            Arc::clone(&captured),
+            json!({
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "text": "PASSWORD=hunter2" }]
+                        },
+                        "finishReason": "STOP"
+                    }
+                ]
+            }),
+        ));
+        let ancestor = Engram::builder(Kind::Prompt)
+            .body(Body::text("ancestor"))
+            .build();
+        let input = Engram::builder(Kind::Prompt)
+            .body(Body::text("show the secret"))
+            .lineage([ancestor.id])
+            .build();
+
+        let agent = GeminiNativeAgent::new(
+            "test-key".to_string(),
+            "https://generativelanguage.googleapis.com".to_string(),
+            base_model(),
+            &AgentOptions::default(),
+        )
+        .with_safety_layer(Some(SafetyLayer::with_defaults()))
+        .with_http_poster(poster);
+
+        let result = agent.run(&input, &Context::now()).await;
+
+        assert!(result.success);
+        assert_eq!(
+            result.output.body.as_text().expect("output text"),
+            "PASSWORD=[REDACTED]"
+        );
+        assert_eq!(result.output.lineage, vec![ancestor.id, input.id]);
     }
 }

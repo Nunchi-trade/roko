@@ -109,6 +109,9 @@ pub async fn start_rpc_server(
         chain_subs: None,
     })
     .map_err(|error| MirageError::Unsupported(error.to_string()))?;
+    tracing::info!(
+        "dashboard-compatible REST surface disabled in pure EVM mode; use roko-serve /api for dashboard traffic"
+    );
     finish_start_rpc_server(address, module, local_state, None).await
 }
 
@@ -136,7 +139,11 @@ pub async fn start_rpc_server_with_chain(
             _ => None,
         }
     };
+    #[cfg(feature = "legacy-api")]
     let api_router = {
+        tracing::info!(
+            "legacy mirage /api surface enabled for migration compatibility; prefer roko-serve /api for dashboard traffic"
+        );
         let block_state = Arc::clone(&local_state);
         let api_state = crate::http_api::ApiState {
             chain: chain.clone(),
@@ -147,6 +154,13 @@ pub async fn start_rpc_server_with_chain(
             subs: chain_subs.clone(),
         };
         Some(crate::http_api::build_router(api_state))
+    };
+    #[cfg(not(feature = "legacy-api"))]
+    let api_router = {
+        tracing::info!(
+            "legacy mirage /api surface disabled; use roko-serve /api aggregator for dashboard-compatible routes"
+        );
+        None
     };
     let module = build_rpc_module(ServerContext {
         state: Arc::clone(&local_state),

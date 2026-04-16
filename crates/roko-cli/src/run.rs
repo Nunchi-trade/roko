@@ -2,22 +2,24 @@
 //!
 //! This is the body of `roko run <prompt>`. It reads [`Config`], opens a
 //! [`FileSubstrate`] under `.roko/`, seeds prompt sections, composes them
-//! into a single Prompt signal, invokes the configured `ExecAgent`, runs
+//! into a single Prompt signal, invokes the configured agent backend, runs
 //! each configured gate on the working directory, and emits an Episode.
 
+use crate::agent_config::{
+    synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
+};
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
+use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
-use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
+use roko_agent::provider::is_known_protocol_command;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ExecAgent, OllamaLlmBackend};
-use roko_compose::{
-    Placement, PromptComposer, PromptSection, RoleSystemPromptSpec, SectionPriority, TaskContext,
-};
+use roko_agent::{AgentResult, OllamaLlmBackend};
+use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
-use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
@@ -61,7 +63,7 @@ impl RunReport {
 ///
 /// - Opens (or creates) `workdir/.roko/signals.jsonl`.
 /// - Seeds a role + task `PromptSection`, composes them under the config's budget.
-/// - Invokes the configured `ExecAgent`.
+/// - Invokes the configured agent backend.
 /// - Runs every gate in the config in declaration order; each gate sees the
 ///   same `GatePayload` pointing at `workdir`.
 /// - Records an Episode signal and persists everything.
@@ -119,9 +121,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         .await
         .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
-    // Run the agent.
-    // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
-    // internally; ExecAgent stays available for non-Claude backends.
+    // Run the configured agent path for this provider/backend mix.
     let (agent_result, external_actions) =
         dispatch_agent(workdir, config, &prompt, prompt_text, &ctx).await?;
 
@@ -223,16 +223,27 @@ fn build_system_prompt(role: &str, prompt_text: &str, tools_csv: &str) -> String
     let workspace = "Single-shot execution through `roko run`.";
     parse_agent_role(role).map_or_else(
         || {
-            let task_context = TaskContext::new(prompt_text)
-                .with_workspace(workspace)
-                .with_domain_notes(format!("User-configured role text: {role}"));
-            RoleSystemPromptSpec::new(AgentRole::Implementer, task_context, tools_csv)
-                .with_extra_conventions(format!("Treat the configured role hint literally: {role}"))
-                .build()
+            build_role_system_prompt(
+                AgentRole::Implementer,
+                TaskContext::new(prompt_text)
+                    .with_workspace(workspace)
+                    .with_domain_notes(format!("User-configured role text: {role}")),
+                tools_csv,
+                PromptBuildOptions {
+                    extra_conventions: Some(format!(
+                        "Treat the configured role hint literally: {role}"
+                    )),
+                    ..PromptBuildOptions::default()
+                },
+            )
         },
         |agent_role| {
-            let task_context = TaskContext::new(prompt_text).with_workspace(workspace);
-            RoleSystemPromptSpec::new(agent_role, task_context, tools_csv).build()
+            build_role_system_prompt(
+                agent_role,
+                TaskContext::new(prompt_text).with_workspace(workspace),
+                tools_csv,
+                PromptBuildOptions::default(),
+            )
         },
     )
 }
@@ -313,10 +324,10 @@ async fn dispatch_agent(
             .clone()
             .unwrap_or_else(|| routing_config.agent.default_model.clone());
         let resolved = resolve_model(&routing_config, &model);
-        let agent = create_agent_for_model(
+        let agent = spawn_agent_scoped(
             &routing_config,
-            &model,
-            AgentOptions {
+            SpawnAgentSpec {
+                model: model.clone(),
                 command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: Some(system_prompt),
@@ -324,7 +335,6 @@ async fn dispatch_agent(
                 tools: Some(tools_csv),
                 mcp_config: config.agent.mcp_config.clone(),
                 working_dir: Some(workdir.to_path_buf()),
-                provider_semaphores: None,
                 env: config.agent.env.clone(),
                 extra_args: config.agent.args.clone(),
                 effort: Some(config.agent.effort.clone()),
@@ -334,12 +344,11 @@ async fn dispatch_agent(
                 ),
                 name: format!("{}:{model}", resolved.provider_kind.label()),
             },
-        )
-        .with_context(|| format!("create agent for model {model}"))?;
+            format!("create agent for model {model}"),
+        )?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "claude" {
-        // ClaudeCliAgent owns `--append-system-prompt`, `--tools`, and `--settings`
-        // internally; ExecAgent stays available for non-Claude backends.
+        // Claude CLI keeps its own prompt/tool/settings wiring internally.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, &tools_csv);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
@@ -349,10 +358,7 @@ async fn dispatch_agent(
             .model
             .clone()
             .unwrap_or_else(|| "claude-opus-4-6".to_string());
-        let mut synthesized_config = RokoConfig::default();
-        synthesized_config.agent.command = Some(config.agent.command.clone());
-        synthesized_config.agent.default_model = model.clone();
-        synthesized_config.agent.default_backend = "claude".to_string();
+        let synthesized_config = synthesize_claude_cli_config(&config.agent.command, &model);
 
         let mut synthetic_extra_args = extra_args;
         if let Some(resume_session) = optional_resume {
@@ -364,10 +370,10 @@ async fn dispatch_agent(
             synthetic_extra_args.push(fallback_model.clone());
         }
 
-        let agent = create_agent_for_model(
+        let agent = spawn_agent_scoped(
             &synthesized_config,
-            &model,
-            AgentOptions {
+            SpawnAgentSpec {
+                model: model.clone(),
                 command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: Some(system_prompt),
@@ -375,7 +381,6 @@ async fn dispatch_agent(
                 tools: Some(tools_csv),
                 mcp_config: config.agent.mcp_config.clone(),
                 working_dir: Some(workdir.to_path_buf()),
-                provider_semaphores: None,
                 env: config.agent.env.clone(),
                 extra_args: synthetic_extra_args,
                 effort: Some(config.agent.effort.clone()),
@@ -385,31 +390,23 @@ async fn dispatch_agent(
                 ),
                 name: String::new(),
             },
-        )
-        .with_context(|| format!("create synthesized claude agent for model {model}"))?;
+            format!("create synthesized claude agent for model {model}"),
+        )?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     } else if config.agent.command == "ollama" {
         Ok(run_ollama_agentic_single(workdir, config, prompt_text).await)
     } else if is_known_protocol_command(&config.agent.command) {
-        let mut agent = ExecAgent::new(config.agent.command.clone(), config.agent.args.clone())
-            .with_timeout_ms(config.agent.timeout_ms);
-        for (key, value) in &config.agent.env {
-            agent = agent.with_env_var(key.clone(), value.clone());
-        }
-        Ok((agent.run(prompt, ctx).await, Vec::new()))
-    } else {
-        let mut fallback_config = RokoConfig::default();
-        fallback_config.agent.command = Some(config.agent.command.clone());
-
         let model = config
             .agent
             .model
             .clone()
             .unwrap_or_else(|| config.agent.command.clone());
-        let agent = create_agent_for_model(
+        let fallback_config = synthesize_known_protocol_config(&config.agent.command, &model);
+
+        let agent = spawn_agent_scoped(
             &fallback_config,
-            &model,
-            AgentOptions {
+            SpawnAgentSpec {
+                model: model.clone(),
                 command: Some(config.agent.command.clone()),
                 timeout_ms: Some(config.agent.timeout_ms),
                 system_prompt: None,
@@ -417,7 +414,6 @@ async fn dispatch_agent(
                 tools: None,
                 mcp_config: None,
                 working_dir: Some(workdir.to_path_buf()),
-                provider_semaphores: None,
                 env: config.agent.env.clone(),
                 extra_args: config.agent.args.clone(),
                 effort: Some(config.agent.effort.clone()),
@@ -425,8 +421,42 @@ async fn dispatch_agent(
                 dangerously_skip_permissions: false,
                 name: String::new(),
             },
-        )
-        .with_context(|| format!("create generic subprocess agent for {}", config.agent.command))?;
+            format!(
+                "create known-protocol subprocess agent for {}",
+                config.agent.command
+            ),
+        )?;
+        Ok((agent.run(prompt, ctx).await, Vec::new()))
+    } else {
+        let model = config
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| config.agent.command.clone());
+        let fallback_config = synthesize_subprocess_config(&config.agent.command);
+        let agent = spawn_agent_scoped(
+            &fallback_config,
+            SpawnAgentSpec {
+                model: model.clone(),
+                command: Some(config.agent.command.clone()),
+                timeout_ms: Some(config.agent.timeout_ms),
+                system_prompt: None,
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(workdir.to_path_buf()),
+                env: config.agent.env.clone(),
+                extra_args: config.agent.args.clone(),
+                effort: Some(config.agent.effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: false,
+                name: String::new(),
+            },
+            format!(
+                "create generic subprocess agent for {}",
+                config.agent.command
+            ),
+        )?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
     }
 }

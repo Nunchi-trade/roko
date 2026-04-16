@@ -13,223 +13,23 @@
 //!     └── <slug>.md
 //! ```
 
-use std::collections::HashMap;
+mod dry_run_fs;
+
 use std::fmt::Write as _;
-use std::hash::{Hash, Hasher};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agent_exec::{AgentExecOpts, run_agent};
+use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 use crate::task_parser::TasksFile;
+use crate::workspace_paths::{
+    drafts_dir, ideas_path, plans_dir as workspace_plans_dir, prd_dir, published_dir,
+};
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::MetricRegistry;
 use roko_core::{Body, Engram, Kind, Provenance, Substrate};
 use roko_fs::FileSubstrate;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-// ─── Directory layout ──────────────────────────────���───────────────
-
-fn prd_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("prd")
-}
-fn ideas_path(workdir: &Path) -> PathBuf {
-    prd_dir(workdir).join("ideas.md")
-}
-fn drafts_dir(workdir: &Path) -> PathBuf {
-    prd_dir(workdir).join("drafts")
-}
-fn published_dir(workdir: &Path) -> PathBuf {
-    prd_dir(workdir).join("published")
-}
-
-fn tasks_root(workdir: &Path) -> PathBuf {
-    workdir.join("plans")
-}
-
-fn collect_tasks_toml_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if !root.exists() {
-        return files;
-    }
-
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.file_name().is_some_and(|name| name == "tasks.toml") {
-                    files.push(path);
-                }
-            }
-        }
-    }
-
-    files.sort();
-    files
-}
-
-fn hash_content(content: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn snapshot_tasks_files(root: &Path) -> HashMap<PathBuf, u64> {
-    let mut snapshot = HashMap::new();
-    for path in collect_tasks_toml_files(root) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            snapshot.insert(path, hash_content(&content));
-        }
-    }
-    snapshot
-}
-
-fn warn_on_tasks_quality(path: &Path) {
-    let Ok(tasks_file) = TasksFile::parse(path) else {
-        return;
-    };
-    let warnings = tasks_file.quality_warnings();
-    if warnings.is_empty() {
-        return;
-    }
-
-    eprintln!("⚠️  Plan quality warnings for {}:", path.display());
-    for warning in warnings {
-        eprintln!("  - {warning}");
-    }
-}
-
-fn warn_on_new_or_updated_tasks(root: &Path, before: &HashMap<PathBuf, u64>) {
-    for path in changed_tasks_files(root, before) {
-        warn_on_tasks_quality(&path);
-    }
-}
-
-fn changed_tasks_files(root: &Path, before: &HashMap<PathBuf, u64>) -> Vec<PathBuf> {
-    let after = snapshot_tasks_files(root);
-    let mut paths: Vec<PathBuf> = after
-        .keys()
-        .filter(|path| after.get(*path) != before.get(*path))
-        .cloned()
-        .collect();
-    paths.sort();
-    paths
-}
-
-fn copy_workspace_for_dry_run(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
-    copy_workspace_dir(src, dst)
-}
-
-struct DryRunWorkspace {
-    path: PathBuf,
-}
-
-impl DryRunWorkspace {
-    fn new(src: &Path) -> Result<Self> {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("compute dry-run workspace timestamp")?
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "roko-prd-dry-run-{}-{}",
-            std::process::id(),
-            unique
-        ));
-        copy_workspace_for_dry_run(src, &path)?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for DryRunWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn copy_workspace_dir(src: &Path, dst: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
-        let entry = entry.with_context(|| format!("read {}", src.display()))?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if matches!(name.as_ref(), ".git" | "target") {
-            continue;
-        }
-
-        let dest = dst.join(name.as_ref());
-        let ty = entry
-            .file_type()
-            .with_context(|| format!("inspect {}", path.display()))?;
-        if ty.is_dir() {
-            std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
-            copy_workspace_dir(&path, &dest)?;
-        } else if ty.is_file() {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
-            std::fs::copy(&path, &dest)
-                .with_context(|| format!("copy {} -> {}", path.display(), dest.display()))?;
-        }
-    }
-    Ok(())
-}
-
-fn print_tasks_preview(path: &Path, tasks_file: &TasksFile) {
-    println!("📄 {}", path.display());
-    println!(
-        "  plan: {}  tasks: {}  status: {}  max_parallel: {}  estimated_minutes: {}",
-        tasks_file.meta.plan,
-        tasks_file.tasks.len(),
-        tasks_file.meta.status,
-        tasks_file.meta.max_parallel,
-        tasks_file.meta.estimated_total_minutes,
-    );
-    for task in &tasks_file.tasks {
-        let mut details = format!("  - {} [{}] {}", task.id, task.tier, task.title);
-        details.push_str(&format!(
-            " | files={} deps={} verify={}",
-            task.files.len(),
-            task.depends_on.len(),
-            task.verify.len()
-        ));
-        println!("{details}");
-    }
-}
-
-fn validate_and_print_preview(path: &Path) -> Result<()> {
-    let tasks_file = TasksFile::parse(path).with_context(|| format!("parse {}", path.display()))?;
-    let issues = tasks_file.validate();
-    if !issues.is_empty() {
-        eprintln!("❌ Dry-run validation failed for {}:", path.display());
-        for issue in &issues {
-            eprintln!("  - {issue}");
-        }
-        return Err(anyhow!(
-            "dry-run plan validation failed for {}",
-            path.display()
-        ));
-    }
-
-    let warnings = tasks_file.quality_warnings();
-    if !warnings.is_empty() {
-        eprintln!("⚠️  Plan quality warnings for {}:", path.display());
-        for warning in &warnings {
-            eprintln!("  - {warning}");
-        }
-    }
-
-    print_tasks_preview(path, &tasks_file);
-    Ok(())
-}
 
 fn tier_rank(tier: &str) -> u8 {
     match tier {
@@ -416,15 +216,26 @@ async fn regenerate_old_format_plan(
         existing = existing,
     );
 
-    let exit_code = match run_agent(AgentExecOpts {
-        prompt: &task_prompt,
-        workdir,
-        model,
-        effort,
-        system_prompt: Some(&system),
-        resume_session: None,
-        env_vars,
-    })
+    let plan_name = plan_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let task_id = format!("plan:regenerate:{plan_name}");
+    let exit_code = match run_agent_logged(
+        AgentExecOpts {
+            prompt: &task_prompt,
+            workdir,
+            model,
+            effort,
+            system_prompt: Some(&system),
+            resume_session: None,
+            env_vars,
+        },
+        AgentExecEpisode {
+            task_kind: "plan-regenerate",
+            task_id: &task_id,
+        },
+    )
     .await
     {
         Ok(code) => code,
@@ -743,7 +554,7 @@ pub fn cmd_status(workdir: &Path, plans_dir: Option<&Path>) -> Result<()> {
         .collect();
 
     // Count tasks across all plans
-    let plans_root = plans_dir.map_or_else(|| workdir.join("plans"), Path::to_path_buf);
+    let plans_root = plans_dir.map_or_else(|| workspace_plans_dir(workdir), Path::to_path_buf);
     let mut total_plans = 0u32;
     let mut total_tasks = 0u32;
     let mut total_done = 0u32;
@@ -814,13 +625,54 @@ pub async fn cmd_promote(workdir: &Path, slug: &str, auto_execute: bool) -> Resu
     std::fs::write(&dst, &content)?;
     std::fs::remove_file(&src)?;
     println!("✅ Promoted: {}", dst.display());
-    if auto_plan_enabled(workdir)? {
-        let plans_root = generate_plan_from_prd(slug, &dst, false).await?;
-        if auto_execute {
-            run_generated_plans(workdir, &plans_root).await?;
+    let _ = maybe_generate_plan_after_promote(workdir, slug, &dst, auto_execute).await?;
+    Ok(())
+}
+
+async fn maybe_generate_plan_after_promote(
+    workdir: &Path,
+    slug: &str,
+    prd_path: &Path,
+    auto_execute: bool,
+) -> Result<Option<PathBuf>> {
+    maybe_generate_plan_after_promote_with(
+        workdir,
+        slug.to_string(),
+        prd_path.to_path_buf(),
+        auto_execute,
+        |slug, path, dry_run| async move { generate_plan_from_prd(&slug, &path, dry_run).await },
+    )
+    .await
+}
+
+async fn maybe_generate_plan_after_promote_with<F, Fut>(
+    workdir: &Path,
+    slug: String,
+    prd_path: PathBuf,
+    auto_execute: bool,
+    generator: F,
+) -> Result<Option<PathBuf>>
+where
+    F: FnOnce(String, PathBuf, bool) -> Fut,
+    Fut: Future<Output = Result<PathBuf>>,
+{
+    if !auto_plan_enabled(workdir)? {
+        return Ok(None);
+    }
+
+    match generator(slug, prd_path, false).await {
+        Ok(plans_root) => {
+            println!("Plan generated: {}", plans_root.display());
+            if auto_execute {
+                run_generated_plans(workdir, &plans_root).await?;
+            }
+            Ok(Some(plans_root))
+        }
+        Err(err) => {
+            eprintln!("warning: auto plan generation failed: {err:#}");
+            Ok(None)
         }
     }
-    Ok(())
 }
 
 async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
@@ -869,7 +721,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
         println!("📋 Generating plans from PRD: {slug}");
 
         let dry_run_workdir = if dry_run {
-            Some(DryRunWorkspace::new(&workdir)?)
+            Some(dry_run_fs::DryRunWorkspace::new(&workdir)?)
         } else {
             None
         };
@@ -878,12 +730,12 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             .map_or(workdir.as_path(), |temp| temp.path());
 
         let resolved = crate::load_layered(workdir_ref)?;
-        let system = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT;
-        let plans_root = tasks_root(workdir_ref);
-        let tasks_before = snapshot_tasks_files(&plans_root);
+        let system = crate::plan_generate::build_generator_system_prompt(workdir_ref);
+        let plans_root = workspace_plans_dir(workdir_ref);
+        let tasks_before = dry_run_fs::snapshot_tasks_files(&plans_root);
         let task_prompt = format!(
             "Read the PRD at {path} and generate implementation plan directories \
-             under plans/. Each REQ-XXX requirement becomes one or more tasks. \
+             under .roko/plans/. Each REQ-XXX requirement becomes one or more tasks. \
              Each acceptance criterion becomes a task verification command. \
              Search the codebase first to understand what already exists. \
              Create plan.md and tasks.toml files directly, including per-task mcp_servers \
@@ -895,15 +747,22 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             content = content,
         );
 
-        let exit_code = run_agent(AgentExecOpts {
-            prompt: &task_prompt,
-            workdir: workdir_ref,
-            model: resolved.config.agent.model.as_deref(),
-            effort: Some(resolved.config.agent.effort.as_str()),
-            system_prompt: Some(system),
-            resume_session: None,
-            env_vars: &resolved.config.agent.env,
-        })
+        let task_id = format!("prd:plan:{slug}");
+        let exit_code = run_agent_logged(
+            AgentExecOpts {
+                prompt: &task_prompt,
+                workdir: workdir_ref,
+                model: resolved.config.agent.model.as_deref(),
+                effort: Some(resolved.config.agent.effort.as_str()),
+                system_prompt: Some(&system),
+                resume_session: None,
+                env_vars: &resolved.config.agent.env,
+            },
+            AgentExecEpisode {
+                task_kind: "prd-plan-generate",
+                task_id: &task_id,
+            },
+        )
         .await?;
         if exit_code != 0 {
             return Err(anyhow!(
@@ -911,7 +770,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             ));
         }
 
-        let generated_changed = changed_tasks_files(&plans_root, &tasks_before);
+        let generated_changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
 
         if !dry_run {
             regenerate_old_format_plans(
@@ -924,7 +783,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             .await?;
         }
 
-        let changed = changed_tasks_files(&plans_root, &tasks_before);
+        let changed = dry_run_fs::changed_tasks_files(&plans_root, &tasks_before);
         if dry_run {
             if changed.is_empty() {
                 return Err(anyhow!(
@@ -933,10 +792,10 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
             }
 
             for path in &changed {
-                validate_and_print_preview(path)?;
+                dry_run_fs::validate_and_print_preview(path)?;
             }
         } else {
-            warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
+            dry_run_fs::warn_on_new_or_updated_tasks(&plans_root, &tasks_before);
         }
 
         let (task_count, estimated_complexity) = generated_plan_stats(&generated_changed)?;
@@ -947,7 +806,11 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                 template_kind.max_task_count()
             );
         }
-        Ok((workdir.join("plans"), task_count, estimated_complexity))
+        Ok((
+            workspace_plans_dir(&workdir),
+            task_count,
+            estimated_complexity,
+        ))
     }
     .await;
 
@@ -975,7 +838,7 @@ pub async fn generate_plan_from_prd(slug: &str, prd_path: &Path, dry_run: bool) 
                     &workdir,
                     Kind::Custom("prd:plan:failed".into()),
                     serde_json::json!({
-                        "plan_path": workdir.join("plans").display().to_string(),
+                        "plan_path": workspace_plans_dir(&workdir).display().to_string(),
                         "error": format!("{err:#}"),
                     }),
                 )
@@ -1001,17 +864,14 @@ pub fn prd_agent_prompt(workdir: &Path, task: &str) -> String {
     let _ = writeln!(prompt, "## Project workspace: {}\n", workdir.display());
 
     // Include the master index so the agent knows everything that exists
-    let master_index = std::fs::read_to_string(workdir.join(".roko/INDEX.md")).unwrap_or_default();
-    if !master_index.is_empty() {
-        let _ = writeln!(
-            prompt,
-            "## Master Index (what already exists — do NOT duplicate)\n"
-        );
-        let _ = writeln!(prompt, "{master_index}\n---\n");
-    }
+    crate::index::append_master_index_prompt(
+        &mut prompt,
+        workdir,
+        "## Master Index (what already exists — do NOT duplicate)",
+    );
 
     // Include the PRD index for detailed cross-references
-    let prd_index = std::fs::read_to_string(workdir.join(".roko/prd/INDEX.md")).unwrap_or_default();
+    let prd_index = std::fs::read_to_string(prd_dir(workdir).join("INDEX.md")).unwrap_or_default();
     if !prd_index.is_empty() {
         let _ = writeln!(prompt, "## PRD Index\n{prd_index}\n---\n");
     }
@@ -1060,6 +920,76 @@ pub fn new_draft_frontmatter(slug: &str, title: &str) -> String {
          tags: []\n\
          ---\n\n"
     )
+}
+
+/// Returns true if a PRD markdown string contains substantive body content.
+#[must_use]
+pub fn has_substantive_markdown_content(content: &str) -> bool {
+    let mut in_frontmatter = false;
+    let mut saw_frontmatter = false;
+
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            if !saw_frontmatter {
+                saw_frontmatter = true;
+                in_frontmatter = true;
+                return false;
+            }
+            if in_frontmatter {
+                in_frontmatter = false;
+                return false;
+            }
+        }
+
+        if in_frontmatter {
+            return false;
+        }
+
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    })
+}
+
+/// Normalize markdown emitted by an agent and optionally prepend a scaffold.
+///
+/// If the model returns fenced markdown, the outer code fence is stripped.
+/// When `scaffold` is provided and the returned markdown lacks YAML frontmatter,
+/// the scaffold is prepended so draft creation can still recover a full PRD file.
+#[must_use]
+pub fn materialize_agent_markdown_output(output: &str, scaffold: Option<&str>) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = strip_markdown_code_fence(trimmed).trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Some(scaffold) = scaffold
+        && !normalized.starts_with("---")
+    {
+        return Some(format!("{scaffold}\n{normalized}"));
+    }
+
+    Some(normalized.to_string())
+}
+
+fn strip_markdown_code_fence(output: &str) -> &str {
+    let trimmed = output.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed;
+    }
+
+    let Some(first_newline) = trimmed.find('\n') else {
+        return trimmed;
+    };
+    let inner = &trimmed[first_newline + 1..];
+    let Some(closing) = inner.rfind("\n```") else {
+        return trimmed;
+    };
+    &inner[..closing]
 }
 
 /// Slugify a title.
@@ -1160,6 +1090,26 @@ mod tests {
         assert!(content.contains("status: published"));
     }
 
+    #[tokio::test]
+    async fn promote_follow_on_generation_failure_is_non_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_dirs(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("roko.toml"), "[prd]\nauto_plan = true\n").unwrap();
+        let prd_path = published_dir(tmp.path()).join("test.md");
+
+        let outcome = maybe_generate_plan_after_promote_with(
+            tmp.path(),
+            "test".to_string(),
+            prd_path.clone(),
+            false,
+            |_slug, _path, _dry_run| async move { Err(anyhow!("synthetic generation failure")) },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.is_none());
+    }
+
     #[test]
     fn new_draft_frontmatter_valid() {
         let fm = new_draft_frontmatter("test-prd", "Test PRD");
@@ -1167,5 +1117,34 @@ mod tests {
         assert!(fm.contains("id: prd-test-prd"));
         assert!(fm.contains("title: Test PRD"));
         assert!(fm.contains("status: draft"));
+    }
+
+    #[test]
+    fn has_substantive_markdown_content_ignores_headers_only() {
+        let content = "---\nid: demo\n---\n# Title\n\n## Overview\n";
+        assert!(!has_substantive_markdown_content(content));
+    }
+
+    #[test]
+    fn has_substantive_markdown_content_detects_body_text() {
+        let content = "---\nid: demo\n---\n# Title\n\nActual requirement text.\n";
+        assert!(has_substantive_markdown_content(content));
+    }
+
+    #[test]
+    fn materialize_agent_markdown_output_strips_fences() {
+        let output = "```markdown\n---\nid: demo\n---\n# Demo\n\nBody\n```";
+        let rendered = materialize_agent_markdown_output(output, None).expect("rendered");
+        assert!(rendered.starts_with("---"));
+        assert!(rendered.contains("Body"));
+        assert!(!rendered.contains("```"));
+    }
+
+    #[test]
+    fn materialize_agent_markdown_output_prepends_scaffold_when_frontmatter_missing() {
+        let rendered = materialize_agent_markdown_output("Body only", Some("---\nid: demo\n---"))
+            .expect("rendered");
+        assert!(rendered.starts_with("---\nid: demo\n---"));
+        assert!(rendered.contains("Body only"));
     }
 }

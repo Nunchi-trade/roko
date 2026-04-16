@@ -12,7 +12,8 @@ use crate::bindings::InsightBoard;
 use crate::chain_ctx::ChainCtx;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::Scenario;
-use crate::scenarios::llm::{LlmProvider, LlmRequest};
+use crate::scenarios::ScenarioRuntime;
+use crate::scenarios::llm::LlmRequest;
 
 /// Flywheel scenario.
 pub struct Flywheel;
@@ -31,7 +32,7 @@ impl Scenario for Flywheel {
         &self,
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
-        llm: Arc<dyn LlmProvider>,
+        runtime: Arc<ScenarioRuntime>,
     ) -> anyhow::Result<()> {
         let board_addr = ctx.address_of("InsightBoard")?;
         for round in 0..ROUNDS {
@@ -39,7 +40,8 @@ impl Scenario for Flywheel {
                 let name = format!("worker{p}");
                 let provider = ctx.wallet_provider(&name)?;
                 let board = InsightBoard::new(board_addr, provider);
-                let content = llm
+                let content = runtime
+                    .llm
                     .fill(LlmRequest {
                         slot: "insight_content".into(),
                         context: serde_json::json!({ "round": round, "poster": p }),
@@ -68,7 +70,8 @@ impl Scenario for Flywheel {
                 let board = InsightBoard::new(board_addr, provider);
                 for p in 0..POSTERS {
                     let id = first_in_round + U256::from(p as u64);
-                    let decide = llm
+                    let decide = runtime
+                        .llm
                         .fill(LlmRequest {
                             slot: "confirm_decision".into(),
                             context: serde_json::json!({ "id": id.to_string() }),

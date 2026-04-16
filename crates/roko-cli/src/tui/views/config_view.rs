@@ -16,6 +16,7 @@ use crate::tui::config_meta::{
     self, ConfigFieldKind, ConfigItem, ConfigSource, build_flat_items, format_count, truncate,
 };
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
 use crate::tui::state::TuiState;
 
 /// Render the full config editor view.
@@ -28,10 +29,21 @@ pub fn render(
     _view_state: &ViewState,
     theme: &Theme,
 ) {
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.accent()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.accent()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Config ")
-        .border_style(theme.accent());
+        .title(Span::styled(" Config ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -61,7 +73,7 @@ pub fn render(
     let cursor_top = line_offsets.get(cursor).copied().unwrap_or(0);
     let cursor_bottom =
         cursor_top + item_height(items.get(cursor).unwrap_or(&ConfigItem::SaveButton), true);
-    let mut scroll = tui_state.config_scroll_offset;
+    let mut scroll = 0;
     if cursor_top < scroll {
         scroll = cursor_top;
     }

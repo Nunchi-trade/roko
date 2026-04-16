@@ -4,6 +4,7 @@
 
 use roko_core::{ContentHash, Engram};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Progress emitted by the execution loop as plans move through phases,
 /// complete tasks, and finish gate checks.
@@ -91,7 +92,16 @@ pub enum ServerEvent {
     AgentSpawned { agent_id: String, role: String },
 
     /// Incremental agent output (streamed).
-    AgentOutput { agent_id: String, content: String },
+    AgentOutput {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        content: String,
+        #[serde(default)]
+        done: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
+    },
 
     /// A gate check completed for a task.
     GateResult {
@@ -211,5 +221,24 @@ mod tests {
         assert_eq!(json["gate"], "compile");
         assert_eq!(json["passed"], false);
         assert_eq!(json["message"], "compile failed");
+    }
+
+    #[test]
+    fn agent_output_serializes_optional_run_fields() {
+        let event = ServerEvent::AgentOutput {
+            agent_id: "agent-7".into(),
+            run_id: Some("run-1".into()),
+            content: "hello".into(),
+            done: true,
+            metadata: Some(serde_json::json!({ "cost_usd": 0.1 })),
+        };
+
+        let json = serde_json::to_value(event).expect("serialize agent output");
+        assert_eq!(json["type"], "agent_output");
+        assert_eq!(json["agent_id"], "agent-7");
+        assert_eq!(json["run_id"], "run-1");
+        assert_eq!(json["content"], "hello");
+        assert_eq!(json["done"], true);
+        assert_eq!(json["metadata"]["cost_usd"], 0.1);
     }
 }

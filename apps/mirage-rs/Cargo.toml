@@ -86,8 +86,8 @@ name = "agent_simulation"
 required-features = ["chain"]
 
 [features]
-# Default = pure EVM fork simulator with binary surface.
-default = ["binary"]
+# Default = backward-compatible binary surface with chain extensions + legacy REST.
+default = ["binary", "chain", "legacy-api"]
 
 # Binary entry point (src/main.rs).
 binary = []
@@ -102,6 +102,9 @@ sim-gas = []
 # Adds chain_* JSON-RPC methods and --enable-hdc / --enable-knowledge /
 # --enable-stigmergy CLI flags. Pulls in roko-primitives for HDC vectors.
 chain = ["dep:roko-primitives"]
+
+# Legacy dashboard REST surface kept during the agent-server migration.
+legacy-api = ["chain"]
 
 # Roko bridge: implements roko-core traits (Gate, Substrate) over mirage internals.
 # Turns mirage-rs into a drop-in simulation + knowledge substrate for roko golems.

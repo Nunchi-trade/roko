@@ -1,17 +1,20 @@
-//! Agent execution helper — drive the Claude CLI through the real runtime adapter.
+//! Agent execution helper for direct CLI flows such as PRD/research/plan generation.
 //!
 //! Used by `roko prd`, `roko research`, and `roko plan generate` to invoke
-//! an agent that can read/write files while preserving Roko's Claude wiring
-//! (system prompt, settings hooks, MCP discovery, resume, PID tracking, and
-//! stderr filtering).
+//! an agent that can read/write files while preserving provider-aware routing,
+//! safety scoping, resume threading, and learning-episode persistence.
 
 use std::path::Path;
+use std::time::Instant;
 
+use crate::agent_config::{command_from_config, model_from_config};
+use crate::agent_episode::build_capture_episode;
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use anyhow::{Context as _, Result};
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_core::agent::ProviderKind;
 use roko_core::agent::resolve_model;
 use roko_core::{Body, Context, Engram, Kind};
+use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 
 /// Options for agent execution.
 pub struct AgentExecOpts<'a> {
@@ -31,7 +34,15 @@ pub struct AgentExecOpts<'a> {
     pub env_vars: &'a [(String, String)],
 }
 
-/// Drive `claude` with the given prompt and return just the exit code.
+/// Episode metadata for agent execution paths that should persist learning data.
+pub struct AgentExecEpisode<'a> {
+    /// Logical task kind used for episode routing and summaries.
+    pub task_kind: &'a str,
+    /// Stable task identifier for the episode record.
+    pub task_id: &'a str,
+}
+
+/// Run the configured direct agent path and return just the exit code.
 ///
 /// Convenience wrapper around [`run_agent_capture`] for callers that
 /// don't need the agent's text output.
@@ -39,24 +50,41 @@ pub async fn run_agent(opts: AgentExecOpts<'_>) -> Result<i32> {
     run_agent_capture(opts).await.map(|(code, _)| code)
 }
 
-/// Drive `claude` with the given prompt and return `(exit_code, output_text)`.
-///
-/// The Claude CLI adapter handles system prompt wiring, settings hooks,
-/// MCP discovery, resume session threading, and stderr filtering.
-pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
-    run_agent_capture_impl(opts, true).await
+/// Run the configured direct agent path, echo the output, and persist an episode.
+pub async fn run_agent_logged(
+    opts: AgentExecOpts<'_>,
+    episode: AgentExecEpisode<'_>,
+) -> Result<i32> {
+    run_agent_capture_logged(opts, episode)
+        .await
+        .map(|(code, _)| code)
 }
 
-/// Drive `claude` with the given prompt and return `(exit_code, output_text)`
+/// Run the configured direct agent path and return `(exit_code, output_text)`.
+pub async fn run_agent_capture(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
+    run_agent_capture_impl(opts, true, None).await
+}
+
+/// Run the configured direct agent path, echo the output, and persist an episode.
+pub async fn run_agent_capture_logged(
+    opts: AgentExecOpts<'_>,
+    episode: AgentExecEpisode<'_>,
+) -> Result<(i32, String)> {
+    run_agent_capture_impl(opts, true, Some(episode)).await
+}
+
+/// Run the configured direct agent path and return `(exit_code, output_text)`
 /// without echoing the agent's rendered output to stdout.
 pub async fn run_agent_capture_silent(opts: AgentExecOpts<'_>) -> Result<(i32, String)> {
-    run_agent_capture_impl(opts, false).await
+    run_agent_capture_impl(opts, false, None).await
 }
 
 async fn run_agent_capture_impl(
     opts: AgentExecOpts<'_>,
     echo_output: bool,
+    episode: Option<AgentExecEpisode<'_>>,
 ) -> Result<(i32, String)> {
+    let started = Instant::now();
     let mut routing_config = roko_core::config::load_config(opts.workdir)
         .with_context(|| format!("load routing config from {}", opts.workdir.display()))?;
     routing_config.apply_process_env();
@@ -94,10 +122,10 @@ async fn run_agent_capture_impl(
         extra_args.push("--resume".to_string());
         extra_args.push(session_id.to_string());
     }
-    let agent = create_agent_for_model(
+    let agent = spawn_agent_scoped(
         &routing_config,
-        &model,
-        AgentOptions {
+        SpawnAgentSpec {
+            model: model.clone(),
             command: routing_config.agent.command.clone(),
             timeout_ms: Some(600_000), // 10 min for plan generation / research tasks
             system_prompt: opts.system_prompt.map(str::to_string),
@@ -105,7 +133,6 @@ async fn run_agent_capture_impl(
             tools: None,
             mcp_config: None,
             working_dir: Some(opts.workdir.to_path_buf()),
-            provider_semaphores: None,
             env: opts.env_vars.to_vec(),
             extra_args,
             effort: Some(opts.effort.unwrap_or("medium").to_string()),
@@ -113,8 +140,8 @@ async fn run_agent_capture_impl(
             dangerously_skip_permissions: true,
             name: format!("{}:{model}", resolved.provider_kind.label()),
         },
-    )
-    .with_context(|| format!("create agent for model {model}"))?;
+        format!("create agent for model {model}"),
+    )?;
 
     let prompt = Engram::builder(Kind::Prompt)
         .body(Body::text(opts.prompt))
@@ -126,77 +153,117 @@ async fn run_agent_capture_impl(
         print!("{rendered}");
     }
 
-    Ok((i32::from(!result.success), rendered))
+    let exit_code = i32::from(!result.success);
+    if let Some(episode) = episode {
+        persist_capture_episode(
+            opts.workdir,
+            resolved.provider_kind.label(),
+            Some(&model),
+            episode.task_kind,
+            episode.task_id,
+            opts.prompt,
+            &rendered,
+            exit_code == 0,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            opts.resume_session,
+        )
+        .await?;
+    }
+
+    Ok((exit_code, rendered))
 }
 
-/// Read model from roko.toml config if available.
-pub fn model_from_config(workdir: &Path) -> Option<String> {
-    let config_path = workdir.join("roko.toml");
-    if !config_path.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    // Simple extraction — avoid pulling in full config parsing
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("model") {
-            let rest = rest.trim().strip_prefix('=')?;
-            let rest = rest.trim().trim_matches('"');
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
+/// Persist a lightweight learning episode for a direct agent-exec CLI path.
+pub async fn persist_capture_episode(
+    workdir: &Path,
+    agent_command: &str,
+    model: Option<&str>,
+    task_kind: &str,
+    task_id: &str,
+    prompt: &str,
+    output: &str,
+    success: bool,
+    wall_time_ms: u64,
+    resume_session: Option<&str>,
+) -> Result<()> {
+    let (episode, provider) = build_capture_episode(
+        agent_command,
+        model,
+        task_kind,
+        task_id,
+        prompt,
+        output,
+        success,
+        wall_time_ms,
+        resume_session,
+    );
+
+    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
+        .await
+        .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
+    let distillation_workdir = workdir.to_path_buf();
+    runtime.set_episode_completion_hook(move |episode| {
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+    });
+
+    let mut completed = CompletedRunInput::from_episode(episode);
+    completed.provider = Some(provider);
+    runtime
+        .record_completed_run(completed)
+        .await
+        .map_err(|e| anyhow::anyhow!("record learning feedback: {e}"))?;
+    Ok(())
 }
 
-/// Read agent command from roko.toml config if available.
-pub fn command_from_config(workdir: &Path) -> Option<String> {
-    let config_path = workdir.join("roko.toml");
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("command") {
-            let rest = rest.trim().strip_prefix('=')?;
-            let rest = rest.trim().trim_matches('"');
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roko_learn::episode_logger::EpisodeLogger;
+    use tempfile::TempDir;
 
-/// Gateway env vars extracted from roko.toml agent.env.
-pub struct GatewayEnv {
-    /// Key-value pairs to set on child processes.
-    pub vars: Vec<(String, String)>,
-}
+    #[tokio::test]
+    async fn persist_capture_episode_records_memory_episode() {
+        let tmp = TempDir::new().expect("tempdir");
 
-/// Load gateway env vars from roko.toml's agent.env entries.
-/// Returns them as key-value pairs to pass to child processes (avoids unsafe `set_var`).
-pub fn load_gateway_env(workdir: &Path) -> GatewayEnv {
-    let mut vars = Vec::new();
-    let config_path = workdir.join("roko.toml");
-    if !config_path.exists() {
-        return GatewayEnv { vars };
+        persist_capture_episode(
+            tmp.path(),
+            "claude",
+            Some("claude-sonnet-4-6"),
+            "prd-plan-generate",
+            "prd:plan:demo",
+            "prompt body",
+            "output body",
+            true,
+            42,
+            Some("sess-1"),
+        )
+        .await
+        .expect("persist capture episode");
+
+        let episodes_path = tmp
+            .path()
+            .join(".roko")
+            .join("memory")
+            .join("episodes.jsonl");
+        let episodes = EpisodeLogger::read_all_lossy(&episodes_path).await.unwrap();
+        assert_eq!(episodes.len(), 1);
+        let episode = &episodes[0];
+        assert_eq!(episode.agent_id, "claude");
+        assert_eq!(episode.task_id, "prd:plan:demo");
+        assert_eq!(episode.kind, "agent_turn");
+        assert_eq!(episode.model, "claude-sonnet-4-6");
+        assert!(episode.success);
+        assert_eq!(
+            episode.extra.get("task_kind"),
+            Some(&serde_json::json!("prd-plan-generate"))
+        );
+        assert_eq!(
+            episode.extra.get("task_category"),
+            Some(&serde_json::json!("scaffolding"))
+        );
+        assert_eq!(
+            episode.extra.get("plan_id"),
+            Some(&serde_json::json!("demo"))
+        );
     }
-    let Ok(content) = std::fs::read_to_string(&config_path) else {
-        return GatewayEnv { vars };
-    };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('[') && line.contains("ANTHROPIC_") {
-            let inner = line.trim_matches(|c| c == '[' || c == ']');
-            let parts: Vec<&str> = inner.split(',').collect();
-            if parts.len() == 2 {
-                let key = parts[0].trim().trim_matches('"');
-                let val = parts[1].trim().trim_matches('"');
-                if !key.is_empty() {
-                    vars.push((key.to_string(), val.to_string()));
-                }
-            }
-        }
-    }
-    GatewayEnv { vars }
 }

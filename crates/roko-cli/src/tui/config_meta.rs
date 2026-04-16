@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::tui::state::model_context_limit;
+
 /// What kind of value a config field holds, and how to edit it.
 #[derive(Debug, Clone)]
 pub enum ConfigFieldKind {
@@ -216,7 +218,7 @@ pub fn all_fields() -> Vec<ConfigFieldMeta> {
             description: "Token budget for prompt composition",
             kind: ConfigFieldKind::Int {
                 min: Some(1000),
-                max: Some(200_000),
+                max: Some(model_context_limit("gemini-pro") as i64),
                 presets: vec![5000, 10_000, 20_000, 50_000],
             },
             group: "Budget",
@@ -586,6 +588,13 @@ pub fn all_fields() -> Vec<ConfigFieldMeta> {
             },
             group: "TUI",
         },
+        ConfigFieldMeta {
+            key: "tui.effects.screen_postfx",
+            label: "Screen PostFX",
+            description: "Enable full-screen post-processing and modal glow effects",
+            kind: ConfigFieldKind::Bool,
+            group: "TUI",
+        },
         // ── Server ──
         ConfigFieldMeta {
             key: "server.bind",
@@ -636,7 +645,10 @@ fn resolve_value(key: &str, toml_root: Option<&toml::Value>) -> Option<String> {
 
 /// Resolve the default value of a config field from the default config.
 fn resolve_default(key: &str, defaults: &toml::Value) -> Option<String> {
-    resolve_value(key, Some(defaults))
+    resolve_value(key, Some(defaults)).or_else(|| match key {
+        "tui.effects.screen_postfx" => Some("false".to_string()),
+        _ => None,
+    })
 }
 
 /// Determine the source of a field's value.

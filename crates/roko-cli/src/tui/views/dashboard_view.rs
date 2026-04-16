@@ -12,14 +12,18 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
 
 use super::ViewState;
+use crate::config::Config;
+use crate::tui::ansi::parse_ansi_line;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::TuiState;
-use crate::tui::widgets;
+use crate::tui::state::{RouteMetrics, TuiState};
+use crate::tui::widgets::{self, braille};
 
 // ---------------------------------------------------------------------------
 // Sub-tab labels
@@ -40,7 +44,7 @@ const SUB_TAB_LABELS: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 /// Render the full dashboard view.
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
@@ -152,8 +156,8 @@ fn render_right_panel(
         2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
         3 => render_sub_errors(frame, sections[1], data, theme),
         4 => render_sub_git(frame, sections[1], tui_state, theme),
-        5 => render_sub_mcp(frame, sections[1], data, theme),
-        6 => render_sub_processes(frame, sections[1], data, focused, theme),
+        5 => render_sub_mcp(frame, sections[1], data, tui_state, theme),
+        6 => render_sub_processes(frame, sections[1], data, tui_state, focused, theme),
         _ => {}
     }
 }
@@ -194,60 +198,42 @@ fn render_sub_agents(
     focused: bool,
     theme: &Theme,
 ) {
-    let sections =
-        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
-
-    // Build pool entries once.
-    let activity =
-        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
-
-    let pool: Vec<widgets::parallel_pool::ParallelAgentState> = data
+    let route_row_count = tui_state
         .agents
         .iter()
-        .map(|agent| {
-            let row = activity
-                .as_ref()
-                .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
-            let state = match agent.status.as_str() {
-                "running" | "active" => widgets::parallel_pool::AgentRunState::Active,
-                "done" | "completed" => widgets::parallel_pool::AgentRunState::Done,
-                "error" | "failed" => widgets::parallel_pool::AgentRunState::Failed,
-                _ => widgets::parallel_pool::AgentRunState::Idle,
-            };
-            let used = row.map_or(0, |r| r.tokens_used);
-            let total = row.map_or(200_000, |r| {
-                if r.tokens_used > 0 {
-                    r.tokens_used * 2
-                } else {
-                    200_000
-                }
-            });
-            widgets::parallel_pool::ParallelAgentState {
-                role: agent.label.clone(),
-                model: row.map_or_else(|| "-".to_string(), |r| r.model.clone()),
-                task: agent.plan_id.as_deref().unwrap_or("-").to_string(),
-                tokens_used: used,
-                tokens_total: total,
-                state,
-                context_pct: if total > 0 {
-                    used as f64 / total as f64
-                } else {
-                    0.0
-                },
-            }
-        })
-        .collect();
+        .filter(|agent| tui_state.route_metrics.contains_key(&agent.id))
+        .count();
+    let route_height = if route_row_count == 0 {
+        3
+    } else {
+        (route_row_count as u16 + 3).min(8)
+    };
+    let sections = Layout::vertical([
+        Constraint::Percentage(52),
+        Constraint::Length(route_height),
+        Constraint::Min(0),
+    ])
+    .split(area);
 
     widgets::parallel_pool::render_parallel_pool(
         frame,
         sections[0],
-        &pool,
-        view_state.selected,
+        &tui_state.agents,
+        tui_state
+            .selected_agent
+            .min(tui_state.agents.len().saturating_sub(1)),
+        theme,
+    );
+    render_agent_routes_table(
+        frame,
+        sections[1],
+        tui_state,
+        &tui_state.route_metrics,
         theme,
     );
     render_output_panel(
         frame,
-        sections[1],
+        sections[2],
         data,
         tui_state,
         view_state,
@@ -270,13 +256,18 @@ fn render_output_panel(
     theme: &Theme,
 ) {
     let border = if focused {
-        theme.accent()
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Output ")
+        .title(Span::styled(" Output ", title_style))
         .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -285,7 +276,7 @@ fn render_output_panel(
     //
     // Priority:
     //   1. current_plan_execution.agent_output_tail
-    //   2. selected agent's output from tui_state.agents_by_id
+    //   2. selected agent's live row data from tui_state.agents
     //   3. most recent task output from data.task_outputs
     let collected: Vec<String> = {
         // 1. Plan execution output tail.
@@ -296,14 +287,21 @@ fn render_output_panel(
             .unwrap_or_default();
         if !exec_lines.is_empty() {
             exec_lines
-        } else if let Some(agent) = tui_state
-            .agents_by_id
-            .values()
-            .nth(tui_state.selected_agent_tab)
-        {
-            // 2. Selected agent output.
+        } else if let Some(agent) = tui_state.agents.get(
+            tui_state
+                .selected_agent
+                .min(tui_state.agents.len().saturating_sub(1)),
+        ) {
+            // 2. Selected agent output from live row data.
             if !agent.output_lines.is_empty() {
                 agent.output_lines.clone()
+            } else if !agent.last_output_line.is_empty() {
+                vec![agent.last_output_line.clone()]
+            } else if !agent.current_task.is_empty() {
+                data.task_outputs
+                    .get(&agent.current_task)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -332,17 +330,103 @@ fn render_output_panel(
         return;
     }
 
-    let text: Vec<Line<'_>> = lines.iter().map(|l| Line::from(*l)).collect();
+    let text: Vec<Line<'static>> = lines
+        .iter()
+        .map(|line| Line::from(parse_ansi_line(line)))
+        .collect();
     let scroll = if view_state.auto_tail {
-        text.len().saturating_sub(inner.height as usize) as u16
+        text.len()
+            .saturating_sub(inner.height as usize)
+            .min(u16::MAX as usize) as u16
     } else {
-        view_state.scroll
+        let max_scroll = text.len().saturating_sub(inner.height as usize);
+        max_scroll
+            .saturating_sub((view_state.scroll as usize).min(max_scroll))
+            .min(u16::MAX as usize) as u16
     };
     frame.render_widget(
         Paragraph::new(text)
             .style(theme.text())
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0)),
+        inner,
+    );
+}
+
+fn render_agent_routes_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    route_metrics: &HashMap<String, RouteMetrics>,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Routes ")
+        .border_style(theme.muted());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = tui_state
+        .agents
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, agent)| {
+            route_metrics.get(&agent.id).map(|metric| {
+                let tier_style = route_tier_style(&metric.tier, theme);
+                let row_style = if idx == tui_state.selected_agent {
+                    theme.selection()
+                } else {
+                    Style::default()
+                };
+                let model = if metric.model.is_empty() {
+                    "-".to_string()
+                } else {
+                    truncate(&shorten_model(&metric.model), 18)
+                };
+                Row::new(vec![
+                    Cell::from(truncate(&agent.id, 14)),
+                    Cell::from(Span::styled(
+                        model,
+                        theme.text().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(truncate(&metric.tier, 10), tier_style)),
+                ])
+                .style(row_style)
+            })
+        })
+        .collect();
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no agent route metrics").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let rows = rows
+        .into_iter()
+        .take(inner.height.saturating_sub(2) as usize)
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(14),
+                Constraint::Min(18),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new(["Agent", "Model", "Tier"]).style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
         inner,
     );
 }
@@ -358,44 +442,12 @@ fn render_sub_diff(
     tui_state: &TuiState,
     theme: &Theme,
 ) {
-    let diff_text = gather_diff_text(data, tui_state);
     let scroll = if tui_state.diff_scroll > 0 {
         Some(tui_state.diff_scroll)
     } else {
         None
     };
-    widgets::diff_panel::render_diff_panel(frame, area, &diff_text, scroll, theme);
-}
-
-fn gather_diff_text(data: &DashboardData, tui_state: &TuiState) -> String {
-    // Try selected agent's diff content.
-    if let Some(agent) = tui_state
-        .agents_by_id
-        .values()
-        .nth(tui_state.selected_agent_tab)
-    {
-        if !agent.diff_content.is_empty() {
-            return agent.diff_content.clone();
-        }
-    }
-    // Fallback: extract diff-like lines from execution output.
-    if let Some(exec) = &data.current_plan_execution {
-        let diff_lines: Vec<&str> = exec
-            .agent_output_tail
-            .iter()
-            .map(String::as_str)
-            .filter(|l| {
-                l.starts_with('+')
-                    || l.starts_with('-')
-                    || l.starts_with("@@")
-                    || l.starts_with("diff ")
-            })
-            .collect();
-        if !diff_lines.is_empty() {
-            return diff_lines.join("\n");
-        }
-    }
-    String::new()
+    widgets::diff_panel::render_diff_panel(frame, area, &data.git_diff, scroll, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,10 +492,21 @@ fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, th
 // ---------------------------------------------------------------------------
 
 fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Git ")
-        .border_style(theme.muted());
+        .title(Span::styled(" Git ", title_style))
+        .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -467,58 +530,68 @@ fn render_sub_git(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// Collect git summary data as plain strings.
-///
-/// This runs multiple git subprocess calls and should only be called from
-/// a background thread, never from the render path.
-pub fn collect_git_summary() -> Vec<String> {
+/// Collect git summary data as plain strings from the cached git snapshot.
+pub(crate) fn collect_git_summary(
+    git_data: &crate::tui::views::git_view::GitViewData,
+    age: &str,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
-    let branch = git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let commit = git_cmd(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
-    let age = git_cmd(&["log", "-1", "--format=%cr"]).unwrap_or_default();
+    let commit = git_data
+        .commits
+        .first()
+        .map(|commit| commit.hash_short.as_str())
+        .unwrap_or_default();
 
-    if !branch.is_empty() {
-        lines.push(format!(" branch: {branch}  {commit}  {age}"));
+    if !git_data.current_branch.is_empty() {
+        lines.push(format!(
+            " branch: {}  {commit}  {age}",
+            git_data.current_branch
+        ));
     }
 
-    if let Some(status) = git_cmd(&["status", "--short"]) {
-        let modified = status
-            .lines()
-            .filter(|l| l.starts_with(" M") || l.starts_with("M "))
-            .count();
-        let added = status
-            .lines()
-            .filter(|l| l.starts_with("A ") || l.starts_with("??"))
-            .count();
-        let deleted = status
-            .lines()
-            .filter(|l| l.starts_with(" D") || l.starts_with("D "))
-            .count();
-        let total = status.lines().filter(|l| !l.is_empty()).count();
-        if total > 0 {
-            lines.push(format!(
-                " status: {total} changed  M:{modified} A:{added} D:{deleted}"
-            ));
-        } else {
-            lines.push(" status: clean".to_string());
-        }
+    let modified = git_data
+        .status_lines
+        .iter()
+        .filter(|line| line.starts_with(" M") || line.starts_with("M "))
+        .count();
+    let added = git_data
+        .status_lines
+        .iter()
+        .filter(|line| line.starts_with("A ") || line.starts_with("??"))
+        .count();
+    let deleted = git_data
+        .status_lines
+        .iter()
+        .filter(|line| line.starts_with(" D") || line.starts_with("D "))
+        .count();
+    let total = git_data
+        .status_lines
+        .iter()
+        .filter(|line| !line.is_empty())
+        .count();
+    if total > 0 {
+        lines.push(format!(
+            " status: {total} changed  M:{modified} A:{added} D:{deleted}"
+        ));
+    } else if !git_data.current_branch.is_empty() {
+        lines.push(" status: clean".to_string());
     }
 
-    if let Some(log) = git_cmd(&["log", "--oneline", "--graph", "-8"]) {
+    if !git_data.commits.is_empty() {
         lines.push(String::new());
         lines.push(" recent commits:".to_string());
-        for line in log.lines().take(8) {
-            lines.push(format!("  {line}"));
+        for commit in git_data.commits.iter().take(8) {
+            lines.push(format!(
+                "  {}{} {}",
+                commit.graph_prefix, commit.hash_short, commit.subject
+            ));
         }
     }
 
-    if let Some(wt) = git_cmd(&["worktree", "list", "--porcelain"]) {
-        let count = wt.lines().filter(|l| l.starts_with("worktree ")).count();
-        if count > 1 {
-            lines.push(String::new());
-            lines.push(format!(" worktrees: {count}"));
-        }
+    if git_data.worktrees.len() > 1 {
+        lines.push(String::new());
+        lines.push(format!(" worktrees: {}", git_data.worktrees.len()));
     }
 
     if lines.is_empty() {
@@ -528,54 +601,210 @@ pub fn collect_git_summary() -> Vec<String> {
     lines
 }
 
-fn git_cmd(args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Sub-tab: MCP / Context status
 // ---------------------------------------------------------------------------
 
-fn render_sub_mcp(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+fn render_sub_mcp(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    theme: &Theme,
+) {
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" MCP / Context ")
-        .border_style(theme.muted());
+        .title(Span::styled(" MCP / Context ", title_style))
+        .border_style(border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let eff = &data.efficiency;
-    let lines = vec![
+    let model_usage = aggregate_model_usage(&data.efficiency_events);
+    let mcp_config = load_mcp_config_view(data.root());
+    let total_trials: u64 = data
+        .cascade_router
+        .confidence_stats
+        .values()
+        .map(|stats| stats.trials)
+        .sum();
+    let total_successes: u64 = data
+        .cascade_router
+        .confidence_stats
+        .values()
+        .map(|stats| stats.successes)
+        .sum();
+
+    let mut lines = vec![
+        section_header("MCP Config", theme),
         Line::from(vec![
-            Span::styled("input tokens:  ", theme.muted()),
-            Span::styled(fmt_count(eff.total_input_tokens), theme.info()),
-        ]),
-        Line::from(vec![
-            Span::styled("output tokens: ", theme.muted()),
-            Span::styled(fmt_count(eff.total_output_tokens), theme.info()),
-        ]),
-        Line::from(vec![
-            Span::styled("total cost:    ", theme.muted()),
-            Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
-        ]),
-        Line::from(Span::raw("")),
-        Line::from(vec![
-            Span::styled("cascade router: ", theme.muted()),
+            Span::styled("agent.mcp_config: ", theme.muted()),
             Span::styled(
-                format!("{} models", data.cascade_router.model_slugs.len()),
-                theme.text(),
+                mcp_config.configured_path.as_ref().map_or_else(
+                    || "(not set)".to_string(),
+                    |path| path.display().to_string(),
+                ),
+                if mcp_config.configured_path.is_some() {
+                    theme.text()
+                } else {
+                    theme.muted()
+                },
             ),
         ]),
         Line::from(vec![
-            Span::styled("experiments:    ", theme.muted()),
-            Span::styled(format!("{} total", data.experiments.len()), theme.text()),
+            Span::styled("resolved path:     ", theme.muted()),
+            Span::styled(
+                mcp_config
+                    .resolved_path
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |path| path.display().to_string()),
+                if mcp_config.resolved_path.is_some() {
+                    theme.text()
+                } else {
+                    theme.muted()
+                },
+            ),
         ]),
+        Line::from(vec![
+            Span::styled("server count:       ", theme.muted()),
+            Span::styled(
+                mcp_config.config.as_ref().map_or_else(
+                    || "-".to_string(),
+                    |config| config.servers.len().to_string(),
+                ),
+                theme.info(),
+            ),
+        ]),
+        Line::from(Span::raw("")),
     ];
+
+    if let Some(error) = &mcp_config.error {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", theme.muted()),
+            Span::styled(
+                truncate(error, inner.width.saturating_sub(8) as usize),
+                theme.danger(),
+            ),
+        ]));
+    } else if let Some(config) = &mcp_config.config {
+        if config.servers.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("status: ", theme.muted()),
+                Span::styled("config loaded, no servers defined", theme.warning()),
+            ]));
+        } else {
+            for server in &config.servers {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:>12}: ", truncate(&server.name, 12)),
+                        theme.muted(),
+                    ),
+                    Span::styled(render_mcp_command(server), theme.text()),
+                ]));
+            }
+        }
+    } else if mcp_config.configured_path.is_some() {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", theme.muted()),
+            Span::styled("configured file not found", theme.warning()),
+        ]));
+    }
+
+    lines.extend([
+        Line::from(Span::raw("")),
+        section_header("Efficiency", theme),
+        Line::from(vec![
+            Span::styled("input tokens:  ", theme.muted()),
+            Span::styled(fmt_count(eff.total_input_tokens), theme.info()),
+            Span::styled("  output: ", theme.muted()),
+            Span::styled(fmt_count(eff.total_output_tokens), theme.info()),
+            Span::styled("  cost: ", theme.muted()),
+            Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
+        ]),
+    ]);
+
+    if model_usage.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("models: ", theme.muted()),
+            Span::styled("no efficiency events", theme.muted()),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("models: ", theme.muted()),
+            Span::styled(format!("{} tracked", model_usage.len()), theme.text()),
+        ]));
+        for (model, usage) in model_usage {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12}: ", truncate(&model, 12)), theme.muted()),
+                Span::styled(format!("{} turns", usage.turns), theme.text()),
+                Span::styled("  in ", theme.muted()),
+                Span::styled(fmt_count(usage.input_tokens), theme.info()),
+                Span::styled("  out ", theme.muted()),
+                Span::styled(fmt_count(usage.output_tokens), theme.info()),
+                Span::styled("  ", theme.muted()),
+                Span::styled(format!("${:.4}", usage.cost_usd), theme.warning()),
+            ]));
+        }
+    }
+
+    lines.extend([
+        Line::from(Span::raw("")),
+        section_header("Cascade Router", theme),
+    ]);
+    if data.cascade_router.model_slugs.is_empty() && total_trials == 0 {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", theme.muted()),
+            Span::styled("no router stats yet", theme.muted()),
+        ]));
+    } else {
+        let success_rate = if total_trials > 0 {
+            format!(
+                "{:.0}%",
+                total_successes as f64 / total_trials as f64 * 100.0
+            )
+        } else {
+            "-".to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("models: ", theme.muted()),
+            Span::styled(
+                data.cascade_router.model_slugs.len().to_string(),
+                theme.info(),
+            ),
+            Span::styled("  trials: ", theme.muted()),
+            Span::styled(total_trials.to_string(), theme.text()),
+            Span::styled("  success: ", theme.muted()),
+            Span::styled(success_rate, theme.text()),
+        ]));
+        for slug in &data.cascade_router.model_slugs {
+            let stats = data.cascade_router.confidence_stats.get(slug);
+            let trials = stats.map_or(0, |entry| entry.trials);
+            let successes = stats.map_or(0, |entry| entry.successes);
+            let rate = if trials > 0 {
+                format!("{:.0}%", successes as f64 / trials as f64 * 100.0)
+            } else {
+                "-".to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12}: ", truncate(slug, 12)), theme.muted()),
+                Span::styled(format!("{successes}/{trials}"), theme.text()),
+                Span::styled("  rate ", theme.muted()),
+                Span::styled(rate, theme.info()),
+            ]));
+        }
+    }
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -586,119 +815,162 @@ fn render_sub_mcp(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme
 fn render_sub_processes(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
+    tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
-    let sections =
-        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
-
-    // Process table.
     let border = if focused {
-        theme.accent()
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
     } else {
         theme.muted()
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Processes ")
+        .title(Span::styled(" Processes ", title_style))
         .border_style(border);
-    let inner = block.inner(sections[0]);
-    frame.render_widget(block, sections[0]);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    if data.agents.is_empty() {
+    let mut process_rows: Vec<_> = tui_state.process_metrics.iter().collect();
+    process_rows.sort_by(|a, b| a.role.cmp(&b.role).then_with(|| a.pid.cmp(&b.pid)));
+
+    if process_rows.is_empty() {
         frame.render_widget(
-            Paragraph::new("no tracked processes").style(theme.muted()),
+            Paragraph::new("No process data").style(theme.muted()),
             inner,
         );
-    } else {
-        let activity = crate::tui::dashboard::build_agent_activity_snapshot(
-            &data.agents,
-            &data.efficiency_events,
-        );
-        let rows: Vec<Row<'_>> = data
-            .agents
-            .iter()
-            .map(|agent| {
-                let ss = match agent.status.as_str() {
-                    "running" | "active" => theme.info(),
-                    "error" | "failed" => theme.danger(),
-                    _ => theme.muted(),
-                };
-                let row = activity
-                    .as_ref()
-                    .and_then(|s| s.active_agents.iter().find(|r| r.agent_id == agent.id));
-                Row::new(vec![
-                    Cell::from(truncate(&agent.id, 14)),
-                    Cell::from(agent.label.as_str()),
-                    Cell::from(Span::styled(agent.status.as_str(), ss)),
-                    Cell::from(row.map_or("-".into(), |r| shorten_model(&r.model))),
-                    Cell::from(row.map_or("-".into(), |r| fmt_tokens(r.tokens_used))),
-                    Cell::from(agent.plan_id.as_deref().unwrap_or("-")),
-                ])
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Min(10),
-            Constraint::Min(12),
-            Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(8),
-            Constraint::Min(8),
-        ];
-        frame.render_widget(
-            Table::new(rows, widths)
-                .header(
-                    Row::new(["pid", "label", "status", "model", "tokens", "plan"])
-                        .style(theme.accent().add_modifier(Modifier::BOLD)),
-                )
-                .column_spacing(1),
-            inner,
-        );
+        return;
     }
 
-    // System metrics summary.
-    let sys_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" System ")
-        .border_style(theme.muted());
-    let sys_inner = sys_block.inner(sections[1]);
-    frame.render_widget(sys_block, sections[1]);
+    let inner_width = inner.width as usize;
+    let role_width = if inner_width < 72 {
+        10
+    } else if inner_width < 96 {
+        14
+    } else {
+        18
+    };
+    let uptime_width = if inner_width < 72 { 9 } else { 12 };
+    let trend_width: usize = if inner_width < 72 {
+        12
+    } else if inner_width < 96 {
+        18
+    } else {
+        22
+    };
+    let spark_width = trend_width.saturating_sub(10).max(4);
 
-    let eff = &data.efficiency;
-    let active = data
-        .agents
-        .iter()
-        .filter(|a| a.status == "running" || a.status == "active")
-        .count();
+    let rows: Vec<Row<'_>> = process_rows
+        .into_iter()
+        .map(|proc| {
+            let cpu_style = if proc.cpu_pct >= 50.0 {
+                theme.warning()
+            } else {
+                theme.info()
+            };
+            let state_style = match proc.state.as_str() {
+                "running" => theme.info(),
+                "sleeping" => theme.muted(),
+                "stopped" => theme.danger(),
+                _ => theme.muted(),
+            };
+
+            let cpu_history: Vec<f32> = proc.cpu_history.iter().copied().collect();
+            let mem_history: Vec<u64> = proc.mem_history.iter().copied().collect();
+
+            let mut trend_spans = vec![Span::styled("c ", theme.muted())];
+            trend_spans.extend(braille::braille_spans_f32(
+                &cpu_history,
+                100.0,
+                spark_width,
+                theme.info,
+            ));
+            trend_spans.push(Span::styled(" m ", theme.muted()));
+            trend_spans.extend(braille::braille_spans_u64(
+                &mem_history,
+                spark_width,
+                theme.warning,
+            ));
+
+            Row::new(vec![
+                Cell::from(Span::styled(proc.pid.to_string(), theme.text())),
+                Cell::from(Span::styled(truncate(&proc.role, role_width), theme.text())),
+                Cell::from(Span::styled(format!("{:>5.1}%", proc.cpu_pct), cpu_style)),
+                Cell::from(Span::styled(
+                    format_mem_bytes(proc.mem_bytes),
+                    theme.warning(),
+                )),
+                Cell::from(Span::styled(truncate(&proc.state, 9), state_style)),
+                Cell::from(Span::styled(format_uptime(proc.uptime_secs), theme.text())),
+                Cell::from(Line::from(trend_spans)),
+            ])
+        })
+        .collect();
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let max_scroll = rows.len().saturating_sub(visible_rows.max(1));
+    let scroll = tui_state.diff_scroll.min(max_scroll);
+    let rows = rows
+        .into_iter()
+        .skip(scroll)
+        .take(visible_rows.max(1))
+        .collect::<Vec<_>>();
+
+    let widths = [
+        Constraint::Length(7),
+        Constraint::Min(role_width as u16),
+        Constraint::Length(7),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(uptime_width as u16),
+        Constraint::Min(trend_width as u16),
+    ];
+
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("agents:  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{active} active / {} total", data.agents.len()),
-                    theme.text(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("tokens:  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!(
-                        "{}in + {}out",
-                        fmt_count(eff.total_input_tokens),
-                        fmt_count(eff.total_output_tokens)
-                    ),
-                    theme.text(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("cost:    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("${:.4}", eff.total_cost_usd), theme.warning()),
-            ]),
-        ]),
-        sys_inner,
+        Table::new(rows, widths)
+            .header(
+                Row::new(["PID", "Role", "CPU%", "MEM", "State", "Uptime", "Trend"])
+                    .style(theme.accent().add_modifier(Modifier::BOLD)),
+            )
+            .column_spacing(1),
+        inner,
     );
+}
+
+fn format_mem_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_uptime(uptime_secs: f64) -> String {
+    let total = uptime_secs.max(0.0).round() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 // ===========================================================================
@@ -708,7 +980,7 @@ fn render_sub_processes(
 fn render_bottom_ribbon(
     frame: &mut Frame<'_>,
     area: Rect,
-    _data: &DashboardData,
+    data: &DashboardData,
     tui_state: &TuiState,
     _theme: &Theme,
 ) {
@@ -723,7 +995,7 @@ fn render_bottom_ribbon(
     // Wave progress: use the real widget
     widgets::wave_progress::render_wave_progress(frame, sections[0], tui_state);
     // Token sparkline: use the real widget
-    widgets::token_sparkline::render_token_sparkline(frame, sections[1], tui_state);
+    widgets::token_sparkline::render_token_sparkline(frame, sections[1], data, tui_state);
     // Sys metrics: use the real widget
     widgets::sys_metrics::render_sys_metrics(frame, sections[2], tui_state);
 }
@@ -731,6 +1003,122 @@ fn render_bottom_ribbon(
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+#[derive(Debug, Clone, Default)]
+struct McpConfigView {
+    configured_path: Option<PathBuf>,
+    resolved_path: Option<PathBuf>,
+    config: Option<roko_agent::mcp::McpConfig>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModelUsageAggregate {
+    turns: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+}
+
+fn section_header(title: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        theme.accent().add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn load_mcp_config_view(root: &Path) -> McpConfigView {
+    let config_path = root.join("roko.toml");
+    let config = match Config::from_file(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return McpConfigView {
+                error: Some(format!("failed to load roko.toml: {error}")),
+                ..McpConfigView::default()
+            };
+        }
+    };
+
+    let Some(configured_path) = config.agent.mcp_config else {
+        return McpConfigView::default();
+    };
+    let resolved_path = resolve_mcp_config_path(root, &configured_path);
+    if !resolved_path.is_file() {
+        return McpConfigView {
+            configured_path: Some(configured_path),
+            resolved_path: Some(resolved_path),
+            ..McpConfigView::default()
+        };
+    }
+
+    match roko_agent::mcp::McpConfig::load(&resolved_path) {
+        Ok(config) => McpConfigView {
+            configured_path: Some(configured_path),
+            resolved_path: Some(resolved_path),
+            config: Some(config),
+            error: None,
+        },
+        Err(error) => McpConfigView {
+            configured_path: Some(configured_path),
+            resolved_path: Some(resolved_path),
+            config: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn resolve_mcp_config_path(root: &Path, configured_path: &Path) -> PathBuf {
+    if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        root.join(configured_path)
+    }
+}
+
+fn render_mcp_command(server: &roko_agent::mcp::McpServerConfig) -> String {
+    if server.args.is_empty() {
+        server.command.clone()
+    } else {
+        format!("{} {}", server.command, server.args.join(" "))
+    }
+}
+
+fn aggregate_model_usage(
+    events: &[roko_learn::efficiency::AgentEfficiencyEvent],
+) -> Vec<(String, ModelUsageAggregate)> {
+    let mut usage: BTreeMap<String, ModelUsageAggregate> = BTreeMap::new();
+    for event in events {
+        let model = event_model_slug(event);
+        let entry = usage.entry(model).or_default();
+        entry.turns += 1;
+        entry.input_tokens += event.input_tokens;
+        entry.output_tokens += event.output_tokens;
+        entry.cost_usd += event.cost_usd;
+    }
+
+    let mut usage: Vec<(String, ModelUsageAggregate)> = usage.into_iter().collect();
+    usage.sort_by(|a, b| {
+        b.1.cost_usd
+            .partial_cmp(&a.1.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.input_tokens.cmp(&a.1.input_tokens))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    usage
+}
+
+fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> String {
+    let model = if event.model.is_empty() {
+        event.model_used.as_str()
+    } else {
+        event.model.as_str()
+    };
+    if model.is_empty() {
+        "unknown".to_string()
+    } else {
+        model.to_string()
+    }
+}
 
 fn shorten_model(slug: &str) -> String {
     slug.replace("claude-", "")
@@ -740,20 +1128,6 @@ fn shorten_model(slug: &str) -> String {
         .replace("sonnet-", "s")
         .replace("opus-", "o")
         .replace("haiku-", "h")
-}
-
-fn fmt_tokens(n: u64) -> String {
-    if n == 0 {
-        "-".to_string()
-    } else if n < 1_000 {
-        format!("{n}")
-    } else if n < 10_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else if n < 1_000_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -773,5 +1147,14 @@ fn fmt_count(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+fn route_tier_style(tier: &str, theme: &Theme) -> Style {
+    match tier {
+        "fast" => theme.success(),
+        "balanced" => theme.accent(),
+        "deep" => theme.warning(),
+        _ => theme.muted(),
     }
 }

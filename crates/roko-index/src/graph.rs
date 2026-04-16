@@ -5,9 +5,15 @@
 //! over the graph produces importance scores for prioritising context.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::LazyLock;
 
 use crate::parser::SourceFile;
 use crate::symbol::SymbolId;
+use regex::Regex;
+use roko_core::language::SymbolKind;
+
+static CALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(").expect("call regex"));
 
 // ─── Edge kinds ─────────────────────────────────────────────────────────
 
@@ -79,6 +85,46 @@ impl SymbolGraph {
             .unwrap_or_default()
     }
 
+    /// Return forward neighbors filtered by edge kind.
+    pub fn neighbors_by_kind(&self, id: &SymbolId, kind: EdgeKind) -> Vec<&SymbolId> {
+        let mut seen = HashSet::new();
+        self.forward
+            .get(id)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter_map(|(target, edge_kind)| {
+                        if *edge_kind == kind.clone() && seen.insert((*target).clone()) {
+                            Some(target)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Return reverse neighbors filtered by edge kind.
+    pub fn reverse_neighbors_by_kind(&self, id: &SymbolId, kind: EdgeKind) -> Vec<&SymbolId> {
+        let mut seen = HashSet::new();
+        self.reverse
+            .get(id)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter_map(|(source, edge_kind)| {
+                        if *edge_kind == kind.clone() && seen.insert((*source).clone()) {
+                            Some(source)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// BFS from `start` up to `max_depth` hops following forward edges.
     pub fn transitive(&self, start: &SymbolId, max_depth: usize) -> Vec<(SymbolId, usize)> {
         if max_depth == 0 || !self.nodes.contains(start) {
@@ -119,6 +165,7 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
     let mut nodes = HashSet::new();
     let mut forward: HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>> = HashMap::new();
     let mut reverse: HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>> = HashMap::new();
+    let mut seen_edges: HashSet<(SymbolId, SymbolId, EdgeKind)> = HashSet::new();
 
     // Phase 1: register all symbols as nodes.
     for file in files {
@@ -127,14 +174,16 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
         }
     }
 
-    // Phase 2: build a name -> SymbolId lookup for target resolution.
+    // Phase 2: build name -> SymbolId lookups for import and call resolution.
     let mut name_to_ids: HashMap<&str, Vec<SymbolId>> = HashMap::new();
+    let mut function_name_to_ids: HashMap<&str, Vec<SymbolId>> = HashMap::new();
     for file in files {
         for sym in &file.symbols {
-            name_to_ids
-                .entry(&sym.name)
-                .or_default()
-                .push(SymbolId::from_symbol(sym, &file.path));
+            let id = SymbolId::from_symbol(sym, &file.path);
+            name_to_ids.entry(&sym.name).or_default().push(id.clone());
+            if sym.kind == SymbolKind::Function {
+                function_name_to_ids.entry(&sym.name).or_default().push(id);
+            }
         }
     }
 
@@ -162,19 +211,82 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
 
             if let Some(targets) = name_to_ids.get(target_name) {
                 for target in targets {
-                    // Don't create self-edges from the same file.
                     if target.file_path == file.path {
                         continue;
                     }
 
-                    forward
-                        .entry(source_id.clone())
-                        .or_default()
-                        .push((target.clone(), EdgeKind::Imports));
-                    reverse
-                        .entry(target.clone())
-                        .or_default()
-                        .push((source_id.clone(), EdgeKind::Imports));
+                    add_edge(
+                        &mut forward,
+                        &mut reverse,
+                        &mut seen_edges,
+                        source_id.clone(),
+                        target.clone(),
+                        EdgeKind::Imports,
+                    );
+                }
+            }
+        }
+    }
+
+    // Phase 4: infer call edges from function bodies.
+    for file in files {
+        let total_lines = file.content.lines().count();
+        if total_lines == 0 {
+            continue;
+        }
+
+        let mut symbols = file.symbols.iter().collect::<Vec<_>>();
+        symbols.sort_by_key(|sym| sym.line);
+
+        for (index, sym) in symbols.iter().enumerate() {
+            if sym.kind != SymbolKind::Function {
+                continue;
+            }
+
+            let start_line = sym.line;
+            if start_line == 0 || start_line > total_lines {
+                continue;
+            }
+
+            let end_line = symbols
+                .get(index + 1)
+                .map(|next| next.line.saturating_sub(1))
+                .unwrap_or(total_lines);
+
+            if end_line < start_line {
+                continue;
+            }
+
+            let source_id = SymbolId::from_symbol(sym, &file.path);
+            for (line_idx, line) in file
+                .content
+                .lines()
+                .enumerate()
+                .skip(start_line.saturating_sub(1))
+                .take(end_line.saturating_sub(start_line).saturating_add(1))
+            {
+                let line_number = line_idx + 1;
+                for capture in CALL_RE.captures_iter(line) {
+                    let candidate = capture.get(1).map(|m| m.as_str()).unwrap_or_default();
+                    if candidate.is_empty() {
+                        continue;
+                    }
+                    if line_number == start_line && candidate == sym.name {
+                        continue;
+                    }
+
+                    if let Some(targets) = function_name_to_ids.get(candidate) {
+                        for target in targets {
+                            add_edge(
+                                &mut forward,
+                                &mut reverse,
+                                &mut seen_edges,
+                                source_id.clone(),
+                                target.clone(),
+                                EdgeKind::Calls,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -185,6 +297,25 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
         forward,
         reverse,
     }
+}
+
+fn add_edge(
+    forward: &mut HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>>,
+    reverse: &mut HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>>,
+    seen: &mut HashSet<(SymbolId, SymbolId, EdgeKind)>,
+    from: SymbolId,
+    to: SymbolId,
+    kind: EdgeKind,
+) {
+    if !seen.insert((from.clone(), to.clone(), kind.clone())) {
+        return;
+    }
+
+    forward
+        .entry(from.clone())
+        .or_default()
+        .push((to.clone(), kind.clone()));
+    reverse.entry(to).or_default().push((from, kind));
 }
 
 // ─── PageRank ───────────────────────────────────────────────────────────
@@ -316,6 +447,26 @@ mod tests {
         )];
         let graph = build_graph(&files);
         assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn call_edges_are_created_from_function_bodies() {
+        let files = vec![make_file(
+            "a.rs",
+            vec![
+                sym("helper", SymbolKind::Function),
+                sym("main", SymbolKind::Function),
+            ],
+            vec![],
+        )];
+        let mut files = files;
+        files[0].content = "fn helper() {}\nfn main() { helper(); }\n".to_string();
+
+        let graph = build_graph(&files);
+        let main_id = SymbolId::new("a.rs", "main", SymbolKind::Function);
+        let callees = graph.neighbors_by_kind(&main_id, EdgeKind::Calls);
+        assert!(!callees.is_empty());
+        assert!(callees.iter().any(|callee| callee.symbol_name == "helper"));
     }
 
     #[test]

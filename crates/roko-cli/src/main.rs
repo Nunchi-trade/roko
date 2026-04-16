@@ -8,6 +8,16 @@
 //! one-shot mode).
 
 #![allow(clippy::too_many_lines)]
+#![cfg_attr(
+    clippy,
+    allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::restriction,
+        missing_docs
+    )
+)]
 
 mod commands;
 
@@ -21,11 +31,11 @@ use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::BackendResponse;
 use roko_cli::serve_runtime::RokoCliRuntime;
-use roko_cli::tui::App;
+use roko_cli::tui::{App, ApprovalChannel};
 use roko_cli::{
-    Config, DaemonMode, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode,
-    PageId, PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source,
-    WizardInputs, config_cmd, load_layered, run_init_wizard, run_once,
+    Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
+    PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs,
+    config_cmd, load_layered, run_init_wizard, run_once,
 };
 use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
@@ -38,6 +48,7 @@ use roko_fs::{FileSubstrate, FsObservabilitySinks, RokoLayout};
 use roko_learn::cascade_router::{CascadeRouteExplanation, CascadeRouter};
 use roko_learn::cfactor::{CFactor, trend_arrow as cfactor_trend_arrow};
 use roko_learn::cost_table::CostTable;
+use roko_learn::costs_log::CostsLog;
 use roko_learn::efficiency::compute_role_profiles;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::latency::{LatencyRegistry, LatencyStats};
@@ -54,6 +65,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
@@ -245,6 +257,15 @@ enum Command {
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
+    /// Interactive chat REPL backed by roko-serve agent messaging.
+    Chat {
+        /// Agent ID to chat with.
+        #[arg(long, default_value = "nunchi-intelligence")]
+        agent: String,
+        /// roko-serve base URL.
+        #[arg(long, default_value = "http://localhost:6677")]
+        serve_url: String,
+    },
     /// Search durable knowledge and memory entries.
     Neuro {
         #[command(subcommand)]
@@ -414,6 +435,9 @@ enum PlanCmd {
         /// Resume from `.roko/state/executor.json` in the working directory.
         #[arg(long = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
         resume_plan: Option<PathBuf>,
+        /// Launch the connected approval TUI while the plan runs.
+        #[arg(long)]
+        approval: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -502,12 +526,12 @@ enum ResearchCmd {
     },
     /// Optimize an implementation plan with research-backed task decomposition techniques.
     EnhancePlan {
-        /// Plan directory name under plans/.
+        /// Plan directory name under .roko/plans/.
         plan: String,
     },
     /// Optimize tasks for efficiency, parallelism, and cheapest viable model.
     EnhanceTasks {
-        /// Plan directory name under plans/.
+        /// Plan directory name under .roko/plans/.
         plan: String,
     },
     /// Analyze execution episodes for self-learning insights and bandit weight recommendations.
@@ -773,10 +797,8 @@ fn main() {
     };
 
     let cli = Cli::parse();
-    let filter = tracing_subscriber::EnvFilter::try_new(
-        env::var("ROKO_LOG").unwrap_or_else(|_| "info".to_string()),
-    )
-    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = tracing_subscriber::EnvFilter::try_new(tracing_log_directive())
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"));
 
     // ROKO_LOG_RAW=1 disables secret redaction (useful for debugging).
     let raw_logs = env::var("ROKO_LOG_RAW")
@@ -787,12 +809,16 @@ fn main() {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
+                    .with_target(false)
                     .json()
                     .with_env_filter(filter)
                     .init();
             }
             LogFormat::Text => {
-                tracing_subscriber::fmt().with_env_filter(filter).init();
+                tracing_subscriber::fmt()
+                    .with_target(false)
+                    .with_env_filter(filter)
+                    .init();
             }
         }
     } else {
@@ -800,6 +826,7 @@ fn main() {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
+                    .with_target(false)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format().json(),
                         scrubber,
@@ -809,6 +836,7 @@ fn main() {
             }
             LogFormat::Text => {
                 tracing_subscriber::fmt()
+                    .with_target(false)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format(),
                         scrubber,
@@ -874,6 +902,16 @@ where
     }
 }
 
+fn tracing_log_directive() -> String {
+    tracing_log_directive_from(env::var("RUST_LOG").ok(), env::var("ROKO_LOG").ok())
+}
+
+fn tracing_log_directive_from(rust_log: Option<String>, roko_log: Option<String>) -> String {
+    rust_log
+        .or(roko_log)
+        .unwrap_or_else(|| "roko=info".to_string())
+}
+
 async fn dispatch(mut cli: Cli) -> Result<i32> {
     // If there is an explicit subcommand, handle it.
     if let Some(command) = cli.command.take() {
@@ -882,7 +920,7 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
 
     // Headless daemon mode.
     if cli.headless {
-        return Ok(cmd_headless(&cli));
+        return cmd_headless(&cli).await;
     }
 
     // One-shot mode: positional prompt argument.
@@ -937,6 +975,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Chat { agent, serve_url } => {
+            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+            Ok(EXIT_SUCCESS)
+        }
         Command::Neuro { cmd } => cmd_neuro(cli, cmd).await,
         Command::Subscription { cmd } => {
             let result = cmd_subscription(cli, cmd).await;
@@ -958,7 +1000,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             list_pages,
             text,
             workdir,
-        } => cmd_dashboard(cli, workdir, page, list_pages, text).await,
+        } => cmd_dashboard(cli, workdir, page, list_pages, text, None).await,
         Command::Serve {
             bind,
             port,
@@ -978,30 +1020,33 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
     }
 }
 
-async fn cmd_daemon(_cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
+async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
+    let workdir = resolve_workdir(cli);
     match cmd {
         DaemonCmd::Start { foreground, port } => {
-            roko_cli::daemon::daemon_start(foreground, port).await?;
+            prepare_runtime_hooks(&workdir, cli.quiet);
+            roko_cli::daemon::daemon_start(&workdir, foreground, port).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Stop => {
-            roko_cli::daemon::daemon_stop().await?;
+            roko_cli::daemon::daemon_stop(&workdir).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Status => {
-            roko_cli::daemon::daemon_status().await?;
+            roko_cli::daemon::daemon_status(&workdir).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Logs { follow, lines } => {
-            roko_cli::daemon::daemon_logs(follow, lines).await?;
+            roko_cli::daemon::daemon_logs(&workdir, follow, lines).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Reload => {
-            roko_cli::daemon::daemon_reload().await?;
+            roko_cli::daemon::daemon_reload(&workdir).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Restart { port } => {
-            roko_cli::daemon::daemon_restart(port).await?;
+            prepare_runtime_hooks(&workdir, cli.quiet);
+            roko_cli::daemon::daemon_restart(&workdir, port).await?;
             Ok(EXIT_SUCCESS)
         }
         DaemonCmd::Install => {
@@ -1092,36 +1137,11 @@ async fn cmd_event_sources(cli: &Cli, cmd: EventSourcesCmd) -> Result<i32> {
     }
 }
 
-fn cmd_headless(cli: &Cli) -> i32 {
-    let session_id = cli
-        .resume
-        .clone()
-        .unwrap_or_else(|| format!("daemon-{}", std::process::id()));
+async fn cmd_headless(cli: &Cli) -> Result<i32> {
     let workdir = resolve_workdir(cli);
     prepare_runtime_hooks(&workdir, cli.quiet);
-    let mut daemon = DaemonMode::with_workdir(&workdir, session_id);
-
-    daemon.start();
-    let status = daemon.status_summary();
-
-    if cli.json {
-        println!(
-            r#"{{"session":"{}","state":"{}","pid":{},"socket":"{}"}}"#,
-            status.session_id,
-            status.state,
-            status.pid,
-            status.socket_path.display(),
-        );
-    } else if !cli.quiet {
-        println!("{status}");
-    }
-
-    // In a real implementation this would block on a socket listener.
-    // For now, report that the daemon started and exit cleanly.
-    daemon.stop();
-    daemon.mark_stopped();
-
-    EXIT_SUCCESS
+    roko_cli::daemon::daemon_start(&workdir, false, 9090).await?;
+    Ok(EXIT_SUCCESS)
 }
 
 async fn cmd_dashboard(
@@ -1130,6 +1150,7 @@ async fn cmd_dashboard(
     page: Option<String>,
     list_pages: bool,
     text: bool,
+    state_hub: Option<roko_core::SharedStateHub>,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
@@ -1146,7 +1167,12 @@ async fn cmd_dashboard(
 
     if !text && !list_pages && std::io::stdout().is_terminal() {
         // Use the Mori-style interactive TUI with 60fps event loop.
-        if App::new_with_page(&workdir, initial_page).run().is_ok() {
+        let app = if let Some(state_hub) = state_hub.as_ref() {
+            App::new_connected_with_page(&workdir, initial_page, state_hub)
+        } else {
+            App::new_with_page(&workdir, initial_page)
+        };
+        if app.run().is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
@@ -3073,6 +3099,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         id,
                         title: "(unloaded)".into(),
                         task_count: 0,
+                        tasks_done: 0,
+                        tasks_failed: 0,
                         completed: false,
                         old_format: plan_has_old_tasks_format(&wd, p),
                         last_error: None,
@@ -3156,10 +3184,12 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             plans_dir,
             workdir,
             resume_plan,
+            approval,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
+            let state_hub = roko_core::shared_state_hub();
 
             // Create the shared metric registry and register standard metrics.
             let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
@@ -3209,6 +3239,37 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 .await?
             };
             runner.set_claude_resume_session(cli.resume.clone());
+            runner.set_state_hub(state_hub.sender());
+
+            if approval {
+                if !std::io::stdout().is_terminal() {
+                    anyhow::bail!("approval mode requires an interactive terminal");
+                }
+
+                let approval_channel = ApprovalChannel::new(16);
+                let state_hub_for_tui = state_hub.clone();
+                let workdir_for_tui = wd.clone();
+                let approval_rx = approval_channel.rx;
+                let process_supervisor: Arc<_> = runner.supervisor_handle();
+
+                std::thread::Builder::new()
+                    .name("roko-plan-approval-tui".to_string())
+                    .spawn(move || {
+                        let mut app = App::new_connected_with_page(
+                            &workdir_for_tui,
+                            None,
+                            &state_hub_for_tui,
+                        );
+                        app.set_process_supervisor(process_supervisor);
+                        app.approval_rx = Some(approval_rx);
+                        if let Err(err) = app.run() {
+                            tracing::error!(error = %err, "approval TUI exited with error");
+                        }
+                    })
+                    .context("spawn approval TUI thread")?;
+
+                runner.set_approval_tx(Some(approval_channel.tx));
+            }
 
             // Use task-driven execution (reads tasks.toml directly) instead of
             // the phase-machine executor which expects enrichment phases.
@@ -3278,9 +3339,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             })
         }
         PlanCmd::Generate { source, from_file } => {
-            use roko_cli::agent_exec::{
-                AgentExecOpts, load_gateway_env, model_from_config, run_agent,
-            };
+            use roko_cli::agent_config::{load_gateway_env, model_from_config};
+            use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let gw = load_gateway_env(&workdir);
@@ -3307,6 +3367,12 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             } else {
                 "prompt"
             };
+            let task_id = from_file
+                .as_ref()
+                .and_then(|path| path.file_stem())
+                .and_then(|stem| stem.to_str())
+                .map(|stem| format!("plan:generate:{stem}"))
+                .unwrap_or_else(|| "plan:generate:prompt".to_string());
             let system = roko_cli::plan_generate::build_generation_prompt(
                 &workdir,
                 &source_text,
@@ -3314,28 +3380,33 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             );
 
             let task_prompt = format!(
-                "Read the source below and generate implementation plan directories under plans/. \
+                "Read the source below and generate implementation plan directories under .roko/plans/. \
                  Search the codebase first to understand what exists. \
                  Create plan.md and tasks.toml files with tier, model_hint, context (read_files with line ranges), \
                  mcp_servers (per-task MCP server names), and verify steps (executable shell commands). \
                  Use the cheapest model tier for each task.\n\n{source_text}"
             );
 
-            run_agent(AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: &workdir,
-                model: model_ref,
-                effort: Some("high"),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &gw.vars,
-            })
+            run_agent_logged(
+                AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    effort: Some("high"),
+                    system_prompt: Some(&system),
+                    resume_session: None,
+                    env_vars: &gw.vars,
+                },
+                AgentExecEpisode {
+                    task_kind: "plan-generate",
+                    task_id: &task_id,
+                },
+            )
             .await
         }
         PlanCmd::Regenerate { plan_dir, dry_run } => {
-            use roko_cli::agent_exec::{
-                AgentExecOpts, load_gateway_env, model_from_config, run_agent,
-            };
+            use roko_cli::agent_config::{load_gateway_env, model_from_config};
+            use roko_cli::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 
             let workdir = std::env::current_dir().context("resolve cwd")?;
             let tasks_path = plan_dir.join("tasks.toml");
@@ -3391,16 +3462,27 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 tasks_path.display(),
                 existing = existing,
             );
+            let plan_name = plan_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            let task_id = format!("plan:regenerate:{plan_name}");
 
-            let exit_code = match run_agent(AgentExecOpts {
-                prompt: &task_prompt,
-                workdir: &workdir,
-                model: model_ref,
-                effort: Some("high"),
-                system_prompt: Some(&system),
-                resume_session: None,
-                env_vars: &gw.vars,
-            })
+            let exit_code = match run_agent_logged(
+                AgentExecOpts {
+                    prompt: &task_prompt,
+                    workdir: &workdir,
+                    model: model_ref,
+                    effort: Some("high"),
+                    system_prompt: Some(&system),
+                    resume_session: None,
+                    env_vars: &gw.vars,
+                },
+                AgentExecEpisode {
+                    task_kind: "plan-regenerate",
+                    task_id: &task_id,
+                },
+            )
             .await
             {
                 Ok(code) => code,
@@ -3562,9 +3644,8 @@ fn with_perplexity_research_model(
 }
 
 async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{
-        AgentExecOpts, load_gateway_env, model_from_config, run_agent_capture_silent,
-    };
+    use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
+    use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
     use roko_cli::research::{
         ResearchMode, build_research_prompt, build_research_prompt_gemini,
         build_research_prompt_perplexity, grounding_to_citations, save_research_with_grounding,
@@ -3578,8 +3659,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     let effort = cli.effort.map(|effort| effort.to_string());
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
-    let agent_command =
-        roko_cli::agent_exec::command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
+    let agent_command = command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
     let config = load_roko_config(&workdir).unwrap_or_default();
 
     match cmd {
@@ -4068,13 +4148,13 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             Ok(exit_code)
         }
         ResearchCmd::EnhancePlan { plan } => {
-            let plan_dir = workdir.join("plans").join(&plan);
+            let plan_dir = roko_cli::plan::plans_dir(&workdir).join(&plan);
             if !plan_dir.is_dir() {
                 anyhow::bail!("Plan directory not found: {}", plan_dir.display());
             }
             println!("🔬 Enhancing plan: {plan}");
             let task_prompt = format!(
-                "Read the plan at plans/{plan}/plan.md and plans/{plan}/tasks.toml. \
+                "Read the plan at .roko/plans/{plan}/plan.md and .roko/plans/{plan}/tasks.toml. \
                  Optimize them using research-backed techniques: \
                  (1) Better task decomposition (cite SWE-bench, Agentless). \
                  (2) More precise context injection per task (exact file:line ranges). \
@@ -4122,14 +4202,16 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             Ok(exit_code)
         }
         ResearchCmd::EnhanceTasks { plan } => {
-            let tasks_path = workdir.join("plans").join(&plan).join("tasks.toml");
+            let tasks_path = roko_cli::plan::plans_dir(&workdir)
+                .join(&plan)
+                .join("tasks.toml");
             if !tasks_path.exists() {
                 anyhow::bail!("tasks.toml not found: {}", tasks_path.display());
             }
             println!("🔬 Optimizing tasks: {plan}");
             let content = std::fs::read_to_string(&tasks_path)?;
             let task_prompt = format!(
-                "Read plans/{plan}/tasks.toml and optimize every task: \
+                "Read .roko/plans/{plan}/tasks.toml and optimize every task: \
                  (1) Split any task >50 LOC into smaller subtasks. \
                  (2) Add context.read_files with exact line ranges for each task. \
                  (3) Ensure every acceptance criterion is a runnable shell command. \
@@ -4499,15 +4581,8 @@ async fn cmd_subscription(cli: &Cli, cmd: SubscriptionCmd) -> Result<i32> {
 
 /// Find a PRD by slug in either published or drafts.
 fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
-    let published = workdir
-        .join(".roko/prd/published")
-        .join(format!("{slug}.md"));
-    if published.exists() {
-        return Ok(published);
-    }
-    let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
-    if draft.exists() {
-        return Ok(draft);
+    if let Some(path) = roko_cli::workspace_paths::find_prd_path(workdir, slug) {
+        return Ok(path);
     }
     anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
 }
@@ -4782,9 +4857,8 @@ fn preserve_completed_task_status(
 }
 
 async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
-    use roko_cli::agent_exec::{
-        AgentExecOpts, load_gateway_env, model_from_config, run_agent_capture_silent,
-    };
+    use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
+    use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
 
     let workdir = resolve_workdir(cli);
     let gw = load_gateway_env(&workdir);
@@ -4793,8 +4867,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     let effort = cli.effort.map(|effort| effort.to_string());
     let effort_ref = effort.as_deref();
     let resume_session = cli.resume.as_deref();
-    let agent_command =
-        roko_cli::agent_exec::command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
+    let agent_command = command_from_config(&workdir).unwrap_or_else(|| "claude".to_string());
 
     match cmd {
         PrdCmd::Idea { text } => {
@@ -4814,7 +4887,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             PrdDraftCmd::New { title } => {
                 let title = title.join(" ");
                 let slug = roko_cli::prd::slugify(&title);
-                let drafts = workdir.join(".roko").join("prd").join("drafts");
+                let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let target = drafts.join(format!("{slug}.md"));
                 // If the draft exists and has real content (not just scaffold),
@@ -4896,12 +4969,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 if file_was_modified {
                     // Agent wrote the file directly — verify it has content.
                     let content = std::fs::read_to_string(&target).unwrap_or_default();
-                    let has_content = content.lines().any(|l| {
-                        !l.starts_with("---")
-                            && !l.starts_with('#')
-                            && !l.starts_with("##")
-                            && !l.trim().is_empty()
-                    });
+                    let has_content = roko_cli::prd::has_substantive_markdown_content(&content);
                     if has_content {
                         println!("📄 Draft written to {}", target.display());
                     } else {
@@ -4912,11 +4980,9 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                 } else if exit_code == 0 && !output.trim().is_empty() {
                     // Agent returned content as text — write it to the file.
-                    let content = if output.trim_start().starts_with("---") {
-                        output.clone()
-                    } else {
-                        format!("{scaffold}\n{output}")
-                    };
+                    let content =
+                        roko_cli::prd::materialize_agent_markdown_output(&output, Some(&scaffold))
+                            .unwrap_or_else(|| scaffold.clone());
                     std::fs::write(&target, content)?;
                     println!("📄 Draft written to {}", target.display());
                 } else if exit_code != 0 {
@@ -4946,7 +5012,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Ok(exit_code)
             }
             PrdDraftCmd::Edit { slug } => {
-                let draft = workdir.join(".roko/prd/drafts").join(format!("{slug}.md"));
+                let draft = roko_cli::workspace_paths::draft_prd_path(&workdir, &slug);
                 if !draft.exists() {
                     eprintln!("Draft not found: {}", draft.display());
                     return Ok(1);
@@ -4956,6 +5022,9 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     &workdir,
                     &format!(
                         "Read and improve the draft PRD at {path}. \
+                         If you have file tools, update that file directly. \
+                         If you do NOT have file tools, output the complete improved PRD markdown \
+                         with YAML frontmatter and no code fences. \
                          Follow the PRD quality standards in your system prompt.",
                         path = draft.display()
                     ),
@@ -4966,9 +5035,12 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                      (2) Are acceptance criteria machine-verifiable shell commands? \
                      (3) Are there 10+ citations with [AUTHOR-YEAR] format? \
                      (4) Are there 2+ mermaid diagrams with color styling? \
-                     Search the codebase to verify claims. Update the file in place.",
+                     Search the codebase to verify claims. \
+                     If you have file tools, update the file in place. \
+                     Otherwise, output the complete improved PRD markdown with YAML frontmatter.",
                     path = draft.display()
                 );
+                let mtime_before = std::fs::metadata(&draft).and_then(|m| m.modified()).ok();
                 let started = Instant::now();
                 let (exit_code, output) = run_agent_capture_silent(AgentExecOpts {
                     prompt: &task_prompt,
@@ -4980,7 +5052,34 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     env_vars: &gw.vars,
                 })
                 .await?;
-                if !output.is_empty() {
+                let mtime_after = std::fs::metadata(&draft).and_then(|m| m.modified()).ok();
+                let file_was_modified = match (mtime_before, mtime_after) {
+                    (Some(before), Some(after)) => after > before,
+                    _ => false,
+                };
+                if file_was_modified {
+                    let content = std::fs::read_to_string(&draft).unwrap_or_default();
+                    if roko_cli::prd::has_substantive_markdown_content(&content) {
+                        println!("📄 Draft updated at {}", draft.display());
+                    } else {
+                        eprintln!(
+                            "Agent modified file but left it empty at {}",
+                            draft.display()
+                        );
+                    }
+                } else if exit_code == 0 {
+                    if let Some(content) =
+                        roko_cli::prd::materialize_agent_markdown_output(&output, None)
+                    {
+                        std::fs::write(&draft, content)?;
+                        println!("📄 Draft updated at {}", draft.display());
+                    } else {
+                        eprintln!(
+                            "Agent returned empty output. Existing draft preserved at {}",
+                            draft.display()
+                        );
+                    }
+                } else if !output.is_empty() {
                     print!("{output}");
                 }
                 let _ = persist_capture_episode(
@@ -5003,7 +5102,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 Ok(0)
             }
             PrdDraftCmd::List => {
-                let drafts = workdir.join(".roko").join("prd").join("drafts");
+                let drafts = roko_cli::workspace_paths::drafts_dir(&workdir);
                 roko_cli::prd::ensure_dirs(&workdir)?;
                 let files = roko_cli::prd::list_md_files(&drafts);
                 if files.is_empty() {
@@ -5026,7 +5125,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
             println!("🔄 Scanning all PRDs for duplicates, gaps, and inconsistencies...");
             let mut all_context = String::new();
             for dir_name in ["published", "drafts"] {
-                let dir = workdir.join(".roko/prd").join(dir_name);
+                let dir = roko_cli::workspace_paths::prd_dir(&workdir).join(dir_name);
                 for path in roko_cli::prd::list_md_files(&dir) {
                     if let Ok(c) = std::fs::read_to_string(&path) {
                         let truncated: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
@@ -5034,8 +5133,8 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     }
                 }
             }
-            let ideas =
-                std::fs::read_to_string(workdir.join(".roko/prd/ideas.md")).unwrap_or_default();
+            let ideas = std::fs::read_to_string(roko_cli::workspace_paths::ideas_path(&workdir))
+                .unwrap_or_default();
             let task_prompt = format!(
                 "Review ALL existing PRDs and ideas. Report: \
                  (1) DUPLICATES: PRDs covering the same thing (propose merge). \
@@ -5175,6 +5274,14 @@ async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<
 
 async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Result<()> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    if !cli.quiet {
+        tracing::info!(
+            workdir = %workdir.display(),
+            json = cli.json,
+            cfactor,
+            "collecting status snapshot"
+        );
+    }
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
         .map_err(|e| anyhow!("open substrate: {e}"))?;
@@ -5204,6 +5311,16 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     } else {
         "→"
     };
+    let learn_dir = workdir.join(".roko").join("learn");
+    let costs_log = CostsLog::at(learn_dir.join("costs.jsonl"));
+    let total_cost_usd = costs_log.total_cost().await.ok();
+    let today_cost_usd = costs_log
+        .daily_cost(1)
+        .await
+        .ok()
+        .and_then(|days| days.last().map(|(_, cost)| *cost));
+    let cost_by_model = costs_log.cost_by_model().await.unwrap_or_default();
+    let cost_by_plan = costs_log.cost_by_plan().await.unwrap_or_default();
 
     if cli.json {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -5219,6 +5336,8 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             episode_count: Some(episode_count),
             last_episode_passed: None,
             cfactor: cfactor_snapshot,
+            total_cost_usd,
+            today_cost_usd,
         };
         println!("{}", status.display_json());
         return Ok(());
@@ -5275,7 +5394,6 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     println!("gate verdicts: {passed} pass / {failed} fail");
 
     // Learning subsystem stats.
-    let learn_dir = workdir.join(".roko").join("learn");
     let efficiency_path = learn_dir.join("efficiency.jsonl");
     match read_efficiency_events(&efficiency_path).await {
         Ok(events) if !events.is_empty() => {
@@ -5329,6 +5447,23 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
         }
     }
 
+    if total_cost_usd.is_some() || !cost_by_model.is_empty() || !cost_by_plan.is_empty() {
+        println!();
+        println!("Cost Summary:");
+        if let Some(total_cost_usd) = total_cost_usd {
+            println!("  Total:    ${total_cost_usd:.4}");
+        }
+        if let Some(today_cost_usd) = today_cost_usd {
+            println!("  Today:    ${today_cost_usd:.4}");
+        }
+        if !cost_by_model.is_empty() {
+            println!("  By model: {}", format_cost_breakdown(&cost_by_model, 5));
+        }
+        if !cost_by_plan.is_empty() {
+            println!("  By plan:  {}", format_cost_breakdown(&cost_by_plan, 5));
+        }
+    }
+
     // Health probes — quick snapshot of orchestrator readiness.
     let health_probes = roko_core::obs::health::ProbeRegistry::new();
     health_probes.register(std::sync::Arc::new(
@@ -5371,6 +5506,28 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
     }
 
     Ok(())
+}
+
+fn format_cost_breakdown(costs: &HashMap<String, f64>, limit: usize) -> String {
+    let mut entries = costs
+        .iter()
+        .map(|(name, cost)| (name.as_str(), *cost))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_name, left_cost), (right_name, right_cost)| {
+        right_cost
+            .total_cmp(left_cost)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    entries.truncate(limit);
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+
+    entries
+        .into_iter()
+        .map(|(name, cost)| format!("{name}=${cost:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
@@ -7208,5 +7365,20 @@ mod tests {
             output.contains("[REDACTED:MY_TOKEN]"),
             "should use named redaction, got: {output}"
         );
+    }
+
+    #[test]
+    fn tracing_log_directive_prefers_rust_log() {
+        let directive = tracing_log_directive_from(Some("roko=debug".into()), Some("info".into()));
+        assert_eq!(directive, "roko=debug");
+    }
+
+    #[test]
+    fn tracing_log_directive_falls_back_to_roko_log_and_default() {
+        let directive = tracing_log_directive_from(None, Some("roko=trace".into()));
+        assert_eq!(directive, "roko=trace");
+
+        let default_directive = tracing_log_directive_from(None, None);
+        assert_eq!(default_directive, "roko=info");
     }
 }

@@ -11,7 +11,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::super::state::{PlanEntry, TuiState};
-use super::rosedust::{MoriTheme, gradient_ocean};
+use super::rosedust::gradient_ocean;
+use crate::tui::Theme;
+use crate::tui::util::truncate_middle;
 
 // ---------------------------------------------------------------------------
 // Fixed column widths (chars)
@@ -31,29 +33,29 @@ const RESERVED: u16 = (COL_PROGRESS + COL_BAR + COL_DELTA + COL_VERIFY + COL_AGE
 
 /// Status icon and style for a plan entry.
 fn plan_icon(plan: &PlanEntry) -> (&'static str, Style) {
-    if !plan.active && (plan.phase == "done" || plan.phase == "completed") {
+    if !plan.active && plan.status.is_done() {
         (
             "\u{2713}", // ✓
-            Style::default().fg(MoriTheme::SAGE),
+            Style::default().fg(Theme::SAGE),
         )
-    } else if !plan.active && plan.phase == "failed" {
+    } else if !plan.active && plan.status.is_failed() {
         (
             "\u{2717}", // ✗
             Style::default()
-                .fg(MoriTheme::EMBER)
+                .fg(Theme::EMBER)
                 .add_modifier(Modifier::BOLD),
         )
     } else if plan.active {
         (
             "\u{25b6}", // ▶
             Style::default()
-                .fg(MoriTheme::WARNING)
+                .fg(Theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         (
             "\u{25cb}", // ○
-            Style::default().fg(MoriTheme::TEXT_GHOST),
+            Style::default().fg(Theme::TEXT_GHOST),
         )
     }
 }
@@ -75,7 +77,7 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     let failed = state
         .plans
         .iter()
-        .filter(|p| !p.active && p.phase == "failed")
+        .filter(|p| !p.active && p.status.is_failed())
         .count();
 
     let health_suffix = {
@@ -93,20 +95,36 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
         }
     };
 
-    let title = if focused {
-        format!("Plans ({completed}/{total}{health_suffix}) [Enter:detail h/l:tree]")
+    let active_filter = active_filter_text(state);
+    let filtered_plan_indices = filtered_plan_indices(state, active_filter.as_deref());
+    let filtered_total = filtered_plan_indices.len();
+    let selected_plan_idx = clamped_selected_plan_idx(state.selected_plan_idx, filtered_total);
+    let selected_plan_id = filtered_plan_indices
+        .get(selected_plan_idx)
+        .and_then(|&idx| state.plans.get(idx))
+        .map(|plan| plan.id.as_str());
+    let filtered_suffix = if active_filter.is_some() {
+        format!(", {filtered_total}/{total} filtered")
     } else {
-        format!("Plans ({completed}/{total}{health_suffix})")
+        String::new()
+    };
+
+    let title = if focused {
+        format!(
+            "Plans ({completed}/{total}{health_suffix}{filtered_suffix}) [Enter:detail h/l:tree]"
+        )
+    } else {
+        format!("Plans ({completed}/{total}{health_suffix}{filtered_suffix})")
     };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Filter indicator
-    if !state.filter.is_empty() {
+    if active_filter.is_some() {
         lines.push(Line::from(vec![
-            Span::styled(" /", Style::default().fg(MoriTheme::DREAM)),
-            Span::styled(state.filter.clone(), Style::default().fg(MoriTheme::BONE)),
-            Span::styled("/ ", Style::default().fg(MoriTheme::DREAM)),
+            Span::styled(" /", Style::default().fg(Theme::DREAM)),
+            Span::styled(state.filter.clone(), Style::default().fg(Theme::BONE)),
+            Span::styled("/ ", Style::default().fg(Theme::DREAM)),
         ]));
     }
 
@@ -116,27 +134,38 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     }
 
     if state.execution_waves.is_empty() {
-        render_flat_plans(&mut lines, state, focused, area);
+        render_flat_plans(
+            &mut lines,
+            state,
+            focused,
+            area,
+            selected_plan_id,
+            active_filter.as_deref(),
+        );
     } else {
-        render_wave_tree(&mut lines, state, focused, area);
+        render_wave_tree(
+            &mut lines,
+            state,
+            focused,
+            area,
+            selected_plan_id,
+            active_filter.as_deref(),
+        );
     }
 
     // Border styling
     let (border_style, title_style) = if focused {
-        (
-            MoriTheme::focused_border_style(),
-            MoriTheme::focused_title_style(),
-        )
+        (Theme::focused_border_style(), Theme::focused_title_style())
     } else {
         (
-            MoriTheme::unfocused_border_style(),
-            MoriTheme::unfocused_title_style(),
+            Theme::unfocused_border_style(),
+            Theme::unfocused_title_style(),
         )
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(MoriTheme::block_style())
+        .style(Theme::block_style())
         .border_style(border_style)
         .title_style(title_style);
 
@@ -144,9 +173,8 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
     let total_lines = lines.len();
 
     // Scroll to keep selected visible
-    let scroll_offset = state
-        .plan_scroll
-        .min(total_lines.saturating_sub(visible_height));
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll_offset = state.plan_scroll_offset.min(max_scroll);
     let visible: Vec<Line> = lines
         .into_iter()
         .skip(scroll_offset)
@@ -174,8 +202,30 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
 // Wave tree rendering
 // ---------------------------------------------------------------------------
 
-fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: bool, area: Rect) {
+fn render_wave_tree(
+    lines: &mut Vec<Line<'static>>,
+    state: &TuiState,
+    focused: bool,
+    area: Rect,
+    selected_plan_id: Option<&str>,
+    filter_lower: Option<&str>,
+) {
+    let selected_wave = state
+        .execution_waves
+        .get(state.current_wave())
+        .map(|wave| wave.index);
+
     for wave in &state.execution_waves {
+        let wave_plans: Vec<&PlanEntry> = wave
+            .plans
+            .iter()
+            .filter_map(|plan_id| state.plans.iter().find(|p| p.id == *plan_id))
+            .filter(|plan| matches_filter(plan, filter_lower))
+            .collect();
+        if wave_plans.is_empty() {
+            continue;
+        }
+
         let all_done = wave.done == wave.total && wave.total > 0;
         let any_active = wave
             .plans
@@ -186,19 +236,19 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
         let (wave_icon, wave_style) = if all_done {
             (
                 "\u{2713}", // ✓
-                Style::default().fg(MoriTheme::SAGE),
+                Style::default().fg(Theme::SAGE),
             )
         } else if any_active {
             (
                 "\u{25b6}", // ►
                 Style::default()
-                    .fg(MoriTheme::ROSE)
+                    .fg(Theme::ROSE)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
             (
                 "\u{00b7}", // ·
-                Style::default().fg(MoriTheme::TEXT_GHOST),
+                Style::default().fg(Theme::TEXT_GHOST),
             )
         };
 
@@ -207,22 +257,29 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
         } else {
             "\u{25b8}"
         }; // ▾ / ▸
+        let wave_selected = selected_wave == Some(wave.index);
+        let header_bg = if wave_selected {
+            Theme::BG_SECONDARY
+        } else {
+            Theme::BG
+        };
 
         let mut wave_spans = vec![
             Span::styled(
                 format!(" {collapse_icon} "),
-                Style::default().fg(MoriTheme::FG_DIM),
+                Style::default().fg(Theme::FG_DIM).bg(header_bg),
             ),
-            Span::styled(format!("{wave_icon} "), wave_style),
+            Span::styled(format!("{wave_icon} "), wave_style.bg(header_bg)),
             Span::styled(
                 format!("Wave {} ", wave.index),
                 Style::default()
-                    .fg(MoriTheme::BONE_DIM)
+                    .fg(Theme::BONE_DIM)
+                    .bg(header_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("({}/{}) ", wave.done, wave.total),
-                Style::default().fg(MoriTheme::FG_DIM),
+                Style::default().fg(Theme::FG_DIM).bg(header_bg),
             ),
         ];
 
@@ -246,13 +303,13 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
                 state
                     .plans
                     .iter()
-                    .any(|p| p.id == **plan_id && !p.active && p.phase == "failed")
+                    .any(|p| p.id == **plan_id && !p.active && p.status.is_failed())
             })
             .count();
         if wave_failed > 0 {
             wave_spans.push(Span::styled(
                 format!(" \u{2717}{wave_failed}"),
-                Style::default().fg(MoriTheme::EMBER),
+                Style::default().fg(Theme::EMBER),
             ));
         }
 
@@ -262,7 +319,7 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
         if avail > used + 1 {
             wave_spans.push(Span::styled(
                 format!(" {}", "\u{2500}".repeat(avail - used - 1)),
-                Style::default().fg(MoriTheme::TEXT_GHOST),
+                Style::default().fg(Theme::TEXT_GHOST).bg(header_bg),
             ));
         }
         lines.push(Line::from(wave_spans));
@@ -272,12 +329,16 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
         }
 
         // Plans within wave
-        for plan_id in &wave.plans {
-            if let Some(plan) = state.plans.iter().find(|p| p.id == *plan_id) {
-                if matches_filter(plan, &state.filter) {
-                    render_plan_line(lines, plan, state, focused, area, true);
-                }
-            }
+        for plan in wave_plans {
+            render_plan_line(
+                lines,
+                plan,
+                focused,
+                area,
+                true,
+                selected_plan_id,
+                wave_selected,
+            );
         }
     }
 }
@@ -286,10 +347,17 @@ fn render_wave_tree(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: b
 // Flat plan list (no waves)
 // ---------------------------------------------------------------------------
 
-fn render_flat_plans(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: bool, area: Rect) {
+fn render_flat_plans(
+    lines: &mut Vec<Line<'static>>,
+    state: &TuiState,
+    focused: bool,
+    area: Rect,
+    selected_plan_id: Option<&str>,
+    filter_lower: Option<&str>,
+) {
     for plan in &state.plans {
-        if matches_filter(plan, &state.filter) {
-            render_plan_line(lines, plan, state, focused, area, false);
+        if matches_filter(plan, filter_lower) {
+            render_plan_line(lines, plan, focused, area, false, selected_plan_id, false);
         }
     }
 }
@@ -301,33 +369,35 @@ fn render_flat_plans(lines: &mut Vec<Line<'static>>, state: &TuiState, focused: 
 fn render_plan_line(
     lines: &mut Vec<Line<'static>>,
     plan: &PlanEntry,
-    state: &TuiState,
     focused: bool,
     area: Rect,
     indented: bool,
+    selected_plan_id: Option<&str>,
+    wave_selected: bool,
 ) {
-    let plan_idx = state.plans.iter().position(|p| p.id == plan.id);
-    let is_selected = focused && plan_idx.map(|i| i == state.selected_plan).unwrap_or(false);
+    let is_selected = focused && selected_plan_id == Some(plan.id.as_str());
 
     let (icon, icon_style) = plan_icon(plan);
 
     // Text styling by plan status
-    let text_style = if !plan.active && (plan.phase == "done" || plan.phase == "completed") {
-        Style::default().fg(MoriTheme::SAGE)
+    let text_style = if !plan.active && plan.status.is_done() {
+        Style::default().fg(Theme::SAGE)
     } else if plan.active {
         Style::default()
-            .fg(MoriTheme::ROSE_BRIGHT)
+            .fg(Theme::ROSE_BRIGHT)
             .add_modifier(Modifier::BOLD)
-    } else if plan.phase == "failed" {
-        Style::default().fg(MoriTheme::EMBER)
+    } else if plan.status.is_failed() {
+        Style::default().fg(Theme::EMBER)
     } else {
-        Style::default().fg(MoriTheme::TEXT_DIM)
+        Style::default().fg(Theme::TEXT_DIM)
     };
 
     let bg = if is_selected {
-        MoriTheme::BG_HIGHLIGHT
+        Theme::BG_HIGHLIGHT
+    } else if wave_selected {
+        Theme::BG_SECONDARY
     } else {
-        MoriTheme::BG
+        Theme::BG
     };
     let icon_s = if is_selected {
         icon_style.bg(bg)
@@ -352,19 +422,19 @@ fn render_plan_line(
     // Progress cell (6 chars): e.g. " 3/10"
     let progress_cell = if plan.tasks_total > 0 {
         let color = if !plan.active && plan.tasks_failed == 0 {
-            MoriTheme::SAGE
+            Theme::SAGE
         } else if plan.active {
             if fill_pct >= 0.999 {
-                MoriTheme::WARNING
+                Theme::WARNING
             } else {
-                MoriTheme::semantic_color(fill_pct)
+                Theme::semantic_color(fill_pct)
             }
-        } else if plan.phase == "failed" {
-            MoriTheme::EMBER
+        } else if plan.status.is_failed() {
+            Theme::EMBER
         } else if plan.tasks_done == 0 {
-            MoriTheme::TEXT_GHOST
+            Theme::TEXT_GHOST
         } else {
-            MoriTheme::TEXT_DIM
+            Theme::TEXT_DIM
         };
         (
             format!(
@@ -377,7 +447,7 @@ fn render_plan_line(
     } else {
         (
             format!("{:>width$}", "\u{00b7}", width = COL_PROGRESS),
-            MoriTheme::TEXT_PHANTOM,
+            Theme::TEXT_PHANTOM,
         )
     };
 
@@ -386,15 +456,15 @@ fn render_plan_line(
         let filled = ((fill_pct.clamp(0.0, 1.0)) * COL_BAR as f64).round() as usize;
         let empty = COL_BAR.saturating_sub(filled);
         let bar_color = if !plan.active && plan.tasks_failed == 0 {
-            MoriTheme::SAGE
+            Theme::SAGE
         } else if plan.active && fill_pct >= 0.999 {
-            MoriTheme::WARNING
-        } else if plan.phase == "failed" {
-            MoriTheme::EMBER
+            Theme::WARNING
+        } else if plan.status.is_failed() {
+            Theme::EMBER
         } else if plan.tasks_done == 0 && !plan.active {
-            MoriTheme::TEXT_PHANTOM
+            Theme::TEXT_PHANTOM
         } else {
-            MoriTheme::semantic_color(fill_pct)
+            Theme::semantic_color(fill_pct)
         };
         (
             format!(
@@ -407,7 +477,7 @@ fn render_plan_line(
     } else {
         (
             format!("{:>width$}", "\u{00b7}", width = COL_BAR),
-            MoriTheme::TEXT_PHANTOM,
+            Theme::TEXT_PHANTOM,
         )
     };
 
@@ -419,19 +489,19 @@ fn render_plan_line(
                 truncate_middle(&format!("\u{2717}{}", plan.tasks_failed), COL_DELTA),
                 width = COL_DELTA
             ),
-            MoriTheme::EMBER,
+            Theme::EMBER,
         )
     } else {
         (
             format!("{:>width$}", "\u{00b7}", width = COL_DELTA),
-            MoriTheme::TEXT_PHANTOM,
+            Theme::TEXT_PHANTOM,
         )
     };
 
     // Verify cell (3 chars): placeholder
     let verify_cell = (
         format!("{:>width$}", "\u{00b7}", width = COL_VERIFY),
-        MoriTheme::TEXT_PHANTOM,
+        Theme::TEXT_PHANTOM,
     );
 
     // Age cell (6 chars): elapsed time
@@ -442,12 +512,12 @@ fn render_plan_line(
                 truncate_middle(&format_duration(plan.elapsed_secs), COL_AGE),
                 width = COL_AGE
             ),
-            MoriTheme::TEXT_DIM,
+            Theme::TEXT_DIM,
         )
     } else {
         (
             format!("{:>width$}", "\u{00b7}", width = COL_AGE),
-            MoriTheme::TEXT_PHANTOM,
+            Theme::TEXT_PHANTOM,
         )
     };
 
@@ -475,7 +545,7 @@ fn render_plan_line(
             text_s.bg(bg),
         )
     } else {
-        let phase_color = MoriTheme::phase_accent(&plan.phase);
+        let phase_color = Theme::phase_accent(&plan.phase);
         let padded = format!("{title_text:<width$}", width = available_title);
         let style = if plan.active {
             text_s.fg(phase_color).bg(bg)
@@ -488,7 +558,7 @@ fn render_plan_line(
     let sep = |bg_c: Color| {
         Span::styled(
             "\u{2502}",
-            Style::default().fg(MoriTheme::TEXT_PHANTOM).bg(bg_c),
+            Style::default().fg(Theme::TEXT_PHANTOM).bg(bg_c),
         )
     };
 
@@ -516,27 +586,25 @@ fn render_plan_line(
         if plan.tasks_total > 0 {
             detail_spans.push(Span::styled(
                 compact_progress_glyphs(8, fill_pct),
-                Style::default()
-                    .fg(MoriTheme::semantic_color(fill_pct))
-                    .bg(bg),
+                Style::default().fg(Theme::semantic_color(fill_pct)).bg(bg),
             ));
             detail_spans.push(Span::styled(
                 "  ",
-                Style::default().fg(MoriTheme::TEXT_PHANTOM).bg(bg),
+                Style::default().fg(Theme::TEXT_PHANTOM).bg(bg),
             ));
         }
 
         let mut detail_parts: Vec<(String, Color)> = Vec::new();
         if !plan.phase.is_empty() {
-            detail_parts.push((format!("phase {}", plan.phase), MoriTheme::ROSE_DIM));
+            detail_parts.push((format!("phase {}", plan.phase), Theme::ROSE_DIM));
         }
         if plan.tasks_failed > 0 {
-            detail_parts.push((format!("{} failed", plan.tasks_failed), MoriTheme::EMBER));
+            detail_parts.push((format!("{} failed", plan.tasks_failed), Theme::EMBER));
         }
         if plan.elapsed_secs > 0.0 {
             detail_parts.push((
                 format!("elapsed {}", format_duration(plan.elapsed_secs)),
-                MoriTheme::TEXT_GHOST,
+                Theme::TEXT_GHOST,
             ));
         }
 
@@ -544,7 +612,7 @@ fn render_plan_line(
             if idx > 0 {
                 detail_spans.push(Span::styled(
                     " \u{00b7} ",
-                    Style::default().fg(MoriTheme::TEXT_PHANTOM).bg(bg),
+                    Style::default().fg(Theme::TEXT_PHANTOM).bg(bg),
                 ));
             }
             detail_spans.push(Span::styled(
@@ -565,36 +633,36 @@ fn render_plan_line(
 fn render_column_header(area: Rect) -> Line<'static> {
     let reserved: u16 = (COL_PROGRESS + COL_BAR + COL_DELTA + COL_VERIFY + COL_AGE + 5) as u16;
     let title_width = area.width.saturating_sub(reserved + 3).max(10) as usize;
-    let sep = Span::styled("\u{2502}", Style::default().fg(MoriTheme::TEXT_PHANTOM));
+    let sep = Span::styled("\u{2502}", Style::default().fg(Theme::TEXT_PHANTOM));
     Line::from(vec![
         Span::styled(
             format!(" {:<width$}", "plan", width = title_width),
-            Style::default().fg(MoriTheme::TEXT_GHOST),
+            Style::default().fg(Theme::TEXT_GHOST),
         ),
         sep.clone(),
         Span::styled(
             format!("{:>6}", "prog"),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ),
         sep.clone(),
         Span::styled(
             format!("{:>8}", "bar"),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ),
         sep.clone(),
         Span::styled(
             format!("{:>8}", "delta"),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ),
         sep.clone(),
         Span::styled(
             format!("{:>3}", "vfy"),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ),
         sep,
         Span::styled(
             format!("{:>6}", "age"),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ),
     ])
 }
@@ -627,41 +695,10 @@ fn render_gradient_bar(width: usize, fill_pct: f64, heartbeat: Option<f64>) -> V
     if empty > 0 {
         spans.push(Span::styled(
             "\u{2500}".repeat(empty),
-            Style::default().fg(MoriTheme::TEXT_PHANTOM),
+            Style::default().fg(Theme::TEXT_PHANTOM),
         ));
     }
     spans
-}
-
-// ---------------------------------------------------------------------------
-// Data-rain fill for empty space
-// ---------------------------------------------------------------------------
-
-fn render_data_rain(frame: &mut Frame<'_>, area: Rect, elapsed: f64, progress: f64) {
-    // Subtle animated rain effect — density increases with progress
-    let base_density = 0.02 + progress * 0.08;
-    let buf = frame.buffer_mut();
-
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            // Pseudo-random using position and time
-            let seed = (x as f64 * 13.37 + y as f64 * 7.31 + elapsed * 2.0).sin();
-            if seed.abs() < base_density {
-                let ch = match ((seed * 1000.0).abs() as usize) % 4 {
-                    0 => '\u{00b7}', // ·
-                    1 => '\u{2502}', // │
-                    2 => '\u{2500}', // ─
-                    _ => '\u{00b0}', // °
-                };
-                let brightness = 0.3 + (seed.abs() * 0.7);
-                let color = super::rosedust::brighten(MoriTheme::TEXT_PHANTOM, brightness);
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
-                    cell.set_fg(color);
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -697,9 +734,9 @@ fn render_scrollbar(
         let y = area.y + i as u16;
         let in_thumb = i >= thumb_top && i < thumb_top + thumb_height;
         let (ch, color) = if in_thumb {
-            ('\u{2588}', MoriTheme::ROSE_DIM) // █
+            ('\u{2588}', Theme::ROSE_DIM) // █
         } else {
-            ('\u{2502}', MoriTheme::TEXT_PHANTOM) // │
+            ('\u{2502}', Theme::TEXT_PHANTOM) // │
         };
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_char(ch);
@@ -712,13 +749,37 @@ fn render_scrollbar(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn matches_filter(plan: &PlanEntry, filter: &str) -> bool {
-    if filter.is_empty() {
-        return true;
+fn active_filter_text(state: &TuiState) -> Option<String> {
+    let filter = state.filter.trim();
+    if state.filter_active && !filter.is_empty() {
+        Some(filter.to_lowercase())
+    } else {
+        None
     }
-    let lower = plan.name.to_lowercase();
-    let filter_lower = filter.to_lowercase();
-    lower.contains(&filter_lower)
+}
+
+fn filtered_plan_indices(state: &TuiState, filter_lower: Option<&str>) -> Vec<usize> {
+    state
+        .plans
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, plan)| matches_filter(plan, filter_lower).then_some(idx))
+        .collect()
+}
+
+fn clamped_selected_plan_idx(selected_plan_idx: usize, filtered_total: usize) -> usize {
+    if filtered_total == 0 {
+        0
+    } else {
+        selected_plan_idx.min(filtered_total - 1)
+    }
+}
+
+fn matches_filter(plan: &PlanEntry, filter_lower: Option<&str>) -> bool {
+    let Some(filter_lower) = filter_lower else {
+        return true;
+    };
+    plan.name.to_lowercase().contains(filter_lower)
 }
 
 fn compact_progress_glyphs(width: usize, fill_pct: f64) -> String {
@@ -767,30 +828,6 @@ fn format_duration(secs: f64) -> String {
     } else {
         format!("{}s", s)
     }
-}
-
-fn truncate_middle(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    if max <= 3 {
-        return "\u{2026}".repeat(max);
-    }
-    let keep_left = (max - 1) / 2;
-    let keep_right = max - keep_left - 1;
-    let left: String = s.chars().take(keep_left).collect();
-    let right: String = s
-        .chars()
-        .rev()
-        .take(keep_right)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{left}\u{2026}{right}")
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +905,17 @@ mod tests {
         state
     }
 
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn plan_tree_renders_without_panic() {
         let backend = TestBackend::new(100, 20);
@@ -911,7 +959,31 @@ mod tests {
     }
 
     #[test]
-    fn truncate_middle_edge_cases() {
+    fn plan_tree_filters_visible_plans_and_clamps_selection() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = sample_state();
+        state.filter_active = true;
+        state.filter = "BETA".into();
+        state.selected_plan_idx = 2;
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_plan_tree(frame, area, &state, true);
+            })
+            .unwrap();
+
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("1/3 filtered"), "{rendered}");
+        assert!(rendered.contains("plan-beta"), "{rendered}");
+        assert!(!rendered.contains("plan-alpha"), "{rendered}");
+        assert!(!rendered.contains("plan-gamma"), "{rendered}");
+        assert!(rendered.contains("phase done"), "{rendered}");
+    }
+
+    #[test]
+    fn middle_truncation_edge_cases() {
         assert_eq!(truncate_middle("hello", 10), "hello");
         assert_eq!(truncate_middle("hello world", 5), "he\u{2026}ld");
         assert_eq!(truncate_middle("abc", 0), "");

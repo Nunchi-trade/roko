@@ -13,11 +13,11 @@ roko-core = { path = "../roko-core" }
 ## What's shipped
 
 - **`plan_discovery`** — scan a plans directory, parse YAML frontmatter, return ranked `PlanInfo` entries.
-- **`dag`** — `UnifiedTaskDag` builds a cross-plan task DAG from intra-plan `depends_on`, cross-plan `depends_on`, plan-level `depends_on`, and optional file-overlap inference. Layered into `ExecutionWave`s via BFS.
+- **`dag`** — `UnifiedTaskDag` builds a cross-plan task DAG from intra-plan `depends_on`, cross-plan `depends_on`, plan-level `depends_on`, and optional file-overlap inference. It now also exposes CPM analysis, zero-slack critical-path extraction, linear-chain fusion, an incremental DAG wrapper, and live mutation support.
+- **`executor`** — `ParallelExecutor` still drives plan phases, and now tracks speculative execution branches plus serializable DAG mutation requests for the runtime boundary.
 
 ## What's *not* yet built
 
-- **Executor** — no code that actually runs tasks through agents + gates.
 - **Worktree manager** — no isolation between parallel tasks.
 - **Merge queue** — no commit-and-integrate loop.
 

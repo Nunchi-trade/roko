@@ -131,13 +131,11 @@ pub fn build_research_prompt(
     let _ = writeln!(prompt, "## Workspace: {}\n", workdir.display());
 
     // Include master index so the agent knows what exists
-    let master_index = std::fs::read_to_string(workdir.join(".roko/INDEX.md")).unwrap_or_default();
-    if !master_index.is_empty() {
-        let _ = writeln!(
-            prompt,
-            "## What already exists (do NOT duplicate)\n{master_index}\n---\n"
-        );
-    }
+    crate::index::append_master_index_prompt(
+        &mut prompt,
+        workdir,
+        "## What already exists (do NOT duplicate)",
+    );
 
     match mode {
         ResearchMode::Topic => {

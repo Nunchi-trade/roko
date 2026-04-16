@@ -198,6 +198,8 @@ impl ProviderAdapter for PerplexityAdapter {
             )));
         }
 
+        // Deep-research / async models follow a dedicated provider flow and do not
+        // participate in the shared tool-loop dispatcher.
         if model.supports_async {
             let name = agent_name(options, &format!("perplexity-deep:{}", model.slug));
             let timeout_ms = options.timeout_ms.unwrap_or(30_000);

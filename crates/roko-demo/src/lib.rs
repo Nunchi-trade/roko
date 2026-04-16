@@ -23,13 +23,19 @@
 //! See `roko/demo/` for the declarative config + scenarios consumed by this
 //! crate's `roko-demo` binary.
 
+pub mod autonomous;
+pub mod benchmark;
 pub mod bindings;
 pub mod chain_ctx;
 pub mod deploy;
+pub mod events;
 pub mod fixtures;
 pub mod manifest;
 pub mod scenarios;
+pub mod tournament;
+pub mod tui;
 pub mod verify;
+pub mod ws_server;
 
 pub use chain_ctx::ChainCtx;
 pub use deploy::{ContractArtifact, DeployCtx, DeployedSuite, deploy_suite};

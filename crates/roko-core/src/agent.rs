@@ -365,7 +365,10 @@ pub fn score_model_for_task(
         score += (ratio.min(2.0) - 1.0).max(0.0) * 0.15;
     }
 
-    match (requirements.max_cost_output_per_m, profile.cost_output_per_m) {
+    match (
+        requirements.max_cost_output_per_m,
+        profile.cost_output_per_m,
+    ) {
         (Some(max_cost), Some(model_cost)) if max_cost > 0.0 => {
             score += ((max_cost - model_cost) / max_cost).max(0.0) * 0.35;
         }

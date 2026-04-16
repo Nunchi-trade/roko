@@ -7,6 +7,7 @@
 
 use roko_core::{PlanPhase, Verdict};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Mutable per-plan state held by the executor.
 ///
@@ -124,12 +125,33 @@ impl PlanState {
         self.iteration += 1;
         self.last_error = None;
     }
+
+    /// Reset the plan to the queued state after a structural re-plan.
+    ///
+    /// This preserves historical file-change context but clears execution
+    /// bookkeeping so the plan can be re-dispatched cleanly.
+    pub fn restart_for_replan(&mut self) {
+        self.reset_for_retry();
+        self.current_phase = PlanPhase::Queued;
+        self.assigned_agents.clear();
+        self.merge_attempts = 0;
+        self.paused = false;
+        self.started_at_ms = current_timestamp_ms();
+    }
 }
 
 impl Default for PlanState {
     fn default() -> Self {
         Self::new("")
     }
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
 }
 
 #[cfg(test)]

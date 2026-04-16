@@ -1,8 +1,12 @@
 //! Scorers for prompt sections.
 //!
 //! `SectionScorer` ranks `Engram<PromptSection>` inputs by priority, recency,
-//! and cache-layer fit. The `HighestScoreRouter` can use this scorer to pick
-//! the most important section when the composer's budget is tight.
+//! and cache-layer fit. `ActiveInferenceScorer` adds goal-directed scoring for
+//! router-facing composition surfaces so budget pressure keeps sections that
+//! are both goal-aligned and information-bearing.
+
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use crate::prompt::{PromptSection, SectionPriority};
 use roko_core::{Context, Engram, Score, Scorer};
@@ -85,10 +89,220 @@ impl Scorer for SectionScorer {
     }
 }
 
+/// Goal-directed scorer that approximates expected free energy for prompt sections.
+///
+/// Pragmatic value is derived from similarity between the current goal embedding
+/// and the section embedding. Epistemic value is shaped by belief strength over
+/// the section's topic plus an uncertainty bonus for underexplored sections.
+#[derive(Clone, Debug)]
+pub struct ActiveInferenceScorer {
+    goal_text: String,
+    goal_embeddings: Vec<f32>,
+    prior_beliefs: HashMap<String, f64>,
+    embedding_dimensions: usize,
+}
+
+impl ActiveInferenceScorer {
+    /// Create a scorer for a specific goal string.
+    #[must_use]
+    pub fn new(goal: impl AsRef<str>) -> Self {
+        let goal_text = goal.as_ref().to_ascii_lowercase();
+        let embedding_dimensions = 32;
+        Self {
+            goal_text: goal_text.clone(),
+            goal_embeddings: embed_text(&goal_text, embedding_dimensions),
+            prior_beliefs: HashMap::new(),
+            embedding_dimensions,
+        }
+    }
+
+    /// Attach topic prior beliefs, keyed by section name or topic label.
+    #[must_use]
+    pub fn with_prior_beliefs(mut self, prior_beliefs: HashMap<String, f64>) -> Self {
+        self.prior_beliefs = prior_beliefs;
+        self
+    }
+
+    fn section_embedding(&self, signal: &Engram) -> Vec<f32> {
+        let section = PromptSection::from_signal(signal).ok();
+        let mut text = String::new();
+        if let Some(section) = section {
+            text.push_str(&section.name);
+            text.push('\n');
+            text.push_str(&section.content);
+        } else {
+            text.push_str(signal.kind.as_str());
+            text.push('\n');
+            if let Some(text_body) = signal.body.as_text().ok() {
+                text.push_str(text_body);
+            }
+        }
+        embed_text(&text, self.embedding_dimensions)
+    }
+
+    fn topic_belief(&self, signal: &Engram, section: Option<&PromptSection>) -> f64 {
+        let mut keys = Vec::new();
+        if let Some(section) = section {
+            keys.push(section.name.as_str());
+        }
+        if let Some(name) = signal.tag("name") {
+            keys.push(name);
+        }
+        if let Some(topic) = signal.tag("topic") {
+            keys.push(topic);
+        }
+        if let Some(cache_layer) = signal.tag("cache_layer") {
+            keys.push(cache_layer);
+        }
+
+        for key in keys {
+            if let Some(belief) = self.prior_beliefs.get(key) {
+                return belief.clamp(0.0, 1.0);
+            }
+        }
+
+        0.5
+    }
+
+    fn pragmatic_value(&self, signal: &Engram, section: Option<&PromptSection>) -> f32 {
+        let section_embedding = self.section_embedding(signal);
+        let embedding_similarity = cosine_similarity(&self.goal_embeddings, &section_embedding);
+        let lexical_similarity = section
+            .map(|section| token_overlap(&section.content, &self.goal_text))
+            .unwrap_or(0.0);
+        let goal_similarity =
+            (0.65 * embedding_similarity + 0.35 * lexical_similarity).clamp(0.0, 1.0);
+        let priority_bonus = section
+            .map(|section| match section.priority {
+                SectionPriority::Critical => 0.18,
+                SectionPriority::High => 0.12,
+                SectionPriority::Normal => 0.06,
+                SectionPriority::Low => 0.02,
+            })
+            .unwrap_or(0.0);
+
+        (goal_similarity + priority_bonus).clamp(0.0, 1.0)
+    }
+
+    fn epistemic_value(&self, signal: &Engram, section: Option<&PromptSection>) -> f32 {
+        let belief = self.topic_belief(signal, section);
+        let uncertainty = (1.0 - belief as f32).clamp(0.0, 1.0);
+        let novelty_hint = signal.score.novelty.clamp(0.0, 1.0);
+        let informational_leverage = section
+            .map(|section| {
+                let len = section.content.len().max(1) as f32;
+                (1.0 / len.sqrt()).clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
+
+        (0.65 * uncertainty + 0.2 * novelty_hint + 0.15 * informational_leverage).clamp(0.0, 1.0)
+    }
+}
+
+impl Scorer for ActiveInferenceScorer {
+    fn score(&self, signal: &Engram, _ctx: &Context) -> Score {
+        let Ok(section) = PromptSection::from_signal(signal) else {
+            return Score::ZERO;
+        };
+
+        let pragmatic = self.pragmatic_value(signal, Some(&section));
+        let epistemic = self.epistemic_value(signal, Some(&section));
+        let belief = self.topic_belief(signal, Some(&section)) as f32;
+        let goal_focus = cosine_similarity(&self.goal_embeddings, &self.section_embedding(signal));
+        let coherence = (0.5 + 0.5 * goal_focus).clamp(0.0, 1.0);
+        let salience = (0.5 * pragmatic + 0.5 * epistemic).clamp(0.0, 1.0);
+
+        Score::new_extended(
+            pragmatic.clamp(0.0, 1.0),
+            epistemic,
+            (pragmatic + epistemic).max(0.0),
+            belief.max(0.1),
+            goal_focus.clamp(0.0, 1.0),
+            salience,
+            coherence,
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "active_inference_scorer"
+    }
+}
+
+fn embed_text(text: &str, dimensions: usize) -> Vec<f32> {
+    let mut vector = vec![0.0_f32; dimensions.max(1)];
+    for (position, token) in tokenize(text).into_iter().enumerate() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        token.hash(&mut hasher);
+        position.hash(&mut hasher);
+        let hash = hasher.finish();
+        let index = (hash as usize) % vector.len();
+        let sign = if hash & 1 == 0 { 1.0 } else { -1.0 };
+        vector[index] += sign;
+    }
+
+    normalize_embedding(vector)
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn token_overlap(left: &str, right: &str) -> f32 {
+    let left = tokenize(left)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let right = tokenize(right)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let overlap = left.intersection(&right).count() as f32;
+    overlap / left.len().max(right.len()) as f32
+}
+
+fn normalize_embedding(mut vector: Vec<f32>) -> Vec<f32> {
+    let magnitude = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if magnitude > 0.0 {
+        for value in &mut vector {
+            *value /= magnitude;
+        }
+    }
+    vector
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    let len = left.len().min(right.len());
+    if len == 0 {
+        return 0.0;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_mag = 0.0_f32;
+    let mut right_mag = 0.0_f32;
+    for idx in 0..len {
+        dot += left[idx] * right[idx];
+        left_mag += left[idx] * left[idx];
+        right_mag += right[idx] * right[idx];
+    }
+
+    let magnitude = (left_mag * right_mag).sqrt();
+    if magnitude == 0.0 {
+        0.0
+    } else {
+        (dot / magnitude).clamp(-1.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::prompt::{CacheLayer, Placement};
+    use std::collections::HashMap;
 
     fn make_signal(priority: SectionPriority, content: &str, created_at_ms: i64) -> Engram {
         PromptSection::new("x", content)
@@ -162,5 +376,28 @@ mod tests {
             .build();
         let score = scorer.score(&not_a_section, &Context::at(0));
         assert_eq!(score, Score::ZERO);
+    }
+
+    #[test]
+    fn active_inference_prefers_goal_aligned_sections() {
+        let scorer = ActiveInferenceScorer::new("reduce routing latency")
+            .with_prior_beliefs(HashMap::from([("routing".to_string(), 0.85)]));
+        let aligned = make_signal(
+            SectionPriority::Normal,
+            "Improve routing latency by trimming context assembly.",
+            0,
+        );
+        let unrelated = make_signal(
+            SectionPriority::Normal,
+            "Write onboarding documentation for a new helper.",
+            0,
+        );
+        let ctx = Context::at(0).with_goal("reduce routing latency");
+
+        let aligned_score = scorer.score(&aligned, &ctx);
+        let unrelated_score = scorer.score(&unrelated, &ctx);
+
+        assert!(aligned_score.effective() > unrelated_score.effective());
+        assert!(aligned_score.salience >= unrelated_score.salience);
     }
 }

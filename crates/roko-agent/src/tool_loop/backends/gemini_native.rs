@@ -4,9 +4,11 @@ use async_trait::async_trait;
 use roko_core::config::schema::ModelProfile;
 use serde_json::Value;
 
+use crate::gemini::native::{
+    build_generate_content_request, build_generation_config, system_instruction_from_segments,
+};
 use crate::gemini::types::{
     Content, GeminiTool, GenerateContentRequest, GenerateContentResponse, GenerationConfig, Part,
-    ThinkingConfig,
 };
 use crate::gemini::wire::{
     generate_content_endpoint, generate_content_headers, send_generate_content_request,
@@ -108,12 +110,7 @@ impl GeminiNativeBackend {
             }
         }
 
-        (!segments.is_empty()).then(|| Content {
-            role: "system".to_string(),
-            parts: vec![Part::Text {
-                text: segments.join("\n\n"),
-            }],
-        })
+        system_instruction_from_segments(segments)
     }
 
     fn translate_messages(messages: &[Value]) -> Vec<Content> {
@@ -134,31 +131,7 @@ impl GeminiNativeBackend {
     }
 
     fn generation_config(&self) -> Option<GenerationConfig> {
-        let thinking_config = self
-            .thinking_level
-            .as_deref()
-            .map(str::trim)
-            .filter(|level| !level.is_empty())
-            .map(|thinking_level| ThinkingConfig {
-                thinking_level: thinking_level.to_string(),
-            });
-
-        if self.model.max_output.is_none() && thinking_config.is_none() {
-            return None;
-        }
-
-        Some(GenerationConfig {
-            temperature: None,
-            top_p: None,
-            max_output_tokens: self
-                .model
-                .max_output
-                .and_then(|value| u32::try_from(value).ok()),
-            stop_sequences: None,
-            response_mime_type: None,
-            response_schema: None,
-            thinking_config,
-        })
+        build_generation_config(&self.model, self.thinking_level.as_deref())
     }
 
     fn build_request(
@@ -166,15 +139,14 @@ impl GeminiNativeBackend {
         messages: &[Value],
         tools: &RenderedTools,
     ) -> Result<GenerateContentRequest, LlmError> {
-        Ok(GenerateContentRequest {
-            contents: Self::translate_messages(messages),
-            system_instruction: Self::system_instruction(messages),
-            tools: Self::translate_tools(tools)?,
-            tool_config: None,
-            generation_config: self.generation_config(),
-            safety_settings: None,
-            cached_content: self.cached_content.clone(),
-        })
+        Ok(build_generate_content_request(
+            Self::translate_messages(messages),
+            Self::system_instruction(messages),
+            Self::translate_tools(tools)?,
+            self.generation_config(),
+            None,
+            self.cached_content.clone(),
+        ))
     }
 }
 

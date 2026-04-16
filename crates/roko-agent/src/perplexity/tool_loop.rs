@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::agent::{Agent, AgentResult};
+use crate::agent::{Agent, AgentResult, derived_output};
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::tool_loop::{LlmBackend, LlmError, StopReason, ToolLoop};
 use crate::translate::{BackendResponse, RenderedTools, SessionState};
@@ -190,13 +190,13 @@ impl PerplexityToolLoopAgent {
 
     fn output_signal(
         &self,
+        input: &Engram,
         text: &str,
         stop_reason: &str,
         iterations: usize,
         metadata: Option<PerplexityMetadata>,
     ) -> Engram {
-        let mut builder = Engram::builder(Kind::AgentOutput)
-            .body(Body::text(text))
+        let mut builder = derived_output(input, Kind::AgentOutput, Body::text(text))
             .provenance(Provenance::agent(&self.name))
             .tag("agent", &self.name)
             .tag("model", &self.model_slug)
@@ -245,6 +245,7 @@ impl Agent for PerplexityToolLoopAgent {
         let metadata = self.metadata_source.take_last_metadata();
         match output.stop_reason {
             StopReason::Stop => AgentResult::ok(self.output_signal(
+                input,
                 &output.final_text,
                 "stop",
                 output.iterations,
@@ -252,6 +253,7 @@ impl Agent for PerplexityToolLoopAgent {
             ))
             .with_usage(output.total_usage),
             StopReason::MaxIterations => AgentResult::fail(self.output_signal(
+                input,
                 &format!("Max iterations ({}) reached", output.iterations),
                 "max_iterations",
                 output.iterations,
@@ -259,6 +261,7 @@ impl Agent for PerplexityToolLoopAgent {
             ))
             .with_usage(output.total_usage),
             StopReason::Cancelled => AgentResult::fail(self.output_signal(
+                input,
                 "Tool loop cancelled",
                 "cancelled",
                 output.iterations,
@@ -266,6 +269,7 @@ impl Agent for PerplexityToolLoopAgent {
             ))
             .with_usage(output.total_usage),
             StopReason::BackendError(err) => AgentResult::fail(self.output_signal(
+                input,
                 &err,
                 "backend_error",
                 output.iterations,
@@ -298,10 +302,10 @@ mod tests {
         ToolResult, ToolSchema, VecToolRegistry,
     };
     use roko_core::{Body, Context, Engram, Kind};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
 
     fn echo_tool() -> ToolDef {
@@ -610,11 +614,15 @@ mod tests {
         assert_eq!(body["user_location"]["country"], "US");
         assert_eq!(body["tools"][0]["function"]["name"], "echo");
         let headers = &captured.headers;
-        assert!(headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer pplx-key"));
-        assert!(headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json"));
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer pplx-key")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json")
+        );
     }
 }

@@ -1,6 +1,6 @@
 # Roko Implementation Status
 
-> **Last updated**: 2026-04-13
+> **Last updated**: 2026-04-14
 >
 > Single source of truth for what's implemented vs. specified across the Roko system.
 > For naming conventions, see [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
@@ -78,9 +78,9 @@ These components form the working self-hosting loop: `roko prd` → `roko plan r
 | Component | Crate | Tests | Gap |
 |-----------|-------|-------|-----|
 | HDC vectors (10,240-bit) + fingerprinting | `roko-primitives` | — | Used by roko-index, not yet by runtime |
-| Knowledge store (6 types × 4 tiers) | `roko-neuro` | — | Struct exists; not wired to orchestrator knowledge injection |
-| PAD vector + 6 behavioral states + somatic markers | `roko-daimon` | — | Struct exists; not wired to tier routing |
-| 10 reactive watchers + circuit breaker | `roko-conductor` | — | Built but not called from orchestrate.rs |
+| Knowledge store (6 types × 4 tiers) | `roko-neuro` | — | Queried during task context assembly; broader writeback remains partial |
+| PAD vector + 6 behavioral states + somatic markers | `roko-daimon` | — | Used in routing/dispatch and model selection; not the only policy input |
+| 10 reactive watchers + circuit breaker | `roko-conductor` | — | Called from orchestrate.rs after dispatch, gates, and merge results; signal coverage is still evolving |
 | Chain client + wallet + witness | `roko-chain` | 52 | Needs Korai chain deployment |
 | Tree-sitter parsing + symbol graph + PageRank | `roko-index` | — | Built; MCP server not wired |
 | Rust/TypeScript/Go language support | `roko-lang-*` | — | Built; used by roko-index |
@@ -152,7 +152,7 @@ The self-hosting loop works today (`prd` → `plan run` → gate → persist →
 
 2. **Automatic plan generation** (Section 01) — Trigger `prd plan` automatically when a PRD is published, removing the manual step.
 
-3. **Feedback loop** (Section 05) — Failed task gates feed back into the plan generator for automatic re-planning, closing the learn-from-failure cycle.
+3. **Failure feedback** (Section 05) — Gate failures already trigger retries/re-plans in orchestrate.rs; the remaining work is richer failure analysis and context enrichment, not basic loop wiring.
 
 After these three, Roko can fully self-host: read its own PRDs, generate plans, execute them, validate results, learn from failures, and iterate — without human intervention beyond initial PRD creation.
 

@@ -17,6 +17,8 @@ hdc = ["dep:roko-primitives"]
 [dependencies]
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
+roko-agent-server = { path = "../roko-agent-server" }
+roko-chain = { path = "../roko-chain" }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
 roko-dreams = { path = "../roko-dreams" }

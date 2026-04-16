@@ -6,14 +6,16 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use cron::Schedule;
 use roko_agent::provider::{AgentOptions, create_agent_for_model, is_known_protocol_command};
-use roko_agent::{Agent, AgentResult, ExecAgent};
+use roko_agent::{Agent, AgentResult};
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Context as RokoContext, Engram};
 use roko_learn::{episode_logger::EpisodeLogger, playbook::PlaybookStore};
@@ -24,6 +26,8 @@ use roko_neuro::{
 use serde::{Deserialize, Serialize};
 
 use crate::cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
+use crate::imagination::ImaginationMode;
+use crate::replay::{DreamReplayBatch, DreamReplayPolicy, select_replay_episodes};
 
 /// Public alias for the replay input episodes.
 pub type Episode = roko_learn::episode_logger::Episode;
@@ -57,7 +61,8 @@ pub struct DreamAgentConfig {
 
 impl DreamAgentConfig {
     fn build_agent(&self, workdir: &Path) -> Result<DreamReviewAgent> {
-        let mut routing_config = load_roko_config(workdir)?;
+        let mut routing_config = roko_core::config::load_config(workdir)
+            .with_context(|| format!("load routing config from {}", workdir.display()))?;
         routing_config.apply_process_env();
         let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
@@ -69,108 +74,63 @@ impl DreamAgentConfig {
                     (!routing_config.agent.default_model.trim().is_empty())
                         .then(|| routing_config.agent.default_model.clone())
                 })
-                .ok_or_else(|| anyhow::anyhow!("dream runner routing needs a configured model"))?;
+                .ok_or_else(|| anyhow::anyhow!("dream review routing needs a configured model"))?;
             let agent = create_agent_for_model(
                 &routing_config,
                 &model,
-                AgentOptions {
-                    command: Some(self.command.clone()),
-                    timeout_ms: Some(self.timeout_ms),
-                    system_prompt: None,
-                    cached_content: None,
-                    tools: None,
-                    mcp_config: None,
-                    working_dir: Some(workdir.to_path_buf()),
-                    provider_semaphores: None,
-                    env: self.env.clone(),
-                    extra_args: self.args.clone(),
-                    effort: Some(self.effort.clone()),
-                    bare_mode: self.bare_mode,
-                    dangerously_skip_permissions: false,
-                    name: format!("dream-review:{model}"),
-                },
+                self.agent_options(workdir, self.args.clone(), format!("dream-review:{model}")),
             )
             .with_context(|| format!("create dream review agent for model {model}"))?;
             Ok(DreamReviewAgent { inner: agent })
-        } else if self.command == "claude" {
-            let model = self
-                .model
-                .clone()
-                .unwrap_or_else(|| "claude-opus-4-6".to_string());
+        } else {
+            let model = if self.command == "claude" {
+                self.model
+                    .clone()
+                    .unwrap_or_else(|| "claude-opus-4-6".to_string())
+            } else {
+                self.model.clone().unwrap_or_else(|| self.command.clone())
+            };
             let mut synthesized_config = RokoConfig::default();
             synthesized_config.agent.command = Some(self.command.clone());
             synthesized_config.agent.default_model = model.clone();
-            synthesized_config.agent.default_backend = "claude".to_string();
+            if self.command == "claude" {
+                synthesized_config.agent.default_backend = "claude".to_string();
+            } else if is_known_protocol_command(&self.command) {
+                synthesized_config.agent.default_backend = self.command.clone();
+            }
 
             let mut extra_args = self.args.clone();
             if let Some(fallback_model) = &self.fallback_model {
                 extra_args.push("--fallback-model".to_string());
                 extra_args.push(fallback_model.clone());
             }
-            let agent = create_agent_for_model(
-                &synthesized_config,
-                &model,
-                AgentOptions {
-                    command: Some(self.command.clone()),
-                    timeout_ms: Some(self.timeout_ms),
-                    system_prompt: None,
-                    cached_content: None,
-                    tools: None,
-                    mcp_config: None,
-                    working_dir: Some(workdir.to_path_buf()),
-                    provider_semaphores: None,
-                    env: self.env.clone(),
-                    extra_args,
-                    effort: Some(self.effort.clone()),
-                    bare_mode: self.bare_mode,
-                    dangerously_skip_permissions: false,
-                    name: format!("dream-review:{model}"),
-                },
-            )
-            .with_context(|| format!("create synthesized dream review agent for model {model}"))?;
-            Ok(DreamReviewAgent {
-                inner: agent,
-            })
-        } else if is_known_protocol_command(&self.command) {
-            let mut agent =
-                ExecAgent::new(&self.command, self.args.clone()).with_timeout_ms(self.timeout_ms);
-            for (key, value) in &self.env {
-                agent = agent.with_env_var(key, value);
-            }
-            Ok(DreamReviewAgent {
-                inner: Box::new(agent),
-            })
-        } else {
-            let model = self
-                .model
-                .clone()
-                .unwrap_or_else(|| self.command.clone());
-            let mut synthesized_config = RokoConfig::default();
-            synthesized_config.agent.command = Some(self.command.clone());
-            synthesized_config.agent.default_model = model.clone();
 
             let agent = create_agent_for_model(
                 &synthesized_config,
                 &model,
-                AgentOptions {
-                    command: Some(self.command.clone()),
-                    timeout_ms: Some(self.timeout_ms),
-                    system_prompt: None,
-                    cached_content: None,
-                    tools: None,
-                    mcp_config: None,
-                    working_dir: Some(workdir.to_path_buf()),
-                    provider_semaphores: None,
-                    env: self.env.clone(),
-                    extra_args: self.args.clone(),
-                    effort: Some(self.effort.clone()),
-                    bare_mode: self.bare_mode,
-                    dangerously_skip_permissions: false,
-                    name: String::new(),
-                },
+                self.agent_options(workdir, extra_args, format!("dream-review:{model}")),
             )
             .with_context(|| format!("create dream review subprocess agent for model {model}"))?;
             Ok(DreamReviewAgent { inner: agent })
+        }
+    }
+
+    fn agent_options(&self, workdir: &Path, extra_args: Vec<String>, name: String) -> AgentOptions {
+        AgentOptions {
+            command: Some(self.command.clone()),
+            timeout_ms: Some(self.timeout_ms),
+            system_prompt: None,
+            cached_content: None,
+            tools: None,
+            mcp_config: None,
+            working_dir: Some(workdir.to_path_buf()),
+            provider_semaphores: None,
+            env: self.env.clone(),
+            extra_args,
+            effort: Some(self.effort.clone()),
+            bare_mode: self.bare_mode,
+            dangerously_skip_permissions: false,
+            name,
         }
     }
 }
@@ -191,11 +151,362 @@ pub struct DreamLoopConfig {
 /// Backwards-compatible config alias for callers that want a shorter name.
 pub type DreamConfig = DreamLoopConfig;
 
+/// Budget consumed by dream replay and consolidation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DreamBudget {
+    /// Maximum replay tokens allowed.
+    pub max_tokens: u64,
+    /// Maximum dollar cost allowed.
+    pub max_cost_usd: f64,
+    /// Maximum wall-clock duration allowed, in seconds.
+    pub max_duration_secs: u64,
+    /// Tokens consumed so far.
+    pub consumed_tokens: u64,
+    /// Dollar cost consumed so far.
+    pub consumed_cost_usd: f64,
+    /// Wall-clock seconds consumed so far.
+    pub consumed_duration_secs: u64,
+}
+
+impl Default for DreamBudget {
+    fn default() -> Self {
+        Self {
+            max_tokens: u64::MAX,
+            max_cost_usd: f64::MAX,
+            max_duration_secs: u64::MAX,
+            consumed_tokens: 0,
+            consumed_cost_usd: 0.0,
+            consumed_duration_secs: 0,
+        }
+    }
+}
+
+impl DreamBudget {
+    /// Consume the accounting for a single episode.
+    pub fn consume_episode(&mut self, episode: &Episode) {
+        let usage_tokens = episode
+            .usage
+            .input_tokens
+            .saturating_add(episode.usage.output_tokens);
+        let tokens = episode.tokens_used.max(usage_tokens);
+        self.consumed_tokens = self.consumed_tokens.saturating_add(tokens);
+        self.consumed_cost_usd += episode.usage.cost_usd;
+        self.consumed_duration_secs = self
+            .consumed_duration_secs
+            .saturating_add(episode.duration_secs.max(0.0).round() as u64);
+    }
+
+    /// Remaining budget fraction across all axes.
+    #[must_use]
+    pub fn remaining_fraction(self) -> f64 {
+        let token_fraction = remaining_fraction(self.consumed_tokens, self.max_tokens);
+        let cost_fraction = remaining_fraction_f64(self.consumed_cost_usd, self.max_cost_usd);
+        let duration_fraction =
+            remaining_fraction(self.consumed_duration_secs, self.max_duration_secs);
+        token_fraction.min(cost_fraction).min(duration_fraction)
+    }
+
+    /// Whether the budget is exhausted on any axis.
+    #[must_use]
+    pub fn exhausted(self) -> bool {
+        self.consumed_tokens >= self.max_tokens
+            || self.consumed_cost_usd >= self.max_cost_usd
+            || self.consumed_duration_secs >= self.max_duration_secs
+    }
+}
+
+/// Dream scheduling trigger kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DreamTrigger {
+    /// Idle gap between task dispatches.
+    Idle,
+    /// Cron-like schedule.
+    Scheduled,
+    /// Manual command invocation.
+    Manual,
+}
+
+impl DreamTrigger {
+    /// Stable lowercase label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Scheduled => "scheduled",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// Scheduling policy for when dream cycles may fire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamSchedulePolicy {
+    /// Whether automatic dreaming is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Idle threshold in minutes.
+    #[serde(default = "default_idle_threshold_mins")]
+    pub idle_threshold_mins: u64,
+    /// Optional cron expression for scheduled dreaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_cron: Option<String>,
+    /// Whether manual triggering is permitted.
+    #[serde(default = "default_true")]
+    pub manual_enabled: bool,
+    /// Factor applied when dream output quality is high.
+    #[serde(default = "default_quality_gain")]
+    pub quality_gain: f64,
+    /// Factor applied when dream output quality is low.
+    #[serde(default = "default_quality_penalty")]
+    pub quality_penalty: f64,
+}
+
+impl Default for DreamSchedulePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_threshold_mins: 15,
+            scheduled_cron: None,
+            manual_enabled: true,
+            quality_gain: 0.75,
+            quality_penalty: 1.25,
+        }
+    }
+}
+
+impl DreamSchedulePolicy {
+    /// Return the adapted idle delay for the current dream quality.
+    #[must_use]
+    pub fn idle_delay(
+        &self,
+        report: Option<&DreamReport>,
+        budget: Option<&DreamBudget>,
+    ) -> Duration {
+        let mut multiplier = 1.0;
+        if let Some(report) = report {
+            let quality = dream_quality_score(report);
+            if quality >= 1.5 {
+                multiplier *= self.quality_gain;
+            } else if quality <= 0.5 {
+                multiplier *= self.quality_penalty;
+            }
+        }
+        if let Some(budget) = budget
+            && budget.remaining_fraction() < 0.20
+        {
+            multiplier *= self.quality_penalty;
+        }
+        let minutes = (self.idle_threshold_mins as f64 * multiplier)
+            .max(1.0)
+            .round() as u64;
+        Duration::from_secs(minutes.saturating_mul(60))
+    }
+
+    /// Return the next cron fire delay, if a cron expression is configured.
+    #[must_use]
+    pub fn cron_delay(&self, now: DateTime<Utc>) -> Option<Duration> {
+        let expression = self.scheduled_cron.as_ref()?.trim();
+        if expression.is_empty() {
+            return None;
+        }
+        let schedule = Schedule::from_str(expression).ok()?;
+        let next = schedule.after(&now).next()?;
+        (next - now).to_std().ok()
+    }
+
+    /// Determine whether a trigger kind is allowed under the current policy.
+    #[must_use]
+    pub fn allows(&self, trigger: DreamTrigger) -> bool {
+        match trigger {
+            DreamTrigger::Idle | DreamTrigger::Scheduled => self.enabled,
+            DreamTrigger::Manual => self.manual_enabled,
+        }
+    }
+
+    /// Resolve the next delay for a specific trigger type.
+    #[must_use]
+    pub fn trigger_delay(
+        &self,
+        trigger: DreamTrigger,
+        report: Option<&DreamReport>,
+        budget: Option<&DreamBudget>,
+        now: DateTime<Utc>,
+    ) -> Option<Duration> {
+        if !self.allows(trigger) {
+            return None;
+        }
+        match trigger {
+            DreamTrigger::Idle => Some(self.idle_delay(report, budget)),
+            DreamTrigger::Scheduled => self.cron_delay(now),
+            DreamTrigger::Manual => Some(Duration::ZERO),
+        }
+    }
+}
+
+/// Heartbeat cadence and delta-loop policy for daemon-friendly polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DreamHeartbeatPolicy {
+    /// How often a daemon should poll for heartbeat updates, in seconds.
+    #[serde(default = "default_heartbeat_tick_secs")]
+    pub tick_interval_secs: u64,
+    /// Minimum age of the last consolidated dream before a delta loop may fire.
+    #[serde(default = "default_delta_interval_mins")]
+    pub delta_interval_mins: u64,
+    /// Minimum idle window before active plan work is considered quiescent.
+    #[serde(default = "default_idle_grace_mins")]
+    pub idle_grace_mins: u64,
+}
+
+impl Default for DreamHeartbeatPolicy {
+    fn default() -> Self {
+        Self {
+            tick_interval_secs: default_heartbeat_tick_secs(),
+            delta_interval_mins: default_delta_interval_mins(),
+            idle_grace_mins: default_idle_grace_mins(),
+        }
+    }
+}
+
+/// Runtime snapshot describing whether the dreams-side heartbeat may fire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamHeartbeatReport {
+    /// Cutoff used to decide which episodes are recent enough to matter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_through: Option<DateTime<Utc>>,
+    /// Number of recent episodes seen after the cutoff.
+    pub recent_episode_count: usize,
+    /// Timestamp of the most recent episode in the active window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_episode_at: Option<DateTime<Utc>>,
+    /// Timestamp of the most recent consolidated dream run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dream_at: Option<DateTime<Utc>>,
+    /// Heartbeat polling interval, in seconds.
+    pub heartbeat_due_in_secs: u64,
+    /// Delta-loop interval, in minutes.
+    pub delta_interval_mins: u64,
+    /// Idle grace period, in minutes.
+    pub idle_grace_mins: u64,
+    /// Whether enough fresh episodes exist to justify a delta pass.
+    pub enough_recent_episodes: bool,
+    /// Whether the plan still looks active enough to suppress delta.
+    pub paused_for_active_plan: bool,
+    /// Idle age of the most recent episode, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_for_secs: Option<u64>,
+    /// Delay until the next delta loop is due, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_due_in_secs: Option<u64>,
+    /// Whether the delta loop is immediately runnable.
+    pub delta_ready: bool,
+}
+
+/// Combined runtime controls for replay, budgeting, and scheduling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamRuntimeControls {
+    /// Replay planner configuration.
+    #[serde(default)]
+    pub replay: DreamReplayPolicy,
+    /// Optional sleep-time compute budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<DreamBudget>,
+    /// Scheduling policy.
+    #[serde(default)]
+    pub schedule: DreamSchedulePolicy,
+    /// Heartbeat cadence and delta-loop policy.
+    #[serde(default)]
+    pub heartbeat: DreamHeartbeatPolicy,
+    /// Creativity mode used for REM imagination.
+    #[serde(default)]
+    pub imagination_mode: ImaginationMode,
+    /// Whether to emit threat warnings from repeated failures.
+    #[serde(default = "default_true")]
+    pub threat_simulation: bool,
+    /// Minimum severity required before a threat becomes a warning entry.
+    #[serde(default = "default_threat_floor")]
+    pub threat_severity_floor: f64,
+}
+
+impl Default for DreamRuntimeControls {
+    fn default() -> Self {
+        Self {
+            replay: DreamReplayPolicy::default(),
+            budget: None,
+            schedule: DreamSchedulePolicy::default(),
+            heartbeat: DreamHeartbeatPolicy::default(),
+            imagination_mode: ImaginationMode::default(),
+            threat_simulation: true,
+            threat_severity_floor: 0.20,
+        }
+    }
+}
+
+impl DreamRuntimeControls {
+    /// Summarize the current heartbeat and delta-loop readiness.
+    #[must_use]
+    pub fn heartbeat_report(
+        &self,
+        episodes: &[Episode],
+        processed_through: Option<DateTime<Utc>>,
+        last_dream_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+        min_recent_episodes: usize,
+    ) -> DreamHeartbeatReport {
+        let recent_episodes: Vec<&Episode> = episodes
+            .iter()
+            .filter(|episode| processed_through.is_none_or(|ts| episode.timestamp > ts))
+            .collect();
+        let recent_episode_count = recent_episodes.len();
+        let latest_episode_at = recent_episodes
+            .iter()
+            .map(|episode| episode.timestamp.clone())
+            .max();
+        let idle_for_secs =
+            latest_episode_at.map(|ts| now.signed_duration_since(ts).num_seconds().max(0) as u64);
+        let enough_recent_episodes = recent_episode_count >= min_recent_episodes;
+        let paused_for_active_plan = idle_for_secs
+            .is_some_and(|secs| secs < self.heartbeat.idle_grace_mins.saturating_mul(60));
+        let delta_due_in_secs = if enough_recent_episodes && !paused_for_active_plan {
+            last_dream_at.map(|last_dream_at| {
+                let delta_ready_at = last_dream_at
+                    + chrono::Duration::minutes(self.heartbeat.delta_interval_mins as i64);
+                if delta_ready_at <= now {
+                    0
+                } else {
+                    delta_ready_at
+                        .signed_duration_since(now)
+                        .num_seconds()
+                        .max(0) as u64
+                }
+            })
+        } else {
+            None
+        };
+
+        DreamHeartbeatReport {
+            processed_through,
+            recent_episode_count,
+            latest_episode_at,
+            last_dream_at,
+            heartbeat_due_in_secs: self.heartbeat.tick_interval_secs.max(1),
+            delta_interval_mins: self.heartbeat.delta_interval_mins.max(1),
+            idle_grace_mins: self.heartbeat.idle_grace_mins.max(1),
+            enough_recent_episodes,
+            paused_for_active_plan,
+            idle_for_secs,
+            delta_due_in_secs,
+            delta_ready: delta_due_in_secs == Some(0),
+        }
+    }
+}
+
 /// Public facade for dream replay, consolidation, and scheduling.
 #[derive(Debug, Clone)]
 pub struct DreamRunner {
     workdir: PathBuf,
     config: DreamLoopConfig,
+    controls: DreamRuntimeControls,
 }
 
 impl DreamRunner {
@@ -205,6 +516,21 @@ impl DreamRunner {
         Self {
             workdir: workdir.into(),
             config,
+            controls: DreamRuntimeControls::default(),
+        }
+    }
+
+    /// Construct a dream runner with explicit runtime controls.
+    #[must_use]
+    pub fn with_controls(
+        workdir: impl Into<PathBuf>,
+        config: DreamLoopConfig,
+        controls: DreamRuntimeControls,
+    ) -> Self {
+        Self {
+            workdir: workdir.into(),
+            config,
+            controls,
         }
     }
 
@@ -213,14 +539,30 @@ impl DreamRunner {
     #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn replay_insights(&self, episodes: &[Episode]) -> Result<Vec<Insight>> {
+        let replay = self.plan_replay(episodes);
         let progression = NeuroTierProgression::default();
-        let report = progression.analyze(episodes);
+        let report = progression.analyze(&replay.episodes);
         Ok(report.insights)
+    }
+
+    /// Select a replay batch using the configured NREM mode.
+    #[must_use]
+    pub fn plan_replay(&self, episodes: &[Episode]) -> DreamReplayBatch {
+        select_replay_episodes(episodes, &self.controls.replay, Utc::now())
     }
 
     /// Load the latest persisted dream report from `.roko/dreams/`.
     pub fn latest_report(&self) -> Result<Option<DreamReport>> {
         load_latest_dream_report(&self.report_dir())
+    }
+
+    /// Summarize the current heartbeat and delta-loop status.
+    pub fn heartbeat_report(&self) -> Result<DreamHeartbeatReport> {
+        let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
+        let episodes = block_on(EpisodeLogger::read_all_lossy(&episodes_path))
+            .with_context(|| format!("read episode log from {}", episodes_path.display()))?;
+        let latest_report = self.latest_report()?;
+        Ok(self.heartbeat_snapshot(&episodes, latest_report.as_ref(), Utc::now()))
     }
 
     /// Run a full dream consolidation cycle against the workspace.
@@ -234,8 +576,45 @@ impl DreamRunner {
         self.schedule()
     }
 
+    /// Resolve the delay for a specific trigger kind.
+    #[must_use]
+    pub fn trigger_delay(&self, trigger: DreamTrigger) -> Option<Duration> {
+        if !self.config.auto_dream {
+            return None;
+        }
+        let latest_report = self.latest_report().ok().flatten();
+        self.controls.schedule.trigger_delay(
+            trigger,
+            latest_report.as_ref(),
+            self.controls.budget.as_ref(),
+            Utc::now(),
+        )
+    }
+
     fn report_dir(&self) -> PathBuf {
         self.workdir.join(".roko").join("dreams")
+    }
+
+    fn heartbeat_snapshot(
+        &self,
+        episodes: &[Episode],
+        latest_report: Option<&DreamReport>,
+        now: DateTime<Utc>,
+    ) -> DreamHeartbeatReport {
+        let processed_through = latest_report.and_then(|report| {
+            report
+                .processed_through
+                .clone()
+                .or(Some(report.started_at.clone()))
+        });
+        let last_dream_at = latest_report.map(|report| report.completed_at.clone());
+        self.controls.heartbeat_report(
+            episodes,
+            processed_through,
+            last_dream_at,
+            now,
+            self.config.min_episodes_for_dream,
+        )
     }
 
     async fn consolidate_async(&mut self) -> Result<DreamReport> {
@@ -245,10 +624,9 @@ impl DreamRunner {
         let knowledge = Arc::new(KnowledgeStore::for_workdir(&self.workdir));
         let playbooks_root = self.workdir.join(".roko").join("learn").join("playbooks");
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
-        let dispatcher: Arc<dyn AgentDispatcher> =
-            Arc::new(self.config.agent.build_agent(&self.workdir)?);
+        let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
-        cycle.run().await
+        cycle.run_budgeted(&mut self.controls.budget).await
     }
 }
 
@@ -295,37 +673,121 @@ impl DreamEngine for DreamRunner {
     }
 
     fn schedule(&self) -> Option<Duration> {
-        if !self.config.auto_dream {
+        if !self.config.auto_dream || !self.controls.schedule.enabled {
+            return None;
+        }
+        if self
+            .controls
+            .budget
+            .is_some_and(|budget| budget.exhausted())
+        {
             return None;
         }
 
         let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
         let episodes = block_on(EpisodeLogger::read_all_lossy(&episodes_path)).ok()?;
         let last_report = load_latest_dream_report(&self.report_dir()).ok().flatten();
-        let cutoff = last_report
-            .as_ref()
-            .and_then(|report| report.processed_through.or(Some(report.started_at)));
+        let now = Utc::now();
+        let heartbeat = self.heartbeat_snapshot(&episodes, last_report.as_ref(), now);
 
-        let recent: Vec<&Episode> = episodes
-            .iter()
-            .filter(|episode| cutoff.is_none_or(|ts| episode.timestamp > ts))
-            .collect();
-
-        if recent.len() < self.config.min_episodes_for_dream {
+        if !heartbeat.enough_recent_episodes {
             return None;
         }
 
-        let latest_episode = recent.iter().map(|episode| episode.timestamp).max()?;
-        let idle_threshold =
-            Duration::from_secs(self.config.idle_threshold_mins.saturating_mul(60));
-        let target_fire_at = latest_episode + chrono::Duration::from_std(idle_threshold).ok()?;
-        let now = Utc::now();
-        if target_fire_at <= now {
+        let latest_episode = heartbeat.latest_episode_at?;
+        let idle_delay = self.controls.schedule.trigger_delay(
+            DreamTrigger::Idle,
+            last_report.as_ref(),
+            self.controls.budget.as_ref(),
+            now,
+        )?;
+        let idle_fire_at = latest_episode + chrono::Duration::from_std(idle_delay).ok()?;
+        let mut target = idle_fire_at;
+        if let Some(cron_delay) = self.controls.schedule.trigger_delay(
+            DreamTrigger::Scheduled,
+            last_report.as_ref(),
+            self.controls.budget.as_ref(),
+            now,
+        ) {
+            let cron_fire_at = now + chrono::Duration::from_std(cron_delay).ok()?;
+            target = target.min(cron_fire_at);
+        }
+        if let Some(report) = last_report.as_ref() {
+            if dream_quality_score(report) > 1.5 {
+                let adjusted = self
+                    .controls
+                    .schedule
+                    .idle_delay(Some(report), self.controls.budget.as_ref());
+                target = latest_episode + chrono::Duration::from_std(adjusted).ok()?;
+            }
+        }
+        if let Some(delta_delay) = heartbeat.delta_due_in_secs {
+            let delta_fire_at = now + chrono::Duration::seconds(delta_delay as i64);
+            target = target.min(delta_fire_at);
+        }
+        if target <= now {
             Some(Duration::ZERO)
         } else {
-            (target_fire_at - now).to_std().ok()
+            (target - now).to_std().ok()
         }
     }
+}
+
+fn dream_quality_score(report: &DreamReport) -> f64 {
+    let cluster_count = report.clusters.len().max(1) as f64;
+    let knowledge = report.knowledge_entries_written as f64;
+    let playbooks = report.playbooks_created as f64 * 0.5;
+    let hypotheses = report.strategy_hypotheses.len() as f64 * 0.25;
+    let regressions = report.regressions_detected.len() as f64 * 0.35;
+    ((knowledge + playbooks + hypotheses) / cluster_count - regressions).clamp(0.0, 5.0)
+}
+
+fn remaining_fraction(current: u64, maximum: u64) -> f64 {
+    if maximum == 0 {
+        return 0.0;
+    }
+    let used = current.min(maximum) as f64 / maximum as f64;
+    (1.0 - used).clamp(0.0, 1.0)
+}
+
+fn remaining_fraction_f64(current: f64, maximum: f64) -> f64 {
+    if maximum <= 0.0 {
+        return 0.0;
+    }
+    let used = (current / maximum).clamp(0.0, 1.0);
+    (1.0 - used).clamp(0.0, 1.0)
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_idle_threshold_mins() -> u64 {
+    15
+}
+
+fn default_quality_gain() -> f64 {
+    0.75
+}
+
+fn default_quality_penalty() -> f64 {
+    1.25
+}
+
+fn default_threat_floor() -> f64 {
+    0.20
+}
+
+fn default_heartbeat_tick_secs() -> u64 {
+    75
+}
+
+fn default_delta_interval_mins() -> u64 {
+    60
+}
+
+fn default_idle_grace_mins() -> u64 {
+    15
 }
 
 /// Load the latest persisted dream report from a report directory.
@@ -387,16 +849,15 @@ where
     }
 }
 
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+/// Build the dream review dispatcher from the configured agent backend.
+pub fn build_dream_review_dispatcher(
+    workdir: &Path,
+    config: &DreamAgentConfig,
+) -> Result<Arc<dyn AgentDispatcher>> {
+    Ok(Arc::new(config.build_agent(workdir)?))
 }
 
+/// Thin wrapper around the configured review agent used by dream consolidation.
 struct DreamReviewAgent {
     inner: Box<dyn Agent>,
 }
@@ -413,5 +874,143 @@ impl Agent for DreamReviewAgent {
 
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roko_learn::episode_logger::Usage;
+    use tempfile::TempDir;
+
+    fn test_loop_config() -> DreamLoopConfig {
+        DreamLoopConfig {
+            auto_dream: true,
+            idle_threshold_mins: 15,
+            min_episodes_for_dream: 1,
+            agent: DreamAgentConfig {
+                command: "cat".to_string(),
+                args: Vec::new(),
+                model: None,
+                bare_mode: true,
+                effort: "medium".to_string(),
+                fallback_model: None,
+                timeout_ms: 120_000,
+                env: Vec::new(),
+            },
+        }
+    }
+
+    fn episode_at(agent: &str, task: &str, timestamp: DateTime<Utc>) -> Episode {
+        let mut episode = Episode::new(agent, task);
+        episode.timestamp = timestamp.clone();
+        episode.completed_at = timestamp.clone();
+        episode.started_at = timestamp;
+        episode
+    }
+
+    #[test]
+    fn budget_tracks_consumption() {
+        let mut budget = DreamBudget {
+            max_tokens: 100,
+            max_cost_usd: 10.0,
+            max_duration_secs: 100,
+            consumed_tokens: 0,
+            consumed_cost_usd: 0.0,
+            consumed_duration_secs: 0,
+        };
+        let mut episode = Episode::new("agent", "task-1");
+        episode.tokens_used = 40;
+        episode.usage = Usage::tokens(20, 10);
+        episode.usage.cost_usd = 1.5;
+        episode.duration_secs = 2.0;
+
+        budget.consume_episode(&episode);
+
+        assert!(budget.remaining_fraction() < 1.0);
+        assert!(!budget.exhausted());
+    }
+
+    #[test]
+    fn schedule_manual_trigger_is_allowed() {
+        let policy = DreamSchedulePolicy::default();
+        let delay = policy.trigger_delay(DreamTrigger::Manual, None, None, Utc::now());
+        assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn heartbeat_report_pauses_delta_during_recent_activity() {
+        let mut controls = DreamRuntimeControls::default();
+        controls.heartbeat = DreamHeartbeatPolicy {
+            tick_interval_secs: 30,
+            delta_interval_mins: 60,
+            idle_grace_mins: 15,
+        };
+        let now = Utc::now();
+        let episodes = vec![
+            episode_at("agent", "task-1", now - chrono::Duration::minutes(6)),
+            episode_at("agent", "task-1", now - chrono::Duration::minutes(5)),
+        ];
+
+        let report = controls.heartbeat_report(
+            &episodes,
+            Some(now - chrono::Duration::hours(2)),
+            Some(now - chrono::Duration::hours(3)),
+            now,
+            1,
+        );
+
+        assert_eq!(report.recent_episode_count, 2);
+        assert!(report.paused_for_active_plan);
+        assert_eq!(report.delta_due_in_secs, None);
+        assert!(!report.delta_ready);
+        assert_eq!(report.heartbeat_due_in_secs, 30);
+    }
+
+    #[test]
+    fn heartbeat_report_becomes_ready_after_interval() {
+        let mut controls = DreamRuntimeControls::default();
+        controls.heartbeat = DreamHeartbeatPolicy {
+            tick_interval_secs: 75,
+            delta_interval_mins: 60,
+            idle_grace_mins: 15,
+        };
+        let now = Utc::now();
+        let episodes = vec![episode_at(
+            "agent",
+            "task-1",
+            now - chrono::Duration::hours(3),
+        )];
+
+        let report = controls.heartbeat_report(
+            &episodes,
+            Some(now - chrono::Duration::hours(4)),
+            Some(now - chrono::Duration::hours(2)),
+            now,
+            1,
+        );
+
+        assert_eq!(report.recent_episode_count, 1);
+        assert!(!report.paused_for_active_plan);
+        assert_eq!(report.delta_due_in_secs, Some(0));
+        assert!(report.delta_ready);
+    }
+
+    #[test]
+    fn runner_heartbeat_report_handles_empty_workspace() {
+        let tmp = TempDir::new().unwrap_or_else(|err| panic!("tempdir: {err}"));
+        let runner = DreamRunner::with_controls(
+            tmp.path(),
+            test_loop_config(),
+            DreamRuntimeControls::default(),
+        );
+
+        let report = runner
+            .heartbeat_report()
+            .unwrap_or_else(|err| panic!("heartbeat report: {err}"));
+
+        assert_eq!(report.recent_episode_count, 0);
+        assert!(!report.enough_recent_episodes);
+        assert_eq!(report.delta_due_in_secs, None);
     }
 }

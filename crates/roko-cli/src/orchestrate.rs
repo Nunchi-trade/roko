@@ -20,9 +20,7 @@ use roko_agent::chat_types::FinishReason;
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
-use roko_agent::provider::{
-    AgentOptions, create_agent_for_model, is_known_protocol_command, with_safety_layer,
-};
+use roko_agent::provider::is_known_protocol_command;
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
@@ -30,16 +28,17 @@ use roko_agent::task_runner::{
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, ExecAgent, SafetyLayer};
+use roko_agent::{Agent, AgentResult, SafetyLayer};
 use roko_compose::{
     AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
-    PromptSection, RoleSystemPromptSpec, SectionPriority, SectionScorer, TaskContext, budget_for,
+    PromptSection, SectionPriority, SectionScorer, TaskContext,
 };
 use roko_conductor::diagnosis::{DiagnosisEngine, ErrorCategory};
 use roko_conductor::{Conductor, ConductorDecision};
 use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
+use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::RokoConfig;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -49,8 +48,8 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
-    OperatingFrequency, PhaseKind, Provenance, Substrate, TaskCategory, TaskRequirements, Verdict,
-    score_model_for_task,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
+    TaskCategory, TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -76,6 +75,7 @@ use roko_learn::conductor::{
     ConductorState as RetryConductorState, ErrorPattern as RetryErrorPattern, HintType,
 };
 use roko_learn::costs_db::CostRecord;
+use roko_learn::costs_log::CostsLog;
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
@@ -83,8 +83,9 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
-use roko_learn::playbook::{Playbook, PlaybookStore};
+use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore};
 use roko_learn::prediction::CalibrationTracker;
+use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -97,13 +98,15 @@ use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
+use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
 };
-use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager};
+use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager, format_branch_name};
 use roko_orchestrator::{
     EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanStrategy, discover_plans,
+    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanResult, ReplanStrategy,
+    discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::ProcessSupervisor;
@@ -112,13 +115,28 @@ use roko_std::SumScorer;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
+use crate::agent_config::{
+    synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
+};
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::config::Config;
+use crate::heartbeat::{
+    HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
+    persist_heartbeat_snapshot,
+};
+use crate::plan::plans_dir;
+use crate::prompting::{
+    PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
+};
 use crate::task_parser::{TaskValidationIssue, TasksFile};
+use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
+use crate::workspace_paths::find_prd_path;
 
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
@@ -147,6 +165,10 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join("latency-stats.json")
 }
 
+fn static_overrides_path(workdir: &Path) -> PathBuf {
+    workdir.join(DEFAULT_STATIC_OVERRIDES_PATH)
+}
+
 fn routing_log_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
@@ -157,6 +179,17 @@ fn cfactor_history_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("c-factor.jsonl")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeartbeatCounts {
+    active_tasks: usize,
+    ready_tasks: usize,
+    completed_tasks: usize,
+    failed_tasks: usize,
+    completion_rate: f64,
+    max_queue_wait_hours: f64,
+    cross_plan_blocked: bool,
 }
 
 #[derive(Clone)]
@@ -591,8 +624,10 @@ fn drain_turn_learning_events(
                 }
             }
             Ok(_) => {}
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, "learning feedback lagged behind event stream");
             }
@@ -1155,10 +1190,11 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             extra_args.push(resume_session);
         }
 
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &routing_config,
-            &cfg.model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: cfg.model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: Some(cfg.system_prompt.clone()),
@@ -1166,7 +1202,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: Some(cfg.allowed_tools_csv.clone()),
                 mcp_config: cfg.mcp_config.clone(),
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars.clone(),
                 extra_args,
                 effort: Some(cfg.effort.clone()),
@@ -1174,6 +1209,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
             },
+            format!("create prepared agent for {}", cfg.model),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -1189,10 +1225,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else if cfg.command == "claude" {
-        let mut synthesized_config = RokoConfig::default();
-        synthesized_config.agent.command = Some(cfg.command.clone());
-        synthesized_config.agent.default_model = cfg.model.clone();
-        synthesized_config.agent.default_backend = "claude".to_string();
+        let synthesized_config = synthesize_claude_cli_config(&cfg.command, &cfg.model);
 
         let mut extra_args = cfg.read_args;
         extra_args.extend(cfg.extra_args);
@@ -1205,10 +1238,11 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             extra_args.push(resume_session);
         }
 
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &synthesized_config,
-            &cfg.model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: cfg.model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: Some(cfg.system_prompt),
@@ -1216,7 +1250,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: Some(cfg.allowed_tools_csv),
                 mcp_config: cfg.mcp_config,
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars,
                 extra_args,
                 effort: Some(cfg.effort),
@@ -1224,6 +1257,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
             },
+            format!("create synthesized claude agent for {}", cfg.model),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -1239,22 +1273,50 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             ),
         }
     } else if is_known_protocol_command(&cfg.command) {
-        let mut agent = ExecAgent::new(&cfg.command, cfg.extra_args)
-            .with_timeout_ms(cfg.timeout_ms)
-            .with_current_dir(cfg.exec_dir.clone());
-        for (k, v) in &cfg.env_vars {
-            agent = agent.with_env_var(k, v);
-        }
-        agent.run(&prompt_signal, &ctx).await
-    } else {
-        let mut fallback_config = RokoConfig::default();
-        fallback_config.agent.command = Some(cfg.command.clone());
+        let fallback_config = synthesize_known_protocol_config(&cfg.command, &cfg.model);
 
-        let model = cfg.model.clone();
-        match create_agent_for_model(
+        match spawn_agent_with_layer(
             &fallback_config,
-            &model,
-            AgentOptions {
+            None,
+            SpawnAgentSpec {
+                model: cfg.model.clone(),
+                command: Some(cfg.command.clone()),
+                timeout_ms: Some(cfg.timeout_ms),
+                system_prompt: None,
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(cfg.exec_dir.clone()),
+                env: cfg.env_vars,
+                extra_args: cfg.extra_args,
+                effort: None,
+                bare_mode: cfg.bare_mode,
+                dangerously_skip_permissions: false,
+                name: String::new(),
+            },
+            format!("create known-protocol subprocess agent for {}", cfg.command),
+        ) {
+            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
+            Err(err) => AgentResult::fail(
+                prompt_signal
+                    .derive(
+                        Kind::AgentOutput,
+                        Body::text(format!(
+                            "create known-protocol subprocess agent for {} failed: {err}",
+                            cfg.command
+                        )),
+                    )
+                    .build(),
+            ),
+        }
+    } else {
+        let model = cfg.model.clone();
+        let fallback_config = synthesize_subprocess_config(&cfg.command);
+        match spawn_agent_with_layer(
+            &fallback_config,
+            None,
+            SpawnAgentSpec {
+                model: model.clone(),
                 command: Some(cfg.command.clone()),
                 timeout_ms: Some(cfg.timeout_ms),
                 system_prompt: Some(cfg.system_prompt),
@@ -1262,7 +1324,6 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 tools: Some(cfg.allowed_tools_csv),
                 mcp_config: cfg.mcp_config,
                 working_dir: Some(cfg.exec_dir.clone()),
-                provider_semaphores: None,
                 env: cfg.env_vars,
                 extra_args: cfg.extra_args,
                 effort: Some(cfg.effort),
@@ -1270,6 +1331,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
                 dangerously_skip_permissions: cfg.skip_permissions,
                 name: String::new(),
             },
+            format!("create generic subprocess agent for {}", cfg.command),
         ) {
             Ok(agent) => agent.run(&prompt_signal, &ctx).await,
             Err(err) => AgentResult::fail(
@@ -1524,6 +1586,34 @@ async fn load_or_create_playbook_store(path: &Path) -> Result<PlaybookStore> {
     Ok(PlaybookStore::new(path))
 }
 
+fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Path) {
+    let overrides_path = static_overrides_path(workdir);
+    let winners = {
+        let store = learning.experiment_store().lock();
+        let winners = store.concluded_winners();
+        if let Err(err) = store.apply_winners_to(&winners, &overrides_path) {
+            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to persist experiment winners");
+        }
+        winners
+    };
+
+    if winners.is_empty() {
+        return;
+    }
+
+    match learning
+        .cascade_router()
+        .load_static_overrides(&overrides_path)
+    {
+        Ok(applied) => {
+            tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides")
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides")
+        }
+    }
+}
+
 /// Convert the latest efficiency entries into the signals expected by the conductor.
 fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Engram> {
     let mut signals = Vec::new();
@@ -1674,6 +1764,36 @@ fn select_prompt_skills(
         .collect()
 }
 
+fn slug_matches(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs
+        || lhs
+            .split(['/', '-'])
+            .next()
+            .is_some_and(|family| rhs.starts_with(family))
+        || rhs
+            .split(['/', '-'])
+            .next()
+            .is_some_and(|family| lhs.starts_with(family))
+}
+
+fn is_premium_model(slug: &str) -> bool {
+    let normalized = slug.to_ascii_lowercase();
+    normalized.contains("opus")
+        || normalized.contains("gpt-5")
+        || normalized.contains("o3")
+        || normalized.contains("sonnet-max")
+}
+
+fn cascade_routing_bias_from_conductor(
+    bias: &roko_conductor::RoutingBias,
+) -> roko_learn::cascade_router::RoutingBias {
+    roko_learn::cascade_router::RoutingBias {
+        deprioritize: bias.deprioritize.clone(),
+        prefer_cheaper: bias.prefer_cheaper,
+        reason: bias.reason.clone(),
+    }
+}
+
 fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
     match role {
         AgentRole::Researcher | AgentRole::PrePlanner | AgentRole::Strategist => {
@@ -1802,6 +1922,89 @@ fn render_playbook_context(playbook: &Playbook) -> String {
     }
 
     parts.join("\n\n")
+}
+
+fn render_playbook_contexts(playbooks: &[Playbook]) -> String {
+    playbooks
+        .iter()
+        .map(render_playbook_context)
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn playbook_query(
+    task: &str,
+    task_text: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> String {
+    let mut parts = vec![task.to_string(), task_text.to_string()];
+    if let Some(task_def) = task_def {
+        parts.push(task_def.title.clone());
+        if let Some(description) = &task_def.description {
+            parts.push(description.clone());
+        }
+        if !task_def.files.is_empty() {
+            parts.push(task_def.files.join(" "));
+        }
+        if !task_def.acceptance.is_empty() {
+            parts.push(task_def.acceptance.join(" "));
+        }
+    }
+    parts.join("\n")
+}
+
+fn build_task_playbook(task_def: &crate::task_parser::TaskDef) -> Playbook {
+    let goal = task_def
+        .description
+        .clone()
+        .unwrap_or_else(|| task_def.title.clone());
+    let mut playbook = Playbook::new(task_def.id.clone(), goal);
+    playbook.name = task_def.title.clone();
+
+    let mut next_index = 0u32;
+    playbook.steps.push(PlaybookStep::new(
+        next_index,
+        task_def
+            .description
+            .clone()
+            .unwrap_or_else(|| task_def.title.clone()),
+        task_def
+            .role
+            .clone()
+            .unwrap_or_else(|| "execute_task".to_string()),
+        if task_def.acceptance.is_empty() {
+            vec!["task_success".to_string()]
+        } else {
+            task_def.acceptance.clone()
+        },
+    ));
+    next_index += 1;
+
+    if !task_def.files.is_empty() {
+        playbook.steps.push(PlaybookStep::new(
+            next_index,
+            format!("Touch files: {}", task_def.files.join(", ")),
+            "edit_file",
+            task_def.files.clone(),
+        ));
+        next_index += 1;
+    }
+
+    if !task_def.verify.is_empty() {
+        let signals = task_def
+            .verify
+            .iter()
+            .map(|step| step.phase.clone())
+            .collect::<Vec<_>>();
+        playbook.steps.push(PlaybookStep::new(
+            next_index,
+            format!("Verify task with {} checks", task_def.verify.len()),
+            "verify",
+            signals,
+        ));
+    }
+
+    playbook
 }
 
 fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
@@ -1966,7 +2169,7 @@ pub struct PlanRunner {
     /// Durable knowledge store queried per task for task-scoped context.
     knowledge_store: KnowledgeStore,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
-    supervisor: ProcessSupervisor,
+    supervisor: Arc<ProcessSupervisor>,
     /// Root cancellation token for coordinated shutdown.
     cancel: CancelToken,
     /// Per-plan task tracking for granular Implementing → Gating progression.
@@ -2021,6 +2224,8 @@ pub struct PlanRunner {
     server_event_bus: Option<roko_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
     /// Optional state hub sender for unified dashboard snapshot updates.
     state_hub_sender: Option<roko_core::StateHubSender>,
+    /// Optional approval IPC sender for connected TUI sessions.
+    approval_tx: Option<mpsc::Sender<ApprovalRequest>>,
     /// Optional cloud execution state for code-implementer runs.
     cloud_execution: Option<CloudExecution>,
     /// Optional Perplexity search client for pre-dispatch context enrichment.
@@ -2049,6 +2254,12 @@ struct TaskTracker {
     last_impl_task_id: Option<String>,
     /// Model slug used by the most recently dispatched implementation task.
     last_impl_model_slug: Option<String>,
+    /// Output hash from the most recent implementation dispatch.
+    last_impl_output_hash: Option<ContentHash>,
+    /// Knowledge entry ids surfaced in the most recent task context.
+    last_context_knowledge_ids: Vec<String>,
+    /// Last detailed gate verdicts emitted for this plan.
+    last_gate_verdicts: Vec<GateVerdict>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -2250,6 +2461,9 @@ impl TaskTracker {
             last_gate_failure_phase: None,
             last_impl_task_id: None,
             last_impl_model_slug: None,
+            last_impl_output_hash: None,
+            last_context_knowledge_ids: Vec::new(),
+            last_gate_verdicts: Vec::new(),
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -2587,28 +2801,6 @@ fn best_completed_task_match<'a>(
         }
     }
     best
-}
-
-fn find_prd_path(workdir: &Path, slug: &str) -> Option<PathBuf> {
-    let published = workdir
-        .join(".roko")
-        .join("prd")
-        .join("published")
-        .join(format!("{slug}.md"));
-    if published.exists() {
-        return Some(published);
-    }
-
-    let draft = workdir
-        .join(".roko")
-        .join("prd")
-        .join("drafts")
-        .join(format!("{slug}.md"));
-    if draft.exists() {
-        return Some(draft);
-    }
-
-    None
 }
 
 fn merge_regenerated_plan(
@@ -3015,17 +3207,16 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3060,7 +3251,7 @@ impl PlanRunner {
             learning,
             daimon,
             skill_library,
-            supervisor: ProcessSupervisor::new(cancel.clone()),
+            supervisor: Arc::new(ProcessSupervisor::new(cancel.clone())),
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
@@ -3109,6 +3300,7 @@ impl PlanRunner {
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
+            approval_tx: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -3140,17 +3332,16 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3179,7 +3370,7 @@ impl PlanRunner {
             learning,
             daimon,
             skill_library,
-            supervisor: ProcessSupervisor::new(cancel.clone()),
+            supervisor: Arc::new(ProcessSupervisor::new(cancel.clone())),
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
@@ -3228,6 +3419,7 @@ impl PlanRunner {
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
+            approval_tx: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -3263,17 +3455,16 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("init learning runtime: {e}"))?;
         install_episode_distillation_hook(&mut learning, workdir);
+        apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
         daimon.configure_strategy_space(config.daimon.strategy_space.clone());
         let skill_library =
             load_or_create_skill_library(&workdir.join(".roko").join("learn").join("skills.json"))
                 .await
                 .context("init skill library")?;
-        let playbook = load_or_create_playbook_store(
-            &workdir.join(".roko").join("learn").join("playbooks.json"),
-        )
-        .await
-        .context("init playbook store")?;
+        let playbook = load_or_create_playbook_store(&learning.paths().playbooks_dir)
+            .await
+            .context("init playbook store")?;
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
@@ -3302,7 +3493,7 @@ impl PlanRunner {
             learning,
             daimon,
             skill_library,
-            supervisor: ProcessSupervisor::new(cancel.clone()),
+            supervisor: Arc::new(ProcessSupervisor::new(cancel.clone())),
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
@@ -3351,6 +3542,7 @@ impl PlanRunner {
             efficiency_events: Vec::new(),
             server_event_bus: None,
             state_hub_sender: None,
+            approval_tx: None,
             cloud_execution: None,
             playbook,
             knowledge_store,
@@ -3377,6 +3569,11 @@ impl PlanRunner {
     /// Attach a state hub sender for unified dashboard snapshot updates.
     pub fn set_state_hub(&mut self, sender: roko_core::StateHubSender) {
         self.state_hub_sender = Some(sender);
+    }
+
+    /// Attach an approval IPC sender for connected TUI sessions.
+    pub fn set_approval_tx(&mut self, tx: Option<mpsc::Sender<ApprovalRequest>>) {
+        self.approval_tx = tx;
     }
 
     /// Enable cloud execution behavior for the current plan run.
@@ -3425,6 +3622,39 @@ impl PlanRunner {
         });
     }
 
+    fn approval_command_display(&self, selected_model: &str) -> String {
+        let mut parts = vec![self.config.agent.command.clone()];
+        parts.extend(self.config.agent.args.iter().cloned());
+        if !selected_model.is_empty() && !parts.iter().any(|arg| arg == "--model") {
+            parts.push("--model".to_string());
+            parts.push(selected_model.to_string());
+        }
+        parts.join(" ")
+    }
+
+    async fn request_approval(
+        &self,
+        role: AgentRole,
+        command: String,
+        approval_id: String,
+    ) -> Result<bool> {
+        let Some(tx) = self.approval_tx.as_ref() else {
+            return Ok(true);
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+        tx.send(ApprovalRequest {
+            role: role.label().to_string(),
+            command,
+            approval_id,
+            response_tx,
+        })
+        .await
+        .map_err(|_| anyhow!("approval IPC receiver dropped"))?;
+
+        Ok(response_rx.await.unwrap_or(false))
+    }
+
     fn apply_event_and_emit(
         &mut self,
         plan_id: &str,
@@ -3457,6 +3687,32 @@ impl PlanRunner {
                 }
             };
             self.emit_execution_event(plan_id, exec_event);
+        }
+    }
+
+    /// Apply a structured re-plan result to the live executor state.
+    fn apply_replan_result(&mut self, result: &ReplanResult) {
+        if !result.requires_restart() {
+            return;
+        }
+
+        let plan_id = result.plan_id().to_string();
+        let task_id = result.task_id().to_string();
+        let old_phase = self
+            .executor
+            .plan_state(&plan_id)
+            .map(|state| Self::phase_label(state.current_phase.kind()).to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if self.executor.restart_plan(&plan_id).is_some() {
+            self.emit_execution_event(
+                &plan_id,
+                crate::serve::events::ExecutionEvent::TaskPhaseChanged {
+                    task_id,
+                    old_phase,
+                    new_phase: "queued".to_string(),
+                },
+            );
         }
     }
 
@@ -3549,8 +3805,14 @@ impl PlanRunner {
 
     /// The process supervisor — exposed for status queries.
     #[must_use]
-    pub const fn supervisor(&self) -> &ProcessSupervisor {
-        &self.supervisor
+    pub fn supervisor(&self) -> &ProcessSupervisor {
+        self.supervisor.as_ref()
+    }
+
+    /// A cloneable handle to the process supervisor.
+    #[must_use]
+    pub fn supervisor_handle(&self) -> Arc<ProcessSupervisor> {
+        Arc::clone(&self.supervisor)
     }
 
     /// The filesystem-backed observability sinks — exposed for status queries.
@@ -3577,46 +3839,63 @@ impl PlanRunner {
         registry
     }
 
+    /// Pause a plan whose circuit breaker has tripped and emit the standard
+    /// intervention signals.
+    fn handle_tripped_circuit_breaker(&mut self, plan_id: &str) {
+        tracing::error!("[conductor] pausing {plan_id}: circuit breaker tripped");
+        let _ = self.executor.pause_plan(plan_id);
+        let error_output = self
+            .conductor
+            .circuit_breaker()
+            .get_record(plan_id)
+            .map(|record| {
+                if record.reasons.is_empty() {
+                    "failure budget exhausted".to_owned()
+                } else {
+                    record.reasons.join("\n")
+                }
+            })
+            .unwrap_or_else(|| "failure budget exhausted".to_owned());
+        let diagnosis_engine = DiagnosisEngine::default();
+        let diagnosis_results = diagnosis_engine.diagnose(&error_output);
+        let primary_diagnosis = diagnosis_results.first().cloned();
+        let payload = serde_json::json!({
+            "plan_id": plan_id,
+            "action": "pause",
+            "watcher": "circuit-breaker",
+            "reason": "failure budget exhausted",
+            "error_output": error_output,
+            "primary_diagnosis": primary_diagnosis,
+            "diagnosis_results": diagnosis_results,
+        });
+        self.event_log
+            .append(EventKind::InterventionFired, payload.clone());
+        self.emit_conductor_signal(Kind::Custom("conductor.circuit_breaker".into()), payload);
+        self.emit_execution_event(
+            plan_id,
+            crate::serve::events::ExecutionEvent::WatcherAlert {
+                watcher: "circuit-breaker".to_string(),
+                message: "failure budget exhausted".to_string(),
+            },
+        );
+    }
+
+    /// Refuse to dispatch work for a plan whose circuit breaker has tripped.
+    fn ensure_dispatch_allowed(&mut self, plan_id: &str) -> Result<()> {
+        if self.conductor.circuit_breaker().is_broken(plan_id) {
+            self.handle_tripped_circuit_breaker(plan_id);
+            return Err(anyhow!(
+                "plan {plan_id} refused before dispatch: circuit breaker tripped"
+            ));
+        }
+        Ok(())
+    }
+
     /// Run conductor watchers against accumulated signals.
     /// Returns the decision and logs non-continue outcomes.
     fn run_conductor_check(&mut self, plan_id: &str) -> ConductorDecision {
         if self.conductor.circuit_breaker().is_broken(plan_id) {
-            tracing::error!("[conductor] pausing {plan_id}: circuit breaker tripped");
-            let _ = self.executor.pause_plan(plan_id);
-            let error_output = self
-                .conductor
-                .circuit_breaker()
-                .get_record(plan_id)
-                .map(|record| {
-                    if record.reasons.is_empty() {
-                        "failure budget exhausted".to_owned()
-                    } else {
-                        record.reasons.join("\n")
-                    }
-                })
-                .unwrap_or_else(|| "failure budget exhausted".to_owned());
-            let diagnosis_engine = DiagnosisEngine::default();
-            let diagnosis_results = diagnosis_engine.diagnose(&error_output);
-            let primary_diagnosis = diagnosis_results.first().cloned();
-            let payload = serde_json::json!({
-                "plan_id": plan_id,
-                "action": "pause",
-                "watcher": "circuit-breaker",
-                "reason": "failure budget exhausted",
-                "error_output": error_output,
-                "primary_diagnosis": primary_diagnosis,
-                "diagnosis_results": diagnosis_results,
-            });
-            self.event_log
-                .append(EventKind::InterventionFired, payload.clone());
-            self.emit_conductor_signal(Kind::Custom("conductor.circuit_breaker".into()), payload);
-            self.emit_execution_event(
-                plan_id,
-                crate::serve::events::ExecutionEvent::WatcherAlert {
-                    watcher: "circuit-breaker".to_string(),
-                    message: "failure budget exhausted".to_string(),
-                },
-            );
+            self.handle_tripped_circuit_breaker(plan_id);
             return ConductorDecision::Continue;
         }
 
@@ -3689,6 +3968,252 @@ impl PlanRunner {
         }
     }
 
+    fn heartbeat_counts(&self, completed_plans: &[String]) -> HeartbeatCounts {
+        let mut total_tasks = 0usize;
+        let mut completed_tasks = 0usize;
+        let mut failed_tasks = 0usize;
+        let mut ready_tasks = 0usize;
+        let mut max_queue_wait_hours = 0.0f64;
+        let mut cross_plan_blocked = false;
+
+        for tracker in self.task_trackers.values() {
+            total_tasks += tracker.tasks_file.tasks.len();
+            completed_tasks += tracker.completed.len();
+            failed_tasks += tracker.failed.len();
+            let ready = tracker.ready_tasks(completed_plans);
+            ready_tasks += ready.len();
+            for task in ready {
+                if let Some(wait_hours) = tracker.queue_wait_hours(&task.id) {
+                    max_queue_wait_hours = max_queue_wait_hours.max(wait_hours);
+                }
+            }
+            cross_plan_blocked |= tracker.has_tasks_blocked_by_plans(completed_plans);
+        }
+
+        let active_tasks = total_tasks.saturating_sub(completed_tasks + failed_tasks);
+        let completion_rate = if total_tasks == 0 {
+            0.0
+        } else {
+            completed_tasks as f64 / total_tasks as f64
+        };
+
+        HeartbeatCounts {
+            active_tasks,
+            ready_tasks,
+            completed_tasks,
+            failed_tasks,
+            completion_rate,
+            max_queue_wait_hours,
+            cross_plan_blocked,
+        }
+    }
+
+    fn heartbeat_probe_results(
+        &self,
+        completed_plans: &[String],
+        counts: HeartbeatCounts,
+        active_agents: usize,
+        watcher_cancel: &TokioCancellationToken,
+        theta_due: bool,
+        delta_due: bool,
+    ) -> Vec<HeartbeatProbeResult> {
+        let (readiness, degraded_reasons) = self.health_probes.readiness();
+        let health_degraded =
+            matches!(readiness, roko_core::obs::health::ReadinessStatus::NotReady);
+        let recent_gate_failure = self
+            .task_trackers
+            .values()
+            .any(|tracker| tracker.last_gate_failure.is_some());
+        let repeated_gate_failures = self
+            .task_trackers
+            .values()
+            .any(|tracker| tracker.gate_failure_count >= 2);
+        let total_spend = self.plan_costs.values().sum::<f64>();
+        let affect_confidence = self.daimon.query().confidence;
+        let low_affect_confidence = affect_confidence < 0.35;
+        let mcp_unavailable = !self.mcp_server_names.is_empty()
+            && self
+                .tool_registry
+                .as_ref()
+                .is_none_or(|registry| registry.all().is_empty());
+
+        vec![
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ShutdownRequested,
+                self.cancel.is_cancelled(),
+                self.cancel
+                    .is_cancelled()
+                    .then(|| "root cancel token tripped".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::WatcherCancelled,
+                watcher_cancel.is_cancelled(),
+                watcher_cancel
+                    .is_cancelled()
+                    .then(|| "watcher task cancellation observed".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::NoReadyTasks,
+                counts.ready_tasks == 0,
+                (counts.ready_tasks == 0).then(|| "no tasks are ready to dispatch".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ReadyQueueStalled,
+                counts.max_queue_wait_hours >= 0.25,
+                (counts.max_queue_wait_hours >= 0.25)
+                    .then(|| format!("max queued task wait {:.2}h", counts.max_queue_wait_hours)),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::CrossPlanBlocked,
+                counts.cross_plan_blocked,
+                counts.cross_plan_blocked.then(|| {
+                    format!(
+                        "{} plan(s) waiting on cross-plan dependencies",
+                        self.task_trackers
+                            .values()
+                            .filter(|tracker| tracker.has_tasks_blocked_by_plans(completed_plans))
+                            .count()
+                    )
+                }),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::GateFailurePresent,
+                recent_gate_failure,
+                recent_gate_failure.then(|| "recent gate failure recorded".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::RepeatedGateFailures,
+                repeated_gate_failures,
+                repeated_gate_failures.then(|| "repeated gate failures detected".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ForceModelOverrideArmed,
+                self.force_model_override.is_some(),
+                self.force_model_override
+                    .as_ref()
+                    .map(|model| format!("pending override: {model}")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::LowAffectConfidence,
+                low_affect_confidence,
+                low_affect_confidence
+                    .then(|| format!("daimon confidence {:.2}", affect_confidence)),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ActiveAgentsPresent,
+                active_agents > 0,
+                (active_agents > 0).then(|| format!("{active_agents} active agent(s)")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::HealthDegraded,
+                health_degraded,
+                health_degraded.then(|| {
+                    degraded_reasons
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                }),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::SearchUnavailable,
+                self.search_client.is_none(),
+                self.search_client
+                    .is_none()
+                    .then(|| "PERPLEXITY_API_KEY not configured".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::McpUnavailable,
+                mcp_unavailable,
+                mcp_unavailable
+                    .then(|| "MCP servers requested but no tools are active".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::SessionSpendElevated,
+                total_spend >= 1.0,
+                (total_spend >= 1.0).then(|| format!("session spend ${total_spend:.2}")),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::ThetaDue,
+                theta_due,
+                theta_due.then(|| "adaptive theta cadence elapsed".to_string()),
+            ),
+            HeartbeatProbeResult::new(
+                HeartbeatProbeKind::DeltaDue,
+                delta_due,
+                delta_due.then(|| "delta consolidation cadence elapsed while idle".to_string()),
+            ),
+        ]
+    }
+
+    async fn maybe_run_heartbeat(
+        &mut self,
+        heartbeat_clock: &mut HeartbeatClock,
+        watcher_cancel: &TokioCancellationToken,
+    ) {
+        let completed_plans = self.executor.completed_plans();
+        let counts = self.heartbeat_counts(&completed_plans);
+        let now = std::time::Instant::now();
+        let active_agents = self.supervisor.count().await;
+        let affect = self.daimon.query();
+        let context = OperatingFrequencyScheduleContext::from_affect(
+            Duration::from_secs(heartbeat_clock.seconds_since_last_theta(now)),
+            counts.active_tasks,
+            counts.completion_rate,
+            &affect,
+        );
+        let theta_due = heartbeat_clock.theta_due(now, context);
+        let delta_due = heartbeat_clock.delta_due(now, context);
+        let Some(frequency) = heartbeat_clock.next_due(now, context) else {
+            return;
+        };
+
+        let snapshot = HeartbeatSnapshot {
+            timestamp: chrono::Utc::now(),
+            frequency,
+            active_tasks: counts.active_tasks,
+            ready_tasks: counts.ready_tasks,
+            completed_tasks: counts.completed_tasks,
+            failed_tasks: counts.failed_tasks,
+            completion_rate: counts.completion_rate,
+            active_agents,
+            seconds_since_last_theta: heartbeat_clock.seconds_since_last_theta(now),
+            delta_interval_secs: heartbeat_clock.delta_interval_secs(),
+            probes: self.heartbeat_probe_results(
+                &completed_plans,
+                counts,
+                active_agents,
+                watcher_cancel,
+                theta_due,
+                delta_due,
+            ),
+        };
+
+        if let Err(err) = persist_heartbeat_snapshot(&self.workdir, &snapshot) {
+            tracing::warn!(error = %err, "failed to persist heartbeat snapshot");
+        }
+
+        let triggered = snapshot.triggered_probe_labels();
+        self.emit_conductor_signal(
+            Kind::Custom(format!("heartbeat.{}", frequency_label(frequency)).into()),
+            serde_json::to_value(&snapshot)
+                .unwrap_or_else(|_| serde_json::json!({"frequency": frequency_label(frequency)})),
+        );
+        tracing::info!(
+            frequency = frequency_label(frequency),
+            active_tasks = snapshot.active_tasks,
+            ready_tasks = snapshot.ready_tasks,
+            completion_rate = snapshot.completion_rate,
+            triggered = ?triggered,
+            "heartbeat snapshot recorded"
+        );
+        heartbeat_clock.record(now, frequency);
+
+        if frequency == OperatingFrequency::Delta {
+            self.maybe_auto_dream().await;
+        }
+    }
+
     fn record_conductor_negative_feedback(&self, plan_id: &str, intervention: &ConductorDecision) {
         let Some((task_id, model_slug, task_def)) =
             self.task_trackers.get(plan_id).and_then(|tracker| {
@@ -3725,10 +4250,12 @@ impl PlanRunner {
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
     fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
-        let sig = Engram::builder(kind)
-            .body(Body::Json(body))
-            .emotional_tag(self.daimon.emotional_tag("conductor"))
-            .build();
+        let sig = maybe_attest_engram(
+            Engram::builder(kind)
+                .body(Body::Json(body))
+                .emotional_tag(self.daimon.emotional_tag("conductor"))
+                .build(),
+        );
         self.conductor_signals.push(sig);
     }
 
@@ -3912,7 +4439,7 @@ impl PlanRunner {
             if plan_id.is_empty() {
                 continue;
             }
-            let plan_dir = workdir.join("plans").join(&plan_id);
+            let plan_dir = plans_dir(workdir).join(&plan_id);
             let tasks_path = plan_dir.join("tasks.toml");
             let Ok(tf) = TasksFile::parse(&tasks_path) else {
                 continue;
@@ -3973,7 +4500,7 @@ impl PlanRunner {
             if trackers.contains_key(plan_id) {
                 continue;
             }
-            let plan_dir = workdir.join("plans").join(plan_id);
+            let plan_dir = plans_dir(workdir).join(plan_id);
             let tasks_path = plan_dir.join("tasks.toml");
             let Ok(tf) = TasksFile::parse(&tasks_path) else {
                 continue;
@@ -4163,6 +4690,7 @@ impl PlanRunner {
     ///
     /// Returns an error if agent dispatch, gate execution, or substrate
     /// I/O fails fatally (per-plan failures are recorded in the report).
+    #[instrument(skip_all)]
     pub async fn run_all(
         &mut self,
         watcher_cancel: &TokioCancellationToken,
@@ -4208,6 +4736,7 @@ impl PlanRunner {
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
+        let mut heartbeat_clock = HeartbeatClock::new();
 
         loop {
             iteration += 1;
@@ -4240,6 +4769,8 @@ impl PlanRunner {
             let actions = self.executor.tick();
 
             if actions.is_empty() {
+                self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
+                    .await;
                 if self.all_terminal(&plan_ids) {
                     break;
                 }
@@ -4262,6 +4793,9 @@ impl PlanRunner {
                 self.dispatch_action(action).await;
             }
 
+            self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
+                .await;
+
             // Auto-save periodically.
             if self.actions_since_save >= AUTOSAVE_INTERVAL {
                 if let Err(e) = self.save_state() {
@@ -4269,6 +4803,10 @@ impl PlanRunner {
                 }
                 self.actions_since_save = 0;
             }
+        }
+
+        if self.cancel.is_cancelled() || watcher_cancel.is_cancelled() {
+            self.cleanup_tracked_plan_worktrees().await;
         }
 
         // Clean up worktrees after completion (§6).
@@ -4587,6 +5125,7 @@ impl PlanRunner {
         match outcome {
             RunExit::Completed(result) => result,
             RunExit::Signaled(result) => {
+                self.cleanup_tracked_plan_worktrees().await;
                 self.save_state_to(&snapshot_path)?;
                 tracing::info!(
                     "[orchestrate] checkpoint saved to {}",
@@ -4597,6 +5136,7 @@ impl PlanRunner {
             }
             RunExit::SignalTimedOut => {
                 self.force_shutdown().await;
+                self.cleanup_tracked_plan_worktrees().await;
                 self.save_state_to(&snapshot_path)?;
                 tracing::info!(
                     "[orchestrate] checkpoint saved to {}",
@@ -4684,6 +5224,7 @@ impl PlanRunner {
     // ── Internal dispatch ─────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
+    #[instrument(skip_all, fields(action = ?action))]
     async fn dispatch_action(&mut self, action: ExecutorAction) {
         self.actions_since_save += 1;
 
@@ -4755,9 +5296,20 @@ impl PlanRunner {
                             ..Usage::default()
                         };
                         self.stamp_episode_affect(&mut ep, "gate", None);
-                        ep.gate_verdicts
-                            .push(GateVerdict::new(format!("rung-{rung}"), passed));
-                        ep.input_signal_hash.clone_from(&plan_id);
+                        ep.gate_verdicts = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .map(|tracker| tracker.last_gate_verdicts.clone())
+                            .filter(|verdicts| !verdicts.is_empty())
+                            .unwrap_or_else(|| {
+                                vec![GateVerdict::new(format!("rung-{rung}"), passed)]
+                            });
+                        ep.input_signal_hash = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .and_then(|tracker| tracker.last_impl_output_hash)
+                            .map(|hash| hash.to_string())
+                            .unwrap_or_else(|| plan_id.clone());
                         let gate_input = self.enrich_completed_run(
                             ep,
                             &plan_id,
@@ -4767,6 +5319,7 @@ impl PlanRunner {
                             Some(passed),
                             1,
                         );
+                        self.apply_knowledge_tier_feedback(&plan_id);
                         self.record_and_check_learning(gate_input, &plan_id).await;
 
                         // Emit observability metric for gate result.
@@ -5017,6 +5570,7 @@ impl PlanRunner {
                                     &ExecutorEvent::MergeSucceeded,
                                     "transitioned",
                                 );
+                                self.cleanup_plan_worktree(&plan_id).await;
                             }
                             Ok(false) => {
                                 self.apply_event_and_emit(
@@ -5042,6 +5596,7 @@ impl PlanRunner {
                                     &ExecutorEvent::MergeSucceeded,
                                     "transitioned",
                                 );
+                                self.cleanup_plan_worktree(&plan_id).await;
                             }
                         }
                     }
@@ -5116,6 +5671,7 @@ impl PlanRunner {
                     &ExecutorEvent::Fatal(reason),
                     "failed",
                 );
+                self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::CompletePlan { plan_id } => {
                 tracing::info!("[orchestrate] CompletePlan {plan_id}");
@@ -5137,6 +5693,7 @@ impl PlanRunner {
                         }),
                     },
                 );
+                self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::Reorder {
                 plan_id,
@@ -5458,6 +6015,9 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task_id.to_string());
             tracker.last_impl_model_slug = None;
+            tracker.last_impl_output_hash = None;
+            tracker.last_context_knowledge_ids.clear();
+            tracker.last_gate_verdicts.clear();
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -5478,6 +6038,7 @@ impl PlanRunner {
         let mut retry_prompt_override: Option<String> = None;
         let mut pending_feedback: Option<(RetryConductorState, RetryConductorAction)> = None;
         let mut terminal_error: Option<anyhow::Error> = None;
+        let mut terminal_failure_handled = false;
         let exec_dir = match self.task_exec_dir(plan_id, task_id).await {
             Ok(dir) => dir,
             Err(e) => {
@@ -5527,6 +6088,34 @@ impl PlanRunner {
                     if let Some((state, action)) = pending_feedback.take() {
                         self.retry_conductor.record_outcome(&state, action, true);
                         self.persist_retry_conductor();
+                    }
+                    if let Err(e) = self
+                        .finalize_successful_task_worktree(plan_id, task_id, &exec_dir)
+                        .await
+                    {
+                        tracing::error!(
+                            "[orchestrate] task worktree finalization failed for {plan_id}/{task_id}: {e}"
+                        );
+                        self.record_task_failure(
+                            plan_id,
+                            task_id,
+                            None,
+                            Some(retry_model.as_str()),
+                            &e,
+                            &started,
+                            Some(&result),
+                        )
+                        .await;
+                        self.apply_event_and_emit(
+                            plan_id,
+                            task_id,
+                            &ExecutorEvent::Fatal(format!(
+                                "task worktree finalization failed: {e}"
+                            )),
+                            "failed",
+                        );
+                        terminal_failure_handled = true;
+                        break;
                     }
                     match self
                         .record_task_success(plan_id, task_id, &result, &started)
@@ -5709,6 +6298,18 @@ impl PlanRunner {
                 None,
             )
             .await;
+            if self.should_replan_after_task_failure()
+                && !self.no_replan
+                && self.executor.config().auto_replan
+            {
+                tracing::info!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    "[orchestrate] Daimon requested replan after task failure"
+                );
+                self.attempt_replan(plan_id).await;
+                terminal_failure_handled = true;
+            }
         }
 
         if self.worktrees_enabled() {
@@ -5717,7 +6318,7 @@ impl PlanRunner {
             }
         }
 
-        if !succeeded && !budget_aborted {
+        if !succeeded && !budget_aborted && !terminal_failure_handled {
             tracing::error!("[orchestrate] task {task_id} failed after {max_retries} retries");
             self.apply_event_and_emit(
                 plan_id,
@@ -5771,7 +6372,7 @@ impl PlanRunner {
         let mut configs: Vec<(String, String, AgentRunConfig)> =
             Vec::with_capacity(task_dirs.len());
 
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
         let tasks_file = if tasks_toml.exists() {
             crate::task_parser::TasksFile::parse(&tasks_toml).ok()
@@ -5826,7 +6427,13 @@ impl PlanRunner {
             } else {
                 claude_tools_csv.clone()
             };
-            let system_prompt = build_system_prompt(role, plan_id, tid, &task_allowed_tools_csv);
+            let system_prompt = build_system_prompt(
+                role,
+                plan_id,
+                tid,
+                &task_allowed_tools_csv,
+                task_def.as_ref(),
+            );
             let env_vars: Vec<(String, String)> = self
                 .config
                 .agent
@@ -5944,6 +6551,26 @@ impl PlanRunner {
                 {
                     tracing::error!(
                         "[orchestrate] parallel task {tid} post-processing failed: {e}"
+                    );
+                    self.record_task_failure(
+                        plan_id,
+                        tid,
+                        Some(task_result.prompt_text.as_str()),
+                        Some(task_result.model.as_str()),
+                        &e,
+                        &started,
+                        Some(&task_result.result),
+                    )
+                    .await;
+                    any_fatal = true;
+                    continue;
+                }
+                if let Err(e) = self
+                    .finalize_successful_task_worktree(plan_id, tid, &task_result.exec_dir)
+                    .await
+                {
+                    tracing::error!(
+                        "[orchestrate] parallel task worktree finalization failed for {plan_id}/{tid}: {e}"
                     );
                     self.record_task_failure(
                         plan_id,
@@ -6708,15 +7335,30 @@ impl PlanRunner {
             }
         }
 
-        if let Some(task_def) = task_def.as_ref()
-            && let Err(err) = self.playbook.record(&task_def.id, result.success).await
-        {
-            tracing::warn!(
-                plan_id = %plan_id,
-                task_id = %task_id,
-                error = %err,
-                "failed to record playbook outcome"
-            );
+        if let Some(task_def) = task_def.as_ref() {
+            match self.playbook.record(&task_def.id, result.success).await {
+                Ok(true) => {}
+                Ok(false) if !result.success => {}
+                Ok(false) => {
+                    let playbook = build_task_playbook(task_def);
+                    if let Err(err) = self.playbook.save(&playbook).await {
+                        tracing::warn!(
+                            plan_id = %plan_id,
+                            task_id = %task_id,
+                            error = %err,
+                            "failed to persist inferred playbook"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        error = %err,
+                        "failed to record playbook outcome"
+                    );
+                }
+            }
         }
 
         let mut ep = Episode::new("Implementer", task_id).succeeded();
@@ -6786,6 +7428,7 @@ impl PlanRunner {
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
+            tracker.last_impl_output_hash = Some(result.output.id);
         }
 
         self.emit_execution_event(
@@ -7111,6 +7754,11 @@ impl PlanRunner {
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
+                        let result = ReplanResult::RetrySame {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                        };
+                        self.apply_replan_result(&result);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -7151,7 +7799,7 @@ impl PlanRunner {
                         AgentRole::Strategist,
                         "replan",
                         Some(prompt),
-                        Some(escalate_model),
+                        Some(escalate_model.clone()),
                         None,
                         None,
                     )
@@ -7175,6 +7823,12 @@ impl PlanRunner {
                         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
                             tracker.gate_failure_count = 0;
                         }
+                        let result = ReplanResult::RetryWithEscalation {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                            escalated_model: escalate_model.clone(),
+                        };
+                        self.apply_replan_result(&result);
                     }
                     Err(e) => {
                         tracing::error!("[orchestrate] escalated replan failed for {plan_id}: {e}");
@@ -7240,7 +7894,8 @@ impl PlanRunner {
                     return;
                 };
                 let gate_report = self.gate_failure_report(plan_id);
-                let system_prompt = crate::plan_generate::PLAN_GENERATOR_SYSTEM_PROMPT.to_string();
+                let system_prompt =
+                    crate::plan_generate::build_generator_system_prompt(&self.workdir);
                 let prompt = self.build_decompose_prompt(
                     plan_id,
                     &tasks_snapshot,
@@ -7558,6 +8213,15 @@ impl PlanRunner {
                             tracker.last_impl_task_id = None;
                             tracker.last_impl_model_slug = None;
                         }
+                        let result = ReplanResult::Decompose {
+                            plan_id: plan_id.to_string(),
+                            task_id: task_id.clone(),
+                            new_task_ids: resulting_subtasks
+                                .iter()
+                                .map(|task| task.id.clone())
+                                .collect(),
+                        };
+                        self.apply_replan_result(&result);
                         self.record_replan_episode(
                             plan_id,
                             &task_id,
@@ -7666,6 +8330,12 @@ impl PlanRunner {
                 );
                 self.record_and_check_learning(input, plan_id).await;
 
+                let result = ReplanResult::Skip {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.clone(),
+                };
+                self.apply_replan_result(&result);
+
                 if self
                     .task_trackers
                     .get(plan_id)
@@ -7773,7 +8443,7 @@ impl PlanRunner {
              Regenerate the implementation plan from the PRD at {}.\
              This is the same work as `roko prd plan {prd_slug}`.\
              Preserve these completed task IDs when you rebuild the plan: {completed_task_ids:?}\n\n\
-             Regenerate the plan at plans/{plan_id}/tasks.toml so it can continue \
+             Regenerate the plan at .roko/plans/{plan_id}/tasks.toml so it can continue \
              from the failed task '{task_id}'. Keep only genuinely new tasks, skip \
              any task whose title matches a completed task, and rewrite the file in place.\n\n\
              ## PRD source\n\
@@ -7900,6 +8570,15 @@ impl PlanRunner {
                     tracker.last_impl_task_id = None;
                     tracker.last_impl_model_slug = None;
                 }
+                let result = ReplanResult::RegeneratePlan {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.to_string(),
+                    new_task_ids: regenerated_subtasks
+                        .iter()
+                        .map(|task| task.id.clone())
+                        .collect(),
+                };
+                self.apply_replan_result(&result);
             }
             Err(e) => {
                 tracing::error!("[orchestrate] plan regeneration failed for {plan_id}: {e}");
@@ -8164,7 +8843,14 @@ impl PlanRunner {
             )
         });
         let prompt_hash = roko_core::ContentHash::of(
-            build_system_prompt(role, plan_id, task_id, &task_allowed_tools_csv).as_bytes(),
+            build_system_prompt(
+                role,
+                plan_id,
+                task_id,
+                &task_allowed_tools_csv,
+                Some(task_def),
+            )
+            .as_bytes(),
         )
         .to_hex();
         let task_text = task_text
@@ -8723,7 +9409,7 @@ impl PlanRunner {
         if self.task_trackers.contains_key(plan_id) {
             return;
         }
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_path = plan_dir.join("tasks.toml");
         if tasks_path.exists() {
             if let Ok(tf) = TasksFile::parse(&tasks_path) {
@@ -8936,6 +9622,7 @@ impl PlanRunner {
     }
 
     /// Core agent dispatch with optional prompt, model, and system-prompt overrides.
+    #[instrument(skip_all, fields(plan_id = %plan_id, role = ?role, task = %task))]
     async fn dispatch_agent_with(
         &mut self,
         plan_id: &str,
@@ -8946,10 +9633,11 @@ impl PlanRunner {
         exec_dir_override: Option<PathBuf>,
         system_prompt_override: Option<String>,
     ) -> Result<AgentResult> {
+        self.ensure_dispatch_allowed(plan_id)?;
         let ctx = Context::now();
         let exec_dir = match exec_dir_override {
             Some(dir) => dir,
-            None => self.plan_exec_dir(plan_id).await,
+            None => self.ensure_plan_exec_dir(plan_id).await?,
         };
         let preexisting_changed_files = self.git_changed_files(&exec_dir).await.ok();
 
@@ -8966,7 +9654,7 @@ impl PlanRunner {
         self.warn_plan_budget_pressure(plan_id, plan_spent);
 
         // ── Try to load structured task definition ──────────────────
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_toml = plan_dir.join("tasks.toml");
         let tasks_file = if tasks_toml.exists() {
             crate::task_parser::TasksFile::parse(&tasks_toml).ok()
@@ -8980,8 +9668,6 @@ impl PlanRunner {
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         let explicit_model_override = model_override;
-
-        let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
         // ── Build prompt: surgical (from TaskDef) or generic ────────
         // Also collect attribution keys for context feedback after the agent runs.
@@ -9069,6 +9755,24 @@ impl PlanRunner {
             routing_ctx.active_agents = load_snapshot.active_agents;
             routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
             routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
+            let routing_bias = {
+                let mut signals = self.conductor_signals.clone();
+                if let Ok(efficiency_signals) = load_efficiency_signals_sync(
+                    &self.learning.paths().efficiency_jsonl,
+                    self.executor.config().budget_usd,
+                ) {
+                    signals.extend(efficiency_signals);
+                }
+                let _ = self.conductor.decide(&signals, &Context::now());
+                self.conductor.routing_bias()
+            };
+            if routing_bias.prefer_cheaper {
+                routing_ctx.conductor_load = routing_ctx.conductor_load.max(0.85);
+            }
+            let cost_spike = CostsLog::at(self.learning.paths().costs_jsonl.clone())
+                .is_cost_spike(0.50)
+                .await
+                .unwrap_or(false);
             let agent_id = format!("{role:?}");
             let all_model_slugs = cascade_router
                 .linucb()
@@ -9090,6 +9794,7 @@ impl PlanRunner {
                 effective_context_window_tokens(&self.config) as u64,
             );
             let healthy_models = {
+                let fallback_models = healthy_models.clone();
                 let mut ranked = healthy_models
                     .iter()
                     .filter_map(|slug| {
@@ -9105,21 +9810,48 @@ impl PlanRunner {
                 if ranked.is_empty() {
                     healthy_models
                 } else {
-                    ranked
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    ranked.into_iter().map(|(slug, _)| slug).collect()
+                    let cascade_bias = cascade_routing_bias_from_conductor(&routing_bias);
+                    cascade_router.apply_bias(&mut ranked, &cascade_bias);
+                    cascade_router.apply_cost_pressure(&mut ranked, cost_spike);
+                    let candidate_count = ranked.len();
+                    ranked.retain(|(slug, score)| {
+                        *score > 0.0
+                            && (!cost_spike || !is_premium_model(slug))
+                            && (!routing_bias
+                                .deprioritize
+                                .iter()
+                                .any(|blocked| slug_matches(slug, blocked))
+                                || candidate_count == 1)
+                    });
+                    if ranked.is_empty() {
+                        fallback_models
+                    } else {
+                        ranked.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        ranked.into_iter().map(|(slug, _)| slug).collect()
+                    }
                 }
             };
 
-            routing_explanation = Some(cascade_router.explain_route(&routing_ctx, None));
+            routing_explanation =
+                Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
             if let Some(explanation) = routing_explanation.as_ref() {
                 routing_stage = explanation.stage.label().to_string();
-                routing_reason = match explanation.stage {
-                    roko_learn::cascade_router::CascadeStage::Static => "role_default",
-                    roko_learn::cascade_router::CascadeStage::Confidence => {
-                        "highest_confidence_score"
+                routing_reason = if cost_spike {
+                    "cost_spike"
+                } else if !routing_bias.deprioritize.is_empty() {
+                    "conductor_deprioritize"
+                } else if routing_bias.prefer_cheaper {
+                    "conductor_prefer_cheaper"
+                } else {
+                    match explanation.stage {
+                        roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                        roko_learn::cascade_router::CascadeStage::Confidence => {
+                            "highest_confidence_score"
+                        }
+                        roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
                     }
-                    roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
                 }
                 .to_string();
             }
@@ -9207,24 +9939,10 @@ impl PlanRunner {
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let prior_skills =
             select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
-        let skill_budget = budget_for(role).skills;
-        let skill_context_section = if prior_skills.is_empty() || skill_budget == 0 {
-            None
-        } else {
-            let skill_text = render_prior_experience(&prior_skills);
-            let skill_text_len = skill_text.len();
-            Some((
-                PromptSection::new("skill-library", skill_text)
-                    .with_priority(SectionPriority::Low)
-                    .with_placement(Placement::Middle)
-                    .with_hard_cap(skill_budget),
-                skill_text_len,
-            ))
-        };
-
-        let playbook_context_section = match self.playbook.lookup(task).await {
-            Ok(Some(playbook)) => {
-                let playbook_text = render_playbook_context(&playbook);
+        let playbook_query = playbook_query(task, &task_text, task_def.as_ref());
+        let playbook_context_section = match self.playbook.relevant(&playbook_query, 3).await {
+            Ok(playbooks) if !playbooks.is_empty() => {
+                let playbook_text = render_playbook_contexts(&playbooks);
                 let playbook_text_len = playbook_text.len();
                 Some((
                     PromptSection::new("playbook", playbook_text)
@@ -9234,9 +9952,11 @@ impl PlanRunner {
                     playbook_text_len,
                 ))
             }
-            Ok(None) => None,
+            Ok(_) => None,
             Err(err) => {
-                tracing::warn!("[orchestrate] failed to lookup playbook for task {task}: {err}");
+                tracing::warn!(
+                    "[orchestrate] failed to lookup relevant playbooks for task {task}: {err}"
+                );
                 None
             }
         };
@@ -9286,6 +10006,24 @@ impl PlanRunner {
         } else {
             selected_model
         };
+
+        if self.approval_tx.is_some() && claude_skip_permissions_for_role(role) {
+            let approval_id = format!(
+                "{plan_id}:{task}:{}:{selected_model}:{}",
+                role.label(),
+                now_ms()
+            );
+            let command = self.approval_command_display(&selected_model);
+            let approved = self.request_approval(role, command, approval_id).await?;
+            if !approved {
+                return Err(anyhow!(
+                    "approval denied for plan={plan_id} task={task} role={}",
+                    role.label()
+                ));
+            }
+        }
+
+        let mcp_lease = self.acquire_task_mcp_servers(task_def.as_ref()).await;
 
         let task_strategy = self.current_task_strategy(plan_id, task, task_def.as_ref());
         let somatic_signal = self.daimon.query_somatic(task_strategy);
@@ -9386,6 +10124,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task.to_string());
             tracker.last_impl_model_slug = Some(selected_model.clone());
+            tracker.last_context_knowledge_ids.clear();
         }
 
         // ── Build context via tiered ContextProvider ───────────────
@@ -9451,6 +10190,20 @@ impl PlanRunner {
                     }
                 })
                 .collect();
+            let context_knowledge_ids = resolved
+                .sections
+                .iter()
+                .filter_map(|cs| {
+                    use roko_compose::ContextSource;
+                    match &cs.source {
+                        ContextSource::KnowledgeEntry { entry_id, .. } => Some(entry_id.clone()),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                tracker.last_context_knowledge_ids = context_knowledge_ids;
+            }
 
             resolved.into_prompt_sections()
         } else {
@@ -9468,6 +10221,7 @@ impl PlanRunner {
         } else {
             claude_tools_csv.clone()
         };
+        let task_allowed_tools_csv = self.apply_daimon_tool_policy_csv(&task_allowed_tools_csv);
 
         // ── Adaptive format selection via bandit ─────────────────────
         let tool_count = task_allowed_tools_csv
@@ -9511,6 +10265,8 @@ impl PlanRunner {
                 &task_allowed_tools_csv,
                 relevant_context.as_deref(),
                 Some(task_affect_state),
+                task_def.as_ref(),
+                &prior_skills,
                 context_window_tokens,
                 Some(&section_effectiveness),
             )?
@@ -9539,23 +10295,6 @@ impl PlanRunner {
                 )
                 .into_signal()
                 .map_err(|e| anyhow!("context section: {e}"))?,
-            );
-        }
-
-        if let Some((skill_section, skill_text_len)) = skill_context_section {
-            sections.push(
-                apply_section_effectiveness_to_prompt_section(
-                    skill_section,
-                    &role_key,
-                    &section_effectiveness,
-                )
-                .with_bidder(AttentionBidder::PlaybookRules)
-                .into_signal()
-                .map_err(|e| anyhow!("skill-library section: {e}"))?,
-            );
-            tracing::info!(
-                "[orchestrate] injected skill library context ({} chars)",
-                skill_text_len
             );
         }
 
@@ -9812,29 +10551,27 @@ impl PlanRunner {
                 extra_args.push(resume.clone());
             }
 
-            let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
-                create_agent_for_model(
-                    &roko_config,
-                    &selected_model,
-                    AgentOptions {
-                        command: Some(self.config.agent.command.clone()),
-                        timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
-                        system_prompt: Some(role_instruction.clone()),
-                        cached_content,
-                        tools: Some(task_allowed_tools_csv.clone()),
-                        mcp_config,
-                        working_dir: Some(exec_dir.clone()),
-                        provider_semaphores: None,
-                        env: self.config.agent.env.clone(),
-                        extra_args,
-                        effort: Some(dispatch_effort.clone()),
-                        bare_mode: self.config.agent.bare_mode,
-                        dangerously_skip_permissions: claude_skip_permissions_for_role(role),
-                        name: String::new(),
-                    },
-                )
-                .map_err(|e| anyhow!("create agent for model {selected_model}: {e}"))
-            })?;
+            let agent = spawn_agent_with_layer(
+                &roko_config,
+                Some(self.safety_layer.clone()),
+                SpawnAgentSpec {
+                    model: selected_model.clone(),
+                    command: Some(self.config.agent.command.clone()),
+                    timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+                    system_prompt: Some(role_instruction.clone()),
+                    cached_content,
+                    tools: Some(task_allowed_tools_csv.clone()),
+                    mcp_config,
+                    working_dir: Some(exec_dir.clone()),
+                    env: self.config.agent.env.clone(),
+                    extra_args,
+                    effort: Some(dispatch_effort.clone()),
+                    bare_mode: self.config.agent.bare_mode,
+                    dangerously_skip_permissions: claude_skip_permissions_for_role(role),
+                    name: String::new(),
+                },
+                format!("create agent for model {selected_model}"),
+            )?;
             let resolved = resolve_model(&roko_config, &selected_model);
             let cost_table = task_runner_cost_table(&resolved);
             let mut runner_budget = RunnerBudgetGuardrail::new(
@@ -9893,45 +10630,59 @@ impl PlanRunner {
             )
             .entered();
             let agent: Box<dyn Agent> = if is_known_protocol_command(&self.config.agent.command) {
-                let mut agent =
-                    ExecAgent::new(&self.config.agent.command, self.config.agent.args.clone())
-                        .with_timeout_ms(self.config.agent.timeout_ms)
-                        .with_current_dir(exec_dir.clone());
-                for (k, v) in &self.config.agent.env {
-                    agent = agent.with_env_var(k, v);
-                }
-                Box::new(agent)
+                let fallback_config =
+                    synthesize_known_protocol_config(&self.config.agent.command, &selected_model);
+                let agent = spawn_agent_with_layer(
+                    &fallback_config,
+                    Some(self.safety_layer.clone()),
+                    SpawnAgentSpec {
+                        model: selected_model.clone(),
+                        command: Some(self.config.agent.command.clone()),
+                        timeout_ms: Some(self.config.agent.timeout_ms),
+                        system_prompt: None,
+                        cached_content: None,
+                        tools: None,
+                        mcp_config: None,
+                        working_dir: Some(exec_dir.clone()),
+                        env: self.config.agent.env.clone(),
+                        extra_args: self.config.agent.args.clone(),
+                        effort: None,
+                        bare_mode: self.config.agent.bare_mode,
+                        dangerously_skip_permissions: false,
+                        name: String::new(),
+                    },
+                    format!(
+                        "create known-protocol subprocess agent for {}",
+                        self.config.agent.command
+                    ),
+                )?;
+                agent
             } else {
-                let mut fallback_config = RokoConfig::default();
-                fallback_config.agent.command = Some(self.config.agent.command.clone());
-                let agent = with_safety_layer(Some(self.safety_layer.clone()), || {
-                    create_agent_for_model(
-                        &fallback_config,
-                        &selected_model,
-                        AgentOptions {
-                            command: Some(self.config.agent.command.clone()),
-                            timeout_ms: Some(self.config.agent.timeout_ms),
-                            system_prompt: None,
-                            cached_content: None,
-                            tools: None,
-                            mcp_config: None,
-                            working_dir: Some(exec_dir.clone()),
-                            provider_semaphores: None,
-                            env: self.config.agent.env.clone(),
-                            extra_args: self.config.agent.args.clone(),
-                            effort: None,
-                            bare_mode: self.config.agent.bare_mode,
-                            dangerously_skip_permissions: false,
-                            name: String::new(),
-                        },
-                    )
-                    .map_err(|e| {
-                        anyhow!(
-                            "create generic subprocess agent for {}: {e}",
-                            self.config.agent.command
-                        )
-                    })
-                })?;
+                let fallback_config = synthesize_subprocess_config(&self.config.agent.command);
+                let agent = spawn_agent_with_layer(
+                    &fallback_config,
+                    Some(self.safety_layer.clone()),
+                    SpawnAgentSpec {
+                        model: selected_model.clone(),
+                        command: Some(self.config.agent.command.clone()),
+                        timeout_ms: Some(self.config.agent.timeout_ms),
+                        system_prompt: None,
+                        cached_content: None,
+                        tools: None,
+                        mcp_config: None,
+                        working_dir: Some(exec_dir.clone()),
+                        env: self.config.agent.env.clone(),
+                        extra_args: self.config.agent.args.clone(),
+                        effort: None,
+                        bare_mode: self.config.agent.bare_mode,
+                        dangerously_skip_permissions: false,
+                        name: String::new(),
+                    },
+                    format!(
+                        "create generic subprocess agent for {}",
+                        self.config.agent.command
+                    ),
+                )?;
                 agent
             };
             let mut runner_budget = RunnerBudgetGuardrail::new(
@@ -10389,33 +11140,49 @@ impl PlanRunner {
     }
 
     /// Run gates at the specified rung level and return whether all passed.
+    #[instrument(skip_all, fields(plan_id = %plan_id, rung))]
     async fn run_gate_pipeline(&mut self, plan_id: &str, rung: u32) -> Result<bool> {
-        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let exec_dir = self.ensure_plan_exec_dir(plan_id).await?;
         let payload = GatePayload::in_dir(&exec_dir).with_label(format!("{plan_id}:rung-{rung}"));
         let started = std::time::Instant::now();
-        let payload_sig = Engram::builder(Kind::Task)
+        let mut payload_builder = Engram::builder(Kind::Task)
             .body(Body::from_json(&payload)?)
             .provenance(Provenance::trusted("orchestrate"))
             .tag("plan_id", plan_id)
-            .tag("rung", rung.to_string())
-            .build();
+            .tag("rung", rung.to_string());
+        if let Some(parent_hash) = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|tracker| tracker.last_impl_output_hash)
+        {
+            payload_builder = payload_builder.lineage([parent_hash]);
+        }
+        let payload_sig = maybe_attest_engram(payload_builder.build());
 
         let verdicts = Self::run_gate_rung(&payload_sig, rung).await;
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_gate_verdicts = verdicts
+                .iter()
+                .map(|verdict| GateVerdict::new(verdict.gate.clone(), verdict.passed))
+                .collect();
+        }
 
         // Persist verdicts.
         let substrate_dir = self.workdir.join(".roko");
         if let Ok(substrate) = FileSubstrate::open(&substrate_dir).await {
             for verdict in &verdicts {
-                let sig = payload_sig
-                    .derive(
-                        Kind::GateVerdict,
-                        Body::from_json(verdict)
-                            .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
-                    )
-                    .provenance(Provenance::trusted("orchestrate"))
-                    .tag("gate", &verdict.gate)
-                    .tag("passed", verdict.passed.to_string())
-                    .build();
+                let sig = maybe_attest_engram(
+                    payload_sig
+                        .derive(
+                            Kind::GateVerdict,
+                            Body::from_json(verdict)
+                                .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
+                        )
+                        .provenance(Provenance::trusted("orchestrate"))
+                        .tag("gate", &verdict.gate)
+                        .tag("passed", verdict.passed.to_string())
+                        .build(),
+                );
                 let _ = substrate.put(sig).await;
             }
         }
@@ -10509,19 +11276,53 @@ impl PlanRunner {
         let branch_name = self
             .worktrees
             .get(plan_id)
-            .map_or_else(|| format!("roko/{plan_id}"), |h| h.branch);
-        let output = tokio::process::Command::new("git")
-            .args(["merge", "--no-ff", &branch_name])
-            .current_dir(&self.workdir)
-            .output()
-            .await
-            .context("git merge")?;
+            .map_or_else(|| format_branch_name(plan_id), |h| h.branch);
+        git_merge_branch_into(&self.workdir, &branch_name).await
+    }
 
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow!("merge failed: {stderr}"))
+    async fn finalize_successful_task_worktree(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        exec_dir: &Path,
+    ) -> Result<()> {
+        if !self.worktrees_enabled() {
+            return Ok(());
+        }
+
+        self.clear_stale_worktree_locks().await;
+        let plan_handle = self
+            .worktrees
+            .ensure_for_plan(plan_id)
+            .await
+            .map_err(|e| anyhow!("ensure plan worktree {plan_id}: {e}"))?;
+        let commit_message = format!("task: {task_id}");
+        git_commit_all_if_needed(exec_dir, &commit_message).await?;
+        let task_branch = format!("roko/task/{plan_id}/{task_id}");
+        git_merge_branch_into(&plan_handle.path, &task_branch)
+            .await
+            .with_context(|| format!("merge task branch {task_branch} into plan {plan_id}"))?;
+        self.worktrees.touch(plan_id);
+        Ok(())
+    }
+
+    async fn cleanup_plan_worktree(&self, plan_id: &str) {
+        if !self.worktrees_enabled() || self.worktrees.get(plan_id).is_none() {
+            return;
+        }
+
+        if let Err(e) = self.worktrees.remove(plan_id).await {
+            tracing::error!("[orchestrate] plan worktree cleanup failed for {plan_id}: {e}");
+        }
+    }
+
+    async fn cleanup_tracked_plan_worktrees(&self) {
+        if !self.worktrees_enabled() {
+            return;
+        }
+
+        if let Err(e) = self.worktrees.remove_all().await {
+            tracing::error!("[orchestrate] tracked plan worktree cleanup failed: {e}");
         }
     }
 
@@ -10579,17 +11380,24 @@ impl PlanRunner {
         }
     }
 
-    async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+    async fn ensure_plan_exec_dir(&self, plan_id: &str) -> Result<PathBuf> {
         if !self.worktrees_enabled() {
-            return self.workdir.clone();
+            return Ok(self.workdir.clone());
         }
         self.clear_stale_worktree_locks().await;
-        match self.worktrees.ensure_for_plan(plan_id).await {
-            Ok(handle) => handle.path,
+        self.worktrees
+            .ensure_for_plan(plan_id)
+            .await
+            .map(|handle| handle.path)
+            .map_err(|err| anyhow!("worktree unavailable for plan={plan_id}: {err}"))
+    }
+
+    #[cfg(test)]
+    async fn plan_exec_dir(&self, plan_id: &str) -> PathBuf {
+        match self.ensure_plan_exec_dir(plan_id).await {
+            Ok(path) => path,
             Err(err) => {
-                tracing::error!(
-                    "[orchestrate] worktree unavailable for plan={plan_id}, using repo root: {err}"
-                );
+                tracing::error!("[orchestrate] {err}; using repo root");
                 self.workdir.clone()
             }
         }
@@ -10653,6 +11461,7 @@ impl PlanRunner {
     }
 
     /// Run task-level verification commands declared in `tasks.toml` for a plan.
+    #[instrument(skip_all, fields(plan_id = %plan_id))]
     async fn run_plan_verify_steps(
         &self,
         plan_id: &str,
@@ -10675,7 +11484,14 @@ impl PlanRunner {
             return Ok(());
         }
 
-        let exec_dir = self.plan_exec_dir(plan_id).await;
+        let exec_dir = self.ensure_plan_exec_dir(plan_id).await.map_err(|err| {
+            (
+                plan_id.to_string(),
+                "worktree".to_string(),
+                "ensure_plan_exec_dir".to_string(),
+                err.to_string(),
+            )
+        })?;
         tracing::info!(
             "[orchestrate] Running plan verify for {plan_id} across {} task(s)",
             steps_to_run.len()
@@ -10717,7 +11533,7 @@ impl PlanRunner {
         use roko_compose::templates::reviewer::{Reviewer, ReviewerInput, ReviewerTemplate};
         use roko_compose::templates::{PlanSlice, RolePromptTemplate};
 
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
 
         // Load plan.md content
         let plan_md_path = plan_dir.join("plan.md");
@@ -10740,16 +11556,23 @@ impl PlanRunner {
             .unwrap_or_default();
 
         // Get files changed via git diff
-        let exec_dir = self.plan_exec_dir(plan_id).await;
-        let files_changed = tokio::process::Command::new("git")
-            .args(["diff", "--name-only", "HEAD"])
-            .current_dir(&exec_dir)
-            .output()
-            .await
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().map(String::from).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let files_changed = match self.ensure_plan_exec_dir(plan_id).await {
+            Ok(exec_dir) => tokio::process::Command::new("git")
+                .args(["diff", "--name-only", "HEAD"])
+                .current_dir(&exec_dir)
+                .output()
+                .await
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().map(String::from).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(
+                    "[orchestrate] review prompt skipped worktree diff for {plan_id}: {err}"
+                );
+                Vec::new()
+            }
+        };
 
         // Prior review findings from tracker
         let prior_findings = self
@@ -10788,7 +11611,7 @@ impl PlanRunner {
         use roko_compose::templates::scribe::{ScribeInput, ScribeTemplate, ScribeVariant};
         use roko_compose::templates::{PlanSlice, RolePromptTemplate};
 
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let mut public_api_files = Vec::new();
         let mut source_snippets = Vec::new();
 
@@ -11570,6 +12393,76 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed
 }
 
+async fn git_commit_all_if_needed(workspace: &Path, message: &str) -> Result<bool> {
+    let add_output = tokio::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git add -A")?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        return Err(anyhow!("git add -A failed: {stderr}"));
+    }
+
+    let diff_output = tokio::process::Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git diff --cached")?;
+
+    if diff_output.status.success() {
+        return Ok(false);
+    }
+
+    if diff_output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&diff_output.stderr);
+        return Err(anyhow!("git diff --cached failed: {stderr}"));
+    }
+
+    let commit_output = tokio::process::Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "roko")
+        .env("GIT_AUTHOR_EMAIL", "roko@nunchi.dev")
+        .env("GIT_COMMITTER_NAME", "roko")
+        .env("GIT_COMMITTER_EMAIL", "roko@nunchi.dev")
+        .output()
+        .await
+        .context("spawn git commit")?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        return Err(anyhow!("git commit failed: {stderr}"));
+    }
+
+    Ok(true)
+}
+
+async fn git_merge_branch_into(workspace: &Path, branch: &str) -> Result<()> {
+    let output = tokio::process::Command::new("git")
+        .args(["merge", "--no-ff", "--no-edit", branch])
+        .current_dir(workspace)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .context("spawn git merge")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if stderr.is_empty() { stdout } else { stderr };
+    Err(anyhow!("git merge failed: {details}"))
+}
+
 fn is_meaningful_output(output: &Engram) -> bool {
     match &output.body {
         Body::Empty => false,
@@ -11630,7 +12523,9 @@ fn server_event_to_dashboard(
             agent_id: agent_id.clone(),
             role: role.clone(),
         }),
-        ServerEvent::AgentOutput { agent_id, content } => Some(DashboardEvent::AgentOutput {
+        ServerEvent::AgentOutput {
+            agent_id, content, ..
+        } => Some(DashboardEvent::AgentOutput {
             agent_id: agent_id.clone(),
             content: content.clone(),
         }),
@@ -11754,8 +12649,42 @@ fn detect_cost_anomaly_override(
     }
 }
 
-fn build_system_prompt(role: AgentRole, plan_id: &str, task: &str, tools_csv: &str) -> String {
-    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None)
+fn task_dispatch_conventions(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
+    let task_def = task_def?;
+    let mut sections = Vec::new();
+
+    if !task_def.files.is_empty() {
+        let mut write_scope = String::from(
+            "Honor the declared write scope strictly. Only create, edit, move, or delete files in this allowlist unless the user explicitly expands it:",
+        );
+        for path in &task_def.files {
+            write_scope.push_str("\n- ");
+            write_scope.push_str(path);
+        }
+        sections.push(write_scope);
+    }
+
+    if let Some(max_loc) = task_def.max_loc {
+        sections.push(format!(
+            "Keep the total code delta within roughly {max_loc} lines of change unless verification requires a tightly scoped follow-up."
+        ));
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
+    }
+}
+
+fn build_system_prompt(
+    role: AgentRole,
+    plan_id: &str,
+    task: &str,
+    tools_csv: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> String {
+    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None, task_def)
 }
 
 fn build_system_prompt_with_context(
@@ -11765,6 +12694,7 @@ fn build_system_prompt_with_context(
     tools_csv: &str,
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
+    task_def: Option<&crate::task_parser::TaskDef>,
 ) -> String {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -11772,9 +12702,16 @@ fn build_system_prompt_with_context(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    RoleSystemPromptSpec::new(role, task_context, tools_csv)
-        .with_affect_state(affect_state)
-        .build()
+    build_role_system_prompt(
+        role,
+        task_context,
+        tools_csv,
+        PromptBuildOptions {
+            affect_state,
+            extra_conventions: task_dispatch_conventions(task_def),
+            ..PromptBuildOptions::default()
+        },
+    )
 }
 
 fn build_system_prompt_with_context_validated(
@@ -11784,6 +12721,8 @@ fn build_system_prompt_with_context_validated(
     tools_csv: &str,
     context_layer: Option<&str>,
     affect_state: Option<PadState>,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    relevant_skills: &[Skill],
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
@@ -11793,12 +12732,19 @@ fn build_system_prompt_with_context_validated(
     if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
         task_context = task_context.with_context(context);
     }
-    Ok(RoleSystemPromptSpec::new(role, task_context, tools_csv)
-        .with_affect_state(affect_state)
-        .build_with_context_window_and_section_effectiveness(
-            context_window_tokens,
-            section_effectiveness,
-        )?)
+    build_role_system_prompt_validated(
+        role,
+        task_context,
+        tools_csv,
+        PromptBuildOptions {
+            affect_state,
+            extra_conventions: task_dispatch_conventions(task_def),
+            relevant_skills: relevant_skills.to_vec(),
+            ..PromptBuildOptions::default()
+        },
+        context_window_tokens,
+        section_effectiveness,
+    )
 }
 
 fn effective_context_window_tokens(config: &Config) -> usize {
@@ -11926,6 +12872,89 @@ impl PlanRunner {
         PadState::from(self.daimon.query().pad)
     }
 
+    fn current_daimon_policy(&self) -> DaimonPolicy {
+        let affect = self.daimon.query();
+        DaimonPolicy::new(affect.confidence, affect.behavioral_state)
+    }
+
+    fn apply_daimon_tool_policy_csv(&self, tools_csv: &str) -> String {
+        let policy = self.current_daimon_policy();
+        let Some(registry) = self.tool_registry.as_deref() else {
+            return tools_csv.to_string();
+        };
+        if !matches!(
+            policy.behavioral_state,
+            roko_core::BehavioralState::Struggling | roko_core::BehavioralState::Resting
+        ) {
+            return tools_csv.to_string();
+        }
+
+        tools_csv
+            .split(',')
+            .filter(|tool| !tool.is_empty())
+            .filter(|tool| {
+                registry
+                    .get(tool)
+                    .is_none_or(|def| !(def.permission.network || def.permission.git))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn should_replan_after_task_failure(&self) -> bool {
+        let policy = self.current_daimon_policy();
+        matches!(
+            policy.behavioral_state,
+            roko_core::BehavioralState::Struggling
+        ) && policy.affect_confidence < 0.45
+    }
+
+    fn apply_knowledge_tier_feedback(&mut self, plan_id: &str) {
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return;
+        };
+        if tracker.last_context_knowledge_ids.is_empty() || tracker.last_gate_verdicts.is_empty() {
+            return;
+        }
+
+        let touched_ids = tracker
+            .last_context_knowledge_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let verdicts = tracker.last_gate_verdicts.clone();
+
+        if let Err(err) = self.knowledge_store.update_entries(|entry| {
+            if !touched_ids.contains(&entry.id) {
+                return false;
+            }
+
+            match TierProgression::evaluate_tier_progression(entry, &verdicts) {
+                TierProgressionDecision::Promote(tier) | TierProgressionDecision::Demote(tier)
+                    if entry.tier != tier =>
+                {
+                    entry.tier = tier;
+                    true
+                }
+                TierProgressionDecision::ReviewExpiry => {
+                    if entry.tags.iter().any(|tag| tag == "expiry-review") {
+                        false
+                    } else {
+                        entry.tags.push("expiry-review".to_string());
+                        true
+                    }
+                }
+                _ => false,
+            }
+        }) {
+            tracing::warn!(
+                plan_id = %plan_id,
+                error = %err,
+                "failed to apply knowledge tier feedback"
+            );
+        }
+    }
+
     fn current_task_strategy(
         &self,
         plan_id: &str,
@@ -12036,7 +13065,7 @@ impl PlanRunner {
     /// but injects the plan's task context and inline read_files content so the
     /// strategist sees the full enrichment surface before dispatch.
     fn build_enrichment_system_prompt(&self, plan_id: &str) -> String {
-        let plan_dir = self.workdir.join("plans").join(plan_id);
+        let plan_dir = plans_dir(&self.workdir).join(plan_id);
         let tasks_file = self
             .task_trackers
             .get(plan_id)
@@ -12072,25 +13101,25 @@ impl PlanRunner {
 
         let tools_csv =
             claude_tool_allowlist_with(AgentRole::Strategist, self.tool_registry.as_deref());
-        RoleSystemPromptSpec::new(
+        build_role_system_prompt(
             AgentRole::Strategist,
             TaskContext::new(format!("Enrich plan {plan_id} before agent dispatch"))
                 .with_plan_id(plan_id)
                 .with_workspace(plan_dir.display().to_string())
                 .with_domain_notes(context_summary),
             tools_csv,
+            PromptBuildOptions {
+                affect_state: Some(self.current_pad_state()),
+                extra_conventions: Some(
+                    "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.".to_string(),
+                ),
+                extra_anti_patterns: vec![
+                    "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.".to_string(),
+                    "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.".to_string(),
+                ],
+                relevant_skills: Vec::new(),
+            },
         )
-        .with_affect_state(Some(self.current_pad_state()))
-        .with_extra_conventions(
-            "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.",
-        )
-        .add_anti_pattern(
-            "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.",
-        )
-        .add_anti_pattern(
-            "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.",
-        )
-        .build()
     }
 }
 
@@ -12624,6 +13653,22 @@ fn save_task_output(workdir: &Path, task_id: &str, output: &str) {
     let _ = std::fs::write(output_path, summary);
 }
 
+fn attestation_signing_key_from_env() -> Option<SigningKey> {
+    let seed = std::env::var("ROKO_ATTEST_SIGNING_KEY_HEX").ok()?;
+    let seed = seed.trim().trim_start_matches("0x");
+    let hash = ContentHash::from_hex(seed)?;
+    Some(SigningKey::from_bytes(&hash.0))
+}
+
+fn maybe_attest_engram(mut signal: Engram) -> Engram {
+    if signal.attestation.is_none()
+        && let Some(key) = attestation_signing_key_from_env()
+    {
+        signal.attestation = Some(attestation::sign(&signal, &key));
+    }
+    signal
+}
+
 fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     let body = match &output.body {
         Body::Text(text) => {
@@ -12646,7 +13691,13 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     let mut builder = Engram::builder(output.kind.clone())
         .body(body)
         .provenance(output.provenance.clone())
-        .lineage([output.id]);
+        .lineage(
+            output
+                .lineage
+                .iter()
+                .copied()
+                .chain(std::iter::once(output.id)),
+        );
     for (key, value) in &output.tags {
         builder = builder.tag(key.clone(), value.clone());
     }
@@ -12656,14 +13707,68 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     if let Some(emotional_tag) = output.emotional_tag.clone() {
         builder = builder.emotional_tag(emotional_tag);
     }
-    Some(builder.build())
+    Some(maybe_attest_engram(builder.build()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command;
     use tempfile::TempDir;
+
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_git_repo() -> Option<TempDir> {
+        if !git_available() {
+            return None;
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        run_git(tmp.path(), &["init"]);
+        run_git(tmp.path(), &["config", "user.name", "Test User"]);
+        run_git(tmp.path(), &["config", "user.email", "test@example.com"]);
+        std::fs::write(tmp.path().join("README.md"), "seed\n").expect("write seed");
+        run_git(tmp.path(), &["add", "README.md"]);
+        run_git(tmp.path(), &["commit", "-m", "seed"]);
+        Some(tmp)
+    }
+
+    async fn runner_for_repo(workdir: &Path, use_worktrees: bool) -> PlanRunner {
+        let snapshot_json = ExecutorSnapshot::new(0).to_json().expect("snapshot json");
+        let mut config = Config::default();
+        config.executor.use_worktrees = use_worktrees;
+        PlanRunner::from_snapshot(
+            &snapshot_json,
+            workdir,
+            config,
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .expect("plan runner")
+    }
 
     #[test]
     fn scrub_signal_redacts_text_and_rehashes_identity() {
@@ -12942,6 +14047,137 @@ mod tests {
     }
 
     #[test]
+    fn task_dispatch_conventions_include_write_scope_and_loc() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Scope-limited refactor"
+tier = "focused"
+max_loc = 40
+files = ["crates/roko-cli/src/orchestrate.rs", "crates/roko-cli/src/task_parser.rs"]
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let conventions =
+            task_dispatch_conventions(Some(&task)).expect("dispatch conventions should exist");
+
+        assert!(conventions.contains("Honor the declared write scope strictly."));
+        assert!(conventions.contains("crates/roko-cli/src/orchestrate.rs"));
+        assert!(conventions.contains("crates/roko-cli/src/task_parser.rs"));
+        assert!(conventions.contains("40 lines of change"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_declared_write_scope() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Scope-limited refactor"
+tier = "focused"
+files = ["crates/roko-cli/src/orchestrate.rs"]
+depends_on = []
+"#,
+        )
+        .unwrap();
+
+        let prompt = build_system_prompt(
+            AgentRole::Implementer,
+            "plan-1",
+            "T1",
+            "Read,Edit",
+            Some(&task),
+        );
+
+        assert!(prompt.contains("Honor the declared write scope strictly."));
+        assert!(prompt.contains("crates/roko-cli/src/orchestrate.rs"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_refuses_tripped_circuit_breaker_before_launch() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan_states = HashMap::new();
+        plan_states.insert("plan-1".to_string(), PlanState::new("plan-1"));
+        let snapshot = ExecutorSnapshot {
+            plan_states,
+            queue_order: vec!["plan-1".to_string()],
+            timestamp_ms: 0,
+            speculative_executions: HashMap::new(),
+        };
+        let snapshot_json = snapshot.to_json().unwrap();
+        let mut runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            Config::default(),
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        runner
+            .conductor
+            .circuit_breaker()
+            .record_failure("plan-1", "err1", 1);
+        runner
+            .conductor
+            .circuit_breaker()
+            .record_failure("plan-1", "err2", 2);
+
+        let err = runner
+            .dispatch_agent_with(
+                "plan-1",
+                AgentRole::Implementer,
+                "task-1",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("circuit breaker tripped"));
+        assert!(
+            runner
+                .executor
+                .plan_state("plan-1")
+                .is_some_and(|state| state.paused)
+        );
+    }
+
+    #[tokio::test]
+    async fn build_review_prompt_skips_repo_root_when_worktree_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan_states = HashMap::new();
+        plan_states.insert("plan-1".to_string(), PlanState::new("plan-1"));
+        let snapshot = ExecutorSnapshot {
+            plan_states,
+            queue_order: vec!["plan-1".to_string()],
+            timestamp_ms: 0,
+            speculative_executions: HashMap::new(),
+        };
+        let snapshot_json = snapshot.to_json().unwrap();
+        let runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            {
+                let mut config = Config::default();
+                config.executor.use_worktrees = true;
+                config
+            },
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let prompt = runner.build_review_prompt("plan-1").await;
+        assert!(!prompt.contains("crates/roko-cli/src/orchestrate.rs"));
+    }
+
+    #[test]
     fn normalize_resume_session_trims_and_drops_blank_values() {
         assert_eq!(normalize_resume_session(None), None);
         assert_eq!(normalize_resume_session(Some(String::new())), None);
@@ -12960,6 +14196,131 @@ mod tests {
             manager.path_for("plan-1"),
             workdir.join(".roko").join("worktrees").join("plan-1")
         );
+    }
+
+    #[tokio::test]
+    async fn finalize_successful_task_worktree_merges_into_plan_branch() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let runner = runner_for_repo(tmp.path(), true).await;
+        let task_dir = runner
+            .task_exec_dir("plan-1", "T1")
+            .await
+            .expect("task worktree");
+
+        std::fs::write(task_dir.join("feature.txt"), "task change\n").expect("write change");
+
+        runner
+            .finalize_successful_task_worktree("plan-1", "T1", &task_dir)
+            .await
+            .expect("finalize task worktree");
+
+        let plan_handle = runner.worktrees.get("plan-1").expect("plan worktree");
+        assert_eq!(
+            std::fs::read_to_string(plan_handle.path.join("feature.txt")).expect("plan file"),
+            "task change\n"
+        );
+
+        runner
+            .merge_branch("plan-1")
+            .await
+            .expect("merge canonical plan branch");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("feature.txt")).expect("repo file"),
+            "task change\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_branch_falls_back_to_canonical_plan_branch_name() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let main_branch = run_git(tmp.path(), &["branch", "--show-current"]);
+        run_git(tmp.path(), &["checkout", "-b", "roko/plan/plan-1"]);
+        std::fs::write(tmp.path().join("branch.txt"), "plan branch\n").expect("write branch");
+        run_git(tmp.path(), &["add", "branch.txt"]);
+        run_git(tmp.path(), &["commit", "-m", "plan branch"]);
+        run_git(tmp.path(), &["checkout", &main_branch]);
+
+        let runner = runner_for_repo(tmp.path(), false).await;
+        runner
+            .merge_branch("plan-1")
+            .await
+            .expect("merge canonical fallback branch");
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("branch.txt")).expect("merged branch file"),
+            "plan branch\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_plan_worktree_removes_tracked_checkout() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        assert!(plan_dir.exists(), "plan worktree should exist");
+
+        runner.cleanup_plan_worktree("plan-1").await;
+
+        assert!(runner.worktrees.get("plan-1").is_none());
+        assert!(!plan_dir.exists(), "plan worktree should be removed");
+    }
+
+    #[tokio::test]
+    async fn ensure_plan_exec_dir_errors_when_worktree_creation_fails() {
+        let tmp = TempDir::new().expect("tempdir");
+        let runner = runner_for_repo(tmp.path(), true).await;
+
+        let err = runner
+            .ensure_plan_exec_dir("plan-1")
+            .await
+            .expect_err("non-git worktree acquisition should fail");
+
+        assert!(err.to_string().contains("worktree unavailable"));
+    }
+
+    #[tokio::test]
+    async fn complete_plan_dispatch_cleans_up_plan_worktree() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let mut runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        assert!(plan_dir.exists(), "plan worktree should exist");
+
+        runner
+            .dispatch_action(ExecutorAction::CompletePlan {
+                plan_id: "plan-1".to_string(),
+            })
+            .await;
+
+        assert!(runner.worktrees.get("plan-1").is_none());
+        assert!(!plan_dir.exists(), "plan worktree should be removed");
+    }
+
+    #[tokio::test]
+    async fn run_all_cleans_up_tracked_plan_worktree_on_cancel() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let mut runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        assert!(plan_dir.exists(), "plan worktree should exist");
+
+        runner.cancel.cancel();
+        let watcher_cancel = TokioCancellationToken::new();
+        let _ = runner
+            .run_all(&watcher_cancel)
+            .await
+            .expect("run_all should return after cancellation");
+
+        assert!(runner.worktrees.get("plan-1").is_none());
+        assert!(!plan_dir.exists(), "plan worktree should be removed");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
 use crate::perplexity::types::SearchResult;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;

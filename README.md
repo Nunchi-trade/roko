@@ -147,21 +147,24 @@ Stop at any step and you still have something useful. A prompt composer without 
 | Crate | What it does |
 |-------|-------------|
 | `roko-core` | Signal type, six trait definitions, config schema, tool system, errors |
-| `roko-agent` | LLM backends (Claude, Gemini, Perplexity, Ollama, OpenAI-compat), tool loop, MCP, safety |
+| `roko-agent` | LLM backends (Claude, Codex, Cursor, Gemini, Perplexity, Ollama, OpenAI-compat), pools, tool loop, MCP, safety |
+| `roko-agent-server` | Per-agent HTTP sidecar: `/message`, `/stream` (WS), `/predictions`, `/research`, `/tasks` |
+| `roko-serve` | HTTP control plane: ~85 REST routes + SSE + WebSocket on port 6677 |
 | `roko-orchestrator` | Plan DAG, parallel executor, merge queue, worktree manager, safety policy |
 | `roko-gate` | 14 gate types, 7-rung pipeline, adaptive thresholds, artifact store |
 | `roko-compose` | Prompt assembly, 9 role templates, U-shape placement, token budgeting |
-| `roko-conductor` | 10 watchers, circuit breaker, intervention policy |
+| `roko-conductor` | 10 watchers, circuit breaker, intervention policy, diagnosis |
 | `roko-learn` | Episodes, playbooks, bandits, model routing, prompt experiments, efficiency tracking |
 | `roko-neuro` | Durable knowledge store, distillation, tier progression, garbage collection |
 | `roko-dreams` | Offline dream cycle: batch episodes, cluster, distill knowledge, promote playbooks |
-| `roko-serve` | HTTP API server with REST routes, SSE, WebSocket, webhook ingestion |
-| `roko-cli` | CLI binary, interactive TUI dashboard, all subcommands |
+| `roko-mcp-code` | Code-intelligence MCP server (symbol lookup, dependency graph) |
+| `roko-mcp-github` / `slack` / `scripts` / `stdio` | Additional MCP integrations |
+| `roko-cli` | CLI binary, interactive ratatui TUI dashboard, all subcommands |
 | `roko-fs` | Append-only JSONL substrate with compaction and GC |
 | `roko-std` | Default trait impls (memory substrate, simple routers, no-op scorers) |
 | `roko-plugin` | Plugin SDK (event sources, feedback collectors) |
-| `bardo-runtime` | Process supervisor, typed event bus, cancellation |
-| `bardo-primitives` | 10,240-bit hyperdimensional vectors, Hamming similarity |
+| `roko-runtime` | Process supervisor, typed event bus, cancellation |
+| `roko-primitives` | 10,240-bit hyperdimensional vectors, Hamming similarity, tier routing |
 | `roko-index` | Code parser, symbol graph, PageRank, HDC fingerprints |
 | `roko-lang-*` | Language support for Rust, TypeScript, Go |
 
@@ -235,13 +238,83 @@ roko dream schedule
 
 ## Deployment
 
-### Local server
+### HTTP control plane (`roko serve`)
 
 ```bash
+roko serve                           # default bind 127.0.0.1:6677
 roko serve --bind 0.0.0.0 --port 9090
 ```
 
-Starts an HTTP API server with REST endpoints for plans, PRDs, agents, config, learning data, and provider health. Includes SSE and WebSocket for real-time streaming.
+Starts an Axum-based HTTP server with ~85 routes grouped by subsystem:
+
+| Prefix | What it covers |
+|--------|----------------|
+| `/api/health`, `/api/status`, `/api/metrics/*` | Readiness + metric rollups (C-factor, gate rate, cost, velocity, coverage) |
+| `/api/plans/*` | List, create, execute, inspect plans |
+| `/api/prds/*` | PRD lifecycle: ideas → drafts → promote → plan |
+| `/api/research/*` | Research topic, enhance-prd, enhance-plan, enhance-tasks, analyze |
+| `/api/agents/*` | Per-agent discovery, registration, messaging (`POST /api/agents/{id}/message`), topology |
+| `/api/predictions/*` | Session predictions, claims, calibration |
+| `/api/knowledge/*` | Knowledge entries, edges, search |
+| `/api/tasks/*` | Task list, stats, improve feedback |
+| `/api/learn/*` | Efficiency, cascade router, cost tiers, experiments, adaptive thresholds |
+| `/api/subscriptions/*`, `/api/templates/*`, `/api/deployments/*` | Ops primitives |
+| `/api/config/*`, `/api/providers/*`, `/api/models/*` | Configuration + provider health |
+| `/ws`, `/api/events`, `/webhooks/*` | Real-time: SSE events, top-level WS, webhook ingestion |
+
+Example responses:
+
+```bash
+curl http://localhost:6677/api/health
+# {"status":"ok","version":"0.1.0","uptime_seconds":123}
+
+curl http://localhost:6677/api/metrics/c_factor
+# {"overall":0.73,"components":{...},"episode_count":120}
+
+curl http://localhost:6677/api/learn/efficiency
+# {"total_cost":12.45,"cost_per_task":0.83,"tokens_per_task":24500.0,...}
+
+curl http://localhost:6677/api/agents?owner=will
+# [{"agent_id":"nunchi-intelligence","owner":"will","endpoints":{...}}]
+```
+
+### Per-agent sidecar (`roko-agent-server`)
+
+Each registered agent also runs its own small HTTP server (typically on a
+private port, proxied by the control plane):
+
+| Endpoint | What it does |
+|----------|-------------|
+| `GET /health`, `/capabilities`, `/stats` | Always-on introspection |
+| `POST /message` | Single-turn prompt → real LLM dispatch via the agent's configured backend |
+| `GET /stream` (WS) | Streaming turn with `content`, `reasoning`, `tool_call`, `usage`, `done` chunks |
+| `GET/POST /predictions*` | Prediction records + calibration |
+| `POST /research` | Sidecar-local research task |
+| `GET/POST /tasks*` | Agent-owned task queue with typed `Artifact` on completion |
+
+`POST /message` wire shape:
+
+```bash
+curl -X POST http://localhost:6677/api/agents/nunchi-intelligence/message \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"ping"}'
+# {"response":"Hello, world","reasoning":null,"usage":{...},"session":{...},
+#  "finish_reason":"stop","engram_id":"engram-...","context":{...}}
+```
+
+Missing dispatcher returns `503`. Backend failure returns `502`. See
+`crates/roko-agent-server/README.md` for the full contract.
+
+### Chat with a running agent
+
+```bash
+roko chat --agent nunchi-intelligence
+roko chat --agent nunchi-intelligence --serve-url http://localhost:6677
+```
+
+Opens an interactive REPL that POSTs to the sidecar through the aggregator.
+Useful for ad-hoc debugging, prompt iteration, and smoke-testing a deployed
+agent from your terminal.
 
 ### Background daemon
 

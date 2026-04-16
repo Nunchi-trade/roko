@@ -177,7 +177,7 @@ touching the filesystem.
 
 A plan is a unit of work defined by a directory containing `plan.md`
 (with optional YAML frontmatter) and `tasks.toml`. Plans are discovered by
-scanning a `plans/` directory. Each plan gets:
+scanning the canonical `.roko/plans/` directory. Each plan gets:
 
 - A `PlanState` in the executor
 - A git worktree for isolated work
@@ -248,13 +248,13 @@ roko prd idea "Wire SystemPromptBuilder into orchestrate.rs"
 roko prd draft new "system-prompt-wiring"
 roko research enhance-prd system-prompt-wiring
 roko prd plan system-prompt-wiring
-roko plan run plans/
-roko plan run plans/ --resume .roko/state/executor.json
+roko plan run .roko/plans/
+roko plan run .roko/plans/ --resume .roko/state/executor.json
 ```
 
 Each step of this loop is a CLI command backed by L4 orchestration:
 
-1. **Plan discovery** scans `plans/`, parses frontmatter, ranks by priority
+1. **Plan discovery** scans `.roko/plans/`, parses frontmatter, ranks by priority
 2. **DAG construction** builds a cross-plan task graph with file-conflict edges
 3. **Parallel execution** dispatches agents to worktrees, up to configured limits
 4. **Gate validation** runs compile/test/clippy per plan, with auto-fix retries

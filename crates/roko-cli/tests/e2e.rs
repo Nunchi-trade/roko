@@ -29,8 +29,28 @@ fn init_run_produces_expected_signals() {
     );
     assert!(workdir.join("roko.toml").exists(), "roko.toml missing");
 
-    // `roko run "hello"` with cat as the agent (the default in roko.toml) and
-    // the default `true` shell gate → both agent and gate pass.
+    // Replace the default config with a deterministic local backend so the
+    // test does not depend on whatever provider `roko init` currently prefers.
+    let config = r#"
+[agent]
+command = "cat"
+args = []
+timeout_ms = 30000
+
+[prompt]
+token_budget = 1000
+role = "You are a Roko agent."
+
+[[gate]]
+kind = "shell"
+program = "true"
+args = []
+timeout_ms = 5000
+"#;
+    fs::write(workdir.join("roko.toml"), config).unwrap();
+
+    // `roko run "hello"` with cat as the agent and the default `true` shell
+    // gate → both agent and gate pass.
     Command::cargo_bin("roko")
         .unwrap()
         .arg("run")

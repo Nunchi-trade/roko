@@ -5,6 +5,7 @@
 //! with CORS and tracing middleware.
 
 mod agents;
+mod aggregator;
 mod config;
 mod deployments;
 mod learning;
@@ -46,6 +47,7 @@ pub fn build_router(
         .merge(research::routes())
         .merge(subscriptions::routes())
         .merge(templates::routes())
+        .merge(aggregator::routes())
         .merge(agents::routes())
         .merge(learning::routes())
         .merge(config::routes())

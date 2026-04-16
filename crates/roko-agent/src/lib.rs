@@ -27,13 +27,16 @@ pub mod chat_types;
 pub mod claude_agent;
 pub mod claude_cli_agent;
 pub mod codex_agent;
+pub mod composition;
 pub mod cursor_agent;
 pub mod dispatcher;
 pub mod exec;
 pub mod format;
 pub mod gemini;
 pub mod http;
+pub mod introspection;
 pub mod mcp;
+pub mod metamorphosis;
 pub mod mock;
 pub mod multi_pool;
 pub mod nl_to_format;
@@ -59,11 +62,14 @@ pub mod usage;
 pub use agent::{Agent, AgentResult};
 pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
+pub use composition::{AgentComposition, CompositeAgent, MergeStrategy, SkillSelector};
 pub use exec::ExecAgent;
 pub use gemini::{
     GeminiCompatAgent, GeminiEmbedAgent, GeminiMetadata, GeminiNativeAgent, GenerateContentRequest,
     GenerateContentResponse, GroundingMetadata,
 };
+pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn};
+pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;
 pub use ollama_backend::OllamaLlmBackend;
@@ -73,9 +79,14 @@ pub use perplexity::{
     PerplexityMetadata, PerplexitySearchClient, SearchOptions, SearchResult,
 };
 pub use pool::{AgentInstanceId, AgentPool};
-pub use provider::{ProviderAdapter, adapter_for_kind, create_agent_for_model};
+pub use provider::{
+    ProviderAdapter, adapter_for_kind, create_agent_for_model, current_safety_layer,
+    with_scoped_safety_layer,
+};
 pub use rate_limit::ProviderRateLimiter;
-pub use safety::SafetyLayer;
+pub use safety::{
+    AgentWarrant, Capability, CapabilityError, SafetyLayer, check_capability, delegate,
+};
 pub use streaming::{StreamAccumulator, StreamChunk};
 pub use task_runner::{TaskResult, TaskRunner};
 pub use tool_loop::ToolLoopAgent;

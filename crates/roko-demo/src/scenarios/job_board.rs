@@ -18,7 +18,7 @@ use crate::chain_ctx::ChainCtx;
 use crate::fixtures::FixtureRegistry;
 use crate::manifest::Scenario as ScenarioManifest;
 use crate::scenarios::llm::LlmRequest;
-use crate::scenarios::{LlmProvider, Scenario};
+use crate::scenarios::{LlmProvider, Scenario, ScenarioRuntime};
 
 /// Job-board scenario implementation.
 pub struct JobBoard;
@@ -41,14 +41,14 @@ impl Scenario for JobBoard {
         &self,
         ctx: Arc<ChainCtx>,
         _manifest: &ScenarioManifest,
-        llm: Arc<dyn LlmProvider>,
+        runtime: Arc<ScenarioRuntime>,
     ) -> anyhow::Result<()> {
         tracing::info!("job-board: preparing wallets + registrations");
         prepare_participants(&ctx).await?;
 
         tracing::info!("job-board: spine running, target={} jobs", JOBS_TO_COMPLETE);
         for round in 0..JOBS_TO_COMPLETE {
-            run_single_job(&ctx, llm.clone(), round).await?;
+            run_single_job(&ctx, runtime.llm.clone(), round).await?;
             tracing::info!(round, "round complete");
         }
         tracing::info!("job-board: all {} rounds complete", JOBS_TO_COMPLETE);

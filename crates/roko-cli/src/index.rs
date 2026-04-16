@@ -13,21 +13,31 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::workspace_paths::{drafts_dir, ideas_path, plans_dir, prd_dir, published_dir, roko_dir};
 use anyhow::Result;
 
 // ─── Index paths ───────────────────────────────────────────────────
 
 fn master_index_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("INDEX.md")
+    roko_dir(workdir).join("INDEX.md")
 }
 fn prd_index_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("prd").join("INDEX.md")
+    prd_dir(workdir).join("INDEX.md")
 }
 fn plans_index_path(workdir: &Path) -> PathBuf {
-    workdir.join("plans").join("INDEX.md")
+    plans_dir(workdir).join("INDEX.md")
 }
 fn research_index_path(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("research").join("INDEX.md")
+}
+
+/// Append the master index to a prompt when it exists and is non-empty.
+pub fn append_master_index_prompt(out: &mut String, workdir: &Path, heading: &str) {
+    let master_index = std::fs::read_to_string(master_index_path(workdir)).unwrap_or_default();
+    if master_index.trim().is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "{heading}\n{master_index}\n---\n");
 }
 
 // ─── PRD index ─────────────────────────────────────────────────────
@@ -40,8 +50,8 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "> Rebuilt on every `roko prd` command.\n");
 
     // Ideas count
-    let ideas_path = workdir.join(".roko/prd/ideas.md");
-    let idea_count = std::fs::read_to_string(&ideas_path)
+    let ideas = ideas_path(workdir);
+    let idea_count = std::fs::read_to_string(&ideas)
         .unwrap_or_default()
         .lines()
         .filter(|l| l.starts_with("- "))
@@ -52,8 +62,7 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "## Published\n");
     let _ = writeln!(out, "| Slug | Title | Crates | Plans | Coverage |");
     let _ = writeln!(out, "|------|-------|--------|-------|----------|");
-    let published_dir = workdir.join(".roko/prd/published");
-    let published = list_md_sorted(&published_dir);
+    let published = list_md_sorted(&published_dir(workdir));
     if published.is_empty() {
         let _ = writeln!(out, "| _(none)_ | | | | |");
     }
@@ -78,8 +87,7 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "\n## Drafts\n");
     let _ = writeln!(out, "| Slug | Title | Created |");
     let _ = writeln!(out, "|------|-------|---------|");
-    let drafts_dir = workdir.join(".roko/prd/drafts");
-    let drafts = list_md_sorted(&drafts_dir);
+    let drafts = list_md_sorted(&drafts_dir(workdir));
     if drafts.is_empty() {
         let _ = writeln!(out, "| _(none)_ | | |");
     }
@@ -91,7 +99,7 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
 
     // Recent ideas (last 10)
     let _ = writeln!(out, "\n## Recent Ideas\n");
-    let ideas_content = std::fs::read_to_string(&ideas_path).unwrap_or_default();
+    let ideas_content = std::fs::read_to_string(&ideas).unwrap_or_default();
     let ideas: Vec<&str> = ideas_content
         .lines()
         .filter(|l| l.starts_with("- "))
@@ -111,25 +119,29 @@ pub fn rebuild_prd_index(workdir: &Path) -> Result<()> {
 
 // ─── Plans index ───────────────────────────────────────────────────
 
-/// Rebuild `plans/INDEX.md` from all plan directories.
+/// Rebuild `.roko/plans/INDEX.md` from all plan directories.
 pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
     let mut out = String::new();
     let _ = writeln!(out, "# Plans Index");
     let _ = writeln!(out, "\n> Auto-generated. Do not edit manually.");
     let _ = writeln!(out, "> Rebuilt on every `roko plan` command.\n");
 
+    if let Some(parent) = plans_index_path(workdir).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let _ = writeln!(out, "| Plan | Tasks | Done | Ready | Status | Parallel |");
     let _ = writeln!(out, "|------|-------|------|-------|--------|----------|");
 
-    let plans_dir = workdir.join("plans");
-    if !plans_dir.is_dir() {
+    let plans_root = plans_dir(workdir);
+    if !plans_root.is_dir() {
         let _ = writeln!(out, "| _(no plans directory)_ | | | | | |");
         std::fs::write(plans_index_path(workdir), &out)?;
         return Ok(());
     }
 
     let mut plan_dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&plans_dir) {
+    if let Ok(entries) = std::fs::read_dir(&plans_root) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() && path.join("tasks.toml").exists() {
@@ -239,9 +251,9 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "> Single entry point for all roko artifacts.\n");
 
     // PRD summary
-    let published_count = list_md_sorted(&workdir.join(".roko/prd/published")).len();
-    let drafts_count = list_md_sorted(&workdir.join(".roko/prd/drafts")).len();
-    let ideas_count = std::fs::read_to_string(workdir.join(".roko/prd/ideas.md"))
+    let published_count = list_md_sorted(&published_dir(workdir)).len();
+    let drafts_count = list_md_sorted(&drafts_dir(workdir)).len();
+    let ideas_count = std::fs::read_to_string(ideas_path(workdir))
         .unwrap_or_default()
         .lines()
         .filter(|l| l.starts_with("- "))
@@ -253,12 +265,12 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
     let _ = writeln!(out, "→ [Full index](.roko/prd/INDEX.md)\n");
 
     // Plans summary
-    let plans_dir = workdir.join("plans");
+    let plans_root = plans_dir(workdir);
     let mut plan_count = 0u32;
     let mut task_count = 0u32;
     let mut done_count = 0u32;
-    if plans_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&plans_dir) {
+    if plans_root.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&plans_root) {
             for entry in entries.flatten() {
                 let tasks_path = entry.path().join("tasks.toml");
                 if tasks_path.exists() {
@@ -274,7 +286,7 @@ pub fn rebuild_master_index(workdir: &Path) -> Result<()> {
         out,
         "## Plans ({plan_count} plans, {task_count} tasks, {done_count} done)"
     );
-    let _ = writeln!(out, "→ [Full index](plans/INDEX.md)\n");
+    let _ = writeln!(out, "→ [Full index](.roko/plans/INDEX.md)\n");
 
     // Research summary
     let research_count = list_md_sorted(&workdir.join(".roko/research"))
@@ -399,14 +411,15 @@ fn extract_toml_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_paths::{drafts_dir, ideas_path, plans_dir, published_dir};
 
     #[test]
     fn rebuild_all_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/published")).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/drafts")).unwrap();
+        std::fs::create_dir_all(published_dir(tmp.path())).unwrap();
+        std::fs::create_dir_all(drafts_dir(tmp.path())).unwrap();
         std::fs::create_dir_all(tmp.path().join(".roko/research")).unwrap();
-        std::fs::write(tmp.path().join(".roko/prd/ideas.md"), "# Ideas\n").unwrap();
+        std::fs::write(ideas_path(tmp.path()), "# Ideas\n").unwrap();
         rebuild_all(tmp.path()).unwrap();
         assert!(master_index_path(tmp.path()).exists());
         assert!(prd_index_path(tmp.path()).exists());
@@ -416,10 +429,10 @@ mod tests {
     #[test]
     fn prd_index_includes_drafts() {
         let tmp = tempfile::tempdir().unwrap();
-        let drafts = tmp.path().join(".roko/prd/drafts");
+        let drafts = drafts_dir(tmp.path());
         std::fs::create_dir_all(&drafts).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/published")).unwrap();
-        std::fs::write(tmp.path().join(".roko/prd/ideas.md"), "# Ideas\n").unwrap();
+        std::fs::create_dir_all(published_dir(tmp.path())).unwrap();
+        std::fs::write(ideas_path(tmp.path()), "# Ideas\n").unwrap();
         std::fs::write(
             drafts.join("test-prd.md"),
             "---\ntitle: Test PRD\nstatus: draft\ncreated: 2026-04-08\n---\n# Test\n",
@@ -434,7 +447,7 @@ mod tests {
     #[test]
     fn plans_index_counts_tasks() {
         let tmp = tempfile::tempdir().unwrap();
-        let plan = tmp.path().join("plans/test-plan");
+        let plan = plans_dir(tmp.path()).join("test-plan");
         std::fs::create_dir_all(&plan).unwrap();
         std::fs::write(
             plan.join("tasks.toml"),
@@ -451,12 +464,21 @@ mod tests {
     }
 
     #[test]
+    fn plans_index_writes_under_dot_roko() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        rebuild_plans_index(tmp.path()).unwrap();
+
+        assert!(plans_index_path(tmp.path()).exists());
+    }
+
+    #[test]
     fn master_index_has_all_sections() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/published")).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".roko/prd/drafts")).unwrap();
+        std::fs::create_dir_all(published_dir(tmp.path())).unwrap();
+        std::fs::create_dir_all(drafts_dir(tmp.path())).unwrap();
         std::fs::create_dir_all(tmp.path().join(".roko/research")).unwrap();
-        std::fs::write(tmp.path().join(".roko/prd/ideas.md"), "# Ideas\n").unwrap();
+        std::fs::write(ideas_path(tmp.path()), "# Ideas\n").unwrap();
         rebuild_all(tmp.path()).unwrap();
         let content = std::fs::read_to_string(master_index_path(tmp.path())).unwrap();
         assert!(content.contains("## PRDs"));
@@ -464,5 +486,29 @@ mod tests {
         assert!(content.contains("## Research"));
         assert!(content.contains("## Episodes"));
         assert!(content.contains("## Config"));
+    }
+
+    #[test]
+    fn append_master_index_prompt_skips_empty_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prompt = String::from("prefix\n");
+
+        append_master_index_prompt(&mut prompt, tmp.path(), "## Existing");
+
+        assert_eq!(prompt, "prefix\n");
+    }
+
+    #[test]
+    fn append_master_index_prompt_includes_heading_and_separator() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".roko")).unwrap();
+        std::fs::write(master_index_path(tmp.path()), "# Master\n").unwrap();
+
+        let mut prompt = String::new();
+        append_master_index_prompt(&mut prompt, tmp.path(), "## Existing");
+
+        assert!(prompt.contains("## Existing"));
+        assert!(prompt.contains("# Master"));
+        assert!(prompt.ends_with("---\n\n"));
     }
 }

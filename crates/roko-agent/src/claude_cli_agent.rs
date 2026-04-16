@@ -434,7 +434,12 @@ impl Agent for ClaudeCliAgent {
             }
         }
 
-        eprintln!("[{}] agent started (pid {}, timeout {}s)", self.name, pid.unwrap_or(0), self.timeout_ms / 1000);
+        eprintln!(
+            "[{}] agent started (pid {}, timeout {}s)",
+            self.name,
+            pid.unwrap_or(0),
+            self.timeout_ms / 1000
+        );
 
         // Track activity across stdout and stderr for heartbeat messages.
         let has_activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -470,13 +475,16 @@ impl Agent for ClaudeCliAgent {
                     match event.get("type").and_then(Value::as_str) {
                         Some("assistant") => {
                             // New turn — check for tool_use in content
-                            if let Some(content) = event.get("message")
+                            if let Some(content) = event
+                                .get("message")
                                 .and_then(|m| m.get("content"))
                                 .and_then(Value::as_array)
                             {
                                 for block in content {
-                                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                                        let name = block.get("name")
+                                    if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                                    {
+                                        let name = block
+                                            .get("name")
                                             .and_then(Value::as_str)
                                             .unwrap_or("unknown");
                                         tool_count += 1;
@@ -490,7 +498,8 @@ impl Agent for ClaudeCliAgent {
                             if let Some(block) = event.get("content_block") {
                                 match block.get("type").and_then(Value::as_str) {
                                     Some("tool_use") => {
-                                        let name = block.get("name")
+                                        let name = block
+                                            .get("name")
                                             .and_then(Value::as_str)
                                             .unwrap_or("unknown");
                                         tool_count += 1;
@@ -622,11 +631,18 @@ impl Agent for ClaudeCliAgent {
 
         let text = Self::output_text(&stdout);
         if text.trim().is_empty() {
-            eprintln!("[{}] finished after {elapsed_secs}s but produced empty output", self.name);
+            eprintln!(
+                "[{}] finished after {elapsed_secs}s but produced empty output",
+                self.name
+            );
             return self.failure(input, "claude produced an empty response", started);
         }
 
-        eprintln!("[{}] completed successfully ({elapsed_secs}s, {} bytes)", self.name, text.len());
+        eprintln!(
+            "[{}] completed successfully ({elapsed_secs}s, {} bytes)",
+            self.name,
+            text.len()
+        );
 
         let output_signal = input
             .derive(Kind::AgentOutput, Body::text(text))

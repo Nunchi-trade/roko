@@ -296,13 +296,52 @@ impl KnowledgeEntry {
             .unwrap_or_else(PadVector::neutral)
     }
 
-    /// Modest retrieval multiplier derived from emotional diversity.
+    /// Consolidation multiplier derived from emotional provenance.
+    ///
+    /// Entries that were validated across varied emotional states and
+    /// resolved through a redemptive or progressive arc are retained
+    /// slightly more aggressively.
+    #[must_use]
+    pub fn emotional_consolidation_boost(&self) -> f64 {
+        let mut boost = 1.0;
+
+        if let Some(provenance) = self.emotional_provenance.as_ref() {
+            boost *= 1.0 + provenance.emotional_diversity.clamp(0.0, 1.0) * 0.15;
+            boost *= match provenance.validation_arc {
+                Some(ValidationArc::Redemptive) => 1.06,
+                Some(ValidationArc::Progressive) => 1.04,
+                Some(ValidationArc::Stable) | None => 1.0,
+                Some(ValidationArc::Contaminating) => 0.94,
+            };
+        }
+
+        if let Some(tag) = self.emotional_tag.as_ref() {
+            boost *= 1.0 + f64::from(tag.intensity).clamp(0.0, 1.0) * 0.05;
+        }
+
+        boost.max(0.1)
+    }
+
+    /// Retrieval multiplier derived from emotional congruence and intensity.
+    ///
+    /// This is intentionally a little stronger than the consolidation boost
+    /// because retrieval should surface affect-laden knowledge sooner when it
+    /// matches the current search conditions.
+    #[must_use]
+    pub fn emotional_retrieval_boost(&self) -> f64 {
+        let mut boost = self.emotional_consolidation_boost();
+
+        if let Some(tag) = self.emotional_tag.as_ref() {
+            boost *= 1.0 + f64::from(tag.intensity).clamp(0.0, 1.0) * 0.08;
+        }
+
+        boost.max(0.1)
+    }
+
+    /// Backwards-compatible emotional reliability boost used by older call sites.
     #[must_use]
     pub fn emotional_reliability_boost(&self) -> f64 {
-        self.emotional_provenance
-            .as_ref()
-            .map(|provenance| 1.0 + provenance.emotional_diversity.clamp(0.0, 1.0) * 0.15)
-            .unwrap_or(1.0)
+        self.emotional_consolidation_boost()
     }
 }
 

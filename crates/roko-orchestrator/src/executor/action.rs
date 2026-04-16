@@ -4,6 +4,7 @@
 //! The caller (runtime harness) is responsible for dispatching these actions to
 //! the appropriate subsystem (agent pool, gate runner, git merge, etc.).
 
+use crate::dag::DagMutation;
 use roko_core::AgentRole;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +44,34 @@ pub enum ExecutorAction {
     RunVerify {
         /// The plan whose worktree to verify.
         plan_id: String,
+    },
+
+    /// Apply a DAG mutation between execution boundaries.
+    ApplyDagMutation {
+        /// The mutation to apply.
+        mutation: DagMutation,
+    },
+
+    /// Launch a backup execution for a slow task.
+    StartSpeculativeExecution {
+        /// The plan that owns the task.
+        plan_id: String,
+        /// The task identifier within the plan.
+        task: String,
+        /// The backup role to use.
+        backup_role: AgentRole,
+        /// Expected runtime in minutes.
+        expected_minutes: u32,
+        /// Elapsed runtime that tripped speculation in minutes.
+        elapsed_minutes: u32,
+    },
+
+    /// Cancel the losing branch of a speculative execution.
+    CancelSpeculativeExecution {
+        /// The plan that owns the task.
+        plan_id: String,
+        /// The task identifier within the plan.
+        task: String,
     },
 
     /// Merge a plan's worktree branch into the batch branch.
@@ -99,6 +128,18 @@ impl std::fmt::Display for ExecutorAction {
             }
             Self::RunGate { plan_id, rung } => write!(f, "gate({plan_id}, rung={rung})"),
             Self::RunVerify { plan_id } => write!(f, "verify({plan_id})"),
+            Self::ApplyDagMutation { mutation } => write!(f, "mutate({mutation:?})"),
+            Self::StartSpeculativeExecution {
+                plan_id,
+                task,
+                backup_role,
+                ..
+            } => {
+                write!(f, "speculate({plan_id}, {task}, backup={backup_role})")
+            }
+            Self::CancelSpeculativeExecution { plan_id, task } => {
+                write!(f, "cancel-speculation({plan_id}, {task})")
+            }
             Self::MergeBranch { plan_id } => write!(f, "merge({plan_id})"),
             Self::FailPlan { plan_id, reason } => {
                 write!(f, "fail({plan_id}: {reason})")
@@ -171,6 +212,23 @@ mod tests {
             },
             ExecutorAction::RunVerify {
                 plan_id: "cv".into(),
+            },
+            ExecutorAction::ApplyDagMutation {
+                mutation: DagMutation::AddDependency {
+                    from: roko_core::GlobalTaskId::new("plan", "a"),
+                    to: roko_core::GlobalTaskId::new("plan", "b"),
+                },
+            },
+            ExecutorAction::StartSpeculativeExecution {
+                plan_id: "spec".into(),
+                task: "t1".into(),
+                backup_role: AgentRole::Implementer,
+                expected_minutes: 10,
+                elapsed_minutes: 25,
+            },
+            ExecutorAction::CancelSpeculativeExecution {
+                plan_id: "spec".into(),
+                task: "t1".into(),
             },
             ExecutorAction::MergeBranch {
                 plan_id: "d".into(),

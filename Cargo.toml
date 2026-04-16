@@ -39,6 +39,7 @@ members = [
     "crates/roko-mcp-github",
     "crates/roko-mcp-slack",
     "crates/roko-mcp-scripts",
+    "crates/roko-mcp-code",
 
     # Roko CLI: minimal user-facing binary that wires the universal loop
     # (prompt → compose → agent → gate → persist → policy) against a working
@@ -46,6 +47,8 @@ members = [
     "crates/roko-cli",
     # HTTP server crate extracted from roko-cli's serve module.
     "crates/roko-serve",
+    # Per-agent HTTP server extracted from the legacy mirage dashboard surface.
+    "crates/roko-agent-server",
 
     # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
     "crates/roko-conductor",

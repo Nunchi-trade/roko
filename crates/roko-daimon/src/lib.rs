@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use kiddo::{KdTree, SquaredEuclidean};
-use roko_core::{BehavioralState, ContentHash, EmotionalTag, OperatingFrequencyAffect, PadVector};
+use roko_core::{
+    BehavioralState, ContentHash, EmotionalTag, OperatingFrequencyAffect, PadVector, Task,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -350,6 +352,159 @@ impl Default for TaskStrategyObservation {
     }
 }
 
+impl TaskStrategyObservation {
+    /// Build a strategy observation from a task and somatic context.
+    #[must_use]
+    pub fn from_task(task: &Task, context: &TaskContext) -> Self {
+        let task_tier = task_tier_label(task);
+        let file_count = task.files.len();
+        let verification_count = task.test_invariants.as_ref().map_or(0, Vec::len)
+            + task.acceptance.len()
+            + task.formulas.as_ref().map_or(0, Vec::len)
+            + task.types_to_define.as_ref().map_or(0, Vec::len)
+            + task.imports.as_ref().map_or(0, Vec::len);
+        let dependency_count = task.depends_on.len()
+            + task.integration_surfaces.as_ref().map_or(0, Vec::len)
+            + task.sidecar_requirements.as_ref().map_or(0, Vec::len)
+            + context.dag_depth.round().clamp(0.0, 3.0) as usize;
+        let max_loc = task_max_loc_estimate(task);
+        let familiarity = task_familiarity(task, context);
+        let confidence = context.model_tier_confidence.clamp(0.0, 1.0);
+        let failure_pressure = task_failure_pressure(task, context);
+        let urgency_pressure = context.deadline_proximity.clamp(0.0, 1.0);
+
+        Self {
+            task_tier,
+            file_count,
+            verification_count,
+            dependency_count,
+            max_loc,
+            familiarity,
+            confidence,
+            failure_pressure,
+            urgency_pressure,
+        }
+    }
+}
+
+/// Extra somatic inputs that are not encoded directly on [`Task`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TaskContext {
+    /// Deadline proximity in `[0.0, 1.0]`.
+    pub deadline_proximity: f64,
+    /// How familiar the task area is in `[0.0, 1.0]`.
+    pub existing_code_familiarity: f64,
+    /// Effective test coverage or reversibility in `[0.0, 1.0]`.
+    pub test_coverage: f64,
+    /// DAG depth / reverse-dependency pressure in `[0.0, 1.0]`.
+    pub dag_depth: f64,
+    /// Confidence in the selected model tier in `[0.0, 1.0]`.
+    pub model_tier_confidence: f64,
+}
+
+impl Default for TaskContext {
+    fn default() -> Self {
+        Self {
+            deadline_proximity: 0.5,
+            existing_code_familiarity: 0.5,
+            test_coverage: 0.5,
+            dag_depth: 0.5,
+            model_tier_confidence: 0.5,
+        }
+    }
+}
+
+impl TaskContext {
+    /// Construct a best-effort context snapshot from a task alone.
+    #[must_use]
+    pub fn from_task(task: &Task) -> Self {
+        let complexity_bias = match task.complexity_band {
+            Some(roko_core::TaskComplexityBand::Fast) => 0.25,
+            Some(roko_core::TaskComplexityBand::Standard) => 0.55,
+            Some(roko_core::TaskComplexityBand::Complex) => 0.85,
+            _ => match task.estimated_minutes.unwrap_or(90) {
+                0..=45 => 0.25,
+                46..=120 => 0.55,
+                121..=240 => 0.72,
+                _ => 0.85,
+            },
+        };
+        let deadline_proximity = match task.speed_priority {
+            Some(roko_core::TaskSpeedPriority::Latency) => 0.85,
+            Some(roko_core::TaskSpeedPriority::Balanced) => complexity_bias,
+            Some(roko_core::TaskSpeedPriority::Accuracy) => 0.35,
+            _ => (f64::from(task.estimated_minutes.unwrap_or(90)) / 240.0).clamp(0.25, 0.95),
+        };
+        let surface_pressure = task_surface_pressure(task);
+        let existing_code_familiarity: f64 =
+            if task.example_pattern.is_some() {
+                0.75
+            } else {
+                0.45
+            } + if task
+                .context_files
+                .as_ref()
+                .is_some_and(|files| !files.is_empty())
+            {
+                0.10
+            } else {
+                0.0
+            } + if matches!(task.category, Some(roko_core::TaskCategory::Research)) {
+                0.05
+            } else {
+                0.0
+            } - if matches!(task.research_before_edit, Some(true)) {
+                0.10
+            } else {
+                0.0
+            } - (surface_pressure * 0.15);
+        let test_coverage: f64 = if task
+            .test_invariants
+            .as_ref()
+            .is_some_and(|tests| !tests.is_empty())
+            || task.quality_profile == Some(roko_core::TaskQualityProfile::Hardened)
+        {
+            0.8
+        } else {
+            0.45
+        } + if task.acceptance.is_empty() {
+            0.0
+        } else {
+            0.05
+        };
+        let dag_depth = (task.depends_on.len() as f64
+            + optional_vec_len(&task.integration_surfaces) as f64 * 0.5
+            + optional_vec_len(&task.sidecar_requirements) as f64 * 0.5
+            + optional_vec_len(&task.dependency_tags) as f64 * 0.25)
+            / 6.0;
+        let model_tier_confidence: f64 =
+            match task.complexity_band {
+                Some(roko_core::TaskComplexityBand::Fast) => 0.35,
+                Some(roko_core::TaskComplexityBand::Standard) => 0.65,
+                Some(roko_core::TaskComplexityBand::Complex) => 0.90,
+                _ => {
+                    if task.quality_profile == Some(roko_core::TaskQualityProfile::Hardened) {
+                        0.80
+                    } else {
+                        0.55
+                    }
+                }
+            } + if task.preferred_model.is_some() || task.preferred_provider.is_some() {
+                0.05
+            } else {
+                0.0
+            };
+
+        Self {
+            deadline_proximity: deadline_proximity.clamp(0.0, 1.0),
+            existing_code_familiarity: existing_code_familiarity.clamp(0.0, 1.0),
+            test_coverage: test_coverage.clamp(0.0, 1.0),
+            dag_depth: dag_depth.clamp(0.0, 1.0),
+            model_tier_confidence: model_tier_confidence.clamp(0.0, 1.0),
+        }
+    }
+}
+
 /// Normalized episode signals used to reconstruct strategy-space placement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EpisodeStrategyObservation {
@@ -468,7 +623,10 @@ impl CanonicalStrategyProfile {
 fn classify_dimension_role(label: &str, index: usize) -> DimensionRole {
     let normalized = label.trim().to_ascii_lowercase();
 
-    if contains_role_keyword(&normalized, &["complex", "difficulty", "volatility", "unstable"]) {
+    if contains_role_keyword(
+        &normalized,
+        &["complex", "difficulty", "volatility", "unstable"],
+    ) {
         return DimensionRole::Difficulty;
     }
     if contains_role_keyword(
@@ -487,31 +645,60 @@ fn classify_dimension_role(label: &str, index: usize) -> DimensionRole {
     }
     if contains_role_keyword(
         &normalized,
-        &["novel", "familiar", "correlation", "similarity", "ambiguity"],
+        &[
+            "novel",
+            "familiar",
+            "correlation",
+            "similarity",
+            "ambiguity",
+        ],
     ) {
         return DimensionRole::Familiarity;
     }
     if contains_role_keyword(&normalized, &["confidence", "conviction", "certainty"]) {
         return DimensionRole::SelfAssessment;
     }
-    if contains_role_keyword(&normalized, &["time", "deadline", "horizon", "urgency", "latency"]) {
+    if contains_role_keyword(
+        &normalized,
+        &["time", "deadline", "horizon", "urgency", "latency"],
+    ) {
         return DimensionRole::Urgency;
     }
     if contains_role_keyword(
         &normalized,
-        &["scope", "breadth", "concentration", "liquidity", "surface", "coverage"],
+        &[
+            "scope",
+            "breadth",
+            "concentration",
+            "liquidity",
+            "surface",
+            "coverage",
+        ],
     ) {
         return DimensionRole::Breadth;
     }
     if contains_role_keyword(
         &normalized,
-        &["revers", "rollback", "recover", "counterparty", "exit", "undo"],
+        &[
+            "revers",
+            "rollback",
+            "recover",
+            "counterparty",
+            "exit",
+            "undo",
+        ],
     ) {
         return DimensionRole::Recoverability;
     }
     if contains_role_keyword(
         &normalized,
-        &["dependency", "coupling", "regulatory", "compliance", "integration"],
+        &[
+            "dependency",
+            "coupling",
+            "regulatory",
+            "compliance",
+            "integration",
+        ],
     ) {
         return DimensionRole::Coupling;
     }
@@ -763,6 +950,15 @@ impl StrategySpaceComputer<EpisodeStrategyObservation> for RegisteredStrategySpa
     }
 }
 
+/// Project a task and somatic context into the canonical 8D strategy space.
+#[must_use]
+pub fn extract_strategy_point(task: &Task, context: &TaskContext) -> [f64; STRATEGY_DIMENSIONS] {
+    StrategySpaceDefinition::coding()
+        .computer()
+        .task_coords(&TaskStrategyObservation::from_task(task, context))
+        .as_array()
+}
+
 /// Situation-specific emotional memory stored in the somatic landscape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SomaticMarker {
@@ -840,6 +1036,28 @@ pub struct DepotentiationReport {
     pub cooled_markers: usize,
     /// Aggregate reduction applied to somatic marker intensity.
     pub total_marker_intensity_reduction: f64,
+}
+
+/// Compact view of the current somatic landscape for UI display.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SomaticSummary {
+    /// Total number of stored markers.
+    pub marker_count: usize,
+    /// Number of positively valenced markers.
+    pub positive_markers: usize,
+    /// Number of negatively valenced markers.
+    pub negative_markers: usize,
+    /// Number of near-neutral markers.
+    pub neutral_markers: usize,
+    /// Intensity-weighted average valence.
+    pub mean_valence: f64,
+    /// Arithmetic mean intensity across markers.
+    pub mean_intensity: f64,
+    /// Strongest intensity observed in the landscape.
+    pub strongest_intensity: f64,
+    /// Most recent reinforcement timestamp, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated_at: Option<DateTime<Utc>>,
 }
 
 /// Mutable store of somatic markers indexed by a k-d tree.
@@ -1060,6 +1278,55 @@ impl SomaticLandscape {
         }
 
         (cooled_markers, total_reduction)
+    }
+
+    /// Summarize the current landscape for the TUI and runtime telemetry.
+    #[must_use]
+    pub fn summary(&self) -> SomaticSummary {
+        if self.markers.is_empty() {
+            return SomaticSummary::default();
+        }
+
+        let marker_count = self.markers.len();
+        let mut positive_markers = 0_usize;
+        let mut negative_markers = 0_usize;
+        let mut neutral_markers = 0_usize;
+        let mut weighted_valence = 0.0_f64;
+        let mut weighted_intensity = 0.0_f64;
+        let mut total_weight = 0.0_f64;
+        let mut strongest_intensity = 0.0_f64;
+        let mut last_updated_at: Option<DateTime<Utc>> = None;
+
+        for marker in &self.markers {
+            if marker.valence > 0.10 {
+                positive_markers += 1;
+            } else if marker.valence < -0.10 {
+                negative_markers += 1;
+            } else {
+                neutral_markers += 1;
+            }
+
+            let weight = marker.intensity.max(0.05);
+            weighted_valence += weight * marker.valence;
+            weighted_intensity += marker.intensity;
+            total_weight += weight;
+            strongest_intensity = strongest_intensity.max(marker.intensity);
+            last_updated_at = Some(match last_updated_at {
+                Some(current) => current.max(marker.updated_at.clone()),
+                None => marker.updated_at.clone(),
+            });
+        }
+
+        SomaticSummary {
+            marker_count,
+            positive_markers,
+            negative_markers,
+            neutral_markers,
+            mean_valence: (weighted_valence / total_weight).clamp(-1.0, 1.0),
+            mean_intensity: (weighted_intensity / marker_count as f64).clamp(0.0, 1.0),
+            strongest_intensity,
+            last_updated_at,
+        }
     }
 }
 
@@ -1303,6 +1570,12 @@ impl DaimonState {
         self.autosave();
     }
 
+    /// Summarize the current somatic landscape for display and telemetry.
+    #[must_use]
+    pub fn somatic_summary(&self) -> SomaticSummary {
+        self.somatic_landscape.summary()
+    }
+
     /// Modulate dispatch parameters using both the global affect state and the
     /// situation-specific somatic landscape.
     pub fn modulate_with_strategy(
@@ -1513,6 +1786,140 @@ fn clamp_unit(value: f64) -> f64 {
     } else {
         0.5
     }
+}
+
+fn task_tier_label(task: &Task) -> String {
+    if let Some(band) = task.complexity_band {
+        return match band {
+            roko_core::TaskComplexityBand::Fast => "mechanical".to_string(),
+            roko_core::TaskComplexityBand::Standard => "focused".to_string(),
+            roko_core::TaskComplexityBand::Complex => "architectural".to_string(),
+            _ => "focused".to_string(),
+        };
+    }
+
+    if matches!(task.category, Some(roko_core::TaskCategory::Research)) {
+        return "integrative".to_string();
+    }
+
+    match task.estimated_minutes.unwrap_or(90) {
+        0..=45 => "mechanical".to_string(),
+        46..=120 => "focused".to_string(),
+        121..=240 => "integrative".to_string(),
+        _ => "architectural".to_string(),
+    }
+}
+
+fn task_max_loc_estimate(task: &Task) -> u32 {
+    let base = task.estimated_minutes.unwrap_or(90).saturating_mul(4);
+    let file_budget = (task.files.len() as u32).saturating_mul(120);
+    let context_budget = task
+        .context_files
+        .as_ref()
+        .map(|files| (files.len() as u32).saturating_mul(80))
+        .unwrap_or(0);
+    let requirement_budget = optional_vec_len(&task.types_to_define) as u32 * 30
+        + optional_vec_len(&task.formulas) as u32 * 45
+        + task.acceptance.len() as u32 * 18
+        + optional_vec_len(&task.imports) as u32 * 20
+        + optional_vec_len(&task.sidecar_requirements) as u32 * 90
+        + optional_vec_len(&task.integration_surfaces) as u32 * 70
+        + optional_vec_len(&task.dependency_tags) as u32 * 15
+        + optional_vec_len(&task.fixture_keys) as u32 * 15
+        + if task.exclusive_files { 30 } else { 60 };
+    base.saturating_add(file_budget)
+        .saturating_add(context_budget)
+        .saturating_add(requirement_budget)
+        .clamp(40, 1_200)
+}
+
+fn task_familiarity(task: &Task, context: &TaskContext) -> f64 {
+    let mut familiarity = context.existing_code_familiarity.clamp(0.0, 1.0);
+    if task.example_pattern.is_some() {
+        familiarity += 0.15;
+    }
+    if task
+        .context_files
+        .as_ref()
+        .is_some_and(|files| !files.is_empty())
+    {
+        familiarity += 0.10;
+    }
+    if matches!(task.research_before_edit, Some(true)) {
+        familiarity -= 0.10;
+    }
+    familiarity -= task_surface_pressure(task) * 0.10;
+    familiarity.clamp(0.0, 1.0)
+}
+
+fn task_failure_pressure(task: &Task, context: &TaskContext) -> f64 {
+    let file_pressure = (task.files.len() as f64 / 8.0).min(1.0);
+    let dependency_pressure = (task.depends_on.len() as f64 / 6.0).min(1.0);
+    let integration_pressure = task
+        .integration_surfaces
+        .as_ref()
+        .map(|surfaces| (surfaces.len() as f64 / 4.0).min(1.0))
+        .unwrap_or(0.0);
+    let sidecar_pressure = task
+        .sidecar_requirements
+        .as_ref()
+        .map(|requirements| (requirements.len() as f64 / 4.0).min(1.0))
+        .unwrap_or(0.0);
+    let surface_pressure = task_surface_pressure(task);
+    let reversibility_gap = (1.0 - context.test_coverage.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let urgency_pressure = context.deadline_proximity.clamp(0.0, 1.0);
+    let complexity_pressure = match task.complexity_band {
+        Some(roko_core::TaskComplexityBand::Fast) => 0.2,
+        Some(roko_core::TaskComplexityBand::Standard) => 0.5,
+        Some(roko_core::TaskComplexityBand::Complex) => 0.85,
+        _ => 0.45,
+    };
+    let routing_uncertainty = if task.preferred_model.is_some() || task.preferred_provider.is_some()
+    {
+        0.0
+    } else {
+        0.05
+    };
+    let retry_pressure = if matches!(task.escalate_on_retry, Some(true)) {
+        0.05
+    } else {
+        0.0
+    };
+    let exclusivity_pressure = if task.exclusive_files { 0.02 } else { 0.0 };
+
+    ((0.18 * file_pressure
+        + 0.18 * dependency_pressure
+        + 0.16 * integration_pressure
+        + 0.10 * sidecar_pressure
+        + 0.12 * surface_pressure
+        + 0.18 * reversibility_gap
+        + 0.12 * urgency_pressure
+        + 0.08 * complexity_pressure)
+        + routing_uncertainty
+        + retry_pressure
+        + exclusivity_pressure)
+        .clamp(0.0, 1.0)
+}
+
+fn optional_vec_len(value: &Option<Vec<String>>) -> usize {
+    value.as_ref().map_or(0, Vec::len)
+}
+
+fn task_surface_load(task: &Task) -> usize {
+    task.files.len()
+        + optional_vec_len(&task.context_files)
+        + optional_vec_len(&task.types_to_define)
+        + optional_vec_len(&task.formulas)
+        + task.acceptance.len()
+        + optional_vec_len(&task.imports)
+        + optional_vec_len(&task.sidecar_requirements)
+        + optional_vec_len(&task.integration_surfaces)
+        + optional_vec_len(&task.dependency_tags)
+        + optional_vec_len(&task.fixture_keys)
+}
+
+fn task_surface_pressure(task: &Task) -> f64 {
+    (task_surface_load(task) as f64 / 18.0).clamp(0.0, 1.0)
 }
 
 fn squared_euclidean(left: &[f64; STRATEGY_DIMENSIONS], right: &[f64; STRATEGY_DIMENSIONS]) -> f64 {
@@ -1810,6 +2217,100 @@ mod tests {
     }
 
     #[test]
+    fn extract_strategy_point_responds_to_task_structure_and_context() {
+        let mut task = roko_core::Task::new("task-a", "Refactor a risky cross-crate path");
+        task.status = roko_core::TaskStatus::Active;
+        task.files = vec![
+            "crates/one/src/lib.rs".to_string(),
+            "crates/two/src/lib.rs".to_string(),
+            "Cargo.toml".to_string(),
+        ];
+        task.depends_on = vec![
+            "task-b".to_string(),
+            "task-c".to_string(),
+            "task-d".to_string(),
+        ];
+        task.test_invariants = Some(vec!["compile".to_string(), "tests".to_string()]);
+        task.estimated_minutes = Some(180);
+        task.complexity_band = Some(roko_core::TaskComplexityBand::Complex);
+        task.quality_profile = Some(roko_core::TaskQualityProfile::Hardened);
+
+        let context = TaskContext {
+            deadline_proximity: 0.9,
+            existing_code_familiarity: 0.1,
+            test_coverage: 0.2,
+            dag_depth: 0.8,
+            model_tier_confidence: 0.85,
+        };
+
+        let point = extract_strategy_point(&task, &context);
+
+        assert!(point[0] > 0.8);
+        assert!(point[1] > 0.7);
+        assert!(point[2] > 0.7);
+        assert!(point[3] > 0.8);
+        assert!(point[4] > 0.6);
+        assert!(point[5] > 0.6);
+        assert!(point[6] < 0.6);
+        assert!(point[7] > 0.6);
+    }
+
+    #[test]
+    fn task_strategy_observation_accounts_for_richer_requirements() {
+        let mut task = roko_core::Task::new("task-b", "Wire the daemon heartbeat through dreams");
+        task.files = vec![
+            "crates/roko-dreams/src/runner.rs".to_string(),
+            "crates/roko-dreams/src/lib.rs".to_string(),
+        ];
+        task.depends_on = vec![
+            "task-a".to_string(),
+            "task-c".to_string(),
+            "task-d".to_string(),
+        ];
+        task.acceptance = vec![
+            "add heartbeat report".to_string(),
+            "pause delta while active".to_string(),
+        ];
+        task.test_invariants = Some(vec!["heartbeat".to_string(), "delta-loop".to_string()]);
+        task.types_to_define = Some(vec![
+            "DreamHeartbeatPolicy".to_string(),
+            "DreamHeartbeatReport".to_string(),
+        ]);
+        task.formulas = Some(vec![
+            "delta_due_in = max(0, last_dream + interval - now)".to_string(),
+        ]);
+        task.imports = Some(vec![
+            "chrono::DateTime".to_string(),
+            "std::time::Duration".to_string(),
+        ]);
+        task.context_files = Some(vec![
+            "tmp/ux-refactoring/D-architectural-gaps.md".to_string(),
+        ]);
+        task.sidecar_requirements = Some(vec!["daemon".to_string()]);
+        task.integration_surfaces = Some(vec![
+            "heartbeat".to_string(),
+            "runtime-controls".to_string(),
+        ]);
+        task.dependency_tags = Some(vec!["dreams".to_string(), "delta".to_string()]);
+        task.fixture_keys = Some(vec!["tempdir".to_string()]);
+        task.estimated_minutes = Some(240);
+        task.complexity_band = Some(roko_core::TaskComplexityBand::Complex);
+        task.research_before_edit = Some(true);
+        task.exclusive_files = false;
+        task.preferred_model = Some("claude-sonnet-4-6".to_string());
+        task.escalate_on_retry = Some(true);
+
+        let context = TaskContext::from_task(&task);
+        let observation = TaskStrategyObservation::from_task(&task, &context);
+
+        assert!(observation.verification_count >= 6);
+        assert!(observation.max_loc >= 600);
+        assert!(observation.failure_pressure > 0.6);
+        assert!(observation.familiarity < 0.7);
+        assert!(context.dag_depth > 0.5);
+    }
+
+    #[test]
     fn somatic_landscape_merges_nearby_markers() {
         let mut landscape = SomaticLandscape::new();
         let first = ContentHash::of(b"episode-a");
@@ -1821,6 +2322,34 @@ mod tests {
         assert_eq!(landscape.markers.len(), 1);
         assert_eq!(landscape.markers[0].episodes.len(), 2);
         assert!(landscape.markers[0].valence < -0.55);
+    }
+
+    #[test]
+    fn somatic_summary_reflects_landscape_balance() {
+        let mut landscape = SomaticLandscape::new();
+        landscape.record_outcome(
+            strategy(0.2, 0.2, 0.4),
+            0.6,
+            0.4,
+            ContentHash::of(b"positive"),
+            Utc::now(),
+        );
+        landscape.record_outcome(
+            strategy(0.8, 0.7, 0.6),
+            -0.7,
+            0.9,
+            ContentHash::of(b"negative"),
+            Utc::now(),
+        );
+
+        let summary = landscape.summary();
+
+        assert_eq!(summary.marker_count, 2);
+        assert_eq!(summary.positive_markers, 1);
+        assert_eq!(summary.negative_markers, 1);
+        assert!(summary.mean_intensity > 0.5);
+        assert!(summary.strongest_intensity >= 0.9);
+        assert!(summary.last_updated_at.is_some());
     }
 
     #[test]

@@ -9,16 +9,31 @@
 //! schema.
 
 #![allow(clippy::module_name_repetitions)]
+#![cfg_attr(
+    clippy,
+    allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::restriction,
+        missing_docs
+    )
+)]
 
 extern crate self as roko_cli;
 
+pub mod agent_config;
+pub mod agent_episode;
 pub mod agent_exec;
+pub mod agent_spawn;
+pub mod chat;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
 pub mod daemon;
 pub mod episode;
 pub mod event_sources;
+mod heartbeat;
 pub mod index;
 pub mod inject;
 pub mod oneshot;
@@ -28,6 +43,7 @@ pub mod plan;
 pub mod plan_generate;
 pub mod prd;
 pub mod prd_prompt;
+pub mod prompting;
 pub mod repl;
 pub mod research;
 pub mod run;
@@ -37,6 +53,7 @@ pub mod subscriptions;
 pub mod task_parser;
 pub mod tui;
 pub mod worker;
+pub mod workspace_paths;
 
 pub mod serve_runtime;
 

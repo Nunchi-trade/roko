@@ -176,6 +176,7 @@ fn default_executor_layer() -> ExecutorLayer {
         budget_usd: defaults.budget_usd,
         auto_replan: Some(defaults.auto_replan),
         use_worktrees: Some(defaults.use_worktrees),
+        speculative_threshold_multiplier: Some(defaults.speculative_threshold_multiplier),
     }
 }
 
