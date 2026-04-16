@@ -535,6 +535,10 @@ pub(crate) fn collect_git_summary(
     git_data: &crate::tui::views::git_view::GitViewData,
     age: &str,
 ) -> Vec<String> {
+    if git_data.is_not_a_git_repository() {
+        return vec![" not a git repository".to_string()];
+    }
+
     let mut lines = Vec::new();
 
     let commit = git_data

@@ -15,6 +15,7 @@ pub mod dashboard;
 pub mod effects_config;
 pub mod event;
 pub mod fs_watch;
+pub(crate) mod git_watch;
 pub mod hit_test;
 pub mod input;
 mod jsonl_cursor;

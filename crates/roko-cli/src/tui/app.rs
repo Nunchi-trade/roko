@@ -33,6 +33,7 @@ use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
 use super::fs_watch::{self, FsRefresh, FsWatchHandle};
+use super::git_watch::{self, GitRefresh, GitWatchHandle};
 use super::input::{self, ConfirmAction, FocusZone, InputMode, TuiAction};
 use super::modals::{
     self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry,
@@ -49,9 +50,10 @@ use super::ws_client::{AgentStreamClient, StreamChunk};
 /// - **Mori-style tabs** (F1-F7): full TuiState + views + modals + postfx
 /// - **Legacy scaffold pages**: original PageId-based rendering
 ///
-/// All expensive I/O (system metrics, file reads, git commands) runs on
-/// background threads.  The render path does zero I/O -- it only reads
-/// `&self.tui_state` and `&self.data` and writes to the frame buffer.
+/// All expensive I/O stays off the render path. System metrics run on a
+/// background thread, while filesystem and git refreshes run only on watcher
+/// nudges. The render path does zero I/O -- it only reads `&self.tui_state`
+/// and `&self.data` and writes to the frame buffer.
 pub struct App {
     workdir: PathBuf,
 
@@ -91,8 +93,8 @@ pub struct App {
     sys_rx: Option<std::sync::mpsc::Receiver<SysSnapshot>>,
     /// Filesystem watcher handle for debounced `.roko/` refresh events.
     fs_watch: Option<FsWatchHandle>,
-    /// Background git data receiver (git commands off main thread).
-    git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    /// Debounced git watcher for repo metadata refreshes.
+    git_watch: Option<GitWatchHandle>,
     /// Optional live process supervisor used for per-agent process sampling.
     process_supervisor: Option<Arc<ProcessSupervisor>>,
     /// Optional approval request receiver from the orchestrator.
@@ -119,7 +121,7 @@ pub struct App {
     terminal_size: (u16, u16),
 }
 
-/// Bundle of git data collected by the background git thread.
+/// Bundle of git data collected by the watcher-driven git refresh path.
 struct GitBgData {
     /// Full git view data for the F4 Git tab.
     view_data: super::views::git_view::GitViewData,
@@ -155,6 +157,30 @@ struct ProcessMetricSample {
     state: String,
     /// Process uptime in seconds.
     uptime_secs: f64,
+}
+
+fn collect_git_bg_data(workdir: &Path) -> GitBgData {
+    let view_data = super::views::git_view::collect_git_data(workdir);
+    let branch = view_data.current_branch.clone();
+    let commit_short = view_data
+        .commits
+        .first()
+        .map(|commit| commit.hash_short.clone())
+        .unwrap_or_default();
+    let age = view_data
+        .commits
+        .first()
+        .map(|commit| commit.age.clone())
+        .unwrap_or_default();
+    let summary_lines = super::views::dashboard_view::collect_git_summary(&view_data, &age);
+
+    GitBgData {
+        view_data,
+        summary_lines,
+        branch,
+        commit_short,
+        age,
+    }
 }
 
 fn plan_status_label(plan: &PlanEntry) -> String {
@@ -422,7 +448,7 @@ impl App {
             gate_failure_selection: 0,
             sys_rx: None,
             fs_watch: None,
-            git_rx: None,
+            git_watch: None,
             process_supervisor: None,
             approval_rx: None,
             pending_approval_response: None,
@@ -555,51 +581,10 @@ impl App {
         self.fs_watch = Some(fs_watch::watch_roko_dir_with_fallback(&self.workdir));
 
         // ---------------------------------------------------------------
-        // Spawn background git data collector thread
+        // Prime git data once, then refresh only when git metadata changes.
         // ---------------------------------------------------------------
-        let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
-        let git_log_dispatch = log_dispatch;
-        std::thread::Builder::new()
-            .name("tui-git-refresh".into())
-            .spawn(move || {
-                let _log_guard = tracing::dispatcher::set_default(&git_log_dispatch);
-                loop {
-                    let view_data = super::views::git_view::collect_git_data();
-                    let branch = view_data.current_branch.clone();
-                    let commit_short = view_data
-                        .commits
-                        .first()
-                        .map(|c| c.hash_short.clone())
-                        .unwrap_or_default();
-                    let age = view_data
-                        .commits
-                        .first()
-                        .map(|commit| commit.age.clone())
-                        .unwrap_or_default();
-                    let summary_lines =
-                        super::views::dashboard_view::collect_git_summary(&view_data, &age);
-                    let bg = GitBgData {
-                        view_data,
-                        summary_lines,
-                        branch,
-                        commit_short,
-                        age,
-                    };
-                    if git_tx.send(bg).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(3));
-                }
-            })
-            .inspect_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    thread = "tui-git-refresh",
-                    "failed to spawn background thread"
-                );
-            })
-            .ok();
-        self.git_rx = Some(git_rx);
+        self.apply_git_bg_data(collect_git_bg_data(&self.workdir));
+        self.git_watch = Some(git_watch::watch_git_repo_with_fallback(&self.workdir));
 
         // ---------------------------------------------------------------
         // Initial draw
@@ -2370,31 +2355,31 @@ impl App {
         }
 
         // -- git data --
-        if let Some(rx) = &self.git_rx {
+        if let Some(git_watch) = &self.git_watch {
+            let mut got_refresh = false;
             let mut count = 0;
-            while let Ok(bg) = rx.try_recv() {
-                self.tui_state.git_branch_tree = bg.view_data.branches.clone();
-                self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
-                self.tui_state.git_worktree_list =
-                    convert_git_worktree_list(&bg.view_data.worktrees);
-                self.tui_state.git_view_data = Some(bg.view_data);
-                self.tui_state.git_summary_lines = bg.summary_lines;
-                if !bg.branch.is_empty() {
-                    self.tui_state.git_branch = bg.branch;
-                }
-                if !bg.commit_short.is_empty() {
-                    self.tui_state.git_commit_short = bg.commit_short;
-                }
-                if !bg.age.is_empty() {
-                    self.tui_state.git_age = bg.age;
-                }
-
+            while let Ok(GitRefresh::Coalesced) = git_watch.try_recv() {
+                got_refresh = true;
                 count += 1;
                 if count >= MAX_MESSAGES_PER_DRAIN {
                     break;
                 }
             }
+            if got_refresh {
+                self.apply_git_bg_data(collect_git_bg_data(&self.workdir));
+            }
         }
+    }
+
+    fn apply_git_bg_data(&mut self, bg: GitBgData) {
+        self.tui_state.git_branch_tree = bg.view_data.branches.clone();
+        self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
+        self.tui_state.git_worktree_list = convert_git_worktree_list(&bg.view_data.worktrees);
+        self.tui_state.git_view_data = Some(bg.view_data);
+        self.tui_state.git_summary_lines = bg.summary_lines;
+        self.tui_state.git_branch = bg.branch;
+        self.tui_state.git_commit_short = bg.commit_short;
+        self.tui_state.git_age = bg.age;
     }
 
     fn drain_snapshot_channel(&mut self) {
@@ -2460,7 +2445,11 @@ impl App {
             return;
         }
 
-        let active_ids = self.agent_stream_clients.keys().cloned().collect::<Vec<_>>();
+        let active_ids = self
+            .agent_stream_clients
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         self.agent_stream_clients.clear();
         for agent_id in active_ids {
             self.tui_state.mark_agent_stream_disconnected(&agent_id);
@@ -2468,7 +2457,11 @@ impl App {
     }
 
     fn drain_agent_stream_clients(&mut self) {
-        let agent_ids = self.agent_stream_clients.keys().cloned().collect::<Vec<_>>();
+        let agent_ids = self
+            .agent_stream_clients
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for agent_id in agent_ids {
             let Some(client) = self.agent_stream_clients.get_mut(&agent_id) else {
                 continue;

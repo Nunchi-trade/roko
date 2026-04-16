@@ -6,6 +6,7 @@
 //! Populates data by running git commands when the TuiState fields are
 //! empty, so the view always shows real repository state.
 
+use std::path::Path;
 use std::process::Command;
 
 use ratatui::Frame;
@@ -47,6 +48,29 @@ pub(crate) struct GitViewData {
     pub current_branch: String,
     pub remote_url: String,
     pub status_lines: Vec<String>,
+}
+
+const NOT_A_GIT_REPOSITORY: &str = "not a git repository";
+
+impl GitViewData {
+    pub(crate) fn not_a_git_repository() -> Self {
+        Self {
+            status_lines: vec![NOT_A_GIT_REPOSITORY.to_string()],
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn is_not_a_git_repository(&self) -> bool {
+        self.branches.is_empty()
+            && self.worktrees.is_empty()
+            && self.commits.is_empty()
+            && self.current_branch.is_empty()
+            && self.remote_url.is_empty()
+            && matches!(
+                self.status_lines.as_slice(),
+                [line] if line == NOT_A_GIT_REPOSITORY
+            )
+    }
 }
 
 /// Render the full git view.
@@ -261,6 +285,14 @@ fn render_status(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if git_data.is_not_a_git_repository() {
+        let empty = Paragraph::new(NOT_A_GIT_REPOSITORY)
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
     if git_data.status_lines.is_empty() {
         let empty = Paragraph::new("clean working tree")
             .style(theme.success())
@@ -399,6 +431,14 @@ fn render_branch_info(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if git_data.is_not_a_git_repository() {
+        let paragraph = Paragraph::new("not a git repository")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
+        return;
+    }
+
     let current = if git_data.current_branch.is_empty() {
         "(detached HEAD)"
     } else {
@@ -465,22 +505,27 @@ fn render_branch_info(
 /// Collect live git data by running git commands.
 ///
 /// This is intentionally expensive (multiple git subprocess calls) and
-/// should only be called from a background thread, never from the render path.
-pub(crate) fn collect_git_data() -> GitViewData {
-    let current_branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
+/// should only be called from watcher-driven refresh paths, never from the
+/// render path.
+pub(crate) fn collect_git_data(workdir: &Path) -> GitViewData {
+    if !is_git_repository(workdir) {
+        return GitViewData::not_a_git_repository();
+    }
+
+    let current_branch = run_git(workdir, &["branch", "--show-current"])
         .unwrap_or_default()
         .trim()
         .to_string();
 
-    let remote_url = run_git(&["remote", "get-url", "origin"])
+    let remote_url = run_git(workdir, &["remote", "get-url", "origin"])
         .unwrap_or_default()
         .trim()
         .to_string();
 
-    let branches = collect_branches(&current_branch);
-    let worktrees = collect_worktrees();
-    let commits = collect_commits();
-    let status_lines = collect_status();
+    let branches = collect_branches(workdir, &current_branch);
+    let worktrees = collect_worktrees(workdir);
+    let commits = collect_commits(workdir);
+    let status_lines = collect_status(workdir);
 
     GitViewData {
         branches,
@@ -492,9 +537,19 @@ pub(crate) fn collect_git_data() -> GitViewData {
     }
 }
 
+fn is_git_repository(workdir: &Path) -> bool {
+    run_git(workdir, &["rev-parse", "--is-inside-work-tree"])
+        .map(|value| value.trim() == "true")
+        .unwrap_or(false)
+}
+
 /// Run a git command and return stdout as a string.
-fn run_git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
+fn run_git(workdir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .output()
+        .ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -503,14 +558,17 @@ fn run_git(args: &[&str]) -> Option<String> {
 }
 
 /// Collect branch list with ahead/behind info.
-fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
+fn collect_branches(workdir: &Path, current_branch: &str) -> Vec<GitBranchNode> {
     // git branch --format with ahead/behind
-    let output = run_git(&[
-        "for-each-ref",
-        "--sort=-committerdate",
-        "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
-        "refs/heads/",
-    ]);
+    let output = run_git(
+        workdir,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
+            "refs/heads/",
+        ],
+    );
 
     let Some(output) = output else {
         return Vec::new();
@@ -578,8 +636,8 @@ fn parse_ahead_behind(s: &str) -> (usize, usize) {
 }
 
 /// Collect worktree list.
-fn collect_worktrees() -> Vec<WorktreeEntry> {
-    let output = run_git(&["worktree", "list", "--porcelain"]);
+fn collect_worktrees(workdir: &Path) -> Vec<WorktreeEntry> {
+    let output = run_git(workdir, &["worktree", "list", "--porcelain"]);
     let Some(output) = output else {
         return Vec::new();
     };
@@ -625,15 +683,18 @@ fn collect_worktrees() -> Vec<WorktreeEntry> {
 }
 
 /// Collect recent commits with graph.
-fn collect_commits() -> Vec<CommitEntry> {
-    let output = run_git(&[
-        "log",
-        "--oneline",
-        "--graph",
-        "--decorate=short",
-        "-30",
-        "--format=%h\t%s\t%an\t%cr",
-    ]);
+fn collect_commits(workdir: &Path) -> Vec<CommitEntry> {
+    let output = run_git(
+        workdir,
+        &[
+            "log",
+            "--oneline",
+            "--graph",
+            "--decorate=short",
+            "-30",
+            "--format=%h\t%s\t%an\t%cr",
+        ],
+    );
     let Some(output) = output else {
         return Vec::new();
     };
@@ -681,8 +742,8 @@ fn split_graph_line(line: &str) -> (String, &str) {
 }
 
 /// Collect git status --short.
-fn collect_status() -> Vec<String> {
-    let output = run_git(&["status", "--short"]);
+fn collect_status(workdir: &Path) -> Vec<String> {
+    let output = run_git(workdir, &["status", "--short"]);
     let Some(output) = output else {
         return Vec::new();
     };

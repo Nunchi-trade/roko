@@ -83,15 +83,19 @@ impl Drop for AgentStreamClient {
 }
 
 async fn run_direct(endpoint: String, tx: Sender<StreamChunk>) {
-    run_loop(tx, move || {
-        let endpoint = endpoint.clone();
-        async move {
-            let (socket, _) = connect_async(&endpoint).await.map_err(|error| {
-                tracing::debug!(%error, %endpoint, "agent stream connect failed");
-            })?;
-            Ok(socket)
-        }
-    }, |text| parse_sidecar_frame(text))
+    run_loop(
+        tx,
+        move || {
+            let endpoint = endpoint.clone();
+            async move {
+                let (socket, _) = connect_async(&endpoint).await.map_err(|error| {
+                    tracing::debug!(%error, %endpoint, "agent stream connect failed");
+                })?;
+                Ok(socket)
+            }
+        },
+        |text| parse_sidecar_frame(text),
+    )
     .await;
 }
 
@@ -225,10 +229,7 @@ where
     P: Fn(&str) -> Vec<StreamChunk>,
 {
     for chunk in parse(text) {
-        let terminal = matches!(
-            chunk,
-            StreamChunk::Done { .. } | StreamChunk::Disconnected
-        );
+        let terminal = matches!(chunk, StreamChunk::Done { .. } | StreamChunk::Disconnected);
         if send_chunk(tx, chunk).await.is_err() {
             return true;
         }
@@ -454,8 +455,7 @@ mod tests {
             axum::serve(listener, app).await.expect("serve");
         });
 
-        let mut client =
-            AgentStreamClient::connect("agent-1", &format!("http://{addr}"), None);
+        let mut client = AgentStreamClient::connect("agent-1", &format!("http://{addr}"), None);
         let mut observed = Vec::new();
         let result = timeout(Duration::from_secs(5), async {
             while observed.len() < 3 {

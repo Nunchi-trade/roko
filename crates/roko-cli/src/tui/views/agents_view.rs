@@ -713,7 +713,10 @@ fn render_live_stream_panel(
         .border_style(theme.muted())
         .title(vec![
             Span::styled(" Live Stream ", title_style),
-            Span::styled(format!(" {status_label} "), Style::default().fg(theme.muted)),
+            Span::styled(
+                format!(" {status_label} "),
+                Style::default().fg(theme.muted),
+            ),
         ]);
     let inner = block.inner(area);
     frame.render_widget(block, area);

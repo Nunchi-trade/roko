@@ -94,12 +94,8 @@ fn self_hosting_workflow_with_mock_dispatcher() {
         "root episodes.jsonl missing prd_published entry: {root_episodes}"
     );
 
-    let memory_episodes_path = workdir
-        .join(".roko")
-        .join("memory")
-        .join("episodes.jsonl");
-    let memory_episodes =
-        fs::read_to_string(&memory_episodes_path).expect("read memory episodes");
+    let memory_episodes_path = workdir.join(".roko").join("memory").join("episodes.jsonl");
+    let memory_episodes = fs::read_to_string(&memory_episodes_path).expect("read memory episodes");
     assert!(
         memory_episodes
             .lines()
