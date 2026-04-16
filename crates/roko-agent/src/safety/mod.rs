@@ -35,9 +35,12 @@ pub mod path;
 pub mod rate_limit;
 pub mod scrub;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use regex::Regex;
+use roko_core::config::schema::{RokoConfig, RoleOverride};
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
@@ -95,6 +98,25 @@ pub struct SafetyLayer {
     pub contract: AgentContract,
     /// Optional OCaps-style warrant for tool execution.
     pub warrant: Option<AgentWarrant>,
+    /// Role-local tool whitelists loaded from config.
+    role_tools: HashMap<String, ToolWhitelist>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolWhitelist(Vec<Regex>);
+
+impl ToolWhitelist {
+    fn from_patterns(patterns: &[String]) -> Self {
+        let patterns = patterns
+            .iter()
+            .map(|pattern| glob_to_regex(pattern))
+            .collect();
+        Self(patterns)
+    }
+
+    fn matches(&self, tool: &str) -> bool {
+        self.0.iter().any(|pattern| pattern.is_match(tool))
+    }
 }
 
 impl SafetyLayer {
@@ -116,7 +138,16 @@ impl SafetyLayer {
             role: "default".into(),
             contract: AgentContract::permissive("default"),
             warrant: None,
+            role_tools: HashMap::new(),
         }
+    }
+
+    /// Construct with default policies and role-local tool whitelists from config.
+    #[must_use]
+    pub fn from_config(config: &RokoConfig) -> Self {
+        let mut layer = Self::with_defaults();
+        layer.role_tools = build_role_tools(&config.agent.roles);
+        layer
     }
 
     /// Override the role label used in rate-limit keys.
@@ -156,6 +187,15 @@ impl SafetyLayer {
     /// short-circuits and is returned as an `Err`.
     pub fn check_pre_execution(&self, call: &ToolCall, ctx: &ToolContext) -> Result<(), ToolError> {
         let name = call.name.as_str();
+
+        if let Some(whitelist) = self.role_tools.get(&self.role) {
+            if !whitelist.matches(name) {
+                return Err(ToolError::PermissionDenied(format!(
+                    "tool `{}` is not allowed for role `{}`",
+                    call.name, self.role
+                )));
+            }
+        }
 
         // 1. Rate limit (applies to all tools).
         if let Some(ref limiter) = self.rate_limiter {
@@ -279,6 +319,34 @@ impl SafetyLayer {
     pub fn scrub_text(&self, content: &str) -> String {
         scrub::scrub_secrets(content, &self.scrub_policy)
     }
+}
+
+fn build_role_tools(roles: &HashMap<String, RoleOverride>) -> HashMap<String, ToolWhitelist> {
+    roles
+        .iter()
+        .filter_map(|(role, override_cfg)| {
+            override_cfg
+                .tools
+                .as_ref()
+                .map(|tools| (role.clone(), ToolWhitelist::from_patterns(tools)))
+        })
+        .collect()
+}
+
+fn glob_to_regex(pattern: &str) -> Regex {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+    regex.push('$');
+    Regex::new(&regex).expect("generated whitelist regex should compile")
 }
 
 fn required_capabilities(

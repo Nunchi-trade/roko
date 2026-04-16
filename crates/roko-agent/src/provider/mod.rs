@@ -110,7 +110,7 @@ pub fn create_agent_for_model(
     if let Some(mock_agent) = mock_agent_from_env(&options)? {
         return Ok(mock_agent);
     }
-    let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::with_defaults()));
+    let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::from_config(config)));
     let resolved = resolve_model(config, model_key);
     let profile = resolved
         .profile

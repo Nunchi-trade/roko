@@ -62,11 +62,16 @@ impl SpawnAgentSpec {
     }
 }
 
-fn role_scoped_safety_layer(role: Option<&str>, layer: Option<SafetyLayer>) -> Option<SafetyLayer> {
+fn role_scoped_safety_layer(
+    config: &RokoConfig,
+    role: Option<&str>,
+    layer: Option<SafetyLayer>,
+) -> Option<SafetyLayer> {
     let role = role.map(str::trim).filter(|role| !role.is_empty());
+    let layer = layer.or_else(|| Some(SafetyLayer::from_config(config)));
     match (layer, role) {
         (Some(layer), Some(role)) => Some(layer.with_role(role)),
-        (None, Some(role)) => Some(SafetyLayer::with_defaults().with_role(role)),
+        (None, Some(role)) => Some(SafetyLayer::from_config(config).with_role(role)),
         (layer, None) => layer,
     }
 }
@@ -81,7 +86,7 @@ pub fn spawn_agent_scoped(
     let role = spec.role.clone();
     let context = error_context.into();
     with_safety_layer(
-        role_scoped_safety_layer(role.as_deref(), current_safety_layer()),
+        role_scoped_safety_layer(config, role.as_deref(), current_safety_layer()),
         || {
             create_agent_for_model(config, &model, spec.into_agent_options())
                 .with_context(|| context.clone())
@@ -100,7 +105,7 @@ pub fn spawn_agent_with_layer(
     let role = spec.role.clone();
     let context = error_context.into();
     with_safety_layer(
-        role_scoped_safety_layer(role.as_deref(), safety_layer),
+        role_scoped_safety_layer(config, role.as_deref(), safety_layer),
         || {
             create_agent_for_model(config, &model, spec.into_agent_options())
                 .with_context(|| context.clone())

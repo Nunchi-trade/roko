@@ -32,6 +32,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 ///
 /// [agent.roles.implementer]
 /// model = "claude-opus-4-6"
+/// tools = ["read", "edit", "bash", "git-*"]
 /// ```
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
@@ -215,6 +216,7 @@ impl RokoConfig {
         let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
         let _ = writeln!(out, "# effort = \"high\"");
         let _ = writeln!(out, "# context_limit_k = 200\n");
+        let _ = writeln!(out, "# tools = [\"read\", \"edit\", \"bash\", \"git-*\"]\n");
     }
 
     fn write_example_gates(out: &mut String, cfg: &Self) {
@@ -1374,6 +1376,9 @@ pub struct RoleOverride {
     /// Context window override (in thousands of tokens).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit_k: Option<u32>,
+    /// Role-local tool whitelist; absent means no additional restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     /// Turn budget override (USD).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_budget_usd: Option<f32>,
@@ -3390,6 +3395,7 @@ default_effort = "high"
 [agent.roles.implementer]
 model = "claude-sonnet-4-6"
 effort = "max"
+tools = ["read_file", "git-*"]
 context_limit_k = 300
 
 [agent.roles.architect]
@@ -3403,6 +3409,10 @@ turn_budget_usd = 5.0
         let imp = cfg.agent.roles.get("implementer").expect("implementer");
         assert_eq!(imp.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(imp.effort.as_deref(), Some("max"));
+        assert_eq!(
+            imp.tools.as_deref(),
+            Some(&["read_file".to_string(), "git-*".to_string()][..])
+        );
         assert_eq!(imp.context_limit_k, Some(300));
 
         let arch = cfg.agent.roles.get("architect").expect("architect");

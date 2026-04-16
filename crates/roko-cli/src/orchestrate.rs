@@ -3320,6 +3320,13 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
+        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
+            tracing::warn!(
+                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
+            );
+            RokoConfig::default()
+        });
+        let safety_layer = SafetyLayer::from_config(&roko_config);
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -3342,7 +3349,7 @@ impl PlanRunner {
             task_trackers,
             gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
-            safety_layer: SafetyLayer::with_defaults(),
+            safety_layer,
             conductor_signals: Vec::new(),
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
@@ -3447,6 +3454,13 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
+        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
+            tracing::warn!(
+                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
+            );
+            RokoConfig::default()
+        });
+        let safety_layer = SafetyLayer::from_config(&roko_config);
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -3469,7 +3483,7 @@ impl PlanRunner {
             task_trackers,
             gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
-            safety_layer: SafetyLayer::with_defaults(),
+            safety_layer,
             conductor_signals: Vec::new(),
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
@@ -3578,6 +3592,13 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
+        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
+            tracing::warn!(
+                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
+            );
+            RokoConfig::default()
+        });
+        let safety_layer = SafetyLayer::from_config(&roko_config);
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -3600,7 +3621,7 @@ impl PlanRunner {
             task_trackers,
             gemini_plan_caches: HashMap::new(),
             conductor: Arc::new(Conductor::new()),
-            safety_layer: SafetyLayer::with_defaults(),
+            safety_layer,
             conductor_signals: Vec::new(),
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
