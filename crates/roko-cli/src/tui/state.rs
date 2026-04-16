@@ -1076,6 +1076,17 @@ impl TuiState {
         &self.filter
     }
 
+    /// Return the display label for the active text input mode.
+    #[must_use]
+    pub const fn input_mode_label(&self) -> &'static str {
+        match self.input_mode {
+            InputMode::Normal => "",
+            InputMode::Inject => "INJECT",
+            InputMode::Filter => "FILTER",
+            InputMode::Confirm | InputMode::ConfigEdit => "",
+        }
+    }
+
     pub fn update_cpu_pct(&mut self, sample: f32) -> f32 {
         let smoothed = self.cpu_pct_smoothed.update(sample as f64) as f32;
         self.sys.cpu_pct = smoothed;

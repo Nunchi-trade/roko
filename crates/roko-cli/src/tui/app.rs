@@ -697,11 +697,12 @@ impl App {
         // The wave slot is 0-height when idle, but indices don't change.
         let content_idx = 2;
         let footer_idx = 3;
+        let (content_area, input_area) = self.split_content_area(main_layout[content_idx]);
 
         let view_state = self.current_view_state();
         views::render_tab_content(
             frame,
-            main_layout[content_idx],
+            content_area,
             self.tui_state.active_tab,
             &self.data,
             &self.tui_state,
@@ -712,35 +713,8 @@ impl App {
         // Footer: status line
         self.render_status_footer(frame, main_layout[footer_idx], &theme);
 
-        if matches!(
-            self.tui_state.input_mode,
-            InputMode::Inject | InputMode::Filter
-        ) && content_area.height > 0
-        {
-            let input_area = Rect::new(
-                content_area.x,
-                content_area.bottom().saturating_sub(1),
-                content_area.width,
-                1,
-            );
-            frame.render_widget(Clear, input_area);
-
-            let (label, buf) = match self.tui_state.input_mode {
-                InputMode::Inject => ("inject> ", self.tui_state.message_input.as_str()),
-                InputMode::Filter => ("filter> ", self.tui_state.filter_text.as_str()),
-                _ => unreachable!(),
-            };
-            let input = Paragraph::new(Line::from(vec![
-                Span::styled(label, theme.accent_bold()),
-                Span::styled(buf, theme.text()),
-            ]));
-            frame.render_widget(input, input_area);
-
-            let cursor_x = input_area
-                .x
-                .saturating_add((label.chars().count() + buf.chars().count()) as u16)
-                .min(input_area.right().saturating_sub(1));
-            frame.set_cursor_position((cursor_x, input_area.y));
+        if let Some(input_area) = input_area {
+            self.render_input_bar(frame, input_area, &theme);
         }
 
         // Dim overlay before modals
@@ -1204,6 +1178,8 @@ impl App {
                     self.tui_state.message_input.push(c);
                 } else if self.tui_state.input_mode == InputMode::Filter {
                     self.tui_state.filter_text.push(c);
+                    self.tui_state.filter = self.tui_state.filter_text.clone();
+                    self.tui_state.filter_active = !self.tui_state.filter.is_empty();
                 }
             }
             TuiAction::InputBackspace => {
@@ -1213,21 +1189,25 @@ impl App {
                     self.tui_state.message_input.pop();
                 } else if self.tui_state.input_mode == InputMode::Filter {
                     self.tui_state.filter_text.pop();
+                    self.tui_state.filter = self.tui_state.filter_text.clone();
+                    self.tui_state.filter_active = !self.tui_state.filter.is_empty();
                 }
             }
             TuiAction::StartFilter => {
                 self.tui_state.input_mode = InputMode::Filter;
                 self.tui_state.filter_text.clear();
+                self.tui_state.filter.clear();
+                self.tui_state.filter_active = false;
             }
             TuiAction::AcceptFilter => {
                 self.tui_state.filter = self.tui_state.filter_text.clone();
                 self.tui_state.input_mode = InputMode::Normal;
-                self.tui_state.filter = self.tui_state.filter_text.clone();
                 self.tui_state.filter_active = !self.tui_state.filter_text.is_empty();
             }
             TuiAction::CancelFilter => {
                 self.tui_state.input_mode = InputMode::Normal;
                 self.tui_state.filter_text.clear();
+                self.tui_state.filter.clear();
                 self.tui_state.filter_active = false;
             }
             TuiAction::RequestConfirm(action) => {
@@ -1902,7 +1882,7 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(content_area);
-        let content_area = main_layout[2];
+        let (content_area, _) = self.split_content_area(main_layout[2]);
 
         match self.tui_state.active_tab {
             Tab::Agents => {
@@ -1925,6 +1905,44 @@ impl App {
             }
             _ => 0,
         }
+    }
+
+    fn split_content_area(&self, area: Rect) -> (Rect, Option<Rect>) {
+        if self.tui_state.is_text_input() && area.height > 0 {
+            let sections =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+            (sections[0], Some(sections[1]))
+        } else {
+            (area, None)
+        }
+    }
+
+    fn render_input_bar(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let label = self.tui_state.input_mode_label();
+        if label.is_empty() || area.width == 0 {
+            return;
+        }
+
+        let buffer = match self.tui_state.input_mode {
+            InputMode::Inject => self.tui_state.message_input.as_str(),
+            InputMode::Filter => self.tui_state.filter_text.as_str(),
+            _ => return,
+        };
+
+        let prefix = format!("[{label}]");
+        let horizontal_scroll = (prefix.chars().count() + 3 + buffer.chars().count() + 1)
+            .saturating_sub(area.width as usize) as u16;
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled(prefix, theme.accent_bold()),
+            Span::styled(" > ", theme.muted()),
+            Span::styled(buffer, theme.text()),
+            Span::styled("│", theme.selection()),
+        ]))
+        .style(theme.text().bg(Theme::BG_SECONDARY))
+        .scroll((0, horizontal_scroll));
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(input, area);
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -2482,7 +2500,20 @@ fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
 mod tests {
     use super::*;
     use roko_core::config::RokoConfig;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tempfile::tempdir;
+
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn app_starts_on_requested_page() {
@@ -2687,9 +2718,6 @@ mod tests {
 
     #[test]
     fn full_frame_render_no_panic() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let dir = tempdir().unwrap();
         let app = App::new(dir.path());
         let backend = TestBackend::new(160, 50);
@@ -2700,9 +2728,6 @@ mod tests {
 
     #[test]
     fn all_tabs_render_without_panic() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
 
@@ -2938,6 +2963,7 @@ mod tests {
                     ahead: 0,
                     behind: 0,
                     depth: 0,
+                    children: Vec::new(),
                 },
                 super::views::git_view::GitBranchNode {
                     name: "feature/test".to_string(),
@@ -2946,6 +2972,7 @@ mod tests {
                     ahead: 0,
                     behind: 0,
                     depth: 1,
+                    children: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -3118,5 +3145,66 @@ mod tests {
         app.dispatch_action(TuiAction::ScrollLogDown);
         assert!(app.tui_state.log_auto_tail);
         assert_eq!(app.tui_state.log_scroll, 0);
+    }
+
+    #[test]
+    fn filter_input_stays_in_sync_and_escape_clears_state() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+
+        app.dispatch_action(TuiAction::StartFilter);
+        assert_eq!(app.tui_state.input_mode, InputMode::Filter);
+        assert!(app.tui_state.filter_text.is_empty());
+        assert!(app.tui_state.filter.is_empty());
+        assert!(!app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::InputChar('a'));
+        app.dispatch_action(TuiAction::InputChar('b'));
+        assert_eq!(app.tui_state.filter_text, "ab");
+        assert_eq!(app.tui_state.filter, "ab");
+        assert!(app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::InputBackspace);
+        assert_eq!(app.tui_state.filter_text, "a");
+        assert_eq!(app.tui_state.filter, "a");
+        assert!(app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::AcceptFilter);
+        assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+        assert_eq!(app.tui_state.filter, "a");
+        assert!(app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::StartFilter);
+        app.dispatch_action(TuiAction::InputChar('z'));
+        app.dispatch_action(TuiAction::CancelFilter);
+        assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+        assert!(app.tui_state.filter_text.is_empty());
+        assert!(app.tui_state.filter.is_empty());
+        assert!(!app.tui_state.filter_active);
+    }
+
+    #[test]
+    fn text_input_bar_renders_only_for_text_modes() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let normal = rendered_text(&terminal);
+        assert!(!normal.contains("[INJECT] > "));
+        assert!(!normal.contains("[FILTER] > "));
+
+        app.tui_state.input_mode = InputMode::Inject;
+        app.tui_state.message_input = "ship it".to_string();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let inject = rendered_text(&terminal);
+        assert!(inject.contains("[INJECT] > ship it│"));
+
+        app.tui_state.input_mode = InputMode::Filter;
+        app.tui_state.filter_text = "plan".to_string();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let filter = rendered_text(&terminal);
+        assert!(filter.contains("[FILTER] > plan│"));
     }
 }
