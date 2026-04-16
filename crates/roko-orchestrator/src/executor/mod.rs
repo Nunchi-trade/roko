@@ -40,7 +40,7 @@ pub mod state_machine;
 pub use action::ExecutorAction;
 pub use plan_state::{GateResult, PlanState};
 pub use reorder::{priority_reorder, reorder_queue};
-pub use snapshot::ExecutorSnapshot;
+pub use snapshot::{CURRENT_SCHEMA_VERSION, ExecutorSnapshot, current_schema_version};
 pub use state_machine::{ExecutorEvent, PlanStateMachine, TransitionError};
 
 /// Live speculative execution tracking for dashboard and recovery.
@@ -510,6 +510,7 @@ impl ParallelExecutor {
     #[must_use]
     pub fn snapshot(&self, timestamp_ms: u64) -> ExecutorSnapshot {
         ExecutorSnapshot {
+            schema_version: current_schema_version(),
             plan_states: self.plans.clone(),
             queue_order: self.queue.clone(),
             speculative_executions: self.speculative_executions.clone(),

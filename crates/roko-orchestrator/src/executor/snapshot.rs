@@ -20,8 +20,15 @@ use super::plan_state::PlanState;
 /// The runtime writes this periodically (or on every significant event)
 /// to `.roko/state/executor.json`. On startup, if the file exists, the
 /// executor restores from it and resumes.
+///
+/// Missing `schema_version` implies a legacy v0 snapshot. Callers that load
+/// persisted snapshots across releases should route through a migration shim
+/// before deserializing into this type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorSnapshot {
+    /// Version of the persisted snapshot schema.
+    #[serde(default)]
+    pub schema_version: u32,
     /// Per-plan mutable state, keyed by `plan_id`.
     #[serde(default)]
     pub plan_states: HashMap<String, PlanState>,
@@ -36,11 +43,21 @@ pub struct ExecutorSnapshot {
     pub timestamp_ms: u64,
 }
 
+/// Current on-disk schema version for [`ExecutorSnapshot`].
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// Return the current on-disk schema version for [`ExecutorSnapshot`].
+#[must_use]
+pub const fn current_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+
 impl ExecutorSnapshot {
     /// Create an empty snapshot at the given timestamp.
     #[must_use]
     pub fn new(timestamp_ms: u64) -> Self {
         Self {
+            schema_version: current_schema_version(),
             plan_states: HashMap::new(),
             queue_order: Vec::new(),
             speculative_executions: HashMap::new(),
@@ -156,6 +173,7 @@ impl ExecutorSnapshot {
         }
 
         Ok(Self {
+            schema_version: current_schema_version(),
             plan_states,
             queue_order,
             speculative_executions: HashMap::new(),
@@ -175,6 +193,7 @@ mod tests {
         let snap = ExecutorSnapshot::new(1000);
         let json = snap.to_json().unwrap();
         let restored = ExecutorSnapshot::from_json(&json).unwrap();
+        assert_eq!(restored.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(restored.timestamp_ms, 1000);
         assert!(restored.plan_states.is_empty());
         assert!(restored.queue_order.is_empty());
@@ -248,6 +267,7 @@ mod tests {
         "#;
 
         let restored = ExecutorSnapshot::from_json(json).unwrap();
+        assert_eq!(restored.schema_version, 0);
         let ps = &restored.plan_states["plan-1"];
         assert_eq!(ps.plan_id, "plan-1");
         assert_eq!(ps.current_phase, PlanPhase::Queued);
@@ -277,6 +297,7 @@ mod tests {
         "#;
 
         let restored = ExecutorSnapshot::from_json(json).unwrap();
+        assert_eq!(restored.schema_version, current_schema_version());
         assert_eq!(restored.timestamp_ms, 42);
         assert_eq!(restored.queue_order, vec!["plan-b", "plan-a"]);
         assert_eq!(restored.plan_states.len(), 2);

@@ -29,8 +29,9 @@ pub use dag::{
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
-    ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
-    PlanState, PlanStateMachine, SpeculativeExecution, TransitionError,
+    CURRENT_SCHEMA_VERSION, ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot,
+    GateResult, ParallelExecutor, PlanState, PlanStateMachine, SpeculativeExecution,
+    TransitionError, current_schema_version,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};
 pub use plan_discovery::{

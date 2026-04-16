@@ -104,9 +104,9 @@ use roko_neuro::{
 };
 use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager, format_branch_name};
 use roko_orchestrator::{
-    EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanResult, ReplanStrategy,
-    discover_plans,
+    CURRENT_SCHEMA_VERSION, EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent,
+    ExecutorSnapshot, GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanResult,
+    ReplanStrategy, discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::event_bus::{
@@ -137,6 +137,7 @@ use crate::plan::plans_dir;
 use crate::prompting::{
     PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
 };
+use crate::snapshot_migrate;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
@@ -647,7 +648,21 @@ fn executor_snapshot_path(workdir: &Path) -> PathBuf {
     state_dir(workdir).join("executor.json")
 }
 
-fn save_snapshot_atomic(snapshot: &ExecutorSnapshot, path: &Path) -> Result<()> {
+/// Persist an executor snapshot via `tmp + rename`.
+///
+/// # Errors
+///
+/// Returns an error if the parent directory cannot be created or the atomic
+/// write fails.
+pub fn save_snapshot_atomic(snapshot: &ExecutorSnapshot, path: &Path) -> Result<()> {
+    debug_assert_eq!(snapshot.schema_version, CURRENT_SCHEMA_VERSION);
+    if snapshot.schema_version != CURRENT_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "refusing to write executor snapshot schema v{} with writer for v{}",
+            snapshot.schema_version,
+            CURRENT_SCHEMA_VERSION
+        ));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create snapshot dir {}", parent.display()))?;
@@ -3389,8 +3404,8 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
-        let snapshot =
-            ExecutorSnapshot::from_json(snapshot_json).map_err(|e| anyhow!("bad snapshot: {e}"))?;
+        let snapshot = snapshot_migrate::load_executor_snapshot(snapshot_json)
+            .map_err(|e| anyhow!("bad snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
@@ -3517,7 +3532,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
-        let exec_snap = ExecutorSnapshot::from_json(executor_json)
+        let exec_snap = snapshot_migrate::load_executor_snapshot(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
         let log_snap: EventLogSnapshot = serde_json::from_str(event_log_json)
             .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
@@ -14780,8 +14795,7 @@ depends_on = []
         let snapshot = ExecutorSnapshot {
             plan_states,
             queue_order: vec!["plan-1".to_string()],
-            timestamp_ms: 0,
-            speculative_executions: HashMap::new(),
+            ..ExecutorSnapshot::new(0)
         };
         let snapshot_json = snapshot.to_json().unwrap();
         let mut runner = PlanRunner::from_snapshot(
@@ -14833,8 +14847,7 @@ depends_on = []
         let snapshot = ExecutorSnapshot {
             plan_states,
             queue_order: vec!["plan-1".to_string()],
-            timestamp_ms: 0,
-            speculative_executions: HashMap::new(),
+            ..ExecutorSnapshot::new(0)
         };
         let snapshot_json = snapshot.to_json().unwrap();
         let runner = PlanRunner::from_snapshot(

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "plan_states": {
+    "plan-a": {
+      "plan_id": "plan-a",
+      "current_phase": {
+        "kind": "queued"
+      }
+    }
+  },
+  "queue_order": [
+    "plan-a"
+  ],
+  "speculative_executions": {},
+  "timestamp_ms": 123
+}
