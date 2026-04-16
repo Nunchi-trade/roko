@@ -166,7 +166,7 @@ impl From<&str> for TaskStatus {
             | "merge"
             | "merging"
             | "commit" => Self::Active,
-            "failed" | "error" => Self::Failed,
+            "failed" | "error" | "gate_rejected" | "gate-rejected" => Self::Failed,
             "blocked" => Self::Blocked,
             _ => Self::Pending,
         }
@@ -1085,7 +1085,23 @@ impl TuiState {
                     .map(|plan| plan.tasks.len())
                     .filter(|count| *count > 0)
                     .unwrap_or(p.task_count);
-                let (tasks_done, tasks_failed) = plan_task_counts(p, snapshot, tasks_total);
+                let (tasks_done, derived_failed) = plan_task_counts(p, snapshot, tasks_total);
+                let tasks_failed = snapshot
+                    .map(|plan| {
+                        usize::try_from(plan.failed_count)
+                            .unwrap_or(tasks_total)
+                            .min(tasks_total)
+                    })
+                    .unwrap_or(derived_failed);
+                let elapsed_secs = snapshot
+                    .map(|plan| {
+                        if plan.elapsed_ms > 0 {
+                            plan.elapsed_ms as f64 / 1000.0
+                        } else {
+                            plan.elapsed_secs
+                        }
+                    })
+                    .unwrap_or(0.0);
                 PlanEntry {
                     id: p.id.clone(),
                     name: p.title.clone(),
@@ -1095,8 +1111,10 @@ impl TuiState {
                     tasks_total,
                     tasks_done,
                     tasks_failed,
-                    elapsed_secs: snapshot.map(|plan| plan.elapsed_secs).unwrap_or(0.0),
-                    wave: plan_waves.get(&p.id).copied(),
+                    elapsed_secs,
+                    wave: snapshot
+                        .map(|plan| usize::try_from(plan.wave).unwrap_or_default())
+                        .or_else(|| plan_waves.get(&p.id).copied()),
                     expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
                     tasks: snapshot
                         .map(|plan| {
@@ -3090,16 +3108,28 @@ status = "running"
 [[task]]
 id = "task-1"
 title = "Bootstrap"
+status = "done"
+model = "claude-haiku-4-5"
+elapsed_ms = 1000
 tier = "focused"
 
 [[task]]
 id = "task-2"
 title = "Wire dashboard"
+status = "implementing"
+model = "claude-sonnet-4-6"
+elapsed_ms = 2500
+started_at_ms = 111
+wave = 2
 tier = "focused"
 
 [[task]]
 id = "task-3"
 title = "Handle failures"
+status = "gate_rejected"
+model = "claude-sonnet-4-6"
+elapsed_ms = 3500
+ended_at_ms = 222
 tier = "focused"
 "#,
         )
@@ -3146,7 +3176,8 @@ tier = "focused"
         assert_eq!(plan.tasks_total, 3);
         assert_eq!(plan.tasks_done, 1);
         assert_eq!(plan.tasks_failed, 1);
-        assert!((plan.elapsed_secs - 4.0).abs() < f64::EPSILON);
+        assert!((plan.elapsed_secs - 7.0).abs() < f64::EPSILON);
+        assert_eq!(plan.wave, Some(2));
         assert_eq!(plan.tasks.len(), 3);
         assert_eq!(plan.tasks[0].id, "task-1");
         assert_eq!(plan.tasks[0].status, TaskStatus::Done);
@@ -3194,18 +3225,21 @@ tier = "focused"
                     title: "Done".into(),
                     status: "done".into(),
                     agent_id: None,
+                    ..crate::tui::dashboard::PlanTaskSnapshot::default()
                 },
                 crate::tui::dashboard::PlanTaskSnapshot {
                     id: "task-2".into(),
                     title: "Active".into(),
                     status: "implementing".into(),
                     agent_id: None,
+                    ..crate::tui::dashboard::PlanTaskSnapshot::default()
                 },
                 crate::tui::dashboard::PlanTaskSnapshot {
                     id: "task-3".into(),
                     title: "Failed".into(),
                     status: "failed".into(),
                     agent_id: None,
+                    ..crate::tui::dashboard::PlanTaskSnapshot::default()
                 },
             ],
             ..PlanTaskListSnapshot::default()

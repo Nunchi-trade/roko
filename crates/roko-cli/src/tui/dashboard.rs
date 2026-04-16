@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -983,12 +983,18 @@ pub struct ReadFileSnapshot {
 }
 
 /// Lightweight task snapshot used by the interactive TUI plan views.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PlanTaskSnapshot {
     pub id: String,
     pub title: String,
     pub status: String,
     pub agent_id: Option<String>,
+    pub model: Option<String>,
+    pub elapsed_ms: Option<u64>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub wave: Option<u32>,
 }
 
 /// Per-plan snapshot used to hydrate `TuiState::plans`.
@@ -998,8 +1004,29 @@ pub(crate) struct PlanTaskListSnapshot {
     pub active: bool,
     pub tasks_done: usize,
     pub tasks_failed: usize,
+    pub elapsed_ms: u64,
     pub elapsed_secs: f64,
+    /// Current wave number for the plan.
+    pub wave: u32,
+    /// Count of failed tasks, including gate rejections.
+    pub failed_count: u32,
     pub tasks: Vec<PlanTaskSnapshot>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlanTaskRuntimeFields {
+    model: Option<String>,
+    elapsed_ms: Option<u64>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    wave: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedPlanTasksFile {
+    tasks_file: TasksFile,
+    task_runtime_fields: Vec<PlanTaskRuntimeFields>,
+    plan_wave: Option<u32>,
 }
 
 /// Aggregate learning efficiency snapshot.
@@ -1716,10 +1743,29 @@ fn build_plan_task_snapshots(
         };
 
         let tasks_path = plans_dir(root).join(&plan.id).join("tasks.toml");
-        let Ok(tasks_file) = TasksFile::parse(&tasks_path) else {
-            snapshots.insert(plan.id.clone(), snapshot);
-            continue;
+        let parsed = match parse_plan_tasks_file(&tasks_path) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %tasks_path.display(),
+                    plan_id = %plan.id,
+                    "failed to parse tasks.toml for TUI plan snapshot"
+                );
+                snapshots.insert(plan.id.clone(), snapshot);
+                continue;
+            }
         };
+        let tasks_file = &parsed.tasks_file;
+        if parsed.task_runtime_fields.len() != tasks_file.tasks.len() {
+            tracing::warn!(
+                path = %tasks_path.display(),
+                plan_id = %plan.id,
+                runtime_fields = parsed.task_runtime_fields.len(),
+                parsed_tasks = tasks_file.tasks.len(),
+                "tasks.toml runtime metadata count did not match parsed task count"
+            );
+        }
 
         let tracker = trackers.get(&plan.id);
         let completed: HashSet<String> = tracker
@@ -1736,7 +1782,9 @@ fn build_plan_task_snapshots(
         snapshot.tasks = tasks_file
             .tasks
             .iter()
-            .map(|task| {
+            .enumerate()
+            .map(|(index, task)| {
+                let runtime = parsed.task_runtime_fields.get(index);
                 let active_task = active_by_key
                     .get(&(plan.id.clone(), task.id.clone()))
                     .copied();
@@ -1746,8 +1794,10 @@ fn build_plan_task_snapshots(
                     String::from("failed")
                 } else if let Some(active_task) = active_task {
                     active_task.status.clone()
-                } else if is_task_done_status(&task.status) || is_task_failed_status(&task.status) {
-                    task.status.clone()
+                } else if is_task_done_status(&task.status) {
+                    String::from("done")
+                } else if is_task_failed_status(&task.status) {
+                    String::from("failed")
                 } else if plan_succeeded {
                     String::from("done")
                 } else {
@@ -1766,6 +1816,13 @@ fn build_plan_task_snapshots(
                     title: task.title.clone(),
                     status,
                     agent_id: active_task.and_then(|task| task.assigned_agents.first().cloned()),
+                    model: runtime
+                        .and_then(|runtime| runtime.model.clone())
+                        .or_else(|| task.model_hint.clone()),
+                    elapsed_ms: runtime.and_then(|runtime| runtime.elapsed_ms),
+                    started_at: runtime.and_then(|runtime| runtime.started_at.clone()),
+                    ended_at: runtime.and_then(|runtime| runtime.ended_at.clone()),
+                    wave: runtime.and_then(|runtime| runtime.wave),
                 }
             })
             .collect();
@@ -1779,6 +1836,24 @@ fn build_plan_task_snapshots(
             .iter()
             .filter(|task| is_task_failed_status(&task.status))
             .count();
+        snapshot.elapsed_ms = snapshot
+            .tasks
+            .iter()
+            .map(|task| task.elapsed_ms.unwrap_or(0))
+            .sum();
+        if snapshot.elapsed_ms > 0 {
+            snapshot.elapsed_secs = snapshot.elapsed_ms as f64 / 1000.0;
+        }
+        snapshot.wave = parsed.plan_wave.unwrap_or_else(|| {
+            snapshot
+                .tasks
+                .iter()
+                .filter(|task| TaskStatus::from(task.status.as_str()).is_active())
+                .filter_map(|task| task.wave)
+                .max()
+                .unwrap_or_default()
+        });
+        snapshot.failed_count = snapshot.tasks_failed as u32;
 
         snapshots.insert(plan.id.clone(), snapshot);
     }
@@ -1786,12 +1861,107 @@ fn build_plan_task_snapshots(
     snapshots
 }
 
+fn parse_plan_tasks_file(path: &Path) -> Result<ParsedPlanTasksFile> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let tasks_file =
+        toml::from_str::<TasksFile>(&content).with_context(|| format!("parse {}", path.display()))?;
+    let raw = toml::from_str::<toml::Value>(&content)
+        .with_context(|| format!("parse runtime metadata from {}", path.display()))?;
+    let raw_tasks = raw.get("task").and_then(toml::Value::as_array);
+
+    let task_runtime_fields = tasks_file
+        .tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let task_table = raw_tasks
+                .and_then(|tasks| tasks.get(index))
+                .and_then(toml::Value::as_table)
+                .or_else(|| {
+                    raw_tasks.and_then(|tasks| {
+                        tasks.iter().find_map(|task_value| {
+                            let table = task_value.as_table()?;
+                            let id = table.get("id").and_then(toml::Value::as_str)?;
+                            (id == task.id).then_some(table)
+                        })
+                    })
+                });
+
+            PlanTaskRuntimeFields {
+                model: task_table
+                    .and_then(|table| table.get("model"))
+                    .and_then(toml_scalar_to_string),
+                elapsed_ms: task_table
+                    .and_then(|table| table.get("elapsed_ms"))
+                    .and_then(toml_value_to_u64),
+                started_at: task_table
+                    .and_then(|table| {
+                        table
+                            .get("started_at")
+                            .or_else(|| table.get("started_at_ms"))
+                            .or_else(|| table.get("start_time"))
+                    })
+                    .and_then(toml_scalar_to_string),
+                ended_at: task_table
+                    .and_then(|table| {
+                        table
+                            .get("ended_at")
+                            .or_else(|| table.get("ended_at_ms"))
+                            .or_else(|| table.get("end_time"))
+                    })
+                    .and_then(toml_scalar_to_string),
+                wave: task_table
+                    .and_then(|table| table.get("wave"))
+                    .and_then(toml_value_to_u32),
+            }
+        })
+        .collect();
+
+    let plan_wave = raw
+        .get("meta")
+        .and_then(toml::Value::as_table)
+        .and_then(|meta| meta.get("wave"))
+        .and_then(toml_value_to_u32);
+
+    Ok(ParsedPlanTasksFile {
+        tasks_file,
+        task_runtime_fields,
+        plan_wave,
+    })
+}
+
+fn toml_scalar_to_string(value: &toml::Value) -> Option<String> {
+    match value {
+        toml::Value::String(value) => Some(value.clone()),
+        toml::Value::Integer(value) => Some(value.to_string()),
+        toml::Value::Float(value) => Some(value.to_string()),
+        toml::Value::Boolean(value) => Some(value.to_string()),
+        toml::Value::Datetime(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn toml_value_to_u64(value: &toml::Value) -> Option<u64> {
+    value.as_integer().and_then(|value| u64::try_from(value).ok())
+}
+
+fn toml_value_to_u32(value: &toml::Value) -> Option<u32> {
+    value.as_integer().and_then(|value| u32::try_from(value).ok())
+}
+
 fn is_task_done_status(status: &str) -> bool {
     TaskStatus::from(status).is_done()
 }
 
 fn is_task_failed_status(status: &str) -> bool {
-    TaskStatus::from(status).is_failed()
+    if TaskStatus::from(status).is_failed() {
+        return true;
+    }
+
+    let normalized = status.trim().to_ascii_lowercase();
+    let compact = normalized.replace(['-', '_', ' '], "");
+    matches!(compact.as_str(), "gaterejected" | "reviewrejected" | "rejected")
 }
 
 fn load_active_tasks(state: &Value) -> Vec<TaskSummary> {
@@ -5470,6 +5640,111 @@ files = ["src/dashboard.rs"]
                 "stderr line 25"
             );
         }
+    }
+
+    #[test]
+    fn plan_task_snapshots_include_runtime_task_metadata() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let state_dir = root.join(".roko/state");
+        let plan_dir = crate::workspace_paths::plans_dir(root).join("plan-a");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&plan_dir).expect("plan dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "implementing" }
+                }
+            }
+        });
+        write_json(&state_dir.join("executor.json"), &executor_state);
+
+        fs::write(
+            plan_dir.join("tasks.toml"),
+            r#"
+[meta]
+plan = "Plan A"
+iteration = 1
+total = 3
+done = 1
+status = "running"
+wave = 4
+
+[[task]]
+id = "task-1"
+title = "Bootstrap"
+status = "done"
+model = "claude-haiku-4-5"
+elapsed_ms = 1000
+tier = "focused"
+
+[[task]]
+id = "task-2"
+title = "Wire dashboard"
+status = "implementing"
+model = "claude-sonnet-4-6"
+elapsed_ms = 2500
+started_at_ms = 111
+wave = 2
+tier = "focused"
+
+[[task]]
+id = "task-3"
+title = "Handle failures"
+status = "gate_rejected"
+model = "claude-sonnet-4-6"
+elapsed_ms = 3500
+ended_at_ms = 222
+tier = "focused"
+"#,
+        )
+        .expect("tasks.toml");
+
+        let data = DashboardData::load_best_effort(root);
+        let snapshots = data.plan_task_snapshots();
+        let snapshot = snapshots.get("plan-a").expect("plan snapshot");
+
+        assert_eq!(snapshot.tasks_done, 1);
+        assert_eq!(snapshot.tasks_failed, 1);
+        assert_eq!(snapshot.elapsed_ms, 7_000);
+        assert!((snapshot.elapsed_secs - 7.0).abs() < f64::EPSILON);
+        assert_eq!(snapshot.wave, 4);
+        assert_eq!(snapshot.tasks.len(), 3);
+        assert_eq!(snapshot.tasks[1].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(snapshot.tasks[1].started_at.as_deref(), Some("111"));
+        assert_eq!(snapshot.tasks[1].wave, Some(2));
+        assert_eq!(snapshot.tasks[2].status, "failed");
+        assert_eq!(snapshot.tasks[2].ended_at.as_deref(), Some("222"));
+        assert_eq!(snapshot.failed_count, 1);
+    }
+
+    #[test]
+    fn plan_task_snapshots_ignore_invalid_tasks_toml() {
+        let tmpdir = tempdir().expect("tempdir");
+        let root = tmpdir.path();
+        let state_dir = root.join(".roko/state");
+        let plan_dir = crate::workspace_paths::plans_dir(root).join("plan-a");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&plan_dir).expect("plan dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "implementing" }
+                }
+            }
+        });
+        write_json(&state_dir.join("executor.json"), &executor_state);
+        fs::write(plan_dir.join("tasks.toml"), "[meta]\nplan = ").expect("invalid tasks.toml");
+
+        let data = DashboardData::load_best_effort(root);
+        let snapshots = data.plan_task_snapshots();
+        let snapshot = snapshots.get("plan-a").expect("plan snapshot");
+
+        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.tasks_done, 0);
+        assert_eq!(snapshot.tasks_failed, 0);
     }
 
     #[test]
