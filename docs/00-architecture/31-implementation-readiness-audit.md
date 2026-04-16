@@ -25,6 +25,30 @@ File classifications:
 - **Built** — Code exists in crates and tests pass
 - **Wired** — Code exists AND is called from the CLI/orchestration loop
 
+## Rewrite Readiness
+
+This audit measures incremental implementation readiness: whether a section can be finished by filling the gaps in the current shape. REF21 adds a second question: when does the current shape itself become the blocker, and when is a from-scratch rewrite the lower-risk move?
+
+Heuristic: prefer a from-scratch rewrite when at least three of these are true:
+
+1. The current design embeds an assumption the new design must invert.
+2. The code surface is small enough to replace without long compatibility debt.
+3. The public interface can stay stable or be feature-flagged.
+4. The rewrite unlocks capability that incremental work cannot reach cleanly.
+5. The current design has few direct users or weak plugin contracts.
+
+In REF21, the five rewrite-track candidates are the roko-core kernel, roko-learn reorganization, Substrate trait rewrite, gate pipeline, and roko-compose engine. Treat them as v2 cutovers, not backlog items: the point is to decide when a clean replacement beats patching the current shape. Terminology follows [01-naming-and-glossary.md](./01-naming-and-glossary.md). See also `tmp/refinements/21-from-scratch-redesigns.md`.
+
+### Risk Management
+
+Rewrite-track work needs stronger governance than ordinary feature work:
+
+1. Feature-flag the new kernel path so the old and new shapes can coexist briefly.
+2. Keep a one-shot compatibility reader for existing Engram data rather than a permanent dual-world shim.
+3. Record current test outputs before cutover and require parity or explicit justification afterward.
+4. Land at most one rewrite per week and allow a bake period before removing the old path.
+5. Require a named owner, a written before/after contract, a rollback plan, and two sign-offs for the kernel rewrite.
+
 ---
 
 ## Section Scorecard
@@ -37,11 +61,11 @@ File classifications:
 | 03 | Composition | 4 | 5 | 5 | 3 | 4 | 4 | **25/30** | Very High | roko-compose: Wired |
 | 04 | Verification | 5 | 4 | 5 | 4 | 5 | 4 | **27/30** | Medium | roko-gate: Wired |
 | 05 | Learning | 5 | 5 | 5 | 4 | 5 | 5 | **29/30** | High | roko-learn: Wired |
-| 06 | Neuro | 4 | 4 | 5 | 3 | 3 | 3 | **22/30** | High | (in roko-core/roko-golem) |
+| 06 | Neuro | 4 | 4 | 5 | 3 | 3 | 3 | **22/30** | High | Core + legacy agent scaffold |
 | 07 | Conductor | 5 | 5 | 5 | 5 | 5 | 4 | **29/30** | High | roko-conductor: Wired |
 | 08 | Chain | 4 | 3 | 3 | 2 | 3 | 3 | **18/30** | Very High | roko-chain: Scaffold |
-| 09 | Daimon | 5 | 4 | 4 | 3 | 3 | 4 | **23/30** | Medium-High | (in roko-golem) |
-| 10 | Dreams | 4 | 4 | 5 | 2 | 4 | 4 | **23/30** | High | (in roko-golem) |
+| 09 | Daimon | 5 | 4 | 4 | 3 | 3 | 4 | **23/30** | Medium-High | Legacy agent scaffold path |
+| 10 | Dreams | 4 | 4 | 5 | 2 | 4 | 4 | **23/30** | High | Legacy agent scaffold path |
 | 11 | Safety | 5 | 4 | 5 | 4 | 5 | 4 | **27/30** | High | (in roko-orchestrator) |
 | 12 | Interfaces | 4 | 4 | 5 | 3 | 4 | 3 | **23/30** | Very High | roko-cli: Wired (partial) |
 | 13 | Coordination | 5 | 5 | 5 | 3 | 5 | 4 | **27/30** | Very High | 0% implemented |
@@ -85,12 +109,12 @@ layer in the codebase. The cognitive loop (09) and five-layer taxonomy (12) have
 60+ config params in RokoConfig schema with validation rules.
 
 **Critical gaps:**
-- Signal→Engram rename (Tier 0D) documented but unexecuted — creates spec/code terminology divergence
+- Kernel readiness is now a rewrite-track decision: the current architecture is coherent as v1, but REF21 asks whether the next kernel should be replaced cleanly rather than patched in place
 - Files 25–29 (Attention Currency, Cognitive Immune, Temporal Topology, Emergent Goals, Energy Model) have
   dense specifications but zero shipping code and no test criteria
 - Cross-section integration map (doc 24) identifies 20 missing wiring points
 
-**Crate reality:** roko-core is Stable with 610 tests across 59 files (~6,500 LOC). Core types (`Signal`,
+**Crate reality:** roko-core is Stable with 610 tests across 59 files (~6,500 LOC). Core types (`Engram`,
 6 Synapse traits, `Kind`, `Body`, `Score`, `Config`) are complete and well-tested.
 
 ---
@@ -197,7 +221,7 @@ trait impls. `GatePipeline`, `AdaptiveThresholds`, `GateFeedback` all wired.
 | Scaffold | 12, 13, 16 (3 files) |
 | Concept only | 17 (1 file) |
 
-**Strengths:** `AgentEfficiencyEvent` (28 fields) is the richest data structure in the codebase — backbone
+**Strengths:** `AgentEfficiency` telemetry record (28 fields) is the richest data structure in the codebase — backbone
 for all learning subsystems. Cascade router 3-stage progression (Static → Confidence → UCB) with observation
 thresholds is fully implementation-ready. 31.6× collective calibration derivation is mathematically grounded.
 
@@ -231,8 +255,8 @@ benchmarked. False positive threshold derivation (Z-score 5.26, Bonferroni for 1
 - Cross-domain HDC transfer entirely unimplemented
 - Half-life constants now match the PRD for CausalLink (60d) and StrategyFragment (14d)
 
-**Crate reality:** bardo-primitives has `HdcVector` (3 files, ~500 LOC, 18 tests). The knowledge store
-types are spread across roko-core and roko-golem without consolidation.
+**Crate reality:** Neuro primitives has `HdcVector` (3 files, ~500 LOC, 18 tests). The knowledge store
+types are spread across roko-core and the legacy agent scaffold without consolidation.
 
 ---
 
@@ -251,7 +275,7 @@ conductor mechanisms.
 pgrep, bottom-up kill ordering, setsid isolation). `SelfHealingConductor` specifies 4 failure modes with
 detection and recovery.
 
-**Gaps:** `ConductorBandit` built but not wired into `evaluate()`. Cognitive signals (Pause/Resume/Reprioritize)
+**Gaps:** `ConductorBandit` built but not wired into `evaluate()`. Cognitive control cues (Pause/Resume/Reprioritize)
 missing from `ConductorDecision`. L3/L4 federation architecture design-only.
 
 **Crate reality:** roko-conductor is Wired (19 files, ~2,200 LOC, ~130 tests). All 10 watchers are real
@@ -291,12 +315,12 @@ appraisal theory correctly applied. ALMA three-layer model (emotion 2s / mood 4h
 elegantly designed.
 
 **Critical gaps:**
-- Two parallel implementations (roko-daimon 569 LOC + roko-golem/daimon.rs 972 LOC) need consolidation
+- Two parallel implementations (`roko-daimon` 569 LOC + the legacy scaffold copy of `daimon.rs` 972 LOC) need consolidation
 - Somatic landscape is now partially implemented: `roko-daimon` has the 8D k-d-tree-backed store, runtime events, and dream-time consolidation/depotentiation; domain-extensible axis sets are still missing
 - CascadeRouter now reads live Daimon behavioral state and biases model-tier selection; the remaining affect gaps are domain-extensible strategy spaces and broader cross-surface bidder production
 - VCG context allocation is now partial: bidder-aware shared prompt composition exists, PAD urgency / affect weighting is wired into the live auction, and diagnostic externality payments are emitted; the remaining gap is exact welfare maximization / fairness policy plus fuller bidder coverage
 
-**Crate reality:** Code split across roko-golem (scaffold) and roko-core affect types.
+**Crate reality:** Code split across the legacy agent scaffold and roko-core affect types.
 
 ---
 
@@ -317,7 +341,7 @@ is a masterclass in integration documentation.
 - HDC counterfactual synthesis not implemented
 - Error handling is weakest criterion (2/5) — implicit failure modes only
 
-**Crate reality:** DreamRunner exists in roko-golem (scaffold). Core loop works but computational
+**Crate reality:** DreamRunner exists in the legacy scaffold. Core loop works but computational
 heart (Mattar-Daw, REM, HDC counterfactuals, hypnagogia) is unimplemented.
 
 ---
@@ -351,7 +375,7 @@ is a wiring decision (subprocess interception vs settings passthrough vs in-proc
 | Concept only | 18 (1 file) |
 
 **Strengths:** ROSEDUST design system (OKLab math, APCA contrast, 256-color quantization) is
-production-grade. TUI ELM architecture (`Model`, `Message`, `update()`, `view()`) ready to implement.
+production-grade. TUI ELM architecture (`Model`, `UpdateMsg`, `update()`, `view()`) ready to implement.
 Spectre physics (Verlet, Gray-Scott, SDF) specified at direct-implementation level.
 
 **Gaps:** Spectre not built. Web Portal not started. Sonification JavaScript-only. WebSocket bidirectional
@@ -518,22 +542,36 @@ Cross-referencing docs against actual crate code:
 | roko-cli | 101 | ~12,000 | ~300 | Entry point | **Stable/Wired** |
 | roko-fs | 12 | ~1,800 | ~60 | Yes | **Stable** |
 | roko-std | 33 | ~3,500 | ~120 | Yes | **Stable** |
-| bardo-runtime | 6 | ~900 | ~12 | Yes | **Stable** |
-| bardo-primitives | 3 | ~500 | 18 | Yes | **Stable** |
+| `roko-runtime` | 6 | ~900 | ~12 | Yes | **Stable** |
+| `roko-primitives` | 3 | ~500 | 18 | Yes | **Stable** |
 | roko-index | 5 | ~700 | 32 | **No** | Built/Unwired |
 | roko-lang-rust | 1 | ~820 | 37 | **No** | Built/Unwired |
 | roko-lang-typescript | 1 | ~918 | 31 | **No** | Built/Unwired |
 | roko-lang-go | 1 | ~601 | 24 | **No** | Built/Unwired |
-| roko-golem | 7 | ~600 | 3 | **No** | Scaffold |
+| Legacy agent scaffold | 7 | ~600 | 3 | **No** | Scaffold |
 | roko-chain | 10 | ~1,200 | ~10 | **No** | Scaffold |
 
 **Key finding:** 12 of 18 crates are Stable/Wired. The remaining 6 break into two categories:
 - **Built/Unwired** (roko-index + 3 lang providers): Complete, tested code with no consumer
-- **Scaffold** (roko-golem, roko-chain): Phase 2+ placeholder code
+- **Scaffold** (legacy agent scaffold, roko-chain): Phase 2+ placeholder code
 
 ---
 
 ## Prioritized Gap List
+
+### Rewrite-track decisions
+
+These are not ordinary backlog items. They are choice points that change the interpretation of the rest of the audit.
+
+| # | Candidate | What changes | Unlocks | Cost | Audit stance |
+|---|---|---|---|---|---|
+| R1 | roko-core kernel | Replace the single-medium kernel with Engram + Pulse, add Bus as a first-class fabric, and generalize the operator surface | Coherent v2 kernel, cleaner dependency graph, unified operator signatures | 2–3 weeks, ~15 consumer crates | Yes |
+| R2 | roko-learn reorganization | Split the monolith into episode, playbook, bandit, experiment, and heuristic crates; make learning subscription-driven | Cleaner dep graph, independent strategy swaps, easier plugin contributions | Significant churn, ~3K lines, ~2 weeks | Yes, after R1 |
+| R3 | Substrate trait rewrite | Expand storage from get/put/delete/list to put/get/query/scan/freeze/thaw | HDC similarity query, cold tier semantics, uniform storage backends | ~1 week | Yes |
+| R4 | Gate pipeline | Replace the state machine with pure gates plus composition combinators | Third-party gates, easier tests, inspectable composition data | 1–2 weeks | Maybe; schedule only if the payoff is clear |
+| R5 | roko-compose engine | Replace the fixed template builder with a query-driven compose pipeline | Situation-specific prompts, HDC retrieval, template-as-data composition | ~2 weeks | Yes, after R3 |
+
+The core distinction is readiness type: these candidates are rewrite-ready, not merely gap-ready. The audit below still matters, but it no longer tells the whole story for the affected sections.
 
 ### Tier 0 — Critical Path to Self-Hosting
 
@@ -551,11 +589,11 @@ Cross-referencing docs against actual crate code:
 |---|---|---|---|---|
 | G6 | Implement active inference EFE scorer | 03 | Medium-High | Replace static SectionScorer |
 | G7 | 8 missing feedback loops (wiring recipes) | 05 | Medium (~495 LOC) | Close the learning loop |
-| G8 | Execute Signal→Engram rename | 00 | Low (find/replace) | Eliminate spec/code divergence |
+| G8 | Normalize kernel vocabulary across the architecture docs | 00 | Low (find/replace) | Eliminate spec/code terminology drift |
 | G9 | Wire PAD persistence to `.roko/daimon/affect.json` | 03, 09 | Low-Medium | Cross-session emotional continuity |
 | G10 | Add tier field to `KnowledgeEntry` | 06 | Low | Enable tier-weighted decay |
 | G11 | Fix half-life constants (30d defaults → spec values) | 06 | Low | Correct knowledge decay rates |
-| G12 | Consolidate roko-daimon + roko-golem/daimon.rs | 09 | Medium | Prerequisite for daimon features |
+| G12 | Consolidate `roko-daimon` + the legacy scaffold copy of `daimon.rs` | 09 | Medium | Prerequisite for Daimon features |
 | G13 | Close safety critical integration gap | 11 | Medium | Activate all 6 safety guards |
 | G14 | Create Dockerfiles + fly.toml | 19 | Low (2-3 days) | Enable cloud deployment |
 | G15 | Implement Mattar-Daw utility scoring | 10 | Medium | Enable NREM replay prioritization |
@@ -573,7 +611,7 @@ Cross-referencing docs against actual crate code:
 | G22 | MCP servers (GitHub, Slack) | 18 | Medium | Service integration |
 | G23 | Daemon mode (roko daemon install) | 19 | High | Background operation |
 | G24 | CorticalState + T0 probes | 16 | High | ~80% tick suppression |
-| G25 | Plugin SDK (EventSource, Integration) | 18 | High | Third-party extensibility |
+| G25 | Plugin SDK (hooks, Integration) | 18 | High | Third-party extensibility |
 
 ### Tier 3 — Advanced / Phase 2+
 
@@ -596,14 +634,14 @@ Cross-referencing docs against actual crate code:
 
 | Section | Core Wiring | Advanced Features | Total |
 |---|---|---|---|
-| 00 Architecture | 1 (rename) | 8 (docs 25-29) | 9 |
+| 00 Architecture | 1 (kernel cutover decision) | 8 (docs 25-29) | 9 |
 | 01 Orchestration | 0 (done) | 4 (CRDT, saga) | 4 |
 | 02 Agents | 2 (G1, G4) | 6 (HTTP backends, temperament) | 8 |
 | 03 Composition | 1 (G6 base) | 8 (VCG, MVT, HDC dedup) | 9 |
 | 04 Verification | 0 (done) | 6 (eval gen, EvoSkills, forensic) | 6 |
 | 05 Learning | 2 (G7) | 4 (ADAS, TrackAndStop) | 6 |
 | 06 Neuro | 2 (G10, G11) | 12 (somatic, cross-domain, library) | 14 |
-| 07 Conductor | 0 (done) | 6 (cognitive signals, L3/L4) | 6 |
+| 07 Conductor | 0 (done) | 6 (cognitive control cues, L3/L4) | 6 |
 | 08 Chain | 0 (deferred) | 24+ (full DeFi stack) | 24+ |
 | 09 Daimon | 2 (G5, G12) | 6 (somatic landscape, contrarian) | 8 |
 | 10 Dreams | 1 (G15) | 10 (REM, HDC counterfactual, hypnagogia) | 11 |
@@ -626,6 +664,8 @@ Cross-referencing docs against actual crate code:
 | **Tier 1 (G6-G15)** | ~8 person-weeks | High — closes feedback loops, fixes data integrity |
 | **Tier 2 (G16-G25)** | ~20 person-weeks | Medium — feature enrichment |
 | **Tier 3 (G26-G33)** | ~50+ person-weeks | Long-term — Phase 2+ advanced capabilities |
+
+These estimates assume incremental delivery. The rewrite-track candidates above are cutover efforts, not ordinary backlog items, so their budgets should be read as sequencing and governance costs rather than feature-closure costs.
 
 ---
 
@@ -660,27 +700,39 @@ Cross-referencing docs against actual crate code:
 
 4. **Phase boundary ambiguity.** Some sections mix immediately implementable features with Phase 2+
    aspirations without clear separation. Sections 08 and 14 handle this well (explicit Tier labels);
-   sections 06 and 12 less so.
+   sections 06 and 12 less so. REF21 adds a second ambiguity: some sections are not just mixed-phase,
+   they are candidates for from-scratch rewrite decisions, so the audit needs both incremental and
+   rewrite-track reading modes.
 
 ---
 
 ## Recommended Execution Order
 
+REF21 splits the roadmap into two tracks. The incremental order below applies only if the team explicitly declines the rewrite-track candidates for the affected subsystems.
+
+### Rewrite track
+
+1. Week 1: roko-bus extraction.
+2. Weeks 2-4: roko-core kernel rewrite.
+3. Weeks 4-5: Substrate trait rewrite.
+4. Week 5: docs rewrite for the architecture chapter.
+5. Weeks 6-7: roko-learn reorganization.
+6. Weeks 8-9: roko-compose engine rewrite.
+7. Week 10: gate pipeline rewrite, if still worth it.
+
+### Incremental track
+
 ```
 Week 1-2:  G1 (ToolDispatcher wiring) + G2/G3 (code intelligence wiring) + G5 (Daimon→CascadeRouter)
-Week 2-3:  G4 (role prompt expansion) + G8 (Signal→Engram rename) + G10/G11 (knowledge entry fixes)
+Week 2-3:  G4 (role prompt expansion) + G8 (kernel vocabulary cleanup) + G10/G11 (knowledge entry fixes)
 Week 3-4:  G7 (8 feedback loops) + G9 (PAD persistence) + G14 (Docker/Fly)
 Week 4-6:  G6 (EFE scorer) + G12 (daimon consolidation) + G13 (safety gap closure)
 Week 6-8:  G15 (Mattar-Daw) + G19 (pheromone types) + G20 (CodeIndex trait)
 Week 8-12: G16 (VCG auction) + G21 (Oracle trait) + G22 (MCP servers) + G24 (T0 probes)
 ```
 
-After weeks 1-4, roko reaches **full self-hosting with safety**: agents have code-aware context,
-safety guards are active, behavioral state routes to appropriate models, knowledge decay is correct,
-and the learning loop is closed.
+After weeks 1-4 on the incremental track, roko reaches **full self-hosting with safety**: agents have code-aware context, safety guards are active, behavioral state routes to appropriate models, knowledge decay is correct, and the learning loop is closed.
 
-After weeks 4-8, roko reaches **intelligent self-hosting**: active inference scores context, daimon
-modulates behavior, dreams prioritize by utility, and coordination primitives exist.
+After weeks 4-8 on the incremental track, roko reaches **intelligent self-hosting**: active inference scores context, daimon modulates behavior, dreams prioritize by utility, and coordination primitives exist.
 
-After weeks 8-12, roko reaches **optimal self-hosting**: attention is auctioned, predictions feed back
-into routing, and probes suppress 80% of unnecessary computation.
+After weeks 8-12 on the incremental track, roko reaches **optimal self-hosting**: attention is auctioned, predictions feed back into routing, and probes suppress 80% of unnecessary computation.

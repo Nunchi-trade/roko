@@ -8,7 +8,8 @@
 > layer taxonomy, cognitive cross-cuts, collective intelligence metrics, crate map, cybernetic
 > foundations, and the frontier innovations that distinguish Roko from every other agent
 > framework. For the phased refactoring plan and rollout ordering, see
-> `tmp/refinements/06-refactoring-plan.md`.
+> `tmp/refinements/06-refactoring-plan.md`. For the rewrite-track alternative and from-scratch
+> sequencing, see `tmp/refinements/21-from-scratch-redesigns.md`.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -66,7 +67,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 20 | [Configuration Schema](./20-configuration-schema.md) | RokoConfig struct, 60+ parameters, 3-level override hierarchy, validation rules |
 | 21 | [Performance and Numerical Stability](./21-performance-numerical-stability.md) | f32/f64 decision matrix, hot-path complexity targets, memory budgets, NaN/Inf handling |
 | 22 | [Error Handling and Recovery](./22-error-handling-recovery.md) | Four error classes, exponential backoff, circuit breaker, 7-level graceful degradation |
-| 23 | [Architectural Analysis and Improvements](./23-architectural-analysis-improvements.md) | Coherence analysis: trait sufficiency, layer violations, category theory, cognitive architecture comparison, novel proposals |
+| 23 | [Architectural Analysis and Improvements](./23-architectural-analysis-improvements.md) | Coherence analysis of the current architecture plus the v2 rewrite path: layer violations, refactor boundaries, category theory, and from-scratch decision points |
 | 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), transport-fabric proposal, data flow diagrams, integration roadmap (~2,070 LOC) |
 | 25 | [Attention as Universal Cognitive Currency](./25-attention-as-currency.md) | Attention tokens as universal unit of account, VCG auction for Engram selection, budget-aware CascadeRouter, Daimon affect modulation, cross-speed token economics |
 | 26 | [Cognitive Immune System](./26-cognitive-immune-system.md) | 5-layer defense against knowledge corruption: taint propagation, anomaly detection, quarantine, red-team probes, immune memory with HDC signatures |
@@ -74,7 +75,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 28 | [Emergent Goal Structures](./28-emergent-goal-structures.md) | Goals emerge from affect×knowledge×experience interaction, 5 built-in detectors, intrinsic motivation scoring, EFE ranking, somatic markers, goal lifecycle |
 | 29 | [Cognitive Energy Model](./29-cognitive-energy-model.md) | Explicit energy pool with depletion and recovery, 5 energy zones, affect-energy bidirectional coupling, capacity growth, Delta sleep cycles |
 | 30 | [Cross-Pollination Innovations](./30-cross-pollination-innovations.md) | Innovation transfer patterns across sections |
-| 31 | [Implementation Readiness Audit](./31-implementation-readiness-audit.md) | Section scorecard, readiness criteria, gap analysis, crate status, and implementation sequencing |
+| 31 | [Implementation Readiness Audit](./31-implementation-readiness-audit.md) | Section scorecard, readiness criteria, rewrite-track candidates, gap analysis, crate status, and implementation sequencing |
 | 32 | [Comprehensive Test Strategy](./32-comprehensive-test-strategy.md) | Per-crate unit test specs, property-based testing (proptest), integration matrix, performance benchmarks (criterion/iai), adversarial/safety testing (ATLAS-mapped), regression prevention for self-improving agents, test count roadmap 1,568→2,810 |
 | 33 | [Refactor Plan Phases](./33-refactor-plan-phases.md) | Phase A/B/C/D rollout sequence, rollback plan, risk notes, and dependency ordering; see `tmp/refinements/06-refactoring-plan.md` |
 
@@ -161,7 +162,7 @@ This topic connects to:
 - **TUI**: Text-mode dashboard only, no interactive terminal UI.
 
 ### What's Not Started
-- Retired-code-name cleanup for Engram terminology (Tier 0D).
+- Kernel v2 cutover decision and vocabulary alignment (Tier 0D).
 - Legacy umbrella-crate dissolution (specified, not executed).
 - VCG Attention Auction (specified, not wired).
 - Somatic Landscape k-d tree (specified, not built).
