@@ -49,9 +49,9 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Gate, Kind,
-    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
-    TaskCategory, TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
+    AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Kind, OperatingFrequency,
+    OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, TaskCategory,
+    TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -66,8 +66,9 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    adaptive_threshold::AdaptiveThresholds, clippy_gate::ClippyGate, compile::CompileGate,
-    payload::GatePayload, test_gate::TestGate,
+    adaptive_threshold::AdaptiveThresholds,
+    payload::GatePayload,
+    rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
@@ -12067,42 +12068,9 @@ impl PlanRunner {
 
     async fn run_gate_rung(payload_sig: &Engram, rung: u32) -> Vec<Verdict> {
         let ctx = Context::now();
-        // Rung 0 = compile, rung 1 = test, rung 2 = clippy, rung 3+ = all.
-        match rung {
-            0 => {
-                let gate = CompileGate::cargo();
-                let _span = info_span!("gate", gate = %gate.name(), rung = %rung).entered();
-                vec![gate.verify(payload_sig, &ctx).await]
-            }
-            1 => {
-                let gate = TestGate::cargo();
-                let _span = info_span!("gate", gate = %gate.name(), rung = %rung).entered();
-                vec![gate.verify(payload_sig, &ctx).await]
-            }
-            2 => {
-                let gate = ClippyGate::cargo();
-                let _span = info_span!("gate", gate = %gate.name(), rung = %rung).entered();
-                vec![gate.verify(payload_sig, &ctx).await]
-            }
-            _ => {
-                let c = CompileGate::cargo();
-                let t = TestGate::cargo();
-                let cl = ClippyGate::cargo();
-                let compile = {
-                    let _span = info_span!("gate", gate = %c.name(), rung = %rung).entered();
-                    c.verify(payload_sig, &ctx).await
-                };
-                let test = {
-                    let _span = info_span!("gate", gate = %t.name(), rung = %rung).entered();
-                    t.verify(payload_sig, &ctx).await
-                };
-                let clippy = {
-                    let _span = info_span!("gate", gate = %cl.name(), rung = %rung).entered();
-                    cl.verify(payload_sig, &ctx).await
-                };
-                vec![compile, test, clippy]
-            }
-        }
+        let inputs = RungExecutionInputs::default();
+        let config = RungExecutionConfig::default();
+        run_rung(payload_sig, &ctx, rung, &inputs, &config).await
     }
 
     /// Run task-level verification commands declared in `tasks.toml` for a plan.

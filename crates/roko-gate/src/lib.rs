@@ -32,6 +32,7 @@ pub mod llm_judge_gate;
 pub mod payload;
 pub mod property_test_gate;
 pub mod ratchet;
+pub mod rung_dispatch;
 pub mod rung_selector;
 pub mod shell;
 pub mod symbol_gate;

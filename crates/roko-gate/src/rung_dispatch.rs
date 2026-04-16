@@ -1,0 +1,220 @@
+//! Runtime dispatch for Roko's advertised 7-rung gate pipeline.
+//!
+//! This module centralizes the rung-to-gate mapping used by the CLI
+//! orchestrator so the mapping can be exercised from `roko-gate` integration
+//! tests without duplicating the selector logic in multiple crates.
+//!
+//! Several gates still need richer inputs than the orchestrator currently
+//! attaches to the base `GatePayload` signal. For those cases, the dispatcher
+//! returns an explicit stub verdict instead of silently skipping the gate or
+//! introducing a false failure.
+
+use crate::CompileGate;
+use crate::clippy_gate::ClippyGate;
+use crate::fact_check::{FactCheckGate, SearchOracle};
+use crate::generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate};
+use crate::integration_gate::IntegrationGate;
+use crate::llm_judge_gate::{JudgeOracle, LlmJudgeGate};
+use crate::payload::BuildSystem;
+use crate::property_test_gate::PropertyTestGate;
+use crate::symbol_gate::SymbolGate;
+use crate::test_gate::TestGate;
+use crate::verify_chain_gate::{VERIFY_SCRIPT_TAG, VerifyChainGate};
+use roko_core::{Context, Engram, Gate, Verdict};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Optional per-gate signals for rungs that need richer inputs than the base
+/// `GatePayload` signal currently provides.
+#[derive(Clone, Debug, Default)]
+pub struct RungExecutionInputs {
+    /// `SymbolGate` expects a `SymbolManifest` body.
+    pub symbol_signal: Option<Engram>,
+    /// `FactCheckGate` expects text or claim-like content.
+    pub fact_check_signal: Option<Engram>,
+    /// `LlmJudgeGate` expects a `JudgePayload` or text diff.
+    pub llm_judge_signal: Option<Engram>,
+}
+
+/// Configuration knobs for executing the 7-rung runtime gate mapping.
+#[derive(Default)]
+pub struct RungExecutionConfig {
+    /// Source roots for `SymbolGate`.
+    pub source_roots: Option<Vec<PathBuf>>,
+    /// Artifact store for `GeneratedTestGate`.
+    pub generated_test_artifacts: Option<Arc<dyn GeneratedArtifactStore>>,
+    /// Optional fallback gate for `VerifyChainGate`.
+    pub verify_chain_fallback: Option<Arc<dyn Gate>>,
+    /// Search oracle for `FactCheckGate`.
+    pub fact_check_oracle: Option<Arc<dyn SearchOracle>>,
+    /// Judge oracle for `LlmJudgeGate`.
+    pub llm_judge_oracle: Option<Arc<dyn JudgeOracle>>,
+    /// Judge threshold. Defaults to `0.8`.
+    pub llm_judge_min_score: Option<f32>,
+    /// Build-system-specific integration test pattern to run on rung 6.
+    pub integration_test_pattern: Option<String>,
+    /// Build system for the integration scenario. Defaults to cargo.
+    pub integration_build_system: Option<BuildSystem>,
+}
+
+/// Execute a single rung of the 7-rung runtime mapping.
+///
+/// The mapping is:
+///
+/// - `0`: compile
+/// - `1`: test
+/// - `2`: clippy
+/// - `3`: symbol + generated test
+/// - `4`: property test + verify-chain
+/// - `5`: fact-check
+/// - `6`: llm-judge + integration
+///
+/// Any `rung > 6` executes every rung in order and flattens the resulting
+/// verdicts.
+pub async fn run_rung(
+    base_signal: &Engram,
+    ctx: &Context,
+    rung: u32,
+    inputs: &RungExecutionInputs,
+    config: &RungExecutionConfig,
+) -> Vec<Verdict> {
+    if rung > 6 {
+        let mut verdicts = Vec::new();
+        for current_rung in 0..=6 {
+            verdicts.extend(run_single_rung(base_signal, ctx, current_rung, inputs, config).await);
+        }
+        return verdicts;
+    }
+
+    run_single_rung(base_signal, ctx, rung, inputs, config).await
+}
+
+async fn run_single_rung(
+    base_signal: &Engram,
+    ctx: &Context,
+    rung: u32,
+    inputs: &RungExecutionInputs,
+    config: &RungExecutionConfig,
+) -> Vec<Verdict> {
+    match rung {
+        0 => vec![CompileGate::cargo().verify(base_signal, ctx).await],
+        1 => vec![TestGate::cargo().verify(base_signal, ctx).await],
+        2 => vec![ClippyGate::cargo().verify(base_signal, ctx).await],
+        3 => vec![
+            run_symbol_gate(ctx, inputs, config).await,
+            run_generated_test_gate(base_signal, ctx, config).await,
+        ],
+        4 => vec![
+            PropertyTestGate::cargo().verify(base_signal, ctx).await,
+            run_verify_chain_gate(base_signal, ctx, config).await,
+        ],
+        5 => vec![run_fact_check_gate(ctx, inputs, config).await],
+        6 => vec![
+            run_llm_judge_gate(ctx, inputs, config).await,
+            run_integration_gate(base_signal, ctx, config).await,
+        ],
+        _ => unreachable!("rung > 6 is handled by run_rung"),
+    }
+}
+
+fn stub_verdict(gate: &str, detail: impl Into<String>) -> Verdict {
+    let message = format!("stub gate; {}", detail.into());
+    let mut verdict = Verdict::pass(gate.to_string());
+    verdict.reason.clone_from(&message);
+    verdict.detail = Some(message);
+    verdict
+}
+
+async fn run_symbol_gate(
+    ctx: &Context,
+    inputs: &RungExecutionInputs,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    let Some(signal) = inputs.symbol_signal.as_ref() else {
+        return stub_verdict("symbol", "no SymbolManifest wired into rung 3");
+    };
+    let Some(source_roots) = config.source_roots.clone() else {
+        return stub_verdict("symbol", "no source roots configured for rung 3");
+    };
+    SymbolGate::new(source_roots).verify(signal, ctx).await
+}
+
+async fn run_generated_test_gate(
+    base_signal: &Engram,
+    ctx: &Context,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    let Some(artifacts) = config.generated_test_artifacts.clone() else {
+        return stub_verdict("generated_test:cargo", "generated test artifacts not wired");
+    };
+    GeneratedTestGate::new(artifacts)
+        .verify(base_signal, ctx)
+        .await
+}
+
+async fn run_verify_chain_gate(
+    base_signal: &Engram,
+    ctx: &Context,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    if base_signal.tag(VERIFY_SCRIPT_TAG).is_none() && config.verify_chain_fallback.is_none() {
+        return stub_verdict("verify_chain", "no verify script wired into rung 4");
+    }
+    let gate = config
+        .verify_chain_fallback
+        .clone()
+        .map_or_else(VerifyChainGate::strict, VerifyChainGate::with_fallback);
+    gate.verify(base_signal, ctx).await
+}
+
+async fn run_fact_check_gate(
+    ctx: &Context,
+    inputs: &RungExecutionInputs,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    let Some(signal) = inputs.fact_check_signal.as_ref() else {
+        return stub_verdict("fact_check", "no fact-check content wired into rung 5");
+    };
+    let Some(oracle) = config.fact_check_oracle.clone() else {
+        return stub_verdict("fact_check", "no fact-check oracle configured");
+    };
+    FactCheckGate::new(oracle, FactCheckGate::DEFAULT_MIN_CONFIDENCE)
+        .verify(signal, ctx)
+        .await
+}
+
+async fn run_llm_judge_gate(
+    ctx: &Context,
+    inputs: &RungExecutionInputs,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    let Some(signal) = inputs.llm_judge_signal.as_ref() else {
+        return stub_verdict("llm_judge", "no judge payload wired into rung 6");
+    };
+    let Some(oracle) = config.llm_judge_oracle.clone() else {
+        return stub_verdict("llm_judge", "no judge oracle configured");
+    };
+    let min_score = config.llm_judge_min_score.unwrap_or(0.8);
+    LlmJudgeGate::new(oracle, min_score)
+        .verify(signal, ctx)
+        .await
+}
+
+async fn run_integration_gate(
+    base_signal: &Engram,
+    ctx: &Context,
+    config: &RungExecutionConfig,
+) -> Verdict {
+    let Some(pattern) = config.integration_test_pattern.as_ref() else {
+        return stub_verdict(
+            "integration:build_test",
+            "no integration scenario wired into rung 6",
+        );
+    };
+    let build_system = config
+        .integration_build_system
+        .unwrap_or(BuildSystem::Cargo);
+    IntegrationGate::build_test(build_system, pattern)
+        .verify(base_signal, ctx)
+        .await
+}
