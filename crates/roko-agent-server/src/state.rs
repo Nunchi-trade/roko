@@ -1,6 +1,9 @@
 //! Shared in-memory state for per-agent routes.
 
 use std::collections::VecDeque;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -15,6 +18,7 @@ use roko_agent::streaming::StreamChunk;
 use roko_agent::tool_loop::LlmBackend;
 use roko_agent::translate::{BackendResponse, RenderedTools, normalize_finish_reason};
 use roko_chain::ChainClient;
+use roko_core::obs::LogScrubber;
 use roko_core::obs::metrics::{MetricSnapshot, MetricValue};
 use roko_core::obs::schema::{self, CanonicalMetricSchema, MetricDescriptor, MetricSchema};
 use roko_neuro::KnowledgeStore;
@@ -423,6 +427,7 @@ pub struct AgentState {
     owner: Option<String>,
     version: String,
     capabilities: Vec<String>,
+    log_path: PathBuf,
     routes: Vec<String>,
     started_at: Instant,
     registered_at: u64,
@@ -455,11 +460,13 @@ impl AgentState {
         let message_dispatcher = llm_backend.as_ref().map(|backend| {
             Arc::new(BackendMessageDispatcher::new(Arc::clone(backend))) as Arc<dyn DispatchLike>
         });
+        let log_path = default_log_path(&agent_id);
         Self {
             agent_id,
             owner,
             version,
             capabilities,
+            log_path,
             routes,
             started_at: Instant::now(),
             registered_at: now_secs(),
@@ -487,6 +494,29 @@ impl AgentState {
         self.started_at
     }
 
+    /// Return the path used for the sidecar log file.
+    #[must_use]
+    pub fn log_path(&self) -> &Path {
+        self.log_path.as_path()
+    }
+
+    /// Append one scrubbed line to the sidecar log file.
+    pub async fn append_log_line(&self, line: impl Into<String>) {
+        let log_path = self.log_path.clone();
+        let display_path = self.log_path.display().to_string();
+        let line = line.into();
+
+        match tokio::task::spawn_blocking(move || append_log_line_sync(&log_path, &line)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(path = %display_path, %error, "failed to append sidecar log line");
+            }
+            Err(error) => {
+                tracing::warn!(path = %display_path, %error, "sidecar log append task failed");
+            }
+        }
+    }
+
     /// Borrow the metrics registry.
     #[must_use]
     pub const fn metrics(&self) -> &AgentMetrics {
@@ -509,6 +539,13 @@ impl AgentState {
     #[must_use]
     pub fn with_message_dispatcher(mut self, dispatcher: Arc<dyn DispatchLike>) -> Self {
         self.message_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Override the path used for the sidecar log file.
+    #[must_use]
+    pub fn with_log_path(mut self, log_path: impl Into<PathBuf>) -> Self {
+        self.log_path = log_path.into();
         self
     }
 
@@ -766,6 +803,7 @@ fn build_routes(capabilities: &[String]) -> Vec<String> {
         "/health".to_string(),
         "/capabilities".to_string(),
         "/stats".to_string(),
+        "/logs".to_string(),
     ];
     if capabilities
         .iter()
@@ -810,4 +848,22 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn default_log_path(agent_id: &str) -> PathBuf {
+    PathBuf::from(".roko")
+        .join("agents")
+        .join(agent_id)
+        .join("log")
+}
+
+fn append_log_line_sync(path: &Path, line: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let scrubbed = LogScrubber::default().scrub(line);
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{scrubbed}")?;
+    file.flush()
 }

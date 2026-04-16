@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -90,7 +91,9 @@ impl AgentServer {
     }
 
     fn protected_router(&self) -> Router<Arc<AgentState>> {
-        let mut router = Router::new().route("/stats", axum::routing::get(features::health::stats));
+        let mut router = Router::new()
+            .route("/stats", axum::routing::get(features::health::stats))
+            .merge(features::logs::router());
         if self.features.messaging {
             router = router.merge(features::messaging::router());
         }
@@ -144,6 +147,7 @@ impl AgentServer {
 pub struct AgentServerBuilder {
     bind: Option<String>,
     agent_id: Option<String>,
+    log_path: Option<PathBuf>,
     owner: Option<String>,
     version: Option<String>,
     capabilities: Vec<String>,
@@ -170,6 +174,13 @@ impl AgentServerBuilder {
     #[must_use]
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.bind = Some(bind.into());
+        self
+    }
+
+    /// Override the sidecar log path exposed by `GET /logs`.
+    #[must_use]
+    pub fn log_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.log_path = Some(path.into());
         self
     }
 
@@ -302,6 +313,9 @@ impl AgentServerBuilder {
             self.llm_backend,
             self.knowledge_store,
         );
+        if let Some(log_path) = self.log_path {
+            state = state.with_log_path(log_path);
+        }
         if let Some(dispatcher) = self.dispatcher {
             state = state.with_dispatcher(dispatcher);
         }

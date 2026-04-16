@@ -49,6 +49,9 @@ async fn message(
         .dispatch(message_request(&request.prompt, false))
         .await
         .map_err(|error| dispatch_failed(&error))?;
+    state
+        .append_log_line(format!("message prompt={:?} status=ok", request.prompt))
+        .await;
 
     Ok(Json(json!({
         "response": response.content,
