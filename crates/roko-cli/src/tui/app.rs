@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -91,6 +91,10 @@ pub struct App {
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
     sys_rx: Option<watch::Receiver<SysSnapshot>>,
+    /// One-shot agent-topology fetch receiver.
+    agent_topology_rx: Option<std_mpsc::Receiver<AgentTopologyFetchResult>>,
+    /// Whether a topology fetch is currently in flight.
+    agent_topology_in_flight: bool,
     /// Filesystem watcher handle for debounced `.roko/` refresh events.
     fs_watch: Option<FsWatchHandle>,
     /// Debounced git watcher for repo metadata refreshes.
@@ -159,6 +163,12 @@ struct ProcessMetricSample {
     state: String,
     /// Process uptime in seconds.
     uptime_secs: f64,
+}
+
+enum AgentTopologyFetchResult {
+    Ready(roko_core::AgentTopology),
+    Unavailable,
+    Error(String),
 }
 
 fn collect_git_bg_data(workdir: &Path) -> GitBgData {
@@ -449,6 +459,8 @@ impl App {
             signal_selection: 0,
             gate_failure_selection: 0,
             sys_rx: None,
+            agent_topology_rx: None,
+            agent_topology_in_flight: false,
             fs_watch: None,
             git_watch: None,
             process_supervisor: None,
@@ -774,6 +786,7 @@ impl App {
                 self.running = false;
             }
             TuiAction::SwitchTab(tab) => {
+                let previous_tab = self.tui_state.active_tab;
                 self.tui_state.active_tab = tab;
                 self.tui_state.focus = match tab {
                     Tab::Dashboard | Tab::Plans => FocusZone::PlanTree,
@@ -784,6 +797,11 @@ impl App {
                 if let Some(page_id) = tab_to_page(tab) {
                     self.current_page = page_id;
                     let _ = self.scaffold.set_active_page(page_id);
+                }
+                if matches!(tab, Tab::Agents) && !matches!(previous_tab, Tab::Agents) {
+                    self.request_agent_topology_refresh();
+                } else if !matches!(tab, Tab::Agents) {
+                    self.tui_state.close_agent_topology();
                 }
             }
             TuiAction::FocusNext => {
@@ -885,7 +903,12 @@ impl App {
                 self.scroll_agent_output_by(delta);
             }
             TuiAction::ScrollAgentEnd => {
-                self.tui_state.agent_scroll = None; // Resume auto-tail
+                if self.tui_state.agent_topology_visible {
+                    self.tui_state.agent_topology_scroll_offset =
+                        self.current_agent_topology_max_scroll();
+                } else {
+                    self.tui_state.agent_scroll = None; // Resume auto-tail
+                }
             }
             TuiAction::ScrollDiffUp => {
                 let delta = self.scroll_accel.tick(-1);
@@ -1107,6 +1130,19 @@ impl App {
                     selected_index,
                     scroll_offset: selected_index as u16,
                 });
+            }
+            TuiAction::ToggleAgentTopology => {
+                let was_visible = self.tui_state.agent_topology_visible;
+                self.tui_state.active_tab = Tab::Agents;
+                self.tui_state.focus = FocusZone::AgentOutput;
+                if let Some(page_id) = tab_to_page(Tab::Agents) {
+                    self.current_page = page_id;
+                    let _ = self.scaffold.set_active_page(page_id);
+                }
+                self.tui_state.toggle_agent_topology();
+                if !was_visible && self.tui_state.agent_topology_visible {
+                    self.request_agent_topology_refresh();
+                }
             }
             TuiAction::CloseTaskPicker => {
                 if matches!(
@@ -1776,7 +1812,14 @@ impl App {
                 };
             }
             (Tab::Agents, FocusZone::AgentOutput) => {
-                if offset == usize::MAX {
+                if self.tui_state.agent_topology_visible {
+                    let max = self.current_agent_topology_max_scroll();
+                    self.tui_state.agent_topology_scroll_offset = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                } else if offset == usize::MAX {
                     self.tui_state.agent_scroll = None;
                 } else {
                     self.tui_state.agent_scroll = Some(offset);
@@ -1798,7 +1841,14 @@ impl App {
                 }
             }
             (_, FocusZone::AgentOutput) => {
-                if offset == usize::MAX {
+                if self.tui_state.agent_topology_visible {
+                    let max = self.current_agent_topology_max_scroll();
+                    self.tui_state.agent_topology_scroll_offset = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                } else if offset == usize::MAX {
                     self.tui_state.agent_scroll = None;
                 } else {
                     self.tui_state.agent_scroll = Some(offset);
@@ -1871,6 +1921,13 @@ impl App {
             .unwrap_or_else(|| self.current_agent_max_scroll())
     }
 
+    fn current_agent_topology_max_scroll(&self) -> usize {
+        views::agents_view::agent_topology_lines(&self.data, &self.tui_state)
+            .len()
+            .saturating_sub(self.current_agent_topology_viewport_height())
+            .min(u16::MAX as usize)
+    }
+
     fn current_agent_max_scroll(&self) -> usize {
         self.current_agent_output_line_count()
             .saturating_sub(self.current_agent_output_viewport_height())
@@ -1902,6 +1959,18 @@ impl App {
     }
 
     fn scroll_agent_output_by(&mut self, delta: i32) {
+        if self.tui_state.agent_topology_visible {
+            let max_scroll = self.current_agent_topology_max_scroll();
+            let current = self.tui_state.agent_topology_scroll_offset.min(max_scroll);
+            self.tui_state.agent_topology_scroll_offset = if delta < 0 {
+                current.saturating_sub(delta.unsigned_abs() as usize)
+            } else {
+                current.saturating_add(delta as usize).min(max_scroll)
+            };
+            self.tui_state.clamp_agent_topology_scroll(max_scroll);
+            return;
+        }
+
         let max_scroll = self.current_agent_max_scroll();
         let current = self.current_agent_scroll_offset().min(max_scroll);
 
@@ -1967,6 +2036,8 @@ impl App {
             Tab::Dashboard | Tab::Agents => {
                 let max_scroll = self.current_agent_max_scroll();
                 self.tui_state.clamp_agent_scroll(max_scroll);
+                self.tui_state
+                    .clamp_agent_topology_scroll(self.current_agent_topology_max_scroll());
             }
             Tab::Git => {
                 self.tui_state
@@ -2041,6 +2112,22 @@ impl App {
                 let sections =
                     Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(main[1]);
                 sections[1].height.saturating_sub(2) as usize
+            }
+            _ => 0,
+        }
+    }
+
+    fn current_agent_topology_viewport_height(&self) -> usize {
+        let content_area = self.current_content_area();
+
+        match self.tui_state.active_tab {
+            Tab::Agents => {
+                let panels =
+                    Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
+                        .split(content_area);
+                let sections =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(panels[1]);
+                sections[1].height.saturating_sub(3) as usize
             }
             _ => 0,
         }
@@ -2287,6 +2374,7 @@ impl App {
         const MAX_MESSAGES_PER_DRAIN: usize = 20;
 
         self.drain_snapshot_channel();
+        self.drain_agent_topology_fetch();
         self.sync_agent_stream_clients();
         self.drain_agent_stream_clients();
 
@@ -2394,6 +2482,76 @@ impl App {
 
         let snapshot = rx.borrow_and_update();
         apply_dashboard_snapshot(tui_state, notifications, last_marker, &snapshot);
+    }
+
+    fn request_agent_topology_refresh(&mut self) {
+        if self.agent_topology_in_flight {
+            return;
+        }
+
+        let (tx, rx) = std_mpsc::channel();
+        let base_url = self.agent_stream_server_url.clone();
+        self.agent_topology_rx = Some(rx);
+        self.agent_topology_in_flight = true;
+        self.tui_state.set_agent_topology_loading();
+
+        match std::thread::Builder::new()
+            .name("tui-agent-topology".into())
+            .spawn(move || {
+                let result = fetch_agent_topology(&base_url);
+                let _ = tx.send(result);
+            })
+        {
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    thread = "tui-agent-topology",
+                    "failed to spawn topology fetch thread"
+                );
+                self.agent_topology_in_flight = false;
+                self.agent_topology_rx = None;
+                self.tui_state
+                    .set_agent_topology_error("topology fetch thread failed");
+            }
+        }
+    }
+
+    fn drain_agent_topology_fetch(&mut self) {
+        let Some(rx) = &self.agent_topology_rx else {
+            return;
+        };
+
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+
+        self.agent_topology_in_flight = false;
+        self.agent_topology_rx = None;
+
+        match result {
+            AgentTopologyFetchResult::Ready(topology) => {
+                self.tui_state.set_agent_topology(topology.clone());
+                self.apply_state_hub_agent_topology(topology);
+            }
+            AgentTopologyFetchResult::Unavailable => {
+                self.tui_state.set_agent_topology_unavailable();
+                self.apply_state_hub_agent_topology(roko_core::AgentTopology::default());
+            }
+            AgentTopologyFetchResult::Error(message) => {
+                self.tui_state.set_agent_topology_error(message);
+            }
+        }
+    }
+
+    fn apply_state_hub_agent_topology(&self, topology: roko_core::AgentTopology) {
+        let Some(state_hub) = &self._state_hub else {
+            return;
+        };
+
+        let mut snapshot = state_hub.current_snapshot();
+        snapshot.agent_topology = topology;
+        state_hub.apply_snapshot(snapshot);
     }
 
     fn sync_agent_stream_clients(&mut self) {
@@ -2756,11 +2914,46 @@ fn apply_dashboard_snapshot(
     }
 }
 
+fn fetch_agent_topology(base_url: &str) -> AgentTopologyFetchResult {
+    let endpoint = format!("{}/api/agents/topology", base_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build();
+
+    let Ok(client) = client else {
+        return AgentTopologyFetchResult::Error("topology client init failed".to_string());
+    };
+
+    let response = match client.get(endpoint).send() {
+        Ok(response) => response,
+        Err(error) => {
+            return AgentTopologyFetchResult::Error(format!("topology fetch failed: {error}"));
+        }
+    };
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return AgentTopologyFetchResult::Unavailable;
+    }
+
+    if !response.status().is_success() {
+        return AgentTopologyFetchResult::Error(format!(
+            "topology fetch returned {}",
+            response.status()
+        ));
+    }
+
+    match response.json::<roko_core::AgentTopology>() {
+        Ok(topology) => AgentTopologyFetchResult::Ready(topology),
+        Err(error) => AgentTopologyFetchResult::Error(format!("invalid topology payload: {error}")),
+    }
+}
+
 fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
     !snapshot.plans.is_empty()
         || !snapshot.tasks.is_empty()
         || !snapshot.agents.is_empty()
         || !snapshot.gates.is_empty()
+        || !snapshot.agent_topology.is_empty()
         || !snapshot.experiment_winners.is_empty()
         || !snapshot.errors.is_empty()
 }

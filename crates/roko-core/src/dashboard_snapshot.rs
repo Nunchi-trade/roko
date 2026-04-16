@@ -240,6 +240,68 @@ pub struct ExperimentWinnerSummary {
     pub confidence: f64,
 }
 
+/// Shared agent-topology payload used by the TUI and HTTP API.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentTopology {
+    /// Flat node roster reported by `roko-serve`.
+    #[serde(default)]
+    pub nodes: Vec<AgentTopologyNode>,
+    /// Directed relationships between agent nodes, when available.
+    #[serde(default)]
+    pub edges: Vec<AgentTopologyEdge>,
+    /// Unix timestamp in seconds for the snapshot.
+    #[serde(default)]
+    pub timestamp: u64,
+}
+
+impl AgentTopology {
+    /// Returns `true` when the topology carries no nodes or edges.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+}
+
+/// One node in the shared agent-topology payload.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentTopologyNode {
+    /// Stable agent identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Reachable address or card URI, when known.
+    #[serde(default)]
+    pub address: String,
+    /// Count of insights posted by this agent.
+    #[serde(default)]
+    pub insights_posted: usize,
+    /// Count of confirmations emitted by this agent.
+    #[serde(default)]
+    pub confirmations_given: usize,
+    /// Count of challenges emitted by this agent.
+    #[serde(default)]
+    pub challenges_given: usize,
+    /// Aggregate routing weight.
+    #[serde(default)]
+    pub total_weight: f64,
+}
+
+/// One edge in the shared agent-topology payload.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentTopologyEdge {
+    /// Source node identifier.
+    #[serde(default)]
+    pub from: String,
+    /// Target node identifier.
+    #[serde(default)]
+    pub to: String,
+    /// Integer edge weight.
+    #[serde(default)]
+    pub weight: usize,
+    /// Logical edge type.
+    #[serde(default, rename = "type")]
+    pub edge_type: String,
+}
+
 /// One bucket of aggregated efficiency telemetry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EfficiencyBucket {
@@ -297,6 +359,9 @@ pub struct DashboardSnapshot {
     /// Concluded prompt experiment winners rendered on the Learning tab.
     #[serde(default)]
     pub experiment_winners: Vec<ExperimentWinnerSummary>,
+    /// Latest fetched agent-topology payload for the Agents tab.
+    #[serde(default)]
+    pub agent_topology: AgentTopology,
     /// Recent efficiency trend buckets for dashboard charts.
     #[serde(default)]
     pub efficiency_trend: Vec<EfficiencyBucket>,

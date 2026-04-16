@@ -6,6 +6,8 @@
 //! Renders rich gradient progress bars, context gauges, role-colored
 //! tabs, and status chips matching the Mori Agents screen (F3).
 
+use std::collections::HashMap;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -15,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
 use crate::tui::input::FocusZone;
-use crate::tui::state::{AgentStatus, TuiState, model_context_limit};
+use crate::tui::state::{AgentStatus, AgentTopologyStatus, TuiState, model_context_limit};
 use crate::tui::util::truncate_middle;
 
 // ---------------------------------------------------------------------------
@@ -547,6 +549,11 @@ fn render_output_body(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    if tui_state.agent_topology_visible {
+        render_agent_topology_panel(frame, area, data, tui_state, theme);
+        return;
+    }
+
     let selected_agent = data.agents.get(view_state.selected);
     let selected_row = tui_state.agents.get(view_state.selected);
     let selected_id = selected_agent
@@ -681,6 +688,167 @@ fn render_output_body(
     if let Some(stream_area) = stream_area {
         render_live_stream_panel(frame, stream_area, selected_id, tui_state, theme);
     }
+}
+
+fn render_agent_topology_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    theme: &Theme,
+) {
+    let focused = matches!(
+        tui_state.focus,
+        FocusZone::AgentOutput | FocusZone::RightPanel
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Theme::focused_border_style()
+        } else {
+            theme.muted()
+        })
+        .title(Span::styled(
+            " Agent Topology ",
+            if focused {
+                Theme::focused_title_style()
+            } else {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            },
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    let status_text = topology_status_text(tui_state);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(status_text, Style::default().fg(theme.muted)),
+        ])),
+        sections[0],
+    );
+
+    let body_lines = agent_topology_lines(data, tui_state)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let viewport_height = sections[1].height as usize;
+    let max_scroll = body_lines
+        .len()
+        .saturating_sub(viewport_height)
+        .min(u16::MAX as usize);
+    let scroll = tui_state.agent_topology_scroll_offset.min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(body_lines)
+            .style(theme.text())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0)),
+        sections[1],
+    );
+}
+
+fn topology_status_text(tui_state: &TuiState) -> String {
+    match &tui_state.agent_topology_status {
+        AgentTopologyStatus::Idle => "press Ctrl+T to load topology".to_string(),
+        AgentTopologyStatus::Loading => "loading topology...".to_string(),
+        AgentTopologyStatus::Ready => format!(
+            "{} nodes · {} edges · Ctrl+T closes",
+            tui_state.agent_topology.nodes.len(),
+            tui_state.agent_topology.edges.len()
+        ),
+        AgentTopologyStatus::Unavailable => {
+            "topology not available from this roko serve".to_string()
+        }
+        AgentTopologyStatus::Error(message) => {
+            format!("topology fetch failed · {}", truncate_middle(message, 48))
+        }
+    }
+}
+
+pub(crate) fn agent_topology_lines(data: &DashboardData, tui_state: &TuiState) -> Vec<String> {
+    match &tui_state.agent_topology_status {
+        AgentTopologyStatus::Idle => vec!["topology not loaded yet".to_string()],
+        AgentTopologyStatus::Loading => vec!["loading topology...".to_string()],
+        AgentTopologyStatus::Unavailable => {
+            vec!["topology not available from this roko serve".to_string()]
+        }
+        AgentTopologyStatus::Error(message) => vec![
+            "topology fetch failed".to_string(),
+            truncate_middle(message, 72),
+        ],
+        AgentTopologyStatus::Ready => build_agent_topology_lines(data, tui_state),
+    }
+}
+
+fn build_agent_topology_lines(data: &DashboardData, tui_state: &TuiState) -> Vec<String> {
+    if tui_state.agent_topology.nodes.is_empty() {
+        return vec!["no topology nodes reported".to_string()];
+    }
+
+    let mut tasks_by_agent: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for task in &data.active_tasks {
+        for agent_id in &task.assigned_agents {
+            tasks_by_agent
+                .entry(agent_id.clone())
+                .or_default()
+                .push((task.task_id.clone(), task.status.clone()));
+        }
+    }
+    for tasks in tasks_by_agent.values_mut() {
+        tasks.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+    }
+
+    let mut nodes = tui_state.agent_topology.nodes.clone();
+    nodes.sort_by(|lhs, rhs| lhs.id.cmp(&rhs.id));
+
+    let mut lines = vec!["└── pool: default".to_string()];
+    for (idx, node) in nodes.iter().enumerate() {
+        let is_last_node = idx + 1 == nodes.len();
+        let node_branch = if is_last_node { "    └──" } else { "    ├──" };
+        let child_prefix = if is_last_node { "        " } else { "    │   " };
+        let status = tui_state
+            .agents
+            .iter()
+            .find(|agent| agent.id == node.id)
+            .map(|agent| agent.status.label())
+            .unwrap_or("idle");
+        lines.push(format!("{node_branch} {} [{}]", node.id, status));
+
+        let mut children = Vec::new();
+        if let Some(tasks) = tasks_by_agent.get(&node.id) {
+            for (task_idx, (task_id, task_status)) in tasks.iter().enumerate() {
+                let branch = if task_idx + 1 == tasks.len() && node.address.is_empty() {
+                    "└──"
+                } else {
+                    "├──"
+                };
+                children.push(format!(
+                    "{child_prefix}{branch} task: {} ({})",
+                    truncate_middle(task_id, 36),
+                    task_status
+                ));
+            }
+        }
+        if !node.address.is_empty() {
+            children.push(format!(
+                "{child_prefix}└── addr: {}",
+                truncate_middle(&node.address, 42)
+            ));
+        }
+        if children.is_empty() {
+            children.push(format!("{child_prefix}└── no active tasks"));
+        }
+        lines.extend(children);
+    }
+
+    lines
 }
 
 fn render_live_stream_panel(

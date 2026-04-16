@@ -238,6 +238,22 @@ impl fmt::Display for PlanPhase {
     }
 }
 
+/// Fetch status for the agent-topology panel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AgentTopologyStatus {
+    /// No fetch has been attempted yet in this session.
+    #[default]
+    Idle,
+    /// A one-shot fetch is in flight.
+    Loading,
+    /// Topology data is available for rendering.
+    Ready,
+    /// The connected `roko serve` does not expose the endpoint.
+    Unavailable,
+    /// The fetch failed for some other reason.
+    Error(String),
+}
+
 /// Agent row for the Vec-based agent roster used by widgets.
 ///
 /// Widgets index into `TuiState::agents` by position, and read fields
@@ -772,6 +788,10 @@ pub struct TuiState {
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
     pub agents: Vec<AgentRow>,
+    /// Latest fetched agent-topology payload.
+    pub agent_topology: roko_core::AgentTopology,
+    /// Fetch status for the agent-topology panel.
+    pub agent_topology_status: AgentTopologyStatus,
     /// Per-agent route and context metrics keyed by agent identifier.
     pub route_metrics: HashMap<String, RouteMetrics>,
     /// Cached styled agent output keyed by agent identifier.
@@ -821,6 +841,10 @@ pub struct TuiState {
     pub plan_scroll_offset: usize,
     /// Log viewer scroll offset.
     pub log_scroll: usize,
+    /// Whether the agent-topology overlay is visible.
+    pub agent_topology_visible: bool,
+    /// Agent-topology overlay scroll offset.
+    pub agent_topology_scroll_offset: usize,
     /// Whether the log viewer is following the tail.
     pub log_auto_tail: bool,
     /// Active log levels shown in the Logs tab.
@@ -941,6 +965,8 @@ impl Default for TuiState {
             experiment_winners: Vec::new(),
 
             agents: Vec::new(),
+            agent_topology: roko_core::AgentTopology::default(),
+            agent_topology_status: AgentTopologyStatus::Idle,
             route_metrics: HashMap::new(),
             agent_output_cache: RefCell::new(HashMap::new()),
             agent_streams: HashMap::new(),
@@ -965,6 +991,8 @@ impl Default for TuiState {
             plan_detail_scroll: 0,
             plan_scroll_offset: 0,
             log_scroll: 0,
+            agent_topology_visible: false,
+            agent_topology_scroll_offset: 0,
             log_auto_tail: true,
             log_filter_levels: LogFilterLevel::all().into_iter().collect(),
 
@@ -1672,6 +1700,12 @@ impl TuiState {
             .collect();
         self.diagnoses = snap.diagnoses.iter().cloned().collect();
         self.experiment_winners = snap.experiment_winners.clone();
+        if !snap.agent_topology.is_empty() {
+            self.agent_topology = snap.agent_topology.clone();
+            self.agent_topology_status = AgentTopologyStatus::Ready;
+        } else if !matches!(self.agent_topology_status, AgentTopologyStatus::Ready) {
+            self.agent_topology = snap.agent_topology.clone();
+        }
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
@@ -1827,6 +1861,7 @@ impl TuiState {
         self.plan_detail_scroll = 0;
         self.plan_scroll_offset = 0;
         self.log_scroll = 0;
+        self.agent_topology_scroll_offset = 0;
         self.log_auto_tail = true;
     }
 
@@ -1849,6 +1884,47 @@ impl TuiState {
         } else {
             self.log_scroll = self.log_scroll.min(max);
         }
+    }
+
+    /// Toggle visibility for the agent-topology overlay.
+    pub fn toggle_agent_topology(&mut self) {
+        self.agent_topology_visible = !self.agent_topology_visible;
+    }
+
+    /// Close the agent-topology overlay.
+    pub fn close_agent_topology(&mut self) {
+        self.agent_topology_visible = false;
+    }
+
+    /// Clamp the agent-topology scroll offset to the current rendered maximum.
+    pub fn clamp_agent_topology_scroll(&mut self, max: usize) {
+        self.agent_topology_scroll_offset = self.agent_topology_scroll_offset.min(max);
+    }
+
+    /// Mark the agent-topology panel as loading.
+    pub fn set_agent_topology_loading(&mut self) {
+        self.agent_topology_status = AgentTopologyStatus::Loading;
+    }
+
+    /// Store the latest fetched agent-topology payload.
+    pub fn set_agent_topology(&mut self, topology: roko_core::AgentTopology) {
+        self.agent_topology = topology;
+        self.agent_topology_status = AgentTopologyStatus::Ready;
+        self.agent_topology_scroll_offset = 0;
+    }
+
+    /// Mark the agent-topology endpoint as unavailable.
+    pub fn set_agent_topology_unavailable(&mut self) {
+        self.agent_topology = roko_core::AgentTopology::default();
+        self.agent_topology_status = AgentTopologyStatus::Unavailable;
+        self.agent_topology_scroll_offset = 0;
+    }
+
+    /// Record a topology fetch error message.
+    pub fn set_agent_topology_error(&mut self, message: impl Into<String>) {
+        self.agent_topology = roko_core::AgentTopology::default();
+        self.agent_topology_status = AgentTopologyStatus::Error(message.into());
+        self.agent_topology_scroll_offset = 0;
     }
 
     /// Clamp the right-panel scroll offset to the current rendered maximum.
@@ -2909,12 +2985,31 @@ mod tests {
         state.agent_scroll = Some(50);
         state.diff_scroll = 10;
         state.log_scroll = 100;
+        state.agent_topology_scroll_offset = 8;
 
         state.reset_scrolls();
 
         assert_eq!(state.agent_scroll, None);
         assert_eq!(state.diff_scroll, 0);
         assert_eq!(state.log_scroll, 0);
+        assert_eq!(state.agent_topology_scroll_offset, 0);
+    }
+
+    #[test]
+    fn agent_topology_toggle_and_clamp_work() {
+        let mut state = TuiState::default();
+
+        assert!(!state.agent_topology_visible);
+
+        state.toggle_agent_topology();
+        assert!(state.agent_topology_visible);
+
+        state.agent_topology_scroll_offset = 42;
+        state.clamp_agent_topology_scroll(12);
+        assert_eq!(state.agent_topology_scroll_offset, 12);
+
+        state.close_agent_topology();
+        assert!(!state.agent_topology_visible);
     }
 
     #[test]
@@ -3576,6 +3671,7 @@ tier = "focused"
             ],
             diagnoses: Default::default(),
             experiment_winners: Vec::new(),
+            agent_topology: roko_core::AgentTopology::default(),
             efficiency_trend: Vec::new(),
             errors: vec![
                 ErrorEntry {
