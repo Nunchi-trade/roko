@@ -3,8 +3,8 @@
 # mirage-rs container image (§42.2).
 #
 # Multi-stage build:
-#   builder : rust:1.85-bookworm-slim — compiles `mirage-rs` with the `chain` feature
-#             (binary + chain = HDC / knowledge / stigmergy RPC surface enabled)
+#   builder : rust:1.85-bookworm-slim — compiles `mirage-rs` with the `roko` feature
+#             (binary + roko = HDC / knowledge / stigmergy + REST API + WebSocket)
 #   runtime : distroless/cc-debian12:nonroot — minimal, non-root, no shell
 #
 # The `mirage-rs` crate's binary is named `mirage-rs` (see apps/mirage-rs/Cargo.toml).
@@ -25,16 +25,18 @@ RUN apt-get update \
 
 COPY . .
 
-# Build mirage-rs with the `binary` + `chain` features so the resulting image
-# exposes the chain_* JSON-RPC methods and --enable-hdc/knowledge/stigmergy flags.
+# Build mirage-rs with the `binary` + `roko` features (roko implies chain) so the
+# resulting image exposes: chain_* JSON-RPC methods, the /api/* REST router
+# (health, stats, pheromones, knowledge, agents, tasks), and WebSocket streaming
+# at /api/ws. Without `roko`, the REST API + WebSocket layer is not fully mounted.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,chain" && \
+    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" && \
     cp target/release/mirage-rs /mirage-rs
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 LABEL org.opencontainers.image.source="https://github.com/wpank/bardo"
-LABEL org.opencontainers.image.description="mirage-rs: in-process EVM fork simulator with HDC/knowledge/stigmergy extensions"
+LABEL org.opencontainers.image.description="mirage-rs: in-process EVM fork simulator with HDC/knowledge/stigmergy + REST API + WebSocket"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 LABEL org.opencontainers.image.title="mirage-rs"
 LABEL org.opencontainers.image.vendor="Bardo"
