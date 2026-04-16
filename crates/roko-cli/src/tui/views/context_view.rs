@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Tab
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
 use crate::tui::state::TuiState;
 
 /// Token burn data for sparkline rendering.
@@ -59,12 +60,20 @@ pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
-    _tui_state: &TuiState,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let ctx_data = build_context_data(data);
-    render_with_context_data(frame, area, data, &ctx_data, view_state, theme);
+    render_with_context_data(
+        frame,
+        area,
+        data,
+        &ctx_data,
+        view_state,
+        theme,
+        matches!(tui_state.focus, FocusZone::RightPanel),
+    );
 }
 
 /// Render the context view with explicit context data (for integration layer).
@@ -75,6 +84,7 @@ fn render_with_context_data(
     ctx_data: &ContextViewData,
     view_state: &ViewState,
     theme: &Theme,
+    focused: bool,
 ) {
     let sections = Layout::vertical([
         Constraint::Percentage(20), // Health summary
@@ -83,26 +93,50 @@ fn render_with_context_data(
     ])
     .split(area);
 
-    render_health_summary(frame, sections[0], data, theme);
+    render_health_summary(frame, sections[0], data, focused, theme);
 
     let mid_panels = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(sections[1]);
-    render_token_burn_by_role(frame, mid_panels[0], data, view_state, theme);
-    render_cost_by_model(frame, mid_panels[1], data, theme);
+    render_token_burn_by_role(frame, mid_panels[0], data, view_state, focused, theme);
+    render_cost_by_model(frame, mid_panels[1], data, focused, theme);
 
     let bottom_panels =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(sections[2]);
-    render_cascade_router(frame, bottom_panels[0], data, ctx_data, view_state, theme);
-    render_alerts_and_health(frame, bottom_panels[1], data, theme);
+    render_cascade_router(
+        frame,
+        bottom_panels[0],
+        data,
+        ctx_data,
+        view_state,
+        focused,
+        theme,
+    );
+    render_alerts_and_health(frame, bottom_panels[1], data, focused, theme);
 }
 
 /// Top section: system health summary with C-Factor and key metrics.
-fn render_health_summary(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+fn render_health_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.accent()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.accent()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" System Health ")
-        .border_style(theme.accent());
+        .title(Span::styled(" System Health ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -241,12 +275,23 @@ fn render_token_burn_by_role(
     area: Rect,
     data: &DashboardData,
     _view_state: &ViewState,
+    focused: bool,
     theme: &Theme,
 ) {
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.accent()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.accent()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Token Burn by Role ")
-        .border_style(theme.accent());
+        .title(Span::styled(" Token Burn by Role ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -340,11 +385,27 @@ fn render_token_burn_by_role(
 }
 
 /// Cost breakdown per model from efficiency events.
-fn render_cost_by_model(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
+fn render_cost_by_model(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.accent()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.accent()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Cost by Model ")
-        .border_style(theme.accent());
+        .title(Span::styled(" Cost by Model ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -428,12 +489,23 @@ fn render_cascade_router(
     data: &DashboardData,
     ctx_data: &ContextViewData,
     _view_state: &ViewState,
+    focused: bool,
     theme: &Theme,
 ) {
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.accent()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.accent()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Cascade Router ")
-        .border_style(theme.accent());
+        .title(Span::styled(" Cascade Router ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -553,12 +625,23 @@ fn render_alerts_and_health(
     frame: &mut Frame<'_>,
     area: Rect,
     data: &DashboardData,
+    focused: bool,
     theme: &Theme,
 ) {
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Alerts & Gates ")
-        .border_style(theme.muted());
+        .title(Span::styled(" Alerts & Gates ", title_style))
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -127,15 +127,15 @@ pub fn render_modal(
             render_help_modal(frame, area, theme);
         }
         ModalState::PlanDetail { plan_id } => {
-            if let Some(plan) = tui_state.plans.iter().find(|plan| &plan.id == plan_id) {
-                plan_detail::render_plan_detail_modal(
-                    frame,
-                    area,
-                    plan,
-                    tui_state.plan_detail_scroll as u16,
-                    theme,
-                );
-            }
+            let plan = tui_state.plans.iter().find(|plan| &plan.id == plan_id);
+            plan_detail::render_plan_detail_modal(
+                frame,
+                area,
+                plan_id,
+                plan,
+                tui_state.plan_detail_scroll as u16,
+                theme,
+            );
         }
         ModalState::Quit => {
             render_quit(frame, area, theme);

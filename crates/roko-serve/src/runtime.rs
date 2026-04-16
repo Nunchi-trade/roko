@@ -31,17 +31,24 @@ pub struct RepoInfo {
 /// Snapshot of session status (mirrors `roko_cli::SessionStatus` fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStatusInfo {
+    /// Active session identifier when a daemon-backed session exists.
     pub session_id: Option<String>,
+    /// Repository working directory used to resolve local `.roko/` state.
     pub workdir: PathBuf,
+    /// Whether the background daemon is currently running.
     pub daemon_running: bool,
+    /// Number of known signals, if available from the runtime implementation.
     pub signal_count: Option<usize>,
+    /// Number of recorded episodes, if available from the runtime implementation.
     pub episode_count: Option<usize>,
+    /// Whether the latest episode passed, if the runtime can determine it.
     pub last_episode_passed: Option<bool>,
 }
 
-/// Opaque dashboard payload.
+/// Opaque dashboard payload rendered by the CLI dashboard scaffold.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardInfo {
+    /// Pre-rendered textual dashboard output.
     pub rendered: String,
 }
 

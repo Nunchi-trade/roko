@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::braille;
-use super::rosedust::{MoriTheme, brighten};
+use super::rosedust::brighten;
+use crate::tui::Theme;
 use crate::tui::dashboard::DashboardData;
 use crate::tui::pages::efficiency::build_efficiency_snapshot;
 use crate::tui::state::TuiState;
@@ -43,10 +44,10 @@ fn fmt_rate(rate: f64) -> String {
 
 fn tier_color(tier: &str) -> Color {
     match tier {
-        "T0" => MoriTheme::SAGE,
-        "T1" => MoriTheme::ROSE,
-        "T2" => MoriTheme::WARNING,
-        _ => MoriTheme::TEXT_DIM,
+        "T0" => Theme::SAGE,
+        "T1" => Theme::ROSE,
+        "T2" => Theme::WARNING,
+        _ => Theme::TEXT_DIM,
     }
 }
 
@@ -96,18 +97,18 @@ pub fn render_token_sparkline(
         .rev()
         .collect();
 
-    let pulsed_color = brighten(MoriTheme::ROSE, state.atmosphere.breathing_brightness());
+    let pulsed_color = brighten(Theme::ROSE, state.atmosphere.breathing_brightness());
     let border_color = if snapshot.total_cost_usd > 0.0 {
-        MoriTheme::ROSE_DIM
+        Theme::ROSE_DIM
     } else {
-        MoriTheme::TEXT_GHOST
+        Theme::TEXT_GHOST
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Efficiency")
-        .style(MoriTheme::block_style())
+        .style(Theme::block_style())
         .border_style(Style::default().fg(border_color))
-        .title_style(MoriTheme::title_style());
+        .title_style(Theme::title_style());
     let inner = block.inner(area);
 
     if inner.width < 8 || inner.height < 1 {
@@ -116,47 +117,44 @@ pub fn render_token_sparkline(
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     let summary1 = Line::from(vec![
-        Span::styled(" tokens ", Style::default().fg(MoriTheme::BONE_DIM)),
+        Span::styled(" tokens ", Style::default().fg(Theme::BONE_DIM)),
         Span::styled(
             fmt_tokens(snapshot.total_tokens),
-            Style::default().fg(MoriTheme::BONE),
+            Style::default().fg(Theme::BONE),
         ),
-        Span::styled(" cost ", Style::default().fg(MoriTheme::BONE_DIM)),
+        Span::styled(" cost ", Style::default().fg(Theme::BONE_DIM)),
         Span::styled(
             format!("${:.2}", snapshot.total_cost_usd),
-            Style::default().fg(MoriTheme::WARNING),
+            Style::default().fg(Theme::WARNING),
         ),
-        Span::styled(" avg/task ", Style::default().fg(MoriTheme::BONE_DIM)),
+        Span::styled(" avg/task ", Style::default().fg(Theme::BONE_DIM)),
         Span::styled(
             fmt_tokens(snapshot.average_tokens_per_task.round() as u64),
-            Style::default().fg(MoriTheme::FG),
+            Style::default().fg(Theme::FG),
         ),
     ]);
     lines.push(summary1);
 
     if inner.height > 3 {
         let summary2 = Line::from(vec![
-            Span::styled(" succ ", Style::default().fg(MoriTheme::BONE_DIM)),
+            Span::styled(" succ ", Style::default().fg(Theme::BONE_DIM)),
             Span::styled(
                 format!("{:.0}%", snapshot.success_rate * 100.0),
                 Style::default().fg(if snapshot.success_rate >= 0.9 {
-                    MoriTheme::SAGE
+                    Theme::SAGE
                 } else if snapshot.success_rate >= 0.6 {
-                    MoriTheme::WARNING
+                    Theme::WARNING
                 } else {
-                    MoriTheme::EMBER
+                    Theme::EMBER
                 }),
             ),
-            Span::styled(" events ", Style::default().fg(MoriTheme::BONE_DIM)),
+            Span::styled(" events ", Style::default().fg(Theme::BONE_DIM)),
             Span::styled(
                 format!("{}", snapshot.event_count),
-                Style::default().fg(MoriTheme::TEXT),
+                Style::default().fg(Theme::TEXT),
             ),
-            Span::styled(" window ", Style::default().fg(MoriTheme::BONE_DIM)),
-            Span::styled(
-                format!("{window}"),
-                Style::default().fg(MoriTheme::TEXT_DIM),
-            ),
+            Span::styled(" window ", Style::default().fg(Theme::BONE_DIM)),
+            Span::styled(format!("{window}"), Style::default().fg(Theme::TEXT_DIM)),
         ]);
         lines.push(summary2);
     }
@@ -172,18 +170,18 @@ pub fn render_token_sparkline(
             .max(8);
         let mut spans = vec![Span::styled(
             format!(" {} ", fmt_tokens(snapshot.total_tokens)),
-            Style::default().fg(MoriTheme::BONE_DIM),
+            Style::default().fg(Theme::BONE_DIM),
         )];
         spans.extend(braille::braille_spans_u64(&display, spark_w, pulsed_color));
         spans.push(Span::styled(
             format!(" {} ", fmt_rate(rate)),
-            Style::default().fg(MoriTheme::ROSE),
+            Style::default().fg(Theme::ROSE),
         ));
         lines.push(Line::from(spans));
     } else {
         lines.push(Line::from(Span::styled(
             format!(" {} waiting for data...", state.atmosphere.spinner()),
-            Style::default().fg(MoriTheme::TEXT_DIM),
+            Style::default().fg(Theme::TEXT_DIM),
         )));
     }
 
@@ -207,9 +205,9 @@ pub fn render_token_sparkline(
             ),
             Span::styled(
                 "\u{2500}".repeat(empty),
-                Style::default().fg(MoriTheme::TEXT_PHANTOM),
+                Style::default().fg(Theme::TEXT_PHANTOM),
             ),
-            Span::styled(suffix, Style::default().fg(MoriTheme::BONE_DIM)),
+            Span::styled(suffix, Style::default().fg(Theme::BONE_DIM)),
         ]));
     }
 

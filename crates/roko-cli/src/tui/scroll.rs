@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 /// Tracks scroll velocity and accelerates on repeated same-direction keys.
 ///
-/// If the user presses the same direction within 300ms, velocity ramps
-/// 1x -> 2x -> 4x -> 8x. Direction change or timeout resets to 1x.
+/// If the user repeats the same direction within 500ms, velocity ramps
+/// 1x -> 2x -> 4x -> 8x. Direction change or idle time resets to 1x.
 #[derive(Debug, Clone)]
 pub struct ScrollAccel {
     velocity: i16,
@@ -20,7 +20,7 @@ impl Default for ScrollAccel {
             velocity: 1,
             last_direction: 0,
             last_key_time: Instant::now(),
-            acceleration_threshold: Duration::from_millis(300),
+            acceleration_threshold: Duration::from_millis(500),
         }
     }
 }
@@ -31,9 +31,9 @@ impl ScrollAccel {
         Self::default()
     }
 
-    /// Push a scroll event in the given direction (+1 or -1).
+    /// Tick the accelerator for a scroll event in the given direction (+1 or -1).
     /// Returns the accelerated scroll amount (signed).
-    pub fn push(&mut self, direction: i16) -> i16 {
+    pub fn tick(&mut self, direction: i16) -> i16 {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_key_time);
 
@@ -49,6 +49,11 @@ impl ScrollAccel {
         self.last_key_time = now;
 
         direction * self.velocity
+    }
+
+    /// Backwards-compatible alias for `tick`.
+    pub fn push(&mut self, direction: i16) -> i16 {
+        self.tick(direction)
     }
 
     /// Reset velocity to 1x.

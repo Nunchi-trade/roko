@@ -11,7 +11,7 @@ use ratatui::widgets::Paragraph;
 
 use super::super::state::TuiState;
 use super::super::tabs::Tab;
-use super::rosedust::MoriTheme;
+use crate::tui::Theme;
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", ".", "\u{25cf}"];
 
@@ -21,7 +21,7 @@ const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", ".", "\u{25cf}"];
 
 /// Render the bottom status bar.
 pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let bg = Style::default().bg(MoriTheme::BG_SECONDARY);
+    let bg = Style::default().bg(Theme::BG_SECONDARY);
 
     let (done, total) = state.task_counts();
     let all_done = total > 0 && state.plans.iter().all(|p| !p.active);
@@ -33,31 +33,27 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     if !state.git_branch.is_empty() {
         spans.push(Span::styled(
             state.git_branch.clone(),
-            Style::default()
-                .fg(MoriTheme::BONE)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::BONE).bg(Theme::BG_SECONDARY),
         ));
         if !state.git_commit_short.is_empty() {
             spans.push(Span::styled(
                 format!(" {}", &state.git_commit_short),
                 Style::default()
-                    .fg(MoriTheme::TEXT_GHOST)
-                    .bg(MoriTheme::BG_SECONDARY),
+                    .fg(Theme::TEXT_GHOST)
+                    .bg(Theme::BG_SECONDARY),
             ));
         }
         if !state.git_age.is_empty() {
             spans.push(Span::styled(
                 format!(" {}", &state.git_age),
                 Style::default()
-                    .fg(MoriTheme::TEXT_GHOST)
-                    .bg(MoriTheme::BG_SECONDARY),
+                    .fg(Theme::TEXT_GHOST)
+                    .bg(Theme::BG_SECONDARY),
             ));
         }
         spans.push(Span::styled(
             " \u{2502} ",
-            Style::default()
-                .fg(MoriTheme::ROSE_DIM)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::ROSE_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -65,16 +61,14 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let hb_idx = (state.atmosphere.frame() / 8) as usize % HEARTBEAT_FRAMES.len();
     spans.push(Span::styled(
         HEARTBEAT_FRAMES[hb_idx],
-        Style::default()
-            .fg(MoriTheme::ROSE_DIM)
-            .bg(MoriTheme::BG_SECONDARY),
+        Style::default().fg(Theme::ROSE_DIM).bg(Theme::BG_SECONDARY),
     ));
     if state.is_paused {
         spans.push(Span::styled(
             " PAUSED ",
             Style::default()
-                .fg(MoriTheme::WARNING)
-                .bg(MoriTheme::BG_SECONDARY)
+                .fg(Theme::WARNING)
+                .bg(Theme::BG_SECONDARY)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -89,15 +83,15 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         format!(" {done}/{total}")
     };
     let progress_style = if has_failures {
-        MoriTheme::error_style()
+        Theme::error_style()
     } else if all_done {
-        MoriTheme::success_style()
+        Theme::success_style()
     } else {
-        Style::default().fg(MoriTheme::ROSE)
+        Style::default().fg(Theme::ROSE)
     };
     spans.push(Span::styled(
         format!(" {progress_text} "),
-        progress_style.bg(MoriTheme::BG_SECONDARY),
+        progress_style.bg(Theme::BG_SECONDARY),
     ));
 
     // Health summary: active plans, live agents, flailing, retries, failures
@@ -109,33 +103,25 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     if active_count > 0 || live_agents > 0 {
         spans.push(Span::styled(
             format!(" {active_count}\u{25b8} {live_agents}ag"),
-            Style::default()
-                .fg(MoriTheme::ROSE_DIM)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::ROSE_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
     if flailing_count > 0 {
         spans.push(Span::styled(
             format!(" \u{26a0}{flailing_count}"),
-            Style::default()
-                .fg(MoriTheme::EMBER)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::EMBER).bg(Theme::BG_SECONDARY),
         ));
     }
     if total_failures > 0 {
         spans.push(Span::styled(
             format!(" \u{2717}{total_failures}"),
-            Style::default()
-                .fg(MoriTheme::EMBER)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::EMBER).bg(Theme::BG_SECONDARY),
         ));
     }
 
     spans.push(Span::styled(
         " \u{2502} ",
-        Style::default()
-            .fg(MoriTheme::ROSE_DIM)
-            .bg(MoriTheme::BG_SECONDARY),
+        Style::default().fg(Theme::ROSE_DIM).bg(Theme::BG_SECONDARY),
     ));
 
     // ── 4. Context-sensitive keybind hints ────────────────────────────
@@ -157,9 +143,7 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
 
     spans.push(Span::styled(
         format!(" {keys}"),
-        Style::default()
-            .fg(MoriTheme::FG_DIM)
-            .bg(MoriTheme::BG_SECONDARY),
+        Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
     ));
 
     let line = Line::from(spans);

@@ -16,24 +16,9 @@ use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Tab
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::input::FocusZone;
+pub(crate) use crate::tui::state::GitBranchNode;
 use crate::tui::state::TuiState;
-
-/// A node in the branch tree display.
-#[derive(Debug, Clone)]
-pub(crate) struct GitBranchNode {
-    /// Branch name (e.g. "main", "feature/foo").
-    pub name: String,
-    /// Whether this is the currently checked-out branch.
-    pub is_current: bool,
-    /// Remote tracking branch, if any.
-    pub tracking: Option<String>,
-    /// Commits ahead of tracking branch.
-    pub ahead: u32,
-    /// Commits behind tracking branch.
-    pub behind: u32,
-    /// Indent depth for hierarchical display (e.g. feature/ prefix).
-    pub depth: u16,
-}
 
 /// A worktree entry.
 #[derive(Debug, Clone)]
@@ -80,7 +65,7 @@ pub(crate) fn render(
 ) {
     let empty = GitViewData::default();
     let git_data = tui_state.git_view_data.as_ref().unwrap_or(&empty);
-    render_with_git_data(frame, area, git_data, view_state, theme);
+    render_with_git_data(frame, area, git_data, tui_state, view_state, theme);
 }
 
 /// Render the git view with explicit git data (for integration layer).
@@ -88,14 +73,17 @@ pub(crate) fn render_with_git_data(
     frame: &mut Frame<'_>,
     area: Rect,
     git_data: &GitViewData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let panels =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
-    render_left_panel(frame, panels[0], git_data, view_state, theme);
-    render_right_panel(frame, panels[1], git_data, view_state, theme);
+    let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+
+    render_left_panel(frame, panels[0], git_data, focused, view_state, theme);
+    render_right_panel(frame, panels[1], git_data, focused, view_state, theme);
 }
 
 /// Left panel: branch tree (top 50%) + worktree list (mid 25%) + status (bottom 25%).
@@ -103,6 +91,7 @@ fn render_left_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     git_data: &GitViewData,
+    focused: bool,
     view_state: &ViewState,
     theme: &Theme,
 ) {
@@ -113,9 +102,9 @@ fn render_left_panel(
     ])
     .split(area);
 
-    render_branch_tree(frame, sections[0], git_data, view_state, theme);
-    render_worktree_list(frame, sections[1], git_data, theme);
-    render_status(frame, sections[2], git_data, theme);
+    render_branch_tree(frame, sections[0], git_data, focused, view_state, theme);
+    render_worktree_list(frame, sections[1], git_data, focused, theme);
+    render_status(frame, sections[2], git_data, focused, theme);
 }
 
 /// Branch tree: hierarchical branch listing.
@@ -123,13 +112,25 @@ fn render_branch_tree(
     frame: &mut Frame<'_>,
     area: Rect,
     git_data: &GitViewData,
+    focused: bool,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Branches ({}) ", git_data.branches.len()))
-        .border_style(theme.accent());
+        .title(Span::styled(
+            format!(" Branches ({}) ", git_data.branches.len()),
+            if focused {
+                Theme::focused_title_style()
+            } else {
+                theme.accent().add_modifier(Modifier::BOLD)
+            },
+        ))
+        .border_style(if focused {
+            Theme::focused_border_style()
+        } else {
+            theme.accent()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -175,11 +176,28 @@ fn render_branch_tree(
 }
 
 /// Worktree list: simple table with path, branch, status.
-fn render_worktree_list(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData, theme: &Theme) {
+fn render_worktree_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    git_data: &GitViewData,
+    focused: bool,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Worktrees ({}) ", git_data.worktrees.len()))
-        .border_style(theme.muted());
+        .title(Span::styled(
+            format!(" Worktrees ({}) ", git_data.worktrees.len()),
+            if focused {
+                Theme::focused_title_style()
+            } else {
+                theme.muted()
+            },
+        ))
+        .border_style(if focused {
+            Theme::focused_border_style()
+        } else {
+            theme.muted()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -218,11 +236,28 @@ fn render_worktree_list(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewDat
 }
 
 /// Status panel: git status summary.
-fn render_status(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData, theme: &Theme) {
+fn render_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    git_data: &GitViewData,
+    focused: bool,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Status ")
-        .border_style(theme.muted());
+        .title(Span::styled(
+            " Status ",
+            if focused {
+                Theme::focused_title_style()
+            } else {
+                theme.muted()
+            },
+        ))
+        .border_style(if focused {
+            Theme::focused_border_style()
+        } else {
+            theme.muted()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -273,14 +308,15 @@ fn render_right_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     git_data: &GitViewData,
+    focused: bool,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let sections =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
-    render_commit_graph(frame, sections[0], git_data, view_state, theme);
-    render_branch_info(frame, sections[1], git_data, theme);
+    render_commit_graph(frame, sections[0], git_data, focused, view_state, theme);
+    render_branch_info(frame, sections[1], git_data, focused, theme);
 }
 
 /// Commit graph: rendered git log with graph characters.
@@ -288,13 +324,25 @@ fn render_commit_graph(
     frame: &mut Frame<'_>,
     area: Rect,
     git_data: &GitViewData,
+    focused: bool,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Commit Graph ({}) ", git_data.commits.len()))
-        .border_style(theme.accent());
+        .title(Span::styled(
+            format!(" Commit Graph ({}) ", git_data.commits.len()),
+            if focused {
+                Theme::focused_title_style()
+            } else {
+                theme.accent().add_modifier(Modifier::BOLD)
+            },
+        ))
+        .border_style(if focused {
+            Theme::focused_border_style()
+        } else {
+            theme.accent()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -326,11 +374,28 @@ fn render_commit_graph(
 }
 
 /// Branch info: current branch, remote tracking, ahead/behind.
-fn render_branch_info(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData, theme: &Theme) {
+fn render_branch_info(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    git_data: &GitViewData,
+    focused: bool,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Branch Info ")
-        .border_style(theme.muted());
+        .title(Span::styled(
+            " Branch Info ",
+            if focused {
+                Theme::focused_title_style()
+            } else {
+                theme.muted()
+            },
+        ))
+        .border_style(if focused {
+            Theme::focused_border_style()
+        } else {
+            theme.muted()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -341,9 +406,8 @@ fn render_branch_info(frame: &mut Frame<'_>, area: Rect, git_data: &GitViewData,
     };
 
     let current_node = git_data.branches.iter().find(|b| b.is_current);
-
     let tracking_display = current_node
-        .and_then(|n| n.tracking.as_deref())
+        .and_then(|node| node.tracking.as_deref())
         .unwrap_or("(none)");
 
     let lines = vec![
@@ -468,7 +532,6 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
         let (ahead, behind) = parse_ahead_behind(track_info);
 
         let is_current = name == current_branch;
-        // Compute depth from path segments (e.g. feature/foo -> depth 1)
         let depth = name.matches('/').count().min(3) as u16;
 
         branches.push(GitBranchNode {
@@ -478,6 +541,7 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
             ahead,
             behind,
             depth,
+            children: Vec::new(),
         });
     }
 
@@ -487,9 +551,9 @@ fn collect_branches(current_branch: &str) -> Vec<GitBranchNode> {
 }
 
 /// Parse "[ahead N, behind M]" from git tracking info.
-fn parse_ahead_behind(s: &str) -> (u32, u32) {
-    let mut ahead = 0u32;
-    let mut behind = 0u32;
+fn parse_ahead_behind(s: &str) -> (usize, usize) {
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
     if s.contains("ahead") {
         if let Some(n) = s
             .split("ahead ")

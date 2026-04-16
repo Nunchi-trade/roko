@@ -5,21 +5,153 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use parking_lot::Mutex;
+use roko_agent::chat_types::{
+    ChatRequest, ChatResponse, FinishReason, ResponseMetadata, SessionState,
+};
+use roko_agent::dispatcher::ToolDispatcher;
+use roko_agent::streaming::StreamChunk;
 use roko_agent::tool_loop::LlmBackend;
+use roko_agent::translate::{BackendResponse, RenderedTools, normalize_finish_reason};
 use roko_chain::ChainClient;
 use roko_neuro::KnowledgeStore;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::registration::{AgentCard, AgentCardEndpoints};
 
-/// Opaque message context payload.
+/// Opaque message context payload that round-trips caller JSON as-is.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MessageContext {
-    /// Raw extra JSON carried by the caller.
-    #[serde(default)]
-    pub extra: serde_json::Value,
+#[serde(transparent)]
+pub struct MessageContext(serde_json::Value);
+
+/// Errors returned by the message dispatch seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// No dispatcher was configured for this request.
+    NotConfigured,
+    /// Dispatch failed after reaching a configured backend.
+    DispatchFailed(String),
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConfigured => f.write_str("no configured dispatcher"),
+            Self::DispatchFailed(reason) => write!(f, "dispatch failed: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+/// Message dispatch abstraction used by messaging routes.
+#[async_trait]
+pub trait DispatchLike: Send + Sync {
+    /// Dispatch a non-streaming message turn.
+    async fn dispatch(&self, request: ChatRequest) -> Result<ChatResponse, DispatchError>;
+
+    /// Dispatch a streaming message turn.
+    async fn dispatch_streaming(
+        &self,
+        request: ChatRequest,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<ChatResponse, DispatchError> {
+        let _ = event_tx;
+        self.dispatch(request).await
+    }
+}
+
+struct BackendMessageDispatcher {
+    backend: Arc<dyn LlmBackend>,
+}
+
+impl BackendMessageDispatcher {
+    fn new(backend: Arc<dyn LlmBackend>) -> Self {
+        Self { backend }
+    }
+}
+
+#[async_trait]
+impl DispatchLike for BackendMessageDispatcher {
+    async fn dispatch(&self, request: ChatRequest) -> Result<ChatResponse, DispatchError> {
+        let messages = request
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+        let response = self
+            .backend
+            .send_turn(
+                &messages,
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+            )
+            .await
+            .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+        Ok(chat_response_from_backend(&*self.backend, &response))
+    }
+
+    async fn dispatch_streaming(
+        &self,
+        request: ChatRequest,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<ChatResponse, DispatchError> {
+        let messages = request
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+        let response = self
+            .backend
+            .send_turn_streaming(
+                &messages,
+                &RenderedTools::JsonArray(serde_json::json!([])),
+                &SessionState::default(),
+                event_tx,
+            )
+            .await
+            .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+        Ok(chat_response_from_backend(&*self.backend, &response))
+    }
+}
+
+fn chat_response_from_backend(
+    backend: &dyn LlmBackend,
+    response: &BackendResponse,
+) -> ChatResponse {
+    let finish_reason = response_finish_reason(response).unwrap_or(FinishReason::Stop);
+
+    ChatResponse {
+        content: response.extract_text(),
+        reasoning: response.extract_reasoning(),
+        tool_calls: Vec::new(),
+        usage: response.extract_usage(),
+        finish_reason,
+        metadata: ResponseMetadata::default(),
+        raw_assistant_message: None,
+        session: backend.extract_session(response),
+    }
+}
+
+fn response_finish_reason(response: &BackendResponse) -> Option<FinishReason> {
+    match response {
+        BackendResponse::Json(value) => value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                value
+                    .pointer("/candidates/0/finishReason")
+                    .and_then(Value::as_str)
+            })
+            .map(normalize_finish_reason),
+        BackendResponse::StreamJson(_) | BackendResponse::Text(_) => None,
+    }
 }
 
 /// Internal and exported agent metrics.
@@ -160,12 +292,13 @@ pub struct ResearchResponse {
 }
 
 /// Task priority labels.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskPriority {
     /// Low priority.
     Low,
     /// Medium priority.
+    #[default]
     Medium,
     /// High priority.
     High,
@@ -173,28 +306,17 @@ pub enum TaskPriority {
     Critical,
 }
 
-impl Default for TaskPriority {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
 /// Task lifecycle labels.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     /// Open for work.
+    #[default]
     Open,
     /// Accepted by the agent.
     Accepted,
     /// Completed successfully.
     Completed,
-}
-
-impl Default for TaskState {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 /// Task artifact payload.
@@ -280,6 +402,8 @@ pub struct AgentState {
     chain_client: Option<Arc<dyn ChainClient>>,
     #[allow(dead_code)]
     llm_backend: Option<Arc<dyn LlmBackend>>,
+    message_dispatcher: Option<Arc<dyn DispatchLike>>,
+    dispatcher: Option<Arc<ToolDispatcher>>,
     #[allow(dead_code)]
     knowledge_store: Option<Arc<KnowledgeStore>>,
     predictions: Mutex<Vec<AgentPrediction>>,
@@ -301,6 +425,9 @@ impl AgentState {
         knowledge_store: Option<Arc<KnowledgeStore>>,
     ) -> Self {
         let routes = build_routes(&capabilities);
+        let message_dispatcher = llm_backend.as_ref().map(|backend| {
+            Arc::new(BackendMessageDispatcher::new(Arc::clone(backend))) as Arc<dyn DispatchLike>
+        });
         Self {
             agent_id,
             owner,
@@ -311,6 +438,8 @@ impl AgentState {
             registered_at: now_secs(),
             chain_client,
             llm_backend,
+            message_dispatcher,
+            dispatcher: None,
             knowledge_store,
             predictions: Mutex::new(Vec::new()),
             tasks: Mutex::new(VecDeque::new()),
@@ -335,6 +464,38 @@ impl AgentState {
     #[must_use]
     pub const fn metrics(&self) -> &AgentMetrics {
         &self.metrics
+    }
+
+    /// Borrow the configured LLM backend, if one is attached.
+    #[must_use]
+    pub fn llm_backend(&self) -> Option<&Arc<dyn LlmBackend>> {
+        self.llm_backend.as_ref()
+    }
+
+    /// Borrow the configured message dispatcher, if one is attached.
+    #[must_use]
+    pub fn message_dispatcher(&self) -> Option<Arc<dyn DispatchLike>> {
+        self.message_dispatcher.as_ref().map(Arc::clone)
+    }
+
+    /// Attach a dispatcher used to service message routes.
+    #[must_use]
+    pub fn with_message_dispatcher(mut self, dispatcher: Arc<dyn DispatchLike>) -> Self {
+        self.message_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach a dispatcher used to service agent messages.
+    #[must_use]
+    pub fn with_dispatcher(mut self, dispatcher: Arc<ToolDispatcher>) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Borrow the configured dispatcher, if one is attached.
+    #[must_use]
+    pub const fn dispatcher(&self) -> Option<&Arc<ToolDispatcher>> {
+        self.dispatcher.as_ref()
     }
 
     /// Build the public capabilities manifest.
@@ -413,6 +574,7 @@ impl AgentState {
     }
 
     /// Create a prediction entry.
+    #[allow(clippy::unused_async)]
     pub async fn create_prediction(&self, request: PredictionCreateRequest) -> AgentPrediction {
         self.metrics.record_request();
         let prediction = AgentPrediction {
@@ -432,12 +594,14 @@ impl AgentState {
     }
 
     /// Return all stored predictions.
+    #[allow(clippy::unused_async)]
     pub async fn list_predictions(&self) -> Vec<AgentPrediction> {
         self.metrics.record_request();
         self.predictions.lock().clone()
     }
 
     /// Fetch a prediction by identifier.
+    #[allow(clippy::unused_async)]
     pub async fn get_prediction(&self, id: &str) -> Option<AgentPrediction> {
         self.metrics.record_request();
         self.predictions
@@ -448,6 +612,11 @@ impl AgentState {
     }
 
     /// Summarize prediction residuals.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::significant_drop_tightening,
+        clippy::unused_async
+    )]
     pub async fn prediction_residuals(&self) -> serde_json::Value {
         self.metrics.record_request();
         let predictions = self.predictions.lock();
@@ -488,6 +657,7 @@ impl AgentState {
     }
 
     /// Execute a simple research request against the local state.
+    #[allow(clippy::unused_async)]
     pub async fn research(&self, request: ResearchRequest) -> ResearchResponse {
         self.metrics.record_request();
         let depth = request.depth;
@@ -507,12 +677,14 @@ impl AgentState {
     }
 
     /// Return the current task queue.
+    #[allow(clippy::unused_async)]
     pub async fn list_tasks(&self) -> Vec<TaskEntry> {
         self.metrics.record_request();
         self.tasks.lock().iter().cloned().collect()
     }
 
     /// Accept a task by identifier.
+    #[allow(clippy::significant_drop_tightening, clippy::unused_async)]
     pub async fn accept_task(&self, id: u64) -> Option<TaskEntry> {
         self.metrics.record_request();
         let mut tasks = self.tasks.lock();
@@ -523,6 +695,7 @@ impl AgentState {
     }
 
     /// Complete a task by identifier.
+    #[allow(clippy::significant_drop_tightening, clippy::unused_async)]
     pub async fn complete_task(
         &self,
         id: u64,
@@ -596,7 +769,7 @@ fn build_routes(capabilities: &[String]) -> Vec<String> {
     routes
 }
 
-fn operating_frequency(task_count: u64) -> &'static str {
+const fn operating_frequency(task_count: u64) -> &'static str {
     match task_count {
         0 => "idle",
         1..=2 => "reactive",

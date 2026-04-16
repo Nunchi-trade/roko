@@ -659,7 +659,10 @@ mod tests {
 
         let active_pids = supervisor.active_pids().await;
         assert_eq!(active_pids.len(), 1);
-        assert_eq!(supervisor.list().await, vec![(id, "test-active-pids".into())]);
+        assert_eq!(
+            supervisor.list().await,
+            vec![(id, "test-active-pids".into())]
+        );
         assert_eq!(active_pids[0].1, "test-active-pids");
         assert!(active_pids[0].0 > 0);
     }

@@ -104,6 +104,7 @@ fn render_agent_roster(
     view_state: &ViewState,
     theme: &Theme,
 ) {
+    let focused = matches!(tui_state.focus, FocusZone::PlanTree);
     let mut agents: Vec<(usize, &crate::tui::dashboard::AgentSummary)> =
         data.agents.iter().enumerate().collect();
     agents.sort_by(|(idx_a, a), (idx_b, b)| {
@@ -120,12 +121,16 @@ fn render_agent_roster(
         .count();
     let title = format!(" Agents ({} active) ", active_count);
 
-    let border_style = if active_count > 0 {
+    let border_style = if focused {
+        Theme::focused_border_style()
+    } else if active_count > 0 {
         Style::default().fg(theme.accent)
     } else {
         theme.muted()
     };
-    let title_style = if active_count > 0 {
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else if active_count > 0 {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
@@ -563,13 +568,13 @@ fn render_output_body(
     };
 
     let border_style = if focused {
-        Style::default().fg(accent)
+        Theme::focused_border_style()
     } else {
         theme.muted()
     };
-    let title_style = if focused
-        || selected_agent.is_some_and(|a| AgentStatus::from(a.status.as_str()).is_active())
-    {
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else if selected_agent.is_some_and(|a| AgentStatus::from(a.status.as_str()).is_active()) {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         theme.muted()
@@ -608,19 +613,17 @@ fn render_output_body(
     } else {
         format!("[PINNED line {}]", scroll.saturating_add(1))
     };
-    let block = block
-        .border_style(border_style)
-        .title(vec![
-            Span::styled(format!(" {title_label}"), title_style),
-            Span::styled(
-                format!(" {tail_indicator} "),
-                if tui_state.agent_scroll.is_none() {
-                    Style::default().fg(theme.success)
-                } else {
-                    Style::default().fg(theme.warning)
-                },
-            ),
-        ]);
+    let block = block.border_style(border_style).title(vec![
+        Span::styled(format!(" {title_label}"), title_style),
+        Span::styled(
+            format!(" {tail_indicator} "),
+            if tui_state.agent_scroll.is_none() {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default().fg(theme.warning)
+            },
+        ),
+    ]);
     frame.render_widget(block, area);
 
     if output_lines.is_empty() {
@@ -896,7 +899,11 @@ fn render_route_metrics_bar(
     let context_limit = metrics
         .map(|metric| metric.context_limit)
         .filter(|limit| *limit > 0)
-        .or_else(|| agent_row.map(|row| row.context_limit).filter(|limit| *limit > 0))
+        .or_else(|| {
+            agent_row
+                .map(|row| row.context_limit)
+                .filter(|limit| *limit > 0)
+        })
         .unwrap_or_else(|| model_context_limit(model));
     let utilization = if context_limit > 0 {
         (context_used as f64 / context_limit as f64).clamp(0.0, 1.0)
@@ -933,25 +940,30 @@ fn render_route_metrics_bar(
         Span::styled(" ", Style::default()),
         Span::styled("ctx:", Style::default().fg(theme.muted)),
         Span::styled(
-            format!(" {}/{}", format_tokens(context_used), format_tokens(context_limit)),
-            Style::default().fg(usage_color).add_modifier(Modifier::BOLD),
+            format!(
+                " {}/{}",
+                format_tokens(context_used),
+                format_tokens(context_limit)
+            ),
+            Style::default()
+                .fg(usage_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" │ ", Style::default().fg(theme.muted)),
         Span::styled("focus:", Style::default().fg(theme.muted)),
         Span::styled(
             format!(" {:.2}", focus_score),
-            Style::default().fg(focus_color).add_modifier(if focus_score >= 0.75 {
-                Modifier::BOLD
-            } else {
-                Modifier::DIM
-            }),
+            Style::default()
+                .fg(focus_color)
+                .add_modifier(if focus_score >= 0.75 {
+                    Modifier::BOLD
+                } else {
+                    Modifier::DIM
+                }),
         ),
         Span::styled(" │ ", Style::default().fg(theme.muted)),
         Span::styled("tier:", Style::default().fg(theme.muted)),
-        Span::styled(
-            format!(" {}", tier),
-            Style::default().fg(theme.foreground),
-        ),
+        Span::styled(format!(" {}", tier), Style::default().fg(theme.foreground)),
     ]);
 
     frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);

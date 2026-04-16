@@ -15,8 +15,9 @@ use ratatui::text::Line;
 use roko_core::OperatingFrequency;
 
 use super::atmosphere::Atmosphere;
-use super::dashboard::{DashboardData, PlanTaskListSnapshot, Theme};
+use super::dashboard::{DashboardData, GateResultSummary, PlanTaskListSnapshot, Theme};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
+use super::modals::ModalState;
 use super::segment::{CachedRender, output_byte_len, render_cached_output};
 use super::tabs::Tab;
 use crate::plan::{PlanSummary, plans_dir};
@@ -166,7 +167,7 @@ impl From<&str> for TaskStatus {
             | "merge"
             | "merging"
             | "commit" => Self::Active,
-            "failed" | "error" => Self::Failed,
+            "failed" | "error" | "gate_rejected" | "gate-rejected" => Self::Failed,
             "blocked" => Self::Blocked,
             _ => Self::Pending,
         }
@@ -371,7 +372,11 @@ fn event_model_slug(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> Str
 #[must_use]
 fn prompt_focus_score(event: &roko_learn::efficiency::AgentEfficiencyEvent) -> f64 {
     if event.prompt_sections.is_empty() {
-        return if event.total_prompt_tokens > 0 { 1.0 } else { 0.0 };
+        return if event.total_prompt_tokens > 0 {
+            1.0
+        } else {
+            0.0
+        };
     }
 
     let mut max_weighted = 0.0;
@@ -488,10 +493,19 @@ pub struct TaskEntry {
 /// Git branch tree node.
 #[derive(Debug, Clone, Default)]
 pub struct GitBranchNode {
+    /// Branch name.
     pub name: String,
+    /// Whether this branch is currently checked out.
     pub is_current: bool,
+    /// Upstream tracking branch, if configured.
+    pub tracking: Option<String>,
+    /// Number of commits ahead of the upstream branch.
     pub ahead: usize,
+    /// Number of commits behind the upstream branch.
     pub behind: usize,
+    /// Display indentation depth derived from the branch path.
+    pub depth: u16,
+    /// Nested child branches when rendered hierarchically.
     pub children: Vec<GitBranchNode>,
 }
 
@@ -504,6 +518,67 @@ pub struct GitCommitEntry {
     pub author: String,
     pub timestamp_ms: i64,
     pub branch: Option<String>,
+}
+
+/// Severity level for a unified TUI log entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogEntryLevel {
+    /// Debug-level event.
+    Debug,
+    /// Informational event.
+    Info,
+    /// Warning event.
+    Warn,
+    /// Error event.
+    Error,
+}
+
+impl LogEntryLevel {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Debug => "DBG",
+            Self::Info => "INF",
+            Self::Warn => "WRN",
+            Self::Error => "ERR",
+        }
+    }
+
+    #[must_use]
+    pub const fn filter_level(self) -> LogFilterLevel {
+        match self {
+            Self::Info => LogFilterLevel::Info,
+            Self::Warn => LogFilterLevel::Warn,
+            Self::Error => LogFilterLevel::Error,
+            Self::Debug => LogFilterLevel::Debug,
+        }
+    }
+}
+
+/// A parsed, display-ready log row for the Logs tab.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    /// Human-readable timestamp for the rendered row.
+    pub timestamp: String,
+    /// Severity level used for filtering and styling.
+    pub level: LogEntryLevel,
+    /// Compact source label such as `signal:gate`.
+    pub source: String,
+    /// Main message body shown in the Logs tab.
+    pub message: String,
+}
+
+impl LogEntry {
+    /// Construct a display-ready log entry.
+    #[must_use]
+    pub fn new(timestamp: String, level: LogEntryLevel, source: String, message: String) -> Self {
+        Self {
+            timestamp,
+            level,
+            source,
+            message,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +655,17 @@ pub struct GateResultEntry {
     pub passed: bool,
     /// Gate output text (stdout + stderr).
     pub output: String,
+}
+
+impl From<&GateResultSummary> for GateResultEntry {
+    fn from(value: &GateResultSummary) -> Self {
+        Self {
+            gate: value.gate_name.clone(),
+            plan_id: value.plan_id.clone(),
+            passed: value.passed,
+            output: value.summary.clone(),
+        }
+    }
 }
 
 /// System resource metrics snapshot.
@@ -724,6 +810,8 @@ pub struct TuiState {
     pub pending_approval: Option<PendingApproval>,
     /// Pending confirmation dialog action, if any.
     pub pending_confirm: Option<ConfirmAction>,
+    /// Active modal overlay, if any.
+    pub active_modal: Option<ModalState>,
 
     // -- git --
     /// Current git branch name.
@@ -764,6 +852,8 @@ pub struct TuiState {
     pub cumulative_output_tokens: u64,
     /// Total token count (input + output) for header_bar / token_sparkline.
     pub token_total: u64,
+    /// Rolling per-agent cumulative token totals, bounded to recent samples.
+    pub token_history: HashMap<String, VecDeque<u64>>,
     /// Current token burn rate (tokens per minute) for token_sparkline.
     pub token_rate: f64,
     /// Current cost burn rate (USD per minute).
@@ -856,6 +946,7 @@ impl Default for TuiState {
 
             pending_approval: None,
             pending_confirm: None,
+            active_modal: None,
 
             git_branch: String::new(),
             git_commit_short: String::new(),
@@ -876,6 +967,7 @@ impl Default for TuiState {
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
             token_total: 0,
+            token_history: HashMap::new(),
             token_rate: 0.0,
             cost_rate: 0.0,
             cost_dollars: 0.0,
@@ -983,6 +1075,17 @@ impl TuiState {
         &self.filter
     }
 
+    /// Return the display label for the active text input mode.
+    #[must_use]
+    pub const fn input_mode_label(&self) -> &'static str {
+        match self.input_mode {
+            InputMode::Normal => "",
+            InputMode::Inject => "INJECT",
+            InputMode::Filter => "FILTER",
+            InputMode::Confirm | InputMode::ConfigEdit => "",
+        }
+    }
+
     pub fn update_cpu_pct(&mut self, sample: f32) -> f32 {
         let smoothed = self.cpu_pct_smoothed.update(sample as f64) as f32;
         self.sys.cpu_pct = smoothed;
@@ -1067,7 +1170,23 @@ impl TuiState {
                     .map(|plan| plan.tasks.len())
                     .filter(|count| *count > 0)
                     .unwrap_or(p.task_count);
-                let (tasks_done, tasks_failed) = plan_task_counts(p, snapshot, tasks_total);
+                let (tasks_done, derived_failed) = plan_task_counts(p, snapshot, tasks_total);
+                let tasks_failed = snapshot
+                    .map(|plan| {
+                        usize::try_from(plan.failed_count)
+                            .unwrap_or(tasks_total)
+                            .min(tasks_total)
+                    })
+                    .unwrap_or(derived_failed);
+                let elapsed_secs = snapshot
+                    .map(|plan| {
+                        if plan.elapsed_ms > 0 {
+                            plan.elapsed_ms as f64 / 1000.0
+                        } else {
+                            plan.elapsed_secs
+                        }
+                    })
+                    .unwrap_or(0.0);
                 PlanEntry {
                     id: p.id.clone(),
                     name: p.title.clone(),
@@ -1077,8 +1196,10 @@ impl TuiState {
                     tasks_total,
                     tasks_done,
                     tasks_failed,
-                    elapsed_secs: snapshot.map(|plan| plan.elapsed_secs).unwrap_or(0.0),
-                    wave: plan_waves.get(&p.id).copied(),
+                    elapsed_secs,
+                    wave: snapshot
+                        .map(|plan| usize::try_from(plan.wave).unwrap_or_default())
+                        .or_else(|| plan_waves.get(&p.id).copied()),
                     expanded: expanded_by_plan.get(&p.id).copied().unwrap_or(false),
                     tasks: snapshot
                         .map(|plan| {
@@ -1208,19 +1329,11 @@ impl TuiState {
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
         self.cumulative_output_tokens = data.efficiency.total_output_tokens;
         self.token_total = self.cumulative_input_tokens + self.cumulative_output_tokens;
-        if self.token_rate == 0.0 {
-            self.token_rate = compute_token_rate(&data.efficiency_events);
-        }
         self.update_efficiency_rates();
         self.gate_results = data
             .gate_results
             .iter()
-            .map(|gate_result| GateResultEntry {
-                gate: gate_result.gate_name.clone(),
-                plan_id: gate_result.plan_id.clone(),
-                passed: gate_result.passed,
-                output: gate_result.summary.clone(),
-            })
+            .map(GateResultEntry::from)
             .collect();
         sum_costs(data, &mut self.cost_per_plan, &mut self.cost_per_task);
 
@@ -1256,6 +1369,25 @@ impl TuiState {
         self.selected_agent_tab = self.selected_agent_tab.min(6);
         self.selected_wave_idx =
             clamp_selected_wave_idx(self.selected_wave_idx, self.execution_waves.len());
+
+        let token_samples = build_token_samples(data);
+        self.token_history = token_samples
+            .iter()
+            .map(|(agent_id, samples)| {
+                (
+                    agent_id.clone(),
+                    samples.iter().map(|(_, total)| *total).collect(),
+                )
+            })
+            .collect();
+        self.token_rate = self
+            .agents
+            .get(self.selected_agent)
+            .and_then(|agent| token_samples.get(&agent.id))
+            .map_or_else(
+                || compute_token_rate(&data.efficiency_events),
+                compute_windowed_token_rate,
+            );
     }
 
     /// Populate state from a connected-mode `DashboardSnapshot`.
@@ -1481,7 +1613,8 @@ impl TuiState {
                         if metrics.model.is_empty() && !agent.model.is_empty() {
                             metrics.model = agent.model.clone();
                         }
-                        metrics.context_used = agent.input_tokens.saturating_add(agent.output_tokens);
+                        metrics.context_used =
+                            agent.input_tokens.saturating_add(agent.output_tokens);
                         if metrics.context_limit == 0 {
                             metrics.context_limit = agent.context_limit.max(1);
                         }
@@ -1637,6 +1770,42 @@ impl TuiState {
         self.log_auto_tail = true;
     }
 
+    /// Clamp the plan tree scroll offset to the current rendered maximum.
+    pub fn clamp_plan_scroll(&mut self, max: usize) {
+        self.plan_scroll_offset = self.plan_scroll_offset.min(max);
+    }
+
+    /// Clamp the pinned agent-output scroll offset to the current rendered maximum.
+    pub fn clamp_agent_scroll(&mut self, max: usize) {
+        if let Some(scroll) = self.agent_scroll.as_mut() {
+            *scroll = (*scroll).min(max);
+        }
+    }
+
+    /// Clamp the log scroll offset to the current rendered maximum.
+    pub fn clamp_log_scroll(&mut self, max: usize) {
+        if self.log_auto_tail {
+            self.log_scroll = 0;
+        } else {
+            self.log_scroll = self.log_scroll.min(max);
+        }
+    }
+
+    /// Clamp the right-panel scroll offset to the current rendered maximum.
+    pub fn clamp_diff_scroll(&mut self, max: usize) {
+        self.diff_scroll = self.diff_scroll.min(max);
+    }
+
+    /// Clamp the task list scroll offset to the current rendered maximum.
+    pub fn clamp_task_scroll(&mut self, max: usize) {
+        self.task_scroll = self.task_scroll.min(max);
+    }
+
+    /// Clamp the command-output scroll offset to the current rendered maximum.
+    pub fn clamp_command_output_scroll(&mut self, max: usize) {
+        self.command_output_scroll = self.command_output_scroll.min(max);
+    }
+
     /// Toggle visibility for a single log level in the Logs tab.
     pub fn toggle_log_filter_level(&mut self, level: LogFilterLevel) {
         if !self.log_filter_levels.insert(level) {
@@ -1677,10 +1846,25 @@ fn plan_task_counts(
     tasks_total: usize,
 ) -> (usize, usize) {
     if let Some(snapshot) = snapshot {
-        return (
-            snapshot.tasks_done.min(tasks_total),
-            snapshot.tasks_failed.min(tasks_total),
-        );
+        let tasks_done = if snapshot.tasks.is_empty() {
+            snapshot.tasks_done
+        } else {
+            snapshot
+                .tasks
+                .iter()
+                .filter(|task| TaskStatus::from(task.status.as_str()).is_done())
+                .count()
+        };
+        let tasks_failed = if snapshot.tasks.is_empty() {
+            snapshot.tasks_failed
+        } else {
+            snapshot
+                .tasks
+                .iter()
+                .filter(|task| TaskStatus::from(task.status.as_str()).is_failed())
+                .count()
+        };
+        return (tasks_done.min(tasks_total), tasks_failed.min(tasks_total));
     }
 
     (
@@ -2400,6 +2584,80 @@ fn compute_token_rate(events: &[roko_learn::efficiency::AgentEfficiencyEvent]) -
     total_tokens as f64 / (elapsed_seconds as f64 / 60.0)
 }
 
+fn build_token_samples(data: &DashboardData) -> HashMap<String, VecDeque<(DateTime<Utc>, u64)>> {
+    const MAX_TOKEN_HISTORY_SAMPLES: usize = 120;
+
+    let mut per_agent: HashMap<String, Vec<(DateTime<Utc>, u64)>> = HashMap::new();
+
+    if data.efficiency_events.is_empty() {
+        for episode in data.episodes() {
+            let total_tokens = episode
+                .usage
+                .input_tokens
+                .saturating_add(episode.usage.output_tokens);
+            per_agent
+                .entry(episode.agent_id.clone())
+                .or_default()
+                .push((episode.timestamp, total_tokens));
+        }
+    } else {
+        for event in &data.efficiency_events {
+            let Some(timestamp) = parse_efficiency_timestamp(&event.timestamp) else {
+                continue;
+            };
+            per_agent
+                .entry(event.agent_id.clone())
+                .or_default()
+                .push((timestamp, event.total_tokens()));
+        }
+    }
+
+    let mut histories = HashMap::new();
+    for (agent_id, mut samples) in per_agent {
+        samples.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+
+        let mut cumulative_total = 0u64;
+        let mut history = VecDeque::new();
+        for (timestamp, total_tokens) in samples {
+            cumulative_total = cumulative_total.saturating_add(total_tokens);
+            history.push_back((timestamp, cumulative_total));
+            if history.len() > MAX_TOKEN_HISTORY_SAMPLES {
+                history.pop_front();
+            }
+        }
+
+        histories.insert(agent_id, history);
+    }
+
+    histories
+}
+
+fn compute_windowed_token_rate(samples: &VecDeque<(DateTime<Utc>, u64)>) -> f64 {
+    const TOKEN_RATE_WINDOW_SAMPLES: usize = 60;
+
+    if samples.len() < 2 {
+        return 0.0;
+    }
+
+    let start_idx = samples.len().saturating_sub(TOKEN_RATE_WINDOW_SAMPLES);
+    let Some((start_time, start_total)) = samples.get(start_idx) else {
+        return 0.0;
+    };
+    let Some((end_time, end_total)) = samples.back() else {
+        return 0.0;
+    };
+
+    let elapsed_secs = end_time
+        .signed_duration_since(*start_time)
+        .num_milliseconds() as f64
+        / 1_000.0;
+    if elapsed_secs <= 0.0 {
+        return 0.0;
+    }
+
+    end_total.saturating_sub(*start_total) as f64 * 60.0 / elapsed_secs
+}
+
 fn parse_efficiency_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
@@ -2971,16 +3229,28 @@ status = "running"
 [[task]]
 id = "task-1"
 title = "Bootstrap"
+status = "done"
+model = "claude-haiku-4-5"
+elapsed_ms = 1000
 tier = "focused"
 
 [[task]]
 id = "task-2"
 title = "Wire dashboard"
+status = "implementing"
+model = "claude-sonnet-4-6"
+elapsed_ms = 2500
+started_at_ms = 111
+wave = 2
 tier = "focused"
 
 [[task]]
 id = "task-3"
 title = "Handle failures"
+status = "gate_rejected"
+model = "claude-sonnet-4-6"
+elapsed_ms = 3500
+ended_at_ms = 222
 tier = "focused"
 "#,
         )
@@ -3027,7 +3297,8 @@ tier = "focused"
         assert_eq!(plan.tasks_total, 3);
         assert_eq!(plan.tasks_done, 1);
         assert_eq!(plan.tasks_failed, 1);
-        assert!((plan.elapsed_secs - 4.0).abs() < f64::EPSILON);
+        assert!((plan.elapsed_secs - 7.0).abs() < f64::EPSILON);
+        assert_eq!(plan.wave, Some(2));
         assert_eq!(plan.tasks.len(), 3);
         assert_eq!(plan.tasks[0].id, "task-1");
         assert_eq!(plan.tasks[0].status, TaskStatus::Done);
@@ -3055,6 +3326,50 @@ tier = "focused"
     }
 
     #[test]
+    fn plan_task_counts_prefers_snapshot_task_statuses() {
+        let summary = crate::plan::PlanSummary {
+            id: "plan-a".into(),
+            title: "Plan A".into(),
+            task_count: 3,
+            tasks_done: 0,
+            tasks_failed: 0,
+            completed: false,
+            old_format: false,
+            last_error: None,
+        };
+        let snapshot = PlanTaskListSnapshot {
+            tasks_done: 0,
+            tasks_failed: 0,
+            tasks: vec![
+                crate::tui::dashboard::PlanTaskSnapshot {
+                    id: "task-1".into(),
+                    title: "Done".into(),
+                    status: "done".into(),
+                    agent_id: None,
+                    ..crate::tui::dashboard::PlanTaskSnapshot::default()
+                },
+                crate::tui::dashboard::PlanTaskSnapshot {
+                    id: "task-2".into(),
+                    title: "Active".into(),
+                    status: "implementing".into(),
+                    agent_id: None,
+                    ..crate::tui::dashboard::PlanTaskSnapshot::default()
+                },
+                crate::tui::dashboard::PlanTaskSnapshot {
+                    id: "task-3".into(),
+                    title: "Failed".into(),
+                    status: "failed".into(),
+                    agent_id: None,
+                    ..crate::tui::dashboard::PlanTaskSnapshot::default()
+                },
+            ],
+            ..PlanTaskListSnapshot::default()
+        };
+
+        assert_eq!(plan_task_counts(&summary, Some(&snapshot), 3), (1, 1));
+    }
+
+    #[test]
     fn new_fields_have_defaults() {
         let state = TuiState::default();
         assert!(state.phase_pipeline.is_empty());
@@ -3062,6 +3377,7 @@ tier = "focused"
         assert!(state.current_task_checklist.is_empty());
         assert_eq!(state.sys.cpu_pct, 0.0);
         assert_eq!(state.token_total, 0);
+        assert!(state.token_history.is_empty());
         assert_eq!(state.token_rate, 0.0);
         assert_eq!(state.cost_rate, 0.0);
         assert_eq!(state.cost_dollars, 0.0);
@@ -3303,6 +3619,73 @@ tier = "focused"
         state.update_from_snapshot(&data);
 
         assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_from_snapshot_populates_token_history_for_selected_agent() {
+        let mut data = DashboardData::default();
+        data.agents = vec![
+            crate::tui::dashboard::AgentSummary {
+                id: "agent-a".into(),
+                label: "agent-a".into(),
+                plan_id: None,
+                status: "active".into(),
+            },
+            crate::tui::dashboard::AgentSummary {
+                id: "agent-b".into(),
+                label: "agent-b".into(),
+                plan_id: None,
+                status: "active".into(),
+            },
+        ];
+        data.efficiency_events = vec![
+            AgentEfficiencyEvent {
+                agent_id: "agent-a".into(),
+                role: "implementer".into(),
+                input_tokens: 100,
+                output_tokens: 20,
+                timestamp: "2026-04-14T12:00:00Z".into(),
+                ..AgentEfficiencyEvent::default()
+            },
+            AgentEfficiencyEvent {
+                agent_id: "agent-b".into(),
+                role: "reviewer".into(),
+                input_tokens: 30,
+                output_tokens: 10,
+                timestamp: "2026-04-14T12:01:00Z".into(),
+                ..AgentEfficiencyEvent::default()
+            },
+            AgentEfficiencyEvent {
+                agent_id: "agent-a".into(),
+                role: "implementer".into(),
+                input_tokens: 50,
+                output_tokens: 10,
+                timestamp: "2026-04-14T12:02:00Z".into(),
+                ..AgentEfficiencyEvent::default()
+            },
+            AgentEfficiencyEvent {
+                agent_id: "agent-b".into(),
+                role: "reviewer".into(),
+                input_tokens: 50,
+                output_tokens: 10,
+                timestamp: "2026-04-14T12:04:00Z".into(),
+                ..AgentEfficiencyEvent::default()
+            },
+        ];
+
+        let mut state = TuiState::default();
+        state.selected_agent = 1;
+        state.update_from_snapshot(&data);
+
+        assert_eq!(
+            state.token_history.get("agent-a").cloned(),
+            Some(VecDeque::from(vec![120, 180]))
+        );
+        assert_eq!(
+            state.token_history.get("agent-b").cloned(),
+            Some(VecDeque::from(vec![40, 100]))
+        );
+        assert!((state.token_rate - 20.0).abs() < f64::EPSILON);
     }
 
     #[test]

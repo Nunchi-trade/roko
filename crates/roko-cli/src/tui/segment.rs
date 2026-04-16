@@ -5,7 +5,6 @@ use ratatui::text::{Line, Span};
 
 use super::ansi::parse_ansi_line;
 use super::dashboard::Theme;
-use super::widgets::rosedust::MoriTheme;
 
 /// Semantic segment types for agent output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +280,7 @@ fn render_groups(groups: &[SegmentGroup], theme: &Theme) -> Vec<Line<'static>> {
 
 fn render_group_header(kind: SegmentKind, theme: &Theme) -> Line<'static> {
     let accent = match kind {
-        SegmentKind::Thinking => MoriTheme::FG_DIM,
+        SegmentKind::Thinking => Theme::FG_DIM,
         SegmentKind::Heading => theme.accent,
         SegmentKind::ToolUse => theme.info,
         SegmentKind::Code => theme.success,
@@ -298,7 +297,7 @@ fn render_group_header(kind: SegmentKind, theme: &Theme) -> Line<'static> {
         Span::styled(" ", Style::default()),
         Span::styled(kind.label().to_ascii_uppercase(), header_style),
         Span::styled(" ", Style::default()),
-        Span::styled("────────", Style::default().fg(MoriTheme::TEXT_PHANTOM)),
+        Span::styled("────────", Style::default().fg(Theme::TEXT_PHANTOM)),
     ])
 }
 
@@ -318,14 +317,12 @@ fn render_content_line(line: &str, base_style: Style) -> Line<'static> {
 
 fn content_style(kind: SegmentKind, theme: &Theme) -> Style {
     match kind {
-        SegmentKind::Thinking => Style::default().fg(MoriTheme::FG_DIM),
+        SegmentKind::Thinking => Style::default().fg(Theme::FG_DIM),
         SegmentKind::Heading => Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
         SegmentKind::ToolUse => Style::default().fg(theme.info),
-        SegmentKind::Code => Style::default()
-            .fg(theme.success)
-            .bg(MoriTheme::BG_SECONDARY),
+        SegmentKind::Code => Style::default().fg(theme.success).bg(Theme::BG_SECONDARY),
         SegmentKind::Success => Style::default()
             .fg(theme.success)
             .add_modifier(Modifier::BOLD),

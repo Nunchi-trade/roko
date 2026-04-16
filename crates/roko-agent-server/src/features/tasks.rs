@@ -28,10 +28,10 @@ async fn accept_task(
     State(state): State<Arc<AgentState>>,
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
-    match state.accept_task(id).await {
-        Some(task) => (StatusCode::OK, Json(task)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    state.accept_task(id).await.map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |task| (StatusCode::OK, Json(task)).into_response(),
+    )
 }
 
 async fn complete_task(
@@ -39,8 +39,8 @@ async fn complete_task(
     Path(id): Path<u64>,
     Json(request): Json<TaskCompletionRequest>,
 ) -> impl IntoResponse {
-    match state.complete_task(id, request).await {
-        Some(task) => (StatusCode::OK, Json(task)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    state.complete_task(id, request).await.map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |task| (StatusCode::OK, Json(task)).into_response(),
+    )
 }

@@ -11,7 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::super::state::TuiState;
-use super::rosedust::{MoriTheme, gradient_fire};
+use super::rosedust::gradient_fire;
+use crate::tui::Theme;
 
 const HEARTBEAT_FRAMES: [&str; 4] = ["\u{00b7}", "\u{00b0}", "\u{2219}", "\u{25cf}"];
 
@@ -23,18 +24,18 @@ fn sep() -> Span<'static> {
     Span::styled(
         "\u{2502}",
         Style::default()
-            .fg(MoriTheme::TEXT_PHANTOM)
-            .bg(MoriTheme::BG_SECONDARY),
+            .fg(Theme::TEXT_PHANTOM)
+            .bg(Theme::BG_SECONDARY),
     )
 }
 
 fn hdr_pct_color(pct: f64) -> Color {
     if pct >= 0.8 {
-        MoriTheme::EMBER
+        Theme::EMBER
     } else if pct >= 0.5 {
-        MoriTheme::WARNING
+        Theme::WARNING
     } else {
-        MoriTheme::SAGE
+        Theme::SAGE
     }
 }
 
@@ -76,7 +77,7 @@ fn shorten_model(slug: &str) -> String {
 
 /// Render the header bar with all 8 sections.
 pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let bg = Style::default().bg(MoriTheme::BG_SECONDARY);
+    let bg = Style::default().bg(Theme::BG_SECONDARY);
     let compact = area.width < 120;
 
     let (done, total) = state.task_counts();
@@ -95,15 +96,15 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         HEARTBEAT_FRAMES[hb_idx],
         Style::default()
             .fg(Color::Rgb(hb_r, hb_g, hb_b))
-            .bg(MoriTheme::BG_SECONDARY),
+            .bg(Theme::BG_SECONDARY),
     ));
 
     // App name
     spans.push(Span::styled(
         " roko",
         Style::default()
-            .fg(MoriTheme::ROSE)
-            .bg(MoriTheme::BG_SECONDARY)
+            .fg(Theme::ROSE)
+            .bg(Theme::BG_SECONDARY)
             .add_modifier(Modifier::BOLD),
     ));
 
@@ -113,9 +114,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let wave_idx = state.current_wave() + 1;
         spans.push(Span::styled(
             format!("  Wave {wave_idx}/{total_waves}"),
-            Style::default()
-                .fg(MoriTheme::BONE)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::BONE).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -133,15 +132,15 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         if filled > 0 {
             spans.push(Span::styled(
                 "\u{2588}".repeat(filled),
-                Style::default().fg(bar_color).bg(MoriTheme::BG_SECONDARY),
+                Style::default().fg(bar_color).bg(Theme::BG_SECONDARY),
             ));
         }
         if empty > 0 {
             spans.push(Span::styled(
                 "\u{2500}".repeat(empty),
                 Style::default()
-                    .fg(MoriTheme::TEXT_PHANTOM)
-                    .bg(MoriTheme::BG_SECONDARY),
+                    .fg(Theme::TEXT_PHANTOM)
+                    .bg(Theme::BG_SECONDARY),
             ));
         }
     }
@@ -164,18 +163,18 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     };
     let progress_style = if has_failures {
         Style::default()
-            .fg(MoriTheme::EMBER)
+            .fg(Theme::EMBER)
             .add_modifier(Modifier::BOLD)
     } else if all_done && total > 0 {
         Style::default()
-            .fg(MoriTheme::SAGE)
+            .fg(Theme::SAGE)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(MoriTheme::semantic_color(fill_pct))
+        Style::default().fg(Theme::semantic_color(fill_pct))
     };
     spans.push(Span::styled(
         progress_text,
-        progress_style.bg(MoriTheme::BG_SECONDARY),
+        progress_style.bg(Theme::BG_SECONDARY),
     ));
 
     // Percentage (hidden when compact)
@@ -184,8 +183,8 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         spans.push(Span::styled(
             format!("  {pct}%"),
             Style::default()
-                .fg(MoriTheme::semantic_color(fill_pct))
-                .bg(MoriTheme::BG_SECONDARY),
+                .fg(Theme::semantic_color(fill_pct))
+                .bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -194,9 +193,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     if in_flight > 0 && !(all_done && !has_failures) {
         spans.push(Span::styled(
             format!("  {in_flight}\u{25b8}"),
-            Style::default()
-                .fg(MoriTheme::ROSE_DIM)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::ROSE_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -210,18 +207,14 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         let eta_str = format_elapsed(remaining.max(1));
         spans.push(Span::styled(
             format!("  ETA:{eta_str}"),
-            Style::default()
-                .fg(MoriTheme::DREAM)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::DREAM).bg(Theme::BG_SECONDARY),
         ));
     }
 
     // Elapsed
     spans.push(Span::styled(
         format!("  {elapsed_str}"),
-        Style::default()
-            .fg(MoriTheme::FG_DIM)
-            .bg(MoriTheme::BG_SECONDARY),
+        Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
     ));
 
     // Cost
@@ -233,9 +226,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         };
         spans.push(Span::styled(
             format!("  {cost_str}"),
-            Style::default()
-                .fg(MoriTheme::BONE_DIM)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::BONE_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -250,9 +241,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         };
         spans.push(Span::styled(
             tok_display,
-            Style::default()
-                .fg(MoriTheme::FG_DIM)
-                .bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -267,7 +256,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
             format!(" C{}{:.0}%", colon, state.sys.cpu_pct),
             Style::default()
                 .fg(hdr_pct_color(cpu_frac))
-                .bg(MoriTheme::BG_SECONDARY),
+                .bg(Theme::BG_SECONDARY),
         ));
 
         let mem_frac = if state.sys.mem_total_bytes > 0 {
@@ -279,7 +268,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
             format!(" M{}{}", colon, hdr_fmt_bytes(state.sys.mem_used_bytes)),
             Style::default()
                 .fg(hdr_pct_color(mem_frac))
-                .bg(MoriTheme::BG_SECONDARY),
+                .bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -288,10 +277,10 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     // ── 7. Active agent spinner with role label ───────────────────────
     if let Some(agent) = state.agents.iter().find(|a| a.active) {
         let short = shorten_model(&agent.model);
-        let role_color = MoriTheme::role_accent(&agent.role);
+        let role_color = Theme::role_accent(&agent.role);
         spans.push(Span::styled(
             format!("  {} {}({})", state.atmosphere.spinner(), agent.role, short),
-            Style::default().fg(role_color).bg(MoriTheme::BG_SECONDARY),
+            Style::default().fg(role_color).bg(Theme::BG_SECONDARY),
         ));
     }
 
@@ -299,13 +288,13 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     use super::super::tabs::Tab;
 
     let fkey_items: Vec<(&str, Color, &str, Tab)> = vec![
-        (" F1", MoriTheme::ROSE, "dash", Tab::Dashboard),
-        (" F2", MoriTheme::BONE_DIM, "plans", Tab::Plans),
-        (" F3", MoriTheme::SAGE, "agents", Tab::Agents),
-        (" F4", MoriTheme::DREAM, "git", Tab::Git),
-        (" F5", MoriTheme::DREAM, "logs", Tab::Logs),
-        (" F6", MoriTheme::BONE_DIM, "cfg", Tab::Config),
-        (" F7", MoriTheme::BONE_DIM, "inspect", Tab::Inspect),
+        (" F1", Theme::ROSE, "dash", Tab::Dashboard),
+        (" F2", Theme::BONE_DIM, "plans", Tab::Plans),
+        (" F3", Theme::SAGE, "agents", Tab::Agents),
+        (" F4", Theme::DREAM, "git", Tab::Git),
+        (" F5", Theme::DREAM, "logs", Tab::Logs),
+        (" F6", Theme::BONE_DIM, "cfg", Tab::Config),
+        (" F7", Theme::BONE_DIM, "inspect", Tab::Inspect),
     ];
 
     let fkey_width: u16 = fkey_items
@@ -332,7 +321,7 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
             fkey_spans.push(Span::styled(
                 format!("{key}:{label}"),
                 Style::default()
-                    .fg(MoriTheme::VOID)
+                    .fg(Theme::VOID)
                     .bg(*color)
                     .add_modifier(Modifier::BOLD),
             ));
@@ -341,14 +330,12 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                 key.to_string(),
                 Style::default()
                     .fg(*color)
-                    .bg(MoriTheme::BG_SECONDARY)
+                    .bg(Theme::BG_SECONDARY)
                     .add_modifier(Modifier::BOLD),
             ));
             fkey_spans.push(Span::styled(
                 format!(":{label}"),
-                Style::default()
-                    .fg(MoriTheme::FG_DIM)
-                    .bg(MoriTheme::BG_SECONDARY),
+                Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
             ));
         }
     }

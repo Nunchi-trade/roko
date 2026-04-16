@@ -7,7 +7,7 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use super::widgets::rosedust::MoriTheme;
+use super::theme::Theme;
 
 // ---------------------------------------------------------------------------
 // Public NervViz state
@@ -111,7 +111,9 @@ fn clamp01(value: f64) -> f64 {
 /// Linear interpolation between two `u8` values.
 fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
     let t = clamp01(t);
-    ((a as f64) + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
+    ((a as f64) + (b as f64 - a as f64) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// Linear interpolation between two RGB colors.
@@ -142,11 +144,11 @@ fn rose_violet(t: f64) -> Color {
     let t = clamp01(t);
     if t < 0.5 {
         lerp_rgb(
-            match MoriTheme::ROSE_DIM {
+            match Theme::ROSE_DIM {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (140, 96, 112),
             },
-            match MoriTheme::ROSE {
+            match Theme::ROSE {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (185, 120, 148),
             },
@@ -154,11 +156,11 @@ fn rose_violet(t: f64) -> Color {
         )
     } else {
         lerp_rgb(
-            match MoriTheme::ROSE {
+            match Theme::ROSE {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (185, 120, 148),
             },
-            match MoriTheme::DREAM {
+            match Theme::DREAM {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => (120, 115, 165),
             },
@@ -310,7 +312,8 @@ pub fn progress_field(area: Rect, buf: &mut Buffer, elapsed: f64, progress: f64)
                 cell.set_bg(bg);
 
                 // The leading edge gets a denser braille contour.
-                if y == edge_line || ((x as f64 * 0.37 + elapsed * 1.5 + depth * 5.0).sin() > 0.68) {
+                if y == edge_line || ((x as f64 * 0.37 + elapsed * 1.5 + depth * 5.0).sin() > 0.68)
+                {
                     let bits = braille_mask(0xA17C_0F11, x, y, elapsed, progress);
                     let fg = pulse_tint(0.55 + 0.45 * pulse, pulse);
                     cell.set_char(braille(bits));
@@ -347,19 +350,16 @@ pub fn activity_ripples(area: Rect, buf: &mut Buffer, elapsed: f64, activity: f6
         let cx = area.left()
             + (unit_from_hash(seed) * (area.width.saturating_sub(1) as f64)).round() as u16;
         let cy = area.top()
-            + (unit_from_hash(seed ^ 0xB4) * (area.height.saturating_sub(1) as f64)).round()
-                as u16;
+            + (unit_from_hash(seed ^ 0xB4) * (area.height.saturating_sub(1) as f64)).round() as u16;
 
         let radius = ((elapsed * (0.9 + activity * 1.3) + unit_from_hash(seed ^ 0xD1) * 2.0)
             % max_radius.max(1.0))
-            .max(0.0);
+        .max(0.0);
 
         let reach = (radius + thickness + 1.0).ceil() as u16;
         let x0 = cx.saturating_sub(reach).max(area.left());
         let y0 = cy.saturating_sub(reach).max(area.top());
-        let x1 = cx
-            .saturating_add(reach)
-            .min(area.right().saturating_sub(1));
+        let x1 = cx.saturating_add(reach).min(area.right().saturating_sub(1));
         let y1 = cy
             .saturating_add(reach)
             .min(area.bottom().saturating_sub(1));
@@ -419,7 +419,9 @@ pub fn data_rain(area: Rect, buf: &mut Buffer, elapsed: f64, throughput: f64) {
 
         let phase = unit_from_hash(seed ^ 0x19) * area.height.max(1) as f64;
         let head = ((elapsed * speed + phase) % area.height.max(1) as f64) as u16;
-        let head_y = area.top().saturating_add(head.min(area.height.saturating_sub(1)));
+        let head_y = area
+            .top()
+            .saturating_add(head.min(area.height.saturating_sub(1)));
 
         for offset in 0..trail {
             let y = head_y.saturating_sub(offset);
@@ -458,11 +460,7 @@ pub fn state_viz(area: Rect, buf: &mut Buffer, elapsed: f64, ctx: &VizContext) {
     let token_rate = ctx.token_rate.clamp(0.0, 1.0);
     let error_boost = if ctx.error_state { 0.18 } else { 0.0 };
 
-    if progress <= 0.0
-        && activity <= 0.0
-        && token_rate <= 0.0
-        && error_boost <= 0.0
-    {
+    if progress <= 0.0 && activity <= 0.0 && token_rate <= 0.0 && error_boost <= 0.0 {
         return;
     }
 
@@ -519,8 +517,7 @@ pub fn particle_overlay(
         }
 
         let start_x = area.left().saturating_add(
-            (unit_from_hash(slot_seed ^ 0x31) * area.width.saturating_sub(1) as f64).round()
-                as u16,
+            (unit_from_hash(slot_seed ^ 0x31) * area.width.saturating_sub(1) as f64).round() as u16,
         );
         let start_y = area.top().saturating_add(
             (unit_from_hash(slot_seed ^ 0x41) * area.height.saturating_sub(1) as f64).round()
@@ -530,10 +527,12 @@ pub fn particle_overlay(
         let sway = ((elapsed * (0.7 + density) + phase * std::f64::consts::TAU).sin()) * 0.5;
         let x = (start_x as f64 + sway * drift_speed * area.width as f64 * age * 0.35)
             .round()
-            .clamp(area.left() as f64, area.right().saturating_sub(1) as f64) as u16;
+            .clamp(area.left() as f64, area.right().saturating_sub(1) as f64)
+            as u16;
         let y = (start_y as f64 - age * rise_speed * area.height.max(1) as f64 * 0.33)
             .round()
-            .clamp(area.top() as f64, area.bottom().saturating_sub(1) as f64) as u16;
+            .clamp(area.top() as f64, area.bottom().saturating_sub(1) as f64)
+            as u16;
 
         if let Some(cell) = buf.cell_mut((x, y)) {
             if !is_blank(cell) {

@@ -41,8 +41,6 @@ use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
 use super::views::{self, ViewState};
 
-const PAGE_SCROLL_LINES: i32 = 20;
-
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
 /// Supports two rendering paths:
@@ -60,8 +58,6 @@ pub struct App {
     pub tui_state: TuiState,
     /// PostFX configuration.
     fx_config: EffectsConfig,
-    /// Active modal overlay.
-    active_modal: Option<ModalState>,
     /// Toast notifications.
     notifications: Vec<super::modals::Notification>,
     /// Keyboard scroll acceleration state for held-key scrolling.
@@ -272,21 +268,6 @@ fn task_picker_rows(state: &TuiState) -> Vec<TaskPickerRow> {
         .collect()
 }
 
-fn convert_git_branch_tree(
-    branches: &[super::views::git_view::GitBranchNode],
-) -> Vec<super::state::GitBranchNode> {
-    branches
-        .iter()
-        .map(|branch| super::state::GitBranchNode {
-            name: branch.name.clone(),
-            is_current: branch.is_current,
-            ahead: branch.ahead as usize,
-            behind: branch.behind as usize,
-            children: Vec::new(),
-        })
-        .collect()
-}
-
 fn convert_git_commit_graph(
     commits: &[super::views::git_view::CommitEntry],
 ) -> Vec<super::state::GitCommitEntry> {
@@ -411,7 +392,6 @@ impl App {
             workdir,
             tui_state,
             fx_config: EffectsConfig::default(),
-            active_modal: None,
             notifications: Vec::new(),
             scroll_accel: super::scroll::ScrollAccel::new(),
             current_page: scaffold.active_page(),
@@ -675,7 +655,7 @@ impl App {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut Frame<'_>) {
+    fn draw(&mut self, frame: &mut Frame<'_>) {
         let theme = Theme::from_env();
         let full_area = frame.area();
 
@@ -712,11 +692,13 @@ impl App {
         // The wave slot is 0-height when idle, but indices don't change.
         let content_idx = 2;
         let footer_idx = 3;
+        let (content_area, input_area) = self.split_content_area(main_layout[content_idx]);
 
+        self.clamp_scroll_state_to_view();
         let view_state = self.current_view_state();
         views::render_tab_content(
             frame,
-            main_layout[content_idx],
+            content_area,
             self.tui_state.active_tab,
             &self.data,
             &self.tui_state,
@@ -727,39 +709,12 @@ impl App {
         // Footer: status line
         self.render_status_footer(frame, main_layout[footer_idx], &theme);
 
-        if matches!(
-            self.tui_state.input_mode,
-            InputMode::Inject | InputMode::Filter
-        ) && content_area.height > 0
-        {
-            let input_area = Rect::new(
-                content_area.x,
-                content_area.bottom().saturating_sub(1),
-                content_area.width,
-                1,
-            );
-            frame.render_widget(Clear, input_area);
-
-            let (label, buf) = match self.tui_state.input_mode {
-                InputMode::Inject => ("inject> ", self.tui_state.message_input.as_str()),
-                InputMode::Filter => ("filter> ", self.tui_state.filter_text.as_str()),
-                _ => unreachable!(),
-            };
-            let input = Paragraph::new(Line::from(vec![
-                Span::styled(label, theme.accent_bold()),
-                Span::styled(buf, theme.text()),
-            ]));
-            frame.render_widget(input, input_area);
-
-            let cursor_x = input_area
-                .x
-                .saturating_add((label.chars().count() + buf.chars().count()) as u16)
-                .min(input_area.right().saturating_sub(1));
-            frame.set_cursor_position((cursor_x, input_area.y));
+        if let Some(input_area) = input_area {
+            self.render_input_bar(frame, input_area, &theme);
         }
 
         // Dim overlay before modals
-        if self.active_modal.is_some() {
+        if self.tui_state.active_modal.is_some() {
             let buf = frame.buffer_mut();
             super::postfx::dim_overlay(content_area, buf, 0.45);
         }
@@ -768,7 +723,7 @@ impl App {
         modals::render_modals(
             frame,
             full_area,
-            self.active_modal.as_ref(),
+            self.tui_state.active_modal.as_ref(),
             &self.tui_state,
             &self.data,
             &self.notifications,
@@ -796,13 +751,17 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if key.code == crossterm::event::KeyCode::Esc {
+            self.scroll_accel.reset();
+        }
+
         // Route through the full TuiAction dispatch
         let action = input::handle_key(
             key,
             self.tui_state.input_mode,
             self.tui_state.active_tab,
             self.tui_state.focus,
-            &input::ModalVisibility::from_active_modal(self.active_modal.as_ref()),
+            &input::ModalVisibility::from_active_modal(self.tui_state.active_modal.as_ref()),
         );
 
         self.dispatch_action(action);
@@ -815,7 +774,7 @@ impl App {
                     self.dismiss_all_modals();
                 } else {
                     self.tui_state.input_mode = InputMode::Confirm;
-                    self.active_modal = Some(ModalState::Quit);
+                    self.tui_state.active_modal = Some(ModalState::Quit);
                 }
             }
             TuiAction::QuitConfirmed => {
@@ -871,73 +830,48 @@ impl App {
                 }
             }
             TuiAction::TaskPickerUp => {
-                if let Some(ModalState::TaskPicker { selected_index, .. }) =
-                    self.active_modal.as_mut()
+                if let Some(ModalState::TaskPicker {
+                    selected_index,
+                    scroll_offset,
+                    ..
+                }) = self.tui_state.active_modal.as_mut()
                 {
                     *selected_index = selected_index.saturating_sub(1);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
                 }
             }
             TuiAction::TaskPickerDown => {
                 if let Some(ModalState::TaskPicker {
                     selected_index,
+                    scroll_offset,
                     tasks,
                     ..
-                }) = self.active_modal.as_mut()
+                }) = self.tui_state.active_modal.as_mut()
                 {
                     let max = tasks.len().saturating_sub(1);
                     *selected_index = selected_index.saturating_add(1).min(max);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
                 }
             }
             TuiAction::ScrollFocusedUp => {
-                let delta = i32::from(self.scroll_accel.push(-1));
+                let delta = i32::from(self.scroll_accel.tick(-1));
                 self.scroll_focused(delta);
             }
             TuiAction::ScrollFocusedDown => {
-                let delta = i32::from(self.scroll_accel.push(1));
+                let delta = i32::from(self.scroll_accel.tick(1));
                 self.scroll_focused(delta);
             }
-            TuiAction::ScrollPageUp => self.scroll_focused(-PAGE_SCROLL_LINES),
-            TuiAction::ScrollPageDown => self.scroll_focused(PAGE_SCROLL_LINES),
-            TuiAction::ScrollFocusedHome => match (self.tui_state.active_tab, self.tui_state.focus)
-            {
-                (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
-                    self.tui_state.agent_scroll = Some(usize::MAX);
-                }
-                (Tab::Logs, _) => {
-                    self.tui_state.log_auto_tail = false;
-                    self.tui_state.log_scroll = usize::MAX;
-                }
-                _ => self.set_focused_scroll(0),
-            },
-            TuiAction::ScrollFocusedEnd => {
-                match (self.tui_state.active_tab, self.tui_state.focus) {
-                    (Tab::Dashboard | Tab::Agents, FocusZone::AgentOutput) => {
-                        self.tui_state.agent_scroll = None;
-                    }
-                    (Tab::Logs, _) => {
-                        self.tui_state.log_auto_tail = true;
-                        self.tui_state.log_scroll = 0;
-                    }
-                    _ => self.set_focused_scroll(usize::MAX),
-                }
-            }
+            TuiAction::ScrollPageUp => self.scroll_focused(-self.page_scroll_lines()),
+            TuiAction::ScrollPageDown => self.scroll_focused(self.page_scroll_lines()),
+            TuiAction::ScrollFocusedHome => self.set_focused_scroll(0),
+            TuiAction::ScrollFocusedEnd => self.set_focused_scroll(usize::MAX),
             TuiAction::ScrollLogUp => {
-                if self.tui_state.log_auto_tail {
-                    self.tui_state.log_auto_tail = false;
-                    self.tui_state.log_scroll = 1;
-                } else {
-                    self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_add(1);
-                }
+                let delta = i32::from(self.scroll_accel.tick(-1));
+                self.scroll_logs_by(delta);
             }
             TuiAction::ScrollLogDown => {
-                if !self.tui_state.log_auto_tail {
-                    if self.tui_state.log_scroll > 0 {
-                        self.tui_state.log_scroll = self.tui_state.log_scroll.saturating_sub(1);
-                    }
-                    if self.tui_state.log_scroll == 0 {
-                        self.tui_state.log_auto_tail = true;
-                    }
-                }
+                let delta = i32::from(self.scroll_accel.tick(1));
+                self.scroll_logs_by(delta);
             }
             TuiAction::ScrollLogEnd => {
                 self.tui_state.log_auto_tail = true;
@@ -950,34 +884,35 @@ impl App {
                 self.tui_state.show_all_log_filter_levels();
             }
             TuiAction::ScrollAgentUp => {
-                let current = self.current_agent_scroll_offset();
-                let delta = self.scroll_accel.push(-1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                let delta = i32::from(self.scroll_accel.tick(-1));
+                self.scroll_agent_output_by(delta);
             }
             TuiAction::ScrollAgentDown => {
-                let current = self.current_agent_scroll_offset();
-                let delta = self.scroll_accel.push(1);
-                self.tui_state.agent_scroll = Some(Self::apply_signed_scroll(current, delta));
+                let delta = i32::from(self.scroll_accel.tick(1));
+                self.scroll_agent_output_by(delta);
             }
             TuiAction::ScrollAgentEnd => {
                 self.tui_state.agent_scroll = None; // Resume auto-tail
             }
             TuiAction::ScrollDiffUp => {
-                let delta = self.scroll_accel.push(-1);
+                let delta = self.scroll_accel.tick(-1);
                 self.tui_state.diff_scroll =
                     Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDiffDown => {
-                let delta = self.scroll_accel.push(1);
+                let delta = self.scroll_accel.tick(1);
                 self.tui_state.diff_scroll =
                     Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDetailUp => {
-                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::PlanDetail { .. })
+                ) {
                     self.tui_state.plan_detail_scroll =
                         self.tui_state.plan_detail_scroll.saturating_sub(1);
                 } else if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
-                    self.active_modal.as_mut()
+                    self.tui_state.active_modal.as_mut()
                 {
                     *scroll_offset = scroll_offset.saturating_sub(1);
                 } else {
@@ -986,11 +921,14 @@ impl App {
                 }
             }
             TuiAction::ScrollDetailDown => {
-                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::PlanDetail { .. })
+                ) {
                     self.tui_state.plan_detail_scroll =
                         self.tui_state.plan_detail_scroll.saturating_add(1);
                 } else if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
-                    self.active_modal.as_mut()
+                    self.tui_state.active_modal.as_mut()
                 {
                     *scroll_offset = scroll_offset.saturating_add(1);
                 } else {
@@ -998,12 +936,63 @@ impl App {
                         self.tui_state.plan_detail_scroll.saturating_add(1);
                 }
             }
+            TuiAction::ModalScrollUp => {
+                if let Some(modal) = self.tui_state.active_modal.as_mut() {
+                    match modal {
+                        ModalState::WaveOverview { scroll_offset, .. }
+                        | ModalState::AgentPool { scroll_offset, .. } => {
+                            *scroll_offset = scroll_offset.saturating_sub(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TuiAction::ModalScrollDown => {
+                if let Some(modal) = self.tui_state.active_modal.as_mut() {
+                    match modal {
+                        ModalState::WaveOverview { scroll_offset, .. }
+                        | ModalState::AgentPool { scroll_offset, .. } => {
+                            *scroll_offset = scroll_offset.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TuiAction::QueueOverviewUp => {
+                if let Some(ModalState::QueueOverview {
+                    selected_index,
+                    scroll_offset,
+                    ..
+                }) = self.tui_state.active_modal.as_mut()
+                {
+                    *selected_index = selected_index.saturating_sub(1);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
+                }
+            }
+            TuiAction::QueueOverviewDown => {
+                if let Some(ModalState::QueueOverview {
+                    selected_index,
+                    scroll_offset,
+                    milestones,
+                }) = self.tui_state.active_modal.as_mut()
+                {
+                    let max = milestones.len().saturating_sub(1);
+                    *selected_index = selected_index.saturating_add(1).min(max);
+                    *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
+                }
+            }
+            TuiAction::CloseModal => {
+                if self.has_modal() {
+                    self.dismiss_all_modals();
+                }
+            }
             TuiAction::ShowHelp => {
-                self.active_modal = if matches!(self.active_modal, Some(ModalState::Help)) {
-                    None
-                } else {
-                    Some(ModalState::Help)
-                };
+                self.tui_state.active_modal =
+                    if matches!(self.tui_state.active_modal, Some(ModalState::Help)) {
+                        None
+                    } else {
+                        Some(ModalState::Help)
+                    };
             }
             TuiAction::ToggleScreenPostFx => {
                 self.fx_config.screen_postfx = !self.fx_config.screen_postfx;
@@ -1036,60 +1025,75 @@ impl App {
                 }
             }
             TuiAction::ShowPlanDetail => {
-                self.active_modal = self
+                let plan_id = self
                     .tui_state
                     .plans
                     .get(self.tui_state.selected_plan_idx)
-                    .map(|plan| plan.id.clone())
-                    .and_then(|plan_id| {
-                        if matches!(
-                            self.active_modal.as_ref(),
-                            Some(ModalState::PlanDetail {
-                                plan_id: active_plan_id
-                            }) if active_plan_id == &plan_id
-                        ) {
-                            None
-                        } else {
-                            Some(ModalState::PlanDetail { plan_id })
-                        }
-                    });
+                    .map(|plan| plan.id.clone());
+                let is_same_plan_open = matches!(
+                    self.tui_state.active_modal.as_ref(),
+                    Some(ModalState::PlanDetail {
+                        plan_id: active_plan_id
+                    }) if plan_id.as_ref().is_some_and(|plan_id| active_plan_id == plan_id)
+                );
+
+                self.tui_state.active_modal = if is_same_plan_open {
+                    None
+                } else {
+                    plan_id.map(|plan_id| {
+                        self.tui_state.plan_detail_scroll = 0;
+                        ModalState::PlanDetail { plan_id }
+                    })
+                };
             }
             TuiAction::ClosePlanDetail => {
-                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
-                    self.active_modal = None;
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::PlanDetail { .. })
+                ) {
+                    self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ShowTaskDetail => {
                 let task_count = self.tui_state.current_task_checklist.len();
                 if task_count > 0 {
                     let task_idx = self.tui_state.task_scroll.min(task_count.saturating_sub(1));
-                    self.active_modal = Some(ModalState::TaskDetail {
+                    self.tui_state.active_modal = Some(ModalState::TaskDetail {
                         task_idx,
                         scroll_offset: 0,
                     });
                 }
             }
             TuiAction::CloseTaskDetail => {
-                if matches!(self.active_modal, Some(ModalState::TaskDetail { .. })) {
-                    self.active_modal = None;
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::TaskDetail { .. })
+                ) {
+                    self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ShowWaveOverview => {
-                if matches!(self.active_modal, Some(ModalState::WaveOverview { .. })) {
-                    self.active_modal = None;
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::WaveOverview { .. })
+                ) {
+                    self.tui_state.active_modal = None;
                 } else {
-                    self.active_modal = Some(ModalState::WaveOverview {
+                    self.tui_state.active_modal = Some(ModalState::WaveOverview {
                         waves: execution_waves_for_modal(&self.tui_state),
                         scroll_offset: 0,
                     });
                 }
             }
             TuiAction::ShowQueueOverview => {
-                if matches!(self.active_modal, Some(ModalState::QueueOverview { .. })) {
-                    self.active_modal = None;
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::QueueOverview { .. })
+                ) {
+                    self.tui_state.active_modal = None;
                 } else {
                     let milestones = queue_overview_milestones(&self.tui_state);
-                    self.active_modal = Some(ModalState::QueueOverview {
+                    self.tui_state.active_modal = Some(ModalState::QueueOverview {
                         selected_index: self
                             .tui_state
                             .current_wave()
@@ -1105,15 +1109,18 @@ impl App {
                     .tui_state
                     .task_scroll
                     .min(tasks.len().saturating_sub(1));
-                self.active_modal = Some(ModalState::TaskPicker {
+                self.tui_state.active_modal = Some(ModalState::TaskPicker {
                     tasks,
                     selected_index,
                     scroll_offset: selected_index as u16,
                 });
             }
             TuiAction::CloseTaskPicker => {
-                if matches!(self.active_modal, Some(ModalState::TaskPicker { .. })) {
-                    self.active_modal = None;
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::TaskPicker { .. })
+                ) {
+                    self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ExpandCollapse => {
@@ -1219,6 +1226,8 @@ impl App {
                     self.tui_state.message_input.push(c);
                 } else if self.tui_state.input_mode == InputMode::Filter {
                     self.tui_state.filter_text.push(c);
+                    self.tui_state.filter = self.tui_state.filter_text.clone();
+                    self.tui_state.filter_active = !self.tui_state.filter.is_empty();
                 }
             }
             TuiAction::InputBackspace => {
@@ -1228,21 +1237,25 @@ impl App {
                     self.tui_state.message_input.pop();
                 } else if self.tui_state.input_mode == InputMode::Filter {
                     self.tui_state.filter_text.pop();
+                    self.tui_state.filter = self.tui_state.filter_text.clone();
+                    self.tui_state.filter_active = !self.tui_state.filter.is_empty();
                 }
             }
             TuiAction::StartFilter => {
                 self.tui_state.input_mode = InputMode::Filter;
                 self.tui_state.filter_text.clear();
+                self.tui_state.filter.clear();
+                self.tui_state.filter_active = false;
             }
             TuiAction::AcceptFilter => {
                 self.tui_state.filter = self.tui_state.filter_text.clone();
                 self.tui_state.input_mode = InputMode::Normal;
-                self.tui_state.filter = self.tui_state.filter_text.clone();
                 self.tui_state.filter_active = !self.tui_state.filter_text.is_empty();
             }
             TuiAction::CancelFilter => {
                 self.tui_state.input_mode = InputMode::Normal;
                 self.tui_state.filter_text.clear();
+                self.tui_state.filter.clear();
                 self.tui_state.filter_active = false;
             }
             TuiAction::RequestConfirm(action) => {
@@ -1253,7 +1266,7 @@ impl App {
                     return;
                 }
                 self.tui_state.input_mode = InputMode::Normal;
-                if matches!(self.active_modal, Some(ModalState::Quit)) {
+                if matches!(self.tui_state.active_modal, Some(ModalState::Quit)) {
                     self.dismiss_all_modals();
                     self.dispatch_action(TuiAction::QuitConfirmed);
                     return;
@@ -1303,13 +1316,12 @@ impl App {
                         )));
                 }
                 self.tui_state.pending_confirm = None;
-                self.active_modal = None;
+                self.tui_state.active_modal = None;
             }
             TuiAction::ConfirmNo => {
-                if self.resolve_active_approval(false) {
-                    return;
+                if !self.resolve_active_approval(false) {
+                    self.dismiss_all_modals();
                 }
-                self.dismiss_all_modals();
             }
             TuiAction::DismissNotification => {
                 if !self.notifications.is_empty() {
@@ -1372,7 +1384,7 @@ impl App {
                 let modal_action = modals::ConfirmAction::Custom {
                     message: "Restart current phase?".to_string(),
                 };
-                self.active_modal = Some(ModalState::Confirm {
+                self.tui_state.active_modal = Some(ModalState::Confirm {
                     action: modal_action,
                 });
             }
@@ -1385,7 +1397,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Restart plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1399,7 +1411,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Force-advance plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1413,7 +1425,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Reset state for plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1427,7 +1439,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Re-verify plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1592,6 +1604,8 @@ impl App {
             TuiAction::Refresh => self.refresh_snapshot(),
             TuiAction::None => {}
         }
+
+        self.clamp_scroll_state_to_view();
     }
 
     fn open_confirm_modal(&mut self, action: ConfirmAction) {
@@ -1600,13 +1614,16 @@ impl App {
         let modal_action = modals::ConfirmAction::Custom {
             message: action.to_string(),
         };
-        self.active_modal = Some(ModalState::Confirm {
+        self.tui_state.active_modal = Some(ModalState::Confirm {
             action: modal_action,
         });
     }
 
     fn resolve_active_approval(&mut self, approved: bool) -> bool {
-        if !matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+        if !matches!(
+            self.tui_state.active_modal,
+            Some(ModalState::Approval { .. })
+        ) {
             return false;
         }
 
@@ -1615,7 +1632,7 @@ impl App {
         }
 
         self.tui_state.pending_approval = None;
-        self.active_modal = None;
+        self.tui_state.active_modal = None;
         if self.tui_state.input_mode == InputMode::Confirm {
             self.tui_state.input_mode = InputMode::Normal;
         }
@@ -1642,7 +1659,7 @@ impl App {
         });
         self.pending_approval_response = Some(response_tx);
         self.tui_state.input_mode = InputMode::Confirm;
-        self.active_modal = Some(ModalState::Approval { role, command });
+        self.tui_state.active_modal = Some(ModalState::Approval { role, command });
     }
 
     fn drain_approval_requests(&mut self) {
@@ -1728,35 +1745,13 @@ impl App {
 
     fn scroll_focused(&mut self, delta: i32) {
         match (self.tui_state.active_tab, self.tui_state.focus) {
-            (Tab::Logs, _) => {
-                if self.tui_state.log_auto_tail {
-                    self.tui_state.log_auto_tail = false;
-                    self.tui_state.log_scroll = delta.unsigned_abs() as usize;
-                } else {
-                    let current = self.tui_state.log_scroll as i32;
-                    let next = (current + delta).max(0) as usize;
-                    self.tui_state.log_scroll = next;
-                    if next == 0 {
-                        self.tui_state.log_auto_tail = true;
-                    }
-                }
-            }
+            (Tab::Logs, _) => self.scroll_logs_by(delta),
             (Tab::Agents, FocusZone::PlanTree) => {
                 let max = self.tui_state.agents.len().saturating_sub(1);
                 let next = (self.tui_state.selected_agent as i32 + delta).clamp(0, max as i32);
                 self.tui_state.selected_agent = next as usize;
             }
-            (Tab::Agents, FocusZone::AgentOutput) => {
-                let current = self.tui_state.agent_scroll.unwrap_or(0);
-                if delta < 0 {
-                    self.tui_state.agent_scroll =
-                        Some(current.saturating_add(delta.unsigned_abs() as usize));
-                } else if current == 0 {
-                    self.tui_state.agent_scroll = None;
-                } else {
-                    self.tui_state.agent_scroll = Some(current.saturating_sub(delta as usize));
-                }
-            }
+            (Tab::Agents, FocusZone::AgentOutput) => self.scroll_agent_output_by(delta),
             (_, FocusZone::PlanTree) => {
                 let current = self.tui_state.plan_scroll_offset as i32;
                 self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
@@ -1765,10 +1760,7 @@ impl App {
                 let current = self.tui_state.task_scroll as i32;
                 self.tui_state.task_scroll = (current + delta).max(0) as usize;
             }
-            (_, FocusZone::AgentOutput) => {
-                let current = self.current_agent_scroll_offset() as i32;
-                self.tui_state.agent_scroll = Some((current + delta).max(0) as usize);
-            }
+            (_, FocusZone::AgentOutput) => self.scroll_agent_output_by(delta),
             (_, FocusZone::CommandOutput) => {
                 let current = self.tui_state.command_output_scroll as i32;
                 self.tui_state.command_output_scroll = (current + delta).max(0) as usize;
@@ -1791,7 +1783,11 @@ impl App {
                 };
             }
             (Tab::Agents, FocusZone::AgentOutput) => {
-                self.tui_state.agent_scroll = Some(offset);
+                if offset == usize::MAX {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(offset);
+                }
             }
             (_, FocusZone::PlanTree) => {
                 self.tui_state.plan_scroll_offset = offset;
@@ -1799,8 +1795,21 @@ impl App {
             (_, FocusZone::TaskProgress) => {
                 self.tui_state.task_scroll = offset;
             }
+            (Tab::Logs, _) => {
+                if offset == usize::MAX {
+                    self.tui_state.log_auto_tail = true;
+                    self.tui_state.log_scroll = 0;
+                } else {
+                    self.tui_state.log_auto_tail = false;
+                    self.tui_state.log_scroll = offset;
+                }
+            }
             (_, FocusZone::AgentOutput) => {
-                self.tui_state.agent_scroll = Some(offset);
+                if offset == usize::MAX {
+                    self.tui_state.agent_scroll = None;
+                } else {
+                    self.tui_state.agent_scroll = Some(offset);
+                }
             }
             (_, FocusZone::CommandOutput) => {
                 self.tui_state.command_output_scroll = offset;
@@ -1819,6 +1828,10 @@ impl App {
         }
     }
 
+    fn page_scroll_lines(&self) -> i32 {
+        i32::from(self.terminal_size.1.saturating_sub(4).max(1))
+    }
+
     fn merge_process_metrics(&mut self, samples: Vec<ProcessMetricSample>) {
         const PROCESS_HISTORY_LIMIT: usize = 60;
 
@@ -1826,16 +1839,16 @@ impl App {
         let mut merged = Vec::with_capacity(samples.len());
 
         for sample in samples {
-            let mut metric = if let Some(index) = existing.iter().position(|entry| entry.pid == sample.pid)
-            {
-                existing.swap_remove(index)
-            } else {
-                super::state::ProcessMetrics {
-                    pid: sample.pid,
-                    role: sample.role.clone(),
-                    ..Default::default()
-                }
-            };
+            let mut metric =
+                if let Some(index) = existing.iter().position(|entry| entry.pid == sample.pid) {
+                    existing.swap_remove(index)
+                } else {
+                    super::state::ProcessMetrics {
+                        pid: sample.pid,
+                        role: sample.role.clone(),
+                        ..Default::default()
+                    }
+                };
 
             metric.pid = sample.pid;
             metric.role = sample.role;
@@ -1843,8 +1856,16 @@ impl App {
             metric.mem_bytes = sample.mem_bytes;
             metric.state = sample.state;
             metric.uptime_secs = sample.uptime_secs;
-            push_bounded_history(&mut metric.cpu_history, sample.cpu_pct, PROCESS_HISTORY_LIMIT);
-            push_bounded_history(&mut metric.mem_history, sample.mem_bytes, PROCESS_HISTORY_LIMIT);
+            push_bounded_history(
+                &mut metric.cpu_history,
+                sample.cpu_pct,
+                PROCESS_HISTORY_LIMIT,
+            );
+            push_bounded_history(
+                &mut metric.mem_history,
+                sample.mem_bytes,
+                PROCESS_HISTORY_LIMIT,
+            );
             merged.push(metric);
         }
 
@@ -1852,11 +1873,118 @@ impl App {
     }
 
     fn current_agent_scroll_offset(&self) -> usize {
-        self.tui_state.agent_scroll.unwrap_or_else(|| {
-            self.current_agent_output_line_count()
-                .saturating_sub(self.current_agent_output_viewport_height())
-                .min(u16::MAX as usize)
-        })
+        self.tui_state
+            .agent_scroll
+            .unwrap_or_else(|| self.current_agent_max_scroll())
+    }
+
+    fn current_agent_max_scroll(&self) -> usize {
+        self.current_agent_output_line_count()
+            .saturating_sub(self.current_agent_output_viewport_height())
+            .min(u16::MAX as usize)
+    }
+
+    fn current_log_max_scroll(&self) -> usize {
+        let content_area = self.current_content_area();
+        let sections =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(content_area);
+        let viewport_height = sections[1].height.saturating_sub(2) as usize;
+        super::views::logs_view::filtered_entry_count(&self.data, &self.tui_state)
+            .saturating_sub(viewport_height)
+            .min(u16::MAX as usize)
+    }
+
+    fn current_git_max_scroll(&self) -> usize {
+        let content_area = self.current_content_area();
+        let panels = Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(content_area);
+        let sections = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(panels[1]);
+        let viewport_height = sections[0].height.saturating_sub(2) as usize;
+        self.tui_state
+            .git_view_data
+            .as_ref()
+            .map_or(0, |git| git.commits.len().saturating_sub(viewport_height))
+            .min(u16::MAX as usize)
+    }
+
+    fn scroll_agent_output_by(&mut self, delta: i32) {
+        let max_scroll = self.current_agent_max_scroll();
+        let current = self.current_agent_scroll_offset().min(max_scroll);
+
+        if delta < 0 {
+            let next = current.saturating_sub(delta.unsigned_abs() as usize);
+            self.tui_state.agent_scroll = Some(next);
+        } else {
+            let next = current.saturating_add(delta as usize).min(max_scroll);
+            if next >= max_scroll {
+                self.tui_state.agent_scroll = None;
+            } else {
+                self.tui_state.agent_scroll = Some(next);
+            }
+        }
+
+        self.tui_state.clamp_agent_scroll(max_scroll);
+    }
+
+    fn scroll_logs_by(&mut self, delta: i32) {
+        let max_scroll = self.current_log_max_scroll();
+        let current = if self.tui_state.log_auto_tail {
+            max_scroll
+        } else {
+            self.tui_state.log_scroll.min(max_scroll)
+        };
+
+        if delta < 0 {
+            self.tui_state.log_auto_tail = false;
+            self.tui_state.log_scroll = current.saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            let next = current.saturating_add(delta as usize).min(max_scroll);
+            if next >= max_scroll {
+                self.tui_state.log_auto_tail = true;
+                self.tui_state.log_scroll = 0;
+            } else {
+                self.tui_state.log_auto_tail = false;
+                self.tui_state.log_scroll = next;
+            }
+        }
+
+        self.tui_state.clamp_log_scroll(max_scroll);
+    }
+
+    fn current_content_area(&self) -> Rect {
+        let full_area = Rect::new(0, 0, self.terminal_size.0, self.terminal_size.1);
+        let content_area = super::layout::responsive_outer_margin(full_area);
+        let has_waves = !self.tui_state.execution_waves.is_empty();
+        let wave_row_height = if has_waves { 1 } else { 0 };
+        let main_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(wave_row_height),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(content_area);
+        self.split_content_area(main_layout[2]).0
+    }
+
+    fn clamp_scroll_state_to_view(&mut self) {
+        match self.tui_state.active_tab {
+            Tab::Dashboard | Tab::Agents => {
+                let max_scroll = self.current_agent_max_scroll();
+                self.tui_state.clamp_agent_scroll(max_scroll);
+            }
+            Tab::Git => {
+                self.tui_state
+                    .clamp_diff_scroll(self.current_git_max_scroll());
+            }
+            Tab::Logs => {
+                self.tui_state
+                    .clamp_log_scroll(self.current_log_max_scroll());
+            }
+            Tab::Plans | Tab::Config | Tab::Inspect => {}
+        }
     }
 
     fn current_agent_output_line_count(&self) -> usize {
@@ -1900,24 +2028,7 @@ impl App {
     }
 
     fn current_agent_output_viewport_height(&self) -> usize {
-        let Ok((width, height)) = crossterm::terminal::size() else {
-            return 0;
-        };
-
-        let full_area = Rect::new(0, 0, width, height);
-        let content_area = super::layout::responsive_outer_margin(full_area);
-        let has_waves = !self.tui_state.execution_waves.is_empty();
-        let wave_row_height = if has_waves { 1 } else { 0 };
-        let main_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(wave_row_height),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
-        let content_area = main_layout[2];
+        let content_area = self.current_content_area();
 
         match self.tui_state.active_tab {
             Tab::Agents => {
@@ -1940,6 +2051,44 @@ impl App {
             }
             _ => 0,
         }
+    }
+
+    fn split_content_area(&self, area: Rect) -> (Rect, Option<Rect>) {
+        if self.tui_state.is_text_input() && area.height > 0 {
+            let sections =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+            (sections[0], Some(sections[1]))
+        } else {
+            (area, None)
+        }
+    }
+
+    fn render_input_bar(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let label = self.tui_state.input_mode_label();
+        if label.is_empty() || area.width == 0 {
+            return;
+        }
+
+        let buffer = match self.tui_state.input_mode {
+            InputMode::Inject => self.tui_state.message_input.as_str(),
+            InputMode::Filter => self.tui_state.filter_text.as_str(),
+            _ => return,
+        };
+
+        let prefix = format!("[{label}]");
+        let horizontal_scroll = (prefix.chars().count() + 3 + buffer.chars().count() + 1)
+            .saturating_sub(area.width as usize) as u16;
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled(prefix, theme.accent_bold()),
+            Span::styled(" > ", theme.muted()),
+            Span::styled(buffer, theme.text()),
+            Span::styled("│", theme.selection()),
+        ]))
+        .style(theme.text().bg(Theme::BG_SECONDARY))
+        .scroll((0, horizontal_scroll));
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(input, area);
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -1981,14 +2130,17 @@ impl App {
     }
 
     fn has_modal(&self) -> bool {
-        self.active_modal.is_some()
+        self.tui_state.active_modal.is_some()
     }
 
     fn dismiss_all_modals(&mut self) {
-        if matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+        if matches!(
+            self.tui_state.active_modal,
+            Some(ModalState::Approval { .. })
+        ) {
             let _ = self.resolve_active_approval(false);
         }
-        self.active_modal = None;
+        self.tui_state.active_modal = None;
         self.tui_state.pending_confirm = None;
         if self.tui_state.input_mode == InputMode::Confirm {
             self.tui_state.input_mode = InputMode::Normal;
@@ -2076,7 +2228,7 @@ impl App {
                 auto_tail: self.tui_state.agent_scroll.is_none(),
             },
             Tab::Git => ViewState {
-                scroll: self.tui_state.plan_scroll_offset as u16,
+                scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: self.tui_state.git_branch_cursor,
                 sub_tab: 0,
                 secondary_selected: 0,
@@ -2097,7 +2249,7 @@ impl App {
                 auto_tail: false,
             },
             Tab::Inspect => ViewState {
-                scroll: 0,
+                scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: 0,
                 sub_tab: 0,
                 secondary_selected: 0,
@@ -2214,7 +2366,7 @@ impl App {
         if let Some(rx) = &self.git_rx {
             let mut count = 0;
             while let Ok(bg) = rx.try_recv() {
-                self.tui_state.git_branch_tree = convert_git_branch_tree(&bg.view_data.branches);
+                self.tui_state.git_branch_tree = bg.view_data.branches.clone();
                 self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
                 self.tui_state.git_worktree_list =
                     convert_git_worktree_list(&bg.view_data.worktrees);
@@ -2496,8 +2648,21 @@ fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use roko_core::config::RokoConfig;
     use tempfile::tempdir;
+
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn app_starts_on_requested_page() {
@@ -2545,7 +2710,7 @@ mod tests {
         app.drain_approval_requests();
 
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::Approval { ref role, ref command })
                 if role == "reviewer" && command == "echo hello"
         ));
@@ -2568,7 +2733,7 @@ mod tests {
         let approved = rt.block_on(async move { response_rx.await.unwrap() });
 
         assert!(approved);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
         assert!(app.pending_approval_response.is_none());
         assert!(app.tui_state.pending_approval.is_none());
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
@@ -2702,11 +2867,8 @@ mod tests {
 
     #[test]
     fn full_frame_render_no_panic() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let dir = tempdir().unwrap();
-        let app = App::new(dir.path());
+        let mut app = App::new(dir.path());
         let backend = TestBackend::new(160, 50);
         let mut terminal = Terminal::new(backend).unwrap();
         // The real test: does a full frame render without panicking?
@@ -2715,9 +2877,6 @@ mod tests {
 
     #[test]
     fn all_tabs_render_without_panic() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
 
@@ -2797,13 +2956,117 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(!matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::Help)
+        ));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(matches!(app.tui_state.active_modal, Some(ModalState::Help)));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(!matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::Help)
+        ));
+    }
+
+    #[test]
+    fn show_plan_detail_opens_selected_plan_and_resets_scroll() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plans = vec![super::super::state::PlanEntry {
+            id: "plan-1".to_string(),
+            name: "Plan One".to_string(),
+            ..Default::default()
+        }];
+        app.tui_state.selected_plan_idx = 0;
+        app.tui_state.plan_detail_scroll = 7;
+
+        app.dispatch_action(TuiAction::ShowPlanDetail);
+
+        assert!(matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::PlanDetail { ref plan_id }) if plan_id == "plan-1"
+        ));
+        assert_eq!(app.tui_state.plan_detail_scroll, 0);
+
+        app.dispatch_action(TuiAction::ShowPlanDetail);
+        assert!(app.tui_state.active_modal.is_none());
+    }
+
+    #[test]
+    fn modal_scroll_actions_update_modal_snapshot_only() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plan_scroll_offset = 9;
+        app.tui_state.active_modal = Some(ModalState::WaveOverview {
+            waves: Vec::new(),
+            scroll_offset: 2,
+        });
+
+        app.dispatch_action(TuiAction::ModalScrollDown);
+
+        assert!(matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::WaveOverview {
+                scroll_offset: 3,
+                ..
+            })
+        ));
+        assert_eq!(app.tui_state.plan_scroll_offset, 9);
+
+        app.tui_state.active_modal = Some(ModalState::AgentPool {
+            agents: Vec::new(),
+            scroll_offset: 4,
+        });
+
+        app.dispatch_action(TuiAction::ModalScrollUp);
+
+        assert!(matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::AgentPool {
+                scroll_offset: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn queue_overview_actions_update_modal_state() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        app.tui_state.plan_scroll_offset = 5;
+        app.tui_state.active_modal = Some(ModalState::QueueOverview {
+            milestones: vec![
+                Milestone {
+                    name: "Wave 0".to_string(),
+                    tasks: Vec::new(),
+                    completed: 0,
+                    total: 1,
+                },
+                Milestone {
+                    name: "Wave 1".to_string(),
+                    tasks: Vec::new(),
+                    completed: 0,
+                    total: 1,
+                },
+            ],
+            selected_index: 0,
+            scroll_offset: 0,
+        });
+
+        app.dispatch_action(TuiAction::QueueOverviewDown);
+
+        assert!(matches!(
+            app.tui_state.active_modal,
+            Some(ModalState::QueueOverview {
+                selected_index: 1,
+                scroll_offset: 1,
+                ..
+            })
+        ));
+        assert_eq!(app.tui_state.plan_scroll_offset, 5);
     }
 
     #[test]
@@ -2811,12 +3074,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
         assert!(app.running);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
 
         app.dispatch_action(TuiAction::Quit);
 
         assert!(app.running);
-        assert!(matches!(app.active_modal, Some(ModalState::Quit)));
+        assert!(matches!(app.tui_state.active_modal, Some(ModalState::Quit)));
         assert_eq!(app.tui_state.input_mode, InputMode::Confirm);
     }
 
@@ -2824,13 +3087,13 @@ mod tests {
     fn confirming_quit_exits() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        app.active_modal = Some(ModalState::Quit);
+        app.tui_state.active_modal = Some(ModalState::Quit);
         app.tui_state.input_mode = InputMode::Confirm;
 
         app.dispatch_action(TuiAction::ConfirmYes);
 
         assert!(!app.running);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
         assert!(app.tui_state.pending_confirm.is_none());
     }
@@ -2903,8 +3166,8 @@ mod tests {
 
     #[test]
     fn v_cycles_effects_presets_and_persists_without_touching_screen_postfx() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use super::super::effects_config::EffectsPreset;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempdir().unwrap();
         std::fs::write(
@@ -2953,6 +3216,7 @@ mod tests {
                     ahead: 0,
                     behind: 0,
                     depth: 0,
+                    children: Vec::new(),
                 },
                 super::views::git_view::GitBranchNode {
                     name: "feature/test".to_string(),
@@ -2961,6 +3225,7 @@ mod tests {
                     ahead: 0,
                     behind: 0,
                     depth: 1,
+                    children: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -2998,7 +3263,7 @@ mod tests {
             Some(ConfirmAction::DiagnosePlan("plan-7".to_string()))
         );
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::Confirm {
                 action: modals::ConfirmAction::Custom { .. }
             })
@@ -3028,17 +3293,18 @@ mod tests {
     }
 
     #[test]
-    fn page_scroll_moves_focused_panel_by_twenty_lines() {
+    fn page_scroll_moves_focused_panel_by_terminal_height_minus_chrome() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
+        app.terminal_size = (120, 50);
         app.tui_state.focus = FocusZone::PlanTree;
         app.tui_state.plan_scroll_offset = 40;
 
         app.dispatch_action(TuiAction::ScrollPageUp);
-        assert_eq!(app.tui_state.plan_scroll_offset, 20);
+        assert_eq!(app.tui_state.plan_scroll_offset, 0);
 
         app.dispatch_action(TuiAction::ScrollPageDown);
-        assert_eq!(app.tui_state.plan_scroll_offset, 40);
+        assert_eq!(app.tui_state.plan_scroll_offset, 46);
     }
 
     #[test]
@@ -3093,6 +3359,13 @@ mod tests {
         assert_eq!(view.scroll, 7);
         assert_eq!(view.selected, 0);
         assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Git;
+        app.tui_state.diff_scroll = 11;
+        let view = app.current_view_state();
+        assert_eq!(view.scroll, 11);
+        assert_eq!(view.selected, app.tui_state.git_branch_cursor);
+        assert!(!view.auto_tail);
     }
 
     #[test]
@@ -3119,19 +3392,76 @@ mod tests {
     }
 
     #[test]
-    fn logs_tail_toggle_and_filter_input_work() {
+    fn log_end_action_resumes_tail_mode() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
         app.tui_state.active_tab = Tab::Logs;
-        app.tui_state.log_auto_tail = true;
-        app.tui_state.log_scroll = 0;
+        app.tui_state.log_auto_tail = false;
+        app.tui_state.log_scroll = 9;
 
-        // Scrolling up pins the view (disables auto-tail).
-        app.dispatch_action(TuiAction::ScrollLogUp);
-        assert_eq!(app.tui_state.log_scroll, 1);
-
-        app.dispatch_action(TuiAction::ScrollLogDown);
+        app.dispatch_action(TuiAction::ScrollLogEnd);
         assert!(app.tui_state.log_auto_tail);
         assert_eq!(app.tui_state.log_scroll, 0);
+    }
+
+    #[test]
+    fn filter_input_stays_in_sync_and_escape_clears_state() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+
+        app.dispatch_action(TuiAction::StartFilter);
+        assert_eq!(app.tui_state.input_mode, InputMode::Filter);
+        assert!(app.tui_state.filter_text.is_empty());
+        assert!(app.tui_state.filter.is_empty());
+        assert!(!app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::InputChar('a'));
+        app.dispatch_action(TuiAction::InputChar('b'));
+        assert_eq!(app.tui_state.filter_text, "ab");
+        assert_eq!(app.tui_state.filter, "ab");
+        assert!(app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::InputBackspace);
+        assert_eq!(app.tui_state.filter_text, "a");
+        assert_eq!(app.tui_state.filter, "a");
+        assert!(app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::AcceptFilter);
+        assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+        assert_eq!(app.tui_state.filter, "a");
+        assert!(app.tui_state.filter_active);
+
+        app.dispatch_action(TuiAction::StartFilter);
+        app.dispatch_action(TuiAction::InputChar('z'));
+        app.dispatch_action(TuiAction::CancelFilter);
+        assert_eq!(app.tui_state.input_mode, InputMode::Normal);
+        assert!(app.tui_state.filter_text.is_empty());
+        assert!(app.tui_state.filter.is_empty());
+        assert!(!app.tui_state.filter_active);
+    }
+
+    #[test]
+    fn text_input_bar_renders_only_for_text_modes() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let normal = rendered_text(&terminal);
+        assert!(!normal.contains("[INJECT] > "));
+        assert!(!normal.contains("[FILTER] > "));
+
+        app.tui_state.input_mode = InputMode::Inject;
+        app.tui_state.message_input = "ship it".to_string();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let inject = rendered_text(&terminal);
+        assert!(inject.contains("[INJECT] > ship it│"));
+
+        app.tui_state.input_mode = InputMode::Filter;
+        app.tui_state.filter_text = "plan".to_string();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let filter = rendered_text(&terminal);
+        assert!(filter.contains("[FILTER] > plan│"));
     }
 }

@@ -6,13 +6,18 @@
 /// A full plan document.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Stable plan identifier.
     pub id: String,
+    /// Human-readable plan title.
     pub title: String,
+    /// Longer description of the plan goal and scope.
     pub description: String,
+    /// Ordered task list belonging to the plan.
     pub tasks: Vec<PlanTask>,
 }
 
 impl Plan {
+    /// Construct an empty plan with the provided metadata.
     #[must_use]
     pub const fn new(id: String, title: String, description: String) -> Self {
         Self {
@@ -23,6 +28,7 @@ impl Plan {
         }
     }
 
+    /// Append one task to the plan's ordered task list.
     pub fn add_task(&mut self, task: PlanTask) {
         self.tasks.push(task);
     }
@@ -55,9 +61,14 @@ impl Plan {
 /// A plan task entry.
 #[derive(Debug, Clone)]
 pub struct PlanTask {
+    /// Stable task identifier within the plan.
     pub id: String,
+    /// Human-readable task description.
     pub description: String,
+    /// IDs of tasks that must complete before this task can start.
     pub depends_on: Vec<String>,
+    /// Files or paths expected to be touched by the task.
     pub files: Vec<String>,
+    /// Whether the task has already been completed.
     pub completed: bool,
 }
