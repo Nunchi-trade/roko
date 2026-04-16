@@ -60,8 +60,6 @@ pub struct App {
     pub tui_state: TuiState,
     /// PostFX configuration.
     fx_config: EffectsConfig,
-    /// Active modal overlay.
-    active_modal: Option<ModalState>,
     /// Toast notifications.
     notifications: Vec<super::modals::Notification>,
     /// Keyboard scroll acceleration state for held-key scrolling.
@@ -396,7 +394,6 @@ impl App {
             workdir,
             tui_state,
             fx_config: EffectsConfig::default(),
-            active_modal: None,
             notifications: Vec::new(),
             scroll_accel: super::scroll::ScrollAccel::new(),
             current_page: scaffold.active_page(),
@@ -718,7 +715,7 @@ impl App {
         }
 
         // Dim overlay before modals
-        if self.active_modal.is_some() {
+        if self.tui_state.active_modal.is_some() {
             let buf = frame.buffer_mut();
             super::postfx::dim_overlay(content_area, buf, 0.45);
         }
@@ -727,7 +724,7 @@ impl App {
         modals::render_modals(
             frame,
             full_area,
-            self.active_modal.as_ref(),
+            self.tui_state.active_modal.as_ref(),
             &self.tui_state,
             &self.data,
             &self.notifications,
@@ -761,7 +758,7 @@ impl App {
             self.tui_state.input_mode,
             self.tui_state.active_tab,
             self.tui_state.focus,
-            &input::ModalVisibility::from_active_modal(self.active_modal.as_ref()),
+            &input::ModalVisibility::from_active_modal(self.tui_state.active_modal.as_ref()),
         );
 
         self.dispatch_action(action);
@@ -774,7 +771,7 @@ impl App {
                     self.dismiss_all_modals();
                 } else {
                     self.tui_state.input_mode = InputMode::Confirm;
-                    self.active_modal = Some(ModalState::Quit);
+                    self.tui_state.active_modal = Some(ModalState::Quit);
                 }
             }
             TuiAction::QuitConfirmed => {
@@ -834,7 +831,7 @@ impl App {
                     selected_index,
                     scroll_offset,
                     ..
-                }) = self.active_modal.as_mut()
+                }) = self.tui_state.active_modal.as_mut()
                 {
                     *selected_index = selected_index.saturating_sub(1);
                     *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
@@ -846,7 +843,7 @@ impl App {
                     scroll_offset,
                     tasks,
                     ..
-                }) = self.active_modal.as_mut()
+                }) = self.tui_state.active_modal.as_mut()
                 {
                     let max = tasks.len().saturating_sub(1);
                     *selected_index = selected_index.saturating_add(1).min(max);
@@ -938,11 +935,11 @@ impl App {
                     Self::apply_signed_scroll(self.tui_state.diff_scroll, delta);
             }
             TuiAction::ScrollDetailUp => {
-                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
+                if matches!(self.tui_state.active_modal, Some(ModalState::PlanDetail { .. })) {
                     self.tui_state.plan_detail_scroll =
                         self.tui_state.plan_detail_scroll.saturating_sub(1);
                 } else if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
-                    self.active_modal.as_mut()
+                    self.tui_state.active_modal.as_mut()
                 {
                     *scroll_offset = scroll_offset.saturating_sub(1);
                 } else {
@@ -951,11 +948,11 @@ impl App {
                 }
             }
             TuiAction::ScrollDetailDown => {
-                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
+                if matches!(self.tui_state.active_modal, Some(ModalState::PlanDetail { .. })) {
                     self.tui_state.plan_detail_scroll =
                         self.tui_state.plan_detail_scroll.saturating_add(1);
                 } else if let Some(ModalState::TaskDetail { scroll_offset, .. }) =
-                    self.active_modal.as_mut()
+                    self.tui_state.active_modal.as_mut()
                 {
                     *scroll_offset = scroll_offset.saturating_add(1);
                 } else {
@@ -964,7 +961,7 @@ impl App {
                 }
             }
             TuiAction::ModalScrollUp => {
-                if let Some(modal) = self.active_modal.as_mut() {
+                if let Some(modal) = self.tui_state.active_modal.as_mut() {
                     match modal {
                         ModalState::WaveOverview { scroll_offset, .. }
                         | ModalState::AgentPool { scroll_offset, .. } => {
@@ -975,7 +972,7 @@ impl App {
                 }
             }
             TuiAction::ModalScrollDown => {
-                if let Some(modal) = self.active_modal.as_mut() {
+                if let Some(modal) = self.tui_state.active_modal.as_mut() {
                     match modal {
                         ModalState::WaveOverview { scroll_offset, .. }
                         | ModalState::AgentPool { scroll_offset, .. } => {
@@ -990,7 +987,7 @@ impl App {
                     selected_index,
                     scroll_offset,
                     ..
-                }) = self.active_modal.as_mut()
+                }) = self.tui_state.active_modal.as_mut()
                 {
                     *selected_index = selected_index.saturating_sub(1);
                     *scroll_offset = (*selected_index).min(u16::MAX as usize) as u16;
@@ -1001,7 +998,7 @@ impl App {
                     selected_index,
                     scroll_offset,
                     milestones,
-                }) = self.active_modal.as_mut()
+                }) = self.tui_state.active_modal.as_mut()
                 {
                     let max = milestones.len().saturating_sub(1);
                     *selected_index = selected_index.saturating_add(1).min(max);
@@ -1014,7 +1011,10 @@ impl App {
                 }
             }
             TuiAction::ShowHelp => {
-                self.active_modal = if matches!(self.active_modal, Some(ModalState::Help)) {
+                self.tui_state.active_modal = if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::Help)
+                ) {
                     None
                 } else {
                     Some(ModalState::Help)
@@ -1056,57 +1056,61 @@ impl App {
                     .plans
                     .get(self.tui_state.selected_plan_idx)
                     .map(|plan| plan.id.clone());
+                let is_same_plan_open = matches!(
+                    self.tui_state.active_modal.as_ref(),
+                    Some(ModalState::PlanDetail {
+                        plan_id: active_plan_id
+                    }) if plan_id.as_ref().is_some_and(|plan_id| active_plan_id == plan_id)
+                );
 
-                self.active_modal = plan_id.and_then(|plan_id| {
-                    if matches!(
-                        self.active_modal.as_ref(),
-                        Some(ModalState::PlanDetail {
-                            plan_id: active_plan_id
-                        }) if active_plan_id == &plan_id
-                    ) {
-                        None
-                    } else {
+                self.tui_state.active_modal = if is_same_plan_open {
+                    None
+                } else {
+                    plan_id.map(|plan_id| {
                         self.tui_state.plan_detail_scroll = 0;
-                        Some(ModalState::PlanDetail { plan_id })
-                    }
-                });
+                        ModalState::PlanDetail { plan_id }
+                    })
+                };
             }
             TuiAction::ClosePlanDetail => {
-                if matches!(self.active_modal, Some(ModalState::PlanDetail { .. })) {
-                    self.active_modal = None;
+                if matches!(
+                    self.tui_state.active_modal,
+                    Some(ModalState::PlanDetail { .. })
+                ) {
+                    self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ShowTaskDetail => {
                 let task_count = self.tui_state.current_task_checklist.len();
                 if task_count > 0 {
                     let task_idx = self.tui_state.task_scroll.min(task_count.saturating_sub(1));
-                    self.active_modal = Some(ModalState::TaskDetail {
+                    self.tui_state.active_modal = Some(ModalState::TaskDetail {
                         task_idx,
                         scroll_offset: 0,
                     });
                 }
             }
             TuiAction::CloseTaskDetail => {
-                if matches!(self.active_modal, Some(ModalState::TaskDetail { .. })) {
-                    self.active_modal = None;
+                if matches!(self.tui_state.active_modal, Some(ModalState::TaskDetail { .. })) {
+                    self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ShowWaveOverview => {
-                if matches!(self.active_modal, Some(ModalState::WaveOverview { .. })) {
-                    self.active_modal = None;
+                if matches!(self.tui_state.active_modal, Some(ModalState::WaveOverview { .. })) {
+                    self.tui_state.active_modal = None;
                 } else {
-                    self.active_modal = Some(ModalState::WaveOverview {
+                    self.tui_state.active_modal = Some(ModalState::WaveOverview {
                         waves: execution_waves_for_modal(&self.tui_state),
                         scroll_offset: 0,
                     });
                 }
             }
             TuiAction::ShowQueueOverview => {
-                if matches!(self.active_modal, Some(ModalState::QueueOverview { .. })) {
-                    self.active_modal = None;
+                if matches!(self.tui_state.active_modal, Some(ModalState::QueueOverview { .. })) {
+                    self.tui_state.active_modal = None;
                 } else {
                     let milestones = queue_overview_milestones(&self.tui_state);
-                    self.active_modal = Some(ModalState::QueueOverview {
+                    self.tui_state.active_modal = Some(ModalState::QueueOverview {
                         selected_index: self
                             .tui_state
                             .current_wave()
@@ -1122,15 +1126,15 @@ impl App {
                     .tui_state
                     .task_scroll
                     .min(tasks.len().saturating_sub(1));
-                self.active_modal = Some(ModalState::TaskPicker {
+                self.tui_state.active_modal = Some(ModalState::TaskPicker {
                     tasks,
                     selected_index,
                     scroll_offset: selected_index as u16,
                 });
             }
             TuiAction::CloseTaskPicker => {
-                if matches!(self.active_modal, Some(ModalState::TaskPicker { .. })) {
-                    self.active_modal = None;
+                if matches!(self.tui_state.active_modal, Some(ModalState::TaskPicker { .. })) {
+                    self.tui_state.active_modal = None;
                 }
             }
             TuiAction::ExpandCollapse => {
@@ -1276,7 +1280,7 @@ impl App {
                     return;
                 }
                 self.tui_state.input_mode = InputMode::Normal;
-                if matches!(self.active_modal, Some(ModalState::Quit)) {
+                if matches!(self.tui_state.active_modal, Some(ModalState::Quit)) {
                     self.dismiss_all_modals();
                     self.dispatch_action(TuiAction::QuitConfirmed);
                     return;
@@ -1326,7 +1330,7 @@ impl App {
                         )));
                 }
                 self.tui_state.pending_confirm = None;
-                self.active_modal = None;
+                self.tui_state.active_modal = None;
             }
             TuiAction::ConfirmNo => {
                 if self.resolve_active_approval(false) {
@@ -1395,7 +1399,7 @@ impl App {
                 let modal_action = modals::ConfirmAction::Custom {
                     message: "Restart current phase?".to_string(),
                 };
-                self.active_modal = Some(ModalState::Confirm {
+                self.tui_state.active_modal = Some(ModalState::Confirm {
                     action: modal_action,
                 });
             }
@@ -1408,7 +1412,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Restart plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1422,7 +1426,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Force-advance plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1436,7 +1440,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Reset state for plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1450,7 +1454,7 @@ impl App {
                     let modal_action = modals::ConfirmAction::Custom {
                         message: format!("Re-verify plan '{plan_id}'?"),
                     };
-                    self.active_modal = Some(ModalState::Confirm {
+                    self.tui_state.active_modal = Some(ModalState::Confirm {
                         action: modal_action,
                     });
                 }
@@ -1623,13 +1627,13 @@ impl App {
         let modal_action = modals::ConfirmAction::Custom {
             message: action.to_string(),
         };
-        self.active_modal = Some(ModalState::Confirm {
+        self.tui_state.active_modal = Some(ModalState::Confirm {
             action: modal_action,
         });
     }
 
     fn resolve_active_approval(&mut self, approved: bool) -> bool {
-        if !matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+        if !matches!(self.tui_state.active_modal, Some(ModalState::Approval { .. })) {
             return false;
         }
 
@@ -1638,7 +1642,7 @@ impl App {
         }
 
         self.tui_state.pending_approval = None;
-        self.active_modal = None;
+        self.tui_state.active_modal = None;
         if self.tui_state.input_mode == InputMode::Confirm {
             self.tui_state.input_mode = InputMode::Normal;
         }
@@ -1665,7 +1669,7 @@ impl App {
         });
         self.pending_approval_response = Some(response_tx);
         self.tui_state.input_mode = InputMode::Confirm;
-        self.active_modal = Some(ModalState::Approval { role, command });
+        self.tui_state.active_modal = Some(ModalState::Approval { role, command });
     }
 
     fn drain_approval_requests(&mut self) {
@@ -2042,14 +2046,14 @@ impl App {
     }
 
     fn has_modal(&self) -> bool {
-        self.active_modal.is_some()
+        self.tui_state.active_modal.is_some()
     }
 
     fn dismiss_all_modals(&mut self) {
-        if matches!(self.active_modal, Some(ModalState::Approval { .. })) {
+        if matches!(self.tui_state.active_modal, Some(ModalState::Approval { .. })) {
             let _ = self.resolve_active_approval(false);
         }
-        self.active_modal = None;
+        self.tui_state.active_modal = None;
         self.tui_state.pending_confirm = None;
         if self.tui_state.input_mode == InputMode::Confirm {
             self.tui_state.input_mode = InputMode::Normal;
@@ -2619,7 +2623,7 @@ mod tests {
         app.drain_approval_requests();
 
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::Approval { ref role, ref command })
                 if role == "reviewer" && command == "echo hello"
         ));
@@ -2642,7 +2646,7 @@ mod tests {
         let approved = rt.block_on(async move { response_rx.await.unwrap() });
 
         assert!(approved);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
         assert!(app.pending_approval_response.is_none());
         assert!(app.tui_state.pending_approval.is_none());
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
@@ -2865,13 +2869,13 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(!matches!(app.tui_state.active_modal, Some(ModalState::Help)));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(matches!(app.tui_state.active_modal, Some(ModalState::Help)));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(!matches!(app.active_modal, Some(ModalState::Help)));
+        assert!(!matches!(app.tui_state.active_modal, Some(ModalState::Help)));
     }
 
     #[test]
@@ -2889,13 +2893,13 @@ mod tests {
         app.dispatch_action(TuiAction::ShowPlanDetail);
 
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::PlanDetail { ref plan_id }) if plan_id == "plan-1"
         ));
         assert_eq!(app.tui_state.plan_detail_scroll, 0);
 
         app.dispatch_action(TuiAction::ShowPlanDetail);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
     }
 
     #[test]
@@ -2903,7 +2907,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
         app.tui_state.plan_scroll_offset = 9;
-        app.active_modal = Some(ModalState::WaveOverview {
+        app.tui_state.active_modal = Some(ModalState::WaveOverview {
             waves: Vec::new(),
             scroll_offset: 2,
         });
@@ -2911,12 +2915,12 @@ mod tests {
         app.dispatch_action(TuiAction::ModalScrollDown);
 
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::WaveOverview { scroll_offset: 3, .. })
         ));
         assert_eq!(app.tui_state.plan_scroll_offset, 9);
 
-        app.active_modal = Some(ModalState::AgentPool {
+        app.tui_state.active_modal = Some(ModalState::AgentPool {
             agents: Vec::new(),
             scroll_offset: 4,
         });
@@ -2924,7 +2928,7 @@ mod tests {
         app.dispatch_action(TuiAction::ModalScrollUp);
 
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::AgentPool { scroll_offset: 3, .. })
         ));
     }
@@ -2934,7 +2938,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
         app.tui_state.plan_scroll_offset = 5;
-        app.active_modal = Some(ModalState::QueueOverview {
+        app.tui_state.active_modal = Some(ModalState::QueueOverview {
             milestones: vec![
                 Milestone {
                     name: "Wave 0".to_string(),
@@ -2956,7 +2960,7 @@ mod tests {
         app.dispatch_action(TuiAction::QueueOverviewDown);
 
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::QueueOverview {
                 selected_index: 1,
                 scroll_offset: 1,
@@ -2971,12 +2975,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
         assert!(app.running);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
 
         app.dispatch_action(TuiAction::Quit);
 
         assert!(app.running);
-        assert!(matches!(app.active_modal, Some(ModalState::Quit)));
+        assert!(matches!(app.tui_state.active_modal, Some(ModalState::Quit)));
         assert_eq!(app.tui_state.input_mode, InputMode::Confirm);
     }
 
@@ -2984,13 +2988,13 @@ mod tests {
     fn confirming_quit_exits() {
         let dir = tempdir().unwrap();
         let mut app = App::new(dir.path());
-        app.active_modal = Some(ModalState::Quit);
+        app.tui_state.active_modal = Some(ModalState::Quit);
         app.tui_state.input_mode = InputMode::Confirm;
 
         app.dispatch_action(TuiAction::ConfirmYes);
 
         assert!(!app.running);
-        assert!(app.active_modal.is_none());
+        assert!(app.tui_state.active_modal.is_none());
         assert_eq!(app.tui_state.input_mode, InputMode::Normal);
         assert!(app.tui_state.pending_confirm.is_none());
     }
@@ -3160,7 +3164,7 @@ mod tests {
             Some(ConfirmAction::DiagnosePlan("plan-7".to_string()))
         );
         assert!(matches!(
-            app.active_modal,
+            app.tui_state.active_modal,
             Some(ModalState::Confirm {
                 action: modals::ConfirmAction::Custom { .. }
             })

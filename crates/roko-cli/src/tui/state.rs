@@ -17,6 +17,7 @@ use roko_core::OperatingFrequency;
 use super::atmosphere::Atmosphere;
 use super::dashboard::{DashboardData, GateResultSummary, PlanTaskListSnapshot, Theme};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
+use super::modals::ModalState;
 use super::segment::{output_byte_len, render_cached_output, CachedRender};
 use super::tabs::Tab;
 use crate::plan::{plans_dir, PlanSummary};
@@ -814,6 +815,8 @@ pub struct TuiState {
     pub pending_approval: Option<PendingApproval>,
     /// Pending confirmation dialog action, if any.
     pub pending_confirm: Option<ConfirmAction>,
+    /// Active modal overlay, if any.
+    pub active_modal: Option<ModalState>,
 
     // -- git --
     /// Current git branch name.
@@ -948,6 +951,7 @@ impl Default for TuiState {
 
             pending_approval: None,
             pending_confirm: None,
+            active_modal: None,
 
             git_branch: String::new(),
             git_commit_short: String::new(),

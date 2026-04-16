@@ -363,29 +363,18 @@ pub fn handle_key(
     }
 
     // Modal intercepts (highest priority first)
-    if modals.show_help {
-        return handle_help_key(key);
-    }
-    if modals.show_approval {
-        return handle_approval_key(key);
-    }
-    if modals.show_wave_overview {
-        return handle_wave_overview_key(key);
-    }
-    if modals.show_plan_detail {
-        return handle_plan_detail_key(key);
-    }
-    if modals.show_task_picker {
-        return handle_task_picker_key(key);
-    }
-    if modals.show_task_detail {
-        return handle_task_detail_key(key);
-    }
-    if modals.show_queue_overview {
-        return handle_queue_overview_key(key);
-    }
-    if modals.show_agent_pool {
-        return handle_agent_pool_key(key);
+    if let Some(modal) = modals.active_modal {
+        return match modal {
+            ModalState::Help => handle_help_key(key),
+            ModalState::Approval { .. } => handle_approval_key(key),
+            ModalState::WaveOverview { .. } => handle_wave_overview_key(key),
+            ModalState::PlanDetail { .. } => handle_plan_detail_key(key),
+            ModalState::TaskPicker { .. } => handle_task_picker_key(key),
+            ModalState::TaskDetail { .. } => handle_task_detail_key(key),
+            ModalState::QueueOverview { .. } => handle_queue_overview_key(key),
+            ModalState::AgentPool { .. } => handle_agent_pool_key(key),
+            _ => TuiAction::None,
+        };
     }
 
     // Confirm dialog
@@ -421,37 +410,16 @@ pub fn handle_key(
     }
 }
 
-/// Subset of TuiState modal flags needed by key dispatch.
+/// Active modal reference used by key dispatch.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ModalVisibility {
-    pub show_approval: bool,
-    pub show_agent_pool: bool,
-    pub show_task_picker: bool,
-    pub show_task_detail: bool,
-    pub show_queue_overview: bool,
-    pub show_wave_overview: bool,
-    pub show_plan_detail: bool,
-    pub show_help: bool,
+pub struct ModalVisibility<'a> {
+    pub active_modal: Option<&'a ModalState>,
 }
 
-impl ModalVisibility {
+impl<'a> ModalVisibility<'a> {
     #[must_use]
-    pub fn from_active_modal(active_modal: Option<&ModalState>) -> Self {
-        let mut visibility = Self::default();
-
-        match active_modal {
-            Some(ModalState::Help) => visibility.show_help = true,
-            Some(ModalState::Approval { .. }) => visibility.show_approval = true,
-            Some(ModalState::AgentPool { .. }) => visibility.show_agent_pool = true,
-            Some(ModalState::PlanDetail { .. }) => visibility.show_plan_detail = true,
-            Some(ModalState::WaveOverview { .. }) => visibility.show_wave_overview = true,
-            Some(ModalState::QueueOverview { .. }) => visibility.show_queue_overview = true,
-            Some(ModalState::TaskPicker { .. }) => visibility.show_task_picker = true,
-            Some(ModalState::TaskDetail { .. }) => visibility.show_task_detail = true,
-            _ => {}
-        }
-
-        visibility
+    pub fn from_active_modal(active_modal: Option<&'a ModalState>) -> Self {
+        Self { active_modal }
     }
 }
 
@@ -855,8 +823,8 @@ mod tests {
         }
     }
 
-    fn modals() -> ModalVisibility {
-        ModalVisibility::default()
+    fn modals<'a>(active_modal: Option<&'a ModalState>) -> ModalVisibility<'a> {
+        ModalVisibility::from_active_modal(active_modal)
     }
 
     #[test]
@@ -866,7 +834,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::QuitConfirmed);
     }
@@ -878,7 +846,7 @@ mod tests {
             InputMode::Normal,
             Tab::Logs,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::DismissNotification);
     }
@@ -890,7 +858,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::SwitchTab(Tab::Agents));
     }
@@ -902,7 +870,7 @@ mod tests {
             InputMode::Confirm,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ConfirmYes);
     }
@@ -914,7 +882,7 @@ mod tests {
             InputMode::Inject,
             Tab::Agents,
             FocusZone::AgentOutput,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::InputChar('x'));
     }
@@ -926,7 +894,7 @@ mod tests {
             InputMode::Filter,
             Tab::Logs,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::AcceptFilter);
     }
@@ -938,7 +906,7 @@ mod tests {
             InputMode::Normal,
             Tab::Logs,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ToggleLogFilter(LogFilterLevel::Error));
     }
@@ -950,7 +918,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ToggleScreenPostFx);
     }
@@ -962,7 +930,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::CycleEffectsPreset);
     }
@@ -974,7 +942,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::CycleEffectsPreset);
     }
@@ -986,15 +954,19 @@ mod tests {
             InputMode::Normal,
             Tab::Logs,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ShowAllLogFilters);
     }
 
     #[test]
     fn task_picker_modal_intercepts() {
-        let mut m = modals();
-        m.show_task_picker = true;
+        let modal = ModalState::TaskPicker {
+            tasks: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+        };
+        let m = modals(Some(&modal));
         let action = handle_key(
             key(KeyCode::Esc),
             InputMode::Normal,
@@ -1007,8 +979,11 @@ mod tests {
 
     #[test]
     fn approval_modal_intercepts_yes_and_no() {
-        let mut m = modals();
-        m.show_approval = true;
+        let modal = ModalState::Approval {
+            role: "implementer".to_string(),
+            command: "cargo check".to_string(),
+        };
+        let m = modals(Some(&modal));
 
         let approve = handle_key(
             key(KeyCode::Char('y')),
@@ -1031,37 +1006,37 @@ mod tests {
 
     #[test]
     fn modal_visibility_reads_active_modal() {
-        let vis = ModalVisibility::from_active_modal(Some(&ModalState::Help));
-        assert!(vis.show_help);
-        assert!(!vis.show_approval);
-        assert!(!vis.show_task_detail);
+        let help = ModalState::Help;
+        let vis = ModalVisibility::from_active_modal(Some(&help));
+        assert!(matches!(vis.active_modal, Some(ModalState::Help)));
 
-        let vis = ModalVisibility::from_active_modal(Some(&ModalState::Approval {
+        let approval = ModalState::Approval {
             role: "implementer".to_string(),
             command: "cargo check".to_string(),
-        }));
-        assert!(vis.show_approval);
-        assert!(!vis.show_help);
+        };
+        let vis = ModalVisibility::from_active_modal(Some(&approval));
+        assert!(matches!(vis.active_modal, Some(ModalState::Approval { .. })));
 
-        let vis = ModalVisibility::from_active_modal(Some(&ModalState::TaskPicker {
+        let task_picker = ModalState::TaskPicker {
             tasks: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
-        }));
-        assert!(vis.show_task_picker);
-        assert!(!vis.show_plan_detail);
+        };
+        let vis = ModalVisibility::from_active_modal(Some(&task_picker));
+        assert!(matches!(vis.active_modal, Some(ModalState::TaskPicker { .. })));
 
-        let vis = ModalVisibility::from_active_modal(Some(&ModalState::AgentPool {
+        let agent_pool = ModalState::AgentPool {
             agents: Vec::new(),
             scroll_offset: 0,
-        }));
-        assert!(vis.show_agent_pool);
+        };
+        let vis = ModalVisibility::from_active_modal(Some(&agent_pool));
+        assert!(matches!(vis.active_modal, Some(ModalState::AgentPool { .. })));
     }
 
     #[test]
     fn modal_open_keys_do_not_fall_through_to_background_navigation() {
-        let mut vis = modals();
-        vis.show_help = true;
+        let modal = ModalState::Help;
+        let vis = modals(Some(&modal));
 
         let action = handle_key(
             key(KeyCode::Tab),
@@ -1084,8 +1059,10 @@ mod tests {
 
     #[test]
     fn modal_specific_navigation_stays_local() {
-        let mut vis = modals();
-        vis.show_plan_detail = true;
+        let modal = ModalState::PlanDetail {
+            plan_id: "plan-1".to_string(),
+        };
+        let vis = modals(Some(&modal));
 
         let action = handle_key(
             key(KeyCode::Char('k')),
@@ -1117,8 +1094,11 @@ mod tests {
 
     #[test]
     fn wave_overview_modal_still_handles_local_scroll() {
-        let mut vis = modals();
-        vis.show_wave_overview = true;
+        let modal = ModalState::WaveOverview {
+            waves: Vec::new(),
+            scroll_offset: 0,
+        };
+        let vis = modals(Some(&modal));
 
         let action = handle_key(
             key(KeyCode::Up),
@@ -1150,8 +1130,12 @@ mod tests {
 
     #[test]
     fn queue_overview_modal_uses_local_navigation() {
-        let mut vis = modals();
-        vis.show_queue_overview = true;
+        let modal = ModalState::QueueOverview {
+            milestones: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+        };
+        let vis = modals(Some(&modal));
 
         let action = handle_key(
             key(KeyCode::Up),
@@ -1174,8 +1158,11 @@ mod tests {
 
     #[test]
     fn agent_pool_modal_blocks_navigation_keys() {
-        let mut vis = modals();
-        vis.show_agent_pool = true;
+        let modal = ModalState::AgentPool {
+            agents: Vec::new(),
+            scroll_offset: 0,
+        };
+        let vis = modals(Some(&modal));
 
         let action = handle_key(
             key(KeyCode::Up),
@@ -1216,8 +1203,11 @@ mod tests {
 
     #[test]
     fn ctrl_c_takes_precedence_over_open_modal() {
-        let mut vis = modals();
-        vis.show_wave_overview = true;
+        let modal = ModalState::WaveOverview {
+            waves: Vec::new(),
+            scroll_offset: 0,
+        };
+        let vis = modals(Some(&modal));
 
         let action = handle_key(
             key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -1236,7 +1226,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::SelectPlanUp);
 
@@ -1245,7 +1235,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::AgentOutput,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollFocusedUp);
     }
@@ -1257,7 +1247,7 @@ mod tests {
             InputMode::Normal,
             Tab::Agents,
             FocusZone::RightPanel,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollDiffDown);
     }
@@ -1269,7 +1259,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::TaskProgress,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollPageUp);
 
@@ -1278,7 +1268,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::CommandOutput,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollPageDown);
     }
@@ -1290,7 +1280,7 @@ mod tests {
             InputMode::Normal,
             Tab::Logs,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::StartFilter);
     }
@@ -1302,7 +1292,7 @@ mod tests {
             InputMode::Normal,
             Tab::Agents,
             FocusZone::RightPanel,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollFocusedHome);
 
@@ -1311,7 +1301,7 @@ mod tests {
             InputMode::Normal,
             Tab::Logs,
             FocusZone::CommandOutput,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollFocusedEnd);
 
@@ -1320,7 +1310,7 @@ mod tests {
             InputMode::Normal,
             Tab::Agents,
             FocusZone::AgentOutput,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::ScrollAgentEnd);
     }
@@ -1332,7 +1322,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::WavePrev);
 
@@ -1341,7 +1331,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::WaveNext);
 
@@ -1350,7 +1340,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::WavePrev);
 
@@ -1359,7 +1349,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(action, TuiAction::WaveNext);
     }
@@ -1370,7 +1360,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(
             action,
@@ -1382,7 +1372,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(
             action,
@@ -1397,7 +1387,7 @@ mod tests {
             InputMode::Normal,
             Tab::Plans,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(
             action,
@@ -1414,7 +1404,7 @@ mod tests {
             InputMode::Normal,
             Tab::Dashboard,
             FocusZone::PlanTree,
-            &modals(),
+            &modals(None),
         );
         assert_eq!(
             action,
