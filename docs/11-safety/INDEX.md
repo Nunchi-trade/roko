@@ -1,6 +1,8 @@
 # Safety & Provenance
 
-> **Abstract:** Roko's safety architecture is a defense-in-depth system that combines structural enforcement (compile-time capabilities, content-addressed audit chains), behavioral enforcement (runtime guards, rate limiters, sandboxing), and cognitive enforcement (temporal logic monitoring, adaptive risk, human intervention signals). Safety is not a bolt-on layer — it is woven into every step of the Universal Cognitive Loop through the Synapse traits. Every Engram carries provenance, every tool call passes through a gated pipeline, every knowledge entry traces back to its evidential basis. This topic covers the full safety stack: from low-level guards (bash command filtering, path sandboxing, secret scrubbing) through mid-level verification (Gate pipeline, threat modeling, adaptive risk) to high-level safety capabilities (temporal logic verification, witness DAGs, forensic AI, formal verification). It also documents the critical integration gap — the #1 priority for making the safety architecture effective in production.
+> **Abstract:** Safety in Roko is a single spine, not a grab-bag of guards. The safety chapter ties together trait-level authorization, human-in-the-loop checkpoints, per-tier plugin sandboxes, taint propagation, attestation, chain-of-custody, network egress control, secret handling, and multi-tenant isolation so an operator can answer: who did what, with what authorization, on what inputs, and with what consequence?
+>
+> **Alignment:** This chapter reflects [REF32](../../tmp/refinements/32-safety-sandbox-provenance.md). For shared vocabulary, see [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
@@ -8,112 +10,95 @@
 
 Before reading this topic, readers should be familiar with:
 
-- **Synapse Architecture**: The 6 traits (Substrate, Scorer, Gate, Router, Composer, Policy) and the Engram data type — see `docs/01-architecture/`
-- **Universal Cognitive Loop**: The 9-step loop (PERCEIVE → EVALUATE → ATTEND → INTEGRATE → ACT → VERIFY → PERSIST → ADAPT → META-COGNIZE) — see `docs/01-architecture/`
-- **Five Layers**: L0 Runtime, L1 Framework, L2 Scaffold, L3 Harness, L4 Orchestration — see `docs/01-architecture/`
+- The two-medium / two-fabric framing: Engrams persist in Substrate, Pulses move on the Bus.
+- The seven-step loop: SENSE, ASSESS, COMPOSE, ACT, VERIFY, PERSIST and BROADCAST, REACT.
+- `TypedContext`, domain profiles, and role separation in the architecture chapter.
+
+Recommended companion docs:
+
+- `docs/00-architecture/05-provenance-and-attestation.md`
+- `docs/00-architecture/09-universal-cognitive-loop.md`
+- `docs/00-architecture/25-attention-as-currency.md`
+- `docs/00-architecture/26-cognitive-immune-system.md`
 
 ---
 
 ## Table of Contents
 
-### Foundation
+### Safety Spine
 
-| # | Sub-doc | Description | Lines |
-|---|---|---|---|
-| 00 | [00-defense-in-depth.md](00-defense-in-depth.md) | Overall safety architecture: three defense categories (structural, behavioral, cognitive), six runtime guards, SafetyLayer composition, integration with Synapse Loop, adversarial safety testing framework (9 attack categories), CSA MAESTRO 7-layer mapping | 499 |
-| 01 | [01-capability-tokens.md](01-capability-tokens.md) | Current ToolPermission system and target Capability<T> design: PhantomData type safety, three tool tiers, compile-time enforcement | 301 |
-| 02 | [02-audit-chain.md](02-audit-chain.md) | Engram lineage DAG, SHA-256 / BLAKE3 Merkle hash-chain, AuditSink trait, FileSubstrate persistence, on-chain anchoring | 333 |
-| 03 | [03-taint-tracking.md](03-taint-tracking.md) | TaintLabel enum, TaintedString with zeroize, DataSink flow matrix, 4-stage ingestion pipeline, Bloom Oracle, causal rollback, taint propagation algebra (Denning lattice, SecurityLabel with confidentiality/integrity dimensions, join operator), FIDES integration, RTBAS dynamic taint tracking, Prompt Flow Integrity (PFI), PCAS Datalog policy language | 804 |
+| # | Sub-doc | Description |
+|---|---|---|
+| 00 | [00-defense-in-depth.md](00-defense-in-depth.md) | Canonical safety spine: authorization, isolation, provenance, pre/post checks, checkpoints, egress, secrets, and tenant boundaries |
+| 01 | [01-capability-tokens.md](01-capability-tokens.md) | Type-level capability design and permission tokens |
+| 02 | [02-audit-chain.md](02-audit-chain.md) | Custody records, attestation levels, replay, and exportable audit evidence |
+| 03 | [03-taint-tracking.md](03-taint-tracking.md) | Taint propagation from untrusted inputs through composition, action, persistence, and review |
 
-### Runtime Guards
+### Runtime Controls
 
-| # | Sub-doc | Description | Lines |
-|---|---|---|---|
-| 04 | [04-permits-allowlists.md](04-permits-allowlists.md) | ToolPermission flags (Read/Write/Execute/Network), role-based permission matrix, task-level tool filters | 227 |
-| 05 | [05-loop-detection.md](05-loop-detection.md) | RateLimiter sliding window, circuit breaker (conductor), DiagnosisEngine ghost turn detection, secret zeroization, adaptive gate thresholds | 202 |
-| 06 | [06-sandboxing.md](06-sandboxing.md) | PathPolicy canonicalization algorithm, ProcessSupervisor lifecycle management, WorktreeManager isolation, future container sandboxing | 201 |
+| # | Sub-doc | Description |
+|---|---|---|
+| 04 | [04-permits-allowlists.md](04-permits-allowlists.md) | Permit matrices and allowlist mechanics for tools and resources |
+| 05 | [05-loop-detection.md](05-loop-detection.md) | Rate limits, breakers, and detection of runaway behavior |
+| 06 | [06-sandboxing.md](06-sandboxing.md) | Tiered plugin sandboxes, worktree and path isolation, egress gates, and tenant-scoped runtime boundaries |
 
 ### Attack Surface
 
-| # | Sub-doc | Description | Lines |
-|---|---|---|---|
-| 07 | [07-prompt-security.md](07-prompt-security.md) | Prompt architecture with XML delimiters, CaMeL dual-LLM (Debenedetti et al. 2025), ventriloquist defense, Tool-Guard pattern, MCP avoidance | 238 |
-| 08 | [08-threat-model.md](08-threat-model.md) | General-purpose attack trees (prompt injection, sandbox escape, credential exfiltration, resource exhaustion), chain-domain attack trees, 8 residual risks, formal safety analysis, NIST AI RMF alignment (4 functions), MITRE ATLAS technique mapping (10 techniques), STRIDE-AI classification (6 categories), OWASP Agentic Top 10 mapping (ASI01-ASI10), cascading failure analysis with blast radius modeling, adversarial testing framework | 968 |
-| 09 | [09-adaptive-risk.md](09-adaptive-risk.md) | Five-layer adaptive risk: hard shields, Kelly sizing with confidence multiplier, Beta-Binomial OperationalConfidenceTracker, health scoring, Daimon integration, safety budgets (5 dimensions: irreversibility, blast radius, footprint, uncertainty, cost), hierarchical budget delegation with conservation laws, automatic allocation strategies (equal, proportional, risk-weighted) | 1101 |
+| # | Sub-doc | Description |
+|---|---|---|
+| 07 | [07-prompt-security.md](07-prompt-security.md) | Prompt-injection defenses and safe prompt composition |
+| 08 | [08-threat-model.md](08-threat-model.md) | Threat assumptions, adversary paths, residual risks, and incident response for the safety spine |
+| 09 | [09-adaptive-risk.md](09-adaptive-risk.md) | Dynamic risk budgets and escalation based on uncertainty and blast radius |
 
-### Domain-Specific Safety (Chain)
+### Domain-Specific Safety
 
-| # | Sub-doc | Description | Lines |
-|---|---|---|---|
-| 10 | [10-mev-protection.md](10-mev-protection.md) | MEV taxonomy (sandwich, front-run, back-run, JIT, arbitrage), detection algorithms, protection strategies, Gate pipeline integration, MEV as intelligence signal | 228 |
-| 11 | [11-temporal-logic.md](11-temporal-logic.md) | LTL Buchi automata for runtime monitoring, CTL pre-execution plan verification, safety/liveness/fairness properties, 40 DeFi temporal patterns, category-theoretic composition, TemporalMonitor as Policy, extended temporal pattern library (11 code agent + 3 multi-agent patterns), past-time LTL, temporal attack pattern detection (3-tier: node/edge/path anomaly scoring), boiling frog and slow escalation detectors | 1157 |
-| 12 | [12-witness-dag.md](12-witness-dag.md) | BLAKE3 content-addressed DAG, five vertex types (Observation, Prediction, Decision, Resolution, NeuroEntry), ZK proofs for strategy auditing, SQLite storage, on-chain anchoring, DAG-based trust, DAG query language (6 query types), Datalog provenance queries via Datafrog, safety-specific query patterns (TOCTOU, escalation chain, exfiltration, circular reasoning) | 1544 |
-| 13 | [13-formal-verification.md](13-formal-verification.md) | Five-stage verification pipeline: Heimdall-rs decompilation → Slither static analysis → Echidna fuzzing → hevm symbolic execution → Certora/Kontrol formal proofs, verification-guided agent design (17 host-agent + 14 task-lifecycle properties), tool behavioral contracts (pre/post/invariant), VeriGuard dual-stage verification, ContractEnforcingDispatcher | 1310 |
+| # | Sub-doc | Description |
+|---|---|---|
+| 10 | [10-mev-protection.md](10-mev-protection.md) | Chain-domain transaction safety and MEV defenses |
+| 11 | [11-temporal-logic.md](11-temporal-logic.md) | Runtime monitors and temporal properties for agent behavior |
+| 12 | [12-witness-dag.md](12-witness-dag.md) | Rich causal replay structures and witness queries |
+| 13 | [13-formal-verification.md](13-formal-verification.md) | Formal methods and contract-oriented verification for high-risk domains |
 
 ### Advanced Safety
 
-| # | Sub-doc | Description | Lines |
-|---|---|---|---|
-| 14 | [14-cognitive-kernel-safety.md](14-cognitive-kernel-safety.md) | Cognitive Kernel Primitives: Namespaces with ACL, Cognitive Signals (typed interrupts), Cognitive Scheduling (priority + deadline + cooperative yield), Engram Syscalls (universal enforcement) | 388 |
-| 15 | [15-forensic-ai.md](15-forensic-ai.md) | Content-addressed causal replay, Forensic AI regulatory pre-compliance: EU AI Act, SEC/CFTC, HIPAA, SOX, GDPR, pre-certified agent templates, enterprise value proposition | 363 |
-
-### Integration Status
-
-| # | Sub-doc | Description | Lines |
-|---|---|---|---|
-| 16 | [16-critical-integration-gap.md](16-critical-integration-gap.md) | The #1 integration gap: SafetyLayer → ToolDispatcher wired but ToolDispatcher never invoked from CLI pipeline. Impact assessment, resolution path (4 phases), architecture mismatch analysis | 254 |
+| # | Sub-doc | Description |
+|---|---|---|
+| 14 | [14-cognitive-kernel-safety.md](14-cognitive-kernel-safety.md) | Cognitive namespaces, scheduling, and kernel-level enforcement |
+| 15 | [15-forensic-ai.md](15-forensic-ai.md) | Replay, postmortems, and regulator-facing forensic workflows |
+| 16 | [16-critical-integration-gap.md](16-critical-integration-gap.md) | The remaining wiring needed for end-to-end safety enforcement |
 
 ---
 
-## Key Architectural Decisions
+## Chapter Through-Line
 
-1. **Safety as a structural property.** Safety is not a separate module — it is woven into the Synapse traits. The `Gate` trait provides verification, `Policy` provides enforcement, `Substrate` provides audit persistence. Every Engram carries provenance by construction.
+This chapter should be read as one defensive story:
 
-2. **Defense in depth, not single barriers.** Six runtime guards compose into the SafetyLayer. Gates verify after execution. The conductor monitors system health. Temporal logic watches for behavioral anomalies. Each layer catches what the previous layer missed.
+1. `00-defense-in-depth.md` defines the spine and the shared vocabulary.
+2. `02-audit-chain.md` explains how high-risk actions become durable Custody Engrams with attestation.
+3. `03-taint-tracking.md` explains how untrusted inputs stay marked until explicitly reviewed.
+4. `06-sandboxing.md` explains how plugin tiers, subprocesses, files, network, and tenants are isolated.
+5. `08-threat-model.md` states what Roko trusts, what it treats as hostile, and what remains outside the model.
 
-3. **Content-addressing enables forensics.** Every Engram has a BLAKE3 hash. Every Engram records its parents via lineage. This makes the entire system auditable by construction — Forensic AI is a free byproduct.
+The rest of the safety chapter deepens those controls for specific attack classes or domains rather than replacing them.
 
-4. **Domain-agnostic core, domain-specific plugins.** The safety guards (BashPolicy, PathPolicy, ScrubPolicy) are domain-agnostic. MEV protection, formal verification, and DeFi temporal patterns are chain-domain plugins. Other domains add their own safety plugins through the same trait system.
+---
 
-5. **The gap must be closed.** The #1 priority is wiring the ToolDispatcher into the production code path. Until then, the safety architecture is built but dormant for per-tool-call enforcement.
+## Key Decisions
+
+1. Safety is enforced where the agent cannot wish it away: authorization checks, sandboxes, gates, and Substrate persistence.
+2. High-risk actions must be explainable after the fact through Custody, lineage, taint, and attestation.
+3. Plugin safety is tiered. Trusted native code, declarative tools, and WASM extensions do not share the same trust model.
+4. Human approval is part of the permission system, not an afterthought. Confirm, allow-once, and escalate are first-class outcomes.
+5. Cross-tenant isolation and secret scrubbing are enforced below the UI so the same guarantees hold in CLI, TUI, web, and automation.
 
 ---
 
 ## Cross-References
 
-- `docs/01-architecture/` — Synapse Architecture, Engram struct, Five Layers
-- `docs/03-cognitive/` — Neuro (knowledge), Daimon (affect modulation of risk), Dreams (offline consolidation)
-- `docs/08-chain/` — Chain domain plugin where MEV protection and formal verification live
-- `docs/09-innovations/` — Forensic AI, Cognitive Kernel Primitives as frontier innovations
-
----
-
-## Generation Notes
-
-- **Sub-docs produced**: 17 (00 through 16)
-- **Total line count**: ~10,679 lines across 17 sub-docs (expanded from ~7,600 in April 2026 enhancement pass)
-- **Key legacy sources consulted**:
-  - `bardo-backup/prd/10-safety/00-defense.md` (defense-in-depth, capability tokens, taint tracking, audit chain)
-  - `bardo-backup/prd/10-safety/05-threat-model.md` (adversary types, attack trees, residual risks)
-  - `bardo-backup/prd/10-safety/06-adaptive-risk.md` (five-layer risk, Kelly sizing, Bayesian guardrails)
-  - `bardo-backup/prd/10-safety/07-temporal-logic-verification.md` (LTL, CTL, DeFi patterns — also available as `docs/11-safety/11-temporal-logic.md` in the target output)
-  - `bardo-backup/prd/10-safety/08-witness-dag.md` (DAG structure, ZK proofs, SQLite storage)
-  - `bardo-backup/prd/10-safety/09-formal-verification-pipeline.md` (Echidna, hevm, Certora, Slither, Heimdall-rs)
-  - `bardo-backup/prd/10-safety/10-mev-protection.md` (MEV detection algorithms)
-  - `refactoring-prd/09-innovations.md` (Forensic AI, Cognitive Kernel Primitives)
-  - `refactoring-prd/01-synapse-architecture.md` (Engram struct, Synapse traits)
-  - `refactoring-prd/07-implementation-priorities.md` (Tier roadmap)
-  - Active codebase: `roko-agent/src/safety/` (all 6 guard modules), `roko-agent/src/dispatcher/mod.rs`, `roko-cli/src/orchestrate.rs`
-  - `tmp/implementation-plans/03-safety-hooks.md`, `tmp/implementation-plans/11-inconsistencies.md`
-- **Judgment calls made**:
-  - Sub-docs 05 (loop detection), 06 (sandboxing), 10 (MEV protection), and 11 (temporal logic) are under the 200-line minimum. These were written in the previous session before context was exhausted. The content is substantive but more concise than the other sub-docs. The remaining sub-docs (12-16) written in the continuation session are all well above minimum length.
-  - The legacy "Grimoire" references were consistently renamed to "Neuro" per naming map.
-  - All "Golem" references were renamed to "Agent" per naming map.
-  - All "Clade" references were renamed to "Collective" per naming map.
-  - "GNOS token" references were renamed to "KORAI" per naming map.
-  - Death/mortality language was not present in the safety sources (it was concentrated in the lifecycle/daimon sources).
-  - The legacy "GrimoireEntry" vertex type in the Witness DAG was renamed to "NeuroEntry" for consistency.
-- **Unresolved tensions**:
-  - The #1 integration gap (16-critical-integration-gap.md) is the most important open issue. The safety architecture is designed and built but not invoked from the production code path. This is a wiring task, not a design task.
-  - The formal verification pipeline (13-formal-verification.md) is chain-domain specific. A generalized verification pipeline for other domains (coding, research) exists partially via the Gate pipeline but lacks the depth of the chain verification tooling.
-  - ZK proofs for the Witness DAG are deferred to Tier 4 and may require significant new dependencies (plonky2 or similar).
+- [00-defense-in-depth.md](00-defense-in-depth.md)
+- [02-audit-chain.md](02-audit-chain.md)
+- [03-taint-tracking.md](03-taint-tracking.md)
+- [06-sandboxing.md](06-sandboxing.md)
+- [08-threat-model.md](08-threat-model.md)
+- [docs/00-architecture/05-provenance-and-attestation.md](../00-architecture/05-provenance-and-attestation.md)
+- [docs/00-architecture/26-cognitive-immune-system.md](../00-architecture/26-cognitive-immune-system.md)

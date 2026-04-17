@@ -1,26 +1,28 @@
 # Cognitive Immune System
 
-> **Abstract:** Roko operates in adversarial environments — external data sources lie, tools fail
-> silently, LLMs hallucinate confidently, and even the agent's own memories can become corrupted
-> through cascading errors. The Cognitive Immune System (CIS) is a defense-in-depth architecture
-> that protects knowledge integrity through five mechanisms: taint propagation tracking, anomaly
-> detection on knowledge mutations, anti-knowledge quarantine, threat simulation (red-team
-> probing), and immune memory that remembers past attacks. This document unifies these mechanisms
-> into a single subsystem that integrates with the Gate pipeline, Neuro knowledge store, and
-> Daimon affect system.
+> **Abstract:** Roko operates in adversarial environments: user input can contain prompt injection,
+> external fetches can be wrong or hostile, plugin output can exceed its declared trust envelope,
+> and imported history can carry stale or forged lineage. The Cognitive Immune System (CIS) is
+> Roko's knowledge-integrity subsystem inside the broader safety spine. The safety spine handles
+> authorization, sandboxing, attestation, custody, human checkpoints, and multi-tenant isolation
+> across every layer. The CIS specializes in taint propagation, quarantine, anomaly detection,
+> replay, and immune memory so corrupted knowledge does not silently become durable policy.
+> This revision aligns the architecture story with
+> [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md)
+> and uses the current vocabulary defined in
+> [01-naming-and-glossary](./01-naming-and-glossary.md).
 
 > **Implementation**: Specified
 
 **Topic**: [00-architecture](./INDEX.md)
-**Prerequisites**: [05-provenance-and-attestation](./05-provenance-and-attestation.md), [06-synapse-traits](./06-synapse-traits.md), [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md)
+**Prerequisites**: [05-provenance-and-attestation](./05-provenance-and-attestation.md), [09-universal-cognitive-loop](./09-universal-cognitive-loop.md), [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md)
 **Key sources**:
-- Chen et al. 2024, NeurIPS (arXiv:2407.12784) — AgentPoison: Red-teaming LLM Agents via Memory Poisoning
-- arXiv:2411.18948 (2024) — RevPRAG: Revealing Poisoning Attacks via LLM Activation Analysis
-- arXiv:2601.05504 (2025) — Memory Poisoning Attack and Defense on Memory-Based LLM Agents
-- arXiv:2407.10867 (2024) — Provable Robustness of GNNs Against Data Poisoning
-- NIST AI 100-2e2025 — Adversarial Machine Learning: Taxonomy of Attacks and Mitigations
-- Matzinger 2002, Science 296 — The Danger Model (immunology)
-- Forrest et al. 1994 — Self-NonSelf Discrimination in Computer Security (negative selection)
+- Chen et al. 2024, NeurIPS (arXiv:2407.12784) - AgentPoison: Red-teaming LLM Agents via Memory Poisoning
+- arXiv:2411.18948 (2024) - RevPRAG: Revealing Poisoning Attacks via Activation Analysis
+- arXiv:2601.05504 (2025) - Memory Poisoning Attack and Defense on Memory-Based LLM Agents
+- NIST AI 100-2e2025 - Adversarial Machine Learning: Taxonomy of Attacks and Mitigations
+- Matzinger 2002, Science 296 - The Danger Model
+- Forrest et al. 1994 - Self-Nonself Discrimination in Computer Security
 
 ---
 
@@ -28,34 +30,39 @@
 
 ### 1.1 Attack Surfaces
 
-Roko's knowledge can be corrupted through five attack vectors:
+The CIS exists because knowledge corruption is usually indirect: hostile input enters through one
+surface, mutates a durable Engram somewhere else, and only becomes visible when a later action is
+about to cross a real-world boundary.
 
-| Vector | Example | Severity | Existing Defense |
+| Vector | Example | Why CIS Cares | Primary Response |
 |---|---|---|---|
-| **Prompt injection** | Malicious instructions embedded in tool output | Critical | Safety layer pre/post checks |
-| **Memory poisoning** | Agent stores hallucinated "facts" that cascade | High | Gate pipeline (partial) |
-| **Knowledge drift** | Correct knowledge becomes stale but retains high tier | Medium | Decay variants (TTL, HalfLife) |
-| **Cascading taint** | Tainted Engram used as input → output is also tainted | High | Provenance.tainted flag (partial) |
-| **Adversarial retrieval** | Crafted Engrams that score high but contain misinformation | Critical | None currently |
+| Prompt injection | Tool output includes instructions that alter later tool use | Can taint composed prompts and derived outputs | Mark taint at ingestion, require stronger gates at ACT |
+| Memory poisoning | False claim survives into durable Neuro state | Contaminates later retrieval and planning | Quarantine, replay, reviewer release only |
+| Adversarial retrieval | Crafted Engrams score high despite low integrity | Pulls the Composer toward bad context | Contradiction and score-distribution checks |
+| Plugin abuse | Third-party plugin output exceeds declared capability intent | Untrusted output can steer later actions | `ThirdPartyPlugin` taint, sandbox violation handling |
+| Legacy import corruption | Imported archives contain stale or forged lineage | Pollutes trusted local state | `LegacyImport` taint plus quarantine-on-ingest |
+| Cross-tenant contamination | Shared deployment leaks a tenant's data into another tenant's query | Breaks isolation and audit boundaries | Immediate quarantine and escalation |
 
-Chen et al. (2024) demonstrated that RAG-based agents can be backdoored with just 0.1%
-poisoning ratio, achieving 82% attack success. arXiv:2601.05504 (2025) showed that episodic
-and semantic memory stores are both vulnerable. Roko's four-tier knowledge system (Transient →
-Working → Consolidated → Persistent) means that a single poisoned entry, if it survives
-promotion, can contaminate the agent's long-term reasoning.
+The CIS assumes the same trust boundary as the REF32 safety spine: role authorization and
+sandboxing are enforced elsewhere, but their outcomes feed CIS decisions. A plugin that violates
+its sandbox is both an isolation failure and a knowledge-integrity incident.
 
-### 1.2 The Biological Analogy
+### 1.2 Scope Boundary: Safety Spine vs. CIS
 
-The CIS draws from two immunological models:
+The defensive story is clearer when the responsibilities are split explicitly:
 
-1. **Self/Non-Self (Forrest et al. 1994)**: The immune system maintains "detectors" trained on
-   self-patterns. Anything that doesn't match triggers an immune response. In Roko: knowledge
-   that deviates from established patterns triggers anomaly detection.
+| Concern | Primary owner | CIS role |
+|---|---|---|
+| Who may act | Safety spine authorization | Consume role and approval outcomes as evidence |
+| Where untrusted code may run | Safety spine sandbox tiers | Treat violations as high-severity findings |
+| What entered the system | CIS taint model | Label, propagate, and expose risk to gates |
+| What must be isolated | CIS quarantine plus Substrate filtering | Remove suspect Engrams from default query paths |
+| What happened and why | Custody and attestation | Attach findings, taint sources, and replay evidence |
+| How the system learns after failure | CIS immune memory plus policy updates | Turn incidents into future defenses |
 
-2. **Danger Model (Matzinger 2002)**: The immune system doesn't respond to "foreign" per se —
-   it responds to *danger signals*. Tissue damage, not foreignness, triggers immunity. In Roko:
-   the CIS responds to *knowledge damage signals* — unexpected Score drops, failed gate
-   verdicts, contradicted predictions — not merely to "external" data.
+The CIS is therefore not a parallel safety subsystem. It is the knowledge-integrity branch of the
+same safety spine described in
+[tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md).
 
 ---
 
@@ -64,496 +71,318 @@ The CIS draws from two immunological models:
 ### 2.1 Five Defense Layers
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  Layer 5: IMMUNE MEMORY              │
-│  Remember past attacks; inoculate against repeats    │
-├─────────────────────────────────────────────────────┤
-│                  Layer 4: RED TEAM PROBES            │
-│  Simulate attacks against own knowledge; find gaps   │
-├─────────────────────────────────────────────────────┤
-│                  Layer 3: QUARANTINE                 │
-│  Isolate suspicious knowledge; prevent propagation   │
-├─────────────────────────────────────────────────────┤
-│                  Layer 2: ANOMALY DETECTION          │
-│  Statistical monitoring of knowledge mutations       │
-├─────────────────────────────────────────────────────┤
-│                  Layer 1: TAINT PROPAGATION          │
-│  Track data lineage; flag downstream of tainted      │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Layer 5: IMMUNE MEMORY + DELTA PROBES                    │
+│ Remember prior attacks; replay and probe weak points     │
+├───────────────────────────────────────────────────────────┤
+│ Layer 4: CUSTODY-LINKED INCIDENT RESPONSE                │
+│ Tie findings to Custody, replay, and postmortems         │
+├───────────────────────────────────────────────────────────┤
+│ Layer 3: QUARANTINE                                      │
+│ Remove suspect Engrams from default retrieval paths      │
+├───────────────────────────────────────────────────────────┤
+│ Layer 2: ANOMALY DETECTION                               │
+│ Detect contradiction clusters, fan-out, and drift        │
+├───────────────────────────────────────────────────────────┤
+│ Layer 1: TAINT PROPAGATION                               │
+│ Track untrusted lineage through Engrams and Pulses       │
+└───────────────────────────────────────────────────────────┘
 ```
+
+Layer 1 is the fast path. Layers 2 and 3 contain suspect knowledge before it reaches action.
+Layers 4 and 5 make the system auditable and self-improving.
 
 ### 2.2 Core Types
 
+The CIS extends the safety spine with a small set of knowledge-integrity records:
+
 ```rust
-/// Threat classification for knowledge corruption events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ThreatClass {
-    /// Data from external source contradicts internal knowledge.
-    ExternalContradiction,
-    /// Agent's own output flagged by gate as inconsistent.
-    InternalInconsistency,
-    /// Knowledge mutation exceeds statistical norms.
-    AnomalousMutation,
-    /// Taint propagated from upstream corrupted source.
-    TaintCascade,
-    /// Known attack pattern matched from immune memory.
-    KnownAttackPattern,
-    /// Simulated red-team probe succeeded (vulnerability found).
-    RedTeamSuccess,
-}
-
-/// A detected threat event in the knowledge system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreatEvent {
-    pub id: Uuid,
-    pub timestamp: SystemTime,
-    pub threat_class: ThreatClass,
-    /// The Engram(s) involved.
-    pub affected_engrams: Vec<ContentHash>,
-    /// Confidence that this is a genuine threat (0.0 to 1.0).
-    pub confidence: f64,
-    /// Severity score (0.0 = informational, 1.0 = critical).
-    pub severity: f64,
-    /// Provenance chain that led to this detection.
-    pub detection_chain: Vec<String>,
-    /// Recommended response action.
-    pub recommended_action: ImmuneAction,
+pub enum Taint {
+    None,
+    UserInput,
+    ExternalFetch(Source),
+    ThirdPartyPlugin(PluginId),
+    LegacyImport,
 }
 
-/// Actions the immune system can take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ImmuneAction {
-    /// Log but take no action (low confidence / low severity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ThreatClass {
+    PromptInjection,
+    MemoryPoisoning,
+    TaintCascade,
+    AdversarialRetrieval,
+    SandboxViolation,
+    CrossTenantLeakage,
+    LineageMismatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatFinding {
+    pub id: Uuid,
+    pub class: ThreatClass,
+    pub affected_engrams: Vec<ContentHash>,
+    pub taint_sources: Vec<ContentHash>,
+    pub confidence: f64,
+    pub severity: f64,
+    pub recommended_action: ContainmentAction,
+    pub custody: Option<ContentHash>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ContainmentAction {
     Monitor,
-    /// Mark Engrams as tainted; downstream consumers are warned.
-    Taint,
-    /// Move Engrams to quarantine zone; excluded from queries until reviewed.
     Quarantine,
-    /// Demote knowledge tier (e.g., Consolidated → Working).
-    Demote,
-    /// Create AntiKnowledge entry to prevent future re-ingestion.
-    Falsify,
-    /// Trigger full re-verification of affected lineage subgraph.
     Reverify,
+    Escalate,
+    DisablePlugin,
 }
 ```
+
+`ThreatFinding` is not a substitute for `Custody`. It points to the relevant custody record when
+the incident touched an auditable action, and otherwise serves as the local detection record that
+later incident handling can cite.
 
 ---
 
 ## 3. Layer 1: Taint Propagation Tracking
 
-### 3.1 Extending Provenance
+### 3.1 Canonical Taint Model
 
-Roko's existing `Provenance` struct has a `tainted: bool` flag. The CIS extends this to a
-rich taint model that tracks *how* and *why* data is tainted:
+REF32 makes the taint rule explicit: untrusted origin is durable metadata, not a temporary score
+penalty. Every Engram that enters through a trust boundary carries a first-class `Taint`:
 
 ```rust
-/// Extended taint information attached to Provenance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaintInfo {
-    /// Is this Engram tainted?
-    pub tainted: bool,
-    /// Source of taint (if tainted): the ContentHash of the first tainted ancestor.
-    pub taint_origin: Option<ContentHash>,
-    /// Taint depth: how many lineage hops from the original taint source.
-    pub taint_depth: u32,
-    /// Taint reason.
-    pub taint_reason: Option<ThreatClass>,
-    /// Taint timestamp.
-    pub tainted_at: Option<SystemTime>,
-    /// Confidence that the taint is genuine (not a false positive).
-    pub taint_confidence: f64,
-}
-
-impl TaintInfo {
-    pub fn clean() -> Self {
-        Self {
-            tainted: false,
-            taint_origin: None,
-            taint_depth: 0,
-            taint_reason: None,
-            tainted_at: None,
-            taint_confidence: 0.0,
-        }
-    }
-
-    /// Propagate taint to a derived Engram.
-    /// Confidence degrades with depth (geometric decay).
-    pub fn propagate(&self, decay_factor: f64) -> Self {
-        Self {
-            tainted: true,
-            taint_origin: self.taint_origin,
-            taint_depth: self.taint_depth + 1,
-            taint_reason: self.taint_reason,
-            tainted_at: Some(SystemTime::now()),
-            taint_confidence: self.taint_confidence * decay_factor,
-        }
-    }
+pub struct Provenance {
+    pub author: AuthorId,
+    pub trust: f32,
+    pub taint: Taint,
+    pub session: Option<SessionId>,
 }
 ```
 
-### 3.2 Lineage-Based Taint Propagation Algorithm
+Typical mappings are:
 
+| Ingress path | Initial taint |
+|---|---|
+| User paste, upload, ad hoc instruction | `UserInput` |
+| HTTP fetch, remote API, scraped page | `ExternalFetch(source)` |
+| Tier-3, Tier-4, or Tier-5 plugin output | `ThirdPartyPlugin(plugin_id)` |
+| Imported archive from another deployment | `LegacyImport` |
+| Locally reviewed durable record with no untrusted ancestor | `None` |
+
+This keeps the CIS aligned with the safety chapter and with
+[05-provenance-and-attestation](./05-provenance-and-attestation.md).
+
+### 3.2 Propagation Law
+
+The propagation rule is intentionally simple:
+
+1. If any Engram or Pulse consumed during composition is tainted, the derived output is tainted.
+2. Pulses carry taint metadata while in motion on the Bus; when a Pulse graduates to an Engram,
+   that taint becomes durable provenance.
+3. Taint is monotonic. It propagates forward through lineage and does not silently disappear.
+4. Human review can approve later use, but approval is recorded through `Custody` or attestation;
+   it does not rewrite ancestor provenance.
+
+The core operation is therefore set-preserving lineage tracking rather than confidence decay:
+
+```rust
+pub fn derive_taint(inputs: &[Taint]) -> Taint {
+    inputs.iter().find(|t| !matches!(t, Taint::None)).cloned().unwrap_or(Taint::None)
+}
 ```
-ALGORITHM: TaintPropagation(source_hash, reason, confidence)
 
-1. Mark source Engram as tainted with (reason, confidence)
-2. BFS over lineage DAG from source:
-   For each child Engram reachable from source:
-     a. Compute propagated confidence = parent_confidence × DECAY_FACTOR
-     b. If propagated_confidence > TAINT_THRESHOLD (default 0.1):
-        - Mark child as tainted
-        - Record taint_depth = parent_depth + 1
-        - Add child to BFS queue
-     c. If propagated_confidence ≤ TAINT_THRESHOLD:
-        - Stop propagating (taint has decayed below detection)
-3. Return set of all newly tainted Engrams
-4. For each newly tainted Engram in Consolidated or Persistent tier:
-   - Emit ThreatEvent with severity = tier_weight × confidence
-   - Recommend action based on severity matrix
+Implementations may retain richer internal annotations, but the public architectural contract is
+"once tainted, always traceably tainted unless a human explicitly signs off on the downstream use."
 
-PARAMETERS:
-  DECAY_FACTOR = 0.8    (20% confidence loss per hop)
-  TAINT_THRESHOLD = 0.1 (stop propagating below 10% confidence)
-  MAX_DEPTH = 10        (circuit breaker on deep lineage chains)
-```
+### 3.3 Gate and Action Consequences
+
+Taint is inert until a decision boundary reads it. The CIS provides evidence; the safety spine
+decides consequences.
+
+| Situation | Default CIS output | Typical safety response |
+|---|---|---|
+| Tainted context used for drafting only | Warning marker on composed Engram | Allow with visible taint annotation |
+| Tainted tool output proposes file mutation | `ThreatFinding(TaintCascade)` | Confirmation or denial depending on role |
+| Tainted address or credential reaches a high-risk sink | High-severity finding | Escalate or refuse |
+| Repeated plugin-tainted outputs fail gates | Sandbox-related finding | Disable plugin and quarantine descendants |
+
+The CIS also publishes Pulses such as `safety.taint.detected`, `safety.quarantine.entered`, and
+`plugin.violation` so StateHub and auditor surfaces see the same truth the gates saw.
 
 ---
 
 ## 4. Layer 2: Anomaly Detection
 
-### 4.1 Statistical Monitoring
+### 4.1 Monitored Indicators
 
-The CIS maintains running statistics on knowledge mutations and triggers alerts when
-mutations deviate from established baselines.
+Not all corruption starts with taint. The CIS also watches for patterns that suggest the
+knowledge graph is behaving unlike itself:
 
-```rust
-/// Anomaly detector for knowledge store mutations.
-pub struct KnowledgeAnomalyDetector {
-    /// Exponential moving averages of mutation rates per knowledge type.
-    pub mutation_ema: HashMap<KnowledgeType, ExponentialMovingAverage>,
-    /// EMA of tier promotion rates.
-    pub promotion_ema: ExponentialMovingAverage,
-    /// EMA of tier demotion rates.
-    pub demotion_ema: ExponentialMovingAverage,
-    /// Z-score threshold for triggering anomaly alert.
-    pub z_threshold: f64,  // default: 3.0 (3 sigma)
-    /// Minimum observations before anomaly detection activates.
-    pub warmup_observations: usize,  // default: 100
-    /// Sliding window for variance estimation.
-    pub window_size: usize,  // default: 500
-}
-
-/// Exponential moving average with variance tracking.
-pub struct ExponentialMovingAverage {
-    pub mean: f64,
-    pub variance: f64,
-    pub alpha: f64,  // smoothing factor, default 0.05
-    pub observations: usize,
-}
-
-impl ExponentialMovingAverage {
-    pub fn update(&mut self, value: f64) {
-        self.observations += 1;
-        let delta = value - self.mean;
-        self.mean += self.alpha * delta;
-        self.variance = (1.0 - self.alpha) * (self.variance + self.alpha * delta * delta);
-    }
-
-    pub fn z_score(&self, value: f64) -> f64 {
-        let stddev = self.variance.sqrt().max(f64::EPSILON);
-        (value - self.mean) / stddev
-    }
-}
-```
-
-### 4.2 Monitored Signals
-
-| Signal | Baseline | Anomaly Indicator |
+| Indicator | Example | Likely class |
 |---|---|---|
-| Mutation rate (Engrams changed per tick) | EMA of recent ticks | Spike > 3σ above mean |
-| Promotion rate (Transient→Working→...) | EMA of recent sessions | Rapid mass promotion |
-| Contradiction rate (new vs. existing) | EMA over window | Sudden cluster of contradictions |
-| Score distribution shift | Kolmogorov-Smirnov vs. baseline | Distribution divergence > 0.1 |
-| Taint propagation fan-out | EMA of fan-out per taint event | Single source tainting > 50 Engrams |
+| Contradiction burst | Many new claims suddenly conflict with established Engrams | `MemoryPoisoning` |
+| Score spike without support | Retrieval rank rises but gates and lineage do not justify it | `AdversarialRetrieval` |
+| Taint fan-out burst | One import suddenly contaminates a large lineage region | `TaintCascade` |
+| Sandbox violation cluster | One plugin repeatedly exceeds permission envelope | `SandboxViolation` |
+| Tenant-boundary mismatch | Query path mixes two tenant prefixes | `CrossTenantLeakage` |
+| Lineage gap | Durable record cites missing or unverifiable ancestors | `LineageMismatch` |
 
-### 4.3 Detection Inspired by RevPRAG
+These indicators are "danger model" style cues: the CIS responds when the system shows signs of
+damage, not only when the content is foreign.
 
-arXiv:2411.18948 (RevPRAG) achieves 98% TPR at 1% FPR by analyzing internal LLM activations
-to detect poisoned generations. The CIS adapts this principle to Engram scoring:
+### 4.2 Detection Outcomes
 
-```
-ALGORITHM: ScoreDistributionAnomaly(new_engram, knowledge_type)
+An anomaly does not immediately make new truth. It creates evidence that must be handled:
 
-1. Compute new_engram.score.effective()
-2. Get baseline distribution for knowledge_type from EMA
-3. Compute z = (effective - baseline_mean) / baseline_stddev
-4. If |z| > Z_THRESHOLD:
-   a. If z > 0: suspiciously high score — possible adversarial inflation
-   b. If z < 0: suspiciously low score — possible corruption
-   c. Emit ThreatEvent(AnomalousMutation, confidence=sigmoid(|z| - Z_THRESHOLD))
-5. Return (is_anomalous, z_score)
-```
+1. Emit a `ThreatFinding` with severity and recommended containment.
+2. Publish a matching safety Pulse for dashboards and replay.
+3. Raise the quarantine candidate set if the finding touches durable Engrams.
+4. If an auditable action is involved, attach the finding to the action's `Custody` record.
+
+This keeps the CIS from becoming an uncontrolled policy engine. It finds, classifies, and routes.
+Human approval, role policy, and attestation remain in the safety spine.
 
 ---
 
 ## 5. Layer 3: Quarantine
 
-### 5.1 Quarantine Zone
+### 5.1 Quarantine Partition
 
-Suspicious Engrams are moved to a quarantine zone — a separate Substrate partition that is
-excluded from normal `query()` results but preserved for investigation.
+Quarantine is a first-class containment boundary inside the Substrate. Suspect Engrams stay
+durable and queryable for reviewers, but they disappear from default retrieval and composition.
 
 ```rust
-/// Quarantine zone for suspicious knowledge.
-pub struct QuarantineZone {
-    /// Quarantined Engrams, indexed by ContentHash.
-    entries: HashMap<ContentHash, QuarantineEntry>,
-    /// Maximum quarantine duration before forced resolution.
-    max_quarantine_duration: Duration,  // default: 72 hours
-    /// Auto-resolve policy after max duration.
-    auto_resolve: QuarantineResolution,  // default: Demote
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineEntry {
     pub engram_hash: ContentHash,
-    pub quarantined_at: SystemTime,
+    pub taint: Taint,
     pub reason: ThreatClass,
-    pub original_tier: KnowledgeTier,
-    pub threat_event_id: Uuid,
-    /// Number of reverification attempts.
-    pub reverify_attempts: u32,
-    /// Latest reverification result.
-    pub last_reverify: Option<GateVerdict>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum QuarantineResolution {
-    /// Release back to original tier (threat was false positive).
-    Release,
-    /// Demote to lower tier (uncertain).
-    Demote,
-    /// Convert to AntiKnowledge (confirmed corrupted).
-    Falsify,
-    /// Delete entirely (dangerous + no learning value).
-    Purge,
+    pub placed_at: SystemTime,
+    pub custody: Option<ContentHash>,
+    pub review_required: bool,
+    pub reviewer_release: Option<PrincipalId>,
 }
 ```
 
-### 5.2 Quarantine Workflow
+Operational rules:
 
-```
-1. DETECT    → Anomaly detector or taint propagation flags an Engram
-2. QUARANTINE → Move Engram to quarantine zone; exclude from queries
-3. NOTIFY    → Emit ThreatEvent; raise Daimon alarm signal
-4. REVERIFY  → Run affected Engram through full gate pipeline
-5. RESOLVE:
-   a. Gate passes + confidence recovers → RELEASE (false alarm)
-   b. Gate passes but confidence low    → DEMOTE (downgrade tier)
-   c. Gate fails                        → FALSIFY (create AntiKnowledge)
-   d. Timeout (72h, no resolution)      → AUTO_RESOLVE per policy
-6. LEARN     → Record outcome in immune memory
-```
+1. `Substrate.query()` excludes quarantine by default.
+2. Composer assembly excludes quarantine unless the caller has an explicit review scope.
+3. Quarantine status is visible on StateHub and on `safety.quarantine.*` Topics.
+4. Quarantined records remain part of lineage and replay; they are hidden from normal use, not
+   erased from history.
+
+### 5.2 Resolution Workflow
+
+REF32's one-way taint rule changes quarantine semantics. The system may release use of a record,
+but it never pretends the contamination never existed.
+
+1. Detect and place the Engram in quarantine.
+2. Run full reverification against current gates and any domain-specific checks.
+3. Open review if the Engram could influence visible, destructive, or cross-tenant actions.
+4. Record the reviewer decision in `Custody`; require `OrgRole` attestation for high-risk release.
+5. Either:
+   - keep the original Engram quarantined and produce a reviewed successor Engram for reuse, or
+   - keep the Engram quarantined permanently and publish a falsifier or postmortem.
+
+Quarantine is therefore both a storage partition and a workflow checkpoint.
 
 ---
 
-## 6. Layer 4: Red Team Probes
+## 6. Layer 4: Custody-Linked Incident Response
 
-### 6.1 Self-Adversarial Testing
+### 6.1 Joining Threat Findings to Custody
 
-During Delta (consolidation) cycles, the CIS runs automated red-team probes against its own
-knowledge store — testing for vulnerabilities before an adversary finds them.
+REF32 requires an operator to answer "who did what, with what authorization, and with what
+consequence?" The CIS contributes the knowledge-integrity side of that answer by linking findings
+to custody whenever the chain crosses an auditable action.
 
 ```rust
-/// Red team probe generator.
-pub struct RedTeamProber {
-    /// Probe strategies, tried in rotation.
-    pub strategies: Vec<ProbeStrategy>,
-    /// Maximum probes per Delta cycle.
-    pub max_probes_per_cycle: usize,  // default: 10
-    /// Minimum knowledge tier to probe (skip Transient).
-    pub min_probe_tier: KnowledgeTier,  // default: Working
-}
-
-#[derive(Debug, Clone)]
-pub enum ProbeStrategy {
-    /// Test if contradictory knowledge can be injected.
-    ContradictionInjection {
-        /// Target knowledge type to contradict.
-        target_type: KnowledgeType,
-    },
-    /// Test if high-scored garbage passes the gate.
-    ScoreInflation {
-        /// Synthetic Engram with inflated score.
-        inflation_magnitude: f64,
-    },
-    /// Test if taint propagation correctly reaches all descendants.
-    TaintCoverageCheck {
-        /// Source hash to taint.
-        source_hash: ContentHash,
-        /// Expected descendant count.
-        expected_descendants: usize,
-    },
-    /// Test if a known-false claim can survive promotion.
-    PromotionBypass {
-        /// False claim to attempt promoting.
-        false_claim: String,
-    },
+pub struct IncidentLink {
+    pub custody: ContentHash,
+    pub findings: Vec<Uuid>,
+    pub affected_engrams: Vec<ContentHash>,
+    pub taint_sources: Vec<ContentHash>,
+    pub replay_snapshot: Option<ContentHash>,
+    pub postmortem: Option<ContentHash>,
 }
 ```
 
-### 6.2 Probe Execution
+The linked custody record tells the auditor:
 
-```
-ALGORITHM: RedTeamCycle(knowledge_store, gate_pipeline)
+| Question | Source of truth |
+|---|---|
+| Who initiated the action | `Custody.principal` |
+| Why the system thought the action was reasonable | `why_heuristics` and `why_claims` |
+| Which gates passed or failed | `gates_passed` plus replay |
+| Whether tainted inputs were present | CIS taint sources and quarantine entries |
+| Whether a human approved release | `authorized` plus attestation level |
 
-For each strategy in strategies (up to max_probes_per_cycle):
-  1. Generate synthetic adversarial Engram per strategy
-  2. Attempt to insert into knowledge store (bypassing CIS for this probe only)
-  3. Run query() to see if synthetic Engram appears in results
-  4. Run gate pipeline on synthetic Engram
-  5. Record outcome:
-     a. If synthetic Engram passed gates → VULNERABILITY FOUND
-        - Emit ThreatEvent(RedTeamSuccess, severity=high)
-        - Record in immune memory for future detection
-     b. If synthetic Engram rejected by gates → DEFENSE HOLDS
-        - Record successful defense pattern
-  6. Remove synthetic Engram from knowledge store (cleanup)
-```
+### 6.2 Incident Workflow
+
+The CIS follows the same incident sequence as the REF32 safety spine:
+
+1. Identify the action's custody record when one exists.
+2. Walk backward through contributing Engrams and taint sources.
+3. Reconstruct the exact gate, heuristic, and context state through replay.
+4. Publish an incident Engram or postmortem linked to the custody chain.
+5. Update the relevant defense:
+   - tighten a gate,
+   - lower a plugin's permissions,
+   - expand quarantine rules,
+   - demote or falsify the offending knowledge.
+
+This is the architectural reason custody belongs in the CIS story: detection without replayable
+accountability is only monitoring.
 
 ---
 
 ## 7. Layer 5: Immune Memory
 
-### 7.1 Remembering Attacks
+### 7.1 Remembering Successful and Failed Defenses
 
-The immune system maintains long-term memory of attack patterns, analogous to adaptive
-immunity (B-cells and T-cells in biology).
+Immune memory stores reusable patterns from prior findings:
 
-```rust
-/// Long-term immune memory. Persists to .roko/learn/immune-memory.json.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ImmuneMemory {
-    /// Known attack signatures (threat class → detection patterns).
-    pub attack_signatures: Vec<AttackSignature>,
-    /// False positive record (to avoid crying wolf).
-    pub false_positives: Vec<FalsePositiveRecord>,
-    /// Defense effectiveness scores (which defenses work against which threats).
-    pub defense_scores: HashMap<(ThreatClass, ImmuneAction), EffectivenessScore>,
-    /// Total threat events processed.
-    pub events_processed: u64,
-    /// Last consolidation timestamp.
-    pub last_consolidated: SystemTime,
-}
+| Stored artifact | Why it matters |
+|---|---|
+| HDC fingerprint of known poisoning pattern | Fast similarity lookup during future intake |
+| Taint source and fan-out shape | Recognize repeated propagation geometry |
+| Best containment action | Reuse the defense that worked last time |
+| False-positive record | Avoid over-quarantining benign material |
+| Postmortem or custody link | Keep learning grounded in auditable history |
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttackSignature {
-    pub id: Uuid,
-    pub threat_class: ThreatClass,
-    /// HDC fingerprint of the attack pattern (for similarity matching).
-    pub fingerprint: Vec<u8>,
-    /// Score distribution anomaly pattern at time of detection.
-    pub score_pattern: ScoreDistributionSnapshot,
-    /// How many times this signature has been matched.
-    pub match_count: u32,
-    /// Effectiveness of defense when this pattern was encountered.
-    pub best_defense: ImmuneAction,
-    pub first_seen: SystemTime,
-    pub last_seen: SystemTime,
-}
+This makes the CIS cumulative: each resolved incident should make the next similar incident
+cheaper to detect and contain.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FalsePositiveRecord {
-    pub threat_event_id: Uuid,
-    pub misclassified_as: ThreatClass,
-    pub actual_status: String,  // "benign", "data_quality", etc.
-    pub recorded_at: SystemTime,
-}
+### 7.2 Delta Probes and Replay
 
-pub struct EffectivenessScore {
-    pub successes: u32,
-    pub failures: u32,
-    pub effectiveness_rate: f64,
-}
-```
+Delta-speed work in Dreams exercises the immune memory:
 
-### 7.2 Signature Matching
+1. Replay prior poisoning cases against updated gates.
+2. Probe known weak spots with synthetic hostile inputs.
+3. Check whether quarantined lineage still leaks into Composer assembly.
+4. Verify that plugin sandbox violations still force containment.
 
-When a new ThreatEvent is detected, the CIS checks immune memory for matching signatures
-using HDC similarity (Kanerva 2009):
-
-```
-ALGORITHM: ImmuneRecognition(threat_event)
-
-1. Compute HDC fingerprint of threat_event's affected Engrams
-2. For each stored attack_signature:
-   a. Compute cosine similarity between fingerprints
-   b. If similarity > RECOGNITION_THRESHOLD (default 0.85):
-      - KNOWN ATTACK: apply best_defense immediately (skip analysis)
-      - Increment match_count
-      - Update last_seen
-      - Return early with recommended action
-3. If no match: NOVEL ATTACK
-   a. Run full analysis pipeline (Layers 2-4)
-   b. After resolution, create new AttackSignature
-   c. Store in immune memory
-
-PARAMETERS:
-  RECOGNITION_THRESHOLD = 0.85
-  HDC_DIMENSION = 10240 (matches bardo-primitives)
-```
+If a prior attack pattern now bypasses containment, the CIS raises a new high-severity finding and
+reopens the relevant policy surface.
 
 ---
 
-## 8. Daimon Integration: Immune Alarm Signals
+## 8. Daimon Integration: Caution Without Policy Override
 
-The CIS communicates threat severity to the Daimon, which adjusts the agent's affective state.
-This implements Matzinger's (2002) danger model — the immune system responds to danger signals,
-not merely to "foreign" content.
+The CIS may bias the Daimon toward a more cautious operating posture, but it does not override the
+safety spine's authorization decisions. High recent finding severity should lower willingness to
+take autonomous action, increase confirmation pressure, and bias routing toward stricter gates.
 
-```rust
-/// Immune alarm signal sent to the Daimon.
-pub struct ImmuneAlarm {
-    /// Overall threat level (0.0 = no threats, 1.0 = critical breach).
-    pub threat_level: f64,
-    /// PAD modulation recommended by the immune system.
-    pub pad_delta: PadVector,
-    /// Suggested behavioral state shift.
-    pub suggested_state: Option<BehavioralState>,
-}
+That separation matters:
 
-impl ImmuneAlarm {
-    /// Generate alarm from recent threat events.
-    pub fn from_events(events: &[ThreatEvent]) -> Self {
-        let max_severity = events.iter()
-            .map(|e| e.severity)
-            .fold(0.0_f64, f64::max);
-        let avg_confidence = events.iter()
-            .map(|e| e.confidence)
-            .sum::<f64>() / events.len().max(1) as f64;
+1. The Daimon can alter posture.
+2. The safety spine still approves or denies.
+3. Custody still records who approved what.
 
-        let threat_level = max_severity * avg_confidence;
-
-        // High threat → decrease pleasure, increase arousal, decrease dominance
-        let pad_delta = PadVector {
-            pleasure: -0.3 * threat_level,
-            arousal: 0.5 * threat_level,
-            dominance: -0.2 * threat_level,
-        };
-
-        let suggested_state = if threat_level > 0.8 {
-            Some(BehavioralState::Cautious)
-        } else if threat_level > 0.4 {
-            Some(BehavioralState::Focused)
-        } else {
-            None
-        };
-
-        Self { threat_level, pad_delta, suggested_state }
-    }
-}
-```
+The cognitive immune response is therefore advisory for behavior and authoritative for
+knowledge-integrity metadata, not a replacement for role policy.
 
 ---
 
@@ -561,143 +390,123 @@ impl ImmuneAlarm {
 
 ```toml
 [immune]
-# Enable/disable the cognitive immune system.
 enabled = true
 
 [immune.taint]
-# Confidence decay per lineage hop.
-decay_factor = 0.8
-# Stop propagating below this confidence.
-taint_threshold = 0.1
-# Maximum lineage depth to traverse.
-max_depth = 10
+propagate_through_pulses = true
+require_human_signoff_for_release = true
 
 [immune.anomaly]
-# Z-score threshold for anomaly alerts.
 z_threshold = 3.0
-# Minimum observations before detection activates.
-warmup_observations = 100
-# EMA smoothing factor.
-ema_alpha = 0.05
+fanout_alert_threshold = 50
+lineage_gap_alert = true
 
 [immune.quarantine]
-# Maximum quarantine duration.
-max_duration_hours = 72
-# Auto-resolve policy: "release", "demote", "falsify", "purge".
-auto_resolve = "demote"
-# Maximum concurrent quarantined Engrams.
-max_quarantined = 1000
+default_partition = "quarantine"
+hide_from_query = true
+hide_from_compose = true
+require_org_attestation_for_high_risk_release = true
 
-[immune.redteam]
-# Maximum probes per Delta consolidation cycle.
-max_probes_per_cycle = 10
-# Minimum knowledge tier to probe.
-min_probe_tier = "working"
+[immune.incident]
+link_to_custody = true
+publish_topics = ["safety.taint.detected", "safety.quarantine.entered", "safety.incident.opened"]
 
 [immune.memory]
-# HDC similarity threshold for recognizing known attacks.
 recognition_threshold = 0.85
-# Maximum stored attack signatures.
-max_signatures = 500
-# Persist location.
-path = ".roko/learn/immune-memory.json"
+store_false_positives = true
+replay_on_delta = true
 ```
+
+The important configuration boundary is not threshold tuning. It is whether release, replay, and
+attestation requirements stay consistent with the safety spine.
 
 ---
 
 ## 10. Integration Wiring
 
-### 10.1 Into the Universal Cognitive Loop
+### 10.1 Into the Seven-Step Loop
 
-| Loop Step | CIS Integration |
+| Loop step | CIS integration |
 |---|---|
-| 1. PERCEIVE | Query results filtered: quarantined Engrams excluded |
-| 2. EVALUATE | Score checked against anomaly detector baseline |
-| 3. ATTEND | Tainted Engrams receive Score penalty (0.5× multiplier) |
-| 4. INTEGRATE | Taint info included in composed context (agents see warnings) |
-| 5. ACT | No direct integration (agent unaware of CIS) |
-| 6. VERIFY | Gate verdicts feed anomaly detector + trigger taint if failed |
-| 7. PERSIST | New Engrams inherit taint from parent lineage |
-| 8. ADAPT | Policy receives ThreatEvents; adjusts future gate strictness |
-| 9. META-COGNIZE | ImmuneAlarm feeds Daimon; affects next tick's caution level |
+| 1. SENSE | Filter quarantined Engrams from default queries; attach taint metadata to incoming Pulses |
+| 2. ASSESS | Run contradiction, fan-out, and lineage checks; classify findings |
+| 3. COMPOSE | Exclude quarantine by default; surface taint annotations in composed context |
+| 4. ACT | Gates read taint before tool use, egress, signing, or other high-risk actions |
+| 5. VERIFY | Gate verdicts and plugin violations feed the anomaly detector and incident links |
+| 6. PERSIST / BROADCAST | Persist findings, quarantine entries, custody links, and attestation state; publish `safety.*` Pulses |
+| 7. REACT | Policy tightens thresholds, disables plugins, or opens reviewer work based on recent findings |
 
-### 10.2 Into Existing Crates
+The CIS is therefore not an extra loop step. It injects into the existing seven-step loop in the
+same way REF32 places taint, custody, and attestation into the broader safety story.
 
-| Crate | Integration Point | Change |
-|---|---|---|
-| `roko-core` | `Provenance` struct | Add `taint_info: TaintInfo` field |
-| `roko-neuro` | `NeuroStore::query()` | Filter out quarantined Engrams |
-| `roko-gate` | `GatePipeline::verify()` | On failure → trigger taint propagation |
-| `roko-daimon` | `DaimonState` | Receive `ImmuneAlarm`, adjust PAD |
-| `roko-learn` | `EpisodeLogger` | Log ThreatEvents alongside episodes |
-| `roko-dreams` | Delta cycle | Schedule RedTeamProber during consolidation |
-| `roko-conductor` | Circuit breaker | Trigger on threat_level > 0.8 |
-| `roko-fs` | `FileSubstrate` | Quarantine partition (separate JSONL file) |
+### 10.2 Target-State Components
+
+| Component | CIS responsibility |
+|---|---|
+| `roko-core` | Durable `Taint` and provenance shape on Engrams |
+| `roko-agent` | Gate-time checks before risky actions and plugin calls |
+| `roko-neuro` | Quarantine-aware query and lineage traversal |
+| `roko-daimon` | Caution bias from recent finding severity |
+| `roko-dreams` | Delta replay and adversarial probes |
+| `roko-chain` | Optional witness path for high-assurance custody evidence |
 
 ---
 
 ## 11. Test Criteria
 
-| Test | What It Validates | Type |
+| Test | What it validates | Type |
 |---|---|---|
-| `test_taint_propagates_through_lineage` | Taint reaches all descendants within MAX_DEPTH | Unit |
-| `test_taint_confidence_decays` | Each hop reduces confidence by DECAY_FACTOR | Unit |
-| `test_taint_stops_at_threshold` | Propagation halts when confidence < TAINT_THRESHOLD | Unit |
-| `test_anomaly_z_score_detection` | Spike > 3σ triggers ThreatEvent | Unit |
-| `test_anomaly_warmup_no_false_positives` | No alerts during first 100 observations | Unit |
-| `test_quarantine_excludes_from_query` | Quarantined Engrams absent from query results | Integration |
-| `test_quarantine_auto_resolve_on_timeout` | After 72h, quarantine auto-resolves per policy | Unit |
-| `test_redteam_detects_score_inflation` | Inflated-score synthetic Engram is caught | Integration |
-| `test_redteam_cleanup` | Synthetic Engrams removed after probe | Unit |
-| `test_immune_memory_recognizes_repeat` | Second occurrence of known signature matches | Unit |
-| `test_immune_memory_hdc_similarity` | Similarity > 0.85 triggers recognition | Unit |
-| `test_false_positive_recording` | False positives tracked to reduce future alerts | Unit |
-| `test_immune_alarm_shifts_pad` | High threat → pleasure decreases, arousal increases | Unit |
-| `test_gate_failure_triggers_taint` | Failed gate verdict taints the Engram | Integration |
+| `test_taint_propagates_from_pulse_to_engram` | Graduated durable records keep the Pulse taint | Unit |
+| `test_taint_never_clears_without_review` | Normal derivation cannot erase taint | Unit |
+| `test_quarantine_hidden_from_default_query` | Suspect Engrams stay out of normal retrieval | Integration |
+| `test_compose_refuses_quarantine_without_scope` | Composer cannot silently use quarantined lineage | Integration |
+| `test_plugin_violation_opens_containment` | Sandbox violation produces containment and review work | Integration |
+| `test_incident_links_back_to_custody` | High-risk incident can be reconstructed from custody plus replay | Integration |
+| `test_high_risk_release_requires_attestation` | Reviewer release for risky material requires the configured attestation level | Integration |
+| `test_cross_tenant_mix_forces_escalation` | Tenant-boundary mismatch never degrades to a warning only | Integration |
+| `test_delta_replay_reopens_regression` | A broken defense in replay raises a fresh finding | Integration |
 
 ---
 
 ## 12. Theoretical Foundations
 
-### 12.1 Biological Immune System Analogy
+### 12.1 Biological Analogy
 
-| Biological Component | CIS Component | Function |
-|---|---|---|
-| Innate immunity | Taint propagation + anomaly detection | Fast, non-specific first response |
-| Adaptive immunity | Immune memory + HDC signature matching | Slow, specific, remembers past attacks |
-| B-cells (antibodies) | Attack signatures | Recognize specific threat patterns |
-| T-cells (killer cells) | Quarantine + Falsify actions | Neutralize identified threats |
-| Fever (systemic alarm) | ImmuneAlarm → Daimon | System-wide behavioral change |
-| Autoimmune disorder | False positives | Immune system attacks own knowledge |
-| Immunodeficiency | Warmup period, disabled CIS | System vulnerable without defenses |
-
-### 12.2 Negative Selection (Forrest et al. 1994)
-
-The red team probes implement negative selection: generate random "non-self" patterns and check
-if they survive the immune system. If they do, the immune system has a gap. The CIS then
-creates a new detector (attack signature) to cover the gap.
-
-### 12.3 NIST AI 100-2 Alignment
-
-The CIS maps to NIST's adversarial ML taxonomy:
-
-| NIST Category | CIS Defense |
+| Biological idea | CIS analogue |
 |---|---|
-| Data poisoning | Anomaly detection + taint propagation |
-| Model evasion | Red team probes test gate bypass |
-| Model extraction | Out of scope (Roko is open-source) |
-| Supply chain | Provenance attestation (planned, see [05-provenance-and-attestation](./05-provenance-and-attestation.md)) |
+| Innate immunity | Immediate tainting and quarantine |
+| Adaptive immunity | HDC-backed immune memory and replay |
+| Tissue damage response | Contradiction and lineage-integrity indicators |
+| Memory cells | Stored postmortems, false positives, and proven defenses |
+
+### 12.2 Negative Selection
+
+Forrest-style negative selection appears in Delta replay: the system keeps generating hostile
+cases that should not survive composition, verification, or release. If one does, the CIS found a
+gap before production drift turned it into an operator-visible failure.
+
+### 12.3 NIST Alignment
+
+| NIST category | CIS defense |
+|---|---|
+| Data poisoning | Taint propagation, anomaly detection, quarantine |
+| Evasion of safeguards | Replay and adversarial probes against gates |
+| Supply-chain corruption | Plugin sandbox findings plus attestation and custody links |
+| Cross-domain contamination | Tenant-aware quarantine and escalation |
+
+The CIS does not solve host compromise or physical access. Those remain outside the architecture
+scope, consistent with the threat model in REF32.
 
 ---
 
 ## Cross-References
 
-- [05-provenance-and-attestation](./05-provenance-and-attestation.md) — Provenance struct that CIS extends with TaintInfo
-- [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) — Neuro knowledge tiers that CIS protects
-- [25-attention-as-currency](./25-attention-as-currency.md) — Tainted Engrams cost more AT (discourage use)
-- [28-emergent-goal-structures](./28-emergent-goal-structures.md) — CIS prevents corrupted knowledge from generating false goals
-- [Topic 04: Verification](../04-verification/INDEX.md) — Gate pipeline that feeds CIS detections
-- [Topic 06: Neuro](../06-neuro/INDEX.md) — Knowledge store that CIS protects
-- [Topic 09: Daimon](../09-daimon/INDEX.md) — Affect system that CIS modulates via alarms
-- [Topic 10: Dreams](../10-dreams/INDEX.md) — Delta cycles that run red team probes
-- [Topic 11: Safety](../11-safety/INDEX.md) — Safety layer for capability-level protection
+- [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md) - canonical safety spine refinement propagated here
+- [01-naming-and-glossary](./01-naming-and-glossary.md) - current terminology for Engram, Pulse, Bus, Topic, TypedContext, and Custody
+- [05-provenance-and-attestation](./05-provenance-and-attestation.md) - durable provenance, attestation levels, and custody-linked auditability
+- [09-universal-cognitive-loop](./09-universal-cognitive-loop.md) - seven-step loop that CIS injects into rather than extending
+- [Topic 04: Verification](../04-verification/INDEX.md) - gate pipeline that consumes taint and emits verdicts
+- [Topic 06: Neuro](../06-neuro/INDEX.md) - durable store and lineage graph protected by quarantine
+- [Topic 09: Daimon](../09-daimon/INDEX.md) - cautious behavior modulation based on recent finding severity
+- [Topic 10: Dreams](../10-dreams/INDEX.md) - Delta replay and adversarial probes
+- [Topic 11: Safety](../11-safety/INDEX.md) - broader safety spine: authorization, sandbox, secrets, and multi-tenant controls

@@ -26,6 +26,7 @@
 > [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md),
 > [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md),
 > [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md),
+> [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md),
 > [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md),
 > [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md),
 > [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md),
@@ -164,6 +165,9 @@ crates directly.
 | `TenantCtx` | Tenant-scoped request context | Identity, role, quota, and audit information propagated through auth, `Substrate`, and control-plane spans. |
 | `TypedContext` | Structured situation payload | Domain-tagged key/value context passed to composers, gates, and heuristics so matching happens on typed fields instead of free-text parsing. |
 | `Custody` | Chain-of-custody record | Auditable record of who approved an action, which heuristics and claims influenced it, what simulation ran, and what witness or result was observed. |
+| `Attestation` | Cryptographic commitment on an Engram | Signature over a durable ContentHash plus timestamp and attestation level for later verification. |
+| `AttestationLevel` | Audit commitment tier | `LocalAgent`, `OrgRole`, or `ChainWitness`, chosen by kind and action criticality. |
+| `Taint` | Untrusted-input marker | One-way safety label such as `UserInput`, `ExternalFetch`, `ThirdPartyPlugin`, or `LegacyImport` that propagates until explicit human sign-off. |
 | `Projection` | Named live-updating view | A typed `State` plus `Delta` fold over Bus + Substrate that consumers query and subscribe to through StateHub. |
 | `Cursor` | Realtime resume token | Opaque position marker carried on projection and stream replies so clients can resume after reconnect. |
 | `Realtime surface` | External streaming contract | Shared `query`, `subscribe`, and `publish` vocabulary carried over WebSocket, SSE, or optional gRPC. |
@@ -281,6 +285,9 @@ The following names are load-bearing additions in the current architecture:
 | `Domain profile` | Installable bundle for one work domain such as coding, research, blockchain, data/ML, ops, or writing. |
 | `TypedContext` | Structured `domain + fields` shape that lets gates, heuristics, and templates match on typed context rather than parsing summaries. |
 | `Custody` | Shared audit record for consequential actions across domains, including approvals, simulations, results, and optional chain witness material. |
+| `Attestation` | Cryptographic signature record attached to selected Engrams so auditors can verify who committed to a durable record and at what level. |
+| `AttestationLevel` | Commitment tier used by attested Engrams: `LocalAgent`, `OrgRole`, or `ChainWitness`. |
+| `Taint` | Durable safety label recording whether an Engram originated from user input, external fetches, third-party plugins, or legacy imports. |
 | `one-liner` | Fastest Rust entry point, typically `roko::run(...)`, for demos, scripts, and first-run success. |
 | `builder` | Daily-driver authoring surface that validates at `.build()` and hides kernel details by default. |
 | `trait impl` | Custom component surface for `Substrate`, `Bus`, operators, translators, and provider adapters. |
@@ -315,6 +322,7 @@ The following names are load-bearing additions in the current architecture:
 | `Diff-first review` | The rule that code changes are shown as hunks before apply, with per-hunk approval and optional explainability. |
 | `Transcript` | Durable session log carrying prompts, outputs, approvals, budget state, and replay metadata across CLI, TUI, Chat, and Web. |
 | `Budget line` | The visible spend summary shown during interactive and status flows so routing and approvals remain legible to the operator. |
+| `Safety spine` | The orthogonal enforcement story joining authorization, sandboxing, taint, attestation, custody, and audit tooling across all layers. |
 | `Component library` | Shared browser widgets and review primitives, such as `@roko/ui`, used by the first-party web UI and extension pages. |
 
 ### 9.1 Topic Namespace Guidance
@@ -365,6 +373,10 @@ prefixes without coordination.
 | `SDK` | The four-layer Rust developer surface that lets Rust users start with a one-liner and descend only as far as builder, trait impl, or runtime impl work requires. |
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
+| `Taint` | One-way safety classification on an Engram indicating untrusted provenance and the need for additional checks before action. |
+| `Custody` | Durable chain-of-custody Engram for auditable actions, including authorization evidence, cited heuristics and claims, gate verdicts, and optional witness data. |
+| `Attestation` | Signature metadata proving that a principal committed to a specific durable ContentHash at a given level. |
+| `AttestationLevel` | Verification tier for an attested Engram: local session, human role, or chain witness. |
 | `StateHub` | Kernel projection layer that turns Bus pulses and Substrate history into named consumer-facing views. |
 | `Cursor` | Opaque resume token carried by the realtime surface so clients can continue from a known stream position. |
 | `Slash command` | Interactive `/<verb>` alias such as `/edit`, `/run`, or `/watch` that resolves to the same underlying Roko actions. |
@@ -402,6 +414,7 @@ prefixes without coordination.
 - [../19-deployment/INDEX.md](../19-deployment/INDEX.md) for deployment profiles, five shapes, and state portability
 - [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md) for layered secret resolution and shared-server credential handling
 - [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md) for the deployment-UX refinement proposal
+- [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md) for the shared vocabulary around custody, sandboxing, taint, attestation, and the safety spine
 - [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the StateHub projection-layer proposal
 - [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) for the shared realtime transport proposal
 - [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md) for the interface-facing realtime surface contract

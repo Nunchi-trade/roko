@@ -85,6 +85,13 @@ chain-of-custody record for auditable actions. Start with
 [`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
 [`18-tools/05-tool-profiles.md`](18-tools/05-tool-profiles.md), and
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/32-safety-sandbox-provenance.md` pulls the scattered safety material into one
+defensive spine: role authorization, tiered sandboxes, pre/post checks, taint propagation,
+attestation, custody, network egress, secrets, and multi-tenant isolation all share one audit
+vocabulary. Start with [`11-safety/INDEX.md`](11-safety/INDEX.md),
+[`00-architecture/05-provenance-and-attestation.md`](00-architecture/05-provenance-and-attestation.md),
+[`00-architecture/26-cognitive-immune-system.md`](00-architecture/26-cognitive-immune-system.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/26-statehub-rearchitecture.md` promotes `StateHub` from a TUI helper to the
 kernel projection layer that folds Bus Pulses and Substrate state into typed, filterable,
 replayable views for every surface. Start with
@@ -203,7 +210,7 @@ and [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy
 - [`08-chain/`](08-chain/INDEX.md) — Topic 08: Chain Layer (Korai)
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
-- [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
+- [`11-safety/`](11-safety/INDEX.md) — Safety spine: authorization, sandboxing, taint, attestation, custody, and audit tooling
 - [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, familiar workflow parity, five-page first-party web UI, StateHub projection layer, shared realtime surface, rich UX primitives, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer

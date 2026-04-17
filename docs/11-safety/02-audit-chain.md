@@ -1,336 +1,240 @@
 # Cryptographic Audit Trail: Merkle Hash-Chain and Engram Lineage
 
-> **Layer**: L0 Runtime (persistence), L3 Harness (verification), Cross-cut (Safety & Provenance)
+> **Layer:** L0 Runtime, L3 Harness
 >
-> **Crate**: `roko-core` (Engram lineage), `roko-fs` (FileSubstrate persistence)
+> **Cross-cut:** Safety & Provenance
 >
-> **Synapse traits**: `Substrate` (persist and query Engrams), `Gate` (verify chain integrity)
->
-> **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md)
-
-
-> **Implementation**: Partially Wired
+> **Alignment:** This doc applies [REF32](../../tmp/refinements/32-safety-sandbox-provenance.md). For the architecture-level provenance model, see [docs/00-architecture/05-provenance-and-attestation.md](../00-architecture/05-provenance-and-attestation.md) and the glossary at [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
-## The Problem
+## Overview
 
-An autonomous agent managing tasks, code, or capital needs forensic-grade evidence of exactly what happened. When something goes wrong — a build fails, a test regresses, a trade loses money, an unexpected action occurs — the operator needs to reconstruct the precise sequence of decisions, tool calls, and outcomes that led to the failure.
+The safety spine needs more than a generic audit log. For any auditable action, Roko should be able to reconstruct:
 
-Standard log files (JSONL, text) can be tampered with after the fact. Entries can be deleted, modified, or reordered without detection. This is unacceptable for agents operating in regulated environments or managing valuable assets.
+- who initiated it,
+- what was authorized,
+- which heuristics and claims influenced it,
+- which gates and reviews approved it,
+- what result was produced,
+- and which tainted inputs were still in play.
 
----
-
-## The Engram Lineage DAG
-
-Every piece of information in Roko is an **Engram** — a content-addressed, scored, decaying, lineage-tracked unit of cognition. The audit trail is built into the Engram's structure via two fields:
-
-### Content Addressing
-
-Every Engram has an `id` field that is a BLAKE3 content hash of its canonical fields:
-
-```rust
-pub struct Engram {
-    pub id: ContentHash,              // BLAKE3(kind + body + author + tags)
-    pub kind: Kind,                   // semantic type
-    pub body: Body,                   // payload (text, JSON, binary)
-    pub tags: BTreeMap<String, String>, // ordered metadata (included in hash)
-    pub created_at_ms: i64,           // Unix milliseconds
-    pub decay: Decay,                 // None | HalfLife | Ttl | Ebbinghaus
-    pub score: Score,                 // 7-axis appraisal
-    pub lineage: Vec<ContentHash>,    // parent Engrams (audit DAG)
-    pub provenance: Provenance,       // author, model fingerprint, taint chain
-    pub attestation: Option<Attestation>, // cryptographic proof of origin
-}
-```
-
-Content addressing means:
-- The same content always produces the same hash (deterministic)
-- Any modification to the content changes the hash (tamper-evident)
-- The hash serves as a unique, unforgeable identifier
-
-### Lineage (Audit DAG)
-
-The `lineage: Vec<ContentHash>` field links every Engram to its parents — the Engrams that caused it to exist. This creates a directed acyclic graph (DAG) where any Engram can be traced back through its causal chain to the original inputs.
-
-For example, when the `ToolDispatcher` executes a tool call:
-
-1. The tool call request becomes an Engram with `Kind::ToolInvocation`
-2. The tool result becomes an Engram with `lineage = [tool_call_engram.id]`
-3. The gate verdict becomes an Engram with `lineage = [tool_result_engram.id]`
-4. The final persisted output becomes an Engram with `lineage = [gate_verdict_engram.id]`
-
-Walking the lineage backwards from any Engram reconstructs the complete decision chain.
-
-### Provenance
-
-The `Provenance` struct records who created the Engram and how:
-
-```rust
-pub struct Provenance {
-    pub author: String,           // "tool_dispatcher", "claude-sonnet-4-20250514", etc.
-    pub model_fingerprint: Option<String>,  // Model identifier if LLM-generated
-    pub taint_chain: Vec<String>, // Sequence of processing steps
-}
-```
-
-### Attestation
-
-The optional `Attestation` field provides cryptographic proof of origin:
-
-```rust
-pub struct Attestation {
-    pub signature: Vec<u8>,       // Cryptographic signature
-    pub signer: String,           // Identity of the signer
-    pub algorithm: String,        // Signing algorithm (e.g., "ed25519")
-    pub timestamp: i64,           // When the attestation was created
-}
-```
+The canonical durable record for that reconstruction is a **Custody** Engram. Merkle or hash-chain structures are still useful implementation details for tamper evidence, but the operator-facing unit is Custody, not an opaque append-only line.
 
 ---
 
-## The SHA-256 Merkle Hash-Chain (Legacy Design)
+## 1. From Lineage to Custody
 
-The legacy specification describes a linear hash-chain audit trail where each entry contains a SHA-256 hash of the previous entry. This design is preserved in the Roko architecture as a specialized Substrate implementation:
+Every Engram already carries lineage and provenance. REF32 extends that into an explicit chain-of-custody story for actions that matter.
 
-### AuditChain Structure
+### Minimal lineage
+
+Lineage answers causal questions:
+
+- Which prompt or plan step led to this action?
+- Which tool output or external fetch influenced the decision?
+- Which gate verdicts were emitted before the action persisted?
+
+Lineage alone is necessary but not sufficient. It tells you ancestry, not whether the action was authorized or who reviewed it.
+
+### Custody as the auditable action record
+
+Custody closes that gap:
 
 ```rust
-use sha2::{Sha256, Digest};
-
-/// The append-only audit chain. One per agent lifetime.
-pub struct AuditChain {
-    writer: std::io::BufWriter<std::fs::File>,
-    current_seq: u64,
-    last_hash: [u8; 32],
-}
-
-/// A single entry in the audit chain. Every field participates in
-/// the hash computation. Tampering with any field invalidates the
-/// chain from that point forward.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AuditEntry {
-    pub seq: u64,
-    /// Hash of the previous entry (chain link).
-    pub prev_hash: [u8; 32],
-    pub timestamp: u64,
-    pub tick: u64,
-    pub event: AuditEvent,
-    /// Hash of THIS entry (computed over all fields above).
-    pub hash: [u8; 32],
+pub struct Custody {
+    pub action: ActionHash,
+    pub principal: PrincipalId,
+    pub when: Timestamp,
+    pub authorized: AuthzEvidence,
+    pub why_heuristics: Vec<HeuristicId>,
+    pub why_claims: Vec<ClaimId>,
+    pub simulation: Option<SimHash>,
+    pub gates_passed: Vec<GateVerdict>,
+    pub taint: Option<Taint>,
+    pub result: Option<ResultHash>,
+    pub witness: Option<ChainWitness>,
 }
 ```
 
-### Audit Event Types
-
-Eleven event types cover the state transitions an operator might want to inspect:
-
-```rust
-pub enum AuditEvent {
-    /// A tool was called. params_hash and result_hash are SHA-256 of
-    /// the serialized parameters and result (not the raw data, to avoid
-    /// logging sensitive values).
-    ToolCall { tool: String, params_hash: [u8; 32], result_hash: [u8; 32] },
-    /// A gate verdict was rendered.
-    GateVerdict { gate: String, passed: bool, score: f64 },
-    /// A capability permit was created.
-    PermitCreated { permit_id: String, action: String, value_limit: String },
-    /// A capability permit was consumed.
-    PermitConsumed { permit_id: String },
-    /// An inference call was made.
-    InferenceCall { model: String, tokens_in: u32, tokens_out: u32, cost: f64 },
-    /// The Neuro knowledge store was mutated.
-    NeuroMutation { mutation_type: String, entry_id: String },
-    /// An operator intervention was received.
-    InterventionReceived { source: String, severity: String },
-    /// A phase transition occurred in the execution pipeline.
-    PhaseTransition { from: String, to: String },
-    /// A taint violation was blocked.
-    TaintViolationBlocked { label: String, sink: String },
-    /// A safety policy check result.
-    SafetyCheck { policy: String, passed: bool, reason: String },
-    /// An Engram was persisted to the Substrate.
-    EngramPersisted { engram_id: String, kind: String },
-}
-```
-
-### Chain Operations
-
-```rust
-impl AuditChain {
-    /// Append an entry to the chain. Returns the new entry's hash.
-    pub fn append(&mut self, tick: u64, event: AuditEvent) -> Result<[u8; 32]> {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as u64;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&self.current_seq.to_le_bytes());
-        hasher.update(&self.last_hash);
-        hasher.update(&timestamp.to_le_bytes());
-        hasher.update(&tick.to_le_bytes());
-        hasher.update(serde_json::to_vec(&event)?);
-        let hash: [u8; 32] = hasher.finalize().into();
-
-        let entry = AuditEntry {
-            seq: self.current_seq,
-            prev_hash: self.last_hash,
-            timestamp,
-            tick,
-            event,
-            hash,
-        };
-
-        bincode::serialize_into(&mut self.writer, &entry)?;
-        self.writer.flush()?;
-
-        self.last_hash = hash;
-        self.current_seq += 1;
-        Ok(hash)
-    }
-
-    /// Verify the integrity of the entire chain.
-    /// Returns false if any entry has been tampered with.
-    pub fn verify(entries: &[AuditEntry]) -> bool {
-        for window in entries.windows(2) {
-            if window[1].prev_hash != window[0].hash {
-                return false;
-            }
-            let mut hasher = Sha256::new();
-            hasher.update(&window[1].seq.to_le_bytes());
-            hasher.update(&window[1].prev_hash);
-            hasher.update(&window[1].timestamp.to_le_bytes());
-            hasher.update(&window[1].tick.to_le_bytes());
-            hasher.update(serde_json::to_vec(&window[1].event).unwrap());
-            let expected: [u8; 32] = hasher.finalize().into();
-            if window[1].hash != expected {
-                return false;
-            }
-        }
-        true
-    }
-}
-```
-
-### On-Chain Anchoring (Chain-Domain Agents)
-
-For agents operating in the chain domain (via `roko-chain`), the audit chain root hash can be periodically anchored on-chain:
-
-```rust
-/// Anchor the current chain root hash on-chain.
-/// Cost: ~$0.001 per anchor on L2. Recommended: every 1,000 ticks or daily.
-/// Creates an on-chain commitment that the audit log existed at this
-/// block — if the operator disputes what happened, the chain state
-/// proves the log's integrity.
-pub async fn anchor_onchain(
-    &self,
-    provider: &impl alloy::providers::Provider,
-) -> Result<String> {
-    let tx_hash = anchor_hash_onchain(provider, self.last_hash).await?;
-    Ok(tx_hash)
-}
-```
+The important addition to plain logging is not just "what happened" but "why the runtime believed it was acceptable at the time."
 
 ---
 
-## Current Implementation: Engram-Based Audit Trail
+## 2. What Requires Custody
 
-The current Roko codebase implements audit trailing via the `Engram` type and the `AuditSink` trait:
+Domain profiles decide the full scope, but the baseline rule is simple: if an action is destructive, externally visible, compliance-relevant, or hard to reverse, it should emit Custody.
 
-### AuditSink Trait
+Typical examples:
+
+- file deletion or overwrite outside trivial workspace edits,
+- shell execution with side effects,
+- dependency installation,
+- network egress carrying user or external data,
+- pull request creation or publication,
+- production infrastructure writes,
+- signing or broadcasting chain transactions,
+- external fact claims promoted into durable knowledge.
+
+Lower-risk actions can still emit lightweight audit Pulses, but the spine reserves Custody for actions an operator may later need to defend.
+
+---
+
+## 3. Authorization Evidence
+
+Custody should record not just the final decision but the evidence behind it:
+
+| Evidence field | Meaning |
+|---|---|
+| Role grant | The principal's standing permission under the active profile |
+| Session approval | A previously granted confirmation still in scope |
+| One-shot approval | A single-use checkpoint approval |
+| Review confirmation | Explicit approval for a destructive or outward-facing action |
+| Escalation outcome | Human or system-level override for exceptional cases |
+
+This makes it possible to distinguish:
+
+- an action the system was always allowed to perform,
+- an action the user approved once,
+- and an action that only happened after escalation.
+
+That distinction is often more important to auditors than the raw action itself.
+
+---
+
+## 4. Attestation Levels
+
+Some Engrams need stronger guarantees than "we persisted them." Attestation attaches a cryptographic statement to the content hash and records who is willing to stand behind it.
 
 ```rust
-/// A sink for audit signals emitted by the ToolDispatcher.
-pub trait AuditSink: Send + Sync {
-    fn emit(&self, signal: Engram);
+pub enum AttestationLevel {
+    LocalAgent,
+    OrgRole,
+    ChainWitness,
 }
 ```
 
-The `ToolDispatcher` emits audit signals at every phase of tool dispatch:
+### LocalAgent
 
-| Phase | Status | Signal Tags |
-|-------|--------|-------------|
-| `validation` | `passed` or `failed` | `call_id`, `tool`, `phase=validation` |
-| `tool_filter` | `denied` | `call_id`, `tool`, `phase=tool_filter` |
-| `permission` | `granted` or `denied` | `call_id`, `tool`, `phase=permission` |
-| `safety` | `blocked` | `call_id`, `tool`, `phase=safety` |
-| `handler` | `started` or `missing` | `call_id`, `tool`, `phase=handler` |
-| `completion` | `succeeded` or `failed` | `call_id`, `tool`, `phase=completion` |
+Low-friction signing by the current agent session. Use it for:
 
-Each emitted record is an `Engram` with:
-- `Kind::ToolInvocation`
-- `Provenance::trusted("tool_dispatcher")`
-- Tags for `call_id`, `tool`, `phase`, and `status`
-- Body containing JSON with phase-specific details
+- gate verdicts,
+- routine safety Pulses,
+- local replay checkpoints,
+- provisional Custody records before human review completes.
 
-### FileSubstrate Persistence
+### OrgRole
 
-Audit signals are persisted via the `FileSubstrate` in `roko-fs`, which writes to JSONL files (`.roko/signals.jsonl`). The FileSubstrate provides:
+Human-owned or organization-owned signing authority. Use it for:
 
-- Append-only JSONL writes with fsync
-- Query by kind, tags, and time range
-- Garbage collection of expired Engrams (respecting decay schedules)
-- Layout management for the `.roko/` directory structure
+- destructive actions that passed review,
+- regulated workflows,
+- production writes,
+- signed exports intended for audit packages.
 
-### Episode Logger
+### ChainWitness
 
-The `EpisodeLogger` in `roko-learn` records higher-level audit events (agent turns, gate verdicts, usage metrics) to `.roko/episodes.jsonl`:
+Phase 2+ attestation anchored outside the local deployment. Use it when the deployment needs independently verifiable evidence across operators or organizations, such as shared heuristic contributions or high-value chain operations.
 
-```rust
-pub struct Episode {
-    pub task_id: String,
-    pub agent_role: String,
-    pub turns: Vec<Turn>,
-    pub gate_verdicts: Vec<GateVerdict>,
-    pub usage: Usage,
-    pub started_at: i64,
-    pub finished_at: i64,
-}
+Attestation does not replace Custody. It strengthens the evidentiary weight of specific Engrams in the custody chain.
+
+---
+
+## 5. Pre-Call, Post-Call, and Replay
+
+Custody should bracket the action lifecycle:
+
+1. **Pre-call:** record the principal, target, context, requested permission, and whether confirmation was required.
+2. **Execution:** capture the concrete result hash, simulation output, and any plugin or sandbox violations.
+3. **Post-call:** persist gate verdicts, secret scrubbing outcomes, taint metadata, and final user review.
+
+That sequence enables faithful replay:
+
+- start from the action hash,
+- walk lineage backward to the inputs,
+- inspect the exact heuristics and claims cited at the time,
+- re-run the verification logic with the recorded taint and attestation state,
+- compare the reproduced result to the stored outcome.
+
+Replay matters because incident response should rely on the recorded historical state, not today's recalibrated system.
+
+---
+
+## 6. Taint, Secrets, and Egress in the Audit Story
+
+Custody is where multiple safety strands meet:
+
+- **Taint:** a custody record should note whether the action depended on `UserInput`, `ExternalFetch`, `ThirdPartyPlugin`, or other tainted sources.
+- **Secrets:** custody should confirm that secret-bearing outputs were scrubbed before persistence or broadcast.
+- **Network egress:** outbound requests should capture principal, destination, status, and whether the destination required explicit approval.
+
+This is the difference between a forensic log and a compliance-grade chain of evidence. Auditors do not just need a timestamp; they need to know whether the system acted on unreviewed input, whether it crossed a trust boundary, and whether it did so under proper authorization.
+
+---
+
+## 7. Hash-Chains and Witnesses
+
+Hash-chains remain useful, but they are subordinate to the custody model:
+
+- a Merkle or append-only chain can prove ordering and tamper evidence,
+- content-addressed Engrams prove object integrity,
+- attestations prove signer intent,
+- chain witnesses prove external commitment when required.
+
+The recommended hierarchy is:
+
+1. Engram content hash for object identity.
+2. Lineage for causal structure.
+3. Custody for action-centric evidence.
+4. Attestation for signer-backed assurance.
+5. External witness for cross-deployment verifiability.
+
+Treating a linear audit chain as the whole provenance story is too weak for multi-agent, multi-surface, or regulated deployments.
+
+---
+
+## 8. Audit Tooling
+
+The safety spine should expose audit queries at the same abstraction level it stores them:
+
+```bash
+roko custody list --after 7d --principal user:alice
+roko custody show <action-hash>
+roko custody verify <action-hash>
+roko custody export --signed
+roko attest verify <engram-hash>
+roko network log --tail 100
 ```
 
----
+Expected properties:
 
-## Relationship to Witness DAG
-
-The linear hash-chain described above is extended by the Witness DAG (see [12-witness-dag.md](12-witness-dag.md)), which uses BLAKE3 content-addressed vertices with five vertex types: Observation, Decision, Action, Outcome, and Attestation. The Witness DAG provides:
-
-- Full causal DAG structure (not just linear chain)
-- ZK proofs for strategy auditing without revealing proprietary details
-- SQLite storage with indexed queries
-- Cross-agent DAG merging via content-addressed vertex deduplication
+- `list` is filterable by action, principal, tenant, and date.
+- `show` expands lineage, taint, gate verdicts, and approvals.
+- `verify` re-checks signatures, chain witnesses, and replay assumptions.
+- `export --signed` produces a package a third party can validate without trusting the UI.
 
 ---
 
-## Implementation Status
+## 9. Incident Response
 
-| Component | Status | Location |
-|-----------|--------|----------|
-| `Engram` with `lineage` field | Built | `roko-core/src/engram.rs` |
-| `Provenance` struct | Built | `roko-core/src/provenance.rs` |
-| `AuditSink` trait | Built | `roko-core/src/tool/mod.rs` |
-| ToolDispatcher audit signal emission | Built | `roko-agent/src/dispatcher/mod.rs` |
-| FileSubstrate JSONL persistence | Built | `roko-fs/src/lib.rs` |
-| EpisodeLogger | Built | `roko-learn/src/episode_logger.rs` |
-| `Attestation` on Engrams | Core schema built; signing/verification not wired | `roko-core/src/attestation.rs` |
-| SHA-256 linear hash-chain | Design only | Target: Tier 2 |
-| On-chain anchoring | Design only | Target: Tier 3 (chain domain) |
-| Witness DAG | Design only | Target: Tier 3 |
+Postmortems should begin with Custody, not with grep:
 
----
+1. Identify the action hash or affected result hash.
+2. Load the custody record and its lineage.
+3. Inspect the authorization evidence and review outcome.
+4. Check taint sources and any external fetches.
+5. Verify attestations and witness status.
+6. Replay the action with the recorded inputs.
+7. Publish a postmortem Engram linked back into the same lineage.
 
-## Academic References
-
-| Paper | Contribution |
-|-------|-------------|
-| Merkle (1979) | Merkle hash trees — cryptographic data integrity verification |
-| Nakamoto (2008) | Bitcoin — append-only hash-chain for transaction ordering |
-| Benet (2014) | IPFS — content-addressed DAG for distributed storage |
-| BLAKE3 Team (2020) | BLAKE3 — fast, parallelizable cryptographic hash function |
+When the safety spine works, incidents turn into learnable evidence instead of irrecoverable ambiguity.
 
 ---
 
 ## Cross-References
 
-- [00-defense-in-depth.md](00-defense-in-depth.md) — Overall safety architecture
-- [12-witness-dag.md](12-witness-dag.md) — Extended DAG with ZK proofs
-- [15-forensic-ai.md](15-forensic-ai.md) — Regulatory compliance via causal replay
+- [00-defense-in-depth.md](00-defense-in-depth.md)
+- [03-taint-tracking.md](03-taint-tracking.md)
+- [06-sandboxing.md](06-sandboxing.md)
+- [08-threat-model.md](08-threat-model.md)
+- [docs/00-architecture/05-provenance-and-attestation.md](../00-architecture/05-provenance-and-attestation.md)

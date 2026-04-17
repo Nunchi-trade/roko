@@ -1,204 +1,203 @@
 # Sandboxing: Worktree Isolation and Process Containment
 
-> **Layer**: L0 Runtime (process management), L1 Framework (path policy), L4 Orchestration (worktree management)
+> **Layer:** L0 Runtime, L1 Framework, L4 Orchestration
 >
-> **Crate**: `roko-agent` (safety/path.rs), `roko-orchestrator` (worktree), `bardo-runtime` (ProcessSupervisor)
+> **Cross-cut:** Safety & Provenance
 >
-> **Synapse traits**: `Substrate` (isolated storage per worktree), `Gate` (verify sandbox boundaries)
->
-> **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md), [04-permits-allowlists.md](04-permits-allowlists.md)
-
-
-> **Implementation**: Shipping
+> **Alignment:** This doc applies [REF32](../../tmp/refinements/32-safety-sandbox-provenance.md). For terminology, see [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
 ## Overview
 
-Sandboxing in Roko operates at three levels:
+Sandboxing is the isolation half of the safety spine. It answers a different question than authorization:
 
-1. **Filesystem sandboxing**: Every agent operates within a git worktree. The `PathPolicy` in `roko-agent/src/safety/path.rs` ensures all file operations stay within the worktree boundary.
-2. **Process sandboxing**: The `ProcessSupervisor` in `bardo-runtime` manages agent process lifecycles, enforcing timeouts, resource limits, and cooperative shutdown.
-3. **Worktree isolation**: The `WorktreeManager` in `roko-orchestrator` creates isolated git worktrees for parallel task execution, ensuring agents cannot interfere with each other's work.
+- authorization decides whether the principal may attempt an action,
+- sandboxing decides what the runtime prevents even if code is buggy, malicious, or compromised.
 
----
-
-## Filesystem Sandboxing via PathPolicy
-
-The `PathPolicy` is the single authority on whether a path argument is safe to hand to a filesystem tool handler. Every filesystem-touching built-in tool runs its path through `canonicalize_with_policy()` before any I/O.
-
-### The Canonicalization Algorithm
-
-1. **Build the joined path**: If the argument is absolute, use it as-is. If relative, join it to the worktree root.
-
-2. **Canonicalize both paths**: Resolve symlinks and normalize `.` and `..` components. For non-existent leaves (e.g., `write_file` creating a new file), canonicalize the deepest existing ancestor and re-attach the missing tail. This avoids platform-specific behavior differences when canonicalizing non-existent paths.
-
-3. **Escape check**: When `prevent_escapes` is true (default), the canonical joined path must `starts_with()` the canonical worktree root. If not, `ToolError::PathOutsideWorktree` is returned. This prevents:
-   - `../../etc/passwd` — parent directory traversal
-   - `/etc/passwd` — absolute path escape
-   - Symlink-based escapes (when `deny_symlinks` is also set)
-
-4. **Symlink check**: When `deny_symlinks` is true, walk the on-disk components and reject any symlink. This prevents an attacker from creating a symlink inside the worktree that points outside it.
-
-5. **Compute relative form**: Strip the worktree prefix to produce a clean relative path with no leading `/` or `./` and no `..` components.
-
-### CanonicalPath Return Type
-
-```rust
-pub struct CanonicalPath {
-    /// Absolute, canonicalized path. Guaranteed inside worktree
-    /// when prevent_escapes is true.
-    pub absolute: PathBuf,
-    /// Path relative to worktree root. No leading "/" or "./",
-    /// no ".." components.
-    pub relative: PathBuf,
-}
-```
-
-### Non-Existent Path Handling
-
-A critical detail: `write_file` needs to create files that don't exist yet. The standard `Path::canonicalize()` fails on non-existent paths. The implementation handles this by walking up ancestors until one canonicalizes, then re-attaching the missing tail:
-
-```rust
-fn canonicalize_existing_or_parent(path: &Path) -> PathBuf {
-    if let Ok(p) = path.canonicalize() {
-        return p;
-    }
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut cursor: &Path = path;
-    loop {
-        if let Ok(p) = cursor.canonicalize() {
-            let mut out = p;
-            for segment in tail.iter().rev() {
-                out.push(segment);
-            }
-            return normalize(&out);
-        }
-        match (cursor.parent(), cursor.file_name()) {
-            (Some(parent), Some(name)) => {
-                tail.push(name);
-                cursor = parent;
-            }
-            _ => break,
-        }
-    }
-    normalize(path)
-}
-```
-
-### Post-Hoc Audit
-
-The `is_within_worktree()` function provides a post-hoc check: "did this tool invocation produce an artifact inside the sandbox?" This is used for audit purposes — even if the path policy is misconfigured, a post-hoc check can detect escapes.
+Roko needs both. A permission grant without a sandbox is trust. A sandbox without permission checks is a crude jail. The production story is a layered combination of worktree boundaries, subprocess controls, plugin tiers, network egress gates, secret restrictions, and tenant scoping.
 
 ---
 
-## Process Sandboxing via ProcessSupervisor
+## 1. Baseline Runtime Boundaries
 
-The `ProcessSupervisor` in `bardo-runtime` manages agent process lifecycles:
+### Workspace and path boundaries
 
-### Process Lifecycle
+Filesystem tools should operate inside an explicitly authorized worktree. Path canonicalization remains the first line of defense:
 
-```rust
-pub struct ProcessSupervisor {
-    processes: Mutex<HashMap<ProcessId, ProcessHandle>>,
-}
+- relative paths are resolved against the active worktree,
+- escapes through `..` or absolute paths are denied,
+- symlink policy is enforced before the tool touches disk,
+- writes outside the declared scope escalate or fail closed.
 
-pub struct ProcessHandle {
-    child: tokio::process::Child,
-    id: ProcessId,
-    started_at: Instant,
-}
-```
+This boundary is valuable even when higher layers exist because many dangerous actions start as "just a file path."
 
-### Key Operations
+### Process supervision
 
-- **Spawn with limits**: Create agent processes with configurable timeouts and resource limits
-- **Cooperative shutdown**: Send SIGTERM, wait for grace period, then SIGKILL if unresponsive
-- **Bulk kill/reap**: `shutdown_all()` terminates all supervised processes (used during plan abort)
-- **Stdout/stderr capture**: Stream capture for audit logging and failure diagnosis
+Subprocesses should run under explicit timeout and lifecycle control:
 
-### Integration with Orchestrator
+- each invocation gets a time budget,
+- abnormal termination becomes a safety signal,
+- repeated violations can disable the tool or plugin,
+- post-call checks decide whether the result can persist or broadcast.
 
-The `PlanRunner` in `orchestrate.rs` tracks active agents via the `ProcessSupervisor`:
-
-1. When a task is dispatched, the agent process is spawned under supervision
-2. The supervisor monitors the process for timeout or abnormal termination
-3. On plan completion or abort, all supervised processes are shut down cooperatively
-4. Process lifecycle events are recorded as Engrams for audit
+Sandboxing is therefore not complete at spawn time; it continues through supervision and post-call verification.
 
 ---
 
-## Worktree Isolation
+## 2. Tiered Plugin Sandboxes
 
-The `WorktreeManager` in `roko-orchestrator` creates isolated git worktrees for parallel task execution:
+REF32 makes the tier model operational rather than descriptive. Different plugin tiers receive different isolation guarantees.
 
-### Why Worktrees?
+| Tier | Trust model | Isolation expectation |
+|---|---|---|
+| Tier 1 | Pure data | No executable code; schema validation only |
+| Tier 2 | Structured prompt/profile data | No executable code; validated against profile and context schema |
+| Tier 3 | Declarative tool manifest | Subprocess or MCP-style boundary with explicit path, env, and network controls |
+| Tier 4 | Native extension | Trusted code in host process; permission-checked but not runtime-isolated |
+| Tier 5 | WASM extension | Host-enforced sandbox with CPU, memory, and hostcall limits |
 
-When multiple agents work on tasks in parallel, they cannot share the same git working directory:
-- File modifications by one agent would conflict with another's
-- Build artifacts from one agent pollute another's environment
-- Git operations (staging, committing) would race
+### Tier 1 and Tier 2
 
-Git worktrees solve this: each agent gets its own filesystem view of the repository, with its own working directory and index, sharing the same git objects database.
+These tiers do not execute plugin code. Their risk is proposal risk, not direct execution risk. The safety spine still matters because the content they supply can influence prompts, routing, or action selection. Their outputs should therefore remain subject to taint, review, and downstream authorization.
 
-### Worktree Configuration
+### Tier 3
 
-```rust
-pub struct WorktreeConfig {
-    /// Base directory for worktrees (default: `.roko/worktrees/`)
-    pub base_dir: PathBuf,
-    /// Idle TTL before a worktree is eligible for cleanup (default: 30 min)
-    pub idle_ttl: Duration,
-    /// Maximum number of concurrent worktrees (default: 8)
-    pub max_worktrees: usize,
-}
-```
+Tier 3 is where most practical sandboxing work lives today. A tier-3 plugin should declare:
 
-### Worktree Lifecycle
+- allowed working directory,
+- environment variable allowlist,
+- read and write path globs,
+- network requirement and allowed hosts,
+- timeout budget,
+- role restrictions for invocation.
 
-1. **Creation**: A new branch is created from the current HEAD, and a git worktree is checked out at `base_dir/<task-id>/`
-2. **Assignment**: The worktree path is passed to the agent as its working directory. The `PathPolicy` sandboxes all file operations to this worktree.
-3. **Execution**: The agent works within its isolated worktree. Changes are committed to the task branch.
-4. **Merge**: On task success, the task branch is merged back into the main branch. The `PostMergeRunner` handles conflict resolution.
-5. **Cleanup**: After merge (or after idle TTL expires for failed tasks), the worktree is removed.
+The runtime should then enforce those declarations, not merely record them.
 
-### Safety Properties
+### Tier 4
 
-- **Isolation**: Agents in different worktrees cannot see or modify each other's files
-- **Rollback**: A failed task's worktree can be discarded without affecting the main branch
-- **Audit**: Each worktree has its own git history, providing a clear record of what each agent did
-- **Resource limits**: `max_worktrees` prevents disk exhaustion from too many concurrent agents
+Tier 4 native extensions are not sandboxed at runtime. The only honest safety claim here is "trusted code with permission checks." That means:
 
----
+- signed manifests should be expected,
+- ABI compatibility should be checked before load,
+- declared permissions should still constrain hostcalls,
+- crashes should be contained as much as practical, but memory safety expectations shift to the extension boundary.
 
-## Future: Container-Level Sandboxing
+Tier 4 is powerful and should remain high-friction to install.
 
-The current sandboxing is filesystem-level (PathPolicy) and process-level (ProcessSupervisor). Future iterations will add container-level sandboxing:
+### Tier 5
 
-- **Namespace isolation**: Each agent in its own Linux namespace (PID, network, mount)
-- **Seccomp filtering**: Restrict system calls available to agent processes
-- **Cgroup limits**: CPU, memory, and I/O bandwidth limits per agent
-- **Network isolation**: Each agent with its own network namespace, filtered by NetworkPolicy
+Tier 5 aims for genuine runtime isolation:
 
-This is a Tier 3 implementation target. The current filesystem and process sandboxing provides sufficient isolation for single-machine deployments.
+- CPU limits per invocation,
+- memory limits per instance,
+- no direct filesystem access,
+- no direct network access,
+- explicit hostcalls only,
+- rate limits on Substrate and Bus access.
 
----
-
-## Academic References
-
-| Paper | Contribution |
-|-------|-------------|
-| Saltzer & Schroeder (1975) | Principle of least privilege — minimum necessary access |
-| Bershad et al. (1995) | SPIN — extensible operating system with safety guarantees |
-| Engler et al. (2003) | Exokernel — application-level resource management |
-| Watson et al. (2015) | CHERI — hardware-enforced memory capabilities |
+Violations should kill the instance, emit a violation Pulse, and mark the plugin for operator review or auto-disable.
 
 ---
 
-## Cross-References
+## 3. Pre-Call and Post-Call Checks
 
-- [00-defense-in-depth.md](00-defense-in-depth.md) — PathPolicy as Guard 5
-- [01-capability-tokens.md](01-capability-tokens.md) — Tool-level capability enforcement
-- [04-permits-allowlists.md](04-permits-allowlists.md) — Permission model
-- [14-cognitive-kernel-safety.md](14-cognitive-kernel-safety.md) — Cognitive Namespaces extend sandboxing to knowledge isolation
-- [16-critical-integration-gap.md](16-critical-integration-gap.md) — PathPolicy is built but not invoked from CLI without ToolDispatcher
+Sandboxing should never be a naked process spawn. The safety spine expects a paired envelope around every tool or plugin call.
+
+### Pre-call
+
+Before execution, verify:
+
+- principal is authorized for the action,
+- target path or endpoint is in scope,
+- plugin manifest allows the requested hostcalls,
+- current tenant matches the tool's scope,
+- required human checkpoint has completed.
+
+### Post-call
+
+After execution, verify:
+
+- output is within size and schema limits,
+- secret scrubbing succeeded,
+- taint was assigned correctly,
+- any writes stayed within allowed paths,
+- the result can be persisted or broadcast under current policy,
+- Custody was emitted for actions that require it.
+
+This pairing prevents a common failure mode where "sandboxing" means only that the subprocess started in the right directory.
+
+---
+
+## 4. Network Egress as a Sandbox Boundary
+
+Network control belongs in the sandbox discussion because outbound connectivity is one of the main escape routes for compromised logic.
+
+The egress layer should enforce:
+
+- host allowlists derived from profile defaults, plugin manifest declarations, and session approvals,
+- private-network blocking unless explicitly required,
+- principal-aware authorization so not every role can use the same external surface,
+- durable logging of principal, URL, status, and tenant for replay.
+
+For tier-3 and tier-5 plugins, "no network" should mean no direct network capability at all, not merely "the docs told the plugin not to call out."
+
+---
+
+## 5. Secrets in Sandboxed Execution
+
+Secrets are a special-case capability:
+
+- they should not be inherited by default into subprocess environments,
+- manifests should request them explicitly,
+- lower-trust tiers should not receive them at all without operator approval,
+- outputs derived from secret use must still pass scrubbing before persistence or broadcast.
+
+This makes secret exposure a controlled capability transfer instead of a side effect of execution.
+
+---
+
+## 6. Multi-Tenancy Boundaries
+
+In shared deployments, sandboxing must include tenant separation:
+
+- Bus topics carry tenant namespace prefixes,
+- Substrate keys are scoped by tenant,
+- plugins default to tenant-scoped access,
+- cross-tenant tools or plugins require elevated review and explicit multi-tenant awareness.
+
+If tenant isolation exists only in the web UI or dashboard, it is not a real safety boundary.
+
+---
+
+## 7. What Sandboxing Does Not Solve
+
+Sandboxing limits blast radius, but it does not answer:
+
+- whether the action was authorized,
+- whether tainted inputs influenced it,
+- whether a human reviewed it,
+- whether an auditor can later prove what happened.
+
+Those questions belong to the rest of the safety spine. A complete deployment therefore combines:
+
+- [00-defense-in-depth.md](00-defense-in-depth.md) for authorization and checkpoints,
+- [02-audit-chain.md](02-audit-chain.md) for Custody and attestation,
+- [03-taint-tracking.md](03-taint-tracking.md) for untrusted input propagation,
+- [08-threat-model.md](08-threat-model.md) for explicit assumptions and residual risks.
+
+---
+
+## 8. Recommended Enforcement Order
+
+The runtime should apply sandbox-related controls in this order:
+
+1. Resolve principal, tenant, and `TypedContext`.
+2. Authorize the requested action and collect any required approval.
+3. Validate manifest permissions, path scope, and egress scope.
+4. Spawn under the correct tier-specific boundary.
+5. Supervise execution with timeout and rate limits.
+6. Run post-call checks for secrets, taint, and policy compliance.
+7. Emit Custody and violation Pulses as needed.
+
+That order keeps policy, isolation, and provenance aligned instead of treating them as independent subsystems.

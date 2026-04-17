@@ -1,348 +1,367 @@
 # Provenance and Attestation
 
-> **Abstract:** Every Engram carries provenance — who produced it, how trusted they are,
-> and whether the data is tainted. Provenance enables taint analysis (preventing untrusted
-> data from reaching privileged contexts), audit trails (tracing decisions back to their
-> source inputs), and reputation-weighted scoring. The extended architecture adds an
-> Attestation field for cryptographic proof of origin. This document specifies both the
-> current Provenance struct and the planned Attestation extension.
+> **Abstract:** In the revised architecture, provenance is the durable audit context attached to every `Engram`, not just a lightweight author tag. It tells operators who produced the record, how much to trust it, whether it is tainted, and which higher-assurance artifacts such as `Custody` and `Attestation` are linked to it. This document aligns the architecture chapter with the REF32 safety spine: typed taint, chain-of-custody records for auditable actions, explicit attestation levels, and a clear split between durable proof in `Substrate` and live safety signaling on the `Bus`. See [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md) and [Naming Map and Glossary](01-naming-and-glossary.md).
 
-
-> **Implementation**: Shipping
+> **Implementation status:** Specified architecture with a shipping subset
 
 ---
 
 ## 1. Why Provenance Matters
 
-Agent systems consume data from many sources: LLM outputs, tool results, external APIs,
-user input, on-chain state, knowledge from other agents. Not all sources are equally
-trustworthy. A compilation gate's verdict is ground truth; an LLM's unverified suggestion
-is a hypothesis; user input from an untrusted channel might contain prompt injection.
+Roko runs in adversarial and regulated environments. It ingests user input, tool output,
+external fetches, plugin results, and its own prior knowledge. That means the system must
+preserve more than content. It must preserve audit context.
 
-Provenance answers three questions for every Engram:
+At the architecture level, provenance answers four questions for every durable record:
 
-1. **Who produced this?** — agent role, model, human user, external chain, gate
-2. **How trusted is that producer?** — a trust score in [0, 1]
-3. **Is the data tainted?** — from an untrusted external source, needs validation
+1. **Who produced this Engram?** A user, agent, gate, plugin, chain source, or system role.
+2. **How trusted was that producer at emission time?** Trust is a snapshot, not a live lookup.
+3. **Is the record tainted, and why?** Taint is a typed safety signal, not a generic warning bit.
+4. **What higher-assurance proof exists around this record?** A `Custody` chain, an
+   `Attestation`, or both.
 
-These answers flow through the entire system:
+This is load-bearing for three reasons:
 
-- **Taint analysis**: Tainted Engrams must be sanitized before they enter prompts or gates.
-  This prevents prompt injection (OWASP LLM01:2025) from untrusted sources.
-- **Audit trails**: Combined with lineage (see [02-engram-data-type.md](02-engram-data-type.md)),
-  provenance creates a complete chain of accountability from any output back to its origins.
-- **Reputation scoring**: The Score's reputation axis (see [03-score-7-axis-appraisal.md](03-score-7-axis-appraisal.md))
-  is initialized from provenance trust.
+- **Safety:** tainted inputs must not silently flow into high-risk actions.
+- **Auditability:** operators must be able to answer who did what, why, with what approval,
+  and with what consequence.
+- **Composability:** `Scorer`, `Gate`, `Router`, `Composer`, and `Policy` need a common,
+  architecture-level vocabulary for trust and safety.
+
+`Pulse` remains the ephemeral wire medium on the `Bus`. It can carry lightweight source
+metadata for routing and live review, but provenance becomes durable only when the runtime
+graduates relevant state into an `Engram` and persists it in `Substrate`.
 
 ---
 
-## 2. The Provenance Struct
+## 2. The Provenance Contract
 
-The current implementation (`roko-core/src/provenance.rs`):
+Every `Engram` carries provenance. The exact shipping struct can evolve, but the architecture
+contract is stable: provenance is the minimum durable audit context required to interpret the
+record safely after the fact.
 
 ```rust
-/// Who produced an Engram and how trustworthy they are.
-///
-/// Roko uses provenance to:
-/// 1. Audit: trace decisions back to their source inputs
-/// 2. Security: prevent untrusted data from reaching high-privilege contexts
-/// 3. Reputation: weight Engrams by their author's track record
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Provenance {
-    /// Identifier of the producer (agent role, user email, chain address, etc.).
     pub author: String,
-
-    /// Trust score [0..1] at time of emission.
-    /// 1.0 = fully trusted (local code, verified gates)
-    /// 0.5 = unverified but internal
-    /// 0.0 = untrusted (user input, external APIs, chain pulls)
     pub trust: f32,
-
-    /// Whether this Engram contains data from an untrusted source.
-    /// Tainted Engrams must be sanitized before they enter prompts or gates.
-    pub tainted: bool,
-
-    /// Optional: the agent session or run that produced this Engram.
-    /// Useful for grouping related Engrams and computing per-run metrics.
     pub session: Option<String>,
+    pub taint: Taint,
 }
 ```
 
-### 2.1 Fields in Detail
+The fields mean:
 
-#### author: String
-
-The identifier of the Engram's producer. Format is free-form but conventions exist:
-
-| Author Pattern | Meaning |
+| Field | Meaning |
 |---|---|
-| `"roko"` | The Roko framework itself (default) |
-| `"gate:compile"` | The compilation gate |
-| `"gate:test"` | The test gate |
-| `"agent:claude-sonnet"` | An LLM agent using Claude Sonnet |
-| `"user:alice@example.com"` | A human user |
-| `"chain:0x1234..."` | An on-chain source (contract address) |
-| `"derived"` | Produced by `Engram.derive()` |
-| `"external:webhook"` | An external webhook source |
+| `author` | Durable producer identity for the record: user, agent, gate, plugin, system role, or external source label |
+| `trust` | Snapshot trust score at time of emission; later reputation changes do not rewrite history |
+| `session` | Optional run/session grouping for replay, audits, and scoped queries |
+| `taint` | Typed safety classification for whether the record originated from or depends on untrusted input |
 
-The author string is included in the ContentHash computation, so the same content from
-different authors produces different Engram identities.
+Two architecture rules follow from that contract:
 
-#### trust: f32
+1. Provenance is part of the Engram's durable meaning. Two identical bodies from different
+   authors or taint states are not the same audit record.
+2. Provenance is not the whole safety story. It is the base layer that `Custody`,
+   `Attestation`, and safety-focused `Pulse` streams build on top of.
 
-A trust score in [0, 1] at the time the Engram was created. This is a snapshot — the
-producer's trust level at emission time, not a live value.
-
-| Trust Level | Range | Meaning |
-|---|---|---|
-| **Fully trusted** | 1.0 | Local code, verified gate outputs, the orchestrator itself |
-| **Agent trusted** | 0.75 | Internal agent output — trusted but not ground truth |
-| **User trusted** | 0.5 | User input — higher trust than external, but tainted for safety |
-| **External** | 0.1 | Untrusted external source — needs validation before use |
-| **Untrusted** | 0.0 | Known-bad or explicitly untrusted source |
-
-Trust is clamped to [0, 1] via `with_trust()`:
-
-```rust
-pub const fn with_trust(mut self, trust: f32) -> Self {
-    self.trust = trust.clamp(0.0, 1.0);
-    self
-}
-```
-
-#### tainted: bool
-
-A binary flag indicating whether the Engram contains data from an untrusted source. Tainted
-Engrams are treated differently throughout the system:
-
-- They must be sanitized before entering prompts (preventing prompt injection)
-- They cannot be used as ground truth by gates
-- They are flagged in audit trails
-- The `is_trusted()` method always returns `false` for tainted Engrams, regardless of trust level
-
-```rust
-pub fn is_trusted(&self, min_trust: f32) -> bool {
-    self.trust >= min_trust && !self.tainted
-}
-```
-
-This design ensures that even a high-trust tainted Engram (trust = 0.9 but tainted = true)
-is never silently treated as trusted. Taint is a hard barrier, not a soft one.
-
-#### session: Option<String>
-
-An optional session identifier for grouping related Engrams. All Engrams produced during a
-single agent run share a session ID, enabling:
-
-- Per-run episode reconstruction
-- Per-run metric computation
-- Session-scoped Substrate queries (`Query.with_session()`)
+Where a record needs stronger guarantees than `author + trust + taint + session`, those
+guarantees are modeled as linked durable artifacts rather than by overloading the base
+provenance struct.
 
 ---
 
-## 3. Provenance Constructors
+## 3. Provenance as Durable Audit Context on Engrams
 
-Four convenience constructors establish default trust levels for common producer types:
+The durable medium in Roko is the `Engram`, so the durable audit trail also lives there.
+Architecture-level provenance therefore means:
 
-```rust
-impl Provenance {
-    /// Produced by trusted internal code (gates, composers, orchestrator).
-    pub fn trusted(author: impl Into<String>) -> Self {
-        Self { author: author.into(), trust: 1.0, tainted: false, session: None }
-    }
+- A retrieved Engram from `Substrate` is self-describing enough to evaluate safety without
+  consulting the original runtime process.
+- A reviewer can inspect lineage and see whether a record came from trusted gates, user input,
+  plugin output, or external fetches.
+- The runtime can attach stronger evidence, such as a `Custody` record or cryptographic
+  `Attestation`, without mutating the historical meaning of the original record.
 
-    /// Produced by an internal agent — trusted but not ground truth.
-    pub fn agent(author: impl Into<String>) -> Self {
-        Self { author: author.into(), trust: 0.75, tainted: false, session: None }
-    }
+In practice, that yields three layers of audit evidence:
 
-    /// From an external/untrusted source — needs sanitization before use.
-    pub fn external(author: impl Into<String>) -> Self {
-        Self { author: author.into(), trust: 0.1, tainted: true, session: None }
-    }
+| Layer | Stored on | Purpose |
+|---|---|---|
+| `Provenance` | every `Engram` | minimum durable audit context |
+| `Custody` | auditable-action `Engram` | why a privileged or externally visible action happened |
+| `Attestation` | opt-in on selected `Engram` kinds | cryptographic proof of signer and integrity |
 
-    /// From a user (higher trust than external, but still tainted for safety).
-    pub fn user(author: impl Into<String>) -> Self {
-        Self { author: author.into(), trust: 0.5, tainted: true, session: None }
-    }
-}
-```
+This is the key architectural split:
 
-The default provenance (`Provenance::default()`) is `trusted("roko")` — fully trusted,
-not tainted, no session. This is used by the EngramBuilder when no explicit provenance is
-specified.
+- `Bus` is for live delivery, approvals, and safety telemetry.
+- `Substrate` is for durable audit truth.
+
+The system may publish `safety.*`, `network.egress.*`, `plugin.violation`, or
+`gate.verdict.emitted` Pulses as events happen, but the evidence that survives replay is the
+Engram set persisted in `Substrate`.
 
 ---
 
 ## 4. Taint Analysis
 
-Taint tracking in Roko implements a simplified form of information flow control. The rules:
-
-1. **User input is always tainted**: Even trusted users can inadvertently introduce prompt
-   injection or malformed data.
-
-2. **External data is always tainted**: Webhooks, API responses, chain state pulled from
-   external RPCs — all tainted until validated.
-
-3. **Gate verdicts are never tainted**: Gates verify against ground truth (compilation,
-   tests, simulation). Their output is trusted.
-
-4. **Taint propagates through derivation**: If a Composer combines tainted and untainted
-   Engrams, the output should be treated with caution. The provenance's taint flag on the
-   composed output is set by the Composer implementation.
-
-5. **Taint is cleared by verification**: A tainted Engram that passes a Gate can produce
-   an untainted derivative. The Gate verdict Engram has `tainted: false`.
-
-This is not a formal information flow type system (like Jif or FlowCaml). It is a practical
-safety measure that prevents the most common failure mode: untrusted external data reaching
-an LLM prompt without sanitization.
-
----
-
-## 5. Provenance in the ContentHash
-
-The `author` and `tainted` fields are included in the ContentHash computation:
+The older binary taint flag is too coarse for the safety spine described in REF32. The
+architecture-level taint model is typed:
 
 ```rust
-hasher.update(self.provenance.author.as_bytes());
-hasher.update(b"|");
-hasher.update(&[u8::from(self.provenance.tainted)]);
-```
-
-This means the same content from different authors produces different Engram identities.
-This is intentional: an insight from a trusted gate and the same text from an untrusted
-webhook should be tracked separately because they have different trust properties.
-
-The `trust` and `session` fields are NOT included in the ContentHash. Trust can be updated
-as the author's reputation evolves, and session is routing metadata, not identity.
-
----
-
-## 6. Attestation (Planned Extension)
-
-The extended Engram adds cryptographic attestation — proof that a specific entity produced
-the Engram and that the content has not been tampered with.
-
-### 6.1 Attestation Struct (Specified)
-
-```rust
-/// Cryptographic proof of Engram origin.
-pub struct Attestation {
-    /// Ed25519 signature over the Engram's ContentHash.
-    pub signature: Ed25519Signature,
-
-    /// Public key of the signer (DID or TEE identity).
-    pub public_key: PublicKey,
-
-    /// Optional on-chain attestation (ContentHash posted to chain).
-    pub chain_attestation: Option<ChainAttestation>,
-}
-
-/// On-chain proof that this Engram's ContentHash was witnessed by a chain.
-pub struct ChainAttestation {
-    /// Chain ID (e.g., Korai mainnet).
-    pub chain_id: u64,
-
-    /// Transaction hash where the ContentHash was posted.
-    pub tx_hash: [u8; 32],
-
-    /// Block number at which the attestation was recorded.
-    pub block_number: u64,
+enum Taint {
+    None,
+    UserInput,
+    ExternalFetch(Source),
+    ThirdPartyPlugin(PluginId),
+    LegacyImport,
 }
 ```
 
-### 6.2 What Attestation Provides
+`Taint` captures where risk entered the system:
 
-| Property | How |
+| Variant | Meaning |
 |---|---|
-| **Non-repudiation** | Ed25519 signature proves the signer produced the Engram |
-| **Integrity** | Signature covers ContentHash, which covers content |
-| **Chain witness** | Optional ChainAttestation provides timestamped on-chain proof |
-| **Identity binding** | PublicKey links to DID (Decentralized Identifier) or TEE attestation |
+| `None` | No known taint source; record may still require normal verification |
+| `UserInput` | User-provided prompt, paste, file upload, or inline instruction |
+| `ExternalFetch(Source)` | Data fetched from HTTP, API, chain RPC, or another remote system |
+| `ThirdPartyPlugin(PluginId)` | Output produced by a plugin or extension outside the trusted kernel |
+| `LegacyImport` | Data imported from another deployment or historical archive |
 
-### 6.3 Attestation Use Cases
+### 4.1 Propagation Rules
 
-- **Forensic AI**: Regulatory compliance requires proving who generated what output and when.
-  Attestation provides cryptographic evidence.
-- **Agent Mesh trust**: When agents share knowledge via the Mesh, attestation lets recipients
-  verify the origin without trusting the transport layer.
-- **Chain witness**: Posting an Engram's ContentHash to the Korai chain creates an immutable
-  timestamp. This is the "notary" function — proving that a piece of knowledge existed at a
-  specific time.
-- **C2PA alignment**: The Content Authenticity Initiative's C2PA standard uses similar
-  content-hash-plus-signature provenance. Roko's attestation model is designed to be
-  compatible with C2PA's manifest format.
+Taint is one-way and conservative:
 
-### 6.4 Implementation Status
+1. If a `Composer` reads any tainted Engram, the composed prompt Engram is tainted.
+2. If an LLM turn or tool action consumes tainted input, its derived output stays tainted until
+   explicitly reviewed and signed off.
+3. If multiple taint sources contribute to one result, the output records the strongest relevant
+   taint classification rather than silently collapsing to `None`.
+4. Gate verdicts can validate claims about tainted inputs, but they do not erase the historical
+   fact that tainted material participated in the decision path.
+5. Clearing taint requires explicit human action recorded in the audit trail; it is not an
+   automatic side effect of normal execution.
 
-Attestation is specified but not yet implemented. The current Signal struct does not have an
-`attestation` field. This is planned for a future tier of the implementation plan.
+This matters because taint is consulted at action time. A tainted summary might be acceptable
+for drafting, but the same tainted lineage can require confirmation, denial, or escalation for a
+destructive write, a network egress, or a signed chain action.
+
+### 4.2 Taint and the Cognitive Immune System
+
+The cognitive immune system consumes taint as an architectural input rather than inventing its
+own parallel concept. `Taint` marks the first-order source of concern; the immune system layers
+quarantine, anomaly detection, re-verification, and attack-pattern memory on top of that base.
+See [26-cognitive-immune-system.md](26-cognitive-immune-system.md) for the defense-in-depth
+path that builds on the taint model defined here.
 
 ---
 
-## 7. Provenance and the Extended Architecture
+## 5. Custody Records for Auditable Actions
 
-The refactoring-prd specifies an enhanced Provenance struct with additional fields for
-the full architecture:
+Not every Engram needs a full chain-of-custody record. But any action that changes external
+state, performs a privileged operation, or needs compliance-grade review must emit a durable
+`Custody` Engram.
+
+REF32 defines the record shape:
 
 ```rust
-pub struct Provenance {
-    pub author: String,
-    pub trust: f32,
-    pub tainted: bool,
-    pub session: Option<String>,
-    // Extended fields (planned):
-    pub model_fingerprint: Option<String>,  // which LLM model produced this
-    pub prompt_hash: Option<ContentHash>,   // hash of the prompt that produced this
-    pub taint_level: TaintLevel,            // graduated taint (replaces bool)
-    pub timestamp: i64,                     // provenance creation time
-    pub context: Option<String>,            // provenance context description
-}
-
-pub enum TaintLevel {
-    Trusted,    // verified ground truth
-    Internal,   // internal agent output
-    User,       // user-provided input
-    External,   // external API/webhook
-    Adversarial, // known-hostile source
+Custody {
+    action: ActionHash,
+    principal: PrincipalId,
+    when: Timestamp,
+    authorized: AuthzEvidence,
+    why_heuristics: Vec<HeuristicId>,
+    why_claims: Vec<ClaimId>,
+    simulation: Option<SimHash>,
+    gates_passed: Vec<GateVerdict>,
+    result: Option<ResultHash>,
+    witness: Option<ChainWitness>,
 }
 ```
 
-The extended Provenance adds model fingerprinting (which specific LLM produced this output),
-prompt hashing (what prompt was used), and graduated taint levels (replacing the binary
-tainted flag with a spectrum).
+The fields answer the auditable questions directly:
 
----
-
-## Academic Foundations
-
-| Citation | Contribution |
+| Field | Why it exists |
 |---|---|
-| OWASP LLM01:2025 | Prompt injection ranked #1 LLM security risk. Motivates taint tracking for untrusted data. |
-| Debenedetti et al. 2025 (arXiv:2503.18813) | CaMeL: capability-based authorization separating control from data flow. Aligns with provenance-based taint analysis. |
-| C2PA (Coalition for Content Provenance and Authenticity) | Content authenticity standard using hash + signature. Roko's attestation model aligns with C2PA manifest format. |
-| Sabelfeld & Myers 2003, IEEE S&P | Language-based information flow security. Theoretical foundation for taint tracking. |
-| Denning 1976, Communications of the ACM | Lattice model for information flow control. Taint levels form a trust lattice. |
+| `action` | Canonical identity for what was attempted or executed |
+| `principal` | Who initiated the action: user, agent, plugin, or delegated role |
+| `when` | Timestamp for replay and audit sequencing |
+| `authorized` | Which role grant, confirmation, escalation, or session approval allowed it |
+| `why_heuristics` | Which heuristics shaped the choice |
+| `why_claims` | Which research-backed claims or prior findings justified it |
+| `simulation` | Optional dry-run or preflight evidence, especially for ops and chain domains |
+| `gates_passed` | Which verification steps approved the action |
+| `result` | Durable pointer to the outcome |
+| `witness` | Optional external witness, including chain witness in Phase 2+ |
+
+Architecture rules for `Custody`:
+
+- `Custody` is itself durable. It lives in `Substrate`, not only in logs.
+- Domain profiles decide which actions require custody, but destructive and externally visible
+  actions are the default high-priority cases.
+- `Custody` does not replace ordinary provenance; it augments it for actions that need deeper
+  accountability.
+- When present, `Custody` should be queryable independently of the original runtime that issued
+  the action.
 
 ---
 
-## Current Status and Gaps
+## 6. Attestation
 
-- **Implemented**: Provenance struct with author, trust, tainted, session. Four constructors
-  (trusted, agent, external, user). `is_trusted()` check. `with_trust()`, `with_session()`,
-  `with_taint()` builders. Fully tested in `roko-core`.
-- **Implemented**: Provenance included in ContentHash (author + tainted).
-- **Not yet implemented**: Attestation struct and `attestation` field on Engram.
-- **Not yet implemented**: Extended Provenance fields (model_fingerprint, prompt_hash,
-  graduated TaintLevel).
-- **Not yet implemented**: Taint propagation rules in Composer implementations.
+Attestation is the cryptographic layer on top of provenance. It proves that a specific signer
+committed to a specific durable record.
+
+```rust
+Attestation {
+    signer: PublicKey,
+    signature: Ed25519Signature,
+    signed_hash: ContentHash,
+    timestamp: i64,
+    level: AttestationLevel,
+}
+
+enum AttestationLevel {
+    LocalAgent,
+    OrgRole,
+    ChainWitness,
+}
+```
+
+### 6.1 Attestation Levels
+
+| Level | Meaning | Typical use |
+|---|---|---|
+| `LocalAgent` | Signed by the current agent session key | low-friction auditability for gate verdicts and local runtime outputs |
+| `OrgRole` | Signed by a human-owned organizational or approval key | destructive or externally visible actions that require human sign-off |
+| `ChainWitness` | Independently witnessed on-chain | cross-deployment trust, later verification, and Phase 2+ external audit |
+
+Attestation is opt-in by kind. REF32's default posture is:
+
+- `GateVerdict` Engrams default to `LocalAgent`.
+- `Custody` for destructive actions defaults to `OrgRole`.
+- Heuristic-commons contributions may use `ChainWitness` when cross-deployment trust matters.
+
+Three rules keep the model coherent:
+
+1. An attestation signs the `ContentHash`; it does not replace content addressing.
+2. Attestation strengthens integrity and signer identity, but it does not erase taint.
+3. Attestation and custody compose: a `Custody` Engram can itself be attested.
+
+---
+
+## 7. Provenance in the Seven-Step Loop
+
+The seven-step loop gives provenance, taint, custody, and attestation their operational home.
+See [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md) for the full loop.
+
+### Step 1: SENSE
+
+- `Substrate.query()` returns provenance-bearing Engrams.
+- `Bus.subscribe()` returns live Pulses that may later graduate into Engrams.
+- External I/O enters as potential taint sources and should be normalized before further use.
+
+### Step 2: ASSESS
+
+- `Scorer` and `Router` are allowed to consult provenance and taint, not just semantic content.
+- Tainted or weakly trusted records can be down-ranked, routed to a stronger gate path, or sent
+  toward confirmation workflows.
+
+### Step 3: COMPOSE
+
+- `Composer` preserves taint lineage when assembling prompt Engrams.
+- Prompt assembly is where untrusted context can become dangerous, so provenance-aware
+  composition is a core safety obligation rather than a later add-on.
+
+### Step 4: ACT
+
+- Actions consume the taint state of their inputs.
+- High-risk actions use that state to require confirmation, deny execution, or escalate.
+- If the action is auditable, this step allocates the `Custody` record that explains what
+  happened and why.
+
+### Step 5: VERIFY
+
+- `Gate` implementations record which verdicts passed and feed those verdicts into `Custody`.
+- Verification can validate an action without deleting the historical taint that fed it.
+- Attestation commonly starts here for `GateVerdict` and approval-bearing outputs.
+
+### Step 6: PERSIST and BROADCAST
+
+- `Substrate.put()` persists the action result, verdict Engrams, and any `Custody` record.
+- `Bus.publish()` emits live Pulses such as `safety.*`, `network.egress.*`, or
+  `gate.verdict.emitted`.
+- The architectural invariant is that `Substrate` holds durable audit truth while `Bus` delivers
+  real-time visibility and reaction triggers.
+
+### Step 7: REACT
+
+- `Policy` reads the new safety evidence and decides follow-up actions: quarantine, approval
+  request, replay, or escalation.
+- The reactive path may publish more Pulses immediately while also persisting additional Engrams
+  for later review.
+
+---
+
+## 8. Provenance Across the Two Fabrics
+
+The safety spine only works if the two fabrics keep distinct responsibilities.
+
+### 8.1 Substrate Responsibilities
+
+`Substrate` is where durable audit context lives:
+
+- persisted Engram provenance
+- `Custody` records
+- attested records
+- lineage needed for replay and incident response
+
+Auditors query `Substrate` because that is where the replayable truth survives.
+
+### 8.2 Bus Responsibilities
+
+`Bus` is where live safety coordination happens:
+
+- approval prompts and confirmations
+- `safety.*` notifications
+- `network.egress.*` telemetry
+- sandbox violations and gate verdict notifications
+
+The `Bus` is not a substitute for durable audit evidence. It is the transport path that keeps
+operators, UIs, and policies informed in time to intervene.
+
+### 8.3 Why the Split Matters
+
+The split prevents a common failure mode in agent systems: safety evidence exists only in live
+logs or UI traces and disappears once the process exits. In Roko, live observation and durable
+proof are separate but connected:
+
+- `Pulse` enables immediate intervention.
+- `Engram` enables later audit.
+- `Custody` and `Attestation` lift selected actions to stronger guarantees.
+
+---
+
+## 9. Current Status and Direction
+
+The repository still contains a shipping subset of this story: a simple provenance shape with
+author/trust/session and a taint bit. The architecture contract in this document is the wider
+target state after REF32:
+
+- taint is typed and propagated conservatively
+- auditable actions emit `Custody`
+- selected kinds support explicit `AttestationLevel`
+- `Substrate` and `Bus` divide durable proof from live safety signaling
+
+That direction keeps the docs aligned with the seven-step loop, the two-fabric model, and the
+broader safety spine instead of treating provenance as an isolated helper struct.
 
 ---
 
 ## Cross-References
 
-- [02-engram-data-type.md](02-engram-data-type.md) — Provenance as a field on the Engram
-- [03-score-7-axis-appraisal.md](03-score-7-axis-appraisal.md) — Reputation axis initialized from trust
-- [14-c-factor-collective-intelligence.md](14-c-factor-collective-intelligence.md) — Trust in agent mesh
-- [17-design-principles-and-frontier-summary.md](17-design-principles-and-frontier-summary.md) — Forensic AI innovation
+- [Naming Map and Glossary](01-naming-and-glossary.md)
+- [02-engram-data-type.md](02-engram-data-type.md)
+- [07-substrate-trait.md](07-substrate-trait.md)
+- [07b-bus-transport-fabric.md](07b-bus-transport-fabric.md)
+- [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md)
+- [26-cognitive-immune-system.md](26-cognitive-immune-system.md)
+- [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md)
