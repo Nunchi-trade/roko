@@ -57,17 +57,15 @@ The control relationship is inverted from a special orchestration loop: the `Hea
 
 ## Gamma: The Heartbeat (~5-15s)
 
-Gamma is the high-frequency consumer — what most agent frameworks call "the agent." Every `heartbeat.gamma.tick` Pulse runs the full 9-step CoALA pipeline (or the Synapse loop equivalent):
+Gamma is the high-frequency consumer — what most agent frameworks call "the agent." Every `heartbeat.gamma.tick` Pulse runs the canonical seven-step loop:
 
-1. **PERCEIVE**: Run T0 probes, fetch environment state.
-2. **EVALUATE**: Score retrieved knowledge.
-3. **ATTEND**: Gate decision (T0/T1/T2).
-4. **INTEGRATE**: Assemble context window (if T1/T2).
-5. **ACT**: Call LLM, produce output (if T1/T2).
-6. **VERIFY**: Check against ground truth (if acted).
-7. **PERSIST**: Store output with lineage.
-8. **ADAPT**: Fire policies, log episode.
-9. **META-COGNIZE**: Update Daimon state.
+1. **SENSE**: Run T0 probes, read Substrate, and drain relevant Bus topics.
+2. **ASSESS**: Score candidates and route the tick toward T0/T1/T2 handling.
+3. **COMPOSE**: Assemble context and action state when the tick escalates past T0.
+4. **ACT**: Call the model, tool, or domain action.
+5. **VERIFY**: Run gates and compare against ground truth.
+6. **PERSIST + BROADCAST**: Store durable outputs and publish live Pulses in parallel.
+7. **REACT**: Let policies, Daimon bias, and other cross-cuts respond to the new state.
 
 **Adaptive interval**: Gamma accelerates when the environment is volatile (more issues detected → faster tick emission, down to 5s) and slows when calm (fewer anomalies → slower tick emission, up to 15s). The `HeartbeatPolicy` changes cadence; the gamma consumer just reacts.
 
@@ -82,7 +80,7 @@ fn compute_gamma_interval(violations: &[Violation]) -> Duration {
 
 **Cost structure**: ~80% of gamma ticks suppress at T0 ($0.00). ~15% escalate to T1 ($0.001-0.003). ~5% reach T2 ($0.01-0.25). This makes high-frequency gamma perception economically viable.
 
-See [04-gamma-reactive-loop.md](./04-gamma-reactive-loop.md) for the full Gamma specification.
+See [04-gamma-reactive-loop.md](./04-gamma-reactive-loop.md) for the full Gamma specification, and `tmp/refinements/09-phase-2-implications.md` for how Phase 2+ systems consume the same heartbeat topics.
 
 ---
 
@@ -216,7 +214,7 @@ See also `tmp/refinements/09-phase-2-implications.md` and [Naming and Glossary](
 - **I1**: Formal gamma loop with adaptive interval.
 - **I2**: Theta loop with periodic "step back and think."
 - **I3**: Delta loop triggering dreams, playbook compilation, meta-cognition.
-- **I4**: Frequency scheduler deciding which loop to run based on context.
+- **I4**: Frequency scheduler deciding which heartbeat topic to emit based on context.
 - **I5**: Meta-cognition hook ("Am I stuck? Am I thrashing? Should I escalate?").
 
 ---

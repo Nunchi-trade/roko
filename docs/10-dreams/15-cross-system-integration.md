@@ -292,7 +292,7 @@ The adaptive gate threshold system uses EMA (Exponential Moving Average) per run
 
 ## Dreams × Agent Mesh (Coordination)
 
-In multi-agent deployments, dreams interact with the agent mesh (formerly "Styx" (now Agent Mesh / Mesh)) for knowledge sharing and collective intelligence.
+In multi-agent deployments, Dreams interact with the Mesh as a pair of ordinary fabrics: `MeshSubstrate` replicates durable dream outputs, and `MeshBus` publishes the live Pulses that let peers react without polling.
 
 ### Knowledge Sharing via Mesh
 
@@ -300,8 +300,8 @@ Dream-generated insights can be shared across the mesh:
 
 | Sharing Direction | Mechanism | Content |
 |------------------|-----------|---------|
-| Agent → Mesh | Publish after dream consolidation | High-confidence insights (T3+), validated heuristics |
-| Mesh → Agent | Subscribe to peer dream outputs | Peer insights for potential integration (at reduced confidence, ×0.85 per hop) |
+| Agent → Mesh | `MeshSubstrate.put()` plus `MeshBus.publish()` | High-confidence insights (T3+), validated heuristics, and promotion Pulses |
+| Mesh → Agent | `MeshBus` subscription plus `MeshSubstrate` query | Peer insights for potential integration (at reduced confidence, ×0.85 per hop) |
 
 The confidence reduction on shared knowledge follows the Weismann barrier principle: inherited knowledge is always less trusted than self-discovered knowledge. An insight that is T4 (0.90 confidence) in the originating agent enters the receiving agent at T3 (0.90 × 0.85 = 0.765).
 
@@ -314,7 +314,7 @@ When multiple agents dream about similar episodes (because they share overlappin
 3. Mesh detects P₁ and P₂ are semantically similar (via HDC cosine similarity)
 4. Both agents receive a "collective confirmation" signal, boosting confidence in the shared pattern
 
-This is analogous to the Grossman-Stiglitz information paradox (Grossman & Stiglitz, "On the Impossibility of Informationally Efficient Markets," *AER*, 1980): individually discovered information has value precisely because it's not universally known. The mesh creates a marketplace where dream insights have economic value — agents that dream more effectively contribute more to collective intelligence.
+This is analogous to the Grossman-Stiglitz information paradox (Grossman & Stiglitz, "On the Impossibility of Informationally Efficient Markets," *AER*, 1980): individually discovered information has value precisely because it's not universally known. The mesh creates a marketplace where dream insights have economic value — agents that dream more effectively contribute more to collective intelligence. In REF09 terms, that marketplace is pub/sub topology over `MeshBus` plus durable replication in `MeshSubstrate`, not a separate coordination mechanism.
 
 ### Pheromone Field Integration
 
@@ -322,9 +322,9 @@ The mesh's pheromone field (a diffusing scalar field encoding collective emotion
 
 | Pheromone Signal | Dream Effect |
 |-----------------|-------------|
-| High threat pheromone (> 0.7) | Prioritize threat simulation in REM phase |
+| High threat pheromone (> 0.7) on `mesh.pheromone.deposited` | Prioritize threat simulation in REM phase |
 | Low activity pheromone | Extend NREM consolidation (more time for thorough replay) |
-| Knowledge pheromone spike | Prioritize integration of newly received mesh insights |
+| Knowledge pheromone spike | Prioritize integration of newly received mesh insights from `MeshSubstrate` |
 
 ---
 
@@ -402,7 +402,7 @@ The runtime process supervisor manages agent process lifecycle. Dream cycles int
 |--------------------|-------------------|
 | Process tracking | Dream agent processes tracked and cleaned up on completion |
 | Cancellation tokens | Dream cycles can be cancelled if a higher-priority task arrives |
-| Event bus | Dream completion events published for other subsystems to observe |
+| Bus | Dream completion and promotion Pulses published for other subsystems to observe |
 | Resource limits | Dream inference constrained by supervisor memory/CPU limits |
 
 ---
@@ -416,7 +416,7 @@ The runtime process supervisor manages agent process lifecycle. Dream cycles int
 | **Learn** (Episodes) | L1 | Neuro-mediated | Episodes, playbooks, patterns, routing |
 | **Compose** (Context) | L2 | Dreams → Context | Post-dream insights injected into context; `neuro.insight.promoted` refreshes enrichment |
 | **Gate** (Validation) | L3 | Bidirectional | Gate results → dreams; threshold updates → gates |
-| **Mesh** (Coordination) | L4 | Bidirectional | Dream insights → mesh; peer insights → dreams |
+| **Mesh** (Coordination) | L4 | Bidirectional | Dream insights → `MeshSubstrate` + `MeshBus`; peer insights → Dreams via Bus subscription + durable query |
 | **Orchestrator** (Plans) | L4 | Bidirectional | Idle windows + Bus wakeups → dreams; feedback → plans |
 | **Hypnagogia** (Creativity) | L0/L1 | Unidirectional | Hypnagogic fragments → dream seeds |
 | **Supervisor** (Process) | L0 | Supervisor → Dreams | Lifecycle, cancellation, resource limits |

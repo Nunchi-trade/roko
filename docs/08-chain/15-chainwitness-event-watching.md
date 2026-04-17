@@ -2,6 +2,8 @@
 
 > ChainWitness is the agent's eyes on the chain. One Tokio task per configured chain maintains a WebSocket connection, ingests block headers, pre-screens with a Binary Fuse filter (8.7 bits/entry, <1% FPR), and feeds relevant blocks to the triage pipeline. Over 90% of blocks are skipped in O(1) time with zero false negatives.
 
+> See also `tmp/refinements/09-phase-2-implications.md` and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the `ChainBus` / `ChainSubstrate` split and Bus vocabulary.
+
 
 > **Implementation**: Built
 
@@ -15,7 +17,7 @@
 
 ChainWitness is the lowest level of the chain intelligence pipeline. It connects to Ethereum-compatible chains via WebSocket, ingests every block header, and determines which blocks are relevant to the agent. The key innovation is the Binary Fuse pre-screening filter: a probabilistic data structure that tests each block's `logsBloom` (a 2048-bit Bloom filter included in every Ethereum block header) against the agent's set of watched addresses and event topics. The filter achieves <1% false positive rate at 8.7 bits per entry, with **zero false negatives** — no relevant block is ever missed.
 
-On Ethereum mainnet (~7,500 blocks/day), an agent watching 50 addresses and 100 event topics skips >90% of blocks. The remaining ~10% trigger full block fetches. This pre-screening is what makes it feasible for a single agent to monitor multiple chains simultaneously without overwhelming bandwidth or processing capacity.
+On Ethereum mainnet (~7,500 blocks/day), an agent watching 50 addresses and 100 event topics skips >90% of blocks. The remaining ~10% trigger full block fetches. This pre-screening is what makes it feasible for a single agent to monitor multiple chains simultaneously without overwhelming bandwidth or processing capacity. In the two-fabric model, matched logs are not a private side channel: ChainWitness normalizes them into `chain.*` Pulses on `ChainBus`, and downstream triage, sidecars, dashboards, and learning consumers subscribe by topic instead of polling `ChainSubstrate`.
 
 ChainWitness is the renamed equivalent of `bardo-witness` from the legacy architecture (see [naming conventions](../00-architecture/INDEX.md)).
 
@@ -60,10 +62,12 @@ eth_subscribe("newHeads")
         └── hit:
             ├── eth_getBlockByHash(hash, true)     // full block with txs
             ├── eth_getBlockReceipts(hash)          // receipts with logs
-            └── send (block, receipts) to triage channel
+            └── publish normalized `chain.*` Pulses on ChainBus
 ```
 
 The subscription connection is dedicated to `eth_subscribe("newHeads")` only. Block fetches fan out across a separate query connection pool, so burst block activity cannot starve the subscription.
+
+In REF09 terms, ChainWitness is the ingestion edge for `ChainBus`: it turns raw headers and receipts into ordinary topic-addressed Pulses such as `chain.block.matched` or `chain.deposit.emitted`. Consumers stay generic Bus subscribers, while durable attested outcomes still land in `ChainSubstrate`.
 
 ---
 
@@ -165,9 +169,9 @@ Reconnection uses exponential backoff: 3s, 6s, 12s, 30s max.
 
 ---
 
-## Block Normalization
+## Block Normalization and ChainBus Projection
 
-Before forwarding to triage, the witness normalizes blocks into a chain-agnostic format:
+Before publishing to `ChainBus`, the witness normalizes blocks into a chain-agnostic format:
 
 ```rust
 pub struct NormalizedBlock {
@@ -251,3 +255,5 @@ Filter hit rate (`hits / (hits + misses)`) is the primary tuning metric. If it e
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for the `ChainClient` trait that provides RPC methods
 - See [19-chain-agent-heartbeat.md](./19-chain-agent-heartbeat.md) for how the witness feeds into the 9-step heartbeat (OBSERVE step)
 - See [01-korai-chain-spec.md](./01-korai-chain-spec.md) for the chain architecture that the witness monitors
+- See `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ `ChainBus` / `ChainSubstrate` split and HTTP projection implications
+- See [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for Bus, Pulse, Topic, and `ChainBus` vocabulary

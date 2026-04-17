@@ -6,6 +6,7 @@
 > `Datum` for Engram-or-Pulse operator inputs, and `PulseSource` for transport-time producer
 > attribution. When another document disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
+> [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -189,6 +190,10 @@ The following names are load-bearing additions in the current architecture:
 | `Datum` | Either-medium enum used by generalized operators. |
 | `PulseSource` | Lightweight source attribution on a Pulse before durable provenance exists. |
 | `BusReceiver` | Subscriber handle that yields matching Pulses in order. |
+| `ChainBus` | Bus backend that maps chain logs into `chain.*` Pulses while `ChainSubstrate` handles durable on-chain Engrams. |
+| `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
+| `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
+| `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
 | `Synapse Architecture` | The architecture story of two mediums, two fabrics, and six operators. |
 
 ### 9.1 Topic Namespace Guidance
@@ -202,6 +207,7 @@ Canonical Topic strings should be lowercase and dot-separated. Example prefixes 
 | `gate.*` | Gate verdicts and pipeline state |
 | `safety.*` | Approvals, taint, custody, and permissions |
 | `conductor.*` | Runtime health and breaker signals |
+| `heartbeat.*` | Cognitive clock ticks and timing telemetry |
 | `substrate.*` | Durable storage lifecycle events |
 | `chain.*` | Phase 2+ chain forwarding topics |
 | `mesh.*` | Phase 2+ multi-agent mesh topics |

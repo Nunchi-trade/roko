@@ -286,14 +286,14 @@ The adaptive clock lives at L0 Runtime in `roko-runtime`.
 
 | Component | Current Status | Target |
 |---|---|---|
-| Process lifecycle | Runtime process supervisor module | Extend with three-loop management |
-| Bus transport | Runtime Bus transport module | Wire topic subscriptions and tick delivery |
+| Process lifecycle | Runtime process supervisor module | Extend with `HeartbeatPolicy` lifecycle and three-speed management |
+| Bus transport | Runtime Bus transport module | Wire topic subscriptions and tick delivery for heartbeat, Dreams, conductor, and chain consumers |
 | Cancellation | Runtime cancellation module | Use for loop shutdown |
 | Metrics | Runtime metrics module | Track per-loop timing and cost |
 | CorticalState | Not yet implemented | New struct in `roko-core` or `roko-runtime` |
 | Regime detection | Implicit in probe logic | Formalize in adaptive clock |
 
-The existing runtime support crate provides the infrastructure (process supervision, Bus transport, cancellation tokens) but does not implement the three-topic architecture. The adaptive clock would be a new component that uses these existing primitives.
+The existing runtime support crate provides the infrastructure (process supervision, Bus transport, cancellation tokens) but does not yet wire the three-topic architecture end to end. The next step is not a special control plane; it is explicit `HeartbeatPolicy` wiring over those existing Bus primitives so Dreams, conductor policies, and other Phase 2+ consumers can subscribe to the same tick topics.
 
 ---
 

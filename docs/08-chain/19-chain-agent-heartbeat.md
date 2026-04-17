@@ -1,6 +1,8 @@
 # Chain Agent Heartbeat: 9-Step Cognitive Mapping
 
-> The chain agent's heartbeat is a 9-step cognitive cycle that maps onto the universal Synapse loop: OBSERVE → RETRIEVE → ANALYZE → GATE → SIMULATE → VALIDATE → EXECUTE → VERIFY → REFLECT. The chain heartbeat adds SIMULATE and VALIDATE steps that do not exist in the coding agent's loop — domain-specific safety checks before committing capital.
+> The chain agent's heartbeat is the chain-domain specialization of the canonical seven-step loop, driven by `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. The historical 9-step chain wording remains useful as a fine-grained decomposition inside that tick-driven loop, especially for SIMULATE and VALIDATE before capital-at-risk actions.
+
+> See also `tmp/refinements/09-phase-2-implications.md` and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 
 > **Implementation**: Specified
@@ -13,38 +15,41 @@
 
 ## Abstract
 
-Every Roko agent runs a universal cognitive loop defined by the Synapse architecture (see topic [01-synapse](../00-architecture/INDEX.md)): PERCEIVE → EVALUATE → ATTEND → ACT → VERIFY → ADAPT. The chain agent's heartbeat is a domain-specific parameterization of this loop, expanding it to 9 steps that add chain-specific safety checks.
+Every Roko agent runs the canonical seven-step cognitive loop defined by the Synapse architecture (see topic [01-synapse](../00-architecture/INDEX.md)): SENSE → ASSESS → COMPOSE → ACT → VERIFY → PERSIST + BROADCAST → REACT. The chain agent's heartbeat is a domain-specific parameterization of this loop, with the historical 9-step chain flow used as a finer-grained breakdown inside the tick-driven runtime.
 
-The critical additions are SIMULATE (step 5) and VALIDATE (step 6) — pre-flight checks that do not exist in the coding agent's loop. Before committing capital, the chain agent simulates the proposed action in mirage-rs and validates it against safety policies. These steps are the domain-specific reason chain agents have more complex cognitive cycles than coding agents: capital-at-risk operations demand extra verification before execution.
+The critical additions are SIMULATE (step 5) and VALIDATE (step 6) — pre-flight checks that do not exist in the coding agent's baseline. Before committing capital, the chain agent simulates the proposed action in mirage-rs and validates it against safety policies. These checks live inside the universal `VERIFY` step rather than creating a separate kernel loop.
+
+REF09 makes the runtime framing explicit: `HeartbeatPolicy` publishes `heartbeat.*` Pulses on the Bus; ChainWitness turns relevant chain activity into `chain.*` Pulses on `ChainBus`; the chain agent consumes those topics and queries `ChainSubstrate` for durable on-chain state. The result is ordinary Bus/Substrate composition rather than a bespoke chain scheduler.
 
 ---
 
 ## The 9-Step Mapping
 
 ```
-Universal Loop          Chain Heartbeat                    Synapse Trait
-─────────────          ────────────────                   ────────────
-PERCEIVE            1. OBSERVE (blocks, logs, prices)     Substrate.query()
-EVALUATE            2. RETRIEVE (4-factor scoring)        Scorer.score()
-                    3. ANALYZE (curiosity, regime shifts)  [Daimon cross-cut]
-ATTEND              4. GATE (T0/T1/T2 routing)           Router.select()
-                    5. SIMULATE (mirage-rs pre-flight)    [domain-specific]
-                    6. VALIDATE (PolicyCage, limits)      Gate.verify()
-ACT                 7. EXECUTE (submit tx, invoke tools)  Agent.execute()
-VERIFY              8. VERIFY (predicted vs. actual)      Gate.verify()
-ADAPT               9. REFLECT (episode, predictions)     Policy.decide()
+Canonical Loop      Chain Heartbeat Detail                             Primary Fabric / Operator
+──────────────      ──────────────────────                             ─────────────────────────
+SENSE               1. OBSERVE (consume `chain.*` Pulses)             ChainBus.subscribe()
+                    2. RETRIEVE (query durable chain state)           ChainSubstrate.query()
+ASSESS              3. ANALYZE (curiosity, regime shifts)             Scorer + [Daimon cross-cut]
+                    4. GATE (T0/T1/T2 routing)                        Router.select()
+COMPOSE             assemble tx context, custody, and policy bundle   Composer.compose()
+ACT                 7. EXECUTE (submit tx, invoke tools)              Agent.execute()
+VERIFY              5. SIMULATE + 6. VALIDATE + 8. VERIFY             Gate.verify()
+PERSIST             write episode, receipts, and durable outcomes     Substrate.put()
+BROADCAST           publish `chain.*`, `gate.*`, `heartbeat.*`        Bus.publish() / ChainBus.publish()
+REACT               9. REFLECT (episode, predictions, policy followup) Policy.decide()
 ```
 
 ### Step 1: OBSERVE
 
-The agent perceives on-chain state through the ChainWitness pipeline:
+The agent perceives on-chain state through the ChainWitness pipeline and `ChainBus` topics:
 
 - **Input**: Block headers, transaction logs, price feeds via WebSocket subscription
 - **Processing**: Binary Fuse filter pre-screening (see [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md))
-- **Output**: Filtered, normalized blocks forwarded to the triage pipeline
-- **Synapse mapping**: `Substrate.query()` — reading from the chain substrate
+- **Output**: Filtered, normalized `chain.*` Pulses published on `ChainBus` and durable state queried from `ChainSubstrate`
+- **Synapse mapping**: `ChainBus.subscribe()` + `ChainSubstrate.query()` — live chain transport plus durable reads
 
-This step runs continuously in its own Tokio task, outside the heartbeat clock. The heartbeat gates the agent's *cognitive response* to what it sees, not the seeing itself. Block ingestion at 12-second intervals (Ethereum) or 400ms intervals (Korai) is too fast for deliberative processing at every block.
+This step runs continuously in its own Tokio task, outside the heartbeat clock. The heartbeat gates the agent's *cognitive response* to what it sees, not the seeing itself. Block ingestion at 12-second intervals (Ethereum) or 400ms intervals (Korai) is too fast for deliberative processing at every block, so the gamma consumer drains buffered `chain.*` Pulses when `heartbeat.gamma.tick` fires.
 
 ### Step 2: RETRIEVE
 
@@ -160,13 +165,13 @@ The agent reflects on the full cycle and updates its models:
 
 The 9 steps operate at different speeds:
 
-| Speed | Steps | Frequency | Processing Type |
+| Speed | Steps | Trigger | Processing Type |
 |---|---|---|---|
-| **Gamma** (fast) | 1-OBSERVE, 4-GATE | Every block | Reactive: filter, route, quick decisions |
-| **Theta** (medium) | 2-RETRIEVE, 3-ANALYZE, 5-SIMULATE, 6-VALIDATE, 7-EXECUTE, 8-VERIFY | Per-event (when T2 route) | Deliberative: analysis, simulation, execution |
-| **Delta** (slow) | 9-REFLECT | Periodic (every N blocks or on significant events) | Consolidative: learning, knowledge update |
+| **Gamma** (fast) | 1-OBSERVE, 4-GATE | `heartbeat.gamma.tick`; consume queued `chain.*` Pulses | Reactive: filter, route, quick decisions |
+| **Theta** (medium) | 2-RETRIEVE, 3-ANALYZE, 5-SIMULATE, 6-VALIDATE, 7-EXECUTE, 8-VERIFY | `heartbeat.theta.tick` when chain work merits deliberation | Deliberative: analysis, simulation, execution |
+| **Delta** (slow) | 9-REFLECT | `heartbeat.delta.tick` plus significant episode backlog | Consolidative: learning, knowledge update |
 
-Gamma runs continuously — the agent always observes and routes. Theta runs only when an event warrants action. Delta runs periodically for consolidation.
+Gamma remains the fast subscriber for fresh chain activity. Theta handles deeper chain reasoning when the gamma route escalates. Delta consolidates outcomes, heuristics, and prediction calibration on the slower topic.
 
 ---
 
@@ -229,3 +234,5 @@ slippage_tolerance = 0.005  # 0.5%
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for step 7 (EXECUTE)
 - See topic [01-synapse](../00-architecture/INDEX.md) for the universal Synapse loop
 - See topic [07-daimon](../09-daimon/INDEX.md) for the affect system in step 3
+- See `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ heartbeat and `ChainBus` implications
+- See [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for Bus, Pulse, Topic, and `ChainBus` vocabulary

@@ -10,6 +10,9 @@
 
 > **Implementation**: Specified
 
+> **See also**: `../../tmp/refinements/09-phase-2-implications.md`,
+> `../00-architecture/01-naming-and-glossary.md`
+
 ---
 
 ## Overview
@@ -20,7 +23,9 @@ is to give implementation agents a clear picture of where to focus effort and to
 duplicate work.
 
 The assessment is organized by sub-doc, mapping each major feature to its current
-implementation status.
+implementation status. For REF09, the key test is whether each coordination capability is
+described as durable Engrams in Substrate plus live Pulses on the Bus rather than as a special
+side channel.
 
 ---
 
@@ -39,12 +44,12 @@ implementation status.
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Engram as content-addressed unit | **Wired** | `roko-core/src/signal.rs` | The `Signal` struct (which the PRD now calls "Engram") is fully implemented with hash, body, score, parents, tags |
+| Engram as content-addressed unit | **Wired** | `roko-core` durable record type | Content-addressed durable record with hash, body, score, parents, and tags is already the right storage primitive for pheromone deposits |
 | Substrate trait (store/query) | **Wired** | `roko-core/src/traits.rs` | `Substrate` trait with `store()` and `query()` |
 | Scorer trait | **Wired** | `roko-core/src/traits.rs` | `Scorer` trait with `score()` |
 | Policy trait | **Wired** | `roko-core/src/traits.rs` | `Policy` trait with `observe()` and `react()` |
 | Universal cognitive loop | **Wired** | `roko-cli/src/orchestrate.rs` | query → score → route → compose → act → verify → write → react |
-| Stigmergic loop (deposit → propagate → sense → respond) | **Scaffold** | Partially wired via signal persistence | Full stigmergic loop with pheromone propagation not yet integrated |
+| Stigmergic loop (deposit → propagate → sense → respond) | **Scaffold** | Partially wired via durable record persistence | Durable deposit is partly present, but the full `Substrate.put()` + `Bus.publish()` coordination loop is not yet integrated |
 
 ---
 
@@ -52,11 +57,11 @@ implementation status.
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| `Pheromone` struct | **Design** | `refactoring-prd/04-knowledge-and-mesh.md` | Struct defined in PRD; not yet in codebase as a first-class type |
+| `Pheromone` struct | **Design** | `refactoring-prd/04-knowledge-and-mesh.md` | Typed coordination view defined in the PRD; intended to sit on top of Engram storage and Bus announcements |
 | `PheromoneKind` enum | **Design** | `refactoring-prd/04-knowledge-and-mesh.md` | 7 universal + domain-specific + Custom(String). Not yet in code. |
 | Exponential decay function | **Design** | PRD + legacy `bardo-backup/prd/02-mortality/10-clade-ecology.md` | `pheromone_decay()` fully specified with formula; not yet implemented in Roko crates |
 | Confirmation mechanics | **Design** | PRD | Half-life extension via confirmation count; anti-spoofing via reputation weighting. Not implemented. |
-| Pheromone-enriched context assembly | **Scaffold** | `roko-compose` crate | The `SystemPromptBuilder` exists and supports 6-layer prompts, but does not yet include ambient pheromone summary |
+| Pheromone-enriched context assembly | **Scaffold** | `roko-compose` crate | The `SystemPromptBuilder` exists and supports 6-layer prompts, but does not yet include ambient pheromone summary from shared Substrate or `mesh.pheromone.deposited` Pulses |
 
 ---
 
@@ -89,14 +94,14 @@ implementation status.
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| WebSocket transport | **Design** | `bardo-backup/prd/20-styx/` | Legacy Styx architecture specified WebSocket relay; not yet implemented in Roko |
-| Iroh P2P transport | **Design** | `bardo-backup/prd/20-styx/07-p2p-transport.md` | Iroh integration fully specified; not implemented |
+| WebSocket transport | **Design** | Historical mesh transport docs | Intended as one backend for `MeshBus`; not yet implemented in Roko |
+| Iroh P2P transport | **Design** | Historical mesh transport docs | Intended as a lower-latency backend for `MeshBus` and `MeshSubstrate`; not implemented |
 | ERC-8004 agent discovery | **Design** | PRD | Service endpoint resolution specified; not implemented |
 | mDNS local discovery | **Design** | PRD (Iroh provides built-in mDNS) | Would come with Iroh integration |
 | Version vector deduplication | **Design** | `bardo-backup/prd/20-styx/03-clade-sync.md` | Lamport/Fidge vector clocks specified; not implemented |
 | Store-and-forward for offline agents | **Design** | `bardo-backup/prd/20-styx/03-clade-sync.md` | 7-day TTL store-and-forward specified; not implemented |
-| Gossip pub/sub for pheromones | **Design** | PRD | iroh-gossip HyParView + PlumTree specified; not implemented |
-| Content-addressed blob transfer | **Design** | PRD | iroh-blobs BLAKE3 transfer specified; not implemented |
+| Gossip pub/sub for pheromones | **Design** | PRD | `MeshBus` gossip for topics such as `mesh.pheromone.deposited` is specified; not implemented |
+| Content-addressed blob transfer | **Design** | PRD | `MeshSubstrate`-style durable replication over content-addressed transfer is specified; not implemented |
 
 ---
 
@@ -310,3 +315,5 @@ implementation plan follows a tier progression from types (Tier 1) through local
 
 - All preceding sub-docs (00–11) — this sub-doc surveys their implementation status
 - `INDEX.md` — Table of contents for the full coordination topic
+- `../../tmp/refinements/09-phase-2-implications.md` — Phase 2+ two-fabric framing for Dreams, Mesh, and coordination
+- `../00-architecture/01-naming-and-glossary.md` — canonical Bus, Pulse, Topic, MeshBus, and MeshSubstrate vocabulary

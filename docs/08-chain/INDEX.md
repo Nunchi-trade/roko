@@ -1,6 +1,7 @@
 # Topic 08: Chain Layer (Korai)
 
 > The Korai chain is a dedicated EVM for agent coordination: identity (soulbound passports), reputation (7-domain EMA), marketplace (Spore/Sparrow), knowledge sharing (HDC precompile), and economic incentives (KORAI/DAEJI tokens with demurrage). Blockchain is ONE domain plugin — the chain layer uses the same Synapse traits as every other domain.
+> In the two-fabric model, durable chain state lives in `ChainSubstrate` while chain logs and contract activity surface as Pulses on `ChainBus`; see `tmp/refinements/09-phase-2-implications.md` and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
@@ -23,11 +24,11 @@
 | 12 | [12-three-hiring-models.md](./12-three-hiring-models.md) | Random VRF (fast), Blind Auction (competitive, 3 variants), Direct Hire (1.5× premium, Tier 0-1 only). Speed-quality-cost tradeoffs. |
 | 13 | [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md) | Adjusted score: `s_i = p_i × (1 + (1 - R_i))`. Payment: `s_second / (1 + (1 - R_winner))`. Truthful bidding preserved. Commit-reveal scheme. |
 | 14 | [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) | 7 base domains. EMA smoothing with adaptive alpha. 30-day half-life decay. 4 discipline states. Slash rates by violation type. C-factor aggregation. **NEW: Gaming resistance (whitewashing, collusion rings, EigenTrust), reputation recovery mechanisms, governance amnesty.** |
-| 15 | [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) | Binary Fuse filter (8.7 bits/entry, <1% FPR). WebSocket block ingestion. Gap detection with Roaring Bitmaps. Connection pool with HTTP fallback. |
+| 15 | [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) | Binary Fuse filter (8.7 bits/entry, <1% FPR). WebSocket block ingestion that normalizes matching chain activity into `ChainBus` Pulses. Gap detection with Roaring Bitmaps. Connection pool with HTTP fallback. |
 | 16 | [16-triage-curiosity-midas.md](./16-triage-curiosity-midas.md) | 4-stage pipeline: rule-based → MIDAS-R anomaly → contextual enrichment → HDC/Bayesian curiosity scoring. No LLM in this path. |
 | 17 | [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) | `ChainClient` (8 read methods) and `ChainWallet` (5 write methods). 3 custody modes: delegation, embedded (ERC-4337), local key. Types and errors. |
 | 18 | [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md) | In-process EVM on revm. Fork mode, scenario replay, 141 tests. Korai chain extensions (HDC precompile, registries, RPC). roko_bridge for trait impl. **NEW: Simulation fidelity guarantees (what can/cannot be simulated), confidence scoring, differential testing, formal verification pipeline.** |
-| 19 | [19-chain-agent-heartbeat.md](./19-chain-agent-heartbeat.md) | 9-step mapping to Synapse loop: OBSERVE → RETRIEVE → ANALYZE → GATE → SIMULATE → VALIDATE → EXECUTE → VERIFY → REFLECT. Three cognitive speeds. |
+| 19 | [19-chain-agent-heartbeat.md](./19-chain-agent-heartbeat.md) | Historical 9-step mapping retold inside the canonical seven-step loop. `HeartbeatPolicy` publishes `heartbeat.*` Pulses; chain consumers react through `ChainBus` / `ChainSubstrate` rather than bespoke scheduling. |
 | 20 | [20-x402-micropayments.md](./20-x402-micropayments.md) | HTTP 402 Payment Required. ERC-3009 transferWithAuthorization. No API keys, no accounts. Batch settlement. Self-funding agent loop. **NEW: Agent payment channels (state channels, streaming payments), knowledge attestation structs, 4-level escalating dispute resolution.** |
 | 21 | [21-isfr-clearing-settlement.md](./21-isfr-clearing-settlement.md) | Intersubjective Fact Registry. QP solver with bisection O(80n). KKT optimality certificates verifiable on-chain. Reputation-weighted aggregation. |
 | 22 | [22-valhalla-privacy-layer.md](./22-valhalla-privacy-layer.md) | 4 privacy tiers: Public → Access-Gated → Confidential (TEE) → Full Sealed (ZK). PSI for capability matching. TEE attestation integration. |

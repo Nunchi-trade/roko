@@ -2,7 +2,7 @@
 
 > The heartbeat is the agent's autonomous decision cycle — in the two-fabric model it is driven by Bus-published tick Pulses at three concurrent timescales (Gamma, Theta, Delta), with dual-process tier gating that makes ~80% of ticks free and active inference determining compute investment.
 
-> See `tmp/refinements/05-loop-retold.md` for the seven-step retelling and `../00-architecture/01-naming-and-glossary.md` for canonical heartbeat terms.
+> See `tmp/refinements/05-loop-retold.md` for the seven-step retelling, `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ Bus-consumer framing, and `../00-architecture/01-naming-and-glossary.md` for canonical heartbeat terms.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -14,6 +14,8 @@
 ## Abstract
 
 The heartbeat topic covers the core cognitive loop that every Roko agent executes autonomously. Unlike conversation-based agent frameworks where cognition is triggered by user messages, Roko agents run a continuous, timed decision cycle — the "heartbeat" — that operates whether or not a human is present. In the two-fabric framing, the adaptive clock publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses on the Bus, and speed-specific consumers subscribe by topic. Approximately 80% of heartbeat ticks have no human input.
+
+Those same heartbeat topics are also what Phase 2+ systems listen to: Dreams wake on Delta cadence, coordination systems can react to scheduled ticks without bespoke clocks, and chain / interface surfaces remain ordinary Bus consumers.
 
 The heartbeat is organized around three key ideas:
 

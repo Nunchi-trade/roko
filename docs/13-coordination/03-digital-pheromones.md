@@ -44,9 +44,9 @@ Roko extends Parunak's framework with three additions:
 
 ---
 
-## The Pheromone Struct
+## Engram-First Pheromone View
 
-The core data structure for a digital pheromone in Roko:
+The primary durable object is still an `Engram`. The `Pheromone` struct below is an implementation-facing view over that Engram's tags and body when the system wants typed ergonomics. Storage stays Engram-first; live notification stays Pulse-first.
 
 ```rust
 /// A digital pheromone — a typed Engram carrying coordination information.
@@ -108,8 +108,9 @@ pub struct Pheromone {
 ### Relationship to the Engram Type
 
 A `Pheromone` is a specialized view of the `Engram` type — Roko's universal unit of cognition.
-Every Engram has a `body` field that can contain a serialized `Pheromone` payload. The
-relationship is:
+The durable record is the Engram; the typed pheromone view is how coordination code interprets
+that record, while `mesh.pheromone.deposited` on `MeshBus` is the live announcement that a new
+deposit landed. The relationship is:
 
 ```
 Engram {
@@ -435,8 +436,8 @@ substrate.store(pheromone.into_engram())?;
 Based on the `scope`, the pheromone is announced on the Bus:
 
 - `Local`: Stays in the agent's own NeuroStore. No propagation.
-- `Mesh`: Published as `mesh.pheromone.deposited` and routed by MeshBus to the Collective.
-- `Global`: Replicated to the Korai chain for all agents worldwide.
+- `Mesh`: Published as `mesh.pheromone.deposited` and routed by `MeshBus` to the Collective while the durable Engram remains queryable in shared Substrate.
+- `Global`: Replicated to the Korai chain for all agents worldwide, with durable state on `ChainSubstrate` and chain-side announcements available via `ChainBus`.
 
 ### 3. Sensing
 

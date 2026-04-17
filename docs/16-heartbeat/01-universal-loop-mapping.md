@@ -1,6 +1,6 @@
 # Universal Loop Mapping: CoALA → Synapse
 
-> How the historical CoALA 9-step pipeline maps onto Roko's canonical seven-step universal loop - the domain-agnostic version every agent executes. See `tmp/refinements/05-loop-retold.md` and `docs/00-architecture/01-naming-and-glossary.md`.
+> How the historical CoALA 9-step pipeline maps onto Roko's canonical seven-step universal loop - the domain-agnostic version every agent executes. See `tmp/refinements/05-loop-retold.md`, `tmp/refinements/09-phase-2-implications.md`, and `docs/00-architecture/01-naming-and-glossary.md`.
 
 
 > **Implementation**: Specified
@@ -15,7 +15,7 @@
 
 The CoALA 9-step pipeline (OBSERVE → RETRIEVE → ANALYZE → GATE → SIMULATE → VALIDATE → EXECUTE → VERIFY → REFLECT) is the legacy framing that guided Roko's initial cognitive architecture. Roko's canonical universal loop is now the seven-step SENSE → ASSESS → COMPOSE → ACT → VERIFY → PERSIST + BROADCAST → REACT loop.
 
-The universal Synapse loop is not a different pipeline. It is the same runtime expressed in terms of the composable Synapse traits (Substrate, Bus, Scorer, Gate, Router, Composer, Policy) plus the cognitive cross-cuts. The CoALA heartbeat is the theoretical frame; the Synapse loop is the implementation frame. Domain-specific heartbeat variants (chain, coding, research) are parameterizations of the universal loop, not separate architectures.
+The universal Synapse loop is not a different pipeline. It is the same runtime expressed in terms of the composable Synapse traits (Substrate, Bus, Scorer, Gate, Router, Composer, Policy) plus the cognitive cross-cuts. The CoALA heartbeat is the theoretical frame; the Synapse loop is the implementation frame. Domain-specific heartbeat variants (chain, coding, research) are parameterizations of the universal loop, not separate architectures. In REF09, that also means Phase 2+ systems ride the same topic-driven runtime: `HeartbeatPolicy` emits the tick Pulses and domain consumers subscribe, rather than importing their own schedulers.
 
 This document provides the complete side-by-side mapping between CoALA and Synapse, explains why the translation is not one-to-one but structurally faithful, and describes how domain-specific variants extend the universal loop without modifying it.
 
@@ -94,13 +94,13 @@ REACT     → EpisodePolicy + DaimonPolicy + PredictionPolicy
 Adds SIMULATE (mirage-rs pre-flight) and VALIDATE (position limits) inside VERIFY rather than as standalone universal steps. See [02-chain-heartbeat-variant.md](./02-chain-heartbeat-variant.md) for the full mapping.
 
 ```
-SENSE     → FileSubstrate.query() + ChainSubstrate.query() + Bus.subscribe() [market, on-chain state, live Pulses]
+SENSE     → FileSubstrate.query() + ChainSubstrate.query() + ChainBus.subscribe() + Bus.subscribe() [market, on-chain state, live Pulses]
 ASSESS    → RecencyScorer + CatalystScorer + PredictiveScorer + Router.select() [multi-factor]
 COMPOSE   → AttentionAuction + PromptComposer [VCG bidding for context budget]
 ACT       → Agent.execute() [submit transaction, invoke tools]
 VERIFY    → VerifyChainGate + TxSimGate + WalletGate [blockchain receipt, pre-flight, limits]
 PERSIST   → FileSubstrate.put() + ChainSubstrate.put() [on-chain + off-chain]
-BROADCAST → Bus.publish() [topic-addressed live updates]
+BROADCAST → Bus.publish() + ChainBus.publish() [topic-addressed live updates]
 REACT     → EpisodePolicy + DaimonPolicy + PredictionPolicy + CFactorPolicy
 ```
 
@@ -201,6 +201,7 @@ CoALA provides the intellectual justification. The Synapse loop provides the eng
 - See [02-chain-heartbeat-variant.md](./02-chain-heartbeat-variant.md) for the chain domain extension
 - See [12-attention-auction-and-gating.md](./12-attention-auction-and-gating.md) for the VCG COMPOSE mechanism
 - See `tmp/refinements/05-loop-retold.md` for the seven-step retelling
+- See `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ Bus/Substrate consumer framing
 - See [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for canonical heartbeat terms
 - See topic [00-architecture](../00-architecture/INDEX.md) for the Synapse Architecture and six traits
 - See topic [03-composition](../03-composition/INDEX.md) for context engineering (the COMPOSE step)

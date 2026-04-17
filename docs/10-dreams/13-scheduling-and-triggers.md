@@ -11,6 +11,9 @@
 
 > **Implementation**: Scaffold
 
+> **See also**: `../../tmp/refinements/09-phase-2-implications.md`,
+> `../00-architecture/01-naming-and-glossary.md`
+
 ---
 
 ## Trigger Conditions
@@ -75,6 +78,18 @@ roko dream run         # Fire a dream cycle now
 roko dream report      # Show the latest dream report
 roko dream history     # List all dream reports
 ```
+
+### 4. Dream Outputs
+
+The trigger side is only half of the two-fabric story. When a dream cycle runs, it writes durable consolidation results and also emits live promotion Pulses:
+
+| Output | Fabric | Purpose |
+|--------|--------|---------|
+| Consolidated `Kind::Insight` / `Kind::Heuristic` Engrams | Substrate | Persist durable dream results with lineage so later cycles can query them completely |
+| `engram.promoted` Pulse | Bus | Notify generic subscribers that a durable Engram graduated |
+| `neuro.insight.promoted` Pulse | Bus | Wake Neuro and Compose refresh paths without waiting for another full Substrate scan |
+
+This means Dreams stay complete on the durable side and reactive on the live side. Delta-speed does not poll for its own downstream effects any more than it polls for its wakeup conditions.
 
 ---
 
