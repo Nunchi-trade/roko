@@ -4,6 +4,8 @@
 
 > **Implementation**: Reference
 
+> **Implementation status:** This is a mixed reality map, not a shipping-only inventory. `Engram` and `Substrate` are live primitives in code today, and `EventBus<E>` is the live transport surface. `HdcVector`/fingerprinting and `c-factor` exist partially. `Pulse`, the generalized `Bus` trait (distinct from today's `EventBus<E>`), `Demurrage`, the replication ledger, and the plugin SPI/domain-profile ecosystem remain target-state. Matrix cells tagged `[target-state]` depend on one or more of those planned pieces.
+
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
 **Prerequisites**: [Naming and Glossary](./01-naming-and-glossary.md), [Engram Data Type](./02-engram-data-type.md), [Pulse Medium](./02b-pulse-ephemeral-event.md), [Bus Transport Fabric](./07b-bus-transport-fabric.md), [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md), [Heuristics, Worldviews, and Falsifiers](../05-learning/19-heuristics-worldviews-and-falsifiers.md)
@@ -14,7 +16,7 @@
 
 The architecture is now best understood as a synergy graph. Some primitives are load-bearing in their own right, but the real leverage comes from the way they combine. This chapter names the ten primitives that sit at the center of the weave, shows how they exchange value in a compact matrix, and then walks the ten concrete synergies that make the system compounding rather than merely modular.
 
-If the earlier chapters answer "what is the primitive?", this chapter answers "what does it unlock, and what does it depend on?" That framing is deliberate. The system is not a pile of adjacent subsystems. It is a matrix of mutually reinforcing constraints and affordances, and the moat lives in those couplings.
+If the earlier chapters answer "what is the primitive?", this chapter answers "what does it unlock, and what does it depend on?" That framing is deliberate. The system is not a pile of adjacent subsystems. It is a matrix of mutually reinforcing constraints and affordances, but today some of those couplings are already live while others remain target-state.
 
 See also [tmp/refinements/31-synergy-integration-map.md](../../tmp/refinements/31-synergy-integration-map.md) for the full proposal source and [Naming and Glossary](./01-naming-and-glossary.md) for the canonical vocabulary used throughout this chapter.
 
@@ -28,7 +30,7 @@ These are the nodes of the synergy graph. Each one is already established in the
 |---|---|---|---|
 | P1 | Engram | [02](./02-engram-data-type.md) | Durable record, lineage anchor, and substrate resident |
 | P2 | Pulse | [02b](./02b-pulse-ephemeral-event.md) | Ephemeral wire medium, live coordination unit |
-| P3 | Bus | [07b](./07b-bus-transport-fabric.md) | Transport fabric, topic routing, replay surface |
+| P3 | Bus / current EventBus transport | [07b](./07b-bus-transport-fabric.md) | Live code uses `EventBus<E>`; the generalized `Bus` trait, topic routing, and replay surface are target-state |
 | P4 | Substrate | [07](./07-substrate-trait.md) | Storage fabric, durable persistence, query surface |
 | P5 | HDC fingerprint | [27](./27-temporal-knowledge-topology.md) | Similarity, clustering, and semantic indexing primitive |
 | P6 | Demurrage | [04](./04-decay-variants.md) | Attention economy, holding cost, self-trimming pressure |
@@ -47,16 +49,16 @@ The matrix below is intentionally compact. Each cell says what the row primitive
 
 | gives \ to | P1 Engram | P2 Pulse | P3 Bus | P4 Substrate | P5 HDC | P6 Demurrage | P7 Heuristics | P8 c-factor | P9 Ledger | P10 Plugins |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **P1 Engram** | - | graduation source | publish target | store target | encode target | balance owner | lineage anchor | cohort artifact | paper body | plugin config target |
-| **P2 Pulse** | graduation destination | - | payload | sub-event | live evidence | reinforcement signal | calibration trial | cohort event | ledger observation | plugin event |
-| **P3 Bus** | `substrate.*` wakeups | delivery | - | notify | routing input | freshness pressure | falsifier watch | cohort floor | watchdog stream | lifecycle events |
-| **P4 Substrate** | home | - | bridge | - | fingerprint store | balance home | heuristic store | metric source | ledger store | plugin state |
-| **P5 HDC** | fingerprint field | - | - | index key | - | novelty score | similarity cluster | diversity signal | paper search | encoder slot |
-| **P6 Demurrage** | weight | - | - | tier logic | - | - | freshness decay | minority support | anti-drift | plugin aging |
-| **P7 Heuristics** | record variant | - | prediction / outcome | store | cluster | reinforcement signal | - | peer model | claim body | heuristic plugin |
-| **P8 c-factor** | cohort record | - | metrics topic | metric store | diversity source | - | peer prediction | - | replication support | c-factor plugin |
-| **P9 Ledger** | paper Engram | - | watchdog topic | ledger store | paper fingerprint | claim decay | lifted claim | ledger observation | - | claim plugin |
-| **P10 Plugins** | plugin Engram | plugin events | plugin topics | plugin reads | plugin encoder | plugin budget | new heuristic source | new metric | new claim | - |
+| **P1 Engram** | - | graduation source `[target-state]` | publish target `[target-state]` | store target | encode target | balance owner `[target-state]` | lineage anchor | cohort artifact | paper body `[target-state]` | plugin config target `[target-state]` |
+| **P2 Pulse** | graduation destination `[target-state]` | - `[target-state]` | payload `[target-state]` | sub-event `[target-state]` | live evidence `[target-state]` | reinforcement signal `[target-state]` | calibration trial `[target-state]` | cohort event `[target-state]` | ledger observation `[target-state]` | plugin event `[target-state]` |
+| **P3 Bus** | `substrate.*` wakeups `[target-state]` | delivery `[target-state]` | - `[target-state]` | notify `[target-state]` | routing input `[target-state]` | freshness pressure `[target-state]` | falsifier watch `[target-state]` | cohort floor `[target-state]` | watchdog stream `[target-state]` | lifecycle events `[target-state]` |
+| **P4 Substrate** | home | - `[target-state]` | bridge `[target-state]` | - | fingerprint store | balance home `[target-state]` | heuristic store | metric source | ledger store `[target-state]` | plugin state `[target-state]` |
+| **P5 HDC** | fingerprint field | - `[target-state]` | - `[target-state]` | index key | - | novelty score `[target-state]` | similarity cluster | diversity signal | paper search `[target-state]` | encoder slot `[target-state]` |
+| **P6 Demurrage** | weight `[target-state]` | - `[target-state]` | - `[target-state]` | tier logic `[target-state]` | - `[target-state]` | - `[target-state]` | freshness decay `[target-state]` | minority support `[target-state]` | anti-drift `[target-state]` | plugin aging `[target-state]` |
+| **P7 Heuristics** | record variant | - `[target-state]` | prediction / outcome `[target-state]` | store | cluster | reinforcement signal `[target-state]` | - | peer model | claim body `[target-state]` | heuristic plugin `[target-state]` |
+| **P8 c-factor** | cohort record | - `[target-state]` | metrics topic `[target-state]` | metric store | diversity source | - `[target-state]` | peer prediction | - | replication support `[target-state]` | c-factor plugin `[target-state]` |
+| **P9 Ledger** | paper Engram `[target-state]` | - `[target-state]` | watchdog topic `[target-state]` | ledger store `[target-state]` | paper fingerprint `[target-state]` | claim decay `[target-state]` | lifted claim `[target-state]` | ledger observation `[target-state]` | - `[target-state]` | claim plugin `[target-state]` |
+| **P10 Plugins** | plugin Engram `[target-state]` | plugin events `[target-state]` | plugin topics `[target-state]` | plugin reads `[target-state]` | plugin encoder `[target-state]` | plugin budget `[target-state]` | new heuristic source `[target-state]` | new metric `[target-state]` | new claim `[target-state]` | - `[target-state]` |
 
 Read the matrix as a design test. If a feature does not connect to at least two nodes, it is probably too thin to matter. If it connects to too many nodes without a clear purpose, it is probably too broad to land cleanly.
 
@@ -64,7 +66,7 @@ Read the matrix as a design test. If a feature does not connect to at least two 
 
 ## 3. Ten Named Synergies
 
-This section turns the matrix into concrete mechanisms. Each synergy is a real composition, not a slogan.
+This section turns the matrix into concrete mechanisms. Some are partially live today; others are target-state compositions and should be read that way rather than as already-shipping behavior.
 
 ### 3.1 Demurrage × HDC -> self-trimming semantic memory
 
@@ -131,7 +133,9 @@ The synergy is auditability. Domain-sensitive actions remain inspectable after t
 ## 4. The Seven-Step Loop Across the Matrix
 
 The synergy matrix is not separate from the universal loop. It explains why the same seven-step
-cycle compounds instead of resetting each turn.
+cycle compounds instead of resetting each turn. In current code, the Engram/Substrate/EventBus
+parts of the loop are much more real than the Pulse, demurrage, ledger, and custody portions
+described below.
 
 1. `SENSE` draws from `Substrate` queries, `Bus` subscriptions, and external I/O, then anchors
    those reads in `Engram`, `Pulse`, and `TypedContext`.
@@ -179,7 +183,7 @@ Use the matrix to avoid dead-end features. If a proposal has no durable connecti
 
 ## 7. The Moat Restated
 
-The moat is the matrix itself. P1 through P4 are important, but they are table stakes. P5 through P7 are individually useful, but they have prior art. P8 through P10 become strategically important because they integrate the earlier primitives into a coherent runtime.
+The moat framing here is target-state rather than a claim about the fully shipped system. P1 through P4 are important, but today that mostly means Engram, Substrate, and the live `EventBus<E>` transport. P5 through P7 are individually useful, but they have prior art. P8 through P10 become strategically important only if the planned primitives around them are implemented and integrated into a coherent runtime.
 
 The competitive claim is therefore architectural: a competitor can copy any node, and often a pair, but not the full interaction lattice without committing to the same dependency order and the same cross-cut discipline. That is what makes the system hard to clone.
 
@@ -203,7 +207,7 @@ These non-synergies matter because they keep the architecture honest. Not every 
 
 ## 9. Emergent Properties
 
-Three properties emerge from the composition that do not exist in the same way in any isolated primitive.
+Three properties are meant to emerge from the composition once the planned primitives land. Today, only parts of this section are already true in shipping code.
 
 The first is self-improvement without a separate training pipeline. The runtime predicts, calibrates, and updates through its own Bus-mediated feedback.
 

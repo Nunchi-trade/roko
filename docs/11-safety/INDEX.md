@@ -3,6 +3,8 @@
 > **Abstract:** Safety in Roko is a single spine, not a grab-bag of guards. The safety chapter ties together trait-level authorization, human-in-the-loop checkpoints, per-tier plugin sandboxes, taint propagation, attestation, chain-of-custody, network egress control, secret handling, and multi-tenant isolation so an operator can answer: who did what, with what authorization, on what inputs, and with what consequence?
 >
 > **Alignment:** This chapter reflects [REF32](../../tmp/refinements/32-safety-sandbox-provenance.md). For shared vocabulary, see [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
+>
+> **Shipping status:** `crates/roko-agent/src/safety/` is already the live safety layer. Today the dispatcher uses `SafetyLayer::check_pre_execution()` for rate limiting, warrant checks, bash/git/network/path validation, `check_contract()` for role-scoped `AgentContract` enforcement, and `scrub_output()` for secret redaction. Shipping pieces include `BashPolicy`, `GitPolicy`, `NetworkPolicy`, `PathPolicy`, `ScrubPolicy`, `RateLimiter`, `AgentContract` with `Invariant` and `GovernanceRule`, `AgentWarrant`, and the `Capability` enum. This chapter also describes target-state extensions; those should be read as planned unless the sub-doc says they are shipping.
 
 ---
 
@@ -30,9 +32,9 @@ Recommended companion docs:
 | # | Sub-doc | Description |
 |---|---|---|
 | 00 | [00-defense-in-depth.md](00-defense-in-depth.md) | Canonical safety spine: authorization, isolation, provenance, pre/post checks, checkpoints, egress, secrets, and tenant boundaries |
-| 01 | [01-capability-tokens.md](01-capability-tokens.md) | Type-level capability design and permission tokens |
+| 01 | [01-capability-tokens.md](01-capability-tokens.md) | Shipping warrant/capability enforcement plus target-state type-level capability design |
 | 02 | [02-audit-chain.md](02-audit-chain.md) | Custody records, attestation levels, replay, and exportable audit evidence |
-| 03 | [03-taint-tracking.md](03-taint-tracking.md) | Taint propagation from untrusted inputs through composition, action, persistence, and review |
+| 03 | [03-taint-tracking.md](03-taint-tracking.md) | Shipping provenance taint plus a target-state richer propagation model through composition, action, persistence, and review |
 
 ### Runtime Controls
 
@@ -87,9 +89,9 @@ The rest of the safety chapter deepens those controls for specific attack classe
 
 1. Safety is enforced where the agent cannot wish it away: authorization checks, sandboxes, gates, and Substrate persistence.
 2. High-risk actions must be explainable after the fact through Custody, lineage, taint, and attestation.
-3. Plugin safety is tiered. Trusted native code, declarative tools, and WASM extensions do not share the same trust model.
+3. If and when a plugin system exists, plugin safety should be tiered. Trusted native code, declarative tools, and WASM extensions should not share the same trust model.
 4. Human approval is part of the permission system, not an afterthought. Confirm, allow-once, and escalate are first-class outcomes.
-5. Cross-tenant isolation and secret scrubbing are enforced below the UI so the same guarantees hold in CLI, TUI, web, and automation.
+5. Secret scrubbing is enforced below the UI today. Cross-tenant isolation is target-state deployment hardening that should eventually live below the UI as well.
 
 ---
 

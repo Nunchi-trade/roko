@@ -12,18 +12,29 @@
 
 Taint tracking is the safety spine's answer to a basic question: which inputs are still untrusted?
 
-Roko treats taint as durable metadata, not an informal warning. If a prompt, fetch result, plugin output, or imported Engram influenced the current action, that fact should remain visible until a reviewer explicitly signs off on it. Taint is therefore:
+Roko already ships taint as durable provenance metadata, not an informal warning. Today that is the `Provenance.tainted: bool` field in `roko-core`, with helpers such as `Provenance::external()` and `Provenance::user()` setting it to `true`. This document also sketches a richer target-state taxonomy. If a prompt, fetch result, plugin output, or imported Engram influenced the current action, that fact should remain visible until a reviewer explicitly signs off on it. Taint is therefore:
 
 - attached when data crosses a trust boundary,
 - propagated through composition and action,
 - consulted by gates before high-risk effects,
-- copied into Custody so auditors can reconstruct the risk state at the time.
+- copied into provenance today and, in the target-state audit chain, into Custody so auditors can reconstruct the risk state at the time.
 
 The model is intentionally one-way. Inputs can accumulate taint automatically; they cannot become clean automatically.
 
 ---
 
 ## 1. Taint Taxonomy
+
+> **Shipping note:** Current code ships a single taint bit on `Provenance`:
+>
+> ```rust
+> pub struct Provenance {
+>     pub tainted: bool,
+>     // ...
+> }
+> ```
+>
+> The richer `Taint` enum below is target-state design, not current code.
 
 REF32's baseline taxonomy is narrow on purpose:
 
@@ -74,7 +85,7 @@ This matters because the highest-risk failures often happen one or two hops afte
 | COMPOSE | Preserve taint in prompts, plans, and intermediate context packs. |
 | ACT | Read taint before tool use, network egress, publication, signing, or filesystem writes. |
 | VERIFY | Gates can deny, confirm, or escalate based on taint and target sensitivity. |
-| PERSIST / BROADCAST | Persist taint in Engrams and include it in Custody; publish only to allowed topics and tenants. |
+| PERSIST / BROADCAST | Persist taint in Engrams and, in the target-state audit chain, include it in Custody; publish only to allowed topics and tenants. |
 | REACT | Disable plugins, tighten policies, or open incidents when taint repeatedly reaches blocked destinations. |
 
 Taint is therefore not just an ingestion concern. It is a runtime control plane signal.
@@ -95,7 +106,7 @@ Typical high-risk destinations:
 
 Expected policy behavior:
 
-- benign low-risk actions may continue with taint recorded in Custody,
+- benign low-risk actions may continue with taint recorded in provenance today and, in the target-state audit chain, in Custody,
 - medium-risk actions require a confirm or review checkpoint,
 - high-risk actions with unresolved taint escalate or fail closed.
 
@@ -119,7 +130,7 @@ A value may be:
 The safety spine therefore uses both:
 
 - taint to decide whether an action may proceed,
-- scrubbing and secret types to prevent disclosure in Pulses, logs, or persisted outputs.
+- scrubbing and secret types to prevent disclosure in runtime events, logs, or persisted outputs.
 
 This distinction avoids a common failure mode where secret redaction exists but the system still takes high-risk actions on unreviewed external data.
 
@@ -134,7 +145,7 @@ Taint should not disappear because time passed or because another model summariz
 - when they approved it,
 - and which resulting Engram or action the approval covers.
 
-That review should itself appear in Custody or an attested verdict Engram. Without that durable record, "cleaning" taint is indistinguishable from silently ignoring it.
+That review should itself appear in the target-state Custody chain or another attested verdict Engram. Without that durable record, "cleaning" taint is indistinguishable from silently ignoring it.
 
 ---
 
@@ -163,7 +174,7 @@ Taint only matters if it survives persistence and replay.
 Minimum expectations:
 
 - the Engram's provenance includes taint source information,
-- Custody records note which taint labels were active at the time of action,
+- target-state Custody records note which taint labels were active at the time of action,
 - replay tooling can surface whether the action would still have been blocked under the recorded taint state,
 - exports preserve taint metadata for third-party auditors.
 

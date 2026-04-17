@@ -2,28 +2,41 @@
 
 > **Layer**: L1 Framework (tool authorization), L3 Harness (gate verification)
 >
-> **Crate**: `roko-agent` (current: `ToolPermission` in `roko-core`; target: `Capability<T>`)
+> **Crate**: `roko-agent` (shipping: `AgentWarrant` + `Capability` enum; target: generic `Capability<T>`)
 >
 > **Synapse traits**: `Gate` (verify tool calls against permissions), `Router` (select appropriate capability tier)
 >
 > **Prerequisites**: [00-defense-in-depth.md](00-defense-in-depth.md)
 
 
-> **Implementation**: Specified
+> **Implementation**: Shipping runtime foundation; compile-time capability design is target-state
 
 ---
 
-## The Problem: Runtime Checks Are Fragile
+## Overview
 
-The standard agent safety pattern is: LLM proposes a tool call, a safety hook checks it, blocks if it violates policy. But this is a runtime check. If the safety hook has a bug, if the hook chain is bypassed by an unexpected code path, if a race condition opens a window between the check and the execution — the tool executes anyway.
+Roko already ships capability-style runtime enforcement in `crates/roko-agent/src/safety/capabilities.rs`. The live implementation includes `AgentWarrant`, the `Capability` enum (`Tool`, `ReadPath`, `WritePath`, `Exec`, `Network`), `check_capability()`, and `delegate()`, and `SafetyLayer::check_pre_execution()` uses those warrants before tool dispatch.
+
+This document goes further than the current implementation. The compile-time `Capability<T>` material below is a target-state extension that would sit on top of the existing warrant and permission system rather than replace the fact that runtime checks already exist and work.
+
+---
+
+## The Problem: Runtime Checks Are Necessary but Not Sufficient
+
+The standard agent safety pattern is: LLM proposes a tool call, a safety hook checks it, blocks if it violates policy. Roko already does this with dispatcher permissions, warrants, and `SafetyLayer` checks. The limitation is that this remains a runtime guard. If the safety hook has a bug, if the hook chain is bypassed by an unexpected code path, if a race condition opens a window between the check and the execution, the tool may still execute anyway.
 
 Dennis & Van Horn (1966) established capability-based security: access rights should be unforgeable tokens verified at the type level, not runtime guards. The WASM Component Model (Haas et al., 2017) instantiates this principle for sandboxed execution. The key insight: if the type system prevents the unsafe code from compiling, no runtime bug can bypass the safety check.
 
 ---
 
-## Current Implementation: ToolPermission
+## Current Implementation: Runtime Permissions and Warrants
 
-The current Roko codebase implements capability-based authorization through the `ToolPermission` system in `roko-core`. Every tool definition (`ToolDef`) declares a required permission level, and every execution context (`ToolContext`) carries a set of granted permissions based on the agent's role.
+The current Roko codebase has two shipping layers:
+
+1. `roko-agent/src/safety/capabilities.rs` provides `AgentWarrant` plus the `Capability` enum and checks them during `SafetyLayer::check_pre_execution()`.
+2. `roko-core` provides `ToolPermission` and `ToolPermissions` for coarse-grained per-tool runtime authorization.
+
+Together they already form a working capability and permission system. The rest of this document describes a stricter target-state model.
 
 ### Permission Flags
 
@@ -82,7 +95,7 @@ The deny list is evaluated before the allow list — a tool on both lists is blo
 
 ---
 
-## Three Tool Tiers (Design Target)
+## Three Tool Tiers (Target-State Design)
 
 The target design splits tools into three trust tiers, each with different access requirements enforced by the Rust type system:
 
@@ -151,7 +164,9 @@ pub trait PrivilegedTool: Send + Sync {
 
 ---
 
-## The Capability Token
+## The Capability Token (Target-State)
+
+> **Target-state:** `Capability<T>` does not exist in the codebase today. The shipping runtime model uses `AgentWarrant` plus the non-generic `Capability` enum.
 
 The `Capability<T>` struct is the core of compile-time safety enforcement:
 
@@ -238,7 +253,7 @@ async fn speculate_read(tool: &dyn ReadTool) {
 
 ## Capability Lifecycle Events
 
-Every capability lifecycle event is emitted as an Engram through the audit sink:
+In the target-state design, every capability lifecycle event is emitted as an Engram through the audit sink:
 
 | Event | Description | Engram Kind |
 |-------|-------------|-------------|
@@ -255,14 +270,14 @@ These events form part of the content-addressed audit DAG (see [02-audit-chain.m
 
 ### Currently Implemented
 
-The `ToolPermission` + `ToolPermissions` system in `roko-core` provides runtime capability checking:
+Roko already ships runtime capability enforcement:
 
-- Five permission flags (read, write, exec, git, network)
-- Per-tool permission requirements in `ToolDef`
-- Per-context granted permissions in `ToolContext`
-- `satisfied_by()` check in `ToolDispatcher`
-- Task-level tool filters (allowed_tools, denied_tools)
-- Full audit trail via `AuditSink` signals at every dispatch phase
+- `AgentWarrant` and the `Capability` enum in `roko-agent/src/safety/capabilities.rs`
+- `check_capability()` and `delegate()` for warrant evaluation and narrowing
+- `SafetyLayer::check_pre_execution()` warrant checks before dispatch
+- `ToolPermission` + `ToolPermissions` in `roko-core`
+- Task-level tool filters (`allowed_tools`, `denied_tools`)
+- Audit trail hooks at dispatch time
 
 ### Planned (Tier 2)
 

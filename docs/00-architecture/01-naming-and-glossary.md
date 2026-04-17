@@ -1,9 +1,9 @@
 # Naming and Glossary
 
-> **TL;DR**: This is the canonical vocabulary reference for Roko. The kernel is two mediums
-> (`Engram` and `Pulse`) moving through two fabrics (`Substrate` and `Bus`), acted on by six
-> operators. Use this document when writing docs, code comments, interfaces, or external
-> material. If another document disagrees, this glossary wins.
+> **TL;DR**: This is the canonical vocabulary reference for Roko. It now distinguishes shipping
+> code from target-state design terms with explicit status tags, so docs stop describing planned
+> architecture as if it already exists. Use this document when writing docs, code comments,
+> interfaces, or external material. If another document disagrees, this glossary wins.
 >
 > **First-time readers**: this chapter is an A-Z lookup. Start here when another architecture
 > doc uses a term you do not recognize, then follow the cited home doc for depth.
@@ -17,29 +17,31 @@
 
 ## Current Naming Map
 
-Roko's naming story is now explicit: two mediums, two fabrics, six operators, five layers,
-three speeds, and three cross-cuts. Use the following canonical forms:
+Roko's naming story now mixes shipping terminology with target-state terms introduced by the
+refinement series. Use the following map to distinguish what is already in the codebase from what
+is still planned.
 
-| Canonical term | Use | Avoid |
-|---|---|---|
-| `Roko` | Project and framework name | `Bardo` / `Mori` (retired) |
-| `Agent` | Running process or session | `Golem` (retired) |
-| `Engram` | Durable record medium | `Signal` (retired durable term) |
-| `Pulse` | Ephemeral transport medium | `Event`, `Envelope`, `Message`, `Signal` (retired wire terms) |
-| `Substrate` | Storage fabric | legacy storage-only synonyms |
-| `Bus` | Transport fabric | `EventBus<E>` (deprecated trait name) |
-| `Topic` | Pulse routing handle | `Channel`, `Subject` |
-| `TopicFilter` | Subscription matcher | ad hoc routing filters |
-| `Datum` | Polymorphic `Engram` or `Pulse` input | one-off sum types |
-| `PulseSource` | Lightweight Pulse origin attribution | overloaded provenance terms |
-| `Neuro` | Durable knowledge cross-cut | `Grimoire` (retired) |
-| `Daimon` | Affect cross-cut | old loop-step framing for affect |
-| `Dreams` | Delta-speed consolidation cross-cut | treating Dreams as a loop step |
-| `Mesh` | Agent-network layer | `Styx` (retired) |
-| `Fleet` | Agent roster | `Clade` (retired) |
-| `StateHub` | Projection layer over Bus + Substrate | TUI-only framing |
-| `TypedContext` | Structured domain situation payload | free-text-only context matching |
-| `Custody` | Chain-of-custody audit record | informal approval prose |
+| Canonical term | Status | Use | Avoid |
+|---|---|---|---|
+| `Roko` | `[shipping]` | Project and framework name | `Bardo` / `Mori` (retired) |
+| `Agent` | `[shipping]` | Running process or session | `Golem` (retired) |
+| `Engram` | `[shipping]` | Durable record medium | `Signal` (retired durable term) |
+| `Pulse` | `[planned]` | Target-state ephemeral transport medium | `Event`, `Envelope`, `Message`, `Signal` (retired wire terms) |
+| `Substrate` | `[shipping]` | Storage fabric | legacy storage-only synonyms |
+| `EventBus<E>` | `[shipping]` | Current live transport implementation | calling it retired |
+| `Bus` | `[planned]` | Target-state transport fabric abstraction | presenting it as already shipped |
+| `Topic` | `[planned]` | Target-state Pulse routing handle | `Channel`, `Subject` |
+| `TopicFilter` | `[planned]` | Target-state subscription matcher | ad hoc routing filters |
+| `Datum` | `[planned]` | Target-state polymorphic `Engram` or `Pulse` input | one-off sum types |
+| `PulseSource` | `[planned]` | Target-state lightweight Pulse origin attribution | overloaded provenance terms |
+| `Neuro` | `[shipping]` | Durable knowledge cross-cut | `Grimoire` (retired) |
+| `Daimon` | `[built]` | Affect cross-cut | old loop-step framing for affect |
+| `Dreams` | `[built]` | Delta-speed consolidation cross-cut | treating Dreams as a loop step |
+| `Mesh` | `[planned]` | Agent-network layer | `Styx` (retired) |
+| `Fleet` | `[planned]` | Agent roster | `Clade` (retired) |
+| `StateHub` | `[built]` | Current dashboard/event hub; target-state projection layer over Bus + Substrate | TUI-only framing |
+| `TypedContext` | `[planned]` | Structured domain situation payload | free-text-only context matching |
+| `Custody` | `[planned]` | Chain-of-custody audit record | informal approval prose |
 
 See also [07-naming](../../tmp/refinements/07-naming.md),
 [02-engram-vs-pulse](../../tmp/refinements/02-engram-vs-pulse.md),
@@ -50,6 +52,11 @@ See also [07-naming](../../tmp/refinements/07-naming.md),
 
 - Terms in **bold** at the start of each entry are the canonical form.
 - `Code terms` stay in backticks.
+- Status tags use four labels:
+  - `[shipping]` = working type, module, or behavior in the current codebase.
+  - `[built]` = code exists, but the glossary term overstates how fully it is wired.
+  - `[planned]` = target-state design term with no corresponding shipped type or runtime path yet.
+  - `[retired]` = historical term deliberately replaced by newer vocabulary.
 - Each entry cites a home doc. Refinement proposals use bare filenames in the label and a link
   to `tmp/refinements/...`; canonical architecture chapters use normal doc links.
 - `(historical)` marks a retired or legacy term that may still appear in old docs or code.
@@ -84,18 +91,21 @@ heuristic, plan, or diff. Home: [30-rich-ux-primitives](../../tmp/refinements/30
 **ASSESS** — Step 2 of the seven-step loop: joint `Scorer` and `Router` pass that chooses the
 next action and records confidence. Home: [05-loop-retold](../../tmp/refinements/05-loop-retold.md).
 
-**Attestation** — Cryptographic signature over an Engram `ContentHash`. Levels include
-`LocalAgent`, `OrgRole`, and `ChainWitness`. Home:
+**Attestation** [built] — Cryptographic signature over an Engram `ContentHash`. The shipped code
+already has `Attestation`, `ChainAttestation`, and sign/verify support; the level taxonomy
+(`LocalAgent`, `OrgRole`, `ChainWitness`) is target-state. Home:
 [32-safety-sandbox-provenance](../../tmp/refinements/32-safety-sandbox-provenance.md) and
 [Provenance and Attestation](./05-provenance-and-attestation.md).
 
-**Authorization** — The `authorize(principal, action, target, ctx)` decision boundary in the
-safety spine. Produces `Allow`, `Confirm`, `Once`, `Deny`, or `Escalate`. Home:
+**Authorization** [built] — The current shipping safety layer authorizes actions through
+`SafetyLayer::check_pre_execution()`, `AgentContract`, and `AgentWarrant`. The
+`authorize(principal, action, target, ctx)` signature is target-state shorthand for that decision
+boundary. Home:
 [32-safety-sandbox-provenance](../../tmp/refinements/32-safety-sandbox-provenance.md).
 
 ## B
 
-**Balance** *(new)* — An Engram's demurrage-taxed attention credit. Starts at `1.0`, decays over
+**Balance** [planned] *(new)* — An Engram's demurrage-taxed attention credit. Starts at `1.0`, decays over
 time, and is restored by reinforcement. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md) and
 [Attention as Universal Cognitive Currency](./25-attention-as-currency.md).
@@ -107,63 +117,63 @@ Bus. Home: [05-loop-retold](../../tmp/refinements/05-loop-retold.md).
 identity. Home: [02-engram-vs-pulse](../../tmp/refinements/02-engram-vs-pulse.md) and
 [Engram Data Type](./02-engram-data-type.md).
 
-**Bus** *(promoted)* — Kernel transport trait for Pulses; sibling to `Substrate`. It owns
-publish, subscribe, replay, and ordered delivery semantics. Home:
+**Bus** [planned] *(promoted)* — Target-state kernel transport trait for Pulses; sibling to
+`Substrate`. The current live transport code is `EventBus<E>` in `roko-runtime`. Home:
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md) and
 [Bus Transport Fabric](./07b-bus-transport-fabric.md).
 
-**`BusReceiver`** *(new)* — Handle returned by `Bus::subscribe`; yields matching Pulses in
+**`BusReceiver`** [planned] *(new)* — Handle returned by `Bus::subscribe`; yields matching Pulses in
 publish order. Home: [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md).
 
-**BroadcastBus** *(new)* — Default in-process Bus backend wrapping
+**BroadcastBus** [planned] *(new)* — Default in-process Bus backend wrapping
 `tokio::sync::broadcast`. Home: [08-code-sketches](../../tmp/refinements/08-code-sketches.md).
 
 ## C
 
-**c-factor** — Collective-intelligence factor computed continuously from Bus and Substrate
+**c-factor** [built] — Collective-intelligence factor computed continuously from Bus and Substrate
 statistics for agent cohorts. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md) and
 [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md).
 
-**Calibrator** — Policy that updates a Heuristic's `Calibration` after observing predictions
+**Calibrator** [planned] — Policy that updates a Heuristic's `Calibration` after observing predictions
 versus outcomes. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md) and
 [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md).
 
-**Calibration** — Per-heuristic, per-claim, or per-operator record of trials, confirmations,
+**Calibration** [planned] — Per-heuristic, per-claim, or per-operator record of trials, confirmations,
 violations, Brier score, and Wilson confidence interval. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md).
 
 **CascadeRouter** — Existing bandit-based model router that picks a model per turn. Home:
 [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md).
 
-**ChainBus** *(Phase 2+)* — Bus backend that maps chain event logs into `chain.*` topics. Home:
+**ChainBus** [planned] *(Phase 2+)* — Bus backend that maps chain event logs into `chain.*` topics. Home:
 [09-phase-2-implications](../../tmp/refinements/09-phase-2-implications.md).
 
-**ChainSubstrate** — Substrate backend that persists attestations and durable insights on-chain.
+**ChainSubstrate** [planned] — Substrate backend that persists attestations and durable insights on-chain.
 Phase 2+. Home: [09-phase-2-implications](../../tmp/refinements/09-phase-2-implications.md).
 
 **Chain witness** — Cryptographic witness over an Engram committed to a blockchain for
 cross-deployment trust. Home:
 [32-safety-sandbox-provenance](../../tmp/refinements/32-safety-sandbox-provenance.md).
 
-**Claim** *(new)* — Structured hypothesis distilled from a `Paper` Engram, including falsifier,
+**Claim** [planned] *(new)* — Structured hypothesis distilled from a `Paper` Engram, including falsifier,
 context, effect size, and calibration. Home:
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
-**`claim!` macro** — Build-time macro resolving a `ClaimId` into a runtime parameter that checks
+**`claim!` macro** [planned] — Build-time macro resolving a `ClaimId` into a runtime parameter that checks
 against the replication ledger. Home:
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
-**Cohort** — Set of agents working on a related task and measured together for c-factor. Home:
+**Cohort** [planned] — Set of agents working on a related task and measured together for c-factor. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md).
 
-**Cold tier** — Substrate region for Engrams whose balance has reached the demurrage floor.
+**Cold tier** [planned] — Substrate region for Engrams whose balance has reached the demurrage floor.
 Content remains resolvable but moves to slower storage. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md) and
 [Decay Variants](./04-decay-variants.md).
 
-**Commons** — Cross-deployment pool of empirically validated heuristics. Home:
+**Commons** [planned] — Cross-deployment pool of empirically validated heuristics. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md) and
 [18-competitive-moat](../../tmp/refinements/18-competitive-moat.md).
 
@@ -182,11 +192,11 @@ often via HDC similarity. Home:
 **ContentHash** — `BLAKE3(kind, body, author, tags)` identifier for an Engram. Home:
 [Engram Data Type](./02-engram-data-type.md).
 
-**Context** — Existing sidecar state passed to operators today; `TypedContext` is the newer,
+**Context** [shipping] — Existing sidecar state passed to operators today; `TypedContext` is the newer,
 structured domain-specific form. Home:
 [25-domain-specific-agents](../../tmp/refinements/25-domain-specific-agents.md).
 
-**Custody** *(new)* — Chain-of-custody record for auditable actions: who approved them, why,
+**Custody** [planned] *(new)* — Chain-of-custody record for auditable actions: who approved them, why,
 what simulation ran, what result occurred, and what witness exists. Home:
 [25-domain-specific-agents](../../tmp/refinements/25-domain-specific-agents.md) and
 [32-safety-sandbox-provenance](../../tmp/refinements/32-safety-sandbox-provenance.md).
@@ -196,7 +206,7 @@ what simulation ran, what result occurred, and what witness exists. Home:
 **Daimon** — Affect cross-cut that maintains PAD state, biases `Scorer`, and gates actions.
 Home: [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md).
 
-**`Datum`** *(new)* — `enum Datum<'a> { Engram(&'a Engram), Pulse(&'a Pulse) }` used by
+**`Datum`** [planned] *(new)* — `enum Datum<'a> { Engram(&'a Engram), Pulse(&'a Pulse) }` used by
 polymorphic operators. Home:
 [04-operators-generalized](../../tmp/refinements/04-operators-generalized.md) and
 [08-code-sketches](../../tmp/refinements/08-code-sketches.md).
@@ -212,7 +222,7 @@ Home: [Three Cognitive Speeds](./10-three-cognitive-speeds.md).
 [26-statehub-rearchitecture](../../tmp/refinements/26-statehub-rearchitecture.md) and
 [StateHub Projection Layer](../12-interfaces/22-statehub-projection-layer.md).
 
-**Demurrage** *(new)* — Economic memory rule that taxes idle Engram balance over time and
+**Demurrage** [planned] *(new)* — Economic memory rule that taxes idle Engram balance over time and
 restores weight through reinforcement. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md) and
 [Attention as Universal Cognitive Currency](./25-attention-as-currency.md).
@@ -252,8 +262,9 @@ and verdicts. Home: [05-learning/INDEX](../05-learning/INDEX.md).
 Colloquial prose may still use it for "something that happened," but not as the canonical type
 name. Home: [07-naming](../../tmp/refinements/07-naming.md).
 
-**EventBus** *(historical)* — Older generic broadcast channel abstraction. Retired in favor of
-the `Bus` trait plus `Pulse` payloads. Home:
+**EventBus** [shipping] — Current live generic broadcast-channel transport abstraction in
+`roko-runtime/src/event_bus.rs`. Target-state work may evolve this into a kernel `Bus` trait with
+`Pulse` payloads, but `EventBus<E>` is the transport code that ships today. Home:
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md).
 
 ## F
@@ -262,17 +273,18 @@ the `Bus` trait plus `Pulse` payloads. Home:
 `Bus` for transport. Home:
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md).
 
-**Falsifier** — Predicate attached to a `Claim` or `Heuristic` that specifies what observable
+**Falsifier** [planned] — Predicate attached to a `Claim` or `Heuristic` that specifies what observable
 would refute it. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md) and
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
-**Fingerprint** *(new)* — `HDC fingerprint` attached to every Engram for similarity queries,
-clustering, consensus, and analogy. Home:
+**Fingerprint** [built] *(new)* — `HDC fingerprint` attached to Engrams or related records for
+similarity queries, clustering, consensus, and analogy. `HdcVector` exists today, but it is not
+attached to every Engram on write. Home:
 [11-hyperdimensional-substrate](../../tmp/refinements/11-hyperdimensional-substrate.md) and
 [Engram Data Type](./02-engram-data-type.md).
 
-**Fleet** — Deployment-scoped roster of agents. Formerly `Clade`. Home:
+**Fleet** [planned] — Deployment-scoped roster of agents. Formerly `Clade`. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md).
 
 ## G
@@ -290,7 +302,7 @@ Home: [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-
 
 **Golem** *(historical)* — Retired old name for `Agent`.
 
-**Graduation** *(new)* — Converting a `Pulse` into an `Engram` when durable lineage and audit
+**Graduation** [planned] *(new)* — Converting a `Pulse` into an `Engram` when durable lineage and audit
 matter. Home:
 [02-engram-vs-pulse](../../tmp/refinements/02-engram-vs-pulse.md) and
 [08-code-sketches](../../tmp/refinements/08-code-sketches.md).
@@ -314,8 +326,9 @@ and consensus operations. Home:
 [09-phase-2-implications](../../tmp/refinements/09-phase-2-implications.md) and
 [16-heartbeat/INDEX](../16-heartbeat/INDEX.md).
 
-**Heuristic** *(new)* — First-class Engram variant encoding preconditions, prediction,
-calibration, lineage, and receipts. Home:
+**Heuristic** [built] *(new)* — First-class learning rule or heuristic record. The shipped code
+has `HeuristicRule` and related learning logic, but not the full Engram variant described here.
+Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md).
 
 **Holographic** — HDC property where partial information still retrieves the whole and damage
@@ -371,7 +384,7 @@ Home: [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning
 umbrella term. Home:
 [09-phase-2-implications](../../tmp/refinements/09-phase-2-implications.md).
 
-**MultiBus** *(new)* — Bus backend composing multiple backends behind one interface. Home:
+**MultiBus** [planned] *(new)* — Bus backend composing multiple backends behind one interface. Home:
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md).
 
 ## N
@@ -381,7 +394,7 @@ Formerly `Grimoire`. Home:
 [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md) and
 [06-neuro/INDEX](../06-neuro/INDEX.md).
 
-**Novelty** — `1 - max(similarity)` over top-K HDC neighbors; used by demurrage reinforcement to
+**Novelty** [planned] — `1 - max(similarity)` over top-K HDC neighbors; used by demurrage reinforcement to
 reward uniqueness as well as reuse. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md).
 
@@ -394,7 +407,7 @@ Home: [04-operators-generalized](../../tmp/refinements/04-operators-generalized.
 **Orchestrator** — Layer-4 subsystem that runs plans, dispatches tasks, and enforces merge
 queues. Home: [01-orchestration/INDEX](../01-orchestration/INDEX.md).
 
-**Outcome Pulse** *(new)* — Pulse on an `outcome.*` topic that closes the loop on a prior
+**Outcome Pulse** [planned] *(new)* — Pulse on an `outcome.*` topic that closes the loop on a prior
 prediction Pulse. Home:
 [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md).
 
@@ -403,7 +416,7 @@ prediction Pulse. Home:
 **PAD vector** — Pleasure-Arousal-Dominance affective state maintained by `Daimon`. Home:
 [09-daimon/INDEX](../09-daimon/INDEX.md).
 
-**Paper** *(new)* — Engram kind representing an academic paper together with DOI, authors,
+**Paper** [planned] *(new)* — Engram kind representing an academic paper together with DOI, authors,
 abstract, fingerprint, and extracted claims. Home:
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
@@ -419,7 +432,7 @@ abstract, fingerprint, and extracted claims. Home:
 **Playbook** — Engram kind storing a distilled reusable action sequence. Home:
 [05-learning/INDEX](../05-learning/INDEX.md).
 
-**Plugin** — Third-party extension package. Tiers span prompts, profiles, manifests, native,
+**Plugin** [planned] — Third-party extension package. Tiers span prompts, profiles, manifests, native,
 and WASM. Home:
 [17-plugin-extension-architecture](../../tmp/refinements/17-plugin-extension-architecture.md).
 
@@ -428,10 +441,10 @@ Engrams. Home:
 [04-operators-generalized](../../tmp/refinements/04-operators-generalized.md) and
 [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md).
 
-**`PolicyOutputs`** *(new)* — Return type of `Policy::decide` containing `{ pulses, engrams }`.
+**`PolicyOutputs`** [planned] *(new)* — Return type of `Policy::decide` containing `{ pulses, engrams }`.
 Home: [04-operators-generalized](../../tmp/refinements/04-operators-generalized.md).
 
-**Prediction Pulse** *(new)* — Pulse on a `prediction.*` topic emitted when an operator makes a
+**Prediction Pulse** [planned] *(new)* — Pulse on a `prediction.*` topic emitted when an operator makes a
 decision that should later be checked against reality. Home:
 [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md).
 
@@ -441,8 +454,9 @@ directory. Home: [12-interfaces/INDEX](../12-interfaces/INDEX.md).
 **Principal** — User, agent, or plugin subject to an authorization decision. Home:
 [32-safety-sandbox-provenance](../../tmp/refinements/32-safety-sandbox-provenance.md).
 
-**Projection** *(new)* — Named, typed, live-updating view on Bus and Substrate with `State`,
-`Delta`, and a fold function. Home:
+**Projection** [planned] *(new)* — Named, typed, live-updating view on Bus and Substrate with
+`State`, `Delta`, and a fold function. The current `StateHub` exists, but this typed projection
+model is still target-state. Home:
 [26-statehub-rearchitecture](../../tmp/refinements/26-statehub-rearchitecture.md) and
 [StateHub Projection Layer](../12-interfaces/22-statehub-projection-layer.md).
 
@@ -455,17 +469,18 @@ bundle customizes agent behavior instead. Home:
 **Provenance** — Full author, trust, taint, and attestation record on an Engram. Home:
 [Provenance and Attestation](./05-provenance-and-attestation.md).
 
-**Pulse** *(new)* — Roko's ephemeral medium: typed, sequence-numbered, topic-addressed,
-ring-buffered, and not persisted by default. Lives on a `Bus` and may graduate to an Engram.
+**Pulse** [planned] *(new)* — Target-state ephemeral medium: typed, sequence-numbered,
+topic-addressed, ring-buffered, and not persisted by default. Lives on a `Bus` and may graduate
+to an Engram.
 Home: [02-engram-vs-pulse](../../tmp/refinements/02-engram-vs-pulse.md).
 
-**`PulseSource`** *(new)* — Lightweight origin attribution on every Pulse, usually
+**`PulseSource`** [planned] *(new)* — Lightweight origin attribution on every Pulse, usually
 `{ component, agent_id }`. Home:
 [08-code-sketches](../../tmp/refinements/08-code-sketches.md).
 
 ## Q
 
-**`query_similar`** *(new)* — Substrate method that returns Engrams within an HDC radius of a
+**`query_similar`** [planned] *(new)* — Substrate method that returns Engrams within an HDC radius of a
 query fingerprint. Home:
 [11-hyperdimensional-substrate](../../tmp/refinements/11-hyperdimensional-substrate.md) and
 [Substrate Trait](./07-substrate-trait.md).
@@ -475,15 +490,15 @@ query fingerprint. Home:
 **REACT** — Step 7 of the seven-step loop: `Policy::decide` emits follow-on Pulses and Engrams.
 Home: [05-loop-retold](../../tmp/refinements/05-loop-retold.md).
 
-**Reinforcement** *(new)* — Bonus applied to an Engram's balance when it is cited, retrieved,
+**Reinforcement** [planned] *(new)* — Bonus applied to an Engram's balance when it is cited, retrieved,
 gated, surprising, or agent-quoted. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md).
 
-**`ReinforceKind`** *(new)* — Enum of reinforcement causes such as `Cited`, `Retrieved`,
+**`ReinforceKind`** [planned] *(new)* — Enum of reinforcement causes such as `Cited`, `Retrieved`,
 `Gated`, `Surprised`, and `AgentQuoted`. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md).
 
-**Replication ledger** *(new)* — Per-claim record of paper-reported effect versus observed
+**Replication ledger** [planned] *(new)* — Per-claim record of paper-reported effect versus observed
 effect, confidence interval, and replication status. Home:
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
@@ -526,8 +541,9 @@ Home:
 Engrams and `mesh.pheromone.*` Pulses. Home:
 [09-phase-2-implications](../../tmp/refinements/09-phase-2-implications.md).
 
-**StateHub** *(promoted)* — Kernel projection layer that folds Bus Pulses and Substrate state
-into typed, filterable, replayable consumer views. Home:
+**StateHub** [built] *(promoted)* — Current dashboard/event hub that can broadcast state updates.
+The typed, filterable projection layer described here is target-state rather than fully wired
+today. Home:
 [26-statehub-rearchitecture](../../tmp/refinements/26-statehub-rearchitecture.md) and
 [StateHub Projection Layer](../12-interfaces/22-statehub-projection-layer.md).
 
@@ -542,21 +558,22 @@ into typed, filterable, replayable consumer views. Home:
 
 ## T
 
-**Taint** — Metadata indicating untrusted input origin that propagates through derived Engrams
-until explicit review or approval. Home:
+**Taint** [built] — Metadata indicating untrusted input origin that propagates through derived
+Engrams until explicit review or approval. The current code ships `Provenance.tainted: bool`; the
+richer enum described in the refinements is target-state. Home:
 [32-safety-sandbox-provenance](../../tmp/refinements/32-safety-sandbox-provenance.md) and
 [Cognitive Immune System](./26-cognitive-immune-system.md).
 
 **Theta** — Middle cognitive speed, usually plan-level cadence. Home:
 [Three Cognitive Speeds](./10-three-cognitive-speeds.md).
 
-**Topic** *(new)* — Routing handle for Pulses. Dot-separated lowercase strings such as
+**Topic** [planned] *(new)* — Routing handle for Pulses. Dot-separated lowercase strings such as
 `gate.verdict.emitted`. Home:
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md),
 [07-naming](../../tmp/refinements/07-naming.md), and
 [Bus Transport Fabric](./07b-bus-transport-fabric.md).
 
-**`TopicFilter`** *(new)* — Declarative subscription matcher with variants such as `Exact`,
+**`TopicFilter`** [planned] *(new)* — Declarative subscription matcher with variants such as `Exact`,
 `Glob`, `AnyOf`, `All`, `And`, `Or`, and `Not`. Home:
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md) and
 [Bus Transport Fabric](./07b-bus-transport-fabric.md).
@@ -565,7 +582,7 @@ until explicit review or approval. Home:
 and c-factor analysis. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md).
 
-**TypedContext** *(new)* — Structured domain situation data, usually
+**TypedContext** [planned] *(new)* — Structured domain situation data, usually
 `{ domain, fields: BTreeMap<Key, Value> }`, so gates and heuristics match on typed predicates
 instead of free text. Home:
 [25-domain-specific-agents](../../tmp/refinements/25-domain-specific-agents.md).
@@ -592,18 +609,18 @@ window and emits a verdict. Home: [05-loop-retold](../../tmp/refinements/05-loop
 
 ## W
 
-**Watchdog** — Policy subscribed to a Claim's falsifier predicate across episodes so the
+**Watchdog** [planned] — Policy subscribed to a Claim's falsifier predicate across episodes so the
 replication ledger updates automatically. Home:
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
-**Wilson CI** — Wilson score interval used as a confidence bound in calibration. Home:
+**Wilson CI** [planned] — Wilson score interval used as a confidence bound in calibration. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md).
 
 **WisdomGate** — Gate enforcing Surowiecki's four conditions before a consensus Engram is
 finalized. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md).
 
-**Worldview** *(new)* — Co-citation cluster of mutually supporting heuristics that dominates a
+**Worldview** [planned] *(new)* — Co-citation cluster of mutually supporting heuristics that dominates a
 domain-fingerprinted region of situations. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md).
 
@@ -620,7 +637,6 @@ formerly-marked contexts.
 |---|---|---|
 | `Signal` (retired durable term) | `Engram` | Durable-record rename already landed |
 | `Signal` (retired ephemeral candidate) | `Pulse` | Do not reuse `Signal` for the wire medium |
-| `EventBus<E>` (deprecated trait name) | `Bus` trait + `Pulse` | Generic transport name is no longer canonical |
 | `Envelope<E>` (historical wrapper name) | `Pulse` | Internal wrapper name leaked into architecture prose |
 | `Message` (retired wire term) | `Pulse` for transport, `ChatMessage` for LLM transcripts | `Message` is overloaded |
 | `Event` (retired wire term) | `Pulse` | Too generic and collides with framework vocabulary |
@@ -631,6 +647,10 @@ formerly-marked contexts.
 | `Clade` (retired roster term) | `Fleet` | `Fleet` is the conventional roster term |
 | `Signal = Engram` disclaimer (retired) | remove the disclaimer | `Engram` and `Pulse` are distinct mediums |
 | retired lifecycle framing like `mortal`, `death`, or `reincarnation` | remove the framing | Use custody, export/import, resource, or budget language instead |
+
+`EventBus<E>` is intentionally not in the retired table. It is the live transport implementation in
+the codebase today. Use `EventBus<E>` when referring to current code and `Bus` only when discussing
+the target-state abstraction proposed by the refinement docs.
 
 ## Terms Deliberately Not Defined Here
 

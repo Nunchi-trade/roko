@@ -9,6 +9,8 @@
 
 > **Implementation**: Planned
 
+> **Team calibration note:** This roadmap was originally drafted as a 5-7 engineer program. The actual project shape is 1 developer + AI agents, so the quarter labels below should be read as full-team estimates, simultaneous workstreams should be reduced, and elapsed timelines will stretch accordingly.
+
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
 **Prerequisites**: [Refactor Plan Phases](./33-refactor-plan-phases.md), [Synergy & Integration Map](./34-synergy-integration-map.md), [Implementation Readiness Audit](./31-implementation-readiness-audit.md)
@@ -26,7 +28,7 @@ UX parity. This chapter makes that order explicit.
 The roadmap is therefore not a second design document. It is the canonical dependency and
 delivery view over the existing design. It keeps the architecture honest by stating which work is
 critical path, which tracks can run in parallel, which risks deserve isolated budget, and what a
-user should be able to see at the end of each quarter.
+user should be able to see at the end of each quarter on a full-team schedule.
 
 See also [tmp/refinements/35-consolidated-roadmap.md](../../tmp/refinements/35-consolidated-roadmap.md)
 for the full proposal, [Naming and Glossary](./01-naming-and-glossary.md) for canonical
@@ -93,7 +95,10 @@ The highest-value edges from the dependency graph can be read as one compact lad
 
 ## 3. Quarter-by-Quarter Roadmap
 
-### 3.1 Q1 - Foundation
+The quarter framing below is a full-team estimate. For 1 developer + AI agents, use the same
+dependency order but expect fewer concurrent tracks and a longer wall-clock timeline.
+
+### 3.1 Q1 - Foundation (full-team estimate)
 
 **Headline:** the two-medium kernel becomes the canonical runtime story and existing subsystems
 start migrating away from ad hoc transport surfaces.
@@ -110,7 +115,7 @@ start migrating away from ad hoc transport surfaces.
 **Quarter demo:** a self-hosting plan flow runs on the new kernel vocabulary and no longer
 depends on scattered local publication types.
 
-### 3.2 Q2 - Learning Substrate
+### 3.2 Q2 - Learning Substrate (full-team estimate)
 
 **Headline:** durable memory becomes semantically indexed and economically shaped while the
 runtime starts learning from prediction and falsification loops.
@@ -128,7 +133,7 @@ runtime starts learning from prediction and falsification loops.
 **Quarter demo:** calibrated heuristics are visible in the product, HDC-backed retrieval is live,
 and c-factor can be inspected during a multi-agent run.
 
-### 3.3 Q3 - Ecosystem and UX
+### 3.3 Q3 - Ecosystem and UX (full-team estimate)
 
 **Headline:** the runtime becomes externally legible and extensible: plugin SPI, StateHub
 projection, stable realtime transport, and first-party UX surfaces all converge.
@@ -146,7 +151,7 @@ projection, stable realtime transport, and first-party UX surfaces all converge.
 **Quarter demo:** a third party installs a plugin and sees the same runtime surface reflected in
 CLI, TUI, and web clients via one shared projection and transport contract.
 
-### 3.4 Q4 - Scale, Safety, and Domains
+### 3.4 Q4 - Scale, Safety, and Domains (full-team estimate)
 
 **Headline:** Roko becomes domain-shaped, auditable, and multi-tenant enough for serious team use.
 
@@ -163,7 +168,7 @@ CLI, TUI, and web clients via one shared projection and transport contract.
 **Quarter demo:** a team selects a domain profile, runs an auditable plan with custody records,
 and watches c-factor, cost, and safety surfaces update in real time.
 
-### 3.5 Q5-Q6 - Phase 2 Optionality
+### 3.5 Q5-Q6 - Phase 2 Optionality (full-team estimate)
 
 Q5 and Q6 are not required for the architecture to stand. They are where the Phase-2 backends and
 long-horizon compounding layers become worth landing.
@@ -181,8 +186,9 @@ even if Q5-Q6 slips.
 
 ## 4. Parallel Tracks and Team Shape
 
-The roadmap assumes a small team can run independent tracks once the Q1 kernel work stops being a
-blocker.
+The roadmap's quarter framing assumes a small team can run independent tracks once the Q1 kernel
+work stops being a blocker. In the actual 1 developer + AI agents setup, many of these tracks
+serialize rather than running in parallel.
 
 | Role | Primary ownership |
 |---|---|
@@ -194,10 +200,11 @@ blocker.
 
 The team can be smaller, but the sequencing penalty is clear: with fewer than five focused owners,
 reduce the number of domain profiles and push some Q4 work by one quarter rather than overloading
-Q2 and Q3.
+Q2 and Q3. With 1 developer + AI agents, that reduction is the default operating assumption.
 
 A comfortable Q1-Q4 plan is therefore roughly a 5-7 engineer program over 6-12 months, with the
-extra range driven mostly by how many Q3 and Q4 tracks can truly run in parallel.
+extra range driven mostly by how many Q3 and Q4 tracks can truly run in parallel. For the actual
+team shape, treat that as a calibration reference rather than a promised calendar.
 
 ---
 
@@ -269,7 +276,7 @@ preempt the critical path described above.
 
 ## 8. One-Year Outcome
 
-If Q1 through Q4 land in order, the resulting one-year story is coherent:
+If Q1 through Q4 land in order on a full-team schedule, the resulting one-year story is coherent:
 
 1. The kernel speaks one transport and storage language: `Engram`, `Pulse`, `Substrate`, `Bus`,
    `Topic`, `TopicFilter`, `Datum`, and `PulseSource`.

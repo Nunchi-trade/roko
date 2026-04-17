@@ -28,9 +28,13 @@ The three concerns are distinct but intentionally stitched together:
 
 This chapter uses "defense in depth" literally: no single guard is assumed sufficient. An action that matters should be subject to authorization, pre-call validation, post-call verification, taint-aware policy, and durable audit evidence.
 
+> **Shipping today:** The current implementation lives in `crates/roko-agent/src/safety/`. `SafetyLayer::check_pre_execution()` enforces role tool allowlists, `RateLimiter`, `AgentWarrant` capability checks, `BashPolicy`, `GitPolicy`, `NetworkPolicy`, and `PathPolicy`. The dispatcher then runs `check_contract()` for `AgentContract` invariants and governance rules, and `scrub_output()` applies `ScrubPolicy` after execution. The unified `authorize(principal, action, target, ctx)` API described below is a target-state design for consolidating those shipping controls, not a claim that this exact API already exists.
+
 ---
 
 ## 1. Shared Permission Vocabulary
+
+> **Note:** The current implementation does not expose a single `authorize(principal, action, target, ctx)` entrypoint. It uses `SafetyLayer::check_pre_execution()` plus `check_contract()` in the dispatcher. The tuple below is the target-state API shape that would replace or wrap the current chain.
 
 Every permission-gated action is evaluated against the same tuple:
 
@@ -108,7 +112,7 @@ Pre/post enforcement also provides the bridge between isolation and provenance:
 
 - The pre-call gate records what was authorized.
 - The post-call gate records what actually occurred.
-- `02-audit-chain.md` stores the result as queryable Custody.
+- `02-audit-chain.md` describes the target-state Custody layer that would store the result as queryable audit evidence.
 
 ---
 
@@ -123,7 +127,7 @@ The safety spine is not a separate loop. It cuts through the existing seven step
 | COMPOSE | Preserve taint in composed prompts and include only context allowed for the principal and tenant. |
 | ACT | Enforce pre-call checks, sandbox limits, egress policy, and checkpoint requirements. |
 | VERIFY | Run gate verdicts, attach review outcomes, and decide whether the result can persist or broadcast. |
-| PERSIST / BROADCAST | Persist Engrams and Custody records in Substrate; publish Pulses only on allowed topics and namespaces. |
+| PERSIST / BROADCAST | Persist Engrams and, in the target-state audit chain, Custody records in Substrate; publish runtime events only on allowed topics and namespaces. |
 | REACT | Tighten permissions, disable plugins, or open incidents in response to verdicts, violations, or tainted outputs. |
 
 Safety therefore lives at the point of action and in the after-action consequences, not only at the end of the turn.
@@ -141,20 +145,20 @@ All outbound network traffic should cross one egress shim. The shim evaluates:
 - Whether the request leaves the current tenant or compliance boundary.
 - Whether the action should produce a review checkpoint because it transmits user-controlled or tainted content.
 
-Every outbound request should also emit a safety Pulse so dashboards and replay tools can answer who accessed which endpoint and when.
+Every outbound request should also emit a durable safety record so dashboards and replay tools can answer who accessed which endpoint and when. Today that means existing logs, audit output, and provenance-linked records rather than a dedicated `Pulse` type.
 
 ### Secrets
 
 Secrets are not ordinary strings. The safety model assumes:
 
 - Secret-typed values render as redacted in logs and UI surfaces.
-- Substrate persistence and Bus publication scrub secret fields before emission.
-- Plugins do not receive secrets unless their tier and manifest explicitly allow it and an operator approved that scope.
+- Tool outputs, logs, and persisted artifacts should scrub secret fields before emission. Today the shipping control is `ScrubPolicy` on tool output.
+- When a plugin system exists, plugins should not receive secrets unless their tier and manifest explicitly allow it and an operator approved that scope.
 - Secret access itself is auditable.
 
 ### Multi-tenancy
 
-Multi-tenant deployments cannot rely on the UI to separate data. Namespace separation belongs in Substrate keys, Bus topics, plugin scope, and authorization decisions. A tenant-scoped tool may be perfectly safe inside one namespace and a data leak in another.
+Target-state for hosted deployments: multi-tenant setups cannot rely on the UI to separate data. Namespace separation should live in storage keys, runtime event scopes, plugin scope, and authorization decisions. A tenant-scoped tool may be perfectly safe inside one namespace and a data leak in another.
 
 ---
 
