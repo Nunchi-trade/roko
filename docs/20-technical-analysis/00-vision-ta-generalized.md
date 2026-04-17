@@ -15,9 +15,23 @@
 
 Technical analysis (TA) originated as a financial discipline — chart patterns, moving averages, momentum oscillators applied to price data. In Roko, TA is generalized far beyond its financial origins into a set of **universal oracle primitives**: prediction, evaluation, calibration, and feedback loops that operate identically across any domain where an agent interacts with a verifiable external system.
 
-The core insight: code, markets, research, and operations all share the same structural properties that make TA useful. They are structured systems with measurable state variables, feedback loops, non-stationary dynamics, and adversarial participants. A build time trend is structurally analogous to a price trend. A test failure probability is structurally analogous to a risk assessment. A dependency vulnerability score is structurally analogous to portfolio risk. The mathematics is the same; the domain vocabulary changes.
+The core insight: code, markets, research, and operations all share the same structural properties that make TA useful. They are structured systems with measurable state variables, feedback loops, non-stationary dynamics, and adversarial participants. A build time trend is structurally analogous to a price trend. A test failure probability is structurally analogous to a risk assessment. A dependency vulnerability score is structurally analogous to portfolio risk. The mathematics is the same; the domain vocabulary changes. That same measurement discipline is what lets TA distinguish a real moat from a feature list.
 
-This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. Under the two-mediums/two-fabrics framing in the [glossary](../00-architecture/01-naming-and-glossary.md), TA is one of the places where Roko's compounding and superlinear product claim becomes measurable: each prediction, correction, and replay cycle should make the next cycle cheaper, faster, and better. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md).
+This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. Under the two-mediums/two-fabrics framing in the [glossary](../00-architecture/01-naming-and-glossary.md), TA is one of the places where Roko's compounding and superlinear product claim becomes measurable: each prediction, correction, and replay cycle should make the next cycle cheaper, faster, and better. It is also the measurement and feedback layer for the structural moat described in [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md): TA shows whether architectural coherence, heuristic commons, plugin ecosystem, replication ledger, and Rust-level correctness are compounding together or merely existing as separate features. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md).
+
+## Moat telemetry
+
+REF18 frames the moat as five interacting components, not a checklist. TA is the instrumentation that tells us whether those components are reinforcing one another across deployments and over time. The shared vocabulary for Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, and c-factor lives in the [glossary](../00-architecture/01-naming-and-glossary.md).
+
+| Moat component | What TA measures | Healthy curve | Drift curve |
+|---|---|---|---|
+| Architectural coherence | Whether Substrate, Bus, HDC fingerprinting, demurrage, heuristic calibration, and c-factor move together as one stack | Joint slopes improve together; no layer is winning while another stalls | Local wins that do not improve end-to-end reuse or coordination |
+| Heuristic commons | Whether cross-deployment heuristics actually improve outcomes for later deployments | Reused heuristics tighten calibration and reduce trial count | More heuristics with no downstream lift, or noisy imports overwhelming the commons |
+| Plugin ecosystem | Whether plugins create durable switching costs and broaden the set of measurable tasks | Adoption, retention, and breadth of domains increase together | Plugins exist but do not change workflows or stick after the first install |
+| Replication ledger | Whether claims remain scientifically defensible across contexts and reruns | Replication rate and effect-size stability improve over time | Claims multiply faster than confirmed replications |
+| Rust-level correctness | Whether the kernel keeps safety and performance guarantees at the boundary where competitors tend to rely on wrappers | Compile-time guarantees, latency, and failure rates stay tight | Glue code hides type mismatches, regressions, or safety leaks |
+
+This is why TA matters here: not because it adds another surface to the product, but because it makes the moat observable. A deployment that looks impressive on one row and flat on the others is still easy to copy.
 
 ---
 
@@ -82,7 +96,7 @@ This is the deepest justification for generalizing TA. If each domain used its o
 
 Roko's architectural thesis is that agent performance varies dramatically based on the surrounding harness — context engineering, verification, learning loops, cognitive architecture. Meta-Harness (Lee et al., 2026, arXiv:2603.28052) demonstrated +7.7 points on text classification and +4.7 on IMO-level math from harness optimization alone, at 4× fewer tokens.
 
-TA generalization is a direct expression of this thesis. By making prediction, calibration, and feedback universal primitives — not domain-specific add-ons — every agent benefits from the same self-improving prediction infrastructure. The harness (oracle + calibration tracker + residual corrector) works identically whether the agent is predicting build times, gas prices, or source reliability.
+TA generalization is a direct expression of this thesis. By making prediction, calibration, and feedback universal primitives — not domain-specific add-ons — every agent benefits from the same self-improving prediction infrastructure. The harness (oracle + calibration tracker + residual corrector) works identically whether the agent is predicting build times, gas prices, source reliability, or whether a moat component is actually compounding instead of merely present.
 
 ---
 
@@ -154,7 +168,7 @@ The seven-step loop is where TA turns usage into compounding returns:
                Residual correction, heuristic updates, and routing changes fire
 ```
 
-This mapping keeps TA aligned with the current architecture story in [00-architecture](../00-architecture/INDEX.md): Engrams carry durable prediction history in the Substrate, Pulses carry ephemeral prediction and outcome traffic on the Bus, and Policy closes the learning loop. See also [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) for the detailed prediction-resolution-calibration path.
+This mapping keeps TA aligned with the current architecture story in [00-architecture](../00-architecture/INDEX.md) and the moat framing in [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md): Engrams carry durable prediction history in the Substrate, Pulses carry ephemeral prediction and outcome traffic on the Bus, and Policy closes the learning loop. See also [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) for the detailed prediction-resolution-calibration path.
 
 ---
 
@@ -182,10 +196,11 @@ This means 80% of cognitive cycles cost nothing — the oracle decides no action
 
 ## Why TA is a compounding system
 
-REF15 makes an explicit product claim: Roko should improve superlinearly on real workloads because multiple feedback loops reinforce each other. Technical analysis is the instrumentation layer for that claim because each loop depends on prediction, verification, or calibration:
+REF15 makes an explicit product claim: Roko should improve superlinearly on real workloads because multiple feedback loops reinforce each other. REF18 makes the defensibility claim: the system should become harder to copy because its moat components reinforce each other. Technical analysis is the instrumentation layer for both claims because each loop depends on prediction, verification, or calibration:
 
 | REF15 loop | TA contribution | What should improve with use |
 |---|---|---|
+| Architectural coherence | TA checks whether the Substrate + Bus + HDC + demurrage + heuristic + c-factor stack is improving as one system | Lower copyability, fewer isolated wins |
 | Demurrage-weighted retrieval | Oracles measure which memories still predict useful outcomes | Fewer wasted tokens, better retrieval precision |
 | Heuristic calibration | Prediction/outcome joins tighten confidence intervals | Better priors on similar tasks |
 | HDC codebook cleanup | Oracle outcomes add cleaner labels to each HDC fingerprint | Faster cache hits and better analogical matches |
@@ -194,7 +209,7 @@ REF15 makes an explicit product claim: Roko should improve superlinearly on real
 | Cross-deployment heuristic commons | Portable calibration data bootstraps new deployments | Better first-week performance on fresh installs |
 | Plugin ecosystem | Each plugin adds new measurable state and new verification surfaces | More domains that feed the same learning machinery |
 
-The point is not just that these loops exist. The point is that they are observable. If TA cannot show improving slopes, then the broader compounding claim has not actually landed.
+The point is not just that these loops exist. The point is that they are observable. If TA cannot show improving slopes, then the broader compounding claim has not actually landed. The same is true for the moat: if the five components do not improve together, there is no defensible structural advantage.
 
 ### Scaling dashboards
 
@@ -292,4 +307,5 @@ See `tmp/implementation-plans/modelrouting/12-advanced-patterns.md` for the Thom
 - See topic [00-architecture](../00-architecture/INDEX.md) for the Synapse Architecture overview
 - See topic [05-learning](../05-learning/INDEX.md) for the cybernetic feedback loops
 - See topic [06-neuro](../06-neuro/INDEX.md) for HDC cross-domain transfer
+- See [../../tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md) for the structural moat synthesis this chapter measures
 - See [../../tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) for the canonical REF15 proposal

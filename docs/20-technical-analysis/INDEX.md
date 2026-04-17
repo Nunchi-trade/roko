@@ -12,7 +12,7 @@ Technical analysis (TA) originated as a financial discipline — chart patterns,
 
 The core insight: code, markets, research, and operations all share the same structural properties that make TA useful — measurable state variables, time series dynamics, feedback loops, pattern recurrence, adversarial dynamics, and external verification. A build time trend is structurally analogous to a price trend. A test failure probability is structurally analogous to a risk assessment. The mathematics is identical; the domain vocabulary changes.
 
-The `Oracle` trait provides the universal interface. Domain-specific implementations (chain, coding, research, custom) handle the details. New domains are added by implementing the Oracle trait — not modifying the kernel. This topic is also where REF15's compounding, superlinear, and exponential product claims become measurable: the oracle stack supplies the KPIs, anti-metrics, and cross-session eval discipline that show whether the flywheel is real. See [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) and the shared [glossary](../00-architecture/01-naming-and-glossary.md).
+The `Oracle` trait provides the universal interface. Domain-specific implementations (chain, coding, research, custom) handle the details. New domains are added by implementing the Oracle trait — not modifying the kernel. This topic is also where REF15's compounding, superlinear, and exponential product claims become measurable, and where REF18's moat becomes observable: the oracle stack supplies the KPIs, anti-metrics, and cross-session eval discipline that show whether the flywheel is real and whether the five moat components are reinforcing each other. See [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md), [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md), and the shared [glossary](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
@@ -20,7 +20,7 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 
 | # | File | Title | Lines | Summary |
 |---|---|---|---|---|
-| 00 | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) | TA as Universal Oracle Primitives | ~280 | Vision document. Why generalize TA. Structural analogy argument. Cross-domain HDC transfer. Seven-step loop integration plus REF15 compounding dashboards, anti-metrics, and cross-session evaluation guardrails. |
+| 00 | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) | TA as Universal Oracle Primitives | ~280 | Vision document. Why generalize TA. Structural analogy argument. Cross-domain HDC transfer. Seven-step loop integration plus REF15 compounding dashboards, REF18 moat telemetry, anti-metrics, and cross-session evaluation guardrails. |
 | 01 | [01-oracle-trait.md](./01-oracle-trait.md) | The Oracle Trait | ~380 | Full Rust trait signature. `predict()`, `evaluate()`. OracleQuery, Prediction, PredictionAccuracy structs. PredictionStore, ResidualCorrector, CalibrationTracker. Integration with all 6 Synapse traits. |
 | 02 | [02-chain-oracles.md](./02-chain-oracles.md) | Chain Oracles | ~300 | ChainOracle implementation. Traditional TA (MA, RSI, Bollinger, MACD). DeFi-native indicators (concentrated liquidity, lending, funding rates, yield curves, on-chain options). MEV detection. 8 T0 chain probes. Mirage-rs integration. |
 | 03 | [03-coding-oracles.md](./03-coding-oracles.md) | Coding Oracles | ~320 | CodingOracle implementation. Build time prediction, test failure probability, complexity drift, dependency risk, performance regression. 6 T0 coding probes. Tech debt feedback loops. roko-index integration. |
@@ -47,7 +47,7 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 | **PredictionStore** | Lifecycle management: register → track → resolve → feedback | [01-oracle-trait.md](./01-oracle-trait.md) |
 | **ResidualCorrector** | Bias elimination at ~50ns per correction | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) |
 | **CalibrationTracker** | Per-(model, category) accuracy statistics | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) |
-| **Scaling dashboard** | Cross-session compounding KPIs and anti-metrics for proving superlinear returns | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) |
+| **Scaling dashboard** | Cross-session compounding KPIs, moat telemetry, and anti-metrics for proving superlinear returns | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) |
 | **CorticalState** | Shared atomic signal bus for T0 probes | [05-witness-as-ta-generalized.md](./05-witness-as-ta-generalized.md) |
 | **T0 Probes** | 16 zero-LLM probes (8 chain + 6 coding + 2 universal) | [02-chain-oracles.md](./02-chain-oracles.md), [03-coding-oracles.md](./03-coding-oracles.md) |
 | **HDC pattern algebra** | 10,240-bit BSC vectors: bind (XOR), bundle (majority), permute (rotate) | [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) |

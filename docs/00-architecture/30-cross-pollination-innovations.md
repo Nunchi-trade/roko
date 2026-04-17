@@ -6,6 +6,13 @@
 > These are not incremental improvements. They are **structural compositions**: the Synapse
 > Architecture's trait-based design means each innovation is a new `impl` block that wires
 > existing traits together, not a new subsystem to build from scratch.
+>
+> That same composition is part of the moat. The advantage does not come from any isolated
+> primitive, but from the reinforcing weave across Substrate, Bus, HDC fingerprinting,
+> demurrage, heuristic calibration, c-factor measurement, plugin SPI, and the replication
+> ledger. A competitor can copy one piece; copying the aligned kernel decisions that make
+> these pieces reinforce each other is a much harder, slower rewrite. See also
+> [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md).
 
 > **Implementation**: Specified
 
@@ -2785,6 +2792,13 @@ impl DreamBudget {
 
 These eight innovations are not isolated. They form a **reinforcing network**:
 
+That network is also the chapter's moat claim: each innovation becomes materially more
+defensible because it depends on aligned decisions across the kernel stack. Substrate,
+Bus, HDC fingerprints, demurrage, heuristic calibration, c-factor measurement, plugin SPI,
+and the replication ledger reinforce one another. Competitors can approximate the isolated
+primitive, but they do not get the same architecture-wide compound effect without rebuilding
+the weave. See also [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md).
+
 ```
    ┌─────────────────────────────────────────────────────────┐
    │                                                         │
@@ -2830,6 +2844,11 @@ These eight innovations are not isolated. They form a **reinforcing network**:
    agent specialization via reaction-diffusion; pheromone trails encode the collective's
    exploration history as bandit arms. Specialized agents deposit stronger pheromones in
    their niche, reinforcing the specialization gradient.
+
+The full interaction set is what makes the moat durable: the primitives are valuable alone,
+but the cross-pollinated architecture compounds because each subsystem improves the others'
+signals, routing, persistence, and calibration. That architectural coherence is expensive to
+copy because it depends on aligned kernel choices, not just feature parity.
 
 ---
 
