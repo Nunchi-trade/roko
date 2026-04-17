@@ -119,6 +119,7 @@ onto one-liner, builder, trait impl, and runtime impl entry points lives in
 | 32 | [Comprehensive Test Strategy](./32-comprehensive-test-strategy.md) | Per-crate unit test specs, property-based testing (proptest), integration matrix, replay-as-test scenarios, telemetry contract validation, performance benchmarks (criterion/iai), adversarial/safety testing (ATLAS-mapped), and regression prevention for self-improving agents; see `tmp/refinements/33-observability-telemetry.md` |
 | 33 | [Refactor Plan Phases](./33-refactor-plan-phases.md) | Phase A/B/C/D rollout sequence, rollback plan, risk notes, and dependency ordering; see `tmp/refinements/06-refactoring-plan.md` |
 | 34 | [Synergy & Integration Map](./34-synergy-integration-map.md) | REF31's 10-primitive synergy matrix, ten named synergies, loop-level composition, non-synergies, and interaction-density moat framing; see `tmp/refinements/31-synergy-integration-map.md` |
+| 35 | [Consolidated Roadmap](./35-consolidated-roadmap.md) | REF35's architecture backmatter roadmap: Q1-Q4 sequencing, dependency graph, quarterly milestones, risk register, and decision checkpoints across the two-medium/two-fabric program; see `tmp/refinements/35-consolidated-roadmap.md` |
 
 ---
 
@@ -138,6 +139,7 @@ mediums, the six operators, the two fabrics, and the five-layer taxonomy.
 7. Read [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) through [17-design-principles-and-frontier-summary](./17-design-principles-and-frontier-summary.md) for metrics, crates, theory, and innovations
 8. Read [24-cross-section-integration-map](./24-cross-section-integration-map.md) and [34-synergy-integration-map](./34-synergy-integration-map.md) for the cross-section matrix and interaction-density moat
 9. Read [31-implementation-readiness-audit](./31-implementation-readiness-audit.md) and [33-refactor-plan-phases](./33-refactor-plan-phases.md) for the current-state scorecard and phased landing sequence
+10. Read [35-consolidated-roadmap](./35-consolidated-roadmap.md) for the architecture-level roadmap, Q1-Q4 sequencing, and quarter-by-quarter dependency ordering across the full refinement set; see `tmp/refinements/35-consolidated-roadmap.md`
 
 ---
 

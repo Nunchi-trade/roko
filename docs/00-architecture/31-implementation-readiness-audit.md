@@ -49,6 +49,13 @@ Rewrite-track work needs stronger governance than ordinary feature work:
 4. Land at most one rewrite per week and allow a bake period before removing the old path.
 5. Require a named owner, a written before/after contract, a rollback plan, and two sign-offs for the kernel rewrite.
 
+This audit answers "how ready is each section to build or rewrite?" rather than "what lands when?"
+REF35 is the sequencing layer: read the architecture roadmap backmatter in
+[35-consolidated-roadmap.md](./35-consolidated-roadmap.md) next, then the authoritative proposal at
+`tmp/refinements/35-consolidated-roadmap.md`. That companion roadmap places the rewrite and
+incremental tracks into a Q1-Q4 plan, adds dependency ordering across sections, and defines the
+decision checkpoints this audit does not.
+
 ---
 
 ## Section Scorecard

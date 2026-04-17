@@ -206,6 +206,12 @@ and [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy
 > makes the interaction-density moat concrete; start with
 > [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy-integration-map.md)
 > and [`tmp/refinements/31-synergy-integration-map.md`](../tmp/refinements/31-synergy-integration-map.md).
+> REF35 adds the sequencing layer over that architecture story: use the architecture backmatter
+> roadmap in [`00-architecture/35-consolidated-roadmap.md`](00-architecture/35-consolidated-roadmap.md), then read
+> [`00-architecture/31-implementation-readiness-audit.md`](00-architecture/31-implementation-readiness-audit.md)
+> for readiness and rewrite-vs-incremental posture, and
+> [`tmp/refinements/35-consolidated-roadmap.md`](../tmp/refinements/35-consolidated-roadmap.md)
+> for the authoritative Q1-Q4 roadmap and quarter-by-quarter dependency ordering.
 
 For canonical vocabulary, start with
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
