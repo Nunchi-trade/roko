@@ -27,7 +27,7 @@ services:
     build:
       context: ..
       dockerfile: docker/mirage.Dockerfile
-    image: ghcr.io/wpank/roko-mirage:dev
+    image: ghcr.io/nunchi/roko-mirage:dev
     container_name: roko-mirage
     networks:
       - roko-net
@@ -57,7 +57,7 @@ services:
     build:
       context: ..
       dockerfile: docker/roko.Dockerfile
-    image: ghcr.io/wpank/roko-roko:dev
+    image: ghcr.io/nunchi/roko-roko:dev
     container_name: roko-cli
     networks:
       - roko-net
@@ -79,7 +79,7 @@ services:
     build:
       context: ..
       dockerfile: docker/gateway.Dockerfile
-    image: ghcr.io/wpank/roko-gateway:dev
+    image: ghcr.io/nunchi/roko-gateway:dev
     container_name: roko-gateway
     networks:
       - roko-net
@@ -137,7 +137,7 @@ services:
     build:
       context: ..
       dockerfile: docker/demo.Dockerfile
-    image: ghcr.io/wpank/roko-demo:dev
+    image: ghcr.io/nunchi/roko-demo:dev
     container_name: roko-demo
     depends_on:
       mirage:

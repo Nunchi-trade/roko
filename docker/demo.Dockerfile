@@ -22,7 +22,7 @@ COPY contracts/lib ./lib
 RUN forge build --silent
 
 # --- Stage 2: build the roko-demo binary -----------------------------------
-FROM --platform=$BUILDPLATFORM rust:1.85-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
 WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -38,10 +38,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- Stage 3: runtime ------------------------------------------------------
 FROM debian:bookworm-slim
-LABEL org.opencontainers.image.source="https://github.com/wpank/bardo"
+LABEL org.opencontainers.image.source="https://github.com/nunchi/roko"
 LABEL org.opencontainers.image.description="Roko demo-environment orchestrator"
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 LABEL org.opencontainers.image.title="roko-demo"
-LABEL org.opencontainers.image.vendor="Bardo"
+LABEL org.opencontainers.image.vendor="Roko"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

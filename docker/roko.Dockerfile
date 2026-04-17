@@ -3,7 +3,7 @@
 # Roko CLI container image (§42.1).
 #
 # Multi-stage build:
-#   builder : rust:1.85-bookworm-slim — compiles the workspace's `roko` binary
+#   builder : rust:1.91-bookworm-slim — compiles the workspace's `roko` binary
 #   runtime : distroless/cc-debian12:nonroot — minimal, non-root, no shell
 #
 # The `roko-cli` crate produces a binary named `roko` (see crates/roko-cli/Cargo.toml).
@@ -12,7 +12,7 @@
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 
-FROM --platform=$BUILDPLATFORM rust:1.85-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
 WORKDIR /src
 
 # System deps commonly required by crates in this workspace (openssl-sys, etc).
@@ -37,11 +37,11 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-LABEL org.opencontainers.image.source="https://github.com/wpank/bardo"
+LABEL org.opencontainers.image.source="https://github.com/nunchi/roko"
 LABEL org.opencontainers.image.description="Roko orchestration CLI"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 LABEL org.opencontainers.image.title="roko"
-LABEL org.opencontainers.image.vendor="Bardo"
+LABEL org.opencontainers.image.vendor="Roko"
 
 COPY --from=builder /roko /usr/local/bin/roko
 
@@ -57,8 +57,6 @@ RUN mkdir -p /workspace/.roko/learn \
     /workspace/.roko/neuro \
     /workspace/.roko/dreams \
     && chown -R roko:roko /workspace/.roko
-
-VOLUME ["/workspace/.roko"]
 
 USER roko
 WORKDIR /workspace

@@ -1,6 +1,6 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "docker/mirage.Dockerfile"
+dockerfilePath = "docker/mirage-demo.Dockerfile"
 watchPatterns = [
   "apps/**",
   "crates/**",
