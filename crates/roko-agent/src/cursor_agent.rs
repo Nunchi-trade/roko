@@ -567,8 +567,8 @@ impl LlmBackend for CursorAgent {
             .await
             .map_err(|err| LlmError::Network(err.to_string()))?;
 
-        let json =
-            serde_json::from_str(&raw).map_err(|err| LlmError::Backend(format!("parse response: {err}")))?;
+        let json = serde_json::from_str(&raw)
+            .map_err(|err| LlmError::Backend(format!("parse response: {err}")))?;
         Ok(BackendResponse::Json(json))
     }
 

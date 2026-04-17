@@ -1,17 +1,17 @@
 //! Shared parity-test harness helpers for backend integration coverage.
 
+use crate::Agent;
 use crate::cursor_agent::CursorAgent;
 use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::exec::ExecAgent;
 use crate::http::{HttpPostError, HttpPoster};
-use crate::streaming::parse_sse_line;
 use crate::openai_compat_backend::OpenAiCompatLlmBackend;
 use crate::streaming::StreamChunk;
+use crate::streaming::parse_sse_line;
 use crate::tool_loop::{LlmBackend, StopReason, ToolLoop};
 use crate::translate::{
     BackendResponse, FinishReason, OpenAiTranslator, RenderedTools, SessionState, Translator,
 };
-use crate::Agent;
 use async_trait::async_trait;
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolHandler, ToolPermission,
@@ -164,8 +164,9 @@ impl HttpPoster for RecordedPoster {
         body: &[u8],
         _timeout_ms: u64,
     ) -> Result<String, HttpPostError> {
-        let body = serde_json::from_slice(body)
-            .map_err(|err| HttpPostError::transport(format!("request body decode failed: {err}")))?;
+        let body = serde_json::from_slice(body).map_err(|err| {
+            HttpPostError::transport(format!("request body decode failed: {err}"))
+        })?;
         self.state
             .requests
             .lock()
@@ -200,7 +201,9 @@ impl StreamServer {
         let captured_requests = Arc::clone(&requests);
 
         let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().map_err(|err| format!("accept request: {err}"))?;
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|err| format!("accept request: {err}"))?;
             let request = read_http_request(&mut stream)?;
             captured_requests
                 .lock()
@@ -417,11 +420,15 @@ async fn run_llm_happy_path(backend: ParityBackend) -> Result<(), String> {
 }
 
 async fn run_exec_happy_path() -> Result<(), String> {
-    let scenario: ExecScenario = load_json_file(scenario_path(ParityBackend::Exec, "happy/scenario.json"))?;
+    let scenario: ExecScenario =
+        load_json_file(scenario_path(ParityBackend::Exec, "happy/scenario.json"))?;
     let input = prompt_signal("");
     let result = ExecAgent::new(
         "sh",
-        vec!["-c".to_string(), "printf '%s' \"$ROKO_EXEC_STDOUT\"".to_string()],
+        vec![
+            "-c".to_string(),
+            "printf '%s' \"$ROKO_EXEC_STDOUT\"".to_string(),
+        ],
     )
     .with_env_var("ROKO_EXEC_STDOUT", scenario.stdout.clone())
     .run(&input, &Context::now())
@@ -486,7 +493,9 @@ async fn run_llm_streaming(backend: ParityBackend) -> Result<(), String> {
     match chunks.last() {
         Some(StreamChunk::Done(FinishReason::Stop)) => {}
         other => {
-            return Err(format!("stream did not end with a clean stop chunk: {other:?}"));
+            return Err(format!(
+                "stream did not end with a clean stop chunk: {other:?}"
+            ));
         }
     }
 
@@ -553,7 +562,10 @@ async fn run_llm_tool_call(backend: ParityBackend) -> Result<(), String> {
     .await;
 
     if output.stop_reason != StopReason::Stop {
-        return Err(format!("tool loop did not stop cleanly: {:?}", output.stop_reason));
+        return Err(format!(
+            "tool loop did not stop cleanly: {:?}",
+            output.stop_reason
+        ));
     }
     if output.final_text != scenario.expected_content {
         return Err(format!(
@@ -609,7 +621,9 @@ async fn run_llm_error_path(backend: ParityBackend) -> Result<(), String> {
 
     let rendered = error.to_string();
     if !rendered.contains(&fixture.status.to_string()) {
-        return Err(format!("error path did not preserve HTTP status: {rendered}"));
+        return Err(format!(
+            "error path did not preserve HTTP status: {rendered}"
+        ));
     }
 
     Ok(())
@@ -673,7 +687,10 @@ async fn run_llm_session_continuation(backend: ParityBackend) -> Result<(), Stri
     }
     .map_err(|err| format!("first session turn failed: {err}"))?;
 
-    merge_session_state(&mut session, extract_backend_session(&backend, &first_response));
+    merge_session_state(
+        &mut session,
+        extract_backend_session(&backend, &first_response),
+    );
 
     let expected_first_session = session
         .session_id
@@ -730,8 +747,8 @@ async fn run_llm_session_continuation(backend: ParityBackend) -> Result<(), Stri
 
 fn load_stream_scenario(backend: ParityBackend) -> Result<StreamScenario, String> {
     let path = scenario_path(backend, "streaming/frames.jsonl");
-    let raw =
-        fs::read_to_string(&path).map_err(|err| format!("read stream fixture {}: {err}", path.display()))?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("read stream fixture {}: {err}", path.display()))?;
     let mut expected_chunks = Vec::new();
     let mut response_lines = Vec::new();
     let mut content = String::new();
@@ -1008,7 +1025,8 @@ fn make_tool_loop<B>(backend: B) -> ToolLoop
 where
     B: LlmBackend + 'static,
 {
-    let registry: Arc<dyn ToolRegistry> = Arc::new(VecToolRegistry::from_tools(vec![parity_tool()]));
+    let registry: Arc<dyn ToolRegistry> =
+        Arc::new(VecToolRegistry::from_tools(vec![parity_tool()]));
     let resolver: Arc<dyn HandlerResolver> = Arc::new(|name: &str| {
         (name == "echo").then(|| Arc::new(EchoHandler) as Arc<dyn ToolHandler>)
     });
@@ -1148,7 +1166,10 @@ fn assert_request_has_assistant_tool_call(
                 })
         });
         if !found {
-            return Err(format!("assistant continuation missing tool call {}", expected.id));
+            return Err(format!(
+                "assistant continuation missing tool call {}",
+                expected.id
+            ));
         }
     }
     Ok(())
@@ -1171,7 +1192,10 @@ fn assert_request_has_tool_results(
                 && message["content"] == expected_content
         });
         if !found {
-            return Err(format!("continuation missing tool result for {}", expected.id));
+            return Err(format!(
+                "continuation missing tool result for {}",
+                expected.id
+            ));
         }
     }
     Ok(())
@@ -1211,7 +1235,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<RecordedRequest, String> 
     let mut buf = Vec::new();
     let mut chunk = [0_u8; 1024];
     let header_end = loop {
-        let read = stream.read(&mut chunk).map_err(|err| format!("read request bytes: {err}"))?;
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|err| format!("read request bytes: {err}"))?;
         if read == 0 {
             return Err("request closed before headers completed".to_string());
         }
@@ -1234,7 +1260,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<RecordedRequest, String> 
         .unwrap_or(0);
 
     while buf.len() < header_end + content_length {
-        let read = stream.read(&mut chunk).map_err(|err| format!("read request body: {err}"))?;
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|err| format!("read request body: {err}"))?;
         if read == 0 {
             return Err("request closed before body completed".to_string());
         }
