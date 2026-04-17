@@ -1,0 +1,10 @@
+{
+  "status": 429,
+  "body": {
+    "error": {
+      "message": "rate limited",
+      "type": "rate_limit"
+    },
+    "retry_after": 2
+  }
+}

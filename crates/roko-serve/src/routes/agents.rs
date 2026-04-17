@@ -2,17 +2,21 @@
 
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::Query;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use validator::Validate;
 
 use roko_runtime::process::ProcessId;
 
 use crate::error::ApiError;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::routes::run::spawn_background_run;
 use crate::state::{AgentRegistrationRecord, AppState};
 
@@ -23,6 +27,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/agents/{id}", get(get_agent))
         .route("/agents/{id}/stop", post(stop_agent))
         .route("/agents/{id}/episodes", get(agent_episodes))
+        .route("/agents/{id}/logs", get(proxy_agent_logs))
         .route("/agents/{id}/message", post(send_message))
         .route("/agents/{id}/token", get(token_status).post(issue_token))
 }
@@ -45,12 +50,8 @@ async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> 
 /// `POST /api/agents/register` — upsert a discovery entry for an agent server.
 async fn register_agent(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RegisterAgentRequest>,
+    ValidJson(req): ValidJson<RegisterAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    if req.agent_id.trim().is_empty() {
-        return Err(ApiError::bad_request("agent_id must not be empty"));
-    }
-
     let agent = state
         .upsert_discovered_agent(AgentRegistrationRecord {
             agent_id: req.agent_id.clone(),
@@ -154,9 +155,64 @@ async fn agent_episodes(
     Ok(Json(Value::Array(filtered)))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
+struct LogsQuery {
+    #[serde(default)]
+    tail: Option<usize>,
+}
+
+/// `GET /api/agents/{id}/logs` — proxy agent-sidecar logs, preserving upstream status.
+async fn proxy_agent_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Response, ApiError> {
+    let agent = state
+        .discovered_agent(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("agent {id} not found")))?;
+    let rest = agent
+        .endpoints
+        .rest
+        .ok_or_else(|| ApiError::bad_request(format!("agent {id} has no rest endpoint")))?;
+
+    let url = format!("{}/logs", rest.trim_end_matches('/'));
+    let mut request = state.http_client.get(url);
+    if let Some(tail) = query.tail {
+        request = request.query(&[("tail", tail)]);
+    }
+    if let Some(token) = agent.proxy_token.as_ref() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| ApiError::internal(format!("proxy to agent logs failed: {error}")))?;
+    let status = response.status();
+    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| ApiError::internal(format!("read proxied agent logs failed: {error}")))?;
+
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+
+    builder.body(Body::from(body)).map_err(|error| {
+        ApiError::internal(format!("build proxied agent logs response failed: {error}"))
+    })
+}
+
+#[derive(Debug, Deserialize, Validate)]
 struct SendMessageRequest {
     #[serde(alias = "content")]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     message: String,
     #[serde(default)]
     context: Option<Value>,
@@ -166,16 +222,18 @@ struct SendMessageRequest {
     response_mode: Option<String>,
 }
 
+impl RequestPayload for SendMessageRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
+}
+
 /// `POST /api/agents/{id}/message` — send a message to a registered agent or fall back to a run.
 async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
-    Json(req): Json<SendMessageRequest>,
+    ValidJson(req): ValidJson<SendMessageRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if req.message.trim().is_empty() {
-        return Err(ApiError::bad_request("message must not be empty"));
-    }
-
     if let Some(agent) = state.discovered_agent(&agent_id).await
         && let Some(rest) = agent.endpoints.rest
     {
@@ -258,8 +316,12 @@ fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) ->
     prompt
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 struct RegisterAgentRequest {
+    #[validate(
+        length(min = 1, max = 128),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     agent_id: String,
     #[serde(default)]
     label: Option<String>,
@@ -285,22 +347,93 @@ struct RegisterAgentRequest {
     issue_token: Option<bool>,
 }
 
+impl RequestPayload for RegisterAgentRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::error::Error;
     use std::sync::Arc;
     use std::time::Duration;
 
+    use anyhow::{Result, anyhow};
+    use axum::body::Body;
     use axum::body::to_bytes;
+    use axum::http::Request;
     use axum::response::IntoResponse;
+    use axum::routing::get;
     use roko_core::config::schema::RokoConfig;
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+    use tower::ServiceExt;
 
     use crate::deploy::manual::ManualBackend;
     use crate::events::ServerEvent;
     use crate::runtime::NoOpRuntime;
-    use crate::state::AppState;
+    use crate::state::{AgentEndpoints, AgentRegistrationRecord, AppState};
+
+    #[derive(Debug)]
+    struct MockLogsServerState {
+        response: Value,
+        status: StatusCode,
+        seen_tails: Mutex<Vec<Option<usize>>>,
+    }
+
+    async fn mock_logs_handler(
+        State(state): State<Arc<MockLogsServerState>>,
+        Query(query): Query<LogsQuery>,
+    ) -> impl IntoResponse {
+        state.seen_tails.lock().await.push(query.tail);
+        (state.status, Json(state.response.clone()))
+    }
+
+    async fn spawn_mock_logs_server(
+        status: StatusCode,
+        response: Value,
+    ) -> Result<(
+        String,
+        Arc<MockLogsServerState>,
+        tokio::task::JoinHandle<()>,
+    )> {
+        let state = Arc::new(MockLogsServerState {
+            response,
+            status,
+            seen_tails: Mutex::new(Vec::new()),
+        });
+        let router = Router::new()
+            .route("/logs", get(mock_logs_handler))
+            .with_state(Arc::clone(&state));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| anyhow!("failed to bind mock logs listener: {error}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|error| anyhow!("failed to read mock logs address: {error}"))?;
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router).await {
+                panic!("mock logs server stopped unexpectedly: {error}");
+            }
+        });
+        Ok((format!("http://{addr}"), state, handle))
+    }
+
+    fn router(state: Arc<AppState>) -> Router {
+        Router::new().nest("/api", routes()).with_state(state)
+    }
+
+    async fn json_body(response: axum::response::Response) -> Result<Value> {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|error| anyhow!("failed to read response body bytes: {error}"))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| anyhow!("failed to parse JSON response body: {error}"))
+    }
 
     #[test]
     fn build_agent_prompt_embeds_context() {
@@ -327,7 +460,7 @@ mod tests {
         let response = send_message(
             State(Arc::clone(&state)),
             Path("agent-1".to_string()),
-            Json(SendMessageRequest {
+            ValidJson(SendMessageRequest {
                 message: "hello".into(),
                 context: Some(json!({ "source": "dashboard" })),
                 conversation_id: Some("conv-1".into()),
@@ -376,7 +509,7 @@ mod tests {
 
         let _ = register_agent(
             State(Arc::clone(&state)),
-            Json(RegisterAgentRequest {
+            ValidJson(RegisterAgentRequest {
                 agent_id: "agent-2".into(),
                 label: Some("agent-two".into()),
                 process_id: None,
@@ -399,5 +532,145 @@ mod tests {
             .await
             .expect("token status");
         assert!(status.exists);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_logs_proxy_forwards_tail_and_body() -> std::result::Result<(), Box<dyn Error>> {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            RokoConfig::default(),
+            Arc::new(ManualBackend::default()),
+        ));
+        let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
+            StatusCode::OK,
+            json!({
+                "lines": ["alpha", "bravo"],
+                "path": "/tmp/agent.log",
+            }),
+        )
+        .await?;
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "agent-logs".into(),
+                label: Some("agent-logs".into()),
+                process_id: None,
+                owner: String::new(),
+                endpoints: AgentEndpoints {
+                    rest: Some(logs_url),
+                    websocket: None,
+                    a2a: None,
+                    mcp: None,
+                },
+                card_uri: None,
+                capabilities: Vec::new(),
+                domain_tags: Vec::new(),
+            })
+            .await;
+
+        let response = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/agent-logs/logs?tail=2")
+                    .body(Body::empty())
+                    .map_err(|error| anyhow!("failed to build agent logs request: {error}"))?,
+            )
+            .await
+            .map_err(|error| anyhow!("agent logs request failed: {error}"))?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await?;
+        assert_eq!(payload["lines"], json!(["alpha", "bravo"]));
+        assert_eq!(payload["path"], "/tmp/agent.log");
+
+        let seen_tails = logs_state.seen_tails.lock().await;
+        assert_eq!(seen_tails.as_slice(), &[Some(2)]);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_logs_missing_agent_returns_404() -> std::result::Result<(), Box<dyn Error>> {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            RokoConfig::default(),
+            Arc::new(ManualBackend::default()),
+        ));
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/missing/logs")
+                    .body(Body::empty())
+                    .map_err(|error| {
+                        anyhow!("failed to build missing-agent logs request: {error}")
+                    })?,
+            )
+            .await
+            .map_err(|error| anyhow!("missing-agent logs request failed: {error}"))?;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let payload = json_body(response).await?;
+        assert_eq!(payload["code"], "not_found");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_logs_sidecar_not_found_is_propagated() -> std::result::Result<(), Box<dyn Error>>
+    {
+        let tempdir = tempdir().expect("tempdir");
+        let state = Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            RokoConfig::default(),
+            Arc::new(ManualBackend::default()),
+        ));
+        let (logs_url, logs_state, _handle) = spawn_mock_logs_server(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "log file missing" }),
+        )
+        .await?;
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "agent-404".into(),
+                label: Some("agent-404".into()),
+                process_id: None,
+                owner: String::new(),
+                endpoints: AgentEndpoints {
+                    rest: Some(logs_url),
+                    websocket: None,
+                    a2a: None,
+                    mcp: None,
+                },
+                card_uri: None,
+                capabilities: Vec::new(),
+                domain_tags: Vec::new(),
+            })
+            .await;
+
+        let response = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/agent-404/logs?tail=9")
+                    .body(Body::empty())
+                    .map_err(|error| {
+                        anyhow!("failed to build sidecar-404 logs request: {error}")
+                    })?,
+            )
+            .await
+            .map_err(|error| anyhow!("sidecar-404 logs request failed: {error}"))?;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let payload = json_body(response).await?;
+        assert_eq!(payload["error"], "log file missing");
+
+        let seen_tails = logs_state.seen_tails.lock().await;
+        assert_eq!(seen_tails.as_slice(), &[Some(9)]);
+        Ok(())
     }
 }

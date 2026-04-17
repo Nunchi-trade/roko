@@ -48,6 +48,8 @@ pub mod repl;
 pub mod research;
 pub mod run;
 pub mod secrets;
+pub mod snapshot_migrate;
+pub mod snapshot_reconcile;
 pub mod status;
 pub mod subscriptions;
 pub mod task_parser;

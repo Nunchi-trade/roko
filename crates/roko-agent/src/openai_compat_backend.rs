@@ -21,6 +21,13 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_PROVIDER_RPM: u32 = 60;
 
+#[derive(Debug, Clone, Default)]
+struct StreamResponseMetadata {
+    response_id: Option<String>,
+    session_id: Option<String>,
+    thread_id: Option<String>,
+}
+
 fn shared_rate_limiter() -> Arc<ProviderRateLimiter> {
     static SHARED_RATE_LIMITER: OnceLock<Arc<ProviderRateLimiter>> = OnceLock::new();
     Arc::clone(
@@ -140,6 +147,7 @@ impl OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        session: &SessionState,
         stream: bool,
     ) -> Result<Vec<u8>, LlmError> {
         let RenderedTools::JsonArray(tools) = tools else {
@@ -155,6 +163,18 @@ impl OpenAiCompatLlmBackend {
         if let Some(body_obj) = body.as_object_mut() {
             if let Some(max_tokens) = self.max_tokens {
                 body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
+            }
+            if let Some(session_id) = &session.session_id {
+                body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+            }
+            if let Some(thread_id) = &session.thread_id {
+                body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+            }
+            if let Some(conversation_id) = &session.conversation_id {
+                body_obj.insert(
+                    "conversation_id".to_string(),
+                    Value::String(conversation_id.clone()),
+                );
             }
             if stream {
                 body_obj.insert("stream".to_string(), Value::Bool(true));
@@ -180,8 +200,34 @@ impl OpenAiCompatLlmBackend {
         }
     }
 
+    fn capture_stream_metadata(line: &[u8], metadata: &mut StreamResponseMetadata) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches(['\r', '\n']);
+        let Some(line) = line.strip_prefix("data:").map(str::trim_start) else {
+            return;
+        };
+        if line == "[DONE]" {
+            return;
+        }
+
+        let Ok(json) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+
+        if let Some(response_id) = json.get("id").and_then(Value::as_str) {
+            metadata.response_id = Some(response_id.to_string());
+        }
+        if let Some(session_id) = json.get("session_id").and_then(Value::as_str) {
+            metadata.session_id = Some(session_id.to_string());
+        }
+        if let Some(thread_id) = json.get("thread_id").and_then(Value::as_str) {
+            metadata.thread_id = Some(thread_id.to_string());
+        }
+    }
+
     fn stream_response_to_json(
         response: crate::chat_types::ChatResponse,
+        metadata: StreamResponseMetadata,
     ) -> Result<Value, LlmError> {
         let message = response
             .raw_assistant_message
@@ -190,14 +236,27 @@ impl OpenAiCompatLlmBackend {
         let message = serde_json::to_value(message)
             .map_err(|e| LlmError::Backend(format!("serialize streamed response: {e}")))?;
 
-        Ok(serde_json::json!({
+        let mut json = serde_json::json!({
             "choices": [{
                 "index": 0,
                 "message": message,
                 "finish_reason": finish_reason_to_wire(&response.finish_reason),
             }],
             "usage": usage_to_wire(&response.usage),
-        }))
+        });
+        if let Some(body) = json.as_object_mut() {
+            if let Some(response_id) = metadata.response_id {
+                body.insert("id".to_string(), Value::String(response_id));
+            }
+            if let Some(session_id) = metadata.session_id {
+                body.insert("session_id".to_string(), Value::String(session_id));
+            }
+            if let Some(thread_id) = metadata.thread_id {
+                body.insert("thread_id".to_string(), Value::String(thread_id));
+            }
+        }
+
+        Ok(json)
     }
 }
 
@@ -224,9 +283,9 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
-        _session: &SessionState,
+        session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
-        let body_bytes = self.build_body(messages, tools, false)?;
+        let body_bytes = self.build_body(messages, tools, session, false)?;
         self.rate_limiter.acquire(&self.provider_id).await;
 
         let raw = self
@@ -250,10 +309,10 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
-        _session: &SessionState,
+        session: &SessionState,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
-        let body_bytes = self.build_body(messages, tools, true)?;
+        let body_bytes = self.build_body(messages, tools, session, true)?;
         self.rate_limiter.acquire(&self.provider_id).await;
 
         let mut req = reqwest::Client::new()
@@ -284,6 +343,7 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         let mut response = response;
         let mut pending = Vec::new();
         let mut accumulator = StreamAccumulator::new();
+        let mut metadata = StreamResponseMetadata::default();
 
         loop {
             let chunk = response.chunk().await.map_err(|e| {
@@ -298,15 +358,17 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             pending.extend_from_slice(&chunk);
             while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=newline_idx).collect();
+                Self::capture_stream_metadata(&line, &mut metadata);
                 Self::push_stream_line(&line, &mut accumulator, &event_tx);
             }
         }
 
         if !pending.is_empty() {
+            Self::capture_stream_metadata(&pending, &mut metadata);
             Self::push_stream_line(&pending, &mut accumulator, &event_tx);
         }
 
-        let json = Self::stream_response_to_json(accumulator.finalize())?;
+        let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;
         Ok(BackendResponse::Json(json))
     }
 
@@ -315,6 +377,10 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             BackendResponse::Json(json) => extract_session(json),
             BackendResponse::StreamJson(_) | BackendResponse::Text(_) => SessionState::default(),
         }
+    }
+
+    fn backend_id(&self) -> &'static str {
+        "openai_compat"
     }
 }
 
@@ -372,6 +438,15 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use crate::http::HttpPostError;
+
+    fn test_timeout(ms: u64) -> Duration {
+        let scaled = if std::env::var("CI").map(|v| v == "true").unwrap_or(false) {
+            ms * 10
+        } else {
+            ms
+        };
+        Duration::from_millis(scaled)
+    }
 
     #[derive(Clone, Debug)]
     struct RecordedRequest {
@@ -889,7 +964,7 @@ mod tests {
                 .await
         });
 
-        let first_chunk = timeout(Duration::from_millis(500), event_rx.recv())
+        let first_chunk = timeout(test_timeout(500), event_rx.recv())
             .await
             .expect("stream should emit before completion")
             .expect("stream channel open");

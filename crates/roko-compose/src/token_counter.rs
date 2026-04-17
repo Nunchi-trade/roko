@@ -9,8 +9,8 @@ use std::{
 pub enum TokenCounter {
     /// OpenAI-style models counted with tiktoken.
     Tiktoken(tiktoken_rs::CoreBPE),
-    /// Models with an available HuggingFace `tokenizer.json`.
-    HuggingFace(tokenizers::Tokenizer),
+    /// Models with an available `HuggingFace` `tokenizer.json`.
+    HuggingFace(Box<tokenizers::Tokenizer>),
     /// Conservative fallback when no exact tokenizer is available.
     Heuristic {
         /// Average characters-per-token used for conservative estimation.
@@ -63,6 +63,7 @@ impl TokenCounter {
     fn try_hf(repo_id: &str) -> Option<Self> {
         find_hf_tokenizer_json(repo_id)
             .and_then(|path| tokenizers::Tokenizer::from_file(path).ok())
+            .map(Box::new)
             .map(Self::HuggingFace)
     }
 }
@@ -72,7 +73,20 @@ fn heuristic_count(text: &str, chars_per_token: f64) -> usize {
         return 0;
     }
 
-    ((text.len() as f64) / chars_per_token).ceil() as usize
+    let (multiplier, divisor) = heuristic_ratio(chars_per_token);
+    text.len().saturating_mul(multiplier).div_ceil(divisor)
+}
+
+fn heuristic_ratio(chars_per_token: f64) -> (usize, usize) {
+    if (chars_per_token - 1.0).abs() < f64::EPSILON {
+        (1, 1)
+    } else if (chars_per_token - 3.5).abs() < f64::EPSILON {
+        (2, 7)
+    } else if (chars_per_token - 3.8).abs() < f64::EPSILON {
+        (5, 19)
+    } else {
+        (1, 4)
+    }
 }
 
 fn find_hf_tokenizer_json(repo_id: &str) -> Option<PathBuf> {

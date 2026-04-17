@@ -1,10 +1,11 @@
 //! JSON-RPC surface for chain extensions (gated by the `chain` feature).
 //!
-//! This module exposes the chain knowledge + pheromone substrates over the same
-//! jsonrpsee server that hosts the `eth_*` and `mirage_*` methods. Wiring is
-//! opt-in: callers must construct a [`ChainContext`] and pass it through
-//! [`crate::rpc::start_rpc_server_with_chain`], otherwise mirage behaves as a
-//! pure EVM fork simulator.
+//! This module exposes the chain knowledge + pheromone substrates.
+//!
+//! It rides on the same jsonrpsee server that hosts the `eth_*` and `mirage_*`
+//! methods. Wiring is opt-in: callers must construct a [`ChainContext`] and
+//! pass it through [`crate::rpc::start_rpc_server_with_chain`], otherwise
+//! mirage behaves as a pure EVM fork simulator.
 //!
 //! # Methods
 //!
@@ -203,7 +204,7 @@ impl std::fmt::Debug for ChainContext {
             dbg.field("pheromone_bus", &self.pheromone_bus.is_some())
                 .field("insight_bus", &self.insight_bus.is_some());
         }
-        dbg.finish()
+        dbg.finish_non_exhaustive()
     }
 }
 
@@ -352,6 +353,11 @@ pub struct PostInsightResult {
 }
 
 /// Handler for `chain_postInsight`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the knowledge layer is disabled,
+/// the kind is unknown, or any `enabled_by` id is malformed.
 pub fn handle_post_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: PostInsightParams,
@@ -441,6 +447,11 @@ const fn default_k() -> usize {
 }
 
 /// Handler for `chain_searchInsights`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the HDC layer is disabled, the
+/// query payload is malformed, or `queryVector` is not 1280 bytes long.
 pub fn handle_search_insights(
     chain: &Arc<RwLock<ChainContext>>,
     params: SearchInsightsParams,
@@ -504,6 +515,12 @@ pub struct ConfirmInsightParams {
 }
 
 /// Handler for `chain_confirmInsight`.
+///
+/// # Errors
+///
+/// Returns `INVALID`, `NOT_FOUND`, `DUPLICATE`, or `IMMUTABLE` JSON-RPC
+/// errors when the knowledge layer is disabled, the id is malformed, or the
+/// store rejects the confirmation.
 pub fn handle_confirm_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: ConfirmInsightParams,
@@ -531,7 +548,9 @@ pub fn handle_confirm_insight(
             crate::chain::KnowledgeError::Immutable(_, _) => {
                 rpc_err(err_code::IMMUTABLE, e.to_string())
             }
-            other => rpc_err(err_code::INVALID, other.to_string()),
+            other @ crate::chain::KnowledgeError::DuplicateChallenge(_) => {
+                rpc_err(err_code::INVALID, other.to_string())
+            }
         })?;
     #[cfg(feature = "roko")]
     if let Some(bus) = &chain_lock.insight_bus {
@@ -554,6 +573,12 @@ pub struct ChallengeInsightParams {
 }
 
 /// Handler for `chain_challengeInsight`.
+///
+/// # Errors
+///
+/// Returns `INVALID`, `NOT_FOUND`, `DUPLICATE`, or `IMMUTABLE` JSON-RPC
+/// errors when the knowledge layer is disabled, the id is malformed, or the
+/// store rejects the challenge.
 pub fn handle_challenge_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: ChallengeInsightParams,
@@ -581,7 +606,9 @@ pub fn handle_challenge_insight(
             crate::chain::KnowledgeError::Immutable(_, _) => {
                 rpc_err(err_code::IMMUTABLE, e.to_string())
             }
-            other => rpc_err(err_code::INVALID, other.to_string()),
+            other @ crate::chain::KnowledgeError::DuplicateConfirmation(_) => {
+                rpc_err(err_code::INVALID, other.to_string())
+            }
         })?;
     #[cfg(feature = "roko")]
     if let Some(bus) = &chain_lock.insight_bus {
@@ -595,6 +622,10 @@ pub fn handle_challenge_insight(
 }
 
 /// Handler for `chain_getInsight`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if `id` is missing or malformed.
 pub fn handle_get_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: JsonValue,
@@ -627,6 +658,11 @@ pub fn handle_get_insight(
 }
 
 /// Handler for `chain_applyDecay`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the knowledge layer is disabled or
+/// the request payload cannot be interpreted.
 pub fn handle_apply_decay(
     chain: &Arc<RwLock<ChainContext>>,
     params: JsonValue,
@@ -703,6 +739,11 @@ const fn default_intensity() -> f32 {
 }
 
 /// Handler for `chain_depositPheromone`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the stigmergy layer is disabled or
+/// the pheromone kind is unknown.
 pub fn handle_deposit_pheromone(
     chain: &Arc<RwLock<ChainContext>>,
     params: DepositPheromoneParams,
@@ -737,6 +778,11 @@ pub fn handle_deposit_pheromone(
 }
 
 /// Handler for `chain_queryPheromones`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the stigmergy layer is disabled or
+/// the query payload is malformed.
 pub fn handle_query_pheromones(
     chain: &Arc<RwLock<ChainContext>>,
     params: JsonValue,
@@ -843,10 +889,11 @@ pub const INSIGHT_SUB_PREFIX: &str = "insi:";
 ///
 /// The manager doesn't own the buses; it holds `Arc` handles so the RPC
 /// `register_subscription` closures can register new mpsc sinks without
-/// touching the `ChainContext` write lock. Every registered bus subscription
-/// is tagged with a prefix (see [`PHEROMONE_SUB_PREFIX`] /
-/// [`INSIGHT_SUB_PREFIX`]) so a single `chain_unsubscribe(subscriptionId)`
-/// call can route to the correct bus.
+/// touching the `ChainContext` write lock.
+///
+/// Every registered bus subscription is tagged with a prefix (see
+/// [`PHEROMONE_SUB_PREFIX`] / [`INSIGHT_SUB_PREFIX`]) so a single
+/// `chain_unsubscribe(subscriptionId)` call can route to the correct bus.
 #[cfg(feature = "roko")]
 #[derive(Clone)]
 #[must_use]
@@ -1008,10 +1055,10 @@ pub fn insight_event_to_json(event: &crate::roko_bridge::InsightEvent) -> JsonVa
 
 /// Canonical list of every `chain_*` JSON-RPC method exposed by this surface.
 ///
-/// Used by [`handle_version`] (to populate `supportedMethods`) and by
-/// [`handle_method_schema`] (to look up per-method schemas). If you add a new
-/// `chain_*` method in [`crate::rpc`], add it here too — the unit tests assert
-/// every entry has a schema.
+/// Used by [`handle_version`] and [`handle_method_schema`].
+///
+/// If you add a new `chain_*` method in [`crate::rpc`], add it here too. The
+/// unit tests assert that every entry has a schema.
 pub const CHAIN_METHOD_NAMES: &[&str] = &[
     "chain_postInsight",
     "chain_searchInsights",
@@ -1102,6 +1149,11 @@ pub fn handle_list_kinds() -> JsonValue {
 /// Takes `{"method": "chain_postInsight"}` and returns a small JSON-Schema-ish
 /// document describing the request params and response shape. Returns
 /// [`err_code::NOT_FOUND`] if `method` is not a known `chain_*` method.
+///
+/// # Errors
+///
+/// Returns `INVALID` if `method` is missing from `params`, or `NOT_FOUND` if
+/// the method name is unknown.
 pub fn handle_method_schema(params: JsonValue) -> Result<JsonValue, ErrorObjectOwned> {
     let method = params
         .get("method")
@@ -1423,6 +1475,10 @@ static METHOD_SCHEMAS: LazyLock<HashMap<&'static str, JsonValue>> = LazyLock::ne
 // ─── Agent registry handlers ────────────────────────────────────────────────
 
 /// Handle `chain_registerAgent(id, address_hex, role)`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if `address_hex` is not valid hex.
 pub fn handle_register_agent(
     chain: &Arc<RwLock<ChainContext>>,
     id: String,
@@ -1467,6 +1523,11 @@ pub fn handle_agent_heartbeat(
 }
 
 /// Handle `chain_agentTrace(id, phase, reads, reasoning, action)`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if `phase` is not one of `retrieve`,
+/// `reason`, `act`, or `verify`.
 pub fn handle_agent_trace(
     chain: &Arc<RwLock<ChainContext>>,
     id: String,

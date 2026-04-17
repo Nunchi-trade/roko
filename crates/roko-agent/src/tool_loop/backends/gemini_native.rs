@@ -179,6 +179,10 @@ impl LlmBackend for GeminiNativeBackend {
 
         Ok(BackendResponse::Json(json))
     }
+
+    fn backend_id(&self) -> &'static str {
+        "gemini"
+    }
 }
 
 #[cfg(test)]

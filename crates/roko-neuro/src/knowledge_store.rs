@@ -446,6 +446,11 @@ impl KnowledgeStore {
     }
 
     /// Read all knowledge entries from the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store file cannot be read or any stored entry
+    /// cannot be decoded from JSON.
     pub fn read_all(&self) -> Result<Vec<KnowledgeEntry>> {
         let file = match File::open(&self.path) {
             Ok(file) => file,

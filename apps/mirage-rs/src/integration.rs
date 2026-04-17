@@ -156,6 +156,10 @@ pub struct MirageClient {
 impl MirageClient {
     /// Builds a new JSON-RPC HTTP client using [`MirageConfig::url`] as the POST endpoint and
     /// [`MirageConfig::timeout`] as the per-request timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns any `reqwest` client-construction error.
     pub async fn new(config: MirageConfig) -> Result<Self> {
         tokio::task::yield_now().await;
         let inner = reqwest::Client::builder().timeout(config.timeout).build()?;
@@ -163,6 +167,11 @@ impl MirageClient {
     }
 
     /// Executes `eth_call`.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn eth_call(&self, req: TransactionRequest) -> Result<Bytes> {
         let response: String = self
             .rpc_call("eth_call", serde_json::json!([req, "latest"]))
@@ -172,24 +181,44 @@ impl MirageClient {
 
     /// Executes `eth_sendTransaction` with params `[req]` (single-object array), matching the server
     /// JSON-RPC contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn eth_send_transaction(&self, req: TransactionRequest) -> Result<B256> {
         self.rpc_call("eth_sendTransaction", serde_json::json!([req]))
             .await
     }
 
     /// Captures an `evm_snapshot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn evm_snapshot(&self) -> Result<u64> {
         let raw: String = self.rpc_call("evm_snapshot", serde_json::json!([])).await?;
         parse_hex_u64(&raw)
     }
 
     /// Restores an `evm_revert` snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn evm_revert(&self, id: u64) -> Result<bool> {
         self.rpc_call("evm_revert", serde_json::json!([format!("0x{id:x}")]))
             .await
     }
 
     /// Adds a contract to the watch list.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_watch_contract(&self, addr: Address) -> Result<()> {
         let _: bool = self
             .rpc_call(MIRAGE_WATCH_CONTRACT_METHOD, serde_json::json!([addr]))
@@ -198,24 +227,44 @@ impl MirageClient {
     }
 
     /// Reads a position helper snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_get_position(&self, req: PositionRequest) -> Result<PositionSnapshot> {
         self.rpc_call(MIRAGE_GET_POSITION_METHOD, serde_json::json!([req]))
             .await
     }
 
     /// Reads the current status snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_status(&self) -> Result<MirageStatus> {
         self.rpc_call(MIRAGE_STATUS_METHOD, serde_json::json!([]))
             .await
     }
 
     /// Reads current resource usage.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_get_resource_usage(&self) -> Result<ResourceUsage> {
         self.rpc_call(MIRAGE_GET_RESOURCE_USAGE_METHOD, serde_json::json!([]))
             .await
     }
 
     /// Creates a new scenario set.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_begin_scenario_set(&self, baseline: &str) -> Result<String> {
         self.rpc_call(
             MIRAGE_BEGIN_SCENARIO_SET_METHOD,
@@ -225,6 +274,11 @@ impl MirageClient {
     }
 
     /// Adds a scenario to an existing set.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_define_scenario(
         &self,
         set_id: &str,
@@ -238,6 +292,11 @@ impl MirageClient {
     }
 
     /// Starts scenario execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_run_scenario_set(&self, set_id: &str, mode: RunMode) -> Result<String> {
         self.rpc_call(
             MIRAGE_RUN_SCENARIO_SET_METHOD,
@@ -247,6 +306,11 @@ impl MirageClient {
     }
 
     /// Polls scenario results.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn mirage_get_scenario_results(&self, job_id: &str) -> Result<ScenarioJob> {
         self.rpc_call(
             MIRAGE_GET_SCENARIO_RESULTS_METHOD,
@@ -257,6 +321,12 @@ impl MirageClient {
 
     /// Waits until the sidecar reports `ready`, polling [`MIRAGE_STATUS_METHOD`] every
     /// [`WAIT_READY_POLL_INTERVAL`] until `timeout` elapses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::Timeout`] if readiness is not reported before
+    /// `timeout`, or any transport/JSON-RPC error when the sidecar request
+    /// fails before the timeout is reached.
     pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
         let started = Instant::now();
         loop {
@@ -277,6 +347,11 @@ impl MirageClient {
     }
 
     /// Returns a stream of currently known local events matching the filter.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors while creating
+    /// the subscription or connecting to the event stream.
     pub async fn subscribe_events(
         &self,
         filter: EventFilter,
@@ -334,6 +409,11 @@ impl MirageClient {
     }
 
     /// Sends a shutdown request to the sidecar.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, timeout, or JSON-RPC decode errors from the sidecar
+    /// request.
     pub async fn shutdown(&self) -> Result<bool> {
         self.rpc_call(MIRAGE_SHUTDOWN_METHOD, serde_json::json!([]))
             .await
@@ -411,6 +491,11 @@ impl MirageTestInstance {
     /// Asks the sidecar to shut down via [`MIRAGE_SHUTDOWN_METHOD`], waits for exit, then on Unix
     /// sends `SIGTERM` via `/bin/kill`, and finally calls [`Child::kill`](tokio::process::Child::kill)
     /// if the child is still alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns process-management or wait errors from killing and reaping the
+    /// child process.
     pub async fn shutdown(&mut self) -> Result<()> {
         let client = MirageClient::new(self.config()).await?;
         let _ = client.shutdown().await;
@@ -436,6 +521,11 @@ impl MirageTestInstance {
 }
 
 /// Spawns a new test instance and waits for readiness.
+///
+/// # Errors
+///
+/// Returns process-spawn, filesystem, startup-artifact, or readiness-polling
+/// errors encountered while bringing the instance up.
 pub async fn spawn_mirage_test_instance(
     rpc_url: Option<&str>,
     port: Option<u16>,

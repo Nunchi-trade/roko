@@ -29,8 +29,9 @@ impl InsightId {
     /// Computes the content-addressed id from the author, content bytes, and knowledge kind.
     #[must_use]
     pub fn derive(author: &[u8], content: &[u8], kind: KnowledgeKind) -> Self {
+        let tag = kind.tag_byte();
         let mut lo: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in author.iter().chain(content).chain([kind.tag_byte()].iter()) {
+        for byte in author.iter().chain(content).chain(std::iter::once(&tag)) {
             lo ^= u64::from(*byte);
             lo = lo.wrapping_mul(0x0100_0000_01b3);
         }

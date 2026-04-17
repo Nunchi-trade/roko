@@ -7,6 +7,7 @@
 //!
 //! Persistence is a single JSON file managed by [`ExperimentStore`].
 
+use roko_core::ExperimentWinnerSummary;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -77,6 +78,26 @@ impl VariantStats {
         let mean = self.successes as f64 / self.trials as f64;
         let exploration = (2.0 * (total_trials as f64).ln() / self.trials as f64).sqrt();
         mean + exploration
+    }
+
+    /// Wilson 95% confidence interval for the empirical success rate.
+    #[allow(clippy::cast_precision_loss)]
+    fn confidence_interval_95(&self) -> (f64, f64) {
+        if self.trials == 0 {
+            return (0.0, 0.0);
+        }
+
+        let n = self.trials as f64;
+        let p = self.success_rate();
+        let z = 1.96_f64;
+        let z_sq = z * z;
+        let denom = 1.0 + z_sq / n;
+        let center = (p + z_sq / (2.0 * n)) / denom;
+        let margin = (z / denom) * ((p * (1.0 - p) / n + z_sq / (4.0 * n * n)).sqrt());
+        (
+            (center - margin).clamp(0.0, 1.0),
+            (center + margin).clamp(0.0, 1.0),
+        )
     }
 }
 
@@ -298,6 +319,31 @@ impl PromptExperiment {
         })
     }
 
+    /// Return a detailed summary for dashboard rendering.
+    #[must_use]
+    pub fn winner_summary(&self) -> Option<ExperimentWinnerSummary> {
+        let winner = self.concluded_winner()?;
+        let winner_id = self.winner_id.as_deref()?;
+        let winner_variant = self
+            .variants
+            .iter()
+            .find(|variant| variant.id == winner_id)?;
+        let winner_stats = self.stats.get(winner_id)?;
+        let (ci_lower, ci_upper) = winner_stats.confidence_interval_95();
+
+        Some(ExperimentWinnerSummary {
+            experiment_id: self.experiment_id.clone(),
+            parameter: winner.parameter,
+            winner: winner_variant_label(winner_variant),
+            winner_variant_id: winner_variant.id.clone(),
+            win_rate: winner_stats.success_rate(),
+            sample_size: winner_stats.trials,
+            ci_lower,
+            ci_upper,
+            confidence: winner.confidence,
+        })
+    }
+
     fn winner_confidence(&self, winner_id: &str) -> Option<f64> {
         let mut ranked: Vec<(&str, &VariantStats, f64)> = self
             .variants
@@ -367,6 +413,11 @@ impl ExperimentStore {
     }
 
     /// Save to a JSON file (atomic write).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be serialized or if the output
+    /// file cannot be created, written, or renamed.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -433,12 +484,33 @@ impl ExperimentStore {
         winners
     }
 
+    /// Return concluded winners with confidence intervals for dashboard rendering.
+    #[must_use]
+    pub fn winner_summaries(&self) -> Vec<ExperimentWinnerSummary> {
+        let mut winners = self
+            .experiments
+            .values()
+            .filter_map(PromptExperiment::winner_summary)
+            .collect::<Vec<_>>();
+        winners.sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+        winners
+    }
+
     /// Write concluded winners to the static-overrides file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the static-overrides file cannot be written.
     pub fn apply_winners(&self, winners: &[ExperimentWinner]) -> io::Result<()> {
         self.apply_winners_to(winners, Path::new(DEFAULT_STATIC_OVERRIDES_PATH))
     }
 
     /// Write concluded winners to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the existing overrides cannot be parsed, or if the
+    /// new overrides cannot be serialized, written, or renamed.
     pub fn apply_winners_to(&self, winners: &[ExperimentWinner], path: &Path) -> io::Result<()> {
         if winners.is_empty() {
             return Ok(());
@@ -517,6 +589,15 @@ impl Default for ExperimentStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn winner_variant_label(variant: &PromptVariant) -> String {
+    variant
+        .slug
+        .clone()
+        .filter(|slug| !slug.trim().is_empty())
+        .or_else(|| (!variant.name.trim().is_empty()).then(|| variant.name.clone()))
+        .unwrap_or_else(|| variant.id.clone())
 }
 
 fn write_static_overrides(path: &Path, overrides: &BTreeMap<String, String>) -> io::Result<()> {
@@ -620,6 +701,61 @@ mod tests {
         assert_eq!(winners[0].parameter, "implementer");
         assert_eq!(winners[0].winning_value, "claude-sonnet-4-6");
         assert!(winners[0].confidence >= 0.95);
+    }
+
+    #[test]
+    fn winner_summaries_include_ci_and_stable_ordering() {
+        let mut store = ExperimentStore::new();
+
+        let mut exp_b = PromptExperiment::new("exp-b", "constraints", make_variants("constraints"));
+        exp_b.status = ExperimentStatus::Concluded;
+        exp_b.winner_id = Some("b".into());
+        exp_b.stats.insert(
+            "a".into(),
+            VariantStats {
+                trials: 80,
+                successes: 8,
+            },
+        );
+        exp_b.stats.insert(
+            "b".into(),
+            VariantStats {
+                trials: 80,
+                successes: 76,
+            },
+        );
+
+        let mut exp_a = PromptExperiment::new("exp-a", "constraints", make_variants("constraints"));
+        exp_a.status = ExperimentStatus::Concluded;
+        exp_a.winner_id = Some("a".into());
+        exp_a.stats.insert(
+            "a".into(),
+            VariantStats {
+                trials: 96,
+                successes: 92,
+            },
+        );
+        exp_a.stats.insert(
+            "b".into(),
+            VariantStats {
+                trials: 96,
+                successes: 12,
+            },
+        );
+
+        store.register(exp_b);
+        store.register(exp_a);
+
+        let winners = store.winner_summaries();
+        assert_eq!(winners.len(), 2);
+        assert_eq!(winners[0].experiment_id, "exp-a");
+        assert_eq!(winners[1].experiment_id, "exp-b");
+        assert_eq!(winners[0].winner_variant_id, "a");
+        assert_eq!(winners[0].winner, "Variant A");
+        assert_eq!(winners[0].sample_size, 96);
+        assert!((winners[0].win_rate - (92.0 / 96.0)).abs() < f64::EPSILON);
+        assert!(winners[0].ci_lower <= winners[0].win_rate);
+        assert!(winners[0].ci_upper >= winners[0].win_rate);
     }
 
     #[test]

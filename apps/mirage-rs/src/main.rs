@@ -33,6 +33,7 @@ const TELEMETRY_BUS_CAPACITY: usize = 10_000;
 /// Command-line configuration for `mirage-rs`.
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Bind host (default `127.0.0.1`).
     #[arg(long, default_value = "127.0.0.1")]

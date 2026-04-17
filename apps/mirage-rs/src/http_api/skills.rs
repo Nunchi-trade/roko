@@ -12,6 +12,10 @@ use super::{ApiError, ApiState};
 use crate::chain::agent::{AgentStats, SkillConfig};
 
 /// `GET /api/agents/{id}/skills` — return all configured skills for an agent.
+///
+/// # Errors
+///
+/// Returns `404` if the agent does not exist.
 pub async fn get_agent_skills(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -34,6 +38,11 @@ pub async fn get_agent_skills(
 }
 
 /// `PUT /api/agents/{id}/skills` — replace all skill configs for an agent.
+///
+/// # Errors
+///
+/// Returns `422` if any skill config is invalid, or `404` if the agent does
+/// not exist.
 pub async fn update_agent_skills(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -56,6 +65,11 @@ pub async fn update_agent_skills(
 }
 
 /// `PUT /api/agents/{id}/skills/{skill}` — upsert a single skill config.
+///
+/// # Errors
+///
+/// Returns `422` if the supplied config is invalid, or `404` if the agent
+/// does not exist.
 pub async fn update_single_skill(
     State(state): State<ApiState>,
     Path((id, skill)): Path<(String, String)>,

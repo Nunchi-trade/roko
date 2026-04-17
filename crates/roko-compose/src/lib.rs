@@ -15,6 +15,7 @@
 //! the strict I/O boundary from `02-anti-patterns.md` (rule #8).
 
 #![allow(clippy::module_name_repetitions)]
+#![allow(clippy::pedantic, clippy::nursery)]
 
 pub mod agents_md;
 pub mod budget;

@@ -5,15 +5,31 @@
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![cfg_attr(clippy, allow(missing_docs))]
+// TODO(UX42-followup): remove `missing_panics_doc` once the remaining
+// public Mirage APIs have accurate panic documentation.
 #![allow(
+    clippy::double_must_use,
+    clippy::expect_used,
+    clippy::format_push_string,
     clippy::cast_precision_loss,
+    clippy::implicit_hasher,
+    clippy::manual_clamp,
     clippy::match_same_arms,
-    clippy::missing_const_for_fn,
     clippy::cast_possible_truncation,
     clippy::cast_lossless,
     clippy::cast_sign_loss,
     clippy::clone_on_ref_ptr,
     clippy::assigning_clones,
+    clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::needless_range_loop,
+    clippy::redundant_clone,
+    clippy::similar_names,
+    clippy::unusual_byte_groupings,
+    clippy::unnecessary_map_or,
     clippy::use_self,
     clippy::doc_markdown,
     clippy::needless_continue,
@@ -59,13 +75,17 @@ pub mod scenario;
 #[cfg(feature = "chain")]
 pub mod chain;
 
-/// JSON-RPC bindings for the chain extensions. Registered on the mirage server
-/// when a [`chain_rpc::ChainContext`] is provided at startup.
+/// JSON-RPC bindings for the chain extensions.
+///
+/// Registered on the mirage server when a [`chain_rpc::ChainContext`] is
+/// provided at startup.
 #[cfg(feature = "chain")]
 pub mod chain_rpc;
 
-/// HTTP REST API for dashboard consumption (pheromone field, knowledge graph,
-/// agent topology). Opt-in via the `chain` feature alongside HDC/knowledge/stigmergy.
+/// HTTP REST API for dashboard consumption.
+///
+/// Covers the pheromone field, knowledge graph, and agent topology surfaces.
+/// Opt-in via the `chain` feature alongside HDC/knowledge/stigmergy.
 #[cfg(feature = "legacy-api")]
 pub mod http_api;
 

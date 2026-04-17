@@ -197,6 +197,9 @@ pub struct Episode {
     /// Model slug used for the dispatch.
     #[serde(default)]
     pub model: String,
+    /// Backend/provider slug used for the dispatch.
+    #[serde(default)]
+    pub backend: String,
     /// Trigger kind that caused the dispatch.
     #[serde(default)]
     pub trigger_kind: String,
@@ -236,6 +239,9 @@ pub struct Episode {
     /// Optional short reasoning summary for auditing and debugging.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
+    /// Optional opaque HDC fingerprint derived from the episode prompt/outcome pair.
+    #[serde(default)]
+    pub hdc_fingerprint: Option<String>,
     /// Optional affect signature captured when the episode completed.
     #[serde(default)]
     pub emotional_tag: Option<EmotionalTag>,
@@ -272,6 +278,7 @@ impl Episode {
             episode_id: String::new(),
             agent_template: String::new(),
             model: String::new(),
+            backend: String::new(),
             trigger_kind: String::new(),
             trigger_signal_hash: String::new(),
             started_at,
@@ -285,6 +292,7 @@ impl Episode {
             external_actions: Vec::new(),
             failure_reason: None,
             reasoning_summary: None,
+            hdc_fingerprint: None,
             emotional_tag: None,
             headline: false,
             extra: HashMap::new(),
@@ -314,6 +322,11 @@ impl Episode {
     }
 
     /// Attach a deterministic fingerprint of the completed episode text.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the computed fingerprint cannot be serialized into JSON for
+    /// storage in the episode metadata map.
     pub fn attach_text_fingerprint(&mut self) {
         let text = self.completion_fingerprint_text();
         let fingerprint = text_fingerprint(&text);
@@ -331,6 +344,11 @@ impl Episode {
     /// what model, which gates fired, did it succeed) rather than the
     /// textual content. It enables similarity search across episodes with
     /// structurally similar execution profiles.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the computed metadata fingerprint cannot be serialized into
+    /// JSON for storage in the episode metadata map.
     pub fn attach_metadata_fingerprint(&mut self) {
         let text = self.metadata_fingerprint_text();
         let fingerprint = text_fingerprint(&text);
@@ -1079,6 +1097,9 @@ pub struct CompactStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hdc_fingerprint::{
+        decode as decode_hdc_fingerprint, encode as encode_hdc_fingerprint, fingerprint_episode,
+    };
     use roko_core::{Body, Engram, Kind};
     use tempfile::TempDir;
 
@@ -1134,6 +1155,61 @@ mod tests {
         assert!(all[0].success);
         assert_eq!(all[0].gate_verdicts.len(), 1);
         assert_eq!(all[0].gate_verdicts[0].gate, "compile");
+    }
+
+    #[tokio::test]
+    async fn backend_round_trips_through_jsonl_append_and_read() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let mut ep = sample("agent-a", "task-1", true);
+        ep.backend = "anthropic".to_string();
+        logger.append(&ep).await.expect("append");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].backend, "anthropic");
+    }
+
+    #[tokio::test]
+    async fn hdc_fingerprint_round_trips_through_jsonl_append_and_read() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let mut ep = sample("agent-a", "task-1", true);
+        let vector = fingerprint_episode("prompt body", "successful outcome");
+        let encoded = encode_hdc_fingerprint(&vector);
+        let decoded = decode_hdc_fingerprint(&encoded).expect("decode");
+        assert_eq!(vector, decoded);
+
+        ep.hdc_fingerprint = Some(encoded.clone());
+        logger.append(&ep).await.expect("append");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].hdc_fingerprint.as_deref(), Some(encoded.as_str()));
+    }
+
+    #[tokio::test]
+    async fn legacy_json_without_backend_defaults_to_empty_string() {
+        let (_dir, path) = tmp_log();
+        let mut episode =
+            serde_json::to_value(sample("agent-a", "task-1", true)).expect("serialize episode");
+        episode
+            .as_object_mut()
+            .expect("episode object")
+            .remove("backend");
+        tokio::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&episode).expect("serialize legacy episode")
+            ),
+        )
+        .await
+        .expect("write legacy episode");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].backend, "");
     }
 
     #[tokio::test]

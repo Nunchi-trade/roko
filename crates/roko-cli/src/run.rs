@@ -343,6 +343,7 @@ async fn dispatch_agent(
                     &config.prompt.role,
                 ),
                 name: format!("{}:{model}", resolved.provider_kind.label()),
+                role: Some(normalized_role_label(&config.prompt.role)),
             },
             format!("create agent for model {model}"),
         )?;
@@ -389,6 +390,7 @@ async fn dispatch_agent(
                     &config.prompt.role,
                 ),
                 name: String::new(),
+                role: Some(normalized_role_label(&config.prompt.role)),
             },
             format!("create synthesized claude agent for model {model}"),
         )?;
@@ -420,6 +422,7 @@ async fn dispatch_agent(
                 bare_mode: config.agent.bare_mode,
                 dangerously_skip_permissions: false,
                 name: String::new(),
+                role: Some(normalized_role_label(&config.prompt.role)),
             },
             format!(
                 "create known-protocol subprocess agent for {}",
@@ -451,6 +454,7 @@ async fn dispatch_agent(
                 bare_mode: config.agent.bare_mode,
                 dangerously_skip_permissions: false,
                 name: String::new(),
+                role: Some(normalized_role_label(&config.prompt.role)),
             },
             format!(
                 "create generic subprocess agent for {}",

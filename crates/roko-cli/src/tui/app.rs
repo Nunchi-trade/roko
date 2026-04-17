@@ -3,11 +3,11 @@
 //! Integrates the Mori-style tab system (F1-F7), modal dialogs, TuiState,
 //! TuiAction dispatch, PostFX pipeline, and atmosphere animations.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -26,12 +26,14 @@ use ratatui::{Frame, Terminal};
 
 use roko_runtime::process::ProcessSupervisor;
 use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::approval_ipc::ApprovalRequest;
 use super::dashboard::{DashboardData, DashboardScaffold, Theme};
 use super::effects_config::EffectsConfig;
 use super::event::{Event, EventHandler};
+use super::fs_watch::{self, FsRefresh, FsWatchHandle};
+use super::git_watch::{self, GitRefresh, GitWatchHandle};
 use super::input::{self, ConfirmAction, FocusZone, InputMode, TuiAction};
 use super::modals::{
     self, Milestone, ModalState, QueueTask, TaskPickerRow, WaveInfo, WavePlanEntry,
@@ -39,7 +41,9 @@ use super::modals::{
 use super::pages::{PageId, PageRegistry};
 use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
+use super::verdicts::VerdictsAggregator;
 use super::views::{self, ViewState};
+use super::ws_client::{AgentStreamClient, StreamChunk};
 
 /// Interactive dashboard shell backed by the existing snapshot renderer.
 ///
@@ -47,9 +51,10 @@ use super::views::{self, ViewState};
 /// - **Mori-style tabs** (F1-F7): full TuiState + views + modals + postfx
 /// - **Legacy scaffold pages**: original PageId-based rendering
 ///
-/// All expensive I/O (system metrics, file reads, git commands) runs on
-/// background threads.  The render path does zero I/O -- it only reads
-/// `&self.tui_state` and `&self.data` and writes to the frame buffer.
+/// All expensive I/O stays off the render path. System metrics run on a
+/// background thread, while filesystem and git refreshes run only on watcher
+/// nudges. The render path does zero I/O -- it only reads `&self.tui_state`
+/// and `&self.data` and writes to the frame buffer.
 pub struct App {
     workdir: PathBuf,
 
@@ -72,6 +77,8 @@ pub struct App {
     scaffold: DashboardScaffold,
     /// Last seen dashboard data generation used to avoid redundant scaffold rebuilds.
     last_data_gen: u64,
+    /// Incremental substrate reader for gate verdict trends.
+    verdicts_aggregator: Option<VerdictsAggregator>,
 
     // -- Common --
     /// Whether the event loop should keep running.
@@ -86,21 +93,33 @@ pub struct App {
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
-    sys_rx: Option<std::sync::mpsc::Receiver<SysSnapshot>>,
-    /// Background data refresh receiver (file reads off main thread).
-    data_rx: Option<std::sync::mpsc::Receiver<DashboardData>>,
-    /// Background git data receiver (git commands off main thread).
-    git_rx: Option<std::sync::mpsc::Receiver<GitBgData>>,
+    sys_rx: Option<watch::Receiver<SysSnapshot>>,
+    /// One-shot agent-topology fetch receiver.
+    agent_topology_rx: Option<std_mpsc::Receiver<AgentTopologyFetchResult>>,
+    /// Whether a topology fetch is currently in flight.
+    agent_topology_in_flight: bool,
+    /// Filesystem watcher handle for debounced `.roko/` refresh events.
+    fs_watch: Option<FsWatchHandle>,
+    /// Debounced git watcher for repo metadata refreshes.
+    git_watch: Option<GitWatchHandle>,
     /// Optional live process supervisor used for per-agent process sampling.
     process_supervisor: Option<Arc<ProcessSupervisor>>,
     /// Optional approval request receiver from the orchestrator.
     pub approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
     /// Pending response channel for the active approval modal.
     pending_approval_response: Option<oneshot::Sender<bool>>,
+    /// Owning handle for the in-process or connected state hub.
+    _state_hub: Option<roko_core::SharedStateHub>,
     /// Live dashboard snapshot receiver from `StateHub` when connected.
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
     last_snapshot_error_marker: Option<(String, u64)>,
+    /// Live websocket consumers for the Agents tab.
+    agent_stream_clients: HashMap<String, AgentStreamClient>,
+    /// Base URL for the `roko-serve` websocket event bus.
+    agent_stream_server_url: String,
+    /// Optional bearer token for authenticated websocket handshakes.
+    agent_stream_auth_token: Option<String>,
     /// Frame counter for adaptive frame rate.
     frame_counter: u64,
     /// Last user input time for adaptive frame rate.
@@ -109,7 +128,7 @@ pub struct App {
     terminal_size: (u16, u16),
 }
 
-/// Bundle of git data collected by the background git thread.
+/// Bundle of git data collected by the watcher-driven git refresh path.
 struct GitBgData {
     /// Full git view data for the F4 Git tab.
     view_data: super::views::git_view::GitViewData,
@@ -124,6 +143,7 @@ struct GitBgData {
 }
 
 /// Combined host + process metrics snapshot emitted by the background sampler.
+#[derive(Debug, Clone, Default)]
 struct SysSnapshot {
     /// Host-level system metrics.
     sys: super::state::SysMetrics,
@@ -132,6 +152,7 @@ struct SysSnapshot {
 }
 
 /// One sampled process row before history is merged into `TuiState`.
+#[derive(Debug, Clone)]
 struct ProcessMetricSample {
     /// OS process identifier.
     pid: u32,
@@ -145,6 +166,36 @@ struct ProcessMetricSample {
     state: String,
     /// Process uptime in seconds.
     uptime_secs: f64,
+}
+
+enum AgentTopologyFetchResult {
+    Ready(roko_core::AgentTopology),
+    Unavailable,
+    Error(String),
+}
+
+fn collect_git_bg_data(workdir: &Path) -> GitBgData {
+    let view_data = super::views::git_view::collect_git_data(workdir);
+    let branch = view_data.current_branch.clone();
+    let commit_short = view_data
+        .commits
+        .first()
+        .map(|commit| commit.hash_short.clone())
+        .unwrap_or_default();
+    let age = view_data
+        .commits
+        .first()
+        .map(|commit| commit.age.clone())
+        .unwrap_or_default();
+    let summary_lines = super::views::dashboard_view::collect_git_summary(&view_data, &age);
+
+    GitBgData {
+        view_data,
+        summary_lines,
+        branch,
+        commit_short,
+        age,
+    }
 }
 
 fn plan_status_label(plan: &PlanEntry) -> String {
@@ -354,11 +405,6 @@ pub async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
         }
         app.drain_snapshot_channel();
         app.drain_approval_requests();
-        if app.snapshot_rx.is_none() && app.last_refresh.elapsed() > Duration::from_secs(1) {
-            app.data.refresh().await?;
-            app.tui_state.update_from_snapshot(&app.data);
-            app.last_refresh = Instant::now();
-        }
         if !app.running {
             break;
         }
@@ -370,12 +416,24 @@ impl App {
     /// Build a new app from a workspace root.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
-        Self::new_with_page(root, None)
+        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let _ = state_hub.bootstrap_from_workdir(root.as_ref());
+        Self::new_connected_with_state_hub(root, None, state_hub)
     }
 
     /// Build a new app from a workspace root with an initial page selection.
     #[must_use]
     pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
+        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let _ = state_hub.bootstrap_from_workdir(root.as_ref());
+        Self::new_connected_with_state_hub(root, initial_page, state_hub)
+    }
+
+    fn new_with_page_inner(
+        root: impl AsRef<Path>,
+        initial_page: Option<PageId>,
+        state_hub: Option<roko_core::SharedStateHub>,
+    ) -> Self {
         let workdir = root.as_ref().to_path_buf();
         let terminal_size = size().unwrap_or((80, 24));
         let mut scaffold = DashboardScaffold::new_in(&workdir);
@@ -398,24 +456,33 @@ impl App {
             data,
             scaffold,
             last_data_gen,
+            verdicts_aggregator: None,
             running: true,
             last_refresh: Instant::now(),
             scroll_offset: HashMap::new(),
             signal_selection: 0,
             gate_failure_selection: 0,
             sys_rx: None,
-            data_rx: None,
-            git_rx: None,
+            agent_topology_rx: None,
+            agent_topology_in_flight: false,
+            fs_watch: None,
+            git_watch: None,
             process_supervisor: None,
             approval_rx: None,
             pending_approval_response: None,
+            _state_hub: state_hub,
             snapshot_rx: None,
             last_snapshot_error_marker: None,
+            agent_stream_clients: HashMap::new(),
+            agent_stream_server_url: resolve_agent_stream_server_url(),
+            agent_stream_auth_token: resolve_agent_stream_auth_token(),
             frame_counter: 0,
             last_input: Instant::now(),
             terminal_size,
         };
         app.fx_config = EffectsConfig::load_from_root(&app.workdir);
+        app.reseed_verdicts_aggregator();
+        app.refresh_verdicts_from_aggregator();
         app
     }
 
@@ -432,8 +499,17 @@ impl App {
         initial_page: Option<PageId>,
         state_hub: &roko_core::SharedStateHub,
     ) -> Self {
-        let mut app = Self::new_with_page(root, initial_page);
+        Self::new_connected_with_state_hub(root, initial_page, state_hub.clone())
+    }
+
+    fn new_connected_with_state_hub(
+        root: impl AsRef<Path>,
+        initial_page: Option<PageId>,
+        state_hub: roko_core::SharedStateHub,
+    ) -> Self {
+        let mut app = Self::new_with_page_inner(root, initial_page, Some(state_hub.clone()));
         let snapshot_rx = state_hub.snapshot();
+        app.refresh_verdicts_from_aggregator();
         if snapshot_has_content(&snapshot_rx.borrow()) {
             let snapshot = snapshot_rx.borrow();
             apply_dashboard_snapshot(
@@ -501,7 +577,7 @@ impl App {
         // ---------------------------------------------------------------
         // Spawn background sys metrics collector thread
         // ---------------------------------------------------------------
-        let (sys_tx, sys_rx) = std::sync::mpsc::channel::<SysSnapshot>();
+        let (sys_tx, sys_rx) = watch::channel(SysSnapshot::default());
         let sys_log_dispatch = log_dispatch.clone();
         let process_supervisor = self.process_supervisor.clone();
         std::thread::Builder::new()
@@ -521,79 +597,15 @@ impl App {
         self.sys_rx = Some(sys_rx);
 
         // ---------------------------------------------------------------
-        // Spawn background data refresh thread
+        // Start debounced `.roko/` watcher with polling fallback
         // ---------------------------------------------------------------
-        let (data_tx, data_rx) = std::sync::mpsc::channel::<DashboardData>();
-        let data_workdir = self.workdir.clone();
-        let data_log_dispatch = log_dispatch.clone();
-        std::thread::Builder::new()
-            .name("tui-data-refresh".into())
-            .spawn(move || {
-                let _log_guard = tracing::dispatcher::set_default(&data_log_dispatch);
-                loop {
-                    let data = DashboardData::load_best_effort(&data_workdir);
-                    if data_tx.send(data).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            })
-            .inspect_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    thread = "tui-data-refresh",
-                    "failed to spawn background thread"
-                );
-            })
-            .ok();
-        self.data_rx = Some(data_rx);
+        self.fs_watch = Some(fs_watch::watch_roko_dir_with_fallback(&self.workdir));
 
         // ---------------------------------------------------------------
-        // Spawn background git data collector thread
+        // Prime git data once, then refresh only when git metadata changes.
         // ---------------------------------------------------------------
-        let (git_tx, git_rx) = std::sync::mpsc::channel::<GitBgData>();
-        let git_log_dispatch = log_dispatch;
-        std::thread::Builder::new()
-            .name("tui-git-refresh".into())
-            .spawn(move || {
-                let _log_guard = tracing::dispatcher::set_default(&git_log_dispatch);
-                loop {
-                    let view_data = super::views::git_view::collect_git_data();
-                    let branch = view_data.current_branch.clone();
-                    let commit_short = view_data
-                        .commits
-                        .first()
-                        .map(|c| c.hash_short.clone())
-                        .unwrap_or_default();
-                    let age = view_data
-                        .commits
-                        .first()
-                        .map(|commit| commit.age.clone())
-                        .unwrap_or_default();
-                    let summary_lines =
-                        super::views::dashboard_view::collect_git_summary(&view_data, &age);
-                    let bg = GitBgData {
-                        view_data,
-                        summary_lines,
-                        branch,
-                        commit_short,
-                        age,
-                    };
-                    if git_tx.send(bg).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(3));
-                }
-            })
-            .inspect_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    thread = "tui-git-refresh",
-                    "failed to spawn background thread"
-                );
-            })
-            .ok();
-        self.git_rx = Some(git_rx);
+        self.apply_git_bg_data(collect_git_bg_data(&self.workdir));
+        self.git_watch = Some(git_watch::watch_git_repo_with_fallback(&self.workdir));
 
         // ---------------------------------------------------------------
         // Initial draw
@@ -781,6 +793,7 @@ impl App {
                 self.running = false;
             }
             TuiAction::SwitchTab(tab) => {
+                let previous_tab = self.tui_state.active_tab;
                 self.tui_state.active_tab = tab;
                 self.tui_state.focus = match tab {
                     Tab::Dashboard | Tab::Plans => FocusZone::PlanTree,
@@ -791,6 +804,11 @@ impl App {
                 if let Some(page_id) = tab_to_page(tab) {
                     self.current_page = page_id;
                     let _ = self.scaffold.set_active_page(page_id);
+                }
+                if matches!(tab, Tab::Agents) && !matches!(previous_tab, Tab::Agents) {
+                    self.request_agent_topology_refresh();
+                } else if !matches!(tab, Tab::Agents) {
+                    self.tui_state.close_agent_topology();
                 }
             }
             TuiAction::FocusNext => {
@@ -892,7 +910,12 @@ impl App {
                 self.scroll_agent_output_by(delta);
             }
             TuiAction::ScrollAgentEnd => {
-                self.tui_state.agent_scroll = None; // Resume auto-tail
+                if self.tui_state.agent_topology_visible {
+                    self.tui_state.agent_topology_scroll_offset =
+                        self.current_agent_topology_max_scroll();
+                } else {
+                    self.tui_state.agent_scroll = None; // Resume auto-tail
+                }
             }
             TuiAction::ScrollDiffUp => {
                 let delta = self.scroll_accel.tick(-1);
@@ -1114,6 +1137,19 @@ impl App {
                     selected_index,
                     scroll_offset: selected_index as u16,
                 });
+            }
+            TuiAction::ToggleAgentTopology => {
+                let was_visible = self.tui_state.agent_topology_visible;
+                self.tui_state.active_tab = Tab::Agents;
+                self.tui_state.focus = FocusZone::AgentOutput;
+                if let Some(page_id) = tab_to_page(Tab::Agents) {
+                    self.current_page = page_id;
+                    let _ = self.scaffold.set_active_page(page_id);
+                }
+                self.tui_state.toggle_agent_topology();
+                if !was_visible && self.tui_state.agent_topology_visible {
+                    self.request_agent_topology_refresh();
+                }
             }
             TuiAction::CloseTaskPicker => {
                 if matches!(
@@ -1783,7 +1819,14 @@ impl App {
                 };
             }
             (Tab::Agents, FocusZone::AgentOutput) => {
-                if offset == usize::MAX {
+                if self.tui_state.agent_topology_visible {
+                    let max = self.current_agent_topology_max_scroll();
+                    self.tui_state.agent_topology_scroll_offset = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                } else if offset == usize::MAX {
                     self.tui_state.agent_scroll = None;
                 } else {
                     self.tui_state.agent_scroll = Some(offset);
@@ -1805,7 +1848,14 @@ impl App {
                 }
             }
             (_, FocusZone::AgentOutput) => {
-                if offset == usize::MAX {
+                if self.tui_state.agent_topology_visible {
+                    let max = self.current_agent_topology_max_scroll();
+                    self.tui_state.agent_topology_scroll_offset = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                } else if offset == usize::MAX {
                     self.tui_state.agent_scroll = None;
                 } else {
                     self.tui_state.agent_scroll = Some(offset);
@@ -1878,6 +1928,13 @@ impl App {
             .unwrap_or_else(|| self.current_agent_max_scroll())
     }
 
+    fn current_agent_topology_max_scroll(&self) -> usize {
+        views::agents_view::agent_topology_lines(&self.data, &self.tui_state)
+            .len()
+            .saturating_sub(self.current_agent_topology_viewport_height())
+            .min(u16::MAX as usize)
+    }
+
     fn current_agent_max_scroll(&self) -> usize {
         self.current_agent_output_line_count()
             .saturating_sub(self.current_agent_output_viewport_height())
@@ -1909,6 +1966,18 @@ impl App {
     }
 
     fn scroll_agent_output_by(&mut self, delta: i32) {
+        if self.tui_state.agent_topology_visible {
+            let max_scroll = self.current_agent_topology_max_scroll();
+            let current = self.tui_state.agent_topology_scroll_offset.min(max_scroll);
+            self.tui_state.agent_topology_scroll_offset = if delta < 0 {
+                current.saturating_sub(delta.unsigned_abs() as usize)
+            } else {
+                current.saturating_add(delta as usize).min(max_scroll)
+            };
+            self.tui_state.clamp_agent_topology_scroll(max_scroll);
+            return;
+        }
+
         let max_scroll = self.current_agent_max_scroll();
         let current = self.current_agent_scroll_offset().min(max_scroll);
 
@@ -1974,6 +2043,8 @@ impl App {
             Tab::Dashboard | Tab::Agents => {
                 let max_scroll = self.current_agent_max_scroll();
                 self.tui_state.clamp_agent_scroll(max_scroll);
+                self.tui_state
+                    .clamp_agent_topology_scroll(self.current_agent_topology_max_scroll());
             }
             Tab::Git => {
                 self.tui_state
@@ -2048,6 +2119,22 @@ impl App {
                 let sections =
                     Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(main[1]);
                 sections[1].height.saturating_sub(2) as usize
+            }
+            _ => 0,
+        }
+    }
+
+    fn current_agent_topology_viewport_height(&self) -> usize {
+        let content_area = self.current_content_area();
+
+        match self.tui_state.active_tab {
+            Tab::Agents => {
+                let panels =
+                    Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
+                        .split(content_area);
+                let sections =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(panels[1]);
+                sections[1].height.saturating_sub(3) as usize
             }
             _ => 0,
         }
@@ -2160,19 +2247,71 @@ impl App {
         }
     }
 
-    /// Manual refresh triggered by Ctrl-R.  Loads data synchronously as a
-    /// one-shot fallback (the normal path uses background threads).
+    /// Full refresh triggered by Ctrl-R and used as the fallback reload path.
     fn refresh_snapshot(&mut self) {
         self.data = DashboardData::load_best_effort(&self.workdir);
         self.scaffold = DashboardScaffold::new_in(&self.workdir);
         self.last_data_gen = self.data.generation;
         self.tui_state.update_from_snapshot(&self.data);
+        if let Some(state_hub) = &self._state_hub {
+            let _ = state_hub.bootstrap_from_workdir(&self.workdir);
+        }
+        self.reseed_verdicts_aggregator();
+        self.refresh_verdicts_from_aggregator();
         self.fx_config = EffectsConfig::load_from_root(&self.workdir);
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
         self.clamp_gate_failure_selection();
         if self.pages().scaffold(self.current_page).is_none() {
             self.current_page = self.scaffold.active_page();
+        }
+    }
+
+    fn tick_snapshot(&mut self) {
+        if let Err(error) = self.data.tick() {
+            tracing::warn!(
+                error = %error,
+                "dashboard incremental tick failed; falling back to full reload"
+            );
+            self.refresh_snapshot();
+            return;
+        }
+
+        self.last_data_gen = self.data.generation;
+        self.tui_state.update_from_snapshot(&self.data);
+        self.refresh_verdicts_from_aggregator();
+        self.last_refresh = Instant::now();
+        self.clamp_signal_selection();
+        self.clamp_gate_failure_selection();
+    }
+
+    fn reseed_verdicts_aggregator(&mut self) {
+        self.verdicts_aggregator = VerdictsAggregator::open(&self.workdir).ok();
+    }
+
+    fn refresh_verdicts_from_aggregator(&mut self) {
+        let Some(aggregator) = self.verdicts_aggregator.as_mut() else {
+            self.tui_state.gate_trends.clear();
+            self.tui_state.gate_recent_failures.clear();
+            return;
+        };
+
+        if let Err(error) = aggregator.tick() {
+            tracing::warn!(
+                error = %error,
+                "verdicts aggregation tick failed"
+            );
+            return;
+        }
+
+        self.tui_state.gate_trends = aggregator.gate_trends();
+        self.tui_state.gate_recent_failures = aggregator.recent_failures();
+
+        if let Some(state_hub) = &self._state_hub {
+            let mut snapshot = state_hub.current_snapshot();
+            snapshot.gate_trends = self.tui_state.gate_trends.clone();
+            snapshot.gate_recent_failures = self.tui_state.gate_recent_failures.clone();
+            state_hub.apply_snapshot(snapshot);
         }
     }
 
@@ -2188,9 +2327,7 @@ impl App {
         {
             Ok(()) => {
                 self.tui_state.config_pending.clear();
-                self.data = DashboardData::load_best_effort(&self.workdir);
-                self.tui_state.update_from_snapshot(&self.data);
-                self.fx_config = EffectsConfig::load_from_root(&self.workdir);
+                self.refresh_snapshot();
                 self.notifications.push(super::modals::Notification::info(
                     "Config saved and reloaded",
                 ));
@@ -2277,117 +2414,94 @@ impl App {
         const MAX_MESSAGES_PER_DRAIN: usize = 20;
 
         self.drain_snapshot_channel();
+        self.drain_agent_topology_fetch();
+        self.sync_agent_stream_clients();
+        self.drain_agent_stream_clients();
 
         // -- sys metrics (merge, don't replace — keep history) --
-        let mut sys_snaps = Vec::new();
-        if let Some(rx) = &self.sys_rx {
+        if let Some(rx) = &mut self.sys_rx {
+            if rx.has_changed().unwrap_or(false) {
+                let snap = rx.borrow_and_update().clone();
+                // CPU
+                let cpu_pct = self.tui_state.update_cpu_pct(snap.sys.cpu_pct);
+                let sys = &mut self.tui_state.sys;
+                sys.cpu_history.push(cpu_pct);
+                if sys.cpu_history.len() > 60 {
+                    sys.cpu_history.remove(0);
+                }
+
+                // Memory
+                sys.mem_used_bytes = snap.sys.mem_used_bytes;
+                sys.mem_total_bytes = snap.sys.mem_total_bytes;
+                let mem_frac = if snap.sys.mem_total_bytes > 0 {
+                    snap.sys.mem_used_bytes as f32 / snap.sys.mem_total_bytes as f32
+                } else {
+                    0.0
+                };
+                sys.mem_history.push(mem_frac);
+                if sys.mem_history.len() > 60 {
+                    sys.mem_history.remove(0);
+                }
+
+                // Network: compute rate from delta of cumulative totals
+                if sys.prev_net_in > 0 && snap.sys.net_down_bytes_sec > sys.prev_net_in {
+                    sys.net_down_bytes_sec = snap.sys.net_down_bytes_sec - sys.prev_net_in;
+                }
+                sys.prev_net_in = snap.sys.net_down_bytes_sec;
+                sys.net_out_bytes_total = snap.sys.net_out_bytes_total;
+
+                // Disk: compute rate from delta of cumulative totals
+                if sys.prev_disk_read > 0 && snap.sys.disk_read_bytes_sec > sys.prev_disk_read {
+                    sys.disk_read_bytes_sec = snap.sys.disk_read_bytes_sec - sys.prev_disk_read;
+                }
+                sys.prev_disk_read = snap.sys.disk_read_bytes_sec;
+                sys.disk_write_bytes_total = snap.sys.disk_write_bytes_total;
+                self.merge_process_metrics(snap.process_metrics);
+            }
+        }
+
+        // -- debounced filesystem refresh --
+        if let Some(fs_watch) = &self.fs_watch {
+            let mut got_refresh = false;
             let mut count = 0;
-            while let Ok(snap) = rx.try_recv() {
-                sys_snaps.push(snap);
+            while let Ok(FsRefresh::Coalesced) = fs_watch.try_recv() {
+                got_refresh = true;
                 count += 1;
                 if count >= MAX_MESSAGES_PER_DRAIN {
                     break;
                 }
             }
-        }
-        for snap in sys_snaps {
-            // CPU
-            let cpu_pct = self.tui_state.update_cpu_pct(snap.sys.cpu_pct);
-            let sys = &mut self.tui_state.sys;
-            sys.cpu_history.push(cpu_pct);
-            if sys.cpu_history.len() > 60 {
-                sys.cpu_history.remove(0);
-            }
-
-            // Memory
-            sys.mem_used_bytes = snap.sys.mem_used_bytes;
-            sys.mem_total_bytes = snap.sys.mem_total_bytes;
-            let mem_frac = if snap.sys.mem_total_bytes > 0 {
-                snap.sys.mem_used_bytes as f32 / snap.sys.mem_total_bytes as f32
-            } else {
-                0.0
-            };
-            sys.mem_history.push(mem_frac);
-            if sys.mem_history.len() > 60 {
-                sys.mem_history.remove(0);
-            }
-
-            // Network: compute rate from delta of cumulative totals
-            if sys.prev_net_in > 0 && snap.sys.net_down_bytes_sec > sys.prev_net_in {
-                sys.net_down_bytes_sec = snap.sys.net_down_bytes_sec - sys.prev_net_in;
-            }
-            sys.prev_net_in = snap.sys.net_down_bytes_sec;
-            sys.net_out_bytes_total = snap.sys.net_out_bytes_total;
-
-            // Disk: compute rate from delta of cumulative totals
-            if sys.prev_disk_read > 0 && snap.sys.disk_read_bytes_sec > sys.prev_disk_read {
-                sys.disk_read_bytes_sec = snap.sys.disk_read_bytes_sec - sys.prev_disk_read;
-            }
-            sys.prev_disk_read = snap.sys.disk_read_bytes_sec;
-            sys.disk_write_bytes_total = snap.sys.disk_write_bytes_total;
-            self.merge_process_metrics(snap.process_metrics);
-        }
-
-        // -- dashboard data --
-        if let Some(rx) = &self.data_rx {
-            let mut got_data = false;
-            let mut rebuild_scaffold = false;
-            let mut count = 0;
-            while let Ok(new_data) = rx.try_recv() {
-                if new_data.generation != self.last_data_gen {
-                    rebuild_scaffold = true;
-                }
-                self.last_data_gen = new_data.generation;
-                self.data = new_data;
-                got_data = true;
-
-                count += 1;
-                if count >= MAX_MESSAGES_PER_DRAIN {
-                    break;
-                }
-            }
-            if got_data {
-                if self.snapshot_rx.is_none() {
-                    self.tui_state.update_from_snapshot(&self.data);
-                }
-                if rebuild_scaffold {
-                    self.scaffold = DashboardScaffold::new_in(&self.workdir);
-                }
-                self.last_refresh = Instant::now();
-                self.clamp_signal_selection();
-                self.clamp_gate_failure_selection();
-                if self.pages().scaffold(self.current_page).is_none() {
-                    self.current_page = self.scaffold.active_page();
-                }
+            if got_refresh {
+                self.tick_snapshot();
             }
         }
 
         // -- git data --
-        if let Some(rx) = &self.git_rx {
+        if let Some(git_watch) = &self.git_watch {
+            let mut got_refresh = false;
             let mut count = 0;
-            while let Ok(bg) = rx.try_recv() {
-                self.tui_state.git_branch_tree = bg.view_data.branches.clone();
-                self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
-                self.tui_state.git_worktree_list =
-                    convert_git_worktree_list(&bg.view_data.worktrees);
-                self.tui_state.git_view_data = Some(bg.view_data);
-                self.tui_state.git_summary_lines = bg.summary_lines;
-                if !bg.branch.is_empty() {
-                    self.tui_state.git_branch = bg.branch;
-                }
-                if !bg.commit_short.is_empty() {
-                    self.tui_state.git_commit_short = bg.commit_short;
-                }
-                if !bg.age.is_empty() {
-                    self.tui_state.git_age = bg.age;
-                }
-
+            while let Ok(GitRefresh::Coalesced) = git_watch.try_recv() {
+                got_refresh = true;
                 count += 1;
                 if count >= MAX_MESSAGES_PER_DRAIN {
                     break;
                 }
             }
+            if got_refresh {
+                self.apply_git_bg_data(collect_git_bg_data(&self.workdir));
+            }
         }
+    }
+
+    fn apply_git_bg_data(&mut self, bg: GitBgData) {
+        self.tui_state.git_branch_tree = bg.view_data.branches.clone();
+        self.tui_state.git_commit_graph = convert_git_commit_graph(&bg.view_data.commits);
+        self.tui_state.git_worktree_list = convert_git_worktree_list(&bg.view_data.worktrees);
+        self.tui_state.git_view_data = Some(bg.view_data);
+        self.tui_state.git_summary_lines = bg.summary_lines;
+        self.tui_state.git_branch = bg.branch;
+        self.tui_state.git_commit_short = bg.commit_short;
+        self.tui_state.git_age = bg.age;
     }
 
     fn drain_snapshot_channel(&mut self) {
@@ -2408,6 +2522,190 @@ impl App {
 
         let snapshot = rx.borrow_and_update();
         apply_dashboard_snapshot(tui_state, notifications, last_marker, &snapshot);
+    }
+
+    fn request_agent_topology_refresh(&mut self) {
+        if self.agent_topology_in_flight {
+            return;
+        }
+
+        let (tx, rx) = std_mpsc::channel();
+        let base_url = self.agent_stream_server_url.clone();
+        self.agent_topology_rx = Some(rx);
+        self.agent_topology_in_flight = true;
+        self.tui_state.set_agent_topology_loading();
+
+        match std::thread::Builder::new()
+            .name("tui-agent-topology".into())
+            .spawn(move || {
+                let result = fetch_agent_topology(&base_url);
+                let _ = tx.send(result);
+            }) {
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    thread = "tui-agent-topology",
+                    "failed to spawn topology fetch thread"
+                );
+                self.agent_topology_in_flight = false;
+                self.agent_topology_rx = None;
+                self.tui_state
+                    .set_agent_topology_error("topology fetch thread failed");
+            }
+        }
+    }
+
+    fn drain_agent_topology_fetch(&mut self) {
+        let Some(rx) = &self.agent_topology_rx else {
+            return;
+        };
+
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+
+        self.agent_topology_in_flight = false;
+        self.agent_topology_rx = None;
+
+        match result {
+            AgentTopologyFetchResult::Ready(topology) => {
+                self.tui_state.set_agent_topology(topology.clone());
+                self.apply_state_hub_agent_topology(topology);
+            }
+            AgentTopologyFetchResult::Unavailable => {
+                self.tui_state.set_agent_topology_unavailable();
+                self.apply_state_hub_agent_topology(roko_core::AgentTopology::default());
+            }
+            AgentTopologyFetchResult::Error(message) => {
+                self.tui_state.set_agent_topology_error(message);
+            }
+        }
+    }
+
+    fn apply_state_hub_agent_topology(&self, topology: roko_core::AgentTopology) {
+        let Some(state_hub) = &self._state_hub else {
+            return;
+        };
+
+        let mut snapshot = state_hub.current_snapshot();
+        snapshot.agent_topology = topology;
+        state_hub.apply_snapshot(snapshot);
+    }
+
+    fn sync_agent_stream_clients(&mut self) {
+        if !matches!(self.tui_state.active_tab, Tab::Agents) {
+            self.clear_agent_stream_clients();
+            return;
+        }
+
+        let mut desired_ids = self
+            .data
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        desired_ids.extend(self.tui_state.agents.iter().map(|agent| agent.id.clone()));
+
+        let stale_ids = self
+            .agent_stream_clients
+            .keys()
+            .filter(|agent_id| !desired_ids.contains(*agent_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for agent_id in stale_ids {
+            self.agent_stream_clients.remove(&agent_id);
+            self.tui_state.mark_agent_stream_disconnected(&agent_id);
+        }
+
+        let server_url = self.agent_stream_server_url.clone();
+        let auth_token = self.agent_stream_auth_token.clone();
+        for agent_id in desired_ids {
+            if self.agent_stream_clients.contains_key(&agent_id) {
+                continue;
+            }
+            self.agent_stream_clients.insert(
+                agent_id.clone(),
+                AgentStreamClient::connect(agent_id, &server_url, auth_token.clone()),
+            );
+        }
+    }
+
+    fn clear_agent_stream_clients(&mut self) {
+        if self.agent_stream_clients.is_empty() {
+            return;
+        }
+
+        let active_ids = self
+            .agent_stream_clients
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.agent_stream_clients.clear();
+        for agent_id in active_ids {
+            self.tui_state.mark_agent_stream_disconnected(&agent_id);
+        }
+    }
+
+    fn drain_agent_stream_clients(&mut self) {
+        let agent_ids = self
+            .agent_stream_clients
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for agent_id in agent_ids {
+            let Some(client) = self.agent_stream_clients.get_mut(&agent_id) else {
+                continue;
+            };
+
+            loop {
+                match client.try_recv() {
+                    Ok(StreamChunk::Connected) => {
+                        self.tui_state.mark_agent_stream_connected(&agent_id);
+                    }
+                    Ok(StreamChunk::Text(text)) => {
+                        self.tui_state.push_agent_chunk(&agent_id, text);
+                    }
+                    Ok(StreamChunk::Reasoning(text)) => {
+                        self.tui_state
+                            .push_agent_chunk(&agent_id, format!("[reasoning] {text}"));
+                    }
+                    Ok(StreamChunk::ToolCall(tool_call)) => {
+                        if let Ok(text) = serde_json::to_string(&tool_call) {
+                            self.tui_state
+                                .push_agent_chunk(&agent_id, format!("[tool_call] {text}"));
+                        }
+                    }
+                    Ok(StreamChunk::Usage(usage)) => {
+                        if let Ok(text) = serde_json::to_string(&usage) {
+                            self.tui_state
+                                .push_agent_chunk(&agent_id, format!("[usage] {text}"));
+                        }
+                    }
+                    Ok(StreamChunk::Error(error)) => {
+                        self.tui_state
+                            .push_agent_chunk(&agent_id, format!("[error] {error}"));
+                    }
+                    Ok(StreamChunk::Done { session }) => {
+                        if let Some(session_id) = session {
+                            self.tui_state.push_agent_chunk(
+                                &agent_id,
+                                format!("[done] session {session_id}"),
+                            );
+                        }
+                        self.tui_state.mark_agent_stream_done(&agent_id);
+                    }
+                    Ok(StreamChunk::Disconnected) => {
+                        self.tui_state.mark_agent_stream_disconnected(&agent_id);
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        self.tui_state.mark_agent_stream_disconnected(&agent_id);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn pages(&self) -> PageRegistry {
@@ -2500,7 +2798,7 @@ fn cycle_field_value(
 
 /// Collect system metrics on a background thread using `sysinfo`.
 fn collect_sys_metrics_bg(
-    tx: std::sync::mpsc::Sender<SysSnapshot>,
+    tx: watch::Sender<SysSnapshot>,
     process_supervisor: Option<Arc<ProcessSupervisor>>,
 ) {
     let mut sys = System::new_all();
@@ -2587,6 +2885,24 @@ fn push_bounded_history<T>(history: &mut VecDeque<T>, value: T, max_len: usize) 
     history.push_back(value);
 }
 
+fn resolve_agent_stream_server_url() -> String {
+    std::env::var("ROKO_SERVE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("ROKO_SERVER_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "http://localhost:6677".to_string())
+}
+
+fn resolve_agent_stream_auth_token() -> Option<String> {
+    std::env::var("ROKO_SERVER_AUTH_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 /// Map a Mori-style Tab to a legacy PageId (best effort).
 fn tab_to_page(tab: Tab) -> Option<PageId> {
     match tab {
@@ -2637,11 +2953,47 @@ fn apply_dashboard_snapshot(
     }
 }
 
+fn fetch_agent_topology(base_url: &str) -> AgentTopologyFetchResult {
+    let endpoint = format!("{}/api/agents/topology", base_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build();
+
+    let Ok(client) = client else {
+        return AgentTopologyFetchResult::Error("topology client init failed".to_string());
+    };
+
+    let response = match client.get(endpoint).send() {
+        Ok(response) => response,
+        Err(error) => {
+            return AgentTopologyFetchResult::Error(format!("topology fetch failed: {error}"));
+        }
+    };
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return AgentTopologyFetchResult::Unavailable;
+    }
+
+    if !response.status().is_success() {
+        return AgentTopologyFetchResult::Error(format!(
+            "topology fetch returned {}",
+            response.status()
+        ));
+    }
+
+    match response.json::<roko_core::AgentTopology>() {
+        Ok(topology) => AgentTopologyFetchResult::Ready(topology),
+        Err(error) => AgentTopologyFetchResult::Error(format!("invalid topology payload: {error}")),
+    }
+}
+
 fn snapshot_has_content(snapshot: &roko_core::DashboardSnapshot) -> bool {
     !snapshot.plans.is_empty()
         || !snapshot.tasks.is_empty()
         || !snapshot.agents.is_empty()
         || !snapshot.gates.is_empty()
+        || !snapshot.agent_topology.is_empty()
+        || !snapshot.experiment_winners.is_empty()
         || !snapshot.errors.is_empty()
 }
 
@@ -2684,6 +3036,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let hub = roko_core::shared_state_hub();
         let app = App::new_connected(dir.path(), &hub);
+        assert!(app.snapshot_rx.is_some());
+    }
+
+    #[test]
+    fn app_new_standalone_installs_snapshot_receiver() {
+        let dir = tempdir().unwrap();
+        let app = App::new(dir.path());
+        assert!(app._state_hub.is_some());
         assert!(app.snapshot_rx.is_some());
     }
 
@@ -2891,7 +3251,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_subtab_keybindings_include_procs() {
+    fn dashboard_subtab_keybindings_include_learning_and_procs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempdir().unwrap();
@@ -2913,8 +3273,11 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 5); // switched to MCP
 
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        assert_eq!(app.tui_state.plan_detail_tab, 6); // switched to Learning
+
         app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
-        assert_eq!(app.tui_state.plan_detail_tab, 6); // switched to Procs
+        assert_eq!(app.tui_state.plan_detail_tab, 7); // switched to Procs
 
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.tui_state.plan_detail_tab, 0); // back to Agents

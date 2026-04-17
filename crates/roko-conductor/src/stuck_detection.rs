@@ -520,6 +520,11 @@ pub struct MetaCognitionAssessment {
 
 impl MetaCognitionAssessment {
     /// Convert the assessment into a structured signal when action is needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the assessment cannot be serialized into JSON for the signal
+    /// body payload.
     #[must_use]
     pub fn to_signal(&self) -> Option<Engram> {
         match self.action {
@@ -564,6 +569,10 @@ impl MetaCognitionHook {
 
     /// Override the number of consecutive no-progress iterations required to
     /// trigger a strategy adjustment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `threshold` is zero.
     #[must_use]
     pub fn with_no_progress_iterations_threshold(mut self, threshold: usize) -> Self {
         assert!(threshold > 0, "no-progress threshold must be positive");

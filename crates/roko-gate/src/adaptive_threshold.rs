@@ -3,8 +3,10 @@
 //! Uses exponential moving averages (EMA) per gate rung to track pass rates
 //! and suggest retry budgets and skip decisions.
 
+use roko_core::config::AgentThresholds;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// EMA decay factor. 0.1 means recent observations weigh more heavily.
@@ -20,6 +22,7 @@ const SKIP_STREAK_THRESHOLD: u32 = 20;
 
 /// Per-rung statistics tracked by the adaptive threshold system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RungStats {
     /// Exponential moving average of the pass rate (0.0 to 1.0).
     pub ema_pass_rate: f64,
@@ -43,6 +46,7 @@ impl Default for RungStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveThresholds {
     /// Per-rung statistics, keyed by rung number.
+    #[serde(default)]
     rungs: HashMap<u32, RungStats>,
 }
 
@@ -54,15 +58,33 @@ impl AdaptiveThresholds {
         }
     }
 
+    /// Load from a JSON file.
+    ///
+    /// Returns `NotFound` if the file does not exist and `InvalidData` if the
+    /// file exists but does not contain valid adaptive-threshold JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns any filesystem error from opening `path`, or
+    /// [`io::ErrorKind::InvalidData`] if the file contents are not valid
+    /// adaptive-threshold JSON.
+    pub fn load(path: &Path) -> Result<Self, io::Error> {
+        let file = std::fs::File::open(path)?;
+        serde_json::from_reader(file).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
     /// Load from a JSON file, or create new if missing/corrupt.
     pub fn load_or_new(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        Self::load(path).unwrap_or_default()
     }
 
     /// Save to a JSON file (atomic write).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be serialized, the parent
+    /// directory cannot be created, or the temporary/output files cannot be
+    /// written and renamed atomically.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -70,13 +92,43 @@ impl AdaptiveThresholds {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)?;
+        let mut tmp_file = std::fs::File::create(&tmp)?;
+        tmp_file.write_all(json.as_bytes())?;
+        tmp_file.sync_all()?;
+        drop(tmp_file);
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
+    /// Return the current threshold for a rung.
+    ///
+    /// Unknown rungs default to the neutral threshold of `0.5`.
+    pub fn threshold_for(&self, rung: u32) -> f64 {
+        self.rungs
+            .get(&rung)
+            .map_or(0.5, |stats| stats.ema_pass_rate)
+    }
+
+    /// Apply a role-local threshold floor over the adaptive EMA baseline.
+    #[must_use]
+    pub fn override_for_role(
+        &self,
+        _role: &str,
+        thresholds: Option<&AgentThresholds>,
+        rung: u32,
+    ) -> f64 {
+        let nominal = self.threshold_for(rung);
+        let Some(floor) = thresholds
+            .and_then(|thresholds| thresholds.gate_pass_rate_floor)
+            .filter(|floor| floor.is_finite())
+        else {
+            return nominal;
+        };
+        nominal.max(floor.clamp(0.0, 1.0))
+    }
+
     /// Update statistics for a rung after a gate run.
-    pub fn update(&mut self, rung: u32, passed: bool) {
+    pub fn observe(&mut self, rung: u32, passed: bool) {
         let stats = self.rungs.entry(rung).or_default();
         let value = if passed { 1.0 } else { 0.0 };
 
@@ -93,6 +145,11 @@ impl AdaptiveThresholds {
         } else {
             stats.consecutive_passes = 0;
         }
+    }
+
+    /// Backwards-compatible alias for `observe`.
+    pub fn update(&mut self, rung: u32, passed: bool) {
+        self.observe(rung, passed);
     }
 
     /// Suggest a maximum retry count for a rung based on its historical pass rate.
@@ -154,6 +211,7 @@ mod tests {
     #[test]
     fn new_rung_starts_neutral() {
         let at = AdaptiveThresholds::new();
+        assert_eq!(at.threshold_for(0), 0.5);
         assert_eq!(at.suggested_max_retries(0), 3); // Default for unknown.
         assert!(!at.should_skip_rung(0));
     }
@@ -199,16 +257,42 @@ mod tests {
 
     #[test]
     fn round_trip_persistence() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()
+            .expect("invariant: adaptive-threshold test should create a temp directory");
         let path = dir.path().join("gate-thresholds.json");
 
         let mut at = AdaptiveThresholds::new();
         for _ in 0..10 {
             at.update(1, true);
         }
-        at.save(&path).unwrap();
+        at.save(&path)
+            .expect("invariant: adaptive thresholds should save to the temp file");
 
         let loaded = AdaptiveThresholds::load_or_new(&path);
-        assert_eq!(loaded.rung_stats(1).unwrap().total_observations, 10);
+        assert_eq!(
+            loaded
+                .rung_stats(1)
+                .expect("invariant: persisted rung stats should exist after reload")
+                .total_observations,
+            10
+        );
+    }
+
+    #[test]
+    fn role_override_raises_floor_without_lowering_nominal_threshold() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(1, false);
+        }
+
+        let strict = AgentThresholds {
+            gate_pass_rate_floor: Some(0.75),
+        };
+        assert_eq!(at.override_for_role("implementer", Some(&strict), 1), 0.75);
+
+        let lenient = AgentThresholds {
+            gate_pass_rate_floor: Some(0.10),
+        };
+        assert!(at.override_for_role("implementer", Some(&lenient), 1) >= at.threshold_for(1));
     }
 }

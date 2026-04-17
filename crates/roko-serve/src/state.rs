@@ -560,6 +560,11 @@ impl SignalStore {
     }
 
     /// Persist a signal through the normal file-backed substrate path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing [`FileSubstrate`] cannot be opened or
+    /// if the signal cannot be appended to the `.roko/signals.jsonl` store.
     pub async fn put(&self, signal: Engram) -> anyhow::Result<()> {
         let substrate = self.substrate().await?;
         substrate.put(signal).await?;

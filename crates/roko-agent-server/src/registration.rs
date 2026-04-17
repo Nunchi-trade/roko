@@ -132,6 +132,12 @@ impl AgentRegistration {
     }
 
     /// Publish the card and optionally submit an `updateAgentCardUri` transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the card cannot be published, if the optional
+    /// on-chain transaction cannot be signed or submitted, or if the optional
+    /// discovery callback fails.
     pub async fn register(
         &self,
         state: &AgentState,

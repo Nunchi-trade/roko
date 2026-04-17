@@ -134,6 +134,10 @@ impl CostsLog {
     }
 
     /// Return the total recorded cost in USD.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying log cannot be read.
     pub async fn total_cost(&self) -> io::Result<f64> {
         Ok(self
             .read_all()
@@ -144,6 +148,10 @@ impl CostsLog {
     }
 
     /// Aggregate recorded cost by model slug.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying log cannot be read.
     pub async fn cost_by_model(&self) -> io::Result<HashMap<String, f64>> {
         Ok(aggregate_costs(self.read_all().await?, |record| {
             record.model.clone()
@@ -151,6 +159,10 @@ impl CostsLog {
     }
 
     /// Aggregate recorded cost by plan id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying log cannot be read.
     pub async fn cost_by_plan(&self) -> io::Result<HashMap<String, f64>> {
         Ok(aggregate_costs(self.read_all().await?, |record| {
             record.plan_id.clone()
@@ -159,6 +171,10 @@ impl CostsLog {
 
     /// Return a zero-filled daily cost breakdown for the most recent `days`
     /// calendar days, ordered oldest-to-newest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying log cannot be read.
     pub async fn daily_cost(&self, days: usize) -> io::Result<Vec<(String, f64)>> {
         if days == 0 {
             return Ok(Vec::new());
@@ -187,6 +203,10 @@ impl CostsLog {
     /// Return the recent cost rate for the last `window` of wall-clock time.
     ///
     /// The result is expressed in USD/minute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying log cannot be read.
     pub async fn recent_cost_rate(&self, window: Duration) -> io::Result<f64> {
         let records = self.read_all().await?;
         Ok(recent_cost_rate_from_records(&records, window))
@@ -195,6 +215,10 @@ impl CostsLog {
     /// Return `true` when the recent cost rate exceeds `threshold`.
     ///
     /// Uses a conservative 15-minute window by default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying log cannot be read.
     pub async fn is_cost_spike(&self, threshold: f64) -> io::Result<bool> {
         Ok(self.recent_cost_rate(DEFAULT_COST_SPIKE_WINDOW).await? > threshold)
     }

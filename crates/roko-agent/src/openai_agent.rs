@@ -244,6 +244,10 @@ impl Agent for OpenAiAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "openai"
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }

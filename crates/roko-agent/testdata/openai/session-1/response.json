@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-openai-session-1",
+  "session_id": "sess-openai-session",
+  "thread_id": "thread-openai-session",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "OpenAI session turn one."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 7,
+    "completion_tokens": 3,
+    "total_tokens": 10,
+    "prompt_tokens_details": {
+      "cached_tokens": 1
+    }
+  }
+}

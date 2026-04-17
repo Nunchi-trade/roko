@@ -78,6 +78,10 @@ impl Agent for GeminiCompatAgent {
         self.inner.name()
     }
 
+    fn backend_id(&self) -> &'static str {
+        "gemini"
+    }
+
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }

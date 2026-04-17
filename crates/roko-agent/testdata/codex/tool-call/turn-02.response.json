@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-codex-tool-2",
+  "session_id": "sess-codex-tool",
+  "thread_id": "thread-codex-tool",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Codex handled the tool."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 6,
+    "total_tokens": 18,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  }
+}

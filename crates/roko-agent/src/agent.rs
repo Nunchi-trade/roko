@@ -130,6 +130,11 @@ pub trait Agent: Send + Sync {
     /// Human-readable name for logs/metrics.
     fn name(&self) -> &str;
 
+    /// Stable backend identifier for audit and episode logging.
+    fn backend_id(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Does this agent emit a streaming trace (many signals), or a single output?
     fn supports_streaming(&self) -> bool {
         false

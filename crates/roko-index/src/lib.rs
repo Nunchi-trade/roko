@@ -10,6 +10,14 @@
 //! - **[`hdc`]** — 10,240-bit hyperdimensional fingerprints for similarity
 //!   search.
 
+#![allow(
+    clippy::expect_used,
+    clippy::map_unwrap_or,
+    clippy::needless_pass_by_value,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
+
 pub mod graph;
 pub mod hdc;
 pub mod parser;

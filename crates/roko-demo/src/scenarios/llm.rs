@@ -84,6 +84,10 @@ pub struct ClaudeApiProvider {
 
 impl ClaudeApiProvider {
     /// Construct from environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `ANTHROPIC_API_KEY` is missing.
     pub fn from_env() -> anyhow::Result<Self> {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY is required for claude backend"))?;
@@ -128,6 +132,10 @@ pub struct MultiProvider {
 
 impl MultiProvider {
     /// Create a new round-robin provider set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `providers` is empty.
     pub fn new(providers: Vec<Arc<dyn LlmProvider>>) -> anyhow::Result<Self> {
         if providers.is_empty() {
             return Err(anyhow::anyhow!(
@@ -142,6 +150,11 @@ impl MultiProvider {
 }
 
 /// Factory for configured providers.
+///
+/// # Errors
+///
+/// Returns an error if the requested backend is unknown or any configured
+/// backend cannot be constructed.
 pub fn create_provider(backend: &str) -> anyhow::Result<Arc<dyn LlmProvider>> {
     match backend {
         "stub" => Ok(Arc::new(StubLlm::new())),

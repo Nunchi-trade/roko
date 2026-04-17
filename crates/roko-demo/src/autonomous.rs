@@ -26,6 +26,11 @@ pub struct AutonomousReport {
 }
 
 /// Prepare the autonomous loop state.
+///
+/// # Errors
+///
+/// Returns an error if scenario preparation fails, including missing contract
+/// addresses, prompt loading, participant setup, or baseline seeding.
 pub async fn prepare_autonomous(
     ctx: Arc<ChainCtx>,
     runtime_dir: PathBuf,
@@ -36,6 +41,11 @@ pub async fn prepare_autonomous(
 }
 
 /// Run an autonomous poster/agent loop for `jobs` rounds.
+///
+/// # Errors
+///
+/// Returns an error if any round helper fails, a round exceeds the timeout,
+/// or reputation persistence fails at the end of the run.
 pub async fn run_autonomous(
     prepared: &PreparedYieldRouting,
     llm: Arc<dyn LlmProvider>,

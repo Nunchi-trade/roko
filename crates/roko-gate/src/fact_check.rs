@@ -199,7 +199,9 @@ impl Gate for FactCheckGate {
             }
         }
 
-        let confidence = verified as f64 / total as f64;
+        let verified = u32::try_from(verified).unwrap_or(u32::MAX);
+        let total = u32::try_from(total).unwrap_or(u32::MAX);
+        let confidence = f64::from(verified) / f64::from(total);
         #[allow(clippy::cast_possible_truncation)]
         let score = confidence as f32;
 

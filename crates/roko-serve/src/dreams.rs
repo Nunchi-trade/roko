@@ -93,6 +93,11 @@ pub fn start_dream_loop(state: Arc<AppState>, config: DreamLoopConfig) -> JoinHa
 ///
 /// This mirrors the daemon bootstrap path, but executes the batch once instead
 /// of waiting for the idle scheduler.
+///
+/// # Errors
+///
+/// Returns an error if the dream cycle cannot be constructed, the last dream
+/// checkpoint cannot be restored, or the cycle itself fails to run.
 pub async fn run_dream_cycle_now(
     state: Arc<AppState>,
     config: DreamLoopConfig,
@@ -107,6 +112,11 @@ pub async fn run_dream_cycle_now(
 /// Load the latest persisted dream report from the report directory.
 ///
 /// Returns `Ok(None)` when no report exists yet.
+///
+/// # Errors
+///
+/// Returns an error if the latest report path cannot be scanned, or if the
+/// selected report cannot be read or parsed as JSON.
 pub fn load_latest_dream_report(report_dir: &Path) -> Result<Option<DreamCycleReport>> {
     let Some(path) = latest_dream_report_path(report_dir)? else {
         return Ok(None);

@@ -24,7 +24,8 @@ use super::validate;
 
 /// The enrichment pipeline. Parameterized by an [`LlmClient`] implementation.
 ///
-/// Use [`run_step`](Self::run_step) for a single step or
+/// Use [`run_step`](Self::run_step) for a single step,
+/// [`run_steps`](Self::run_steps) for an explicit subset, or
 /// [`run_all`](Self::run_all) for the full pipeline in dependency order.
 pub struct EnrichmentPipeline<C: LlmClient> {
     /// Pipeline configuration.
@@ -115,8 +116,16 @@ impl<C: LlmClient> EnrichmentPipeline<C> {
     /// Continues past failures — each step's outcome is collected.
     /// Returns the list of outcomes for all 13 steps.
     pub async fn run_all(&self, plan_base: &str) -> Vec<StepOutcome> {
-        let mut outcomes = Vec::with_capacity(ALL_ORDERED.len());
-        for &step in ALL_ORDERED {
+        self.run_steps(plan_base, ALL_ORDERED).await
+    }
+
+    /// Run a selected subset of enrichment steps in the order provided.
+    ///
+    /// Continues past failures — each step's outcome is collected.
+    /// Returns the list of outcomes for the requested steps only.
+    pub async fn run_steps(&self, plan_base: &str, steps: &[EnrichStep]) -> Vec<StepOutcome> {
+        let mut outcomes = Vec::with_capacity(steps.len());
+        for &step in steps {
             outcomes.push(self.run_step(step, plan_base).await);
         }
         outcomes
@@ -430,6 +439,29 @@ mod tests {
                 }
                 other => panic!("expected Skipped(DryRun), got {other:?}"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_steps_executes_only_requested_steps_in_explicit_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _plan_dir = setup_plan_dir(tmp.path(), "test-plan");
+
+        let client = MockLlmClient::single_ok("unused");
+        let mut config = make_config(tmp.path());
+        config.force = true;
+
+        let pipeline = EnrichmentPipeline::new(config, client);
+        let selected = [EnrichStep::Tasks, EnrichStep::Prd, EnrichStep::Briefs];
+        let outcomes = pipeline.run_steps("test-plan", &selected).await;
+
+        assert_eq!(outcomes.len(), selected.len());
+        for (outcome, step) in outcomes.iter().zip(selected) {
+            assert_eq!(outcome.step(), step);
+            assert!(
+                matches!(outcome, StepOutcome::Generated { .. }),
+                "expected generated outcome for {step}, got {outcome:?}"
+            );
         }
     }
 

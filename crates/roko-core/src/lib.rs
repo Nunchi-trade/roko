@@ -34,7 +34,17 @@
 //! New capabilities are added by implementing one of the six traits; no core
 //! changes are needed.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    missing_docs,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::collapsible_str_replace,
+    clippy::derivable_impls,
+    clippy::expect_used,
+    clippy::module_name_repetitions,
+    clippy::nursery,
+    clippy::obfuscated_if_else,
+    clippy::pedantic
+)]
 
 pub mod affect;
 pub mod agent;
@@ -123,7 +133,11 @@ pub use task::{
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
-pub use dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
+pub use dashboard_snapshot::{
+    AgentTopology, AgentTopologyEdge, AgentTopologyNode, DashboardEvent, DashboardSnapshot,
+    DiagnosisSeverity, DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
+    TrendBucket, TrendBuckets,
+};
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,

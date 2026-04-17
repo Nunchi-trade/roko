@@ -13,6 +13,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::config::{LoadConfigError, load_config};
 
 use crate::error::ApiError;
+use crate::extract::ApiJson;
 use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -41,7 +42,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
 /// then write the result to `roko.toml`.
 async fn update_config(
     State(state): State<Arc<AppState>>,
-    Json(partial): Json<Value>,
+    ApiJson(partial): ApiJson<Value>,
 ) -> Result<Json<Value>, ApiError> {
     // Read current config, merge the partial update, and write back.
     let cfg = state.load_roko_config();
@@ -91,6 +92,11 @@ fn map_load_config_error(err: LoadConfigError) -> ApiError {
 }
 
 /// Reload `roko.toml` from disk into the live state and return validation warnings.
+///
+/// # Errors
+///
+/// Returns [`LoadConfigError::Read`] when `roko.toml` cannot be read and
+/// [`LoadConfigError::Parse`] when the file contents are not valid config.
 pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConfigError> {
     let new_config = load_config(&state.workdir)?;
     let warnings = validate_references(&new_config);

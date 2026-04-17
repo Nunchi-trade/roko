@@ -3,6 +3,8 @@
 //! Implements a small JSON-RPC 2.0 stdio server that exposes Slack Web API
 //! tools to MCP clients.
 
+#![allow(clippy::default_trait_access, clippy::similar_names)]
+
 use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use roko_mcp_stdio::{JsonRpcError, JsonRpcRequest, serve_stdio};

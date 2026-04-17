@@ -140,6 +140,10 @@ impl Agent for ToolLoopAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        self.tool_loop.backend_id()
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }

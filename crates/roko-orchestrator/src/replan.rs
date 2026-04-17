@@ -158,16 +158,12 @@ impl std::fmt::Display for ReplanResult {
                 plan_id,
                 task_id,
                 new_task_ids,
-            } => write!(f, "decompose({plan_id}, {task_id}, {:?})", new_task_ids),
+            } => write!(f, "decompose({plan_id}, {task_id}, {new_task_ids:?})"),
             Self::RegeneratePlan {
                 plan_id,
                 task_id,
                 new_task_ids,
-            } => write!(
-                f,
-                "regenerate_plan({plan_id}, {task_id}, {:?})",
-                new_task_ids
-            ),
+            } => write!(f, "regenerate_plan({plan_id}, {task_id}, {new_task_ids:?})"),
             Self::Skip { plan_id, task_id } => write!(f, "skip({plan_id}, {task_id})"),
         }
     }

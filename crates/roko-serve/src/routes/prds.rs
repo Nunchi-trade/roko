@@ -1,18 +1,29 @@
 //! PRD lifecycle endpoints — list, read, idea capture, draft, promote, plan.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::task::JoinHandle;
+use validator::Validate;
 
 use crate::error::{ApiError, validate_path_segment};
 use crate::events::ServerEvent;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::state::{AppState, OperationHandle, OperationStatus};
+use parking_lot::Mutex;
+use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_runtime::event_bus::{EventBus, PublishOrigin, RokoEvent, global_event_bus};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -23,6 +34,229 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/prds/{slug}/draft", post(draft_prd))
         .route("/prds/{slug}/promote", post(promote_prd))
         .route("/prds/{slug}/plan", post(plan_from_prd))
+}
+
+const PRD_PUBLISH_AUDIT_KIND: &str = "prd_published";
+const PRD_PUBLISH_DEDUPE_WINDOW: Duration = Duration::from_secs(60);
+
+static RECENT_PUBLISHES: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn recent_publishes() -> &'static Mutex<HashMap<String, Instant>> {
+    RECENT_PUBLISHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn clear_recent_publishes() {
+    recent_publishes().lock().clear();
+}
+
+fn publish_dedupe_key(workdir: &std::path::Path, slug: &str) -> String {
+    format!("{}::{slug}", workdir.display())
+}
+
+fn should_queue_publish(workdir: &std::path::Path, slug: &str, now: Instant) -> bool {
+    let mut recent = recent_publishes().lock();
+    recent.retain(|_, last_seen| {
+        now.saturating_duration_since(*last_seen) < PRD_PUBLISH_DEDUPE_WINDOW
+    });
+
+    let key = publish_dedupe_key(workdir, slug);
+    if recent.get(&key).is_some_and(|last_seen| {
+        now.saturating_duration_since(*last_seen) < PRD_PUBLISH_DEDUPE_WINDOW
+    }) {
+        return false;
+    }
+
+    recent.insert(key, now);
+    true
+}
+
+fn prd_publish_audit_path(workdir: &std::path::Path) -> PathBuf {
+    workdir.join(".roko").join("episodes.jsonl")
+}
+
+pub(crate) async fn append_prd_published_episode(
+    workdir: &std::path::Path,
+    slug: &str,
+    path: &std::path::Path,
+    published_at: DateTime<Utc>,
+    origin: PublishOrigin,
+) {
+    let logger = EpisodeLogger::new(prd_publish_audit_path(workdir));
+    let mut episode = Episode::new("roko-serve", slug);
+    episode.kind = PRD_PUBLISH_AUDIT_KIND.to_string();
+    episode.agent_template = "serve".to_string();
+    episode.trigger_kind = "prd_publish".to_string();
+    episode.timestamp = published_at;
+    episode.started_at = published_at;
+    episode.completed_at = published_at;
+    episode.success = true;
+    episode.extra.insert(
+        "slug".to_string(),
+        serde_json::Value::String(slug.to_string()),
+    );
+    episode.extra.insert(
+        "path".to_string(),
+        serde_json::Value::String(path.display().to_string()),
+    );
+    episode.extra.insert(
+        "origin".to_string(),
+        serde_json::to_value(origin).unwrap_or(serde_json::Value::String("unknown".to_string())),
+    );
+    episode.extra.insert(
+        "published_at".to_string(),
+        serde_json::Value::String(published_at.to_rfc3339()),
+    );
+
+    if let Err(err) = logger.append(&episode).await {
+        tracing::warn!(slug = %slug, error = %err, "failed to audit PRD publish event");
+    }
+}
+
+async fn queue_plan_generation_after_publish(
+    state: Arc<AppState>,
+    slug: String,
+    prd_path: PathBuf,
+    prd_content: String,
+) -> Option<String> {
+    if !should_queue_publish(&state.workdir, &slug, Instant::now()) {
+        tracing::trace!(slug = %slug, "skipping duplicate PRD publish within 60s");
+        return None;
+    }
+
+    Some(queue_plan_generation_op(state, slug, prd_path, prd_content).await)
+}
+
+fn prd_published_event_from_episode(episode: &Episode) -> Option<RokoEvent> {
+    if episode.kind != PRD_PUBLISH_AUDIT_KIND {
+        return None;
+    }
+
+    let slug = episode.extra.get("slug")?.as_str()?.to_string();
+    let path = PathBuf::from(episode.extra.get("path")?.as_str()?);
+    let origin = serde_json::from_value::<PublishOrigin>(episode.extra.get("origin")?.clone())
+        .ok()
+        .unwrap_or(PublishOrigin::Import);
+    let published_at = episode
+        .extra
+        .get("published_at")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or(episode.timestamp);
+
+    Some(RokoEvent::PrdPublished {
+        slug,
+        path,
+        published_at,
+        origin,
+    })
+}
+
+async fn handle_prd_published_event(
+    state: Arc<AppState>,
+    slug: String,
+    path: PathBuf,
+    origin: PublishOrigin,
+) {
+    let config = state.load_roko_config();
+    if !config.serve.auto_orchestrate || !config.prd.auto_plan {
+        tracing::trace!(slug = %slug, ?origin, "auto-orchestrate disabled; skipping PRD publish");
+        return;
+    }
+
+    tracing::info!(slug = %slug, ?origin, "auto-orchestrating published PRD");
+
+    let prd_content = match tokio::fs::read_to_string(&path).await {
+        Ok(content) => content,
+        Err(err) => {
+            tracing::warn!(
+                slug = %slug,
+                path = %path.display(),
+                error = %err,
+                "auto-orchestrate skipped because the published PRD could not be read"
+            );
+            return;
+        }
+    };
+
+    let _ = queue_plan_generation_after_publish(state, slug, path, prd_content).await;
+}
+
+async fn follow_prd_published_audit(state: Arc<AppState>) {
+    let episodes_path = prd_publish_audit_path(&state.workdir);
+    let mut processed = EpisodeLogger::read_all_lossy(&episodes_path)
+        .await
+        .map_or(0, |episodes| episodes.len());
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = state.cancel.cancelled() => break,
+            _ = interval.tick() => {
+                let Ok(episodes) = EpisodeLogger::read_all_lossy(&episodes_path).await else {
+                    continue;
+                };
+                if episodes.len() < processed {
+                    processed = 0;
+                }
+                for episode in episodes.iter().skip(processed) {
+                    let Some(RokoEvent::PrdPublished { slug, path, origin, .. }) =
+                        prd_published_event_from_episode(episode)
+                    else {
+                        continue;
+                    };
+                    let state = Arc::clone(&state);
+                    tokio::spawn(async move {
+                        handle_prd_published_event(state, slug, path, origin).await;
+                    });
+                }
+                processed = episodes.len();
+            }
+        }
+    }
+}
+
+pub(crate) fn spawn_prd_publish_subscriber(
+    state: Arc<AppState>,
+    bus: &EventBus<RokoEvent>,
+) -> JoinHandle<()> {
+    let mut rx = bus.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            let env = tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                event = rx.recv() => match event {
+                    Ok(env) => env,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "PRD publish subscriber lagged");
+                        continue;
+                    }
+                },
+            };
+
+            if let RokoEvent::PrdPublished {
+                slug, path, origin, ..
+            } = env.payload
+            {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    handle_prd_published_event(state, slug, path, origin).await;
+                });
+            }
+        }
+    })
+}
+
+pub(crate) fn start_prd_publish_subscriber(state: Arc<AppState>) -> JoinHandle<()> {
+    let audit_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        follow_prd_published_audit(audit_state).await;
+    });
+    spawn_prd_publish_subscriber(state, global_event_bus())
 }
 
 /// `GET /api/prds` — list PRD slugs from drafts/ and published/.
@@ -77,15 +311,25 @@ async fn get_prd(
     })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct IdeaRequest {
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     text: String,
+}
+
+impl RequestPayload for IdeaRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
 }
 
 /// `POST /api/prds/ideas` — append a line to `.roko/prd/ideas.md`.
 async fn post_idea(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<IdeaRequest>,
+    ValidJson(body): ValidJson<IdeaRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let prd_dir = state.workdir.join(".roko").join("prd");
     tokio::fs::create_dir_all(&prd_dir)
@@ -241,18 +485,31 @@ async fn promote_prd(
         "status": "published",
     });
 
-    if state.load_roko_config().prd.auto_plan {
+    let published_at = Utc::now();
+    append_prd_published_episode(
+        &state.workdir,
+        &slug,
+        &dst,
+        published_at,
+        PublishOrigin::Http,
+    )
+    .await;
+
+    let config = state.load_roko_config();
+    if config.prd.auto_plan && config.serve.auto_orchestrate {
         match tokio::fs::read_to_string(&dst).await {
             Ok(prd_content) => {
-                let plan_op_id = queue_plan_generation_op(
+                if let Some(plan_op_id) = queue_plan_generation_after_publish(
                     Arc::clone(&state),
                     plan_slug,
                     dst.clone(),
                     prd_content,
                 )
-                .await;
-                response["plan_generation"] = json!("queued");
-                response["plan_operation_id"] = json!(plan_op_id);
+                .await
+                {
+                    response["plan_generation"] = json!("queued");
+                    response["plan_operation_id"] = json!(plan_op_id);
+                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -264,6 +521,13 @@ async fn promote_prd(
             }
         }
     }
+
+    global_event_bus().emit(RokoEvent::PrdPublished {
+        slug,
+        path: dst,
+        published_at,
+        origin: PublishOrigin::Http,
+    });
 
     Ok(Json(response))
 }
@@ -547,10 +811,12 @@ async fn queue_plan_generation_op(
 mod tests {
     use super::*;
 
+    use chrono::Utc;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
@@ -560,6 +826,7 @@ mod tests {
     use crate::deploy::manual::ManualBackend;
     use crate::runtime::NoOpRuntime;
     use crate::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
+    use roko_runtime::event_bus::{EventBus, PublishOrigin, RokoEvent};
 
     #[derive(Clone)]
     struct RecordingRuntime {
@@ -642,6 +909,128 @@ mod tests {
         })
         .await
         .expect("timed out waiting for background PRD draft job");
+    }
+
+    #[test]
+    fn publish_dedupe_allows_retry_after_window() {
+        clear_recent_publishes();
+        let workdir = std::path::Path::new("/tmp/roko-prd-publish-dedupe");
+        let base = Instant::now();
+
+        assert!(should_queue_publish(workdir, "alpha", base));
+        assert!(!should_queue_publish(
+            workdir,
+            "alpha",
+            base + Duration::from_secs(10)
+        ));
+        assert!(should_queue_publish(
+            workdir,
+            "alpha",
+            base + Duration::from_secs(61)
+        ));
+    }
+
+    #[tokio::test]
+    async fn prd_publish_subscriber_queues_plan_generation_and_audits() {
+        clear_recent_publishes();
+        let runtime = Arc::new(RecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            success: true,
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
+        let notify = Arc::clone(&runtime.as_ref().notify);
+        let calls = Arc::clone(&runtime.as_ref().calls);
+        let (_dir, state) = test_state_with_runtime(runtime);
+        let published_path = state
+            .workdir
+            .join(".roko")
+            .join("prd")
+            .join("published")
+            .join("alpha.md");
+        if let Some(parent) = published_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .expect("create published dir");
+        }
+        tokio::fs::write(&published_path, "# Alpha\n")
+            .await
+            .expect("write published prd");
+
+        let bus = EventBus::new(16);
+        let _subscriber = spawn_prd_publish_subscriber(Arc::clone(&state), &bus);
+
+        bus.emit(RokoEvent::PrdPublished {
+            slug: "alpha".into(),
+            path: published_path.clone(),
+            published_at: Utc::now(),
+            origin: PublishOrigin::Cli,
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("subscriber should queue plan generation");
+        tokio::task::yield_now().await;
+
+        let calls = calls.lock().expect("lock calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, state.workdir);
+        assert!(calls[0].1.contains(".roko/prd/published/alpha.md"));
+
+        let ops = state.operations.read().await;
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prd_publish_subscriber_dedupes_repeated_events() {
+        clear_recent_publishes();
+        let runtime = Arc::new(RecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+            success: true,
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
+        let notify = Arc::clone(&runtime.as_ref().notify);
+        let calls = Arc::clone(&runtime.as_ref().calls);
+        let (_dir, state) = test_state_with_runtime(runtime);
+        let published_path = state
+            .workdir
+            .join(".roko")
+            .join("prd")
+            .join("published")
+            .join("beta.md");
+        if let Some(parent) = published_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .expect("create published dir");
+        }
+        tokio::fs::write(&published_path, "# Beta\n")
+            .await
+            .expect("write published prd");
+
+        let bus = EventBus::new(16);
+        let _subscriber = spawn_prd_publish_subscriber(Arc::clone(&state), &bus);
+
+        let event = RokoEvent::PrdPublished {
+            slug: "beta".into(),
+            path: published_path,
+            published_at: Utc::now(),
+            origin: PublishOrigin::Http,
+        };
+        bus.emit(event.clone());
+        bus.emit(event);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("first publish should queue plan generation");
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let calls = calls.lock().expect("lock calls");
+        assert_eq!(calls.len(), 1);
+
+        let ops = state.operations.read().await;
+        assert_eq!(ops.len(), 1);
     }
 
     #[tokio::test]

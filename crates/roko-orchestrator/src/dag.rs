@@ -26,6 +26,71 @@ use roko_core::{GlobalTaskId, Task};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Detect every node that participates in a cycle.
+///
+/// Input edges are expressed as `node -> direct dependencies`.
+/// The returned node list is sorted for deterministic diagnostics.
+#[must_use]
+pub fn detect_cycle_nodes<N>(deps: &BTreeMap<N, BTreeSet<N>>) -> Vec<N>
+where
+    N: Clone + Ord,
+{
+    fn dfs<'a, N>(
+        node: &'a N,
+        deps: &'a BTreeMap<N, BTreeSet<N>>,
+        state: &mut BTreeMap<&'a N, u8>,
+        stack: &mut Vec<&'a N>,
+        positions: &mut BTreeMap<&'a N, usize>,
+        cycle_nodes: &mut BTreeSet<N>,
+    ) where
+        N: Clone + Ord,
+    {
+        state.insert(node, 1);
+        positions.insert(node, stack.len());
+        stack.push(node);
+
+        if let Some(children) = deps.get(node) {
+            for child in children {
+                match state.get(child).copied().unwrap_or(0) {
+                    0 => dfs(child, deps, state, stack, positions, cycle_nodes),
+                    1 => {
+                        if let Some(start) = positions.get(child).copied() {
+                            for entry in &stack[start..] {
+                                cycle_nodes.insert((*entry).clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        stack.pop();
+        positions.remove(node);
+        state.insert(node, 2);
+    }
+
+    let mut state: BTreeMap<&N, u8> = BTreeMap::new();
+    let mut stack: Vec<&N> = Vec::new();
+    let mut positions: BTreeMap<&N, usize> = BTreeMap::new();
+    let mut cycle_nodes: BTreeSet<N> = BTreeSet::new();
+
+    for node in deps.keys() {
+        if state.get(node).copied().unwrap_or(0) == 0 {
+            dfs(
+                node,
+                deps,
+                &mut state,
+                &mut stack,
+                &mut positions,
+                &mut cycle_nodes,
+            );
+        }
+    }
+
+    cycle_nodes.into_iter().collect()
+}
+
 /// A single wave: every task in `tasks` has no open dependencies and
 /// can run in parallel with its peers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,11 +401,22 @@ impl UnifiedTaskDag {
             }
         }
         if out.len() != self.nodes.len() {
-            let stuck: Vec<GlobalTaskId> = remaining_deps
+            let cycle_graph = self
+                .edges
+                .iter()
+                .map(|(node, deps)| (node.clone(), deps.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let cycle_nodes = detect_cycle_nodes(&cycle_graph);
+            if !cycle_nodes.is_empty() {
+                return Err(DagError::Cycle(cycle_nodes));
+            }
+
+            let mut stuck: Vec<GlobalTaskId> = remaining_deps
                 .into_iter()
                 .filter(|(_, n)| *n > 0)
                 .map(|(k, _)| k)
                 .collect();
+            stuck.sort();
             return Err(DagError::Cycle(stuck));
         }
         Ok(out)
@@ -437,8 +513,7 @@ impl UnifiedTaskDag {
         let edge_count: usize = self.edges.values().map(BTreeSet::len).sum();
         let critical = self
             .cpm_analysis()
-            .map(|(_, _, total, _)| duration_to_minutes(total))
-            .unwrap_or(0);
+            .map_or(0, |(_, _, total, _)| duration_to_minutes(total));
         let wave_count = self.waves().map(|w| w.len()).unwrap_or(0);
         DagStats {
             nodes: self.nodes.len(),
@@ -534,6 +609,15 @@ impl UnifiedTaskDag {
     ///
     /// The mutation is validated against the current graph and rejected if
     /// it would introduce a cycle or touch a completed task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DagMutationError::UnknownTask`] if the target task does
+    /// not exist, [`DagMutationError::CompletedTask`] if the mutation
+    /// touches a completed task, [`DagMutationError::InvalidMutation`] if
+    /// the payload is structurally invalid, or [`DagMutationError::Cycle`]
+    /// if the mutation introduces a cycle.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
         let mut next = self.clone();
         let result = match mutation {
@@ -562,14 +646,14 @@ impl UnifiedTaskDag {
                 let Some(task) = next.tasks.get(&task_id).cloned() else {
                     return Err(DagMutationError::UnknownTask(task_id));
                 };
-                let deps = task.depends_on.clone();
+                let deps = task.depends_on;
                 let dependents: Vec<_> = next.dependents_of(&task_id).iter().cloned().collect();
                 let task_key = task_id.to_string();
                 for dependent in dependents {
                     if let Some(dep_task) = next.tasks.get_mut(&dependent) {
                         remove_dep(&mut dep_task.depends_on, &task_key);
                         for dep in &deps {
-                            let dep_key = dep.to_string();
+                            let dep_key = dep.clone();
                             if !dep_task.depends_on.iter().any(|raw| raw == &dep_key) {
                                 dep_task.depends_on.push(dep_key);
                             }
@@ -590,7 +674,7 @@ impl UnifiedTaskDag {
                     return Err(DagMutationError::UnknownTask(task_id));
                 };
                 let dependents: Vec<_> = next.dependents_of(&task_id).iter().cloned().collect();
-                let original_deps = original.depends_on.clone();
+                let original_deps = original.depends_on;
                 let mut chain: Vec<GlobalTaskId> = Vec::with_capacity(into.len());
                 for (index, mut task) in into.into_iter().enumerate() {
                     if index == 0 && task.id != task_id.task {
@@ -661,7 +745,7 @@ impl UnifiedTaskDag {
                     .tasks
                     .get(&task_id)
                     .map(|current| current.depends_on.clone())
-                    .ok_or(DagMutationError::UnknownTask(task_id.clone()))?;
+                    .ok_or_else(|| DagMutationError::UnknownTask(task_id.clone()))?;
                 next.tasks.insert(task_id, task);
                 Ok(())
             }
@@ -767,6 +851,7 @@ impl UnifiedTaskDag {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     fn cpm_analysis(
         &self,
     ) -> Option<(
@@ -817,8 +902,9 @@ impl UnifiedTaskDag {
         self.tasks
             .get(id)
             .and_then(|task| task.estimated_minutes)
-            .map(|minutes| Duration::from_secs(u64::from(minutes).saturating_mul(60)))
-            .unwrap_or(Duration::ZERO)
+            .map_or(Duration::ZERO, |minutes| {
+                Duration::from_secs(u64::from(minutes).saturating_mul(60))
+            })
     }
 }
 
@@ -856,12 +942,12 @@ impl IncrementalDag {
 
     /// Read-only access to the underlying DAG.
     #[must_use]
-    pub fn dag(&self) -> &UnifiedTaskDag {
+    pub const fn dag(&self) -> &UnifiedTaskDag {
         &self.dag
     }
 
     /// Mutable access to the underlying DAG.
-    pub fn dag_mut(&mut self) -> &mut UnifiedTaskDag {
+    pub const fn dag_mut(&mut self) -> &mut UnifiedTaskDag {
         &mut self.dag
     }
 
@@ -913,6 +999,12 @@ impl IncrementalDag {
     }
 
     /// Apply a mutation and mark the touched subtree dirty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`DagMutationError`] variants as
+    /// [`UnifiedTaskDag::apply_mutation`] when the mutation cannot be
+    /// applied.
     pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
         let touched = mutation_touched_ids(&mutation);
         self.dag.apply_mutation(mutation)?;
@@ -986,7 +1078,7 @@ fn merge_task_specs(target: &mut Task, merged: &Task) {
     append_unique(&mut target.acceptance, &merged.acceptance);
     target.exclusive_files |= merged.exclusive_files;
     if target.role.is_none() {
-        target.role = merged.role.clone();
+        target.role.clone_from(&merged.role);
     }
     if target.category.is_none() {
         target.category = merged.category;
@@ -1007,10 +1099,12 @@ fn merge_task_specs(target: &mut Task, merged: &Task) {
         target.complexity_band = merged.complexity_band;
     }
     if target.preferred_model.is_none() {
-        target.preferred_model = merged.preferred_model.clone();
+        target.preferred_model.clone_from(&merged.preferred_model);
     }
     if target.preferred_provider.is_none() {
-        target.preferred_provider = merged.preferred_provider.clone();
+        target
+            .preferred_provider
+            .clone_from(&merged.preferred_provider);
     }
 }
 

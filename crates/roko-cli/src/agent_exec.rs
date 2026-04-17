@@ -139,6 +139,7 @@ async fn run_agent_capture_impl(
             bare_mode: true,
             dangerously_skip_permissions: true,
             name: format!("{}:{model}", resolved.provider_kind.label()),
+            role: None,
         },
         format!("create agent for model {model}"),
     )?;

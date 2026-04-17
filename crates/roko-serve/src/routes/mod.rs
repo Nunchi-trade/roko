@@ -8,10 +8,11 @@ mod agents;
 mod aggregator;
 mod config;
 mod deployments;
+mod diagnosis;
 mod learning;
 mod middleware;
 mod plans;
-mod prds;
+pub(crate) mod prds;
 mod providers;
 mod research;
 mod run;
@@ -30,6 +31,7 @@ use roko_core::config::ServeAuthConfig;
 use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
+pub(crate) use self::prds::start_prd_publish_subscriber;
 
 /// Build the complete API router with all route groups and middleware.
 pub fn build_router(
@@ -40,6 +42,7 @@ pub fn build_router(
     let cors = middleware::cors_layer(cors_origins);
 
     let api = Router::new()
+        .merge(crate::openapi::routes())
         .merge(status::routes())
         .merge(plans::routes())
         .merge(prds::routes())
@@ -52,6 +55,7 @@ pub fn build_router(
         .merge(learning::routes())
         .merge(config::routes())
         .merge(deployments::routes())
+        .merge(diagnosis::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())

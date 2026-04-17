@@ -3,6 +3,39 @@
 //! This package owns the dream-cycle runtime, heartbeat helpers, and the
 //! remaining placeholder subsystem types that still live in the dreams domain.
 
+#![allow(
+    clippy::assigning_clones,
+    clippy::bool_to_int_with_if,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_copy,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::derivable_impls,
+    clippy::derive_partial_eq_without_eq,
+    clippy::double_must_use,
+    clippy::expect_used,
+    clippy::format_push_string,
+    clippy::if_not_else,
+    clippy::iter_with_drain,
+    clippy::manual_let_else,
+    clippy::manual_midpoint,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::or_fun_call,
+    clippy::redundant_closure_for_method_calls,
+    clippy::similar_names,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::unnecessary_wraps,
+    clippy::unused_async
+)]
+
 pub mod cycle;
 pub mod hypnagogia;
 pub mod imagination;

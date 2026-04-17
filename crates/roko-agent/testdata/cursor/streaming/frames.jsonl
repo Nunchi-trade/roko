@@ -1,0 +1,4 @@
+{"id":"chatcmpl-cursor-stream","session_id":"sess-cursor-stream","thread_id":"thread-cursor-stream","choices":[{"index":0,"delta":{"content":"Cursor "}}]}
+{"choices":[{"index":0,"delta":{"content":"streams "}}]}
+{"choices":[{"index":0,"delta":{"content":"well."}}]}
+{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":1}}}

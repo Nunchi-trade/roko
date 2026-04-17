@@ -80,6 +80,11 @@ struct RustCfg {
 }
 
 /// Execute all fixtures in sequence.
+///
+/// # Errors
+///
+/// Returns an error if any fixture step fails, including configuration
+/// decoding, wallet lookup, spawned processes, or RPC calls.
 pub async fn run_fixtures(
     ctx: &ChainCtx,
     registry: &FixtureRegistry,

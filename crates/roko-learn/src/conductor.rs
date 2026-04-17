@@ -172,6 +172,11 @@ impl ConductorBandit {
     }
 
     /// Persist the current conductor policy as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the policy cannot be serialized or if the target
+    /// file cannot be created, written, or renamed.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let snapshot = ConductorBanditSnapshot {
             arms: self

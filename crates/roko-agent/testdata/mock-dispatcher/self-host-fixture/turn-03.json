@@ -1,0 +1,22 @@
+{
+  "reply": "Plan artifacts created under plans/test-wire-xyz/.",
+  "name": "self-host-fixture-turn-03",
+  "writes": [
+    {
+      "path": "plans/test-wire-xyz/plan.md",
+      "content": "# Plan: test-wire-xyz\n\nA single-task smoke-test plan generated from the PRD.\n"
+    },
+    {
+      "path": "plans/test-wire-xyz/tasks.toml",
+      "content": "[meta]\nplan = \"test-wire-xyz\"\niteration = 1\ntotal = 1\ndone = 0\nstatus = \"ready\"\nmax_parallel = 1\nestimated_total_minutes = 1\n\n[[task]]\nid = \"T1\"\ntitle = \"Run the offline smoke-test task\"\ndescription = \"Exercise the mock-backed plan runner with a single task.\"\nrole = \"implementer\"\nstatus = \"ready\"\ntier = \"focused\"\nmodel_hint = \"claude-opus-4-6\"\nmax_loc = 10\nfiles = [\"Cargo.toml\", \"Cargo.lock\", \"src/main.rs\", \".roko\"]\nallowed_tools = [\"read_file\"]\ndenied_tools = []\nmcp_servers = []\ndepends_on = []\ndepends_on_plan = []\nacceptance = [\"cargo check\"]\nverify = [{ phase = \"compile\", command = \"cargo check\" }]\ntimeout_secs = 60\nmax_retries = 1\n\n[task.context]\nread_files = [{ path = \"Cargo.toml\", why = \"confirm the workspace is initialized\" }, { path = \"src/main.rs\", why = \"confirm the sample binary compiles\" }]\nsymbols = []\nanti_patterns = []\nprior_failures = []\n"
+    }
+  ],
+  "usage": {
+    "input_tokens": 9,
+    "output_tokens": 12,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

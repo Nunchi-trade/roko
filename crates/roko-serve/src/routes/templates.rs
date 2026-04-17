@@ -1,5 +1,6 @@
 //! Template CRUD and deploy (run-from-template) endpoints.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -9,8 +10,11 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use roko_agent::mcp::find_mcp_config;
+
 use crate::error::ApiError;
 use crate::events::ServerEvent;
+use crate::extract::{ApiJson, RequestPayload, ValidJson};
 use crate::state::{AppState, OperationHandle, OperationStatus};
 use crate::templates::AgentTemplate;
 
@@ -47,9 +51,14 @@ async fn list_templates(State(state): State<Arc<AppState>>) -> Result<Json<Value
 /// `POST /api/templates` — create a new template.
 async fn create_template(
     State(state): State<Arc<AppState>>,
-    Json(template): Json<AgentTemplate>,
+    ApiJson(template): ApiJson<AgentTemplate>,
 ) -> Result<impl IntoResponse, ApiError> {
     let name = template.name.clone();
+    let configured_mcp_servers = configured_mcp_servers(&state.workdir);
+
+    template
+        .validate(None, configured_mcp_servers.as_ref())
+        .map_err(|errors| ApiError::bad_request(errors.join("; ")))?;
 
     // Single write lock to check-and-insert atomically (no TOCTOU race).
     let mut registry = state.templates.write().await;
@@ -116,7 +125,7 @@ struct DeployRequest {
 async fn deploy_template(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-    Json(body): Json<DeployRequest>,
+    ValidJson(body): ValidJson<DeployRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
     // If a backend is specified, delegate to the deployments endpoint logic
     if body.backend.is_some() {
@@ -201,6 +210,36 @@ async fn deploy_template(
         axum::http::StatusCode::ACCEPTED,
         Json(json!({ "id": op_id })),
     ))
+}
+
+impl RequestPayload for DeployRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        if self
+            .backend
+            .as_deref()
+            .is_some_and(|backend| backend.trim().is_empty())
+        {
+            return Err(ApiError::bad_request("backend must not be blank"));
+        }
+        Ok(())
+    }
+}
+
+fn configured_mcp_servers(workdir: &std::path::Path) -> Option<HashSet<String>> {
+    match find_mcp_config(workdir) {
+        Some(Ok((_path, config))) => Some(
+            config
+                .servers
+                .into_iter()
+                .map(|server| server.name)
+                .collect(),
+        ),
+        Some(Err(err)) => {
+            tracing::warn!(error = %err, "failed to load MCP config while validating template");
+            None
+        }
+        None => None,
+    }
 }
 
 /// Cloud deployment path: create a Railway/manual deployment for this template.

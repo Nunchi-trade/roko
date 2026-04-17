@@ -38,6 +38,11 @@ pub struct TournamentReport {
 }
 
 /// Prepare the tournament scenario state once.
+///
+/// # Errors
+///
+/// Returns an error if scenario preparation fails, including contract lookups,
+/// prompt loading, or participant setup.
 pub async fn prepare_tournament(
     ctx: Arc<ChainCtx>,
     runtime_dir: PathBuf,
@@ -48,6 +53,11 @@ pub async fn prepare_tournament(
 }
 
 /// Run a multi-round tournament on top of a prepared scenario state.
+///
+/// # Errors
+///
+/// Returns an error if any round fails or the underlying scenario helpers
+/// report an error.
 pub async fn run_tournament(
     prepared: &PreparedYieldRouting,
     llm: Arc<dyn LlmProvider>,

@@ -18,6 +18,9 @@
 //!     └── ring buffer (1024)        ← replay for late joiners
 //! ```
 
+use std::fmt;
+use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 
 use roko_runtime::event_bus::{self, EventBus};
@@ -69,6 +72,11 @@ impl StateHub {
                 snap.apply(&event);
             }
         });
+    }
+
+    /// Replace the current materialized snapshot atomically.
+    pub fn apply_snapshot(&self, snapshot: DashboardSnapshot) {
+        let _ = self.snapshot_tx.send(snapshot);
     }
 
     /// Get a receiver for the materialized snapshot.
@@ -134,11 +142,78 @@ impl StateHubSender {
 }
 
 /// Shared reference-counted handle to a [`StateHub`].
-pub type SharedStateHub = Arc<StateHub>;
+#[derive(Clone)]
+pub struct SharedStateHub(Arc<StateHub>);
+
+impl SharedStateHub {
+    /// Wrap an existing hub in a shared handle.
+    pub fn new(state_hub: StateHub) -> Self {
+        Self(Arc::new(state_hub))
+    }
+
+    /// Create a new in-process hub for standalone clients.
+    pub fn new_in_process() -> Self {
+        Self::new(StateHub::default_capacity())
+    }
+
+    /// Seed the materialized snapshot from a workspace root.
+    ///
+    /// Missing or unreadable sources are handled by loading an empty
+    /// snapshot and warning, so standalone consumers keep running.
+    pub fn bootstrap_from_workdir(&self, workdir: &Path) -> Result<(), std::io::Error> {
+        match DashboardSnapshot::load_from_workdir(workdir) {
+            Ok(snapshot) => {
+                self.0.apply_snapshot(snapshot);
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    workdir = %workdir.display(),
+                    "failed to bootstrap dashboard snapshot from workdir; using empty snapshot"
+                );
+                self.0.apply_snapshot(DashboardSnapshot::default());
+                Err(err)
+            }
+        }
+    }
+}
+
+impl Deref for SharedStateHub {
+    type Target = StateHub;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<StateHub> for SharedStateHub {
+    fn as_ref(&self) -> &StateHub {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SharedStateHub {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedStateHub").finish_non_exhaustive()
+    }
+}
+
+impl From<StateHub> for SharedStateHub {
+    fn from(state_hub: StateHub) -> Self {
+        Self::new(state_hub)
+    }
+}
+
+impl From<Arc<StateHub>> for SharedStateHub {
+    fn from(state_hub: Arc<StateHub>) -> Self {
+        Self(state_hub)
+    }
+}
 
 /// Create a new shared state hub with the default capacity.
 pub fn shared_state_hub() -> SharedStateHub {
-    Arc::new(StateHub::default_capacity())
+    SharedStateHub::new_in_process()
 }
 
 #[cfg(test)]
@@ -220,5 +295,49 @@ mod tests {
         let snap = hub.current_snapshot();
         assert_eq!(snap.stats.plans_active, 1);
         assert_eq!(snap.stats.tasks_active, 1);
+    }
+
+    #[test]
+    fn in_process_bootstrap_populates_live_receiver() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmpdir.path().join(".roko/state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+
+        let executor_state = serde_json::json!({
+            "plan_states": {
+                "plan-a": {
+                    "current_phase": { "kind": "implementing" },
+                    "task_id": "task-a",
+                    "assigned_agents": ["agent-a"],
+                    "gate_results": [
+                        {
+                            "gate_name": "compile",
+                            "passed": true,
+                            "duration_ms": 42
+                        }
+                    ],
+                    "last_error": "boom"
+                }
+            }
+        });
+        std::fs::write(
+            state_dir.join("executor.json"),
+            serde_json::to_vec(&executor_state).expect("executor json"),
+        )
+        .expect("write executor state");
+
+        let hub = SharedStateHub::new_in_process();
+        let rx = hub.snapshot();
+        assert!(rx.borrow().plans.is_empty());
+
+        hub.bootstrap_from_workdir(tmpdir.path())
+            .expect("bootstrap workdir");
+
+        let snapshot = rx.borrow();
+        assert!(snapshot.plans.contains_key("plan-a"));
+        assert!(snapshot.tasks.contains_key("plan-a/task-a"));
+        assert!(snapshot.agents.contains_key("agent-a"));
+        assert_eq!(snapshot.stats.gates_passed, 1);
+        assert_eq!(snapshot.stats.errors_total, 1);
     }
 }

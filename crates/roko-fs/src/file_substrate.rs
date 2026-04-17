@@ -12,6 +12,9 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
+#[cfg(any(test, feature = "hdc"))]
+const HDC_TAG: &str = "hdc_fingerprint";
+
 /// A substrate that persists signals to a JSONL log on disk.
 ///
 /// Thread-safety: reads go through a `parking_lot::RwLock`-protected `HashMap`
@@ -259,10 +262,6 @@ impl Substrate for FileSubstrate {
     }
 }
 
-/// HDC fingerprint tag key. The value is a base64-encoded 1280-byte
-/// HDC vector computed from the signal's kind + body.
-const HDC_TAG: &str = "hdc_fingerprint";
-
 /// Attach a deterministic HDC fingerprint to a signal's tags.
 ///
 /// The fingerprint is derived from `kind|body` so that signals with
@@ -287,7 +286,7 @@ fn attach_hdc_fingerprint(mut signal: Engram) -> Engram {
 }
 
 #[cfg(not(feature = "hdc"))]
-fn attach_hdc_fingerprint(signal: Engram) -> Engram {
+const fn attach_hdc_fingerprint(signal: Engram) -> Engram {
     signal
 }
 

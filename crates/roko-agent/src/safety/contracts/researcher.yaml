@@ -1,0 +1,13 @@
+{
+  "role": "researcher",
+  "invariants": [
+    { "MaxTokensPerTurn": 16000 }
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 12 },
+    { "ForbiddenTools": ["edit_file", "apply_patch"] }
+  ],
+  "recovery": [
+    { "trigger": "tool_budget_exhausted", "action": "Downgrade" }
+  ]
+}

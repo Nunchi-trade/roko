@@ -24,7 +24,7 @@ pub struct JsonRpcRequest {
 }
 
 /// A JSON-RPC 2.0 error object.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JsonRpcError {
     /// Numeric error code.
     pub code: i64,
@@ -102,6 +102,11 @@ struct JsonRpcResponse {
 /// Requests and responses are serialized as single newline-delimited JSON
 /// objects. Notifications are handled by calling the handler and discarding
 /// any returned value.
+///
+/// # Errors
+///
+/// Returns an error if reading a request line from `reader`, serializing a
+/// JSON-RPC response, writing to `writer`, or flushing `writer` fails.
 pub fn serve_stdio<R, W, F>(reader: R, mut writer: W, mut handler: F) -> anyhow::Result<()>
 where
     R: BufRead,
@@ -119,7 +124,7 @@ where
             Err(err) => {
                 write_response(
                     &mut writer,
-                    JsonRpcResponse {
+                    &JsonRpcResponse {
                         jsonrpc: "2.0",
                         result: None,
                         error: Some(JsonRpcError::parse_error(err.to_string())),
@@ -137,7 +142,7 @@ where
             Err(err) => {
                 write_response(
                     &mut writer,
-                    JsonRpcResponse {
+                    &JsonRpcResponse {
                         jsonrpc: "2.0",
                         result: None,
                         error: Some(JsonRpcError::invalid_request(err.to_string())),
@@ -151,7 +156,7 @@ where
         if request.jsonrpc != "2.0" {
             write_response(
                 &mut writer,
-                JsonRpcResponse {
+                &JsonRpcResponse {
                     jsonrpc: "2.0",
                     result: None,
                     error: Some(JsonRpcError::invalid_request(
@@ -183,14 +188,14 @@ where
             },
         };
 
-        write_response(&mut writer, response)?;
+        write_response(&mut writer, &response)?;
     }
 
     writer.flush().context("flush JSON-RPC output")?;
     Ok(())
 }
 
-fn write_response<W: Write>(writer: &mut W, response: JsonRpcResponse) -> anyhow::Result<()> {
+fn write_response<W: Write>(writer: &mut W, response: &JsonRpcResponse) -> anyhow::Result<()> {
     serde_json::to_writer(&mut *writer, &response).context("serialize JSON-RPC response")?;
     writer.write_all(b"\n").context("write JSON-RPC newline")?;
     writer.flush().context("flush JSON-RPC response")?;

@@ -51,6 +51,11 @@ pub struct ContractArtifact {
 
 impl ContractArtifact {
     /// Load `contracts/out/<Name>.sol/<Name>.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the artifact cannot be read, parsed, decoded, or if
+    /// the bytecode is empty.
     pub fn load(contracts_dir: &Path, name: &str) -> anyhow::Result<Self> {
         let path = contracts_dir
             .join("out")
@@ -95,6 +100,10 @@ impl ContractArtifact {
 }
 
 /// Ensure `forge build` has produced artifacts; run it if out/ is empty.
+///
+/// # Errors
+///
+/// Returns an error if `forge build` cannot be spawned or exits unsuccessfully.
 pub fn ensure_artifacts_built(contracts_dir: &Path) -> anyhow::Result<()> {
     let out = contracts_dir.join("out");
     let needs_build =
@@ -137,6 +146,11 @@ pub struct DeployedSuite {
 /// Advance the chain by one block (via `evm_mine`) if the tip is still at
 /// genesis. Works around mirage-rs's lazy local block initialization so
 /// alloy's `eth_getBlockByNumber("latest")` sees a real block.
+///
+/// # Errors
+///
+/// Returns an error if the JSON-RPC probe request fails or if the probe
+/// response body cannot be decoded.
 pub async fn warmup_chain(rpc_url: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let resp = client
@@ -170,6 +184,12 @@ pub async fn warmup_chain(rpc_url: &str) -> anyhow::Result<()> {
 }
 
 /// Deploy the full suite in order.
+///
+/// # Errors
+///
+/// Returns an error if warming up the chain, building artifacts, loading an
+/// artifact, submitting a deployment transaction, waiting for the receipt, or
+/// decoding the deployed contract address fails.
 pub async fn deploy_suite(ctx: &DeployCtx, deploy: &DeployStep) -> anyhow::Result<DeployedSuite> {
     warmup_chain(&ctx.rpc_url).await?;
     ensure_artifacts_built(&ctx.contracts_dir)?;
@@ -292,6 +312,12 @@ fn coerce_arg(
 }
 
 /// Public wrapper for fixture use (uses zero deployer — `$deployer` refs not supported here).
+///
+/// # Errors
+///
+/// Returns an error if the Solidity type is unsupported, the TOML value is of
+/// the wrong shape, a reference cannot be resolved, or a value cannot be
+/// parsed into the requested ABI type.
 pub fn coerce_toml_public(
     sol_type: &str,
     value: &toml::Value,
@@ -408,6 +434,12 @@ fn resolve_ref(
 
 impl LoadedManifest {
     /// Build a `DeployCtx` from the manifest + env overrides.
+    /// Build a deployment context from the loaded manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manifest is missing required defaults, the RPC
+    /// endpoint cannot be determined, or the contracts directory is invalid.
     pub fn build_deploy_ctx(&self, override_rpc: Option<String>) -> anyhow::Result<DeployCtx> {
         let defaults = &self.manifest.defaults;
         let rpc_url = override_rpc

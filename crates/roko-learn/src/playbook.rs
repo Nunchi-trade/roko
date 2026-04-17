@@ -24,7 +24,6 @@
 //! # }
 //! ```
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -131,6 +130,62 @@ impl Playbook {
         } else {
             Some(self.success_count as f64 / total as f64)
         }
+    }
+}
+
+/// Query metadata for selecting playbooks during prompt composition.
+///
+/// The query is intentionally small and stable: it captures the task
+/// identity, the human-facing task title, optional task details, and the
+/// calling role so the store can rank playbooks deterministically.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueryContext {
+    /// Stable task identifier when available.
+    pub task_id: String,
+    /// Human-readable task title used as the primary search signal.
+    pub task_title: String,
+    /// Extended task details such as descriptions or acceptance criteria.
+    pub task_body: String,
+    /// Calling role that is composing the prompt.
+    pub role: String,
+    /// Reserved for future episode-aware ranking.
+    pub recent_episodes: usize,
+    /// Maximum number of ranked playbooks to return.
+    pub max_results: usize,
+}
+
+impl QueryContext {
+    /// Construct a new query context.
+    #[must_use]
+    pub fn new(
+        task_id: impl Into<String>,
+        task_title: impl Into<String>,
+        task_body: impl Into<String>,
+        role: impl Into<String>,
+        recent_episodes: usize,
+        max_results: usize,
+    ) -> Self {
+        Self {
+            task_id: task_id.into(),
+            task_title: task_title.into(),
+            task_body: task_body.into(),
+            role: role.into(),
+            recent_episodes,
+            max_results,
+        }
+    }
+
+    fn to_query_text(&self) -> String {
+        [
+            self.task_title.as_str(),
+            self.task_body.as_str(),
+            self.role.as_str(),
+            self.task_id.as_str(),
+        ]
+        .into_iter()
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
     }
 }
 
@@ -249,8 +304,29 @@ impl PlaybookStore {
     ///
     /// This is a thin alias for [`PlaybookStore::load`] used by the
     /// orchestrator's pre-dispatch learning hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error raised by [`PlaybookStore::load`].
     pub async fn lookup(&self, task_type: &str) -> io::Result<Option<Playbook>> {
         self.load(task_type).await
+    }
+
+    /// Return playbooks ranked by textual relevance to the supplied query
+    /// context.
+    ///
+    /// Ranking prefers textual matches against the task title, role, and task
+    /// id, then recency, then stable evidence and id ordering. Results are
+    /// capped by [`QueryContext::max_results`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any persisted playbook file cannot be read or
+    /// deserialized.
+    pub async fn query(&self, ctx: &QueryContext) -> io::Result<Vec<Playbook>> {
+        let mut ranked = self.rank_playbooks(&ctx.to_query_text()).await?;
+        ranked.truncate(ctx.max_results);
+        Ok(ranked)
     }
 
     /// Return up to `limit` playbooks ranked by textual relevance to `query`
@@ -263,6 +339,11 @@ impl PlaybookStore {
     /// If the query yields no textual matches, the store falls back to the
     /// most recently used playbooks so callers still get a best-effort prompt
     /// injection candidate list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any persisted playbook file cannot be read or
+    /// deserialized.
     pub async fn relevant(
         &self,
         query: impl AsRef<str>,
@@ -271,8 +352,13 @@ impl PlaybookStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let mut ranked = self.rank_playbooks(query.as_ref()).await?;
+        ranked.truncate(limit);
+        Ok(ranked)
+    }
 
-        let query = normalize_query(query.as_ref());
+    async fn rank_playbooks(&self, query: &str) -> io::Result<Vec<Playbook>> {
+        let query = normalize_query(query);
         let query_terms = tokenize(&query);
         let now_ms = Utc::now().timestamp_millis();
         let mut scored: Vec<(f64, f64, Playbook)> = self
@@ -302,14 +388,12 @@ impl PlaybookStore {
 
         scored.sort_by(|(relevance_a, recency_a, a), (relevance_b, recency_b, b)| {
             relevance_b
-                .partial_cmp(relevance_a)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| recency_b.partial_cmp(recency_a).unwrap_or(Ordering::Equal))
+                .total_cmp(relevance_a)
+                .then_with(|| recency_b.total_cmp(recency_a))
                 .then_with(|| playbook_anchor_ms(b).cmp(&playbook_anchor_ms(a)))
                 .then_with(|| b.total_outcomes().cmp(&a.total_outcomes()))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        scored.truncate(limit);
         Ok(scored
             .into_iter()
             .map(|(_, _, playbook)| playbook)
@@ -387,6 +471,10 @@ impl PlaybookStore {
     /// This is a convenience wrapper around [`PlaybookStore::record_outcome`]
     /// for call sites that already have the originating task definition and
     /// only need to persist the success/failure result.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error raised while loading or updating the playbook.
     pub async fn record(&self, id: &str, success: bool) -> io::Result<bool> {
         self.record_outcome(id, success).await
     }
@@ -628,6 +716,93 @@ mod tests {
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].id, "newer");
         assert_eq!(ranked[1].id, "older");
+    }
+
+    #[tokio::test]
+    async fn query_ranks_matching_playbooks_and_respects_max_results() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        let now = Utc::now().timestamp_millis();
+        let mut exact_new = sample_playbook("exact-new");
+        exact_new.goal = "Implement REST API".to_string();
+        exact_new.last_used_ms = Some(now);
+
+        let mut exact_old = sample_playbook("exact-old");
+        exact_old.goal = "Implement REST API".to_string();
+        exact_old.last_used_ms = Some(now - 86_400_000 * 2);
+
+        let mut partial = sample_playbook("partial");
+        partial.goal = "Implement REST service".to_string();
+        partial.last_used_ms = Some(now - 86_400_000);
+
+        let mut unrelated = sample_playbook("unrelated");
+        unrelated.goal = "Write release notes".to_string();
+        unrelated.last_used_ms = Some(now - 86_400_000 * 4);
+
+        store.save(&exact_new).await.expect("save exact new");
+        store.save(&exact_old).await.expect("save exact old");
+        store.save(&partial).await.expect("save partial");
+        store.save(&unrelated).await.expect("save unrelated");
+
+        let ranked = store
+            .query(&QueryContext::new(
+                "task-42",
+                "Implement REST API",
+                "Implement REST API endpoints and routing",
+                "implementer",
+                10,
+                2,
+            ))
+            .await
+            .expect("query");
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].id, "exact-new");
+        assert_eq!(ranked[1].id, "exact-old");
+    }
+
+    #[tokio::test]
+    async fn query_falls_back_to_recency_and_id_when_no_match_exists() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = PlaybookStore::new(tmp.path());
+
+        let anchor = Utc::now().timestamp_millis();
+        let mut newer = sample_playbook("newer");
+        newer.goal = "Refresh docs".to_string();
+        newer.created_at_ms = anchor;
+        newer.last_used_ms = Some(anchor);
+
+        let mut beta = sample_playbook("beta");
+        beta.goal = "Audit dependencies".to_string();
+        beta.created_at_ms = anchor - 10_000;
+        beta.last_used_ms = Some(anchor - 86_400_000);
+
+        let mut alpha = sample_playbook("alpha");
+        alpha.goal = "Audit dependencies".to_string();
+        alpha.created_at_ms = anchor - 10_000;
+        alpha.last_used_ms = Some(anchor - 86_400_000);
+
+        store.save(&newer).await.expect("save newer");
+        store.save(&beta).await.expect("save beta");
+        store.save(&alpha).await.expect("save alpha");
+
+        let ranked = store
+            .query(&QueryContext::new(
+                "task-99",
+                "Completely unrelated request",
+                "Unrelated task details",
+                "reviewer",
+                10,
+                3,
+            ))
+            .await
+            .expect("query");
+
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].id, "newer");
+        assert_eq!(ranked[1].id, "alpha");
+        assert_eq!(ranked[2].id, "beta");
     }
 
     #[tokio::test]

@@ -215,6 +215,7 @@ pub enum TuiAction {
 
     // -- agent tab --
     SwitchAgentTab(usize),
+    ToggleAgentTopology,
 
     // -- approval --
     ApproveCommand,
@@ -560,10 +561,8 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ApproveAll)
         }
-        // Ctrl-t: open task picker
-        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(TuiAction::OpenTaskPicker)
-        }
+        // Ctrl-t: toggle the agent-topology panel from anywhere.
+        KeyCode::Char('t') if is_ctrl_t(key) => Some(TuiAction::ToggleAgentTopology),
         // Ctrl-x: force advance (confirm)
         KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::ForceAdvance)
@@ -587,6 +586,16 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::BackTab => Some(TuiAction::FocusPrev),
         _ => Option::None,
     }
+}
+
+/// Returns `true` when the key event matches the global `Ctrl+T` shortcut.
+#[must_use]
+pub(crate) fn is_ctrl_t(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('t'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key.modifiers.contains(KeyModifiers::SUPER)
 }
 
 // ---------------------------------------------------------------------------
@@ -619,14 +628,15 @@ fn handle_dashboard_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
 
-        // Sub-tab switching (a/o/d/e/g/m/P)
+        // Sub-tab switching (a/o/d/e/g/m/L/P)
         KeyCode::Char('a') => TuiAction::SwitchDetailTab(0), // Agents
         KeyCode::Char('o') => TuiAction::SwitchDetailTab(1), // Output
         KeyCode::Char('d') => TuiAction::SwitchDetailTab(2), // Diff
         KeyCode::Char('e') => TuiAction::SwitchDetailTab(3), // Errors
         KeyCode::Char('g') => TuiAction::SwitchDetailTab(4), // Git
         KeyCode::Char('m') => TuiAction::SwitchDetailTab(5), // MCP
-        KeyCode::Char('P') => TuiAction::SwitchDetailTab(6), // Processes
+        KeyCode::Char('L') => TuiAction::SwitchDetailTab(6), // Learning
+        KeyCode::Char('P') => TuiAction::SwitchDetailTab(7), // Processes
 
         // Modal triggers
         KeyCode::Char('w') => TuiAction::ShowWaveOverview,
@@ -725,6 +735,7 @@ fn handle_agents_key(key: KeyEvent, focus: FocusZone) -> TuiAction {
         KeyCode::Char('x') => TuiAction::RejectCommand,
         KeyCode::Char('i') => TuiAction::StartInject,
         KeyCode::Char('g') => TuiAction::ToggleAgentPaneGroup,
+        KeyCode::Char('t') => TuiAction::ToggleAgentTopology,
         _ => TuiAction::None,
     }
 }
@@ -925,6 +936,18 @@ mod tests {
             &modals(None),
         );
         assert_eq!(action, TuiAction::ToggleScreenPostFx);
+    }
+
+    #[test]
+    fn ctrl_t_toggles_agent_topology_globally() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(None),
+        );
+        assert_eq!(action, TuiAction::ToggleAgentTopology);
     }
 
     #[test]

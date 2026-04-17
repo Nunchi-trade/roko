@@ -134,7 +134,7 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
             }
         }
         Tab::Plans => "\u{2191}\u{2193}:nav  Enter:detail  h/l:drill  /:filter  ?:help",
-        Tab::Agents => "\u{2191}\u{2193}:nav  `:cycle  i:inject  y:approve  ?:help",
+        Tab::Agents => "\u{2191}\u{2193}:nav  `:cycle  Ctrl+T:topology  i:inject  ?:help",
         Tab::Git => "\u{2191}\u{2193}:nav  h/l:drill  Enter:expand  ?:help",
         Tab::Logs => "\u{2191}\u{2193}/PgUp/PgDn:scroll  1-4:levels  a:all  ?:help",
         Tab::Config => "j/k:nav  Enter:toggle  ?:help",

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use roko_compose::{PadState, RoleSystemPromptSpec, TaskContext};
 use roko_core::AgentRole;
+use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
 
@@ -17,6 +18,8 @@ pub struct PromptBuildOptions {
     pub extra_anti_patterns: Vec<String>,
     /// Optional relevant skills injected into the system prompt.
     pub relevant_skills: Vec<Skill>,
+    /// Optional relevant playbooks injected into the system prompt.
+    pub relevant_playbooks: Vec<Playbook>,
 }
 
 fn build_spec(
@@ -35,6 +38,9 @@ fn build_spec(
     }
     if !options.relevant_skills.is_empty() {
         spec = spec.with_relevant_skills(&options.relevant_skills);
+    }
+    if !options.relevant_playbooks.is_empty() {
+        spec = spec.with_relevant_playbooks(&options.relevant_playbooks);
     }
     spec
 }

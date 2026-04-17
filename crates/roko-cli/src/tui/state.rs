@@ -238,6 +238,22 @@ impl fmt::Display for PlanPhase {
     }
 }
 
+/// Fetch status for the agent-topology panel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AgentTopologyStatus {
+    /// No fetch has been attempted yet in this session.
+    #[default]
+    Idle,
+    /// A one-shot fetch is in flight.
+    Loading,
+    /// Topology data is available for rendering.
+    Ready,
+    /// The connected `roko serve` does not expose the endpoint.
+    Unavailable,
+    /// The fetch failed for some other reason.
+    Error(String),
+}
+
 /// Agent row for the Vec-based agent roster used by widgets.
 ///
 /// Widgets index into `TuiState::agents` by position, and read fields
@@ -269,6 +285,21 @@ pub struct AgentRow {
     pub output_lines: Vec<String>,
     /// Last line of agent output (for the output pane).
     pub last_output_line: String,
+}
+
+const MAX_AGENT_STREAM_CHUNKS: usize = 200;
+
+/// Live websocket-backed tail for one agent.
+#[derive(Debug, Clone, Default)]
+pub struct AgentStream {
+    /// Recent streamed chunks for the Agents tab detail panel.
+    pub chunks: VecDeque<String>,
+    /// Whether the backing websocket is currently connected.
+    pub connected: bool,
+    /// Whether the latest observed stream has completed.
+    pub completed: bool,
+    /// When the most recent chunk arrived.
+    pub last_chunk_at: Option<Instant>,
 }
 
 /// Per-agent routing and context metrics shown in the TUI.
@@ -749,14 +780,28 @@ pub struct TuiState {
     // -- gate results --
     /// Gate pipeline results for the command_output widget.
     pub gate_results: Vec<GateResultEntry>,
+    /// Recent conductor diagnoses from the live dashboard snapshot.
+    pub diagnoses: Vec<roko_core::dashboard_snapshot::DiagnosisSummary>,
+    /// Concluded prompt experiment winners for the Learning tab.
+    pub experiment_winners: Vec<roko_core::ExperimentWinnerSummary>,
+    /// Rolling per-gate pass/fail trends from the live verdict reader.
+    pub gate_trends: HashMap<String, roko_core::TrendBuckets>,
+    /// Recent failing verdicts surfaced beside the trend grid.
+    pub gate_recent_failures: Vec<roko_core::FailureEntry>,
 
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
     pub agents: Vec<AgentRow>,
+    /// Latest fetched agent-topology payload.
+    pub agent_topology: roko_core::AgentTopology,
+    /// Fetch status for the agent-topology panel.
+    pub agent_topology_status: AgentTopologyStatus,
     /// Per-agent route and context metrics keyed by agent identifier.
     pub route_metrics: HashMap<String, RouteMetrics>,
     /// Cached styled agent output keyed by agent identifier.
     pub agent_output_cache: RefCell<HashMap<String, CachedRender>>,
+    /// Live websocket tails keyed by agent identifier.
+    pub agent_streams: HashMap<String, AgentStream>,
     // -- navigation --
     /// Active top-level tab.
     pub active_tab: Tab,
@@ -800,6 +845,10 @@ pub struct TuiState {
     pub plan_scroll_offset: usize,
     /// Log viewer scroll offset.
     pub log_scroll: usize,
+    /// Whether the agent-topology overlay is visible.
+    pub agent_topology_visible: bool,
+    /// Agent-topology overlay scroll offset.
+    pub agent_topology_scroll_offset: usize,
     /// Whether the log viewer is following the tail.
     pub log_auto_tail: bool,
     /// Active log levels shown in the Logs tab.
@@ -916,10 +965,17 @@ impl Default for TuiState {
             execution_waves: Vec::new(),
             current_task_checklist: Vec::new(),
             gate_results: Vec::new(),
+            diagnoses: Vec::new(),
+            experiment_winners: Vec::new(),
+            gate_trends: HashMap::new(),
+            gate_recent_failures: Vec::new(),
 
             agents: Vec::new(),
+            agent_topology: roko_core::AgentTopology::default(),
+            agent_topology_status: AgentTopologyStatus::Idle,
             route_metrics: HashMap::new(),
             agent_output_cache: RefCell::new(HashMap::new()),
+            agent_streams: HashMap::new(),
             active_tab: Tab::default(),
             selected_plan_idx: 0,
             selected_agent: 0,
@@ -941,6 +997,8 @@ impl Default for TuiState {
             plan_detail_scroll: 0,
             plan_scroll_offset: 0,
             log_scroll: 0,
+            agent_topology_visible: false,
+            agent_topology_scroll_offset: 0,
             log_auto_tail: true,
             log_filter_levels: LogFilterLevel::all().into_iter().collect(),
 
@@ -1111,6 +1169,9 @@ impl TuiState {
         self.current_phase = executor_summary.current_phase;
         let latest_events = latest_agent_events(&data.efficiency_events);
         let latest_route_metrics = latest_route_metrics(&data.efficiency_events, data);
+        self.experiment_winners = data.experiment_winners.clone();
+        self.gate_trends.clear();
+        self.gate_recent_failures.clear();
 
         let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
         for task in &data.active_tasks {
@@ -1324,6 +1385,7 @@ impl TuiState {
             })
             .collect();
         self.prune_agent_output_cache();
+        self.prune_agent_streams();
 
         self.cost_dollars = data.efficiency.total_cost_usd;
         self.cumulative_input_tokens = data.efficiency.total_input_tokens;
@@ -1628,6 +1690,7 @@ impl TuiState {
             })
             .collect();
         self.prune_agent_output_cache();
+        self.prune_agent_streams();
 
         self.gate_results = snap
             .gates
@@ -1643,6 +1706,16 @@ impl TuiState {
                 },
             })
             .collect();
+        self.diagnoses = snap.diagnoses.iter().cloned().collect();
+        self.experiment_winners = snap.experiment_winners.clone();
+        self.gate_trends = snap.gate_trends.clone();
+        self.gate_recent_failures = snap.gate_recent_failures.clone();
+        if !snap.agent_topology.is_empty() {
+            self.agent_topology = snap.agent_topology.clone();
+            self.agent_topology_status = AgentTopologyStatus::Ready;
+        } else if !matches!(self.agent_topology_status, AgentTopologyStatus::Ready) {
+            self.agent_topology = snap.agent_topology.clone();
+        }
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
@@ -1718,6 +1791,37 @@ impl TuiState {
         cached.styled_lines.clone()
     }
 
+    /// Append one streamed chunk for the given agent, trimming to the last 200 entries.
+    pub fn push_agent_chunk(&mut self, agent_id: &str, chunk: String) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        while stream.chunks.len() >= MAX_AGENT_STREAM_CHUNKS {
+            stream.chunks.pop_front();
+        }
+        stream.chunks.push_back(chunk);
+        stream.connected = true;
+        stream.completed = false;
+        stream.last_chunk_at = Some(Instant::now());
+    }
+
+    /// Mark the agent's live stream as connected.
+    pub fn mark_agent_stream_connected(&mut self, agent_id: &str) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        stream.connected = true;
+    }
+
+    /// Mark the agent's live stream as disconnected.
+    pub fn mark_agent_stream_disconnected(&mut self, agent_id: &str) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        stream.connected = false;
+    }
+
+    /// Mark the agent's live stream as complete.
+    pub fn mark_agent_stream_done(&mut self, agent_id: &str) {
+        let stream = self.agent_streams.entry(agent_id.to_string()).or_default();
+        stream.connected = false;
+        stream.completed = true;
+    }
+
     fn update_efficiency_rates(&mut self) {
         let now = Instant::now();
         let token_total = self.token_total;
@@ -1767,6 +1871,7 @@ impl TuiState {
         self.plan_detail_scroll = 0;
         self.plan_scroll_offset = 0;
         self.log_scroll = 0;
+        self.agent_topology_scroll_offset = 0;
         self.log_auto_tail = true;
     }
 
@@ -1789,6 +1894,47 @@ impl TuiState {
         } else {
             self.log_scroll = self.log_scroll.min(max);
         }
+    }
+
+    /// Toggle visibility for the agent-topology overlay.
+    pub fn toggle_agent_topology(&mut self) {
+        self.agent_topology_visible = !self.agent_topology_visible;
+    }
+
+    /// Close the agent-topology overlay.
+    pub fn close_agent_topology(&mut self) {
+        self.agent_topology_visible = false;
+    }
+
+    /// Clamp the agent-topology scroll offset to the current rendered maximum.
+    pub fn clamp_agent_topology_scroll(&mut self, max: usize) {
+        self.agent_topology_scroll_offset = self.agent_topology_scroll_offset.min(max);
+    }
+
+    /// Mark the agent-topology panel as loading.
+    pub fn set_agent_topology_loading(&mut self) {
+        self.agent_topology_status = AgentTopologyStatus::Loading;
+    }
+
+    /// Store the latest fetched agent-topology payload.
+    pub fn set_agent_topology(&mut self, topology: roko_core::AgentTopology) {
+        self.agent_topology = topology;
+        self.agent_topology_status = AgentTopologyStatus::Ready;
+        self.agent_topology_scroll_offset = 0;
+    }
+
+    /// Mark the agent-topology endpoint as unavailable.
+    pub fn set_agent_topology_unavailable(&mut self) {
+        self.agent_topology = roko_core::AgentTopology::default();
+        self.agent_topology_status = AgentTopologyStatus::Unavailable;
+        self.agent_topology_scroll_offset = 0;
+    }
+
+    /// Record a topology fetch error message.
+    pub fn set_agent_topology_error(&mut self, message: impl Into<String>) {
+        self.agent_topology = roko_core::AgentTopology::default();
+        self.agent_topology_status = AgentTopologyStatus::Error(message.into());
+        self.agent_topology_scroll_offset = 0;
     }
 
     /// Clamp the right-panel scroll offset to the current rendered maximum.
@@ -1833,6 +1979,16 @@ impl TuiState {
         self.agent_output_cache
             .borrow_mut()
             .retain(|key, _| key == "__agent-output__" || valid_ids.contains(key.as_str()));
+    }
+
+    fn prune_agent_streams(&mut self) {
+        let valid_ids = self
+            .agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<HashSet<_>>();
+        self.agent_streams
+            .retain(|agent_id, _| valid_ids.contains(agent_id.as_str()));
     }
 }
 
@@ -2839,12 +2995,31 @@ mod tests {
         state.agent_scroll = Some(50);
         state.diff_scroll = 10;
         state.log_scroll = 100;
+        state.agent_topology_scroll_offset = 8;
 
         state.reset_scrolls();
 
         assert_eq!(state.agent_scroll, None);
         assert_eq!(state.diff_scroll, 0);
         assert_eq!(state.log_scroll, 0);
+        assert_eq!(state.agent_topology_scroll_offset, 0);
+    }
+
+    #[test]
+    fn agent_topology_toggle_and_clamp_work() {
+        let mut state = TuiState::default();
+
+        assert!(!state.agent_topology_visible);
+
+        state.toggle_agent_topology();
+        assert!(state.agent_topology_visible);
+
+        state.agent_topology_scroll_offset = 42;
+        state.clamp_agent_topology_scroll(12);
+        assert_eq!(state.agent_topology_scroll_offset, 12);
+
+        state.close_agent_topology();
+        assert!(!state.agent_topology_visible);
     }
 
     #[test]
@@ -3504,6 +3679,13 @@ tier = "focused"
                     ts_millis: 2_000,
                 },
             ],
+            diagnoses: Default::default(),
+            experiment_winners: Vec::new(),
+            agent_topology: roko_core::AgentTopology::default(),
+            efficiency_trend: Vec::new(),
+            cfactor_trend: Vec::new(),
+            gate_trends: HashMap::new(),
+            gate_recent_failures: Vec::new(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),
@@ -3775,6 +3957,40 @@ tier = "focused"
             passed: true,
             ts_millis: 1,
         });
+        snap.diagnoses
+            .push_back(roko_core::dashboard_snapshot::DiagnosisSummary {
+                id: "plan:plan-a:watcher:circuit-breaker:pattern:loop-detected".into(),
+                ts: chrono::Utc::now(),
+                severity: roko_core::dashboard_snapshot::DiagnosisSeverity::Warn,
+                subject: "Circuit Breaker: Loop Detected".into(),
+                detail: "repeated identical output".into(),
+                suggested_action: Some("Restart Agent".into()),
+                intervention_taken: Some("Paused plan".into()),
+            });
+        snap.experiment_winners
+            .push(roko_core::ExperimentWinnerSummary {
+                experiment_id: "exp-01".into(),
+                parameter: "constraints".into(),
+                winner: "claude-opus-4-6".into(),
+                winner_variant_id: "opus".into(),
+                win_rate: 0.71,
+                sample_size: 142,
+                ci_lower: 0.63,
+                ci_upper: 0.78,
+                confidence: 0.97,
+            });
+        snap.gate_trends.insert(
+            "compile".into(),
+            roko_core::TrendBuckets::new(3_600, 24, chrono::Utc::now()),
+        );
+        snap.gate_recent_failures.push(roko_core::FailureEntry {
+            ts: chrono::Utc::now(),
+            plan_id: "plan-a".into(),
+            task_id: "task-2".into(),
+            gate: "compile".into(),
+            summary: "compile failed".into(),
+            artifacts: None,
+        });
         snap.errors.push(roko_core::dashboard_snapshot::ErrorEntry {
             message: "compile failed once".into(),
             ts_millis: 2,
@@ -3806,6 +4022,13 @@ tier = "focused"
         assert_eq!(state.gate_results.len(), 1);
         assert_eq!(state.gate_results[0].gate, "compile");
         assert_eq!(state.gate_results[0].output, "task task-2");
+        assert_eq!(state.diagnoses.len(), 1);
+        assert_eq!(state.diagnoses[0].subject, "Circuit Breaker: Loop Detected");
+        assert_eq!(state.experiment_winners.len(), 1);
+        assert_eq!(state.experiment_winners[0].experiment_id, "exp-01");
+        assert!(state.gate_trends.contains_key("compile"));
+        assert_eq!(state.gate_recent_failures.len(), 1);
+        assert_eq!(state.gate_recent_failures[0].task_id, "task-2");
         assert_eq!(state.execution_waves.len(), 1);
         assert_eq!(state.execution_waves[0].plans, vec![String::from("plan-a")]);
         assert_eq!(state.phase_pipeline.len(), 9);

@@ -47,7 +47,7 @@ pub struct AgentStats {
 }
 
 /// Per-skill configuration persisted for an agent.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillConfig {
     /// Whether the skill is currently enabled.
     #[serde(default)]

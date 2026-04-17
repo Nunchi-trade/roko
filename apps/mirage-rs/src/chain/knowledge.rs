@@ -122,6 +122,7 @@ impl KnowledgeStore {
 
     /// Posts a new entry. Returns an outcome describing whether it was accepted,
     /// duplicated, or already exists.
+    #[allow(clippy::too_many_arguments)]
     pub fn post(
         &mut self,
         author: Vec<u8>,
@@ -164,19 +165,17 @@ impl KnowledgeStore {
 
     fn find_hdc_duplicate(&self, entry: &InsightEntry) -> Option<(InsightId, f32)> {
         let top = self.hdc.top_k(&entry.vector, 5);
-        top.into_iter()
-            .filter_map(|hit| {
-                let existing = self.entries.get(&hit.id)?;
-                if existing.kind != entry.kind {
-                    return None;
-                }
-                if hit.similarity >= DUPLICATE_SIMILARITY_THRESHOLD {
-                    Some((hit.id, hit.similarity))
-                } else {
-                    None
-                }
-            })
-            .next()
+        top.into_iter().find_map(|hit| {
+            let existing = self.entries.get(&hit.id)?;
+            if existing.kind != entry.kind {
+                return None;
+            }
+            if hit.similarity >= DUPLICATE_SIMILARITY_THRESHOLD {
+                Some((hit.id, hit.similarity))
+            } else {
+                None
+            }
+        })
     }
 
     /// Retrieves a single entry by id.
@@ -191,6 +190,13 @@ impl KnowledgeStore {
     }
 
     /// Records a confirmation from `confirmer` on entry `id`. Updates indices.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KnowledgeError::NotFound`] if the entry does not exist,
+    /// [`KnowledgeError::Immutable`] if the entry is terminal, or
+    /// [`KnowledgeError::DuplicateConfirmation`] if the confirmer has already
+    /// been recorded.
     pub fn confirm(&mut self, id: InsightId, confirmer: Vec<u8>) -> Result<(), KnowledgeError> {
         let entry = self
             .entries
@@ -211,6 +217,13 @@ impl KnowledgeStore {
     }
 
     /// Records a challenge against entry `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KnowledgeError::NotFound`] if the entry does not exist,
+    /// [`KnowledgeError::Immutable`] if the entry is terminal, or
+    /// [`KnowledgeError::DuplicateChallenge`] if the challenger has already
+    /// been recorded.
     pub fn challenge(&mut self, id: InsightId, challenger: Vec<u8>) -> Result<(), KnowledgeError> {
         let entry = self
             .entries

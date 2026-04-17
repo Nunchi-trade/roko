@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 ///     label: Some("check-login-module".into()),
 /// };
 /// let sig = Engram::builder(Kind::Task)
-///     .body(Body::from_json(&payload).unwrap())
+///     .body(Body::from_json(&payload).expect("example payload should serialize"))
 ///     .build();
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,8 +279,10 @@ mod tests {
     #[test]
     fn serde_roundtrip() {
         let p = GatePayload::in_dir("/x").with_label("y");
-        let json = serde_json::to_string(&p).unwrap();
-        let parsed: GatePayload = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&p)
+            .expect("invariant: gate payload should serialize in round-trip test");
+        let parsed: GatePayload = serde_json::from_str(&json)
+            .expect("invariant: serialized gate payload should deserialize");
         assert_eq!(p, parsed);
     }
 
