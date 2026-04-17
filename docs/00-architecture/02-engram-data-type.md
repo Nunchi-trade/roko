@@ -2,22 +2,19 @@
 
 > **Abstract:** The Engram is the universal datum of the Roko system. Every event, every
 > piece of data, every agent output, every gate verdict, every knowledge entry, every
-> prediction, every tool trace — is an Engram. Engrams are content-addressed (BLAKE3),
+> prediction, every tool trace - is an Engram. Engrams are content-addressed (BLAKE3),
 > scored (7-axis appraisal), decaying (four decay models), lineage-tracked (audit DAG),
-> and provenance-stamped (author + trust + taint). This document specifies the Engram
-> struct in full detail, explains each field, describes the content-addressing scheme,
-> and shows how Engrams flow through the Synapse Architecture.
+> provenance-stamped (author + trust + taint), and fingerprinted with a first-class HDC
+> vector. This document specifies the Engram struct in full detail, explains each field,
+> describes the content-addressing and HDC fingerprinting schemes, and shows how Engrams
+> flow through the Synapse Architecture.
 
 
 > **Implementation**: Shipping
 
-> **Code ↔ Docs Naming:** In the Rust codebase (`roko-core`), the universal data type is
-> called **`Signal`** (struct `Signal` in `crates/roko-core/src/signal.rs`). In these PRD
-> documents, the same concept is called **Engram**. The names are synonymous — "Engram"
-> emphasizes the cognitive/neuroscience framing, while "Signal" is the Rust identifier.
-> When reading code, `Signal` = Engram. When reading docs, Engram = `Signal`. The six
-> verb traits (`Substrate`, `Scorer`, `Gate`, `Router`, `Composer`, `Policy`) operate on
-> `Signal` in code and on "Engram" in documentation.
+> **Historical note:** The shipping Rust implementation still uses the legacy `Signal`
+> identifier in `roko-core`. This document uses **Engram** for the durable record and
+> treats the old name as an implementation detail, not the canonical architectural term.
 
 ---
 
@@ -45,15 +42,18 @@ traits that operate on it. This design choice has three consequences:
 
 The name "Engram" comes from neuroscience: a hypothetical means by which memories are stored
 as biophysical changes in the brain (Semon 1904; Lashley 1950; Tonegawa et al. 2015, Science
-348(6238)). In Roko, an Engram is the digital equivalent — a content-addressed unit of
-cognition that persists, decays, and can be retrieved by similarity or query.
+348(6238)). In Roko, an Engram is the digital equivalent - a content-addressed unit of
+cognition that persists, decays, and can be retrieved by exact address or by HDC similarity.
+That similarity path matters because the Substrate can hold both a unique identity hash and a
+first-class semantic fingerprint on the same record.
 
 ---
 
 ## 2. The Engram Struct
 
-The target Engram struct (the architectural specification). The current Rust type is named
-`Signal`; rename to `Engram` is Tier 0D in the implementation plan.
+The target Engram struct (the architectural specification). The current Rust type still
+uses the historical `Signal` identifier in shipping code; the fields below describe the
+canonical Engram shape.
 
 ```rust
 /// The universal datum of the Roko system.
@@ -63,12 +63,15 @@ The target Engram struct (the architectural specification). The current Rust typ
 /// # Identity
 ///
 /// An Engram's identity is its ContentHash, computed from its kind, body,
-/// author, and tags. Score and decay are excluded — they can change
-/// without changing identity.
+/// author, and tags. Score, decay, and fingerprint are excluded - they can
+/// change without changing identity.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Signal { // will be renamed to Engram in Tier 0D
+pub struct Engram {
     /// Content-addressed identity (computed from kind + body + author + tags).
     pub id: ContentHash,
+    /// HDC fingerprint plus encoder metadata used for similarity and consensus.
+    /// `None` only when the encoder is unavailable or explicitly disabled.
+    pub fingerprint: Option<HdcFingerprint>,
     /// What kind of Engram this is.
     pub kind: Kind,
     /// The Engram's payload.
@@ -89,21 +92,14 @@ pub struct Signal { // will be renamed to Engram in Tier 0D
 }
 ```
 
-The extended Engram includes an attestation field in the current code:
+The HDC fingerprint is itself a first-class value:
 
 ```rust
-pub struct Engram {
-    pub id: ContentHash,              // BLAKE3(kind + body + author + tags)
-    pub kind: Kind,                   // semantic type (#[non_exhaustive] enum + Custom(String))
-    pub body: Body,                   // payload (text, JSON, binary)
-    pub tags: BTreeMap<String, String>, // ordered metadata (included in hash)
-    pub created_at_ms: i64,           // Unix milliseconds
-    pub decay: Decay,                 // None | HalfLife | Ttl | Ebbinghaus
-    pub score: Score,                 // 7-axis appraisal
-    pub lineage: Vec<ContentHash>,    // parent Engrams (audit DAG)
-    pub provenance: Provenance,       // author, model fingerprint, taint chain
-    pub attestation: Option<Attestation>, // cryptographic proof of origin
+pub struct HdcFingerprint {
+    pub vector: HdcVector,      // 10,240-bit HDC vector
+    pub encoder_version: u32,   // registry version for deterministic comparison
 }
+
 ```
 
 Each field is specified in detail in the sections that follow.
@@ -120,7 +116,7 @@ Engram's canonical encoding. Two Engrams with identical content have identical h
 ///
 /// Two Engrams with identical canonical encoding share the same ContentHash.
 /// The hash is computed over the Engram's body and its identity fields, but
-/// not its score or decay — those can change without changing identity.
+/// not its score, decay, or fingerprint - those can change without changing identity.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentHash(pub [u8; 32]);
 
@@ -199,6 +195,8 @@ The content hash **excludes**:
   knowledge) without changing identity.
 - `created_at_ms` — Creation time is metadata, not content. Two Engrams with identical
   content produced at different times should deduplicate.
+- `fingerprint` — The HDC vector is derived from semantic structure and encoder version,
+  not part of identity. If the encoder changes, the fingerprint changes, not the hash.
 
 This design means that `Substrate.put()` is **idempotent**: re-putting the same Engram
 produces the same ContentHash and is a no-op in the Substrate.
@@ -236,6 +234,29 @@ pub fn content_hash(&self) -> ContentHash {
 Fields are separated by `|` delimiters. Tags use `key=value;` format with semicolons. The
 BTreeMap guarantees lexicographic key order, making the hash deterministic regardless of
 insertion order.
+
+### 3.5 HDC fingerprint
+
+The HDC fingerprint is the semantic access vector for an Engram. It is 10,240 bits by
+default, computed deterministically from `kind` and `body` by a registered encoder, and
+stored with encoder-version metadata so nodes can compare fingerprints safely across
+deployments. The field is optional so the record can still land when the encoder is
+unavailable or disabled, but the normal path is for `Substrate.put()` to populate it.
+
+The encoder registry is plural: the system ships with a default encoder, but Kind-specific
+or body-specific encoders can override it when a domain needs a different binding strategy.
+That plurality is deliberate. A playbook, a gate verdict, and a JSON task payload do not
+need the same feature extraction path, but they all need to produce a stable fingerprint
+for the same encoder version.
+
+The canonical population point is `Substrate.put()`. When an Engram is persisted, the
+Substrate resolves the appropriate encoder, computes the fingerprint if the caller did not
+already stage one, and writes the finalized HDC metadata alongside the durable record.
+
+The default encoder is simple and deterministic: it hashes each word or structured token
+into HDC space, permutes by position, and bundles the result. More specialized encoders
+can bind tags, structured fields, or domain-specific markers, but they must preserve
+determinism for a given `encoder_version`.
 
 ---
 
@@ -320,6 +341,7 @@ Kinds serve as the switchyard for dispatch throughout the system:
 - A Composer might only combine `PromptSection` Engrams into a `Prompt`
 - A Policy might watch for `ToolHealthDegraded` Engrams and emit circuit-breaker responses
 - A Router might select among `RouterChoice` candidates based on historical feedback
+- A Substrate may select a Kind-specific HDC encoder before populating `fingerprint`
 
 ---
 
@@ -350,7 +372,7 @@ pub enum Body {
 | `Empty` | Marker Engrams where the Kind and tags carry all meaning (e.g., `ProcessSpawn`) | `byte_size() → 0` |
 | `Text(String)` | Logs, prompts, messages, natural-language content | `byte_size() → string.len()` |
 | `Json(Value)` | Structured data: tool call parameters, gate results, configuration | `byte_size() → json.to_string().len()` |
-| `Bytes(Vec<u8>)` | Binary artifacts, compressed data, HDC vectors | `byte_size() → bytes.len()` |
+| `Bytes(Vec<u8>)` | Binary artifacts, compressed data, serialized HDC vectors | `byte_size() → bytes.len()` |
 
 ### 5.2 Canonical Encoding
 
@@ -399,10 +421,10 @@ output's lineage includes all input ContentHashes. The `derive()` method on Engr
 automates this:
 
 ```rust
-impl Signal { // will be renamed to Engram
+impl Engram {
     /// Emit a derived Engram — new kind/body, but tracks this Engram as lineage.
-    pub fn derive(&self, kind: Kind, body: Body) -> SignalBuilder {
-        SignalBuilder::new(kind)
+    pub fn derive(&self, kind: Kind, body: Body) -> EngramBuilder {
+        EngramBuilder::new(kind)
             .body(body)
             .lineage([self.id])
             .provenance(Provenance::agent("derived"))
@@ -418,8 +440,8 @@ The lineage DAG can be traversed by querying the Substrate for each parent Conte
 // Trace an Engram's full lineage
 async fn trace_lineage(
     substrate: &dyn Substrate,
-    engram: &Signal,   // will be renamed to Engram
-) -> Vec<Signal> {     // will be renamed to Engram
+    engram: &Engram,
+) -> Vec<Engram> {
     let mut ancestors = Vec::new();
     let mut queue: VecDeque<ContentHash> = engram.lineage.iter().copied().collect();
     let mut seen = HashSet::new();
@@ -444,7 +466,7 @@ async fn trace_lineage(
 Engrams are constructed using the builder pattern, which provides sensible defaults:
 
 ```rust
-pub struct SignalBuilder { // will be renamed to EngramBuilder
+pub struct EngramBuilder {
     kind: Kind,
     body: Body,
     created_at_ms: Option<i64>,
@@ -453,6 +475,7 @@ pub struct SignalBuilder { // will be renamed to EngramBuilder
     score: Score,
     lineage: Vec<ContentHash>,
     tags: BTreeMap<String, String>,
+    fingerprint: Option<HdcFingerprint>,
 }
 ```
 
@@ -467,20 +490,21 @@ pub struct SignalBuilder { // will be renamed to EngramBuilder
 | `score` | `Score::NEUTRAL` (confidence=0.5, novelty=0, utility=0, reputation=1) | Neutral until scored |
 | `lineage` | Empty vec | No parents unless specified |
 | `tags` | Empty BTreeMap | No metadata unless specified |
+| `fingerprint` | `None` | Finalized by `Substrate.put()` using the registered HDC encoder |
 
 ### 7.2 Usage Examples
 
 ```rust
-use roko_core::{Signal, Kind, Body, Decay, Provenance, Score};
+use roko_core::{Engram, Kind, Body, Decay, Provenance, Score};
 
 // Simple task Engram
-let task = Signal::builder(Kind::Task)
+let task = Engram::builder(Kind::Task)
     .body(Body::text("implement login"))
     .tag("priority", "high")
     .build();
 
 // Pheromone with decay
-let pheromone = Signal::builder(Kind::Pheromone)
+let pheromone = Engram::builder(Kind::Pheromone)
     .body(Body::text("high gas prices detected"))
     .decay(Decay::HalfLife { half_life_ms: 14_400_000 }) // 4 hours
     .provenance(Provenance::agent("chain_monitor"))
@@ -500,7 +524,7 @@ let episode_data = serde_json::json!({
     "outcome": "success",
     "tokens_used": 1500
 });
-let episode = Signal::builder(Kind::Episode)
+let episode = Engram::builder(Kind::Episode)
     .body(Body::Json(episode_data))
     .decay(Decay::HalfLife { half_life_ms: 604_800_000 }) // 7 days
     .tag("run", "42")
@@ -509,12 +533,12 @@ let episode = Signal::builder(Kind::Episode)
 
 ### 7.3 Finalization
 
-The `build()` method computes the content hash and freezes the Engram:
+The `build()` method computes the content hash and freezes the durable fields:
 
 ```rust
-pub fn build(self) -> Signal { // will be renamed to Engram
+pub fn build(self) -> Engram {
     let created_at_ms = self.created_at_ms.unwrap_or_else(current_time_ms);
-    let mut signal = Signal {
+    let mut engram = Engram {
         id: ContentHash([0; 32]), // placeholder
         kind: self.kind,
         body: self.body,
@@ -524,11 +548,16 @@ pub fn build(self) -> Signal { // will be renamed to Engram
         score: self.score,
         lineage: self.lineage,
         tags: self.tags,
+        fingerprint: self.fingerprint,
     };
-    signal.id = signal.content_hash();
-    signal
+    engram.id = engram.content_hash();
+    engram
 }
 ```
+
+The HDC fingerprint is finalized by `Substrate.put()` rather than by the builder. That
+keeps encoder selection in the storage fabric, where the registry version is known and
+semantic clustering can stay consistent across nodes.
 
 ---
 
@@ -550,6 +579,9 @@ An Engram that was highly scored at creation but has decayed significantly may f
 the weight threshold and be excluded from query results — or pruned entirely by
 `Substrate.prune()`.
 
+Fingerprint-based lookup is a separate path: `query_similar()` uses the HDC vector and does
+not depend on the scalar weight. The two signals are complementary.
+
 ---
 
 ## 9. Serde and Persistence
@@ -558,11 +590,12 @@ Engrams are fully serializable via serde. The default persistence format is JSON
 (JSON Lines) in the `FileSubstrate` (`roko-fs`), where each line is one Engram:
 
 ```json
-{"id":"a1b2c3d4...","kind":"task","body":{"format":"text","data":"implement login"},"created_at_ms":1712345678000,"decay":{"kind":"none"},"provenance":{"author":"roko","trust":1.0,"tainted":false,"session":null},"score":{"confidence":0.5,"novelty":0.0,"utility":0.0,"reputation":1.0},"lineage":[],"tags":{"priority":"high"}}
+{"id":"a1b2c3d4...","fingerprint":{"vector":"<hdc-bytes>","encoder_version":3},"kind":"task","body":{"format":"text","data":"implement login"},"created_at_ms":1712345678000,"decay":{"kind":"none"},"provenance":{"author":"roko","trust":1.0,"tainted":false,"session":null},"score":{"confidence":0.5,"novelty":0.0,"utility":0.0,"reputation":1.0},"lineage":[],"tags":{"priority":"high"}}
 ```
 
 ContentHashes serialize as hex strings (64 characters). Byte bodies serialize as base64.
-This ensures JSONL files are valid UTF-8 throughout.
+HDC fingerprints serialize as a vector plus encoder-version metadata. This ensures JSONL
+files are valid UTF-8 throughout while preserving the ability to detect encoder mismatch.
 
 ---
 
@@ -571,6 +604,7 @@ This ensures JSONL files are valid UTF-8 throughout.
 | Property | Value | Implication |
 |---|---|---|
 | **Content-addressed** | BLAKE3(kind + body + author + tags) | Deduplication, integrity, addressable storage |
+| **HDC fingerprinted** | 10,240-bit vector + encoder version | Similarity, consensus, analogy, semantic clustering |
 | **Scored** | 7-axis (4 stable + 3 extended) | Multi-dimensional quality assessment |
 | **Decaying** | 4 models (None, HalfLife, Ttl, Ebbinghaus) | Temporal dynamics, automatic memory management |
 | **Lineage-tracked** | Vec&lt;ContentHash&gt; | Audit DAG, causal replay, forensic AI |
@@ -638,10 +672,12 @@ maintaining determinism and IPLD compatibility. Keep **rkyv** for zero-copy HDC 
 | Partition | Fields | Hashed? | Evolution |
 |---|---|---|---|
 | **Identity** | kind, body, author, tainted, lineage, tags | Yes | Adding creates new identity (correct) |
-| **Mutable** | score, decay, created_at_ms, attestation | No | Evolves freely |
+| **Mutable** | score, decay, created_at_ms, attestation, fingerprint | No | Evolves freely |
 
 This mirrors Protocol Buffers' field number stability rule (Kleppmann 2017): identity fields
 are frozen; mutable fields can change without breaking existing hashes.
+The fingerprint belongs in the mutable partition because it is derived semantic metadata,
+not identity. Its versioning is explicit so encoder migrations stay observable.
 
 ### 13.2 CRDT Compatibility
 
@@ -684,8 +720,8 @@ corpus of same-Kind Engrams.
 pub struct ComplexityScorer;
 
 impl Scorer for ComplexityScorer {
-    fn score(&self, signal: &Signal, _ctx: &Context) -> Score {
-        let raw = signal.body.canonical_bytes();
+    fn score(&self, engram: &Engram, _ctx: &Context) -> Score {
+        let raw = engram.body.canonical_bytes();
         if raw.is_empty() { return Score::NEUTRAL; }
         let compressed = zstd::encode_all(&raw[..], 1).unwrap_or_default();
         let ratio = compressed.len() as f32 / raw.len() as f32;
@@ -738,22 +774,33 @@ provide the algebraic structure for compositional knowledge representation (Plat
 Gayler 2004; Kleyko et al. 2022).
 
 ```rust
-impl Signal { // will be renamed to Engram
+impl Engram {
     /// Bind: create an association between two Engrams (XOR in HDC space).
-    pub fn bind(&self, other: &Signal) -> HdcVector {
-        self.fingerprint().xor(&other.fingerprint())
+    pub fn bind(&self, other: &Engram) -> HdcVector {
+        self.fingerprint
+            .as_ref()
+            .expect("fingerprint populated by Substrate.put()")
+            .vector
+            .xor(&other.fingerprint.as_ref().expect("fingerprint populated by Substrate.put()").vector)
     }
 
     /// Bundle: create a composite similar to ALL inputs (majority vote).
-    pub fn bundle(engrams: &[Signal]) -> HdcVector {
+    pub fn bundle(engrams: &[Engram]) -> HdcVector {
         HdcVector::majority(
-            &engrams.iter().map(|e| e.fingerprint()).collect::<Vec<_>>()
+            &engrams
+                .iter()
+                .map(|e| e.fingerprint.as_ref().expect("fingerprint populated by Substrate.put()").vector)
+                .collect::<Vec<_>>()
         )
     }
 
     /// Permute: encode this Engram at a sequence position.
     pub fn at_position(&self, position: usize) -> HdcVector {
-        self.fingerprint().rotate(position)
+        self.fingerprint
+            .as_ref()
+            .expect("fingerprint populated by Substrate.put()")
+            .vector
+            .rotate(position)
     }
 }
 ```
@@ -783,14 +830,17 @@ impl Signal { // will be renamed to Engram
 
 ## Current Status and Gaps
 
-- **Shipping code**: The `Signal` struct, `SignalBuilder`, `ContentHash`, `Kind`, `Body`,
+- **Shipping code**: The current Rust implementation still carries the legacy `Signal`
+  identifier and builder name in `roko-core`, while the architectural spec here uses
+  `Engram` and `EngramBuilder` for the durable record. `ContentHash`, `Kind`, `Body`,
   `Score`, `Decay`, and `Provenance` are all implemented and tested in `roko-core`
   (376 tests passing).
-- **Rename pending**: `Signal` → `Engram`, `SignalBuilder` → `EngramBuilder` is Tier 0D.
+- **Fingerprint spec**: The HDC fingerprint is specified here as a first-class field and
+  is expected to be populated by `Substrate.put()` using the registered encoder version.
 - **Extended score axes**: Precision, salience, and coherence are specified but not yet in
   the Score struct.
 - **Attestation field**: The `attestation: Option<Attestation>` field is specified in the
-  architecture but not yet present in the current Signal struct. See
+  architecture but not yet present in the current shipping Engram shape. See
   [05-provenance-and-attestation.md](05-provenance-and-attestation.md).
 
 ---
@@ -802,3 +852,5 @@ impl Signal { // will be renamed to Engram
 - [05-provenance-and-attestation.md](05-provenance-and-attestation.md) — Provenance and Attestation
 - [06-synapse-traits.md](06-synapse-traits.md) — The traits that operate on Engrams
 - [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md) — How Engrams flow through the loop
+- [01-naming-and-glossary.md](01-naming-and-glossary.md) — Canonical vocabulary and terminology
+- [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) — Source refinement for the HDC fingerprint field

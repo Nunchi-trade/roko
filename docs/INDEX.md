@@ -18,6 +18,8 @@ architecture story, and
 in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-plan-phases.md).
 `tmp/refinements/10-self-learning-cybernetic-loops.md` extends that story by making prediction,
 outcome, calibration, and `prediction.error.*` topics first-class across learning and heartbeat.
+`tmp/refinements/11-hyperdimensional-substrate.md` extends it further by making the HDC
+fingerprint a first-class Engram field and a native Substrate query primitive.
 
 ## Start Here
 
@@ -35,6 +37,9 @@ outcome, calibration, and `prediction.error.*` topics first-class across learnin
 > for the medium split. The storage and transport fabric deep dives live in
 > [`00-architecture/07-substrate-trait.md`](00-architecture/07-substrate-trait.md) and
 > [`00-architecture/07b-bus-transport-fabric.md`](00-architecture/07b-bus-transport-fabric.md).
+> REF11 adds that every durable Engram carries an HDC fingerprint for native similarity,
+> clustering, and consensus; see [`00-architecture/02-engram-data-type.md`](00-architecture/02-engram-data-type.md)
+> and [`06-neuro/INDEX.md`](06-neuro/INDEX.md).
 
 ## Topics
 

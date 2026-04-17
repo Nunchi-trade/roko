@@ -6,6 +6,7 @@
 > `Datum` for Engram-or-Pulse operator inputs, and `PulseSource` for transport-time producer
 > attribution. When another document disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
+> [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md),
 > [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
@@ -192,6 +193,7 @@ The following names are load-bearing additions in the current architecture:
 | `PulseSource` | Lightweight source attribution on a Pulse before durable provenance exists. |
 | `BusReceiver` | Subscriber handle that yields matching Pulses in order. |
 | `ChainBus` | Bus backend that maps chain logs into `chain.*` Pulses while `ChainSubstrate` handles durable on-chain Engrams. |
+| `HDC fingerprint` | Deterministic 10,240-bit `HdcVector` carried on each Engram for native similarity, clustering, consensus, and analogy. |
 | `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
@@ -233,6 +235,7 @@ prefixes without coordination.
 | `Dreams` | Delta-speed consolidation cross-cut that writes durable results back to storage. |
 | `Engram` | Durable cognitive record stored in a Substrate and identified by content hash. |
 | `Fleet` | Roster of agents under shared coordination or ownership. |
+| `HDC fingerprint` | Per-Engram 10,240-bit hyperdimensional vector used for `query_similar`, clustering, consensus, and analogy. |
 | `Mesh` | Agent-network layer for multi-agent communication. |
 | `Neuro` | Durable knowledge cross-cut that influences storage reads and composition. |
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
@@ -253,3 +256,4 @@ prefixes without coordination.
 - [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) for the transport fabric
 - [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md) for `Datum`-aware operator signatures
 - [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md) for the canonical naming proposal
+- [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the fingerprint-first HDC proposal

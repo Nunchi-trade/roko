@@ -12,6 +12,7 @@
 - `crates/roko-neuro/src/distiller.rs` (DistillationBackend, Distiller)
 - `crates/roko-neuro/src/episode_completion.rs` (spawn_episode_distillation)
 - `refactoring-prd/03-cognitive-subsystems.md` §3 (Dreams produce knowledge promotions)
+- `../../tmp/refinements/11-hyperdimensional-substrate.md` (canonical refinement source)
 
 ---
 
@@ -19,11 +20,13 @@
 
 The distillation pipeline transforms raw agent experiences (episodes) into progressively more abstract and durable knowledge. It operates in three stages:
 
-1. **D1: Episodes → Insights** — Pattern detection extracts observations from completed episodes
-2. **D2: Insights → Heuristics** — Clusters of 5+ confirmed Insights with ≥0.7 confidence are promoted to Heuristics
+1. **D1: Episodes → Insights** — Pattern detection extracts observations from completed episodes, then fingerprints them at ingestion
+2. **D2: Insights → Heuristics** — Clusters of 5+ confirmed Insights with ≥0.7 confidence are promoted by HDC fingerprint similarity
 3. **D3: Heuristics → PLAYBOOK.md** — Validated Heuristics are compiled into human-readable playbook files
 
-This pipeline directly implements Complementary Learning Systems (CLS) theory (McClelland et al. 1995): fast episodic memory (episodes) consolidates into slow semantic memory (Insights, Heuristics, Playbooks) through repeated extraction and validation. Each stage increases abstraction, durability, and generalizability while decreasing specificity and recency.
+This pipeline directly implements Complementary Learning Systems (CLS) theory (McClelland et al. 1995): fast episodic memory (episodes) consolidates into slow semantic memory (Insights, Heuristics, Playbooks) through repeated extraction and validation. HDC fingerprints make the D2 clustering step structural rather than textual, so the system promotes coherent neighborhoods of knowledge instead of tag-adjacent piles.
+
+See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md), and [Temporal Knowledge Topology](../00-architecture/27-temporal-knowledge-topology.md).
 
 ---
 
@@ -81,7 +84,7 @@ pub struct InsightRecord {
 
 ### D1 Output
 
-Distilled knowledge entries enter the NeuroStore at **Transient tier** with initial confidence based on the extraction confidence (typically 0.3–0.6). They must be validated through use before promotion.
+Distilled knowledge entries enter the NeuroStore at **Transient tier** with initial confidence based on the extraction confidence (typically 0.3–0.6). They also receive their HDC fingerprint at ingestion time and must be validated through use before promotion.
 
 ---
 
@@ -92,7 +95,7 @@ Distilled knowledge entries enter the NeuroStore at **Transient tier** with init
 The D2 stage uses the `PatternMiner` from `roko-learn` to identify clusters of related Insights that share a common pattern. The mining process:
 
 1. **Collect** all Insights with confidence ≥ 0.5
-2. **Cluster** by HDC similarity (if vectors are available) or by tag overlap
+2. **Cluster** by HDC fingerprint similarity using the per-Engram fingerprint field
 3. **Filter** clusters with ≥ 5 members and mean confidence ≥ 0.7
 4. **Extract** the common pattern from each qualifying cluster
 
@@ -240,7 +243,7 @@ Episodes (raw agent turns)
     ▼
 ┌─────────────────────────────────────────┐
 │  D2: Insight → Heuristic Promotion      │
-│  - Cluster related Insights             │
+│  - Cluster related Insights by HDC     │
 │  - min_support = 5 insights             │
 │  - min_confidence = 0.7                 │
 │  - Cross-validation required            │
@@ -265,11 +268,20 @@ Episodes (raw agent turns)
 The distillation pipeline runs both online (after episode completion) and offline (during Dreams consolidation). The Dreams cycle (see topic [10-dreams](../10-dreams/INDEX.md)) drives the pipeline during idle time:
 
 1. **NREM Replay**: Re-process recent episodes (prioritized by Mattar-Daw utility formula)
-2. **Consolidation**: Run D1 and D2 on replayed episodes
+2. **Consolidation**: Run D1 and D2 on replayed episodes, with D2 grouping by fingerprint similarity
 3. **Pruning**: Run decay + GC to remove stale knowledge
 4. **Playbook update**: Run D3 to recompile PLAYBOOK.md with new Heuristics
 
 This mirrors the neuroscience of sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995).
+
+---
+
+## Cross-References
+
+- See [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the HDC fingerprint proposal that drives D2 clustering
+- See [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for the HDC algebra behind fingerprint similarity
+- See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for the default encoder and per-Engram fingerprinting pipeline
+- See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for the native similarity query surface
 
 ---
 
@@ -445,7 +457,7 @@ pub fn anti_knowledge_check(
         if anti.kind != KnowledgeKind::AntiKnowledge {
             continue;
         }
-        if let Some(anti_hv) = anti.hdc_vector.as_ref()
+        if let Some(anti_hv) = anti.fingerprint.as_ref()
             .and_then(|b| HdcVector::from_bytes(b)) {
             if cluster.centroid.similarity(&anti_hv) > threshold {
                 return false; // Blocked

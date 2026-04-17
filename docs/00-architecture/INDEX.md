@@ -58,14 +58,14 @@ loop, and the frontier innovations that emerge from the architecture.
 | # | Sub-doc | What It Covers |
 |---|---|---|
 | 00 | [Vision and Core Thesis](./00-vision-and-thesis.md) | "The scaffold IS the product" thesis, empirical evidence, modern agent-systems mapping, active inference foundations, design principles overview |
-| 01 | [Naming and Glossary](./01-naming-and-glossary.md) | Complete retired→current naming map, crate dissolution, glossary of all terms |
-| 02 | [Engram Data Type](./02-engram-data-type.md) | The durable content-addressed record medium: struct fields, ContentHash (BLAKE3), Kind enum, Body enum, lineage DAG, and builder pattern |
+| 01 | [Naming and Glossary](./01-naming-and-glossary.md) | Complete retired→current naming map, HDC fingerprint vocabulary, crate dissolution, glossary of all terms |
+| 02 | [Engram Data Type](./02-engram-data-type.md) | The durable content-addressed record medium: struct fields, ContentHash (BLAKE3), HDC fingerprint, Kind enum, Body enum, lineage DAG, and builder pattern |
 | 02b | [Pulse Ephemeral Event Medium](./02b-pulse-ephemeral-event.md) | The durable-versus-ephemeral medium split: Pulse, graduation rules, and the storage/stream boundary between Substrate and Bus |
 | 03 | [Score: 7-Axis Appraisal](./03-score-7-axis-appraisal.md) | 4 stable axes (confidence, novelty, utility, reputation) + 3 extended (precision, salience, coherence), effective formula, arithmetic, constants |
 | 04 | [Decay Variants](./04-decay-variants.md) | Four decay variants (None, HalfLife, Ttl, Ebbinghaus), formulas, pheromone constants, knowledge tier interaction, selection guidelines |
 | 05 | [Provenance and Attestation](./05-provenance-and-attestation.md) | Provenance struct (author, trust, tainted, session), four constructors, taint analysis, planned Attestation (Ed25519 + chain), extended fields |
 | 06 | [Synapse Traits](./06-synapse-traits.md) | Six operators across two mediums and two fabrics, the trait composition model, all six trait signatures, trait × layer map, composability example via loop_tick |
-| 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | The durable storage fabric: Substrate's trait surface, backends, concurrency, pruning, and its relationship to the Bus sibling fabric |
+| 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | The durable storage fabric: Substrate's trait surface, fingerprint population, `query_similar`, backends, concurrency, pruning, and its relationship to the Bus sibling fabric |
 | 07b | [Bus Transport Fabric](./07b-bus-transport-fabric.md) | The transport fabric: Bus trait, Topic and TopicFilter routing, replay/ring semantics, backend families, and topic-driven decoupling |
 | 08 | [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md) | Detailed specs for the five non-Substrate operators after REF04: `Datum`-aware scoring/composition, stream Gates, Pulse routing, and `PolicyOutputs` |
 | 09 | [Universal Cognitive Loop](./09-universal-cognitive-loop.md) | Seven-step loop specification with SENSE, ASSESS, COMPOSE, ACT, VERIFY, co-equal PERSIST/BROADCAST, REACT, plus three-speed and shipping `loop_tick` guidance |
@@ -86,7 +86,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), REF09 two-fabric implications for ChainBus/Dreams/Coordination/Heartbeat, data flow diagrams, integration roadmap (~2,070 LOC) |
 | 25 | [Attention as Universal Cognitive Currency](./25-attention-as-currency.md) | Attention tokens as universal unit of account, VCG auction for Engram selection, budget-aware CascadeRouter, Daimon affect modulation, cross-speed token economics |
 | 26 | [Cognitive Immune System](./26-cognitive-immune-system.md) | 5-layer defense against knowledge corruption: taint propagation, anomaly detection, quarantine, red-team probes, immune memory with HDC signatures |
-| 27 | [Temporal Knowledge Topology](./27-temporal-knowledge-topology.md) | Allen's 13 interval relations, temporal calculus (fluents, causation, interval relations), three-tier temporal KG (episodes/entities/communities), temporal queries |
+| 27 | [Temporal Knowledge Topology](./27-temporal-knowledge-topology.md) | Allen's 13 interval relations, temporal calculus, HDC-clustered episode/entity/community tiers, and temporal queries |
 | 28 | [Emergent Goal Structures](./28-emergent-goal-structures.md) | Goals emerge from affect×knowledge×experience interaction, 5 built-in detectors, intrinsic motivation scoring, EFE ranking, somatic markers, goal lifecycle |
 | 29 | [Cognitive Energy Model](./29-cognitive-energy-model.md) | Explicit energy pool with depletion and recovery, 5 energy zones, affect-energy bidirectional coupling, capacity growth, Delta sleep cycles |
 | 30 | [Cross-Pollination Innovations](./30-cross-pollination-innovations.md) | Innovation transfer patterns across sections |
