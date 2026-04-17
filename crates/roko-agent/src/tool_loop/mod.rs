@@ -77,6 +77,11 @@ pub trait LlmBackend: Send + Sync {
         SessionState::default()
     }
 
+    /// Stable backend identifier for audit and episode logging.
+    fn backend_id(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Send the current conversation state to the backend in streaming mode.
     ///
     /// Backends that do not implement streaming fall back to [`send_turn`](Self::send_turn).
@@ -187,6 +192,12 @@ impl ToolLoop {
             retry_policy: RetryPolicy::default(),
             monitor: None,
         }
+    }
+
+    /// Stable identifier for the backing LLM implementation.
+    #[must_use]
+    pub fn backend_id(&self) -> &'static str {
+        self.backend.backend_id()
     }
 
     /// Override the default iteration cap (25).

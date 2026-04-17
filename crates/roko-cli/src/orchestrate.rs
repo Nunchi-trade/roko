@@ -1326,7 +1326,7 @@ impl EnrichmentLlmClient for EnrichmentRuntimeClient {
         user: &str,
         _max_tokens: u32,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let result = run_prepared_agent(AgentRunConfig {
+        let dispatch = run_prepared_agent(AgentRunConfig {
             command: self.command.clone(),
             exec_dir: self.exec_dir.clone(),
             model: model.to_string(),
@@ -1346,10 +1346,11 @@ impl EnrichmentLlmClient for EnrichmentRuntimeClient {
             skip_permissions: self.skip_permissions,
         })
         .await;
-        self.record_usage(&result.usage);
+        self.record_usage(&dispatch.result.usage);
 
-        if !result.success {
-            let reason = result
+        if !dispatch.result.success {
+            let reason = dispatch
+                .result
                 .output
                 .body
                 .as_text()
@@ -1357,7 +1358,13 @@ impl EnrichmentLlmClient for EnrichmentRuntimeClient {
             return Err(anyhow!("enrichment model {model} failed: {reason}").into());
         }
 
-        let text = result.output.body.as_text().unwrap_or_default().to_string();
+        let text = dispatch
+            .result
+            .output
+            .body
+            .as_text()
+            .unwrap_or_default()
+            .to_string();
         if text.trim().is_empty() {
             return Err(anyhow!("enrichment model {model} returned empty output").into());
         }
@@ -1411,11 +1418,19 @@ struct ParallelTaskResult {
     prompt_text: String,
     system_prompt: String,
     model: String,
+    backend_id: String,
+    result: AgentResult,
+}
+
+/// Result bundle returned from a single orchestrated agent dispatch.
+#[derive(Debug)]
+struct DispatchOutcome {
+    backend_id: String,
     result: AgentResult,
 }
 
 /// Run a prepared agent configuration. No `PlanRunner` borrow required.
-async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
+async fn run_prepared_agent(cfg: AgentRunConfig) -> DispatchOutcome {
     let ctx = Context::now();
     let prompt_signal = Engram::builder(Kind::Task)
         .body(Body::Text(cfg.prompt.clone()))
@@ -1458,18 +1473,25 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             },
             format!("create prepared agent for {}", cfg.model),
         ) {
-            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
-            Err(err) => AgentResult::fail(
-                prompt_signal
-                    .derive(
-                        Kind::AgentOutput,
-                        Body::text(format!(
-                            "create prepared agent for {} failed: {err}",
-                            cfg.model
-                        )),
-                    )
-                    .build(),
-            ),
+            Ok(agent) => {
+                let backend_id = agent.backend_id().to_string();
+                let result = agent.run(&prompt_signal, &ctx).await;
+                DispatchOutcome { backend_id, result }
+            }
+            Err(err) => DispatchOutcome {
+                backend_id: "unknown".to_string(),
+                result: AgentResult::fail(
+                    prompt_signal
+                        .derive(
+                            Kind::AgentOutput,
+                            Body::text(format!(
+                                "create prepared agent for {} failed: {err}",
+                                cfg.model
+                            )),
+                        )
+                        .build(),
+                ),
+            },
         }
     } else if cfg.command == "claude" {
         let synthesized_config = synthesize_claude_cli_config(&cfg.command, &cfg.model);
@@ -1507,18 +1529,25 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             },
             format!("create synthesized claude agent for {}", cfg.model),
         ) {
-            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
-            Err(err) => AgentResult::fail(
-                prompt_signal
-                    .derive(
-                        Kind::AgentOutput,
-                        Body::text(format!(
-                            "create synthesized claude agent for {} failed: {err}",
-                            cfg.model
-                        )),
-                    )
-                    .build(),
-            ),
+            Ok(agent) => {
+                let backend_id = agent.backend_id().to_string();
+                let result = agent.run(&prompt_signal, &ctx).await;
+                DispatchOutcome { backend_id, result }
+            }
+            Err(err) => DispatchOutcome {
+                backend_id: "unknown".to_string(),
+                result: AgentResult::fail(
+                    prompt_signal
+                        .derive(
+                            Kind::AgentOutput,
+                            Body::text(format!(
+                                "create synthesized claude agent for {} failed: {err}",
+                                cfg.model
+                            )),
+                        )
+                        .build(),
+                ),
+            },
         }
     } else if is_known_protocol_command(&cfg.command) {
         let fallback_config = synthesize_known_protocol_config(&cfg.command, &cfg.model);
@@ -1545,18 +1574,25 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             },
             format!("create known-protocol subprocess agent for {}", cfg.command),
         ) {
-            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
-            Err(err) => AgentResult::fail(
-                prompt_signal
-                    .derive(
-                        Kind::AgentOutput,
-                        Body::text(format!(
-                            "create known-protocol subprocess agent for {} failed: {err}",
-                            cfg.command
-                        )),
-                    )
-                    .build(),
-            ),
+            Ok(agent) => {
+                let backend_id = agent.backend_id().to_string();
+                let result = agent.run(&prompt_signal, &ctx).await;
+                DispatchOutcome { backend_id, result }
+            }
+            Err(err) => DispatchOutcome {
+                backend_id: "unknown".to_string(),
+                result: AgentResult::fail(
+                    prompt_signal
+                        .derive(
+                            Kind::AgentOutput,
+                            Body::text(format!(
+                                "create known-protocol subprocess agent for {} failed: {err}",
+                                cfg.command
+                            )),
+                        )
+                        .build(),
+                ),
+            },
         }
     } else {
         let model = cfg.model.clone();
@@ -1583,18 +1619,25 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> AgentResult {
             },
             format!("create generic subprocess agent for {}", cfg.command),
         ) {
-            Ok(agent) => agent.run(&prompt_signal, &ctx).await,
-            Err(err) => AgentResult::fail(
-                prompt_signal
-                    .derive(
-                        Kind::AgentOutput,
-                        Body::text(format!(
-                            "create generic subprocess agent for {} failed: {err}",
-                            cfg.command
-                        )),
-                    )
-                    .build(),
-            ),
+            Ok(agent) => {
+                let backend_id = agent.backend_id().to_string();
+                let result = agent.run(&prompt_signal, &ctx).await;
+                DispatchOutcome { backend_id, result }
+            }
+            Err(err) => DispatchOutcome {
+                backend_id: "unknown".to_string(),
+                result: AgentResult::fail(
+                    prompt_signal
+                        .derive(
+                            Kind::AgentOutput,
+                            Body::text(format!(
+                                "create generic subprocess agent for {} failed: {err}",
+                                cfg.command
+                            )),
+                        )
+                        .build(),
+                ),
+            },
         }
     }
 }
@@ -6167,6 +6210,7 @@ impl PlanRunner {
                             &plan_id,
                             &format!("rung-{rung}"),
                             "gate",
+                            "",
                             "n/a",
                             Some(passed),
                             1,
@@ -6733,7 +6777,8 @@ impl PlanRunner {
             )
             .await
         {
-            Ok(result) => {
+            Ok(dispatch) => {
+                let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
 
@@ -6750,8 +6795,16 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input =
-                    self.enrich_completed_run(ep, plan_id, "enrich", "Strategist", &model, None, 1);
+                let input = self.enrich_completed_run(
+                    ep,
+                    plan_id,
+                    "enrich",
+                    "Strategist",
+                    &dispatch.backend_id,
+                    &model,
+                    None,
+                    1,
+                );
                 self.record_and_check_learning(input, plan_id).await;
 
                 if let Some(tracker) = self.task_trackers.get(plan_id) {
@@ -7041,7 +7094,7 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] task worktree acquisition failed for {plan_id}/{task_id}: {e}"
                 );
-                self.record_task_failure(plan_id, task_id, None, None, &e, &started, None)
+                self.record_task_failure(plan_id, task_id, None, None, &e, &started, "", None)
                     .await;
                 self.apply_event_and_emit(
                     plan_id,
@@ -7080,7 +7133,8 @@ impl PlanRunner {
                 )
                 .await
             {
-                Ok(result) => {
+                Ok(dispatch) => {
+                    let result = dispatch.result;
                     if let Some((state, action)) = pending_feedback.take() {
                         self.retry_conductor.record_outcome(&state, action, true);
                         self.persist_retry_conductor();
@@ -7099,6 +7153,7 @@ impl PlanRunner {
                             Some(retry_model.as_str()),
                             &e,
                             &started,
+                            &dispatch.backend_id,
                             Some(&result),
                         )
                         .await;
@@ -7114,7 +7169,13 @@ impl PlanRunner {
                         break;
                     }
                     match self
-                        .record_task_success(plan_id, task_id, &result, &started)
+                        .record_task_success(
+                            plan_id,
+                            task_id,
+                            &result,
+                            &dispatch.backend_id,
+                            &started,
+                        )
                         .await
                     {
                         Ok(()) => {
@@ -7291,6 +7352,7 @@ impl PlanRunner {
                 Some(retry_model.as_str()),
                 error,
                 &started,
+                "",
                 None,
             )
             .await;
@@ -7348,7 +7410,7 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] task budget exhausted before dispatch for {plan_id}/{tid}: {e}"
                 );
-                self.record_task_failure(plan_id, tid, None, None, &e, &started, None)
+                self.record_task_failure(plan_id, tid, None, None, &e, &started, "", None)
                     .await;
                 continue;
             }
@@ -7358,7 +7420,7 @@ impl PlanRunner {
                     tracing::error!(
                         "[orchestrate] task worktree acquisition failed for {plan_id}/{tid}: {e}"
                     );
-                    self.record_task_failure(plan_id, tid, None, None, &e, &started, None)
+                    self.record_task_failure(plan_id, tid, None, None, &e, &started, "", None)
                         .await;
                 }
             }
@@ -7506,14 +7568,15 @@ impl PlanRunner {
                     let prompt_text = cfg.prompt.clone();
                     let system_prompt = cfg.system_prompt.clone();
                     let model = cfg.model.clone();
-                    let result = run_prepared_agent(cfg).instrument(span).await;
+                    let dispatch = run_prepared_agent(cfg).instrument(span).await;
                     ParallelTaskResult {
                         task_id,
                         exec_dir,
                         prompt_text,
                         system_prompt,
                         model,
-                        result,
+                        backend_id: dispatch.backend_id,
+                        result: dispatch.result,
                     }
                 });
             }
@@ -7564,6 +7627,7 @@ impl PlanRunner {
                         Some(task_result.model.as_str()),
                         &e,
                         &started,
+                        &task_result.backend_id,
                         Some(&task_result.result),
                     )
                     .await;
@@ -7584,6 +7648,7 @@ impl PlanRunner {
                         Some(task_result.model.as_str()),
                         &e,
                         &started,
+                        &task_result.backend_id,
                         Some(&task_result.result),
                     )
                     .await;
@@ -7591,7 +7656,13 @@ impl PlanRunner {
                     continue;
                 }
                 if let Err(e) = self
-                    .record_task_success(plan_id, tid, &task_result.result, &started)
+                    .record_task_success(
+                        plan_id,
+                        tid,
+                        &task_result.result,
+                        &task_result.backend_id,
+                        &started,
+                    )
                     .await
                 {
                     tracing::error!("[orchestrate] task {tid} aborted by plan budget: {e}");
@@ -7614,6 +7685,7 @@ impl PlanRunner {
                     Some(task_result.model.as_str()),
                     &err,
                     &started,
+                    &task_result.backend_id,
                     Some(&task_result.result),
                 )
                 .await;
@@ -7658,12 +7730,16 @@ impl PlanRunner {
         plan_id: &str,
         task_id: &str,
         role: &str,
+        backend: &str,
         model: &str,
         gate_passed: Option<bool>,
         iteration: u32,
     ) -> CompletedRunInput {
         if ep.agent_template.trim().is_empty() {
             ep.agent_template = role.to_string();
+        }
+        if ep.backend.trim().is_empty() && !backend.trim().is_empty() {
+            ep.backend = backend.to_string();
         }
         if ep.model.trim().is_empty() {
             ep.model = model.to_string();
@@ -7677,6 +7753,11 @@ impl PlanRunner {
         ep.extra
             .entry("model".to_string())
             .or_insert_with(|| serde_json::json!(model));
+        if !backend.trim().is_empty() {
+            ep.extra
+                .entry("backend".to_string())
+                .or_insert_with(|| serde_json::json!(backend));
+        }
         ep.extra
             .entry("task_category".to_string())
             .or_insert_with(|| serde_json::json!(default_task_category(role)));
@@ -7716,6 +7797,11 @@ impl PlanRunner {
             }
         }
 
+        let task_metric_backend = if backend.trim().is_empty() {
+            "claude"
+        } else {
+            backend
+        };
         if let Some(passed) = gate_passed {
             let metric = TaskMetric {
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -7723,7 +7809,7 @@ impl PlanRunner {
                 task_id: task_id.to_string(),
                 iteration,
                 role: role.to_string(),
-                backend: "claude".to_string(),
+                backend: task_metric_backend.to_string(),
                 model: model.to_string(),
                 gate_passed: passed,
                 wall_time_ms: input.episode.usage.wall_ms,
@@ -8214,6 +8300,7 @@ impl PlanRunner {
         plan_id: &str,
         task_id: &str,
         result: &AgentResult,
+        backend_id: &str,
         started: &std::time::Instant,
     ) -> Result<()> {
         *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
@@ -8390,7 +8477,16 @@ impl PlanRunner {
             );
         }
         let model = self.effective_model();
-        let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
+        let input = self.enrich_completed_run(
+            ep,
+            plan_id,
+            task_id,
+            "Implementer",
+            backend_id,
+            &model,
+            None,
+            1,
+        );
         self.record_and_check_learning(input, plan_id).await;
         self.record_crate_familiarity(plan_id, task_id, task_def.as_ref(), true);
         let success_entry = build_success_knowledge_entry(
@@ -8932,8 +9028,8 @@ impl PlanRunner {
                     )
                     .await
                 {
-                    Ok(result) => {
-                        let response_text = match result.output.body.as_text() {
+                    Ok(dispatch) => {
+                        let response_text = match dispatch.result.output.body.as_text() {
                             Ok(text) => text,
                             Err(e) => {
                                 tracing::error!(
@@ -9343,6 +9439,7 @@ impl PlanRunner {
                     plan_id,
                     &task_id,
                     "Strategist",
+                    "",
                     &current_model,
                     None,
                     failure_count,
@@ -9898,6 +9995,7 @@ impl PlanRunner {
         selected_model: Option<&str>,
         error: &anyhow::Error,
         started: &std::time::Instant,
+        backend_id: &str,
         result: Option<&AgentResult>,
     ) {
         let wall_ms = result
@@ -9941,7 +10039,16 @@ impl PlanRunner {
         let model = selected_model
             .map(str::to_owned)
             .unwrap_or_else(|| self.effective_model());
-        let input = self.enrich_completed_run(ep, plan_id, task_id, "Implementer", &model, None, 1);
+        let input = self.enrich_completed_run(
+            ep,
+            plan_id,
+            task_id,
+            "Implementer",
+            backend_id,
+            &model,
+            None,
+            1,
+        );
         self.record_and_check_learning(input, plan_id).await;
         self.emit_failure_efficiency_event(
             plan_id,
@@ -10163,7 +10270,8 @@ impl PlanRunner {
             )
             .await
         {
-            Ok(result) => {
+            Ok(dispatch) => {
+                let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
 
@@ -10180,8 +10288,16 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input =
-                    self.enrich_completed_run(ep, plan_id, "fix", "AutoFixer", &model, None, 1);
+                let input = self.enrich_completed_run(
+                    ep,
+                    plan_id,
+                    "fix",
+                    "AutoFixer",
+                    &dispatch.backend_id,
+                    &model,
+                    None,
+                    1,
+                );
                 self.record_and_check_learning(input, plan_id).await;
 
                 // Reset for retry: increment iteration, clear gate results
@@ -10212,7 +10328,8 @@ impl PlanRunner {
             .dispatch_agent(plan_id, AgentRole::AutoFixer, "regen-verify")
             .await
         {
-            Ok(result) => {
+            Ok(dispatch) => {
+                let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
 
@@ -10234,6 +10351,7 @@ impl PlanRunner {
                     plan_id,
                     "regen-verify",
                     "AutoFixer",
+                    &dispatch.backend_id,
                     &model,
                     None,
                     1,
@@ -10348,7 +10466,8 @@ impl PlanRunner {
             )
             .await
         {
-            Ok(result) => {
+            Ok(dispatch) => {
+                let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
 
@@ -10393,8 +10512,16 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input =
-                    self.enrich_completed_run(ep, plan_id, "review", "Auditor", &model, None, 1);
+                let input = self.enrich_completed_run(
+                    ep,
+                    plan_id,
+                    "review",
+                    "Auditor",
+                    &dispatch.backend_id,
+                    &model,
+                    None,
+                    1,
+                );
                 self.record_and_check_learning(input, plan_id).await;
 
                 if approved {
@@ -10454,7 +10581,8 @@ impl PlanRunner {
             )
             .await
         {
-            Ok(result) => {
+            Ok(dispatch) => {
+                let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
 
@@ -10471,8 +10599,16 @@ impl PlanRunner {
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
                 let model = self.effective_model();
-                let input =
-                    self.enrich_completed_run(ep, plan_id, "docs", "Scribe", &model, None, 1);
+                let input = self.enrich_completed_run(
+                    ep,
+                    plan_id,
+                    "docs",
+                    "Scribe",
+                    &dispatch.backend_id,
+                    &model,
+                    None,
+                    1,
+                );
                 self.record_and_check_learning(input, plan_id).await;
             }
             Err(e) => {
@@ -10516,7 +10652,8 @@ impl PlanRunner {
             }
 
             match self.dispatch_agent(plan_id, role, task).await {
-                Ok(ref result) => {
+                Ok(dispatch) => {
+                    let result = dispatch.result;
                     *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                     self.agent_calls += 1;
                     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -10538,6 +10675,7 @@ impl PlanRunner {
                         plan_id,
                         task,
                         &role_str,
+                        &dispatch.backend_id,
                         &model,
                         None,
                         attempt + 1,
@@ -10573,6 +10711,7 @@ impl PlanRunner {
                             plan_id,
                             task,
                             &role_str,
+                            "",
                             &model,
                             None,
                             attempt + 1,
@@ -10673,7 +10812,7 @@ impl PlanRunner {
         plan_id: &str,
         role: AgentRole,
         task: &str,
-    ) -> Result<AgentResult> {
+    ) -> Result<DispatchOutcome> {
         self.dispatch_agent_with(plan_id, role, task, None, None, None, None)
             .await
     }
@@ -10828,7 +10967,7 @@ impl PlanRunner {
         model_override: Option<String>,
         exec_dir_override: Option<PathBuf>,
         system_prompt_override: Option<String>,
-    ) -> Result<AgentResult> {
+    ) -> Result<DispatchOutcome> {
         self.ensure_dispatch_allowed(plan_id)?;
         let ctx = Context::now();
         let exec_dir = match exec_dir_override {
@@ -11737,7 +11876,7 @@ impl PlanRunner {
                     .unwrap_or("focused"),
             )
             .with_attr("model_tier", Self::retry_model_tier_label(&selected_model));
-        let result: AgentResult = if self.config.agent.command == "claude" {
+        let (backend_id, result): (String, AgentResult) = if self.config.agent.command == "claude" {
             let task_role = task_def
                 .as_ref()
                 .and_then(|task| task.role.clone())
@@ -11794,6 +11933,7 @@ impl PlanRunner {
                 },
                 format!("create agent for model {selected_model}"),
             )?;
+            let backend_id = agent.backend_id().to_string();
             let resolved = resolve_model(&roko_config, &selected_model);
             let cost_table = task_runner_cost_table(&resolved);
             let mut runner_budget = RunnerBudgetGuardrail::new(
@@ -11832,12 +11972,15 @@ impl PlanRunner {
 
             let mut usage = task_result.total_usage;
             usage.cost_usd = task_result.total_cost_usd as f32;
-            AgentResult {
-                output: task_result.output,
-                trace: Vec::new(),
-                usage,
-                success: task_result.gate_passed,
-            }
+            (
+                backend_id,
+                AgentResult {
+                    output: task_result.output,
+                    trace: Vec::new(),
+                    usage,
+                    success: task_result.gate_passed,
+                },
+            )
         } else {
             let task_role = task_def
                 .as_ref()
@@ -11909,6 +12052,7 @@ impl PlanRunner {
                 )?;
                 agent
             };
+            let backend_id = agent.backend_id().to_string();
             let mut runner_budget = RunnerBudgetGuardrail::new(
                 self.config.budget.max_task_usd,
                 self.config.budget.max_session_usd,
@@ -11951,12 +12095,15 @@ impl PlanRunner {
 
             let mut usage = task_result.total_usage;
             usage.cost_usd = task_result.total_cost_usd as f32;
-            AgentResult {
-                output: task_result.output,
-                trace: Vec::new(),
-                usage,
-                success: task_result.gate_passed,
-            }
+            (
+                backend_id,
+                AgentResult {
+                    output: task_result.output,
+                    trace: Vec::new(),
+                    usage,
+                    success: task_result.gate_passed,
+                },
+            )
         };
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
 
@@ -12298,7 +12445,7 @@ impl PlanRunner {
             }
         }
 
-        Ok(result)
+        Ok(DispatchOutcome { backend_id, result })
     }
 
     /// Run per-task verification steps.

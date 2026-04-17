@@ -356,6 +356,10 @@ impl Agent for ExecAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "exec"
+    }
+
     fn supports_streaming(&self) -> bool {
         // We collect all output before returning — not streaming.
         false

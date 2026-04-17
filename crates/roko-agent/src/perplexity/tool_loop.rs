@@ -134,6 +134,10 @@ impl LlmBackend for PerplexityToolLoopBackend {
 
         Ok(BackendResponse::Json(parsed))
     }
+
+    fn backend_id(&self) -> &'static str {
+        "perplexity"
+    }
 }
 
 pub struct PerplexityToolLoopAgent {
@@ -281,6 +285,10 @@ impl Agent for PerplexityToolLoopAgent {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backend_id(&self) -> &'static str {
+        self.tool_loop.backend_id()
     }
 
     fn supports_streaming(&self) -> bool {

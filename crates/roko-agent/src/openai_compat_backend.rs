@@ -378,6 +378,10 @@ impl LlmBackend for OpenAiCompatLlmBackend {
             BackendResponse::StreamJson(_) | BackendResponse::Text(_) => SessionState::default(),
         }
     }
+
+    fn backend_id(&self) -> &'static str {
+        "openai_compat"
+    }
 }
 
 fn finish_reason_to_wire(finish_reason: &FinishReason) -> String {

@@ -197,6 +197,9 @@ pub struct Episode {
     /// Model slug used for the dispatch.
     #[serde(default)]
     pub model: String,
+    /// Backend/provider slug used for the dispatch.
+    #[serde(default)]
+    pub backend: String,
     /// Trigger kind that caused the dispatch.
     #[serde(default)]
     pub trigger_kind: String,
@@ -272,6 +275,7 @@ impl Episode {
             episode_id: String::new(),
             agent_template: String::new(),
             model: String::new(),
+            backend: String::new(),
             trigger_kind: String::new(),
             trigger_signal_hash: String::new(),
             started_at,
@@ -1134,6 +1138,40 @@ mod tests {
         assert!(all[0].success);
         assert_eq!(all[0].gate_verdicts.len(), 1);
         assert_eq!(all[0].gate_verdicts[0].gate, "compile");
+    }
+
+    #[tokio::test]
+    async fn backend_round_trips_through_jsonl_append_and_read() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let mut ep = sample("agent-a", "task-1", true);
+        ep.backend = "anthropic".to_string();
+        logger.append(&ep).await.expect("append");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].backend, "anthropic");
+    }
+
+    #[tokio::test]
+    async fn legacy_json_without_backend_defaults_to_empty_string() {
+        let (_dir, path) = tmp_log();
+        let mut episode = serde_json::to_value(sample("agent-a", "task-1", true))
+            .expect("serialize episode");
+        episode
+            .as_object_mut()
+            .expect("episode object")
+            .remove("backend");
+        tokio::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&episode).expect("serialize legacy episode")),
+        )
+        .await
+        .expect("write legacy episode");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].backend, "");
     }
 
     #[tokio::test]

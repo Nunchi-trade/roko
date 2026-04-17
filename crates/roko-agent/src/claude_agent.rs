@@ -466,6 +466,10 @@ impl Agent for ClaudeAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "claude_api"
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }

@@ -1813,7 +1813,9 @@ mod tests {
         freq.skill_mining_every_n = 1;
         runtime.set_update_frequency(freq);
 
-        let input = CompletedRunInput::from_episode(sample_episode(true));
+        let mut episode = sample_episode(true);
+        episode.backend = "claude_cli".to_string();
+        let input = CompletedRunInput::from_episode(episode);
         let update = runtime.record_completed_run(input).await.unwrap();
 
         assert_eq!(update.episode_logged, ApplyStatus::Applied);
@@ -1825,6 +1827,7 @@ mod tests {
         let episodes_jsonl = std::fs::read_to_string(&runtime.paths().episodes_jsonl).unwrap();
         let persisted: Episode = serde_json::from_str(episodes_jsonl.lines().next().unwrap())
             .expect("persisted episode");
+        assert_eq!(persisted.backend, "claude_cli");
         let pad = persisted
             .extra
             .get("pad")

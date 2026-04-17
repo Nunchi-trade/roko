@@ -409,6 +409,10 @@ impl Agent for CodexAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "codex"
+    }
+
     fn supports_streaming(&self) -> bool {
         true
     }

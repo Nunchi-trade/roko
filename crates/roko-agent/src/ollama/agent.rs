@@ -211,6 +211,10 @@ impl Agent for OllamaAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "ollama"
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }
@@ -611,6 +615,10 @@ impl LlmBackend for OllamaLlmBackend {
         } else {
             self.execute_request(&url, &body_bytes).await
         }
+    }
+
+    fn backend_id(&self) -> &'static str {
+        "ollama"
     }
 }
 

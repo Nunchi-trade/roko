@@ -504,6 +504,10 @@ impl Agent for CursorAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "cursor"
+    }
+
     fn supports_streaming(&self) -> bool {
         true
     }
@@ -643,6 +647,10 @@ impl LlmBackend for CursorAgent {
             BackendResponse::Json(json) => extract_session(json),
             BackendResponse::StreamJson(_) | BackendResponse::Text(_) => SessionState::default(),
         }
+    }
+
+    fn backend_id(&self) -> &'static str {
+        "cursor"
     }
 }
 
