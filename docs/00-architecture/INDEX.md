@@ -11,10 +11,12 @@
 > `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
 > `tmp/refinements/05-loop-retold.md` for the seven-step loop, co-equal PERSIST/BROADCAST, and
 > `tmp/refinements/10-self-learning-cybernetic-loops.md` for Bus-backed prediction, outcome,
-> `tmp/refinements/12-knowledge-demurrage.md` for the attention-economy view of durable memory,
 > calibration, and `prediction.error.*` loops across operators,
+> `tmp/refinements/12-knowledge-demurrage.md` for the attention-economy view of durable memory,
 > cross-cut injection model, `tmp/refinements/09-phase-2-implications.md` for how Chain,
 > Dreams, Coordination, and Heartbeat collapse onto that same kernel, and
+> `tmp/refinements/13-collective-intelligence-c-factor.md` for continuous c-factor
+> measurement from cohort Bus/Substrate statistics and conditional Policy intervention,
 > `tmp/refinements/06-refactoring-plan.md` plus `tmp/refinements/21-from-scratch-redesigns.md`
 > for the rollout and rewrite-track sequencing. This topic covers the complete architectural
 > specification from the core data types through the layer taxonomy, cognitive cross-cuts,
@@ -74,7 +76,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 11 | [Dual-Process and Active Inference](./11-dual-process-and-active-inference.md) | T0/T1/T2 tiers, EFE formula, 16 T0 probes, literal predict/publish/correct active inference on the Bus, per-operator calibration, Kahneman mapping, classical architectures, LLM-era architectures |
 | 12 | [Five-Layer Taxonomy](./12-five-layer-taxonomy.md) | L0-L4 detailed specifications, cognitive cross-cuts table, operator × layer map, dependency rules, 18-crate map by layer |
 | 13 | [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md) | Neuro, Daimon, and Dreams as injected cross-cuts rather than loop steps: knowledge retrieval/composition, affect-biased assessment and act gating, and Delta-speed consolidation |
-| 14 | [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md) | Two-level metric (C-Factor ratio + C-Score composite), four diagnostic indicators, 31.6× collective calibration, network flywheel |
+| 14 | [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md) | Continuous c-factor measurement from cohort Bus and Substrate statistics, five-axis `CohortMetrics`, conditional Policy levers, WisdomGate, and anti-groupthink controls |
 | 15 | [Crate Map](./15-crate-map.md) | 18+ crates by layer with status, test counts, dependency graph, legacy umbrella-crate dissolution, legacy naming |
 | 16 | [Autocatalytic Improvement and Cybernetics](./16-autocatalytic-and-cybernetics.md) | Kauffman autocatalytic sets, compound improvement (0.9^4), Ashby's Law, Good Regulator Theorem, Beer VSM, Bus-centered feedback nervous system, Free Energy Principle, stigmergy |
 | 17 | [Design Principles and Frontier Summary](./17-design-principles-and-frontier-summary.md) | 7 design principles (P1-P7), 14 Blue Ocean innovations with details, interconnection map, empirical validation status |

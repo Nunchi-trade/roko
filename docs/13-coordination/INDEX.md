@@ -28,7 +28,9 @@ The **exponential flywheel** describes ten mechanisms (autocatalytic knowledge n
 superlinear scaling, Reed's Law, knowledge distillation cascades, evolutionary dynamics,
 collective calibration, cross-domain resonance, niche construction, information-theoretic
 compounding, transactive memory) that produce superlinear growth in collective intelligence.
-The **C-Factor** and composite **C-Score** metrics quantify coordination effectiveness.
+The **c-factor** chapter reframes coordination metrics around continuously measured cohort
+process quality: turn-taking equality, peer prediction accuracy, citation reciprocity,
+delivery rate, and HDC diversity computed from Bus and Substrate traces.
 
 ---
 
@@ -58,7 +60,7 @@ The **C-Factor** and composite **C-Score** metrics quantify coordination effecti
 | 08 | [08-permissioned-subnets.md](08-permissioned-subnets.md) | Permissioned Subnets | ~240 | Private Mesh scopes, access control models (invite/role/reputation), internal reputation, opt-in publishing, scope boundary enforcement, organizational patterns, club goods theory |
 | 09 | [09-stigmergy-scaling.md](09-stigmergy-scaling.md) | Stigmergy Scaling | ~250 | O(N×M) vs O(N²) analysis, pheromone field scaling, transport scaling (relay vs gossip), morphogenetic scaling, knowledge sync scaling, practical limits, comparison with consensus and pub-sub |
 | 10 | [10-exponential-flywheel.md](10-exponential-flywheel.md) | Exponential Flywheel | ~280 | 10 mechanisms for superlinear growth: autocatalytic networks (Kauffman), superlinear scaling (West/Bettencourt β≈1.15), Reed's Law (2^N), distillation cascades (Hinton), evolutionary dynamics, collective calibration (31.6×), cross-domain resonance (HDC 0.526), niche construction, information-theoretic compounding, transactive memory |
-| 11 | [11-collective-intelligence-metrics.md](11-collective-intelligence-metrics.md) | Collective Intelligence Metrics | ~640 | C-Factor (Woolley et al. 2010) from Bus statistics, composite C-Score (4 diagnostic signals), turn-taking equality, knowledge flow rate, cross-domain transfer, emergent coordination, information-theoretic metrics, **collective pathology detection** (information cascades/herding, groupthink/premature consensus, echo chambers, cascading hallucinations, pheromone deadlock, composite pathology dashboard), A/B testing with clustered standard errors, dashboard integration |
+| 11 | [11-collective-intelligence-metrics.md](11-collective-intelligence-metrics.md) | Collective Intelligence Metrics | ~640 | Continuous c-factor measurement for cohorts: five-axis `CohortMetrics`, online `CohortWeightsLearner`, WisdomGate checks, groupthink countermeasures, and dashboard/API/Prometheus surfacing built from Bus plus Substrate instrumentation |
 | 12 | [12-current-status-and-gaps.md](12-current-status-and-gaps.md) | Current Status and Gaps | ~250 | Per-feature implementation status (Wired/Scaffold/Design/Gap), 5-tier implementation priority, existing code assets, key gaps (no pheromone types, no transport, no morphogenetic code, no metrics), open questions and decisions |
 
 ---
@@ -75,6 +77,7 @@ The **C-Factor** and composite **C-Score** metrics quantify coordination effecti
 - `00-architecture/01-naming-and-glossary.md` — Shared vocabulary for Bus, Pulse, MeshBus, and MeshSubstrate
 - `00-architecture/24-cross-section-integration-map.md` — Bus-based integration map for the two-fabric model
 - `../../tmp/refinements/09-phase-2-implications.md` — Phase 2+ implications for chain, dreams, mesh, coordination, and heartbeat
+- `../../tmp/refinements/13-collective-intelligence-c-factor.md` — Canonical REF13 proposal for c-factor measurement, cohort metrics, and conditional Policy actuation
 
 ---
 

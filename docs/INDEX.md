@@ -23,6 +23,9 @@ fingerprint a first-class Engram field and a native Substrate query primitive.
 `tmp/refinements/12-knowledge-demurrage.md` then recasts durable memory as an attention
 economy: Engrams carry `balance`, demurrage taxes idle knowledge, reinforcement keeps useful
 knowledge warm, and cold-tier freeze/thaw replaces blunt prune-only decay for long-lived stores.
+`tmp/refinements/13-collective-intelligence-c-factor.md` adds c-factor as a continuously
+measured cohort diagnostic derived from Bus and Substrate statistics, with conditional Policy
+interventions when degraded group process correlates with worse outcomes.
 
 ## Start Here
 
@@ -46,7 +49,10 @@ knowledge warm, and cold-tier freeze/thaw replaces blunt prune-only decay for lo
 > demurrage `balance`, so freshness is earned through use rather than preserved by age-only
 > decay; start with [`00-architecture/04-decay-variants.md`](00-architecture/04-decay-variants.md),
 > [`00-architecture/25-attention-as-currency.md`](00-architecture/25-attention-as-currency.md),
-> and [`05-learning/INDEX.md`](05-learning/INDEX.md).
+> and [`05-learning/INDEX.md`](05-learning/INDEX.md). REF13 adds c-factor as a cohort-level
+> measurement of collective process quality computed from Bus and Substrate traces; start with
+> [`00-architecture/14-c-factor-collective-intelligence.md`](00-architecture/14-c-factor-collective-intelligence.md)
+> and [`13-coordination/11-collective-intelligence-metrics.md`](13-coordination/11-collective-intelligence-metrics.md).
 
 ## Topics
 

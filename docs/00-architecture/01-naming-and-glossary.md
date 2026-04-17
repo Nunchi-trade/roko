@@ -8,6 +8,7 @@
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
 > [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md),
 > [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md),
+> [tmp/refinements/13-collective-intelligence-c-factor.md](../../tmp/refinements/13-collective-intelligence-c-factor.md),
 > [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
@@ -201,6 +202,7 @@ The following names are load-bearing additions in the current architecture:
 | `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
+| `c-factor` | Continuously measured cohort-process metric learned from turn-taking entropy, peer prediction accuracy, citation reciprocity, delivery rate, and HDC diversity. |
 | `Synapse Architecture` | The architecture story of two mediums, two fabrics, and six operators. |
 
 ### 9.1 Topic Namespace Guidance
@@ -240,6 +242,7 @@ prefixes without coordination.
 | `Dreams` | Delta-speed consolidation cross-cut that writes durable results back to storage. |
 | `Engram` | Durable cognitive record stored in a Substrate and identified by content hash. |
 | `Balance` | Per-Engram attention credit under demurrage; when it falls to the floor, the Engram becomes a cold-tier candidate. |
+| `c-factor` | Learned scalar summarizing collective process quality for a cohort; computed from Bus plus Substrate statistics and used as a diagnostic covariate rather than a standalone objective. |
 | `Fleet` | Roster of agents under shared coordination or ownership. |
 | `HDC fingerprint` | Per-Engram 10,240-bit hyperdimensional vector used for `query_similar`, clustering, consensus, and analogy. |
 | `Mesh` | Agent-network layer for multi-agent communication. |
