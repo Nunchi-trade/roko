@@ -574,6 +574,38 @@ impl Default for TaskStore {
     }
 }
 
+/// Serialisable snapshot of a [`TaskStore`] for disk persistence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskStoreSnapshot {
+    /// All tasks.
+    pub tasks: Vec<TaskEntry>,
+    /// Monotonic id counter.
+    pub next_id: TaskId,
+}
+
+impl TaskStore {
+    /// Captures a serialisable snapshot of the store.
+    #[must_use]
+    pub fn snapshot(&self) -> TaskStoreSnapshot {
+        let mut tasks: Vec<TaskEntry> = self.tasks.values().cloned().collect();
+        tasks.sort_by_key(|t| t.id);
+        TaskStoreSnapshot {
+            tasks,
+            next_id: self.next_id,
+        }
+    }
+
+    /// Restores a store from a snapshot.
+    #[must_use]
+    pub fn from_snapshot(snap: TaskStoreSnapshot) -> Self {
+        let tasks = snap.tasks.into_iter().map(|t| (t.id, t)).collect();
+        Self {
+            tasks,
+            next_id: snap.next_id,
+        }
+    }
+}
+
 /// Map priority to a numeric ordering value for sorting.
 fn priority_ord(p: TaskPriority) -> u8 {
     match p {

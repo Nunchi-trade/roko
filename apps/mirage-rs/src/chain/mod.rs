@@ -32,7 +32,8 @@ pub mod projection;
 pub mod task;
 
 pub use agent::{
-    AgentEntry, AgentEvent, AgentRegistry, AgentStats, AgentTrace, CognitivePhase, SkillConfig,
+    AgentEntry, AgentEvent, AgentRegistry, AgentRegistrySnapshot, AgentStats, AgentTrace,
+    CognitivePhase, SkillConfig,
 };
 pub use hdc_index::{HdcIndex, Hit, IndexedVector};
 pub use hnsw::{HnswBinaryIndex, HnswConfig};
@@ -41,17 +42,18 @@ pub use knowledge::{
     DUPLICATE_SIMILARITY_THRESHOLD, KnowledgeError, KnowledgeSnapshot, KnowledgeStore, PostOutcome,
 };
 pub use pheromone::{
-    DECAY_BUCKETS, Pheromone, PheromoneField, PheromoneHit, PheromoneId, PheromoneKind,
+    DECAY_BUCKETS, Pheromone, PheromoneField, PheromoneFieldSnapshot, PheromoneHit, PheromoneId,
+    PheromoneKind,
 };
 pub use prediction::{
     CalibrationCategorySummary, CalibrationSummary, ClaimId, ClaimState, PredictionClaim,
-    PredictionError, PredictionEvent, PredictionSession, PredictionStore, ResolveResult, SessionId,
-    SessionState,
+    PredictionError, PredictionEvent, PredictionSession, PredictionStore,
+    PredictionStoreSnapshot, ResolveResult, SessionId, SessionState,
 };
 pub use projection::{
     DEFAULT_EMBEDDING_DIM, HDC_BITS, ProjectionMatrix, project_bytes, project_tokens,
 };
 pub use task::{
     CompletionMetadata, TaskArtifact, TaskEntry, TaskError, TaskEvent, TaskId, TaskPriority,
-    TaskState, TaskStats, TaskStore,
+    TaskState, TaskStats, TaskStore, TaskStoreSnapshot,
 };

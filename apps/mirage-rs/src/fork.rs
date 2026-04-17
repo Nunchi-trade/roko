@@ -196,7 +196,7 @@ impl ReadCache {
 }
 
 /// Local write layer for partially overridden account state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DirtyAccount {
     /// Overridden balance, if any.
     pub balance: Option<U256>,
@@ -254,7 +254,7 @@ struct DirtyStoreSnapshot {
 }
 
 /// Write layer for local mutations and watch tracking.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DirtyStore {
     /// Dirty accounts keyed by address.
     pub accounts: HashMap<Address, DirtyAccount>,
@@ -265,8 +265,11 @@ pub struct DirtyStore {
     /// Total number of dirty slots tracked locally.
     pub total_dirty_slots: u64,
     /// When set, newly classified protocol contracts are demoted to slot-only reads.
+    #[serde(skip)]
     pub(crate) demote_protocols_to_slot_only: bool,
+    #[serde(skip)]
     snapshots: HashMap<u64, Box<DirtyStoreSnapshot>>,
+    #[serde(skip)]
     next_snapshot_id: u64,
 }
 
@@ -859,7 +862,7 @@ pub struct LocalTransaction {
 }
 
 /// Persisted local transaction receipt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalReceipt {
     /// Transaction hash.
     pub transaction_hash: B256,
@@ -882,7 +885,7 @@ pub struct LocalReceipt {
 }
 
 /// Synthetic local block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalBlock {
     /// Block hash.
     pub hash: B256,

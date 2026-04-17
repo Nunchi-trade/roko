@@ -47,7 +47,7 @@ use roko_primitives::HdcVector;
 use crate::roko_bridge::{InsightBus, InsightEvent, PheromoneBus};
 
 /// Toggles governing which chain subsystems are active.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChainToggles {
     /// Whether the HDC index accepts reads/writes (`chain_postInsight`, `chain_searchInsights`).
     pub hdc: bool,

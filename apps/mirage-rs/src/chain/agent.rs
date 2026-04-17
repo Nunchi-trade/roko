@@ -288,6 +288,36 @@ impl AgentRegistry {
             false
         }
     }
+
+    /// Captures a serialisable snapshot of the registry.
+    #[must_use]
+    pub fn snapshot(&self) -> AgentRegistrySnapshot {
+        let mut agents: Vec<AgentEntry> = self.agents.values().cloned().collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        AgentRegistrySnapshot {
+            agents,
+            traces: self.traces.clone(),
+        }
+    }
+
+    /// Restores a registry from a snapshot.
+    #[must_use]
+    pub fn from_snapshot(snap: AgentRegistrySnapshot) -> Self {
+        let agents = snap.agents.into_iter().map(|a| (a.id.clone(), a)).collect();
+        Self {
+            agents,
+            traces: snap.traces,
+        }
+    }
+}
+
+/// Serialisable snapshot of an [`AgentRegistry`] for disk persistence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentRegistrySnapshot {
+    /// All registered agents.
+    pub agents: Vec<AgentEntry>,
+    /// Cognitive traces keyed by agent id.
+    pub traces: HashMap<String, Vec<AgentTrace>>,
 }
 
 #[cfg(test)]

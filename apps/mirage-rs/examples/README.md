@@ -21,6 +21,10 @@ cargo run -p mirage-rs --features chain --bin mirage-rs -- \
 This starts the JSON-RPC server on `http://127.0.0.1:8545` with the REST API
 available at `http://127.0.0.1:8545/api/*`.
 
+State is persisted to `.roko/state/` by default, so seeded data survives restarts.
+Add `--no-persist` if you want a clean slate every run, or `--state-dir /tmp/mirage`
+to use a custom location.
+
 ---
 
 ## `seed_chain_fixtures`

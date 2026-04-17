@@ -69,6 +69,9 @@ pub mod chain_rpc;
 #[cfg(feature = "legacy-api")]
 pub mod http_api;
 
+/// Periodic atomic disk snapshots for state persistence across restarts.
+pub mod persist;
+
 /// Roko trait bridge: implements `roko_core::{Gate, Substrate}` over mirage.
 #[cfg(feature = "roko")]
 pub mod roko_bridge;
