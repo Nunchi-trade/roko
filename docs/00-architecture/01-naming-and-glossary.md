@@ -25,6 +25,7 @@
 > [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md),
 > [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md),
 > [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md),
+> [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -144,10 +145,14 @@ crates directly.
 | `Surface` | User interaction rendering | One of CLI, TUI, Chat, or Web presenting the same verbs over shared state. |
 | `Verb set` | Cross-surface action vocabulary | The shared `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` contract. |
 | `Session` | Cross-surface continuity artifact | Named, replayable unit of user-visible work spanning prompts, checkpoints, and progress streams. |
-| `Profile` | Deployment-shape config bundle | A named default set for laptop, single-server, container, clustered, or edge runtime behavior. |
+| `Domain profile` | Installable domain bundle | A tier-2 plugin bundle that packages domain-specific tools, roles, gates, heuristics, and templates for coding, research, blockchain, data/ML, ops, writing, or third-party domains. |
+| `Profile bundle` | Versioned install unit for a domain profile | The discoverable package installed through `roko plugin install @roko/<name>-profile`. |
+| `Profile` | Deployment-shape config bundle | A named default set for laptop, single-server, container, clustered, or edge runtime behavior. Use `domain profile` when the bundle customizes agent behavior rather than deployment shape. |
 | `State portability` | Signed import/export workflow | The rule that `Substrate` state, queue state, and deployment config can move between shapes as one auditable archive. |
 | `SecretStore` | Secret backend trait | Layered secret resolver behind OS keychain, vault-style stores, and role-scoped credential injection. |
 | `TenantCtx` | Tenant-scoped request context | Identity, role, quota, and audit information propagated through auth, `Substrate`, and control-plane spans. |
+| `TypedContext` | Structured situation payload | Domain-tagged key/value context passed to composers, gates, and heuristics so matching happens on typed fields instead of free-text parsing. |
+| `Custody` | Chain-of-custody record | Auditable record of who approved an action, which heuristics and claims influenced it, what simulation ran, and what witness or result was observed. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -246,6 +251,9 @@ The following names are load-bearing additions in the current architecture:
 | `roko-compose-core` | Proposed crate for compose engine mechanics split out of `roko-compose`. |
 | `roko-templates` | Proposed crate for role and domain template packs split out of `roko-compose`. |
 | `SDK` | Four-layer Rust developer surface spanning one-liner, builder, trait impl, and runtime impl entry points over the same kernel. |
+| `Domain profile` | Installable bundle for one work domain such as coding, research, blockchain, data/ML, ops, or writing. |
+| `TypedContext` | Structured `domain + fields` shape that lets gates, heuristics, and templates match on typed context rather than parsing summaries. |
+| `Custody` | Shared audit record for consequential actions across domains, including approvals, simulations, results, and optional chain witness material. |
 | `one-liner` | Fastest Rust entry point, typically `roko::run(...)`, for demos, scripts, and first-run success. |
 | `builder` | Daily-driver authoring surface that validates at `.build()` and hides kernel details by default. |
 | `trait impl` | Custom component surface for `Substrate`, `Bus`, operators, translators, and provider adapters. |

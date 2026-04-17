@@ -8,7 +8,8 @@
 > surface, and the extensibility architecture.
 >
 > See also: `../../tmp/refinements/22-developer-ux-rust.md` and
-> `../00-architecture/01-naming-and-glossary.md`.
+> `../00-architecture/01-naming-and-glossary.md` and
+> `../../tmp/refinements/25-domain-specific-agents.md`.
 
 
 > **Implementation**: Shipping
@@ -57,6 +58,11 @@ The four layers are the frame for the rest of this chapter: the
 extensibility points below are the trait-implementor and runtime-implementor
 layers in practice, while the builder surface is how most agent authors
 compose the system.
+
+For domain-specific deployments, the canonical bundle contract lives in
+`16-domain-profiles.md`. That file defines how a profile packages roles,
+tools, gates, heuristics, templates, `TypedContext`, and `Custody` into an
+installable unit.
 
 ---
 
@@ -291,7 +297,9 @@ Then register it in `translator_for` in `translate/capability.rs`.
 ## 8-Step Domain Plugin Process
 
 The refactoring PRD §05-agent-types defines an 8-step process for adding
-a new domain-specific agent type:
+a new domain-specific agent type. The profile bundle in
+`16-domain-profiles.md` is the user-facing artifact; this process is the
+implementation path:
 
 1. **Define the role** — Add a variant to `AgentRole` with default tier,
    budget, and permissions.
@@ -310,6 +318,11 @@ a new domain-specific agent type:
 8. **Test end-to-end** — Run `roko run "<domain prompt>"` and verify the
    full pipeline: prompt assembly → agent execution → gate validation →
    persistence.
+
+The six canonical profiles are coding, research, blockchain, data/ML,
+ops/SRE, and writing. They are intentionally narrow enough to be coherent,
+but broad enough that a deployment can mix two or more profiles when the
+task genuinely spans domains.
 
 ---
 

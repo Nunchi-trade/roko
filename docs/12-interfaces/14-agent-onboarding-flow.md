@@ -1,6 +1,6 @@
 # Agent Onboarding Flow
 
-> The journey from "new agent" to "fully operational Spectre-bearing cognitive agent" — domain selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, and first-task execution.
+> The journey from "new agent" to "fully operational Spectre-bearing cognitive agent" - domain/profile selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, and first-task execution.
 
 
 > **Implementation**: Scaffold
@@ -13,9 +13,9 @@
 
 ## Abstract
 
-Agent onboarding is the process of bringing a new cognitive agent from zero to operational. This includes choosing the agent's domain and role, selecting a template, configuring model routing, bootstrapping initial knowledge, generating the Spectre creature identity, and executing the first task to validate the setup.
+Agent onboarding is the process of bringing a new cognitive agent from zero to operational. This includes choosing the agent's domain and role, selecting or installing a profile bundle, composing profiles when needed, selecting a template, configuring model routing, bootstrapping initial knowledge, generating the Spectre creature identity, and executing the first task to validate the setup.
 
-This chapter follows the refinement in [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md): onboarding should feel familiar-first, interactive, fast, provider/plugin/MCP-aware, and resumable. The same underlying verbs should be reachable from all four surfaces, so a user can start in CLI and continue in TUI, Chat, or Web without relearning the workflow. The target is first useful output in under 30 seconds.
+This chapter follows the refinements in [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md): onboarding should feel familiar-first, interactive, fast, provider/plugin/MCP-aware, profile-aware, and resumable. The same underlying verbs should be reachable from all four surfaces, so a user can start in CLI and continue in TUI, Chat, or Web without relearning the workflow. The target is first useful output in under 30 seconds, with domain profile install and composition treated as part of first-run rather than a separate admin task.
 
 ---
 
@@ -31,7 +31,7 @@ The canonical verb set for the onboarding surfaces is:
 - `replay` for rerunning a prior session or episode
 - `learn` for heuristic and playbook curation
 - `tune` for configuration changes
-- `connect` for plugins, MCP servers, and credentials
+- `connect` for plugins, MCP servers, credentials, and profile bundles
 
 That verb set is rendered differently in CLI, TUI, Chat, and Web, but it should behave like one system rather than four separate ones. See also the glossary at [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the canonical terms used here.
 
@@ -39,6 +39,7 @@ That verb set is rendered differently in CLI, TUI, Chat, and Web, but it should 
 
 ```bash
 # Initialize project
+roko plugin install @roko/coding-profile
 roko init
 
 # Ask the first useful question
@@ -46,17 +47,18 @@ roko ask "Add error handling to the auth module"
 ```
 
 What happens automatically:
-1. `roko init` opens an interactive setup flow and creates `.roko/` plus a resumable `roko.toml`
-2. The setup flow auto-detects the project domain and preferred model providers
-3. If the user accepts the defaults, Roko chooses a safe starter template and a working provider configuration
-4. The init flow checks plugins and MCP servers opportunistically, but never blocks first success on a failed remote check
-5. The first `roko ask` or `roko do` can start immediately, with live output visible on every surface
+1. `roko plugin install` adds a domain profile bundle and records its declared tools, gates, heuristics, and templates
+2. `roko init` opens an interactive setup flow and creates `.roko/` plus a resumable `roko.toml`
+3. The setup flow auto-detects the project domain and preferred model providers, then offers the matching profile or a blank starter
+4. If the user accepts the defaults, Roko chooses a safe starter template, a working provider configuration, and a profile-specific `TypedContext`
+5. The init flow checks plugins and MCP servers opportunistically, but never blocks first success on a failed remote check
+6. The first `roko ask` or `roko do` can start immediately, with live output visible on every surface and custody records attached to any sensitive activation
 
 ### Standard Path (CLI, ~2 minutes)
 
 ```bash
 # Initialize with guided choices
-roko init --domain rust
+roko init --profile coding
 
 # Review the proposed setup
 roko inspect onboarding
@@ -74,9 +76,9 @@ Every configuration option is explicitly set:
 
 ```bash
 # 1. Initialize
-roko init --domain rust --name "my-project"
+roko init --profile coding --name "my-project"
 
-# 2. Configure agent templates
+# 2. Configure agent templates inside the selected profile
 roko config set agent.templates.implementer.model "claude-sonnet-4-6"
 roko config set agent.templates.implementer.tools ["read_file", "write_file", "edit_file", "bash"]
 roko config set agent.templates.reviewer.model "claude-sonnet-4-6"
@@ -110,6 +112,8 @@ roko do "Run the first validated task"
 
 `roko init` should behave as an onboarding assistant, not a static scaffold command. The flow should:
 
+- Discover or install the best matching domain profile before the first task runs.
+- Let the user compose multiple profiles when the project spans more than one domain.
 - Detect the project domain from the working tree, then let the user override it.
 - Probe provider availability, including local and remote model options, and keep the best working choice.
 - Offer to import or defer plugin and MCP setup, with a visible skip path for every failed probe.
@@ -123,7 +127,7 @@ Welcome to Roko. Let's set up your first agent.
 
 What would you like to do?
   [x] Start with a fast default setup
-  [ ] Choose providers, templates, and tools manually
+  [ ] Choose providers, profiles, templates, and tools manually
   [ ] Import an existing project or session
 
 Which providers should we check?
@@ -132,7 +136,7 @@ Which providers should we check?
   [x] Local Ollama
   [ ] Other
 
-Should we look for plugins and MCP servers?
+Should we look for plugins, profiles, and MCP servers?
   [x] Yes, auto-discover
   [ ] No, configure later
 ```
@@ -148,22 +152,22 @@ The practical rule is simple: no single setup check should block the user from r
 
 ---
 
-## Stage 1: Domain Selection
+## Stage 1: Profile Selection and Domain Mapping
 
-The first onboarding decision is choosing the agent's primary domain. That choice should be made once, then carried with the session as the user moves across CLI, TUI, Chat, and Web.
+The first onboarding decision is choosing the agent's primary profile. That choice should be made once, then carried with the session as the user moves across CLI, TUI, Chat, and Web. A profile may be a single domain bundle or a composition of multiple bundles when the project spans more than one domain.
 
 ### Auto-Detection
 
 `roko init` auto-detects the domain from the project directory:
 
-| Detection Signal | Domain | Confidence |
+| Detection Signal | Profile hint | Confidence |
 |---|---|---|
-| `Cargo.toml` present | Rust | 0.95 |
-| `package.json` + TypeScript files | TypeScript | 0.90 |
-| `go.mod` present | Go | 0.90 |
-| `pyproject.toml` / `setup.py` | Python | 0.85 |
-| `Makefile` only | Generic | 0.50 |
-| Empty directory | Generic | 0.10 |
+| `Cargo.toml` present | coding profile | 0.95 |
+| `package.json` + TypeScript files | coding profile | 0.90 |
+| `go.mod` present | coding profile | 0.90 |
+| `pyproject.toml` / `setup.py` | research or data profile | 0.85 |
+| `Makefile` only | blank starter | 0.50 |
+| Empty directory | blank starter | 0.10 |
 
 ### Domain Effects
 
@@ -177,20 +181,25 @@ The selected domain configures:
 | **System prompt** | Domain-specific context in the system prompt builder |
 | **Knowledge types** | Domain-relevant heuristics pre-loaded |
 | **Index settings** | Code parser configuration for `roko-index` |
+| **TypedContext schema** | Declares the keys gates and heuristics can match on without parsing free text |
+| **Custody expectations** | Marks install/approve/execute actions that need a chain-of-custody record |
 | **Session defaults** | The same onboarding session can be resumed from any surface |
 
 ### Manual Override
 
 ```bash
-roko init --domain rust    # Force Rust domain
-roko init --domain generic # No domain-specific configuration
+roko init --profile coding    # Force the coding profile
+roko init --profile blank     # No domain-specific configuration
 ```
 
 ---
 
 ## Stage 2: Template Instantiation
 
-Agent templates define the role, tools, and behavioral profile of an agent.
+Agent templates define the role, tools, and behavioral profile of an agent. In the profile-first
+flow, templates are the lower-level defaults that a profile bundle exports for a particular task
+shape. The profile can supply a template directly, override specific fields, or offer a small set
+of template choices inside the same wizard.
 
 ### Built-in Templates
 
@@ -238,7 +247,7 @@ Layer 6: Behavioral directives (from Daimon state, risk tolerance)
 
 **Source**: `roko-compose/src/system_prompt_builder.rs`, `RoleSystemPromptSpec` in `roko-cli/src/orchestrate.rs`
 
-The onboarding flow should keep template selection lightweight. A first-time user should be able to accept a default template, get the session moving, and refine templates later through `tune` or `learn`.
+The onboarding flow should keep template selection lightweight. A first-time user should be able to accept a default template, get the session moving, and refine templates later through `tune` or `learn`. The UI should make it obvious which profile owns the default and which fields are inherited from a composed profile set.
 
 ---
 
@@ -332,16 +341,17 @@ roko neuro import --from /other/project/.roko/neuro/
 roko neuro inject --type Heuristic --content "Always check error returns in Go"
 ```
 
-### Provider, Plugin, and MCP Discovery
+### Provider, Profile, Plugin, and MCP Discovery
 
-The onboarding flow should treat provider checks, plugin setup, and MCP discovery as related setup tasks, not separate product surfaces. Users should be able to:
+The onboarding flow should treat provider checks, profile setup, plugin setup, and MCP discovery as related setup tasks, not separate product surfaces. Users should be able to:
 
 - Import a known provider configuration from a prior session or another project.
+- Install or compose a domain profile before the first task.
 - Auto-discover MCP servers and accept the working ones while skipping failures.
 - Add plugins and credentials later without restarting the onboarding flow.
 - Resume discovery after an interruption without repeating completed steps.
 
-This is especially important for the Web surface, which should present the same setup state as CLI and TUI rather than a separate wizard model.
+This is especially important for the Web surface, which should present the same setup state as CLI and TUI rather than a separate wizard model. The shared contract should surface the profile's `TypedContext` keys and any `Custody` requirements for activating sensitive tools or gates so the user understands what the profile will expect before they commit.
 
 ### Knowledge Types Available at Bootstrap
 
@@ -440,7 +450,7 @@ After the first task, the agent has:
 
 ## Portal Onboarding Wizard
 
-The Web surface provides a visual wizard for the full onboarding path, but it should mirror the same state machine as `roko init` rather than inventing a parallel setup flow.
+The Web surface provides a visual wizard for the full onboarding path, but it should mirror the same state machine as `roko init` rather than inventing a parallel setup flow. The wizard should expose profile install, profile composition, and the same TypedContext/Custody preview that the CLI shows.
 
 ### Step 1: Welcome
 
@@ -462,10 +472,10 @@ The Web surface provides a visual wizard for the full onboarding path, but it sh
 ┌─────────────────────────────────────────┐
 │                                          │
 │  Project: [my-project_____________]     │
-│  Domain:  [○ Rust ○ TypeScript ○ Go]    │
-│           [○ Python ○ Generic]          │
+│  Profile: [○ Coding ○ Research ○ Ops]   │
+│           [○ Blockchain ○ Writing ○ +]  │
 │                                          │
-│  Detected: Rust (Cargo.toml found)      │
+│  Detected: Coding profile (Cargo.toml)  │
 │  Session:  [resume from CLI ▾]          │
 │                                          │
 │  [← Back]  [Next →]                     │
@@ -473,7 +483,34 @@ The Web surface provides a visual wizard for the full onboarding path, but it sh
 └──────────────────────────────────────────┘
 ```
 
-### Step 3: Agent Configuration
+### Step 3: Profile Composition
+
+```
+┌─────────────────────────────────────────┐
+│                                          │
+│  Active profiles:                       │
+│                                          │
+│  ┌─ Coding ───────────────────────────┐ │
+│  │ Tools: fs, git, cargo, mcp-code    │ │
+│  │ Gates: unit, type, style, diff     │ │
+│  │ TypedContext: language, repo_root  │ │
+│  └────────────────────────────────────┘ │
+│                                          │
+│  ┌─ Research ─────────────────────────┐ │
+│  │ Tools: web, pdf, citations         │ │
+│  │ Gates: citation, factuality        │ │
+│  │ Custody: required for publish      │ │
+│  └────────────────────────────────────┘ │
+│                                          │
+│  [Install another profile]             │
+│  [Resolve collisions]                   │
+│                                          │
+│  [← Back]  [Next →]                     │
+│                                          │
+└──────────────────────────────────────────┘
+```
+
+### Step 4: Agent Configuration
 
 ```
 ┌─────────────────────────────────────────┐
@@ -499,7 +536,7 @@ The Web surface provides a visual wizard for the full onboarding path, but it sh
 └──────────────────────────────────────────┘
 ```
 
-### Step 4: Gate Pipeline
+### Step 5: Gate Pipeline
 
 ```
 ┌─────────────────────────────────────────┐
@@ -518,7 +555,7 @@ The Web surface provides a visual wizard for the full onboarding path, but it sh
 └──────────────────────────────────────────┘
 ```
 
-### Step 5: Budget & Limits
+### Step 6: Budget & Limits
 
 ```
 ┌─────────────────────────────────────────┐
@@ -536,12 +573,13 @@ The Web surface provides a visual wizard for the full onboarding path, but it sh
 └──────────────────────────────────────────┘
 ```
 
-### Step 6: Ready
+### Step 7: Ready
 
 ```
 ┌─────────────────────────────────────────┐
 │                                          │
 │  ✓ Project configured                  │
+│  ✓ Profiles installed                  │
 │  ✓ Templates created                   │
 │  ✓ Gates enabled                       │
 │  ✓ Budget set                          │
@@ -597,16 +635,19 @@ For shared work, the important property is continuity: a user should be able to 
 **Not yet built:**
 - Fully interactive, resumable onboarding across all four surfaces
 - Provider-aware setup that degrades gracefully when keys or local runtimes are missing
+- Profile install and composition workflow that is visible on every surface
 - Plugin and MCP discovery with skip/retry/diagnostic flows
 - First-party Web onboarding wizard that mirrors CLI state
 - Session continuity across onboarding and the first task
 - Visual template editor
+- TypedContext and Custody surface contracts in the onboarding UI
 
 ---
 
 ## Cross-References
 
 - See [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the full proposal
+- See [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md) for profile install, TypedContext, and Custody details
 - See [00-cli-overview.md](./00-cli-overview.md) for the CLI command structure
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for the configuration system
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre generation

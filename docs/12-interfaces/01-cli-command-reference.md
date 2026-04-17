@@ -21,6 +21,8 @@ underlying plugin SPI is described in [14-plugin-sdk.md](../18-tools/14-plugin-s
 [16-plugin-loading.md](../18-tools/16-plugin-loading.md). See also
 [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) and
 [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
+REF25 extends the same CLI surface with domain profile install and composition; see
+[tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 The `roko` binary uses `clap` for parsing and supports both positional arguments and named flags. All subcommands inherit the global flags described in [00-cli-overview.md](./00-cli-overview.md).
 
@@ -42,7 +44,7 @@ These verbs are the user-facing contract that should survive across surfaces and
 | `replay` | `roko replay <episode>` | Current debugging verb; promoted to first-class user verb. |
 | `learn` | `roko learn ...` | Target-state surface for heuristics, playbooks, and experiments. |
 | `tune` | `roko tune ...` or `roko config ...` | Target-state configuration noun; `config` remains the detailed subtree. |
-| `connect` | `roko connect ...` or `roko plugin ...` | Target-state add/integrate noun for providers, MCP servers, and plugins. |
+| `connect` | `roko connect ...` or `roko plugin ...` | Target-state add/integrate noun for providers, MCP servers, profile bundles, and plugins. |
 
 ---
 
@@ -50,10 +52,10 @@ These verbs are the user-facing contract that should survive across surfaces and
 
 ### `roko init`
 
-Interactively scaffold a new Roko project by creating `.roko/`, a default `roko.toml`, and the first session-safe runtime state.
+Interactively scaffold a new Roko project by creating `.roko/`, a default `roko.toml`, and the first session-safe runtime state. The same flow can activate or install a domain profile before the first task runs.
 
 ```
-roko init [PATH] [--cloud] [--template T]
+roko init [PATH] [--cloud] [--template T] [--profile P]
 ```
 
 | Argument/Flag | Type | Default | Description |
@@ -61,10 +63,11 @@ roko init [PATH] [--cloud] [--template T]
 | `PATH` | PathBuf | Current directory | Directory to initialize |
 | `--cloud` | bool | false | Generate cloud-ready defaults for deployment |
 | `--template` | String | (auto-detect) | Template: `coding`, `research`, `ops`, `chain`, `blank` |
+| `--profile` | String | (auto-detect) | Domain profile to install or activate: `coding`, `research`, `blockchain`, `data`, `ops`, `writing`, or `blank` |
 
-Auto-detects language, build system, and gates from project files (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`). Creates the `.roko/` directory tree with `roko.toml`, signal storage, learning state, and knowledge store.
+Auto-detects language, build system, gates, and matching profile options from project files (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`). Creates the `.roko/` directory tree with `roko.toml`, signal storage, learning state, and knowledge store.
 
-REF23 raises the bar for `roko init`: provider checks, MCP autodiscovery, heuristic-starter import, and secret collection should all degrade gracefully with explicit `skip` or `configure later` exits. Partial success is valid; setup state should be persisted incrementally so the next `roko init` can resume instead of restarting.
+REF23 raises the bar for `roko init`: provider checks, MCP autodiscovery, heuristic-starter import, and secret collection should all degrade gracefully with explicit `skip` or `configure later` exits. REF25 adds profile install and composition to that same contract. Partial success is valid; setup state should be persisted incrementally so the next `roko init` can resume instead of restarting.
 
 ### `roko ask`
 
@@ -195,7 +198,7 @@ roko tune <SUBCOMMAND>
 
 ### `roko connect`
 
-Add a plugin, MCP server, provider, or credential source.
+Add a plugin, profile bundle, MCP server, provider, or credential source.
 
 ```
 roko connect <SUBCOMMAND>
@@ -238,7 +241,7 @@ roko new <TYPE> <NAME>
 
 | Type | What it scaffolds |
 |---|---|
-| `domain <name>` | Complete domain plugin (tools, gates, probes, templates) |
+| `domain <name>` | Complete domain profile bundle (tools, gates, probes, templates, heuristics) |
 | `gate <name>` | Custom Gate implementation with test harness |
 | `scorer <name>` | Custom Scorer with composite integration |
 | `router <name>` | Custom Router with feedback method |

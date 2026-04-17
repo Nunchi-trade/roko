@@ -13,9 +13,9 @@
 | 00 | [00-tool-architecture.md](00-tool-architecture.md) | Tool Architecture | ~350 | ToolDef pattern, ToolContext, ToolResult, three trust tiers (Read/Write/Privileged), Capability<T> compile-time safety, speculation engine, event bus integration, DecisionCycleRecord, relationship to Synapse Architecture |
 | 01 | [01-builtin-tools.md](01-builtin-tools.md) | Built-in Tools (roko-std) | ~250 | 16 built-in tools: read_file, write_file, edit_file, multi_edit, glob, grep, bash, ls, web_fetch, web_search, notebook_edit, todo_write, task, exit_plan_mode, apply_patch, run_tests. StaticToolRegistry, role-based filtering, module structure |
 | 02 | [02-tool-categories.md](02-tool-categories.md) | Tool Categories Taxonomy | ~250 | 17 chain domain categories, prefix conventions, chain support matrix, risk tier scale (Layer1/2/3), tool module breakdown (423+ tools), profile-to-category mapping, capability gating |
-| 03 | [03-chain-domain-tools.md](03-chain-domain-tools.md) | Chain Domain Plugin | ~280 | 423+ DeFi tools as ONE domain plugin. Two-layer tool model, adapter pattern, profile-specific adapter sets, Alloy integration, TypeScript sidecar, Revm simulation, tool pruning, mirage-rs |
+| 03 | [03-chain-domain-tools.md](03-chain-domain-tools.md) | Chain Domain Plugin | ~280 | 423+ DeFi tools as one domain plugin. Two-layer tool model, profile-specific adapter sets, typed context and custody implications, Alloy integration, TypeScript sidecar, Revm simulation, tool pruning, mirage-rs |
 | 04 | [04-safety-hooks.md](04-safety-hooks.md) | Safety Hooks & Capability Tokens | ~280 | Capability<T> 8-step flow, compile-time safety, SafetyHook trait, 7-hook chain (PolicyCage → AllowlistGuard → SpendingLimiter → RateLimiter → RevmSimulator → HallucinationDetector → ResultFilter), WASM sandbox, TaintedString, audit trail |
-| 05 | [05-tool-profiles.md](05-tool-profiles.md) | Tool Profiles & Configuration | ~250 | 13 chain domain profiles, profile filtering mechanism, configuration hierarchy (CLI > env > config > defaults), environment variables (ROKO_ prefix), three-tier API key model, data sources, caching, error taxonomy |
+| 05 | [05-tool-profiles.md](05-tool-profiles.md) | Tool Profiles & Configuration | ~250 | Domain profile bundles, profile composition rules, 13 chain reference profiles, configuration hierarchy (CLI > env > config > defaults), environment variables (ROKO_ prefix), three-tier API key model, data sources, caching, error taxonomy |
 | 06 | [06-wallet-management.md](06-wallet-management.md) | Wallet Management | ~250 | Three custody modes (Delegation/Embedded/LocalKey), WalletHandle abstraction, 7 wallet providers, session keys (ERC-7715), wallet tools, identity NFT, credential lifecycle |
 | 07 | [07-tool-testing.md](07-tool-testing.md) | Tool Testing Strategy | ~280 | Four-layer testing: SessionShim, unit tests, property-based (proptest), evaluation tests (66 LLM tool selection tests), red-team tests (OWASP Agentic Top 10 + DeFi attacks), CI pipeline |
 | 08 | [08-service-integrations.md](08-service-integrations.md) | Service Integrations | ~230 | Three-layer integration architecture, chain domain services (MetaMask, Uniswap API, Venice, Bankr, AgentCash), operations adapters (Slack, GitHub, Linear), bounty program, structural vs decorative classification |
@@ -24,10 +24,10 @@
 | 11 | [11-mcp-slack.md](11-mcp-slack.md) | roko-mcp-slack | ~230 | 8 tools: post_message, update_message, reply_thread, add_reaction, upload_file, get_channel_history, get_thread, lookup_user. Socket Mode + HTTP Mode, rate limits, Block Kit |
 | 12 | [12-mcp-scripts.md](12-mcp-scripts.md) | roko-mcp-scripts | ~230 | Config-driven tool wrappers, scripts.toml format, executor with timeout/isolation, collaboration repo scripts (6), knowledge-base scripts (5), discovery mechanism |
 | 13 | [13-mcp-stdio.md](13-mcp-stdio.md) | roko-mcp-stdio | ~210 | Scaffold crate: McpToolHandler trait, McpServerBuilder, JSON-RPC protocol handler, tool registry, error codes, middleware extension points |
-| 14 | [14-plugin-sdk.md](14-plugin-sdk.md) | roko-plugin SDK | ~280 | Five-tier SPI: prompts, profiles, declarative tools/MCPs, native trait implementations, WASM sandboxed extensions. Manifest shape, permissions, discovery-not-configuration, ABI bridge, host imports |
+| 14 | [14-plugin-sdk.md](14-plugin-sdk.md) | roko-plugin SDK | ~280 | Five-tier SPI: prompts, profile bundles, declarative tools/MCPs, native trait implementations, WASM sandboxed extensions. Manifest shape, permissions, discovery-not-configuration, ABI bridge, host imports, TypedContext/Custody hooks |
 | 15 | [15-event-sources.md](15-event-sources.md) | Event Sources | ~280 | 5 event source types: Cron (tokio-cron-scheduler), FileWatch (notify), GitHub webhooks, Slack events, generic webhooks. Subscription configuration, dispatch loop, multi-repository support |
 | 15-16 | [15-16-agent-templates.md](15-16-agent-templates.md) | Agent Templates | ~420 | 18 templates: 6 collaboration (doc-lifecycle, digest, meeting, sync, conflict-detector, freshness), 5 knowledge-base (pm-board, enrich, triage, pm-health, action-tracker), 7 roko (pr-review, slack-notify, auto-plan, code-implementer, gate-fixer, prd-ingestion, review-response). Full system prompts, triggers, subscription summary |
-| 16 | [16-plugin-loading.md](16-plugin-loading.md) | Plugin Loading Mechanisms | ~250 | Discovery-first loader for the five-tier SPI. Manifest roots, `roko plugin` CLI surface, validation, sandbox selection, native ABI loading, WASM instantiation |
+| 16 | [16-plugin-loading.md](16-plugin-loading.md) | Plugin Loading Mechanisms | ~250 | Discovery-first loader for the five-tier SPI. Manifest roots, `roko plugin` CLI surface, profile composition, validation, sandbox selection, native ABI loading, WASM instantiation |
 
 ---
 
@@ -39,7 +39,8 @@
 | Engram (universal data type) | `docs/01-synapse-architecture/` | 00-tool-architecture, 04-safety-hooks |
 | Universal Cognitive Loop | `docs/01-synapse-architecture/` | 00-tool-architecture, 07-tool-testing |
 | Five Layers | `docs/01-synapse-architecture/` | 00-tool-architecture, 15-event-sources |
-| Agent Types & Domains | `docs/05-agent-types/` | 03-chain-domain-tools, 14-plugin-sdk |
+| Agent Types & Domains | `docs/05-agent-types/` | 03-chain-domain-tools, 05-tool-profiles, 14-plugin-sdk |
+| Domain-Specific Agents | `tmp/refinements/25-domain-specific-agents.md` | 00-tool-architecture, 03-chain-domain-tools, 05-tool-profiles, 14-plugin-sdk, 16-plugin-loading |
 | Daimon (behavioral states) | `docs/07-daimon/` | 04-safety-hooks, 05-tool-profiles |
 | Neuro (knowledge) | `docs/06-neuro/` | 00-tool-architecture, 03-chain-domain-tools |
 | Dreams (offline learning) | `docs/08-dreams/` | 02-tool-categories, 05-tool-profiles |
@@ -70,6 +71,7 @@
 - `bardo-backup/prd/07-tools/24-testing.md` — Four-layer testing strategy
 - `bardo-backup/prd/21-integrations/00-overview.md` — Service integration bounties, dependency graph
 - `bardo-backup/tmp/mori-agents/14-service-integrations.md` — Slack integration details
+- `tmp/refinements/25-domain-specific-agents.md` — Domain profile bundles, TypedContext, Custody, composition rules
 
 ### Implementation Plans
 

@@ -76,6 +76,15 @@ observability, and explicit multi-tenancy instead of bespoke platform forks. Sta
 [`12-interfaces/04-configuration-layered-resolution.md`](12-interfaces/04-configuration-layered-resolution.md),
 [`12-interfaces/05-http-api-roko-serve.md`](12-interfaces/05-http-api-roko-serve.md), and
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/25-domain-specific-agents.md` adds six canonical domain profiles on top of the
+shared kernel: coding, research, blockchain, data/ML, ops, and writing. It also introduces
+`TypedContext` as the typed situation payload that domains share and `Custody` as the shared
+chain-of-custody record for auditable actions. Start with
+[`02-agents/INDEX.md`](02-agents/INDEX.md),
+[`12-interfaces/14-agent-onboarding-flow.md`](12-interfaces/14-agent-onboarding-flow.md),
+[`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
+[`18-tools/05-tool-profiles.md`](18-tools/05-tool-profiles.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
 which primitives are genuinely new, which are integrations of prior art, and which claims
 deserve publication-grade evidence. Start with
@@ -130,7 +139,7 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 
 - [`00-architecture/`](00-architecture/INDEX.md) — Architecture
 - [`01-orchestration/`](01-orchestration/INDEX.md) — 01-orchestration — L4 Orchestration Layer
-- [`02-agents/`](02-agents/INDEX.md) — 02 — Agents
+- [`02-agents/`](02-agents/INDEX.md) — 02 — Agents, role taxonomy, domain profiles, TypedContext, and Custody-aware agent composition
 - [`03-composition/`](03-composition/INDEX.md) — 03 — Composition: Scaffold Layer (L2) — Prompt Assembly & Context Engineering
 - [`04-verification/`](04-verification/INDEX.md) — 04 — Verification (L3 Harness)
 - [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, heuristics, worldview calibration, and prediction-error feedback
@@ -140,13 +149,13 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
 - [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, profile-aware config surfaces, and Rust SDK developer UX
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence
 - [`16-heartbeat/`](16-heartbeat/INDEX.md) — Heartbeat: The Cognitive Clock
 - [`17-lifecycle/`](17-lifecycle/INDEX.md) — Agent Lifecycle
-- [`18-tools/`](18-tools/INDEX.md) — Topic 18 — Tools, Plugins & Integrations
+- [`18-tools/`](18-tools/INDEX.md) — Topic 18 — Tools, Plugins & Integrations, including domain profile bundles and per-domain tool/gate composition
 - [`19-deployment/`](19-deployment/INDEX.md) — 19 — Deployment, five shapes, portable state, secrets, observability, and multi-tenancy
 - [`20-technical-analysis/`](20-technical-analysis/INDEX.md) — Topic 20: Technical Analysis — Universal Oracle Primitives, compounding telemetry, and REF19 publishable-claims evidence
 - [`21-references/`](21-references/INDEX.md) — References — Master Citation Index

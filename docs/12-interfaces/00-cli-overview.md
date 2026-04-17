@@ -15,11 +15,11 @@
 
 The `roko` binary is a single Rust executable that serves as the canonical entry point for all Roko operations. It is built with `clap` for argument parsing and exposes a rich subcommand tree covering agent lifecycle management, plan orchestration, PRD-driven development, knowledge operations, research, deployment, system introspection, and plugin lifecycle operations. Unlike systems that separate CLI, TUI, and server into different binaries, Roko unifies them: the same binary that runs `roko run "fix the bug"` also hosts `roko dashboard` (the interactive TUI), `roko serve` (the HTTP API), `roko daemon --start` (the background service), and `roko plugin install <id>` (the ecosystem entry point).
 
-The CLI is designed around the principle of **progressive disclosure**: beginners see three commands (`roko init`, `roko run`, `roko status`), intermediates configure behavior through `roko.toml` and install ready-made plugins, and advanced users author Tier 4 or Tier 5 extensions against the stable plugin SPI. This layered approach ensures that Roko is approachable for a developer who just wants to run an agent against their codebase, while providing full architectural control for those building domain-specific cognitive systems. See also [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md), [16-plugin-loading.md](../18-tools/16-plugin-loading.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
+The CLI is designed around the principle of **progressive disclosure**: beginners see three commands (`roko init`, `roko run`, `roko status`), intermediates configure behavior through `roko.toml` and install ready-made plugins and domain profiles, and advanced users author Tier 4 or Tier 5 extensions against the stable plugin SPI. This layered approach ensures that Roko is approachable for a developer who just wants to run an agent against their codebase, while providing full architectural control for those building domain-specific cognitive systems. See also [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md), [16-plugin-loading.md](../18-tools/16-plugin-loading.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md), and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 The CLI sits at the **Application layer** — above L4 Orchestration. It consumes crates from every layer: `roko-core` (L0/L1), `roko-compose` (L2), `roko-gate` (L3), `roko-orchestrator` (L4), and the cognitive cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`). The `roko-serve` crate provides the HTTP server that `roko serve` starts.
 
-REF23 reframes the CLI as one rendering of a unified verb set shared by four surfaces: CLI, TUI, Chat, and Web. The CLI keeps the canonical command names, while the other surfaces render the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions over the same Bus-backed progress stream and the same session state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+REF23 reframes the CLI as one rendering of a unified verb set shared by four surfaces: CLI, TUI, Chat, and Web. The CLI keeps the canonical command names, while the other surfaces render the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions over the same Bus-backed progress stream and the same session state. REF25 extends that same contract to profile selection and profile composition, so the user can install a domain profile once and carry it between surfaces without relearning setup. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
 
 ---
 
@@ -37,7 +37,7 @@ REF23's user-facing rule is simple: learn one verb set once, then carry it betwe
 | `replay` | `roko replay <episode>` | Re-run a prior episode, optionally with changed inputs. |
 | `learn` | `roko learn ...` | Browse heuristics, playbooks, experiments, and calibration state. |
 | `tune` | `roko tune ...` or `roko config ...` | Adjust routing, thresholds, permissions, and other operator settings. |
-| `connect` | `roko connect ...` or `roko plugin ...` | Add plugins, MCP servers, credentials, and provider links. |
+| `connect` | `roko connect ...` or `roko plugin ...` | Add plugins, profile bundles, MCP servers, credentials, and provider links. |
 
 The exact command tree can stay broader than the verb set. What matters is that every high-frequency workflow has a stable canonical verb and every help page teaches the adjacent verb, not an isolated silo.
 
@@ -170,6 +170,30 @@ ships as data, advertises permissions up front, and enters the tool registry thr
 CLI flow as any other plugin. Tier 4 and Tier 5 are reserved for extensions that need more
 power than pure manifests can provide.
 
+### Domain Profiles
+
+REF25 treats domain profiles as installable, composable bundles rather than loose config snippets.
+The user-facing workflow is:
+
+1. Discover or install the matching profile bundle.
+2. Review the declared tools, gates, heuristics, roles, and starter templates.
+3. Activate one profile or compose several profiles for a mixed-domain project.
+4. Carry the selected `TypedContext` schema and `Custody` expectations into onboarding and later
+   inspect/replay flows.
+
+The CLI examples stay familiar:
+
+```bash
+roko plugin install @roko/coding-profile
+roko plugin install @roko/research-profile
+roko init --profile coding
+```
+
+When multiple profiles are active, the CLI should surface merge warnings for role or tool
+collisions, show which gates will stack, and make it obvious which profile owns the default
+template choices. The same profile picker and conflict summary should be available in TUI, Chat,
+and Web so the user does not have to relearn the setup flow on another surface.
+
 ---
 
 ## Zero-to-Agent in 60 Seconds
@@ -187,6 +211,8 @@ roko ask "Add error handling to the auth module"   # runs agent with smart defau
 - **Build system** — sets compile/test/lint commands automatically
 - **Model** — defaults to `claude-sonnet-4-6` (configurable)
 - **Gates** — enables compile + test gates matching the detected language
+- **Profile** — offers the matching domain profile if one is available, or a blank starter if the
+  user wants to compose a custom profile set
 
 This auto-detection is implemented in `roko-cli/src/config.rs`. The `load_layered` function resolves configuration from multiple sources in priority order (see [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md)). Plugin discovery stays separate: installed plugins are discovered from `plugins/**`, then optional config layers override only the pieces that need site-specific tuning.
 
@@ -202,7 +228,7 @@ roko init --template chain         # blockchain agent (DeFi tools, chain gates)
 roko init --template blank         # minimal: just the types, you configure everything
 ```
 
-Each template generates a tuned `roko.toml` with appropriate gate pipelines, model routing configurations, and prompt roles for the target domain.
+Each template generates a tuned `roko.toml` with appropriate gate pipelines, model routing configurations, and prompt roles for the target domain. In the REF25 framing, templates are the profile-local defaults that a profile bundle can supply, override, or compose.
 
 ### What `roko init` Creates
 

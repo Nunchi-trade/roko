@@ -3,6 +3,7 @@
 > Five-tier SPI for prompts, profiles, declarative tools and MCPs, native trait implementations,
 > and WASM sandboxed extensions. See also
 > [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md)
+> and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md)
 > and [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 > **Implementation**: Specified
@@ -28,7 +29,7 @@ The five tiers are:
 | Tier | Extension shape | Typical payload | Default sandbox |
 |---|---|---|---|
 | 1 | Prompt/template bundle | Role prompts, tool descriptions, system-message overlays | None, pure data |
-| 2 | Configuration profile | Team presets, model profiles, domain settings | None, pure data |
+| 2 | Configuration profile | Team presets, model profiles, domain profile bundles | None, pure data |
 | 3 | Declarative tool or MCP manifest | JSON-schema tools, subprocess wrappers, MCP servers | Existing tool safety layer |
 | 4 | Native trait implementation | Substrate, Bus, Scorer, Gate, Router, Composer, Policy | Process + ABI isolation |
 | 5 | WASM sandboxed extension | Arbitrary logic with bounded host imports | Capability sandbox |
@@ -121,6 +122,10 @@ Tier-specific shapes are all variations on the same contract:
 - Tier 4 points at a native crate or `cdylib` entrypoint plus an ABI version.
 - Tier 5 points at a `.wasm` module plus host capability grants.
 
+Tier 2 is the preferred bundle boundary for domain-specific agents: a profile can package
+tools, roles, gates, heuristics, templates, and the typed context schema that downstream tools
+expect. The bundle remains data, not executable policy.
+
 Discovery should never depend on a user editing a central plugin registry by hand.
 
 ---
@@ -160,6 +165,10 @@ Use Tier 2 for opinionated presets:
 - routing preferences,
 - or team-level tool allowlists.
 
+In the domain-agent model, Tier 2 is the installable profile bundle. The user gets a coherent
+starting point for a domain rather than a bag of unrelated extensions, and the loader can
+validate the bundle before activation.
+
 Typical layout:
 
 ```text
@@ -169,6 +178,15 @@ plugins/profiles/rust-oss/
 ```
 
 Profiles can inherit from built-in defaults but remain explicit data, not executable policy.
+
+Typical profile bundle contents:
+
+- `tools` or tool categories to expose by default,
+- `roles` that should exist at boot,
+- `gates` that should wrap tool execution,
+- `heuristics` and starter prompts,
+- and any domain-specific context or custody metadata that loaders need to enforce before
+  activation.
 
 ---
 

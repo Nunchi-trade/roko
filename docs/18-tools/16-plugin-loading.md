@@ -3,6 +3,7 @@
 > Discovery-first loading for the five-tier SPI. Manifests are the source of truth; `roko.toml`
 > is runtime configuration, not the plugin catalog. See also
 > [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md)
+> and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md)
 > and [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 > **Implementation**: Specified
@@ -33,13 +34,17 @@ Discovery is driven by file layout and install metadata.
 | Tier | Discovery source | Loader action |
 |---|---|---|
 | 1 | `plugins/prompts/**/manifest.toml` | Load Markdown or front-matter bundles |
-| 2 | `plugins/profiles/**/manifest.toml` | Merge profile defaults into runtime settings |
+| 2 | `plugins/profiles/**/manifest.toml` | Merge profile defaults into runtime settings and resolve profile bundles |
 | 3 | `plugins/tools/**/manifest.toml` and `plugins/mcp/**/manifest.toml` | Spawn subprocesses or MCP servers and expose tools |
 | 4 | `plugins/native/**/manifest.toml` or workspace-local extension crates | Resolve ABI bridge, load native trait implementation |
 | 5 | `plugins/wasm/**/manifest.toml` | Instantiate module inside capability sandbox |
 
 This keeps discovery local, inspectable, and auditable. A plugin can be installed, listed, and
 enabled without editing a global registry by hand.
+
+For Tier 2 profile bundles, the loader also validates composition. Multiple installed profiles
+can be active together, but the runtime should resolve conflicts explicitly rather than
+silently overwriting settings.
 
 ---
 
@@ -64,6 +69,8 @@ The commands map directly to discovery and policy:
 - `install` fetches a manifest bundle into the local plugin root or registry cache.
 - `enable` and `disable` toggle the manifest without mutating the bundle itself.
 - `audit` reports permissions, sandbox requirements, ABI version, and any policy conflicts.
+- `profile check`-style validation reports bundle conflicts, missing context keys, and custody
+  mismatches before activation.
 
 `roko.toml` may still set defaults such as plugin roots or registry mirrors, but it is not the
 canonical place to enumerate every extension.
@@ -90,10 +97,23 @@ discover -> validate -> sandbox -> instantiate -> register -> monitor -> unload
 The actual registration target depends on the tier:
 
 - Tier 1 updates prompt and template surfaces.
-- Tier 2 updates profile resolution.
+- Tier 2 updates profile resolution and domain-bundle composition.
 - Tier 3 adds tools or MCP-backed capabilities.
 - Tier 4 registers kernel traits.
 - Tier 5 registers sandboxed host functions and tool surfaces.
+
+### Profile Composition
+
+Tier 2 bundles compose before tool registration. The default merge behavior is:
+
+- tools merge by union,
+- roles merge by union, with a collision warning if two bundles define the same role,
+- gates stack unless a bundle scopes them to a profile name,
+- heuristics coexist and are routed by situation fit,
+- and profile priority resolves key conflicts when two bundles set the same override.
+
+The loader should also preserve the bundle's typed context schema and custody expectations so
+downstream tool sets can validate structured intent before they are exposed to the LLM.
 
 ---
 
@@ -123,6 +143,10 @@ Tier 3 and Tier 5 are the most important operational boundaries:
 
 The loader reads the manifest, loads the data bundle, and merges it into the prompt or profile
 surface. No code is executed.
+
+For Tier 2, the merge step also resolves multiple installed profile bundles into one active
+domain view. That resolution is where domain-specific tools, gates, and custody rules become a
+single coherent starting point.
 
 ### Tier 3
 
@@ -169,6 +193,9 @@ The recommended loading strategy is the same as the extension strategy:
 
 That choice keeps the platform easy to extend without collapsing safety into configuration
 sprawl.
+
+For domains, this means "install a profile bundle first, then let the loader resolve its tool
+set" rather than hand-editing a registry of individual tools.
 
 ---
 
