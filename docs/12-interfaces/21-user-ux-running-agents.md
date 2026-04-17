@@ -90,6 +90,8 @@ This is intentionally modeled on familiar-first agent UX: the user should be abl
 
 Users should not stare at a spinner while the agent works. Every surface should render the same live progress feed, but REF26 makes the contract more specific: surfaces subscribe to shared `StateHub` projections that fold `Bus` Pulses together with durable `Substrate` state.
 
+REF30 adds the rendering rule on top of that transport rule: the shared live feed should decompose into reusable rich UX primitives rather than one opaque log. In practice that means reasoning streams, tool-call banners, gate badges, heuristic footnotes, uncertainty bars, replay scrubbers, and progressive disclosure all ride on the same shared state contract. The surface can choose density, but it should not invent a different meaning for the same underlying event. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) and [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).
+
 The live feed should include:
 
 - Token streaming from the model.
@@ -166,8 +168,10 @@ Roko should also adopt familiar key conventions instead of inventing its own whe
 - `j` and `k` for navigation.
 - `Ctrl+R` for prompt history.
 - `#` for anchoring a thought, task, or session reference.
+- `cmd+k` / `ctrl+k` for the cross-surface command palette where available.
+- `cmd+z` / `ctrl+z` for visible undo after a diff or change is applied.
 
-Those shortcuts are not just convenience. They are part of the familiar-first contract.
+Those shortcuts are not just convenience. They are part of the familiar-first contract. REF30 tightens this further: shortcut meaning and panel placement should stay stable enough to create spatial memory, so the same core actions appear in the same places across sessions and surfaces. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) and [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).
 
 ## 8. Surface-Specific Notes
 
@@ -181,15 +185,21 @@ CLI should also expose the same action vocabulary the other surfaces do: slash c
 
 TUI should be a control surface, not a read-only dashboard. If the CLI can do it, the TUI should provide a binding or action for it. That includes replaying episodes, editing plans, adjusting thresholds, jumping between active sessions, and selecting or composing profiles with a visible collision summary. The TUI should consume the same in-process StateHub projections as the remote surfaces rather than maintaining a private dashboard-only state tree. It should also present the same approval granularity as CLI: a proposed change can be accepted wholesale, rejected, or split by hunk.
 
+REF30 adds the TUI-specific rendering vocabulary: reasoning streams belong in a toggleable side pane, gate badges in a persistent status row, tool banners in expandable list items, heuristic footnotes in a footnote pane, uncertainty bars in compact unicode form, and replay in a bottom timeline bar. The point is not feature parity with a browser widget library; it is parity of meaning with terminal-native density. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md).
+
 ### Chat
 
 Chat should support multi-agent interaction, live streaming, slash commands, and inline artifacts. If the agent emits a code block or a diff, the surface should offer affordances to apply, copy, or inspect it instead of flattening everything into text. Profile install, profile activation, and custody confirmation should be represented as explicit chat actions, not hidden side effects. Chat should also preserve slash-command muscle memory from CLI, so `/edit`, `/plan`, `/replay`, `/inspect`, and `/undo` remain first-class even when the user types natural language first.
+
+REF30 makes the transcript structure more explicit: chat responses should layer short answers over inline progressive disclosure, with reasoning streams, heuristic footnotes, gate badges, and uncertainty bars expanding in place instead of forcing the user into separate screens for every inspection step. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md).
 
 ### Web
 
 Web should behave like the browser counterpart to the same runtime state, not a separate product. REF29 makes the first-party scope explicit: the shipped browser surface is a five-page reference UI made of `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. Those pages are not separate micro-products; they are browser renderings of the same verbs, sessions, approvals, and replay semantics the CLI and TUI already expose.
 
 That means the browser should consume the same named StateHub projections that the TUI and external dashboards read, then route mutations back through the same control plane. `Home` is the observation-first pulse view, `Chat` is the streaming interactive surface, `Plans` is the orchestration view, `Beliefs` is the heuristic and worldview browser, and `Settings` is the minimal control surface for config, plugins, budgets, and credentials. The same `TypedContext` and `Custody` summary that CLI can inspect should be visible in the browser, and diff-first review, hunk-level acceptance, transcripts, resume prompts, and visible budget state should all remain part of the browser contract rather than being dropped as "desktop-only" features. See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
+
+REF30 then adds the browser-facing primitive layer on top of that page model: reasoning streams, tool-call banners, gate badges, heuristic footnotes, replay scrubbers, confidence-weighted aggregation, and a persistent explainability panel all belong inside the same five-page surface rather than in a separate "advanced mode." See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) and [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).
 
 ## 9. Related Refinements
 
@@ -199,9 +209,9 @@ That means the browser should consume the same named StateHub projections that t
 - [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) — streaming transport for `watch` and browser updates.
 - [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md) — familiar-first CLI parity, slash commands, diff-first review, transcripts, budgets, and piped-mode parity.
 - [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md) — five-page first-party web UI on top of StateHub and the shared realtime surface.
-- [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md) — rendering primitives for tool banners, uncertainty, and heuristic annotations.
+- [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md) — reasoning stream, footnote, uncertainty, replay, and explainability primitives shared across surfaces.
 - [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) — the Rust SDK path for power users who outgrow the shipped surfaces.
 
 ## 10. Implementation Notes
 
-This chapter is the canonical user-facing framing for REF23 and the surface-level parity framing for REF28. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `StateHub`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, undo, transcripts, slash commands, and hunk-level review part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens. REF29 then fixes the browser scope: the first-party web UI is a deliberate five-page surface, not an unbounded dashboard sprawl.
+This chapter is the canonical user-facing framing for REF23 and the surface-level parity framing for REF28. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `StateHub`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, undo, transcripts, slash commands, and hunk-level review part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens. REF29 then fixes the browser scope: the first-party web UI is a deliberate five-page surface, not an unbounded dashboard sprawl. REF30 adds the shared rich-UX vocabulary each surface should compose from rather than reinvent.

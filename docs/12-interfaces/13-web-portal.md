@@ -1,6 +1,6 @@
 # Web Portal
 
-> **Abstract:** This chapter propagates `tmp/refinements/29-web-ui-architecture.md` into the canonical docs tree. The `Web Portal` is not a second server or a browser-only product fork. It is the first-party web UI: a deliberate small reference implementation that sits on top of `StateHub`, the shared realtime surface, and the existing HTTP control plane. The initial scope is five pages only: `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. See also [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [06-websocket-streaming.md](./06-websocket-streaming.md), and [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
+> **Abstract:** This chapter propagates `tmp/refinements/29-web-ui-architecture.md` into the canonical docs tree and layers in `tmp/refinements/30-rich-ux-primitives.md`. The `Web Portal` is not a second server or a browser-only product fork. It is the first-party web UI: a deliberate small reference implementation that sits on top of `StateHub`, the shared realtime surface, and the existing HTTP control plane. The initial scope is five pages only: `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. See also [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [06-websocket-streaming.md](./06-websocket-streaming.md), and [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [07-rosedust-design-language.md](./07-rosedust-design-language.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)
@@ -81,18 +81,33 @@ Anything beyond those pages is either a later batch or a plugin-contributed exte
 
 This page optimizes for glanceability, not deep operation.
 
+The mobile view should stay read-biased and stable under interruption. High-signal tiles should surface summary states first, then expand into detail only when a user taps through. If a task is still running, the page should show progress and uncertainty plainly rather than hiding it behind a spinner.
+
+The tile set should also surface browser-native rich UX primitives:
+
+- reasoning stream summaries for the current active task
+- compact gate badges for the latest pass, warn, and fail states
+- uncertainty bars on decisions that may need approval or extra scrutiny
+- replay entry points for recent episodes and notable state changes
+- notification-worthy alerts only when the user is away, blocked, or explicitly waiting
+
 ### 4.2 Chat
 
 `Chat` is the most-used page and the most important one to get right. It should provide:
 
 - streaming token output
+- a reasoning stream pane or inline ribbon that can be expanded from the transcript
 - tool banners and approval checkpoints
+- gate badges near the latest action so verification status is visible without leaving the conversation
 - inline diff review with apply, reject, and edit affordances
+- heuristic footnotes that explain why a response or tool choice was shaped a certain way
+- uncertainty bars on proposed actions so confidence is visible before the user commits
 - the same slash-command vocabulary as CLI where it maps cleanly
 - file drop for additional context
 - agent switching in the session header
-- replay links for episode citations
+- replay links for episode citations and episode-level rewind
 - accessible voice input as a convenience, not a dependency
+- progressive disclosure for all secondary detail: show the answer first, then expand the chain, trace, or footnotes on demand
 
 This page is the browser continuation of the familiar workflow described in [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), not a separate chat product.
 
@@ -103,9 +118,13 @@ This page is the browser continuation of the familiar workflow described in [21-
 - plan list on the left
 - selected plan DAG on the right
 - status-colored task nodes
+- confidence-weighted aggregation when multiple agents or subsystems propose competing interpretations of the next step
 - episode drill-down on node selection
+- replay scrubber hooks for jumping to a previous execution point and inspecting the causal chain
 - breakpoint controls for "pause here, require approval"
 - drag-to-reorder for tasks that have not started yet on desktop
+- progressive disclosure for plan metadata so the DAG stays readable at a glance
+- uncertainty cues on branch points where the plan depends on incomplete evidence
 
 On mobile, this same content degrades to a vertical task list instead of forcing a tiny DAG.
 
@@ -114,9 +133,11 @@ On mobile, this same content degrades to a vertical task list instead of forcing
 `Beliefs` is the inspectable worldview surface. It should include:
 
 - heuristic table with calibration intervals and provenance
+- heuristic footnotes that let users inspect the exact explanation, supporting evidence, and last calibration trail behind a belief
 - worldview clusters showing dominant heuristics
 - replication ledger showing source claims versus local results
 - explicit challenge, retire, and edit actions
+- confidence and calibration summaries so users can distinguish strong, weak, and stale heuristics quickly
 
 This page exists because heuristics and falsifiers are first-class, inspectable system state. See [../05-learning/19-heuristics-worldviews-and-falsifiers.md](../05-learning/19-heuristics-worldviews-and-falsifiers.md), [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md), and [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md).
 
@@ -129,6 +150,9 @@ This page exists because heuristics and falsifiers are first-class, inspectable 
 - gate-threshold tuning with reset-to-adaptive affordance
 - plugin install, enable, disable, and inspection
 - budget limits and warning thresholds
+- keyboard-first behavior for the whole page, including command palette access and reversible toggles
+- clear confirmation for destructive or irreversible actions before any mutation is sent
+- notification preferences that let the user suppress non-essential alerts and keep approval prompts visible
 
 The browser should never expose raw provider keys to page scripts. Credential operations happen through authenticated control-plane endpoints and server-managed session state.
 
@@ -141,6 +165,7 @@ State ownership rules prevent page races and keep cross-surface continuity intac
 - Mutations go through explicit API calls.
 - Projection deltas are authoritative when they arrive.
 - Optimistic UI is allowed for high-latency actions, but speculative state must be visibly marked until the real delta lands.
+- When projection data is incomplete or stale, the browser should degrade gracefully with the last known state, a clear stale marker, and an action to refresh or open replay.
 
 In the reference `SvelteKit` client, the simplest pattern is one reactive store per projection:
 
@@ -181,6 +206,8 @@ Every page must be deep-linkable because the browser is an observation and shari
 | `/beliefs/h/<id>?challenge=true` | open challenge flow for one heuristic |
 | `/episodes/<hash>` | direct episode detail |
 | `/replay/<episode>?t=0:45` | replay scrubber at a precise offset |
+
+The routing model should preserve spatial memory. The same surfaces should stay in the same places across sessions, and the same deep link should reopen the same kind of detail view without forcing the user to re-learn the layout.
 
 When a link is shared, the semantics should be explicit:
 
@@ -225,6 +252,9 @@ Accessibility rules are not optional:
 - visible focus outlines
 - screen-reader validation on core flows
 - all user-facing strings stored in resource bundles for later translation
+- the explainability panel should be available from any page and should summarize what the agent is doing, what heuristics are active, what gates are pending, and what budget remains
+- keyboard-first navigation should work end to end, with shortcuts discoverable from a single help overlay
+- notifications should remain conservative: alert for approval, failure, long-running completion, or user-blocking state, but not for every intermediate tool call
 
 Mobile rules are page-specific:
 
@@ -233,6 +263,9 @@ Mobile rules are page-specific:
 - `Plans` becomes a vertical task list on narrow screens
 - `Beliefs` switches to stacked cards and horizontally scrolling worldview clusters
 - `Settings` becomes selectively read-only for risky or irreversible operations
+- reasoning streams, footnotes, and replay controls collapse into compact affordances first, then expand on demand
+- uncertainty and gate status should remain legible at thumb distance, not buried behind hover-only interactions
+- if a surface loses live data, show a coherent degraded view rather than empty chrome or a hard error state
 
 Touch targets should stay at or above 44 pt and body text at or above 16 px to avoid mobile browser zoom traps.
 
@@ -262,17 +295,25 @@ The first-party surface should publish its reusable browser widgets through a sh
 
 Load-bearing primitives include:
 
+- `<ReasoningStream>`
+- `<ToolBanner>`
+- `<GateBadge>`
+- `<HeuristicFootnote>`
+- `<UncertaintyBar>`
+- `<ReplayScrubber>`
+- `<ConsensusView>`
+- `<ExplainabilityPanel>`
 - `<CFactorGauge>`
 - `<EpisodeCard>`
 - `<TaskNode>`
 - `<HeuristicRow>`
-- `<GateBadge>`
 - `<CostMeter>`
-- `<ReplayTrack>`
 - `<DiffView>`
 - `<AgentAvatar>`
 
 That component library is the contract third-party dashboards and plugin pages should build on.
+
+The component set should encode progressive disclosure and spatial memory as defaults, not afterthoughts. Shared controls should open the same detail in the same place across pages whenever possible, and compact modes should preserve the same information hierarchy on smaller screens.
 
 Plugins may extend the web surface in three ways:
 
@@ -316,5 +357,7 @@ The browser surface therefore optimizes for observation-first continuity with se
 - [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md) — browser affordances should preserve slash commands, diff-first review, and replay semantics where appropriate.
 - [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md) — plugin-contributed pages, tiles, and visualization hooks should reuse the same browser extension boundary.
 - [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md) — replay scrubbers, footnotes, banners, and diff review primitives layered on top of this architecture.
+- [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) — the projection store that feeds the browser primitives and replay views.
+- [../00-architecture/13-cognitive-cross-cuts.md](../00-architecture/13-cognitive-cross-cuts.md) — cross-cut guidance for keeping browser affordances aligned with the broader loop and operator model.
 - [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md) — permission model for mutating actions and plugin surfaces.
 - [tmp/refinements/33-observability-telemetry.md](../../tmp/refinements/33-observability-telemetry.md) — browser telemetry, error tracking, and client performance reporting.

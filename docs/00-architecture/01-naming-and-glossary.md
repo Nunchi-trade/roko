@@ -30,9 +30,11 @@
 > [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md),
 > [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md),
 > [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md),
+> [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md),
 > [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md),
 > [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md),
 > [../12-interfaces/13-web-portal.md](../12-interfaces/13-web-portal.md),
+> [../12-interfaces/23-rich-ux-primitives.md](../12-interfaces/23-rich-ux-primitives.md),
 > [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
@@ -169,6 +171,14 @@ crates directly.
 | `Diff-first review` | Proposed-edit presentation style | Show hunks before apply, preserve per-hunk accept/reject/edit decisions in the transcript, and expose `explain` on demand. |
 | `Transcript` | Session interaction log | Human-readable or structured record of prompts, outputs, approvals, budgets, and replay metadata. |
 | `Budget line` | Visible cost state | Prompt or status-surface rendering of current turn or session spend versus configured limit. |
+| `Reasoning stream` | Live thought-sidecar rendering | Collapsible stream of `agent.reasoning` Pulses that keeps long-running work legible without replacing the main answer. |
+| `Tool-call banner` | Action-status affordance | Compact rendering of one tool invocation with status, output drill-down, rerun, and explanation hooks. |
+| `Gate badge` | Verification status chip | Clickable or focusable pass/warn/fail indicator backed by gate evidence rather than decorative status. |
+| `Heuristic footnote` | Inline heuristic citation | Numbered annotation that reveals which heuristic shaped a response, plus calibration and provenance. |
+| `Uncertainty bar` | Confidence rendering | Visual or textual confidence indicator attached to a decision, often used to trigger explicit approval. |
+| `Replay scrubber` | Episode timeline control | Time-based affordance that rewinds transcript, diff, and projection views together over a recorded episode. |
+| `Progressive disclosure` | Layered reveal pattern | Summary-first presentation that expands to reasoning, heuristics, trace, or cost only when requested. |
+| `Spatial memory` | Layout consistency discipline | Stable panel placement, navigation paths, and shortcut meaning that lets operators build muscle memory. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -396,3 +406,4 @@ prefixes without coordination.
 - [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) for the shared realtime transport proposal
 - [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md) for the interface-facing realtime surface contract
 - [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md) for the interface-facing projection-layer contract
+- [../12-interfaces/23-rich-ux-primitives.md](../12-interfaces/23-rich-ux-primitives.md) for reasoning streams, heuristic footnotes, uncertainty bars, replay scrubbers, and the shared interface primitive vocabulary
