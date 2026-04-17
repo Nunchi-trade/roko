@@ -32,6 +32,7 @@ pub mod tabs;
 pub mod task_outputs;
 pub mod theme;
 pub mod util;
+pub mod verdicts;
 pub mod views;
 pub mod widgets;
 pub mod ws_client;

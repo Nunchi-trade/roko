@@ -41,6 +41,7 @@ use super::modals::{
 use super::pages::{PageId, PageRegistry};
 use super::state::{PendingApproval, PlanEntry, TaskRowStatus, TuiState};
 use super::tabs::Tab;
+use super::verdicts::VerdictsAggregator;
 use super::views::{self, ViewState};
 use super::ws_client::{AgentStreamClient, StreamChunk};
 
@@ -76,6 +77,8 @@ pub struct App {
     scaffold: DashboardScaffold,
     /// Last seen dashboard data generation used to avoid redundant scaffold rebuilds.
     last_data_gen: u64,
+    /// Incremental substrate reader for gate verdict trends.
+    verdicts_aggregator: Option<VerdictsAggregator>,
 
     // -- Common --
     /// Whether the event loop should keep running.
@@ -453,6 +456,7 @@ impl App {
             data,
             scaffold,
             last_data_gen,
+            verdicts_aggregator: None,
             running: true,
             last_refresh: Instant::now(),
             scroll_offset: HashMap::new(),
@@ -477,6 +481,8 @@ impl App {
             terminal_size,
         };
         app.fx_config = EffectsConfig::load_from_root(&app.workdir);
+        app.reseed_verdicts_aggregator();
+        app.refresh_verdicts_from_aggregator();
         app
     }
 
@@ -503,6 +509,7 @@ impl App {
     ) -> Self {
         let mut app = Self::new_with_page_inner(root, initial_page, Some(state_hub.clone()));
         let snapshot_rx = state_hub.snapshot();
+        app.refresh_verdicts_from_aggregator();
         if snapshot_has_content(&snapshot_rx.borrow()) {
             let snapshot = snapshot_rx.borrow();
             apply_dashboard_snapshot(
@@ -2249,6 +2256,8 @@ impl App {
         if let Some(state_hub) = &self._state_hub {
             let _ = state_hub.bootstrap_from_workdir(&self.workdir);
         }
+        self.reseed_verdicts_aggregator();
+        self.refresh_verdicts_from_aggregator();
         self.fx_config = EffectsConfig::load_from_root(&self.workdir);
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
@@ -2270,9 +2279,40 @@ impl App {
 
         self.last_data_gen = self.data.generation;
         self.tui_state.update_from_snapshot(&self.data);
+        self.refresh_verdicts_from_aggregator();
         self.last_refresh = Instant::now();
         self.clamp_signal_selection();
         self.clamp_gate_failure_selection();
+    }
+
+    fn reseed_verdicts_aggregator(&mut self) {
+        self.verdicts_aggregator = VerdictsAggregator::open(&self.workdir).ok();
+    }
+
+    fn refresh_verdicts_from_aggregator(&mut self) {
+        let Some(aggregator) = self.verdicts_aggregator.as_mut() else {
+            self.tui_state.gate_trends.clear();
+            self.tui_state.gate_recent_failures.clear();
+            return;
+        };
+
+        if let Err(error) = aggregator.tick() {
+            tracing::warn!(
+                error = %error,
+                "verdicts aggregation tick failed"
+            );
+            return;
+        }
+
+        self.tui_state.gate_trends = aggregator.gate_trends();
+        self.tui_state.gate_recent_failures = aggregator.recent_failures();
+
+        if let Some(state_hub) = &self._state_hub {
+            let mut snapshot = state_hub.current_snapshot();
+            snapshot.gate_trends = self.tui_state.gate_trends.clone();
+            snapshot.gate_recent_failures = self.tui_state.gate_recent_failures.clone();
+            state_hub.apply_snapshot(snapshot);
+        }
     }
 
     fn save_config_changes(&mut self) {

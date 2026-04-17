@@ -375,6 +375,164 @@ impl Default for CFactorBucket {
     }
 }
 
+/// One hourly gate-trend bucket capturing pass/fail counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrendBucket {
+    /// Bucket start timestamp in UTC.
+    #[serde(default = "default_diagnosis_timestamp")]
+    pub start: DateTime<Utc>,
+    /// Number of passing verdicts in the bucket.
+    #[serde(default)]
+    pub pass: u32,
+    /// Number of failing verdicts in the bucket.
+    #[serde(default)]
+    pub fail: u32,
+}
+
+impl Default for TrendBucket {
+    fn default() -> Self {
+        Self {
+            start: default_diagnosis_timestamp(),
+            pass: 0,
+            fail: 0,
+        }
+    }
+}
+
+/// Fixed-width rolling pass/fail buckets for one gate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TrendBuckets {
+    /// Width of each bucket in seconds.
+    #[serde(default)]
+    pub bucket_size_secs: u64,
+    /// Buckets ordered from oldest to newest.
+    #[serde(default)]
+    pub slots: VecDeque<TrendBucket>,
+}
+
+impl TrendBuckets {
+    /// Create a fixed-width rolling window anchored to `reference`.
+    #[must_use]
+    pub fn new(bucket_size_secs: u64, bucket_count: usize, reference: DateTime<Utc>) -> Self {
+        if bucket_size_secs == 0 || bucket_count == 0 {
+            return Self::default();
+        }
+
+        let bucket_ms = i64::try_from(bucket_size_secs)
+            .unwrap_or(i64::MAX / 1000)
+            .saturating_mul(1000);
+        let latest_start_ms = current_bucket_start_ms(reference.timestamp_millis(), bucket_ms);
+        let oldest_start_ms = latest_start_ms
+            .saturating_sub(i64::try_from(bucket_count.saturating_sub(1)).unwrap_or(0) * bucket_ms);
+
+        let slots = (0..bucket_count)
+            .map(|idx| TrendBucket {
+                start: timestamp_from_millis(
+                    oldest_start_ms + i64::try_from(idx).unwrap_or(0) * bucket_ms,
+                ),
+                ..TrendBucket::default()
+            })
+            .collect();
+
+        Self {
+            bucket_size_secs,
+            slots,
+        }
+    }
+
+    /// Shift the rolling window forward so it covers `reference`.
+    pub fn align_to(&mut self, reference: DateTime<Utc>) {
+        if self.bucket_size_secs == 0 {
+            return;
+        }
+
+        let target_len = self.slots.len().max(GATE_TREND_BUCKET_COUNT);
+        if self.slots.is_empty() {
+            *self = Self::new(self.bucket_size_secs, target_len, reference);
+            return;
+        }
+
+        let bucket_ms = i64::try_from(self.bucket_size_secs)
+            .unwrap_or(i64::MAX / 1000)
+            .saturating_mul(1000);
+        let latest_start = trend_bucket_start(reference, self.bucket_size_secs);
+
+        while self
+            .slots
+            .back()
+            .is_some_and(|bucket| bucket.start < latest_start)
+        {
+            self.slots.pop_front();
+            let next_start_ms = self
+                .slots
+                .back()
+                .map(|bucket| bucket.start.timestamp_millis().saturating_add(bucket_ms))
+                .unwrap_or_else(|| latest_start.timestamp_millis());
+            self.slots.push_back(TrendBucket {
+                start: timestamp_from_millis(next_start_ms),
+                ..TrendBucket::default()
+            });
+        }
+
+        while self.slots.len() < target_len {
+            let first_start_ms = self
+                .slots
+                .front()
+                .map(|bucket| bucket.start.timestamp_millis().saturating_sub(bucket_ms))
+                .unwrap_or_else(|| latest_start.timestamp_millis());
+            self.slots.push_front(TrendBucket {
+                start: timestamp_from_millis(first_start_ms),
+                ..TrendBucket::default()
+            });
+        }
+    }
+
+    /// Record a pass/fail observation in the matching bucket.
+    pub fn record_gate_result(&mut self, ts: DateTime<Utc>, passed: bool) {
+        if self.bucket_size_secs == 0 {
+            *self = Self::new(GATE_TREND_BUCKET_SIZE_SECS, GATE_TREND_BUCKET_COUNT, ts);
+        }
+        self.align_to(ts);
+        let bucket_start = trend_bucket_start(ts, self.bucket_size_secs);
+        let Some(bucket) = self
+            .slots
+            .iter_mut()
+            .find(|bucket| bucket.start == bucket_start)
+        else {
+            return;
+        };
+
+        if passed {
+            bucket.pass = bucket.pass.saturating_add(1);
+        } else {
+            bucket.fail = bucket.fail.saturating_add(1);
+        }
+    }
+}
+
+/// One recent failing gate verdict surfaced in the dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FailureEntry {
+    /// When the gate failed.
+    #[serde(default = "default_diagnosis_timestamp")]
+    pub ts: DateTime<Utc>,
+    /// Parent plan identifier when known.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Task identifier when known.
+    #[serde(default)]
+    pub task_id: String,
+    /// Gate name.
+    #[serde(default)]
+    pub gate: String,
+    /// Short failure summary or reason when available.
+    #[serde(default)]
+    pub summary: String,
+    /// Optional artifacts directory or file path associated with the failure.
+    #[serde(default)]
+    pub artifacts: Option<PathBuf>,
+}
+
 /// The full materialized dashboard state.
 ///
 /// Updated atomically by [`StateHub`](super::state_hub::StateHub) via
@@ -405,6 +563,12 @@ pub struct DashboardSnapshot {
     /// Recent c-factor trend buckets for dashboard charts.
     #[serde(default)]
     pub cfactor_trend: Vec<CFactorBucket>,
+    /// Rolling per-gate pass/fail timelines over the last 24 hours.
+    #[serde(default)]
+    pub gate_trends: HashMap<String, TrendBuckets>,
+    /// Recent failing verdicts across all gates.
+    #[serde(default)]
+    pub gate_recent_failures: Vec<FailureEntry>,
     /// Recent errors (ring of last 64).
     pub errors: Vec<ErrorEntry>,
     /// Overall counts.
@@ -443,6 +607,9 @@ pub struct SnapshotStats {
 const MAX_GATES: usize = 256;
 const MAX_DIAGNOSES: usize = 50;
 const MAX_ERRORS: usize = 64;
+const MAX_GATE_FAILURES: usize = 50;
+const GATE_TREND_BUCKET_SIZE_SECS: u64 = 60 * 60;
+const GATE_TREND_BUCKET_COUNT: usize = 24;
 
 // ---------------------------------------------------------------------------
 // apply()
@@ -581,6 +748,20 @@ impl DashboardSnapshot {
                     passed: *passed,
                     ts_millis: ts,
                 });
+                record_gate_trend(self, gate, diagnosis_timestamp_from_ms(ts), *passed);
+                if !passed {
+                    push_gate_failure(
+                        self,
+                        FailureEntry {
+                            ts: diagnosis_timestamp_from_ms(ts),
+                            plan_id: plan_id.clone(),
+                            task_id: task_id.clone(),
+                            gate: gate.clone(),
+                            summary: String::new(),
+                            artifacts: None,
+                        },
+                    );
+                }
             }
             DashboardEvent::PhaseTransition { plan_id, to, .. } => {
                 if let Some(plan) = self.plans.get_mut(plan_id) {
@@ -720,6 +901,12 @@ fn snapshot_from_workdir_parts(
     }
     append_event_diagnoses(&mut snapshot, event_entries);
     append_event_errors(&mut snapshot, event_entries);
+    let fallback_gates = if signal_gates.is_empty() {
+        snapshot.gates.clone()
+    } else {
+        signal_gates.to_vec()
+    };
+    rebuild_gate_observability(&mut snapshot, &fallback_gates);
     snapshot
 }
 
@@ -1539,6 +1726,56 @@ fn push_gate(snapshot: &mut DashboardSnapshot, gate: GateVerdict) {
     snapshot.gates.push(gate);
 }
 
+fn record_gate_trend(
+    snapshot: &mut DashboardSnapshot,
+    gate_name: &str,
+    ts: DateTime<Utc>,
+    passed: bool,
+) {
+    snapshot
+        .gate_trends
+        .entry(gate_name.to_string())
+        .or_insert_with(|| {
+            TrendBuckets::new(GATE_TREND_BUCKET_SIZE_SECS, GATE_TREND_BUCKET_COUNT, ts)
+        })
+        .record_gate_result(ts, passed);
+}
+
+fn push_gate_failure(snapshot: &mut DashboardSnapshot, failure: FailureEntry) {
+    if snapshot.gate_recent_failures.len() >= MAX_GATE_FAILURES {
+        snapshot.gate_recent_failures.remove(0);
+    }
+    snapshot.gate_recent_failures.push(failure);
+}
+
+fn rebuild_gate_observability(snapshot: &mut DashboardSnapshot, gates: &[GateVerdict]) {
+    snapshot.gate_trends.clear();
+    snapshot.gate_recent_failures.clear();
+
+    let reference = Utc::now();
+    for gate in gates {
+        let ts = timestamp_from_millis(i64::try_from(gate.ts_millis).unwrap_or_default());
+        record_gate_trend(snapshot, &gate.gate, ts, gate.passed);
+        if !gate.passed {
+            push_gate_failure(
+                snapshot,
+                FailureEntry {
+                    ts,
+                    plan_id: gate.plan_id.clone(),
+                    task_id: gate.task_id.clone(),
+                    gate: gate.gate.clone(),
+                    summary: String::new(),
+                    artifacts: None,
+                },
+            );
+        }
+    }
+
+    for trend in snapshot.gate_trends.values_mut() {
+        trend.align_to(reference);
+    }
+}
+
 fn push_error(snapshot: &mut DashboardSnapshot, error: ErrorEntry) {
     snapshot.stats.errors_total += 1;
     if snapshot.errors.len() >= MAX_ERRORS {
@@ -1666,6 +1903,16 @@ fn diagnosis_severity_from_action(action: &str) -> DiagnosisSeverity {
 
 fn default_diagnosis_timestamp() -> DateTime<Utc> {
     diagnosis_timestamp_from_ms(0)
+}
+
+fn trend_bucket_start(timestamp: DateTime<Utc>, bucket_size_secs: u64) -> DateTime<Utc> {
+    let bucket_ms = i64::try_from(bucket_size_secs)
+        .unwrap_or(i64::MAX / 1000)
+        .saturating_mul(1000);
+    timestamp_from_millis(current_bucket_start_ms(
+        timestamp.timestamp_millis(),
+        bucket_ms,
+    ))
 }
 
 fn diagnosis_timestamp_from_ms(ts_millis: u64) -> DateTime<Utc> {
@@ -1830,6 +2077,35 @@ mod tests {
         }
         assert_eq!(snap.gates.len(), MAX_GATES);
         assert_eq!(snap.stats.gates_passed, 300);
+    }
+
+    #[test]
+    fn gate_results_update_trends_and_recent_failures() {
+        let mut snap = DashboardSnapshot::default();
+
+        snap.apply(&DashboardEvent::GateResult {
+            plan_id: "plan-a".into(),
+            task_id: "task-1".into(),
+            gate: "compile".into(),
+            passed: true,
+        });
+        snap.apply(&DashboardEvent::GateResult {
+            plan_id: "plan-a".into(),
+            task_id: "task-2".into(),
+            gate: "compile".into(),
+            passed: false,
+        });
+
+        let trend = snap.gate_trends.get("compile").expect("compile trend");
+        assert_eq!(trend.bucket_size_secs, GATE_TREND_BUCKET_SIZE_SECS);
+        assert_eq!(trend.slots.len(), GATE_TREND_BUCKET_COUNT);
+        let latest = trend.slots.back().expect("latest bucket");
+        assert_eq!(latest.pass, 1);
+        assert_eq!(latest.fail, 1);
+
+        assert_eq!(snap.gate_recent_failures.len(), 1);
+        assert_eq!(snap.gate_recent_failures[0].gate, "compile");
+        assert_eq!(snap.gate_recent_failures[0].task_id, "task-2");
     }
 
     #[test]

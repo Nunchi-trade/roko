@@ -784,6 +784,10 @@ pub struct TuiState {
     pub diagnoses: Vec<roko_core::dashboard_snapshot::DiagnosisSummary>,
     /// Concluded prompt experiment winners for the Learning tab.
     pub experiment_winners: Vec<roko_core::ExperimentWinnerSummary>,
+    /// Rolling per-gate pass/fail trends from the live verdict reader.
+    pub gate_trends: HashMap<String, roko_core::TrendBuckets>,
+    /// Recent failing verdicts surfaced beside the trend grid.
+    pub gate_recent_failures: Vec<roko_core::FailureEntry>,
 
     // -- agents (Vec-based roster for widgets) --
     /// Ordered agent roster for widgets (agent_pool, agent_output, header_bar).
@@ -963,6 +967,8 @@ impl Default for TuiState {
             gate_results: Vec::new(),
             diagnoses: Vec::new(),
             experiment_winners: Vec::new(),
+            gate_trends: HashMap::new(),
+            gate_recent_failures: Vec::new(),
 
             agents: Vec::new(),
             agent_topology: roko_core::AgentTopology::default(),
@@ -1164,6 +1170,8 @@ impl TuiState {
         let latest_events = latest_agent_events(&data.efficiency_events);
         let latest_route_metrics = latest_route_metrics(&data.efficiency_events, data);
         self.experiment_winners = data.experiment_winners.clone();
+        self.gate_trends.clear();
+        self.gate_recent_failures.clear();
 
         let mut tasks_by_plan: HashMap<String, Vec<TaskEntry>> = HashMap::new();
         for task in &data.active_tasks {
@@ -1700,6 +1708,8 @@ impl TuiState {
             .collect();
         self.diagnoses = snap.diagnoses.iter().cloned().collect();
         self.experiment_winners = snap.experiment_winners.clone();
+        self.gate_trends = snap.gate_trends.clone();
+        self.gate_recent_failures = snap.gate_recent_failures.clone();
         if !snap.agent_topology.is_empty() {
             self.agent_topology = snap.agent_topology.clone();
             self.agent_topology_status = AgentTopologyStatus::Ready;
@@ -3674,6 +3684,8 @@ tier = "focused"
             agent_topology: roko_core::AgentTopology::default(),
             efficiency_trend: Vec::new(),
             cfactor_trend: Vec::new(),
+            gate_trends: HashMap::new(),
+            gate_recent_failures: Vec::new(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),
@@ -3967,6 +3979,18 @@ tier = "focused"
                 ci_upper: 0.78,
                 confidence: 0.97,
             });
+        snap.gate_trends.insert(
+            "compile".into(),
+            roko_core::TrendBuckets::new(3_600, 24, chrono::Utc::now()),
+        );
+        snap.gate_recent_failures.push(roko_core::FailureEntry {
+            ts: chrono::Utc::now(),
+            plan_id: "plan-a".into(),
+            task_id: "task-2".into(),
+            gate: "compile".into(),
+            summary: "compile failed".into(),
+            artifacts: None,
+        });
         snap.errors.push(roko_core::dashboard_snapshot::ErrorEntry {
             message: "compile failed once".into(),
             ts_millis: 2,
@@ -4002,6 +4026,9 @@ tier = "focused"
         assert_eq!(state.diagnoses[0].subject, "Circuit Breaker: Loop Detected");
         assert_eq!(state.experiment_winners.len(), 1);
         assert_eq!(state.experiment_winners[0].experiment_id, "exp-01");
+        assert!(state.gate_trends.contains_key("compile"));
+        assert_eq!(state.gate_recent_failures.len(), 1);
+        assert_eq!(state.gate_recent_failures[0].task_id, "task-2");
         assert_eq!(state.execution_waves.len(), 1);
         assert_eq!(state.execution_waves[0].plans, vec![String::from("plan-a")]);
         assert_eq!(state.phase_pipeline.len(), 9);

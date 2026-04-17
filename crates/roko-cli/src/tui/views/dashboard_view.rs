@@ -2,7 +2,7 @@
 //!
 //! Left panel (38%): plan tree + phase compact + task progress.
 //! Right panel (62%): sub-tabbed detail view (Agents, Output, Diff,
-//! Errors, Git, Context/MCP, Learning, Processes).
+//! Gate, Git, Context/MCP, Learning, Processes).
 //! Bottom ribbon: wave progress + token sparkline + sys metrics.
 //!
 //! Delegates to compiled widgets for all panels.
@@ -14,16 +14,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Wrap};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use roko_core::dashboard_snapshot::{
-    DiagnosisSeverity, DiagnosisSummary, ErrorEntry, ExperimentWinnerSummary, GateVerdict,
-    SnapshotStats,
+    DiagnosisSeverity, DiagnosisSummary, ExperimentWinnerSummary, FailureEntry,
 };
 
 use super::ViewState;
 use crate::config::Config;
 use crate::tui::ansi::parse_ansi_line;
-use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::dashboard::{DashboardData, GateFailureRow, GateSummaryRow, Theme};
 use crate::tui::input::FocusZone;
 use crate::tui::state::{RouteMetrics, TuiState};
 use crate::tui::widgets::{self, braille};
@@ -36,7 +36,7 @@ const SUB_TAB_LABELS: &[(&str, &str)] = &[
     ("a", "Agents"),
     ("o", "Output"),
     ("d", "Diff"),
-    ("e", "Errors"),
+    ("e", "Gate"),
     ("g", "Git"),
     ("m", "MCP"),
     ("L", "Learning"),
@@ -174,7 +174,7 @@ fn render_right_panel_content(
         0 => render_sub_agents(frame, area, data, tui_state, view_state, focused, theme),
         1 => render_output_panel(frame, area, data, tui_state, view_state, focused, theme),
         2 => render_sub_diff(frame, area, data, tui_state, theme),
-        3 => render_sub_errors(frame, area, data, theme),
+        3 => render_sub_gate(frame, area, data, tui_state, focused, theme),
         4 => render_sub_git(frame, area, tui_state, theme),
         5 => render_sub_mcp(frame, area, data, tui_state, theme),
         6 => render_sub_learning(frame, area, data, tui_state, focused, theme),
@@ -472,40 +472,87 @@ fn render_sub_diff(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-tab: Errors -- delegates to widgets::error_digest
+// Sub-tab: Gate -- verdict summary + recent failures
 // ---------------------------------------------------------------------------
 
-fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
-    let verdicts: Vec<GateVerdict> = data
-        .gate_results
-        .iter()
-        .map(|g| GateVerdict {
-            plan_id: g.plan_id.clone(),
-            task_id: String::new(),
-            gate: g.gate_name.clone(),
-            passed: g.passed,
-            ts_millis: 0,
-        })
-        .collect();
-
-    let errors: Vec<ErrorEntry> = data
-        .gate_results_page
-        .failure_rows
-        .iter()
-        .map(|row| ErrorEntry {
-            message: format!("{}: {} - {}", row.gate_name, row.task_id, row.error_excerpt),
-            ts_millis: row.created_at_ms.max(0) as u64,
-        })
-        .collect();
-
-    let stats = SnapshotStats {
-        gates_passed: data.gate_results.iter().filter(|g| g.passed).count(),
-        gates_failed: data.gate_results.iter().filter(|g| !g.passed).count(),
-        errors_total: errors.len(),
-        ..Default::default()
+fn render_sub_gate(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
     };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Verdicts ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    widgets::error_digest::render_error_digest(frame, area, &verdicts, &errors, &stats, theme);
+    if inner.width < 24 || inner.height < 8 {
+        frame.render_widget(
+            Paragraph::new(" verdicts panel needs more space").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let rows = gate_verdict_rows(data);
+    let trend_rows = gate_trend_rows(tui_state);
+    let failures = &data.gate_results_page.failure_rows;
+
+    if rows.is_empty()
+        && trend_rows.is_empty()
+        && tui_state.gate_recent_failures.is_empty()
+        && failures.is_empty()
+    {
+        frame.render_widget(
+            Paragraph::new(" no gate verdict data yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(gate_failure_section_height(inner.height)),
+    ])
+    .split(inner);
+
+    if trend_rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" historical summary shown until live verdict buckets populate")
+                .style(theme.muted()),
+            sections[0],
+        );
+        render_gate_verdict_summary(frame, sections[1], &rows, focused, theme);
+    } else {
+        frame.render_widget(
+            Paragraph::new(" per-gate pass ratio over the last 24 hours").style(theme.muted()),
+            sections[0],
+        );
+        render_gate_trend_grid(frame, sections[1], &trend_rows, focused, theme);
+    }
+    render_recent_gate_failures(
+        frame,
+        sections[2],
+        &tui_state.gate_recent_failures,
+        failures,
+        focused,
+        theme,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,6 +1392,400 @@ fn rate_style(rate: f64, theme: &Theme) -> Style {
     }
 }
 
+fn gate_verdict_rows(data: &DashboardData) -> Vec<GateSummaryRow> {
+    data.gate_results_page.gate_rows.clone()
+}
+
+fn render_gate_verdict_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateSummaryRow],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Gate Summary ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" no gate verdict rows yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let gate_width = gate_summary_gate_width(inner.width);
+    let runs_width = 6usize;
+    let pass_width = 7usize;
+    let avg_width = 10usize;
+    let last_width = gate_summary_last_width(inner.width);
+    let trend_width = inner
+        .width
+        .saturating_sub(
+            gate_width as u16
+                + runs_width as u16
+                + pass_width as u16
+                + avg_width as u16
+                + last_width as u16
+                + 6,
+        )
+        .max(12) as usize;
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .take(visible_rows.max(1))
+        .map(|row| {
+            let pass_style = rate_style(row.pass_rate, theme);
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    truncate(&row.gate_name, gate_width),
+                    pass_style,
+                )),
+                Cell::from(Span::styled(fmt_count(row.total_runs), theme.text())),
+                Cell::from(Span::styled(
+                    format!("{:.0}%", row.pass_rate * 100.0),
+                    pass_style,
+                )),
+                Cell::from(Span::styled(
+                    format_duration_ms(row.avg_duration_ms),
+                    theme.muted(),
+                )),
+                Cell::from(Span::styled(
+                    render_rate_bar(row.pass_rate, trend_width),
+                    pass_style,
+                )),
+                Cell::from(Span::styled(
+                    truncate(&row.last_run, last_width),
+                    theme.muted(),
+                )),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(
+        Table::new(
+            table_rows,
+            [
+                Constraint::Length(gate_width as u16),
+                Constraint::Length(runs_width as u16),
+                Constraint::Length(pass_width as u16),
+                Constraint::Length(avg_width as u16),
+                Constraint::Min(12),
+                Constraint::Length(last_width as u16),
+            ],
+        )
+        .header(
+            Row::new(["gate", "runs", "pass", "avg", "trend", "last"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+#[derive(Debug, Clone)]
+struct GateTrendRow {
+    gate: String,
+    pass_rate: f64,
+    buckets: Vec<f32>,
+    failures: usize,
+}
+
+fn gate_trend_rows(tui_state: &TuiState) -> Vec<GateTrendRow> {
+    let mut rows = tui_state
+        .gate_trends
+        .iter()
+        .map(|(gate, trend)| {
+            let total_pass = trend
+                .slots
+                .iter()
+                .map(|bucket| bucket.pass as u64)
+                .sum::<u64>();
+            let total_fail = trend
+                .slots
+                .iter()
+                .map(|bucket| bucket.fail as u64)
+                .sum::<u64>();
+            let pass_rate = if total_pass + total_fail == 0 {
+                0.0
+            } else {
+                total_pass as f64 / (total_pass + total_fail) as f64
+            };
+            let buckets = trend
+                .slots
+                .iter()
+                .map(|bucket| {
+                    let total = bucket.pass + bucket.fail;
+                    if total == 0 {
+                        0.0
+                    } else {
+                        bucket.pass as f32 / total as f32
+                    }
+                })
+                .collect::<Vec<_>>();
+            let failures = tui_state
+                .gate_recent_failures
+                .iter()
+                .filter(|failure| failure.gate == *gate)
+                .count();
+
+            GateTrendRow {
+                gate: gate.clone(),
+                pass_rate,
+                buckets,
+                failures,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|lhs, rhs| {
+        rhs.failures
+            .cmp(&lhs.failures)
+            .then_with(|| lhs.gate.cmp(&rhs.gate))
+    });
+    rows
+}
+
+fn render_gate_trend_grid(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateTrendRow],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Gate Timeline ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new(" no data yet").style(theme.muted()), inner);
+        return;
+    }
+
+    let gate_width = gate_summary_gate_width(inner.width);
+    let pass_width = 7usize;
+    let fail_width = 5usize;
+    let spark_width = inner
+        .width
+        .saturating_sub(gate_width as u16 + pass_width as u16 + fail_width as u16 + 5)
+        .max(8) as usize;
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+
+    let table_rows = rows
+        .iter()
+        .take(visible_rows.max(1))
+        .map(|row| {
+            let style = rate_style(row.pass_rate, theme);
+            let mut spark = vec![Span::styled("24h ", theme.muted())];
+            spark.extend(braille::braille_spans_f32(
+                &row.buckets,
+                1.0,
+                spark_width.saturating_sub(4).max(4),
+                style.fg.unwrap_or(theme.info),
+            ));
+
+            Row::new(vec![
+                Cell::from(Span::styled(truncate(&row.gate, gate_width), style)),
+                Cell::from(Span::styled(
+                    format!("{:.0}%", row.pass_rate * 100.0),
+                    style,
+                )),
+                Cell::from(Line::from(spark)),
+                Cell::from(Span::styled(row.failures.to_string(), theme.warning())),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Table::new(
+            table_rows,
+            [
+                Constraint::Length(gate_width as u16),
+                Constraint::Length(pass_width as u16),
+                Constraint::Min(8),
+                Constraint::Length(fail_width as u16),
+            ],
+        )
+        .header(
+            Row::new(["gate", "pass", "timeline", "fail"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+fn render_recent_gate_failures(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    live_failures: &[FailureEntry],
+    fallback_failures: &[GateFailureRow],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Recent Failures ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if live_failures.is_empty() && fallback_failures.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" no recent gate failures").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let lines: Vec<Line<'_>> = if !live_failures.is_empty() {
+        live_failures
+            .iter()
+            .rev()
+            .take(visible_rows.max(1))
+            .map(|failure| {
+                let detail = if failure.summary.trim().is_empty() {
+                    failure
+                        .artifacts
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                } else {
+                    failure.summary.clone()
+                };
+                Line::from(vec![
+                    Span::styled(relative_age_datetime(failure.ts), theme.muted()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.gate, 12), theme.warning()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.task_id, 16), theme.text()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(
+                        truncate(&detail, inner.width.saturating_sub(40) as usize),
+                        theme.text(),
+                    ),
+                ])
+            })
+            .collect()
+    } else {
+        fallback_failures
+            .iter()
+            .take(visible_rows.max(1))
+            .map(|failure| {
+                Line::from(vec![
+                    Span::styled(relative_age_label(failure.created_at_ms), theme.muted()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.gate_name, 12), theme.warning()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.task_id, 16), theme.text()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(
+                        truncate(
+                            &failure.error_excerpt,
+                            inner.width.saturating_sub(40) as usize,
+                        ),
+                        theme.text(),
+                    ),
+                ])
+            })
+            .collect()
+    };
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn gate_summary_gate_width(width: u16) -> usize {
+    if width >= 120 {
+        22
+    } else if width >= 100 {
+        18
+    } else {
+        14
+    }
+}
+
+fn gate_summary_last_width(width: u16) -> usize {
+    if width >= 120 {
+        16
+    } else if width >= 100 {
+        14
+    } else {
+        10
+    }
+}
+
+fn gate_failure_section_height(height: u16) -> u16 {
+    height.saturating_div(3).clamp(3, 8)
+}
+
+fn format_duration_ms(duration_ms: f64) -> String {
+    if duration_ms >= 1_000.0 {
+        format!("{:.1}s", duration_ms / 1_000.0)
+    } else {
+        format!("{:.0}ms", duration_ms.max(0.0).round())
+    }
+}
+
+fn relative_age_label(created_at_ms: i64) -> String {
+    let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    let age_ms = now_ms.saturating_sub(created_at_ms);
+    if age_ms >= 86_400_000 {
+        format!("{:.1}d ago", age_ms as f64 / 86_400_000.0)
+    } else if age_ms >= 3_600_000 {
+        format!("{:.1}h ago", age_ms as f64 / 3_600_000.0)
+    } else if age_ms >= 60_000 {
+        format!("{:.1}m ago", age_ms as f64 / 60_000.0)
+    } else {
+        format!("{age_ms}ms ago")
+    }
+}
+
+fn relative_age_datetime(created_at: chrono::DateTime<chrono::Utc>) -> String {
+    relative_age_label(created_at.timestamp_millis())
+}
+
 #[derive(Debug, Clone, Default)]
 struct LearningTrends {
     cfactor_overall: Vec<u64>,
@@ -1702,6 +2143,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use tempfile::tempdir;
 
+    use crate::tui::dashboard::{GateFailureRow, GateSummaryRow};
     use crate::tui::pages::PageId;
     use crate::tui::state::TuiState;
     use crate::tui::views::ViewState;
@@ -1731,6 +2173,25 @@ mod tests {
             .draw(|frame| {
                 let area = frame.area();
                 assert_eq!(PageId::Learning.group(), "efficiency");
+                render(frame, area, data, &tui_state, &view_state, &theme);
+            })
+            .unwrap();
+        rendered_text(&terminal)
+    }
+
+    fn render_gate_dashboard(data: &DashboardData) -> String {
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let tui_state = TuiState::default();
+        let view_state = ViewState {
+            sub_tab: 3,
+            ..ViewState::default()
+        };
+        let theme = Theme::dark();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
                 render(frame, area, data, &tui_state, &view_state, &theme);
             })
             .unwrap();
@@ -1816,5 +2277,41 @@ mod tests {
         assert!(rendered.contains("n=142"));
         assert!(rendered.contains("95% CI"));
         assert!(rendered.contains("████"));
+    }
+
+    #[test]
+    fn gate_tab_renders_verdicts_and_recent_failures() {
+        let data = concluded_experiment_store();
+        let mut data = data;
+        data.gate_results_page.gate_rows = vec![
+            GateSummaryRow {
+                gate_name: "compile".to_string(),
+                total_runs: 12,
+                pass_rate: 0.83,
+                avg_duration_ms: 1825.0,
+                last_run: "2m ago".to_string(),
+            },
+            GateSummaryRow {
+                gate_name: "test".to_string(),
+                total_runs: 8,
+                pass_rate: 0.50,
+                avg_duration_ms: 2450.0,
+                last_run: "5m ago".to_string(),
+            },
+        ];
+        data.gate_results_page.failure_rows = vec![GateFailureRow {
+            created_at_ms: 1_700_000_000_000,
+            task_id: "task-17".to_string(),
+            gate_name: "test".to_string(),
+            error_excerpt: "assertion failed".to_string(),
+        }];
+
+        let rendered = render_gate_dashboard(&data);
+
+        assert!(rendered.contains("Verdicts"));
+        assert!(rendered.contains("Gate Summary"));
+        assert!(rendered.contains("Recent Failures"));
+        assert!(rendered.contains("compile"));
+        assert!(rendered.contains("assertion failed"));
     }
 }
