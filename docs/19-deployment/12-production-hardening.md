@@ -3,7 +3,7 @@
 > When Roko runs in laptop-local, single-server, container, clustered, or edge profiles, the
 > runtime still has to behave like production software: bounded latency, safe retries, clean
 > shutdown, upgradeability, observability, and tenant isolation. See also
-> `../../tmp/refinements/24-deployment-ux.md`.
+> `../../tmp/refinements/24-deployment-ux.md` and `../../tmp/refinements/27-realtime-event-surface.md`.
 
 > **Implementation**: Specified
 
@@ -116,6 +116,10 @@ Flush durable state, persist executor progress, and close transports cleanly.
 
 The same shutdown path supports regular exits and rolling upgrades.
 
+For long-lived realtime subscribers, draining needs one extra rule: readiness should fail before
+liveness so new subscriptions stop landing on a node while existing WebSocket and SSE clients
+either finish or reconnect elsewhere with their last cursor.
+
 ---
 
 ## Zero-Downtime Upgrades
@@ -130,6 +134,10 @@ Single-server and clustered deployments should upgrade without losing in-flight 
 
 Container deployments should treat upgrades as a new image plus a state handoff, not a manual
 reinstall.
+
+Clustered deployments should avoid treating sticky sessions as the main continuity mechanism.
+Shared cursor retention and replayable projection state matter more than pinning every browser to
+one node.
 
 ---
 
@@ -153,6 +161,24 @@ Useful Roko-specific metrics include:
 | `roko.tenant.quota_utilization` | Tenant pressure in shared deployments |
 
 These metrics should carry shape and tenant labels where cardinality is safe.
+
+### Realtime Surface Telemetry
+
+The realtime surface needs its own operational signals when it is exposed remotely:
+
+| Metric | Meaning |
+|---|---|
+| `roko.realtime.connections` | open connections by transport |
+| `roko.realtime.subscriptions` | active subscriptions by channel family |
+| `roko.realtime.messages_per_second` | inbound and outbound traffic rate |
+| `roko.realtime.cursor_lag` | how far behind subscribers are |
+| `roko.realtime.reconnects` | reconnect churn during outages or deploys |
+| `roko.realtime.backpressure_coalesced_total` | updates coalesced under pressure |
+| `roko.realtime.backpressure_dropped_total` | updates dropped in lossy modes |
+| `roko.realtime.auth_denied_total` | subscribe or publish denials |
+
+These are the signals operators need to decide whether the remote surface is healthy, overloaded,
+or misconfigured behind a proxy.
 
 ---
 
@@ -184,6 +210,12 @@ and clustered orchestrators.
 During shutdown or upgrade, readiness should fail before liveness does so traffic drains
 cleanly.
 
+For realtime traffic, this also means:
+
+- `SSE` endpoints must disable proxy buffering
+- `WebSocket` endpoints must preserve upgrade headers through ingress
+- replay retention must outlive short node restarts so reconnecting clients do not fall off the log immediately
+
 ---
 
 ## Multi-Tenant Safety
@@ -204,4 +236,3 @@ The point is isolation without creating a separate codepath per tenant.
 The production-hardening model is profile-aware and shape-aware. The actionable part of the
 deployment chapter is that timeout handling, retries, shutdown, upgrade flow, observability,
 and tenant controls should all work the same way across the five deployment shapes.
-

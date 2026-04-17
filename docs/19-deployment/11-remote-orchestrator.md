@@ -1,9 +1,9 @@
 # Remote Orchestrator
 
 > Roko can run as a long-lived HTTP service, letting you interact with it from anywhere —
-> submit plans, trigger runs, stream events, and manage projects via REST API. This document
-> covers the server mode, the HTTP API surface, authentication, multi-project management,
-> webhook integration, the local-to-remote transition, and the `roko-serve` crate.
+> submit plans, trigger runs, query durable state, and subscribe to the shared realtime surface.
+> This document covers the server mode, the HTTP API surface, authentication, remote-consumer
+> patterns, webhook integration, the local-to-remote transition, and the `roko-serve` crate.
 
 
 > **Implementation**: Specified
@@ -13,8 +13,8 @@
 ## Overview
 
 The remote orchestrator transforms Roko from a local CLI tool into a deployed service. The
-same orchestration engine (DAG executor, agent dispatch, gate pipeline, signal persistence)
-runs behind an HTTP API instead of a terminal interface.
+same orchestration engine (DAG executor, agent dispatch, gate pipeline, Engram persistence,
+and Bus-backed live progress) runs behind an HTTP API instead of a terminal interface.
 
 Use cases:
 - **Team usage**: Deploy one Roko instance, give team members API keys, everyone can view
@@ -23,6 +23,12 @@ Use cases:
 - **Autonomous operation**: The remote orchestrator runs continuously, processing webhooks
   and scheduled subscriptions without human intervention
 - **Mobile/tablet access**: Interact with Roko from any device with a browser
+
+REF27 tightens the remote-consumer story: the deployed service should expose one realtime
+surface over WebSocket, SSE, and optional gRPC streaming, with the same channel names, the same
+cursor/resume rules, and the same auth model across transports. See
+[../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md) and
+[../../tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md).
 
 ---
 
@@ -83,23 +89,41 @@ POST   /v1/projects/:id/prds/:name/promote  # Promote draft to published
 # Artifacts
 GET    /v1/projects/:id/artifacts/:plan  # Download artifacts for a plan
 
-# Signals and episodes
-GET    /v1/projects/:id/signals       # Query signals (Engrams)
+# Engrams and episodes
+GET    /v1/projects/:id/engrams       # Query durable Engrams
 GET    /v1/projects/:id/episodes      # Query episode log
 ```
 
 ### Real-Time Streaming
 
 ```
-GET    /v1/projects/:id/events        # SSE stream of agent events
-WS     /v1/projects/:id/ws            # WebSocket for bidirectional control
+GET    /projections/:name             # Query current projection state
+GET    /projections/:name/stream      # SSE or WebSocket stream for one projection
+WS     /ws/*                          # Bidirectional binding for subscribe + publish
+gRPC   RealtimeSurface.Subscribe      # Optional typed binding for the same contract
 ```
 
-The SSE endpoint streams events as they happen: agent turn starts, tool calls, gate results,
-task completions, errors. This is the remote equivalent of watching the TUI.
+The deployment contract is projection-first:
 
-The WebSocket endpoint adds bidirectional control: inject messages to agents, pause/resume
-runs, change configuration mid-run.
+- remote clients `query` the current projection state over HTTP
+- remote clients `subscribe` to a `channel` over WebSocket, SSE, or optional gRPC
+- every outbound frame carries a cursor
+- reconnecting clients resume from that cursor when retained history still exists
+- bidirectional transports may `publish` user-originated Pulses back into the Bus
+
+Typical remote consumers include:
+
+- browser pages using `projection:active_tasks` and `projection:agent_trails`
+- Slack or chat bots using filtered `topic:*` subscriptions
+- audit or replication sinks using `engram-stream:*`
+- another Roko instance following the same channel registry for cross-instance sync
+
+Deployment guidance:
+
+- disable proxy buffering for `SSE`
+- preserve upgrade headers for `WebSocket`
+- keep cursor retention in shared storage for clustered nodes
+- authorize each requested `channel` and filter rather than relying on connection-level auth alone
 
 ### Provider and Model Management
 
@@ -132,12 +156,17 @@ API keys are bearer tokens. Three scopes:
 
 | Scope | Capabilities |
 |---|---|
-| `read` | View projects, plans, runs, artifacts, event streams |
-| `write` | Create projects, start runs, upload PRDs, inject messages |
+| `read` | View projects, plans, runs, artifacts, and realtime subscriptions |
+| `write` | Create projects, start runs, upload PRDs, and publish user-originated Pulses |
 | `admin` | Manage API keys, server config, delete projects |
 
 Keys are stored in the server's state directory (`.roko/auth.db` — SQLite). They are
 rotatable, revocable, and auditable.
+
+User-scoped deployments may also layer OIDC bearer tokens or browser session cookies on top of
+the same policy engine. The important deployment rule is that authorization happens per
+subscription request: a client that authenticated successfully may still be denied access to a
+specific `channel` or filter.
 
 ### Authentication Header
 
@@ -174,7 +203,7 @@ One roko-serve instance can manage multiple projects. Each project has its own:
 - PRDs, plans, and context artifacts
 - Provider configuration and API keys (inherits from server defaults, overridable per-project)
 - Run history and artifacts
-- Signal and episode logs
+- Engram and episode logs
 
 Projects are isolated. A run in project A does not affect project B.
 
@@ -220,17 +249,16 @@ curl -X POST https://roko-serve.fly.dev/v1/projects/proj_abc123/run \
 # }
 ```
 
-### Streaming Events
+### Streaming Activity
 
 ```bash
-curl -N https://roko-serve.fly.dev/v1/projects/proj_abc123/events \
+curl -N https://roko-serve.fly.dev/projections/active_tasks/stream?filter=project:proj_abc123 \
   -H "Authorization: Bearer roko_sk_..."
 
-# SSE stream:
-# data: {"type":"agent_started","agent_id":"a1","task":"01-setup","model":"claude-sonnet-4-6"}
-# data: {"type":"tool_call","agent_id":"a1","tool":"write_file","path":"src/main.rs"}
-# data: {"type":"gate_result","task":"01-setup","gate":"compile","verdict":"pass"}
-# data: {"type":"task_completed","task":"01-setup","status":"success","duration_ms":12345}
+# initial state plus later deltas:
+# data: {"projection":"active_tasks","cursor":"0x10","kind":"state","payload":{"tasks":[]}}
+# data: {"projection":"active_tasks","cursor":"0x11","kind":"delta","payload":{"task":"01-setup","status":"running","agent":"a1"}}
+# data: {"projection":"active_tasks","cursor":"0x12","kind":"delta","payload":{"task":"01-setup","status":"success","duration_ms":12345}}
 ```
 
 ---
@@ -279,7 +307,7 @@ secret = "${GITHUB_WEBHOOK_SECRET}"
 
 ### GitHub Webhook Flow
 
-1. **Push event**: When code is pushed to a monitored branch, the server pulls the latest
+1. **Push webhook**: When code is pushed to a monitored branch, the server pulls the latest
    changes and triggers a plan run for affected plans.
 
 2. **Pull request opened**: The server can auto-run plans against the PR branch, posting
@@ -301,15 +329,15 @@ async fn handle_github_webhook(
         return StatusCode::UNAUTHORIZED;
     }
 
-    // Parse the event
-    let event_type = headers.get("x-github-event")
+    // Parse the webhook kind
+    let hook_kind = headers.get("x-github-event")
         .and_then(|v| v.to_str().ok());
 
-    match event_type {
-        Some("push") => handle_push_event(&body, &state).await,
-        Some("pull_request") => handle_pr_event(&body, &state).await,
-        Some("issue_comment") => handle_comment_event(&body, &state).await,
-        _ => StatusCode::OK, // Acknowledge but ignore other events
+    match hook_kind {
+        Some("push") => handle_push_hook(&body, &state).await,
+        Some("pull_request") => handle_pr_hook(&body, &state).await,
+        Some("issue_comment") => handle_comment_hook(&body, &state).await,
+        _ => StatusCode::OK, // Acknowledge but ignore other webhook kinds
     }
 }
 ```
@@ -331,10 +359,10 @@ The workflow for transitioning from local development to remote operation:
                     (server clones the repo, loads .roko/ config)
 
 4. Remote runs:     curl -X POST .../projects/:id/run
-                    (same DAG executor, same gates, same signals)
+                    (same DAG executor, same gates, same Engrams and Pulses)
 
-5. Stream events:   curl -N .../projects/:id/events
-                    (SSE stream, same events as TUI would show)
+5. Watch remotely:  GET /projections/active_tasks + subscribe
+                    (same live progress state rendered by TUI, Web, or a bot)
 ```
 
 The critical property: **same tool, same config, same artifacts**. The only difference is where
@@ -376,7 +404,8 @@ max_per_project_daily_usd = 50.00
 max_daily_usd = 200.00
 ```
 
-When a budget limit is reached, the server pauses the run and notifies via the event stream.
+When a budget limit is reached, the server pauses the run and notifies subscribers on the
+realtime surface.
 The run can be resumed after the budget is increased or the daily reset occurs.
 
 ---
@@ -388,7 +417,7 @@ The remote orchestrator and related services use these ports:
 | Port | Service | Protocol | Notes |
 |---|---|---|---|
 | 8080 | roko-serve HTTP API | HTTPS | Primary API endpoint |
-| 8443 | roko-serve WebSocket | WSS | Bidirectional event stream |
+| 8443 | roko-serve WebSocket | WSS | Bidirectional realtime stream |
 | 8545 | mirage-rs JSON-RPC | HTTPS | Anvil-compatible EVM RPC |
 | 3000 | roko-console | HTTPS | Web terminal UI |
 | 7681 | ttyd (per service) | WSS | Internal, proxied through console |
@@ -404,11 +433,11 @@ The remote orchestrator is at **Tier 3H** priority (P2 — planned):
 
 - **roko-serve crate**: Scaffold exists at `crates/roko-serve/`, but the HTTP API is not wired
 - **REST endpoints**: Designed and documented here, not yet implemented
-- **SSE streaming**: Not yet implemented
+- **Realtime surface**: Designed as a shared WebSocket/SSE/gRPC contract, not yet implemented
 - **Authentication**: Designed, not yet implemented
 - **Multi-project management**: Depends on the server API being wired
 - **Webhook integration**: Designed, depends on server API
-- **Cost tracking**: Partially implemented in `roko-learn` (per-run efficiency events exist)
+- **Cost tracking**: Partially implemented in `roko-learn` (per-run efficiency Pulses exist)
 
 The prerequisite is wiring the `roko-serve` Axum server and connecting it to the existing
 orchestration engine in `roko-cli/src/orchestrate.rs`. The orchestration engine itself is

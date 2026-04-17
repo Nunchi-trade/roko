@@ -1,6 +1,6 @@
 # HTTP API — `roko-serve`
 
-> The `roko-serve` crate provides the HTTP server exposing REST endpoints plus StateHub-backed WebSocket and SSE projection streams for remote control of Roko.
+> The `roko-serve` crate provides the HTTP server exposing REST endpoints plus the shared realtime surface over WebSocket, SSE, and optional gRPC streaming for remote control of Roko.
 
 
 > **Implementation**: Scaffold
@@ -13,7 +13,7 @@
 
 ## Abstract
 
-`roko-serve` is the HTTP server crate that exposes the Roko cognitive agent framework as a REST API with real-time streaming. It is started via `roko serve` or `roko daemon --start` and provides endpoints for agent management, plan orchestration, PRD lifecycle, knowledge queries, provider monitoring, and StateHub projection delivery via WebSocket and SSE.
+`roko-serve` is the HTTP server crate that exposes the Roko cognitive agent framework as a REST API with a shared realtime surface. It is started via `roko serve` or `roko daemon --start` and provides endpoints for agent management, plan orchestration, PRD lifecycle, knowledge queries, provider monitoring, and StateHub projection delivery over WebSocket, SSE, and optional gRPC streaming.
 
 The server is built on `axum` (Tokio-based async HTTP framework), uses `tower-http` for middleware (CORS, tracing), and should expose the kernel's two-fabric reality directly: writes land in `Substrate`, live changes travel on the `Bus`, and remote consumers read typed `StateHub` projections instead of bespoke per-surface fanout. The architecture follows the `ServerBuilder` pattern, allowing configuration of auth, CORS origins, and projection transports before binding.
 
@@ -32,6 +32,8 @@ not fork the core runtime. See [../19-deployment/INDEX.md](../19-deployment/INDE
 and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
 
 REF26 adds the missing middle layer: HTTP clients should usually talk to `StateHub` projections, not raw internal Pulses. `roko-serve` therefore becomes the transport binding for `query + subscribe` over named projections such as `active_tasks`, `gate_pipeline`, `agent_trails`, `cohort_health`, and `cost_meter`. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
+
+REF27 adds the missing wire contract: those projections and filtered Topic views should ride one realtime protocol with shared `query`, `subscribe`, and `publish` semantics, shared cursors, shared auth rules, and transport-specific bindings for WebSocket, SSE, and optional gRPC. See [06-websocket-streaming.md](./06-websocket-streaming.md) and [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md).
 
 ---
 
@@ -102,6 +104,28 @@ The rule is:
 
 This keeps `roko-serve` small: command verbs mutate the runtime; projections report the runtime.
 
+## Realtime Transport Contract
+
+The projection registry is the semantic contract; the realtime surface is the delivery contract.
+
+`roko-serve` should therefore expose:
+
+- HTTP reads for `query`
+- WebSocket for bidirectional `subscribe` plus `publish`
+- SSE for server-to-client `subscribe`
+- optional gRPC streaming for typed remote consumers that want the same cursor and auth behavior
+
+The important constraint is that `/ws/*` is not the product contract by itself. It is one transport binding over the same named channels and projections documented in [06-websocket-streaming.md](./06-websocket-streaming.md).
+
+Shared rules across transports:
+
+- every subscription names a `channel`
+- filters run server-side
+- every outbound frame carries a cursor
+- reconnecting clients resume from that cursor when retained history still exists
+- auth is checked per subscription, not only once per socket
+- `publish` is rate-limited, topic-allow-listed, and audited
+
 ---
 
 ## Architecture
@@ -127,7 +151,7 @@ This keeps `roko-serve` small: command verbs mutate the runtime; projections rep
 │  CliRuntime (bridge to roko-cli)             │
 │  TemplateAgentDispatcher                     │
 │  Projection transport bindings               │
-│  EventSource dispatch loop                   │
+│  Source dispatch loop                        │
 │  Feedback loop                               │
 └──────────────────────────────���───────────────┘
 ```
@@ -152,6 +176,7 @@ The router is assembled in `roko-serve/src/routes/mod.rs` from route modules inc
 | `deployments` | `/api/deployments` | Cloud deployments |
 | `sse` | `/api/sse` | Server-Sent Events binding for projection streams |
 | `ws` | `/ws/*` | WebSocket binding for projection streams and bidirectional controls |
+| `grpc` | service definition | Optional typed binding for the same realtime surface |
 | `webhooks` | `/webhooks/*` | Incoming webhook handlers |
 
 ---
@@ -202,7 +227,7 @@ GET    /api/agents                   # List all agents
 GET    /api/agents/:id               # Agent details + Daimon state
 POST   /api/agents                   # Create agent from template
 DELETE /api/agents/:id               # Delete agent
-POST   /api/agents/:id/message       # Send message to running agent
+POST   /api/agents/:id/input         # Send operator input to running agent
 ```
 
 Agent detail response includes:
@@ -262,7 +287,7 @@ POST   /api/mesh/publish             # Publish Engram to mesh
 
 ## Authentication
 
-The server supports optional API key authentication:
+The server supports API-key, token, and browser-session authentication:
 
 ```toml
 [serve.auth]
@@ -270,7 +295,14 @@ enabled = true
 api_key = "roko_sk_..."
 ```
 
-When enabled, all `/api/*` routes require a `Authorization: Bearer <key>` header. Webhook routes (`/webhooks/*`) are exempt from API key auth as they use their own signature verification.
+Supported auth forms:
+
+- API key in `Authorization: Bearer ...` or `x-api-key`
+- OIDC bearer token for user-scoped control-plane clients
+- session cookie for first-party browser flows
+- trusted-header auth only when explicitly enabled behind a controlled reverse proxy
+
+Webhook routes (`/webhooks/*`) are exempt from this path because they use their own signature verification.
 
 The auth middleware is implemented in `roko-serve/src/routes/middleware.rs` using `axum::middleware::from_fn_with_state`. A secret-scrubbing middleware layer also runs on all API responses, redacting API keys and tokens from JSON output.
 
@@ -280,6 +312,7 @@ important API-facing additions are:
 - OIDC and personal access token flows should both produce a `TenantCtx` attached to the request.
 - Tenant identity should scope durable `Substrate` access, budget enforcement, and audit fields.
 - Trusted-header auth is an explicit opt-in for air-gapped or reverse-proxy deployments, not the default path.
+- Realtime subscriptions must authorize each requested `channel` and filter before streaming begins.
 
 The deployment chapter covers the mapping rules and `TenantCtx` examples in more detail. See
 [../19-deployment/INDEX.md](../19-deployment/INDEX.md),
@@ -341,7 +374,7 @@ The `TemplateAgentDispatcher` (`roko-serve/src/dispatch.rs`) monitors the Substr
 4. Runs the cognitive loop
 5. Persists results and publishes Pulses plus final Engrams
 
-Built-in event sources (cron scheduler, file watcher) are started automatically from `roko.toml` configuration. As durable task Engrams are created and Pulses are emitted during execution, StateHub folds them into `active_tasks`, `recent_episodes`, and `agent_trails` so every consumer sees the same task state.
+Built-in input sources (cron scheduler, file watcher) are started automatically from `roko.toml` configuration. As durable task Engrams are created and Pulses are emitted during execution, StateHub folds them into `active_tasks`, `recent_episodes`, and `agent_trails` so every consumer sees the same task state.
 
 ---
 
@@ -352,7 +385,7 @@ Built-in event sources (cron scheduler, file watcher) are started automatically 
 - Core route structure
 - Bus-backed streaming internals
 - Template agent dispatcher with dispatch loop
-- Cron and file-watch event sources
+- Cron and file-watch input sources
 - Deployment backends (Railway, manual)
 - Feedback loop
 
@@ -368,10 +401,11 @@ Built-in event sources (cron scheduler, file watcher) are started automatically 
 
 ## Cross-References
 
-- See [06-websocket-streaming.md](./06-websocket-streaming.md) for real-time streaming
+- See [06-websocket-streaming.md](./06-websocket-streaming.md) for the shared realtime transport contract
 - See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) for the projection contract
 - See [00-cli-overview.md](./00-cli-overview.md) for `roko serve` command
 - See [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for `Pulse`, `Bus`, `StateHub`, and `projection` terminology
 - See topic [01-orchestration](../01-orchestration/INDEX.md) for plan execution
 - See topic [19-deployment](../19-deployment/INDEX.md) for cloud deployment
 - See [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the canonical REF26 proposal
+- See [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) for the canonical REF27 proposal

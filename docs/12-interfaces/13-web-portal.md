@@ -1,6 +1,6 @@
 # Web Portal
 
-> The Roko Portal — a React 19 + Next.js 15.5+ web dashboard for monitoring and controlling cognitive agents. ROSEDUST design language in CSS, glass morphism panels, WebGL Spectre rendering, real-time WebSocket feeds.
+> The Roko Portal — a React 19 + Next.js 15.5+ web dashboard for monitoring and controlling cognitive agents. ROSEDUST design language in CSS, glass morphism panels, WebGL Spectre rendering, and the shared realtime surface carried over WebSocket or SSE.
 
 
 > **Implementation**: Scaffold
@@ -13,9 +13,9 @@
 
 ## Abstract
 
-The Roko Portal is a web-based dashboard that provides the same monitoring and control capabilities as the TUI, with richer visualization affordances. Built on React 19 and Next.js 15.5+, it uses the ROSEDUST design language adapted for CSS/Tailwind, renders Spectre creatures in WebGL, and consumes real-time data via WebSocket connections to roko-serve.
+The Roko Portal is a web-based dashboard that provides the same monitoring and control capabilities as the TUI, with richer visualization affordances. Built on React 19 and Next.js 15.5+, it uses the ROSEDUST design language adapted for CSS/Tailwind, renders Spectre creatures in WebGL, and consumes shared `StateHub` projections through the realtime surface exposed by `roko-serve`.
 
-The Portal is designed for three personas: **operators** monitoring active agent execution, **analysts** reviewing historical performance data, and **administrators** configuring the system. Under REF23, the initial first-party web scope should stay small and discoverable: a Web rendering of the same unified verb set and the same named sessions used by CLI, TUI, and Chat. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+The Portal is designed for three personas: **operators** monitoring active agent execution, **analysts** reviewing historical performance data, and **administrators** configuring the system. Under REF23, the initial first-party web scope should stay small and discoverable: a Web rendering of the same unified verb set and the same named sessions used by CLI, TUI, and Chat. REF27 adds the delivery rule: browser pages should speak the same `query`, `subscribe`, and optional `publish` vocabulary as every other consumer, rather than inventing a portal-only socket API. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [06-websocket-streaming.md](./06-websocket-streaming.md), and [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md).
 
 ---
 
@@ -45,7 +45,7 @@ Richer pages remain valid later, but parity and continuity matter more than page
 | Styling | Tailwind CSS | 4.x | Utility-first CSS with ROSEDUST config |
 | 3D rendering | Three.js | latest | WebGL Spectre creatures |
 | Charts | Recharts or Nivo | latest | Performance charts, C-Factor trends |
-| WebSocket | native `WebSocket` | — | Real-time event stream from roko-serve |
+| Realtime client | native `WebSocket` plus browser `SSE` fallback | — | Shared `query + subscribe` surface from roko-serve |
 | State | React Query + Zustand | latest | Server state caching + local UI state |
 | Auth | Bearer token | — | `roko_sk_*` API key in session storage |
 
@@ -66,7 +66,7 @@ module.exports = {
           'rose':         '#D4778C',
           'rose-muted':   '#A05C6E',
           'rose-bright':  '#E8A0B4',
-          // Signal colors
+          // Accent colors
           'gold':         '#D4A857',
           'teal':         '#5DB8A3',
           'sapphire':     '#6B8FBD',
@@ -224,7 +224,7 @@ Infrastructure monitoring — equivalent to TUI Region 6.
 **Sections:**
 - **Provider Health**: Per-provider cards with latency charts, rate limits, error rates
 - **Resource Monitor**: CPU, memory, disk, network gauges
-- **Event Log**: Searchable, filterable real-time event stream
+- **Activity Feed**: Searchable, filterable real-time activity stream
 - **Circuit Breaker Status**: Per-provider circuit state (Closed/Open/HalfOpen)
 
 ### Page 8: Configuration
@@ -253,36 +253,39 @@ The six-page REF23 scope above is the first release bar. Additional pages and ri
 
 ---
 
-## WebSocket Integration
+## Realtime Client Integration
 
-The Portal connects to roko-serve WebSocket endpoints for real-time data:
+The Portal should consume the same realtime protocol described in [06-websocket-streaming.md](./06-websocket-streaming.md). `WebSocket` is the default for interactive pages because the browser may need to `publish` user-originated Pulses. Passive views can fall back to `SSE` while keeping the same channel names, cursors, and reducers.
 
 ### Connection Management
 
 ```typescript
-// WebSocket connection manager
-class RokoWebSocket {
-  private ws: WebSocket;
+// Browser client over the shared realtime surface
+class RokoRealtimeClient {
+  private ws?: WebSocket;
   private reconnectAttempts = 0;
-  private lastSeq = 0;
+  private cursors = new Map<string, string>();
 
-  connect(endpoint: string, token: string) {
-    this.ws = new WebSocket(`ws://${host}${endpoint}`);
+  connect(url: string, token: string) {
+    this.ws = new WebSocket(url, []);
     this.ws.onopen = () => {
-      // Resume from last known sequence
-      if (this.lastSeq > 0) {
-        this.ws.send(JSON.stringify({ resume_from: this.lastSeq }));
-      }
-      // Subscribe to relevant events
       this.ws.send(JSON.stringify({
-        subscribe: ['agent_output', 'gate_result', 'cfactor_update',
-                     'plan_phase', 'agent_spawned', 'daimon_state']
+        type: "subscribe",
+        id: "cohort-health",
+        payload: {
+          channel: "projection:cohort_health",
+          cursor: this.cursors.get("projection:cohort_health") ?? null,
+          filter: { tenant: "acme" },
+          mode: "Coalesce"
+        }
       }));
     };
-    this.ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      this.lastSeq = data.seq;
-      this.dispatch(data);
+    this.ws.onmessage = ({ data }) => {
+      const frame = JSON.parse(data);
+      if (frame.cursor && frame.payload?.channel) {
+        this.cursors.set(frame.payload.channel, frame.cursor);
+      }
+      this.dispatch(frame);
     };
     this.ws.onclose = () => this.reconnect();
   }
@@ -297,36 +300,43 @@ class RokoWebSocket {
 }
 ```
 
-### Active WebSocket Connections
+### Recommended Portal Subscriptions
 
-| Endpoint | Page | Data |
+| Channel | Page | Why it exists |
 |---|---|---|
-| `/ws/events` | Dashboard, System | All server events |
-| `/ws/agent/:id` | Agent Detail | Agent output, tool traces, gate results |
-| `/ws/cfactor` | Dashboard, Collective | C-Factor snapshots |
-| `/ws/spectre/:id` | Dashboard, Agent Detail | Spectre animation state |
+| `projection:active_tasks` | Home, Plans | task progress, ETA, and current assignee |
+| `projection:agent_trails` | Ask, Agent Detail | token streaming, tool banners, and current action |
+| `projection:gate_pipeline` | Plans, Episodes | rung status and verification deltas |
+| `projection:cohort_health` | Home, Collective | c-factor, roster, and delivery metrics |
+| `agent:agt_042` | Agent Detail | convenience alias for focused agent activity |
+| `session:sess_xyz` | Ask, Episodes | cross-surface session continuity |
 
 ### React Query Integration
 
 WebSocket data is fed into React Query's cache for consistent state management:
 
 ```typescript
-// WebSocket → React Query bridge
-function useWebSocketQuery<T>(endpoint: string, queryKey: string[]) {
+// Realtime surface -> React Query bridge
+function useRealtimeQuery<T>(channel: string, queryKey: string[]) {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    const ws = new RokoWebSocket();
-    ws.connect(endpoint, getToken());
-    ws.onMessage((data: T) => {
-      queryClient.setQueryData(queryKey, data);
+    const client = new RokoRealtimeClient();
+    client.connect(getStreamUrl(), getToken());
+    client.onMessage((frame: { type: string; payload: T }) => {
+      if (frame.type === "state" || frame.type === "delta") {
+        queryClient.setQueryData(queryKey, frame.payload);
+      }
     });
-    return () => ws.disconnect();
-  }, [endpoint]);
+    client.subscribe(channel);
+    return () => client.disconnect();
+  }, [channel]);
 
   return useQuery({ queryKey, queryFn: fetchInitial });
 }
 ```
+
+The important point is architectural, not library-specific: the Portal should hydrate from a normal HTTP `query`, then `subscribe` to the same named channel and fold deltas as they arrive. That keeps browser state aligned with TUI, CLI `watch`, and external dashboards.
 
 ---
 

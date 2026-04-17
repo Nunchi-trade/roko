@@ -1,353 +1,332 @@
-# WebSocket and SSE Streaming
+# WebSocket, SSE, and gRPC Realtime Surface
 
-> Real-time StateHub projection streaming via WebSocket and Server-Sent Events for live agent output, c-factor dashboards, gate views, and Spectre state.
+> **Abstract:** This chapter propagates `tmp/refinements/27-realtime-event-surface.md` into the canonical docs tree. Roko exposes one realtime surface over three co-equal transports: `WebSocket` for full-duplex browser and chat clients, `SSE` for one-way feeds that survive common proxies, and optional `gRPC` streaming for typed server-to-server consumers. The frame vocabulary, auth rules, cursor semantics, and back-pressure contract stay the same across transports. See also [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) for the projection layer this wire surface carries and [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for shared terms such as `Pulse`, `Bus`, `Topic`, `TopicFilter`, and `StateHub`.
 
-
-> **Implementation**: Scaffold
+> **Implementation**: Specified
 
 **Topic**: [12-interfaces](./INDEX.md)
-**Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md)
-**Key sources**: `refactoring-prd/06-interfaces.md` §2, `roko-serve/src/routes/ws.rs`, `roko-serve/src/routes/sse.rs`, `roko-serve/src/event_bus.rs`
+**Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [13-web-portal.md](./13-web-portal.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)
+**Key sources**: `tmp/refinements/27-realtime-event-surface.md`, `tmp/refinements/26-statehub-rearchitecture.md`
 
 ---
 
-## Abstract
+## 1. Why Three Transports
 
-Roko provides two real-time streaming mechanisms: WebSocket for bidirectional communication and Server-Sent Events (SSE) for unidirectional feeds. Under REF26, both are transport bindings for StateHub projections rather than raw internal event fanout. WebSocket endpoints support live agent interaction and projection subscription; SSE provides a lightweight alternative for headless operation and monitoring dashboards.
+REF27 turns realtime delivery into a first-class external contract instead of a handful of ad hoc socket endpoints.
 
-The streaming architecture is designed for multiple concurrent consumers. The TUI, Web Portal, external dashboards, and CI systems should all subscribe to the same named projections and see the same typed `State` plus `Delta` sequence, with reconnection handled by per-projection cursors rather than transport-local sequence IDs.
+The rule is simple:
 
-REF23 turns that into a product rule rather than an implementation detail: CLI, TUI, Chat, and Web all render the same progress stream, so `watch` is a shared surface capability rather than a one-off endpoint feature. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+- `WebSocket` is the default for interactive clients that both read and publish Pulses.
+- `SSE` is the default for dashboards, lightweight observers, and browser contexts that benefit from plain HTTP plus native reconnect behavior.
+- `gRPC` streaming is the optional typed transport for server-to-server, audit ingestion, and higher-throughput consumers.
 
-REF26 adds the missing contract for that stream: `watch` should usually attach to a projection such as `active_tasks`, `agent_trails`, `gate_pipeline`, or `cohort_health`, with current state fetched first and later updates streamed as deltas. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
+Those transports are co-equal. They carry the same conceptual protocol:
 
----
+- `query` current state
+- `subscribe` to a channel
+- receive `state`, `delta`, or a raw `pulse` frame
+- resume from a cursor after reconnect
+- optionally `publish` a Pulse back into the runtime when the transport is bidirectional
 
-## Canonical `watch` Stream
+This keeps browser UIs, mobile feeds, Slack bots, dashboards, and another Roko instance on one vocabulary rather than forcing each consumer to learn a different integration story.
 
-The shared `watch` experience should surface the same categories regardless of transport, but the wire contract is projection-first rather than event-first:
+## 2. Realtime Surface in the Two-Fabric Model
 
-| Category | What the user sees |
-|---|---|
-| Token streaming | Partial model output with a visible cursor while generation is active |
-| Tool call banners | Short, literal progress banners such as file reads, commands, and external calls |
-| Gate feedback | Immediate pass/fail/pending updates with counts and next-step hints |
-| Episode and heuristic events | Episode creation, heuristic application, challenge, or calibration signals |
-| Checkpoint prompts | Permission or ambiguity checkpoints that pause work pending user choice |
+The realtime surface is the wire layer that externalizes the kernel's two fabrics:
 
-In practice:
+- `Bus` is still the transport fabric for live `Pulse` delivery inside the runtime.
+- `Substrate` is still the storage fabric for durable `Engram` history.
+- `StateHub` turns Bus plus Substrate into typed projections that external consumers can query and subscribe to.
 
-- `active_tasks` carries task progress, ETAs, and state transitions.
-- `agent_trails` carries token chunks, tool banners, and current action context.
-- `gate_pipeline` carries rung status and pass/fail counts.
-- `recent_episodes` carries newly completed or resumed work.
+Remote clients therefore do not tap arbitrary internal queues. They attach to one of three external shapes:
 
-The transport may differ by surface, but the semantics must not. A user switching from CLI to TUI or Web mid-task should see the same session continue from the same projection cursor and the same folded state.
+- a named `projection:*` channel from `StateHub`
+- a filtered `topic:*` view over raw Bus Topics
+- a filtered `engram-stream:*` view over live Substrate writes
 
----
+That distinction matters operationally. Interactive surfaces mostly consume projections; bots and diagnostics may consume filtered Topics; replication or audit flows may consume live Engram streams.
 
-## Projection Stream Endpoints
+## 3. Canonical Frame Vocabulary
 
-### Canonical path
-
-The canonical external shape is a projection stream, not a raw event tap:
-
-```text
-GET /projections/:name
-GET /projections/:name/stream
-```
-
-The server answers `GET /projections/:name` with the current typed `State`, then upgrades `GET /projections/:name/stream` to WebSocket or SSE and emits `Delta` envelopes for the same projection. One-off WebSocket families can survive as compatibility aliases, but the public contract should resolve to the same projection registry.
-
-### Envelope
-
-Every streamed message should carry the same projection envelope:
+The logical frame shape is transport-agnostic. JSON is the baseline encoding for `WebSocket` and `SSE`; `gRPC` maps the same fields into typed request and response structs.
 
 ```json
 {
-  "projection": "cohort_health",
-  "cursor": "0x1a2b...",
-  "kind": "state",
-  "timestamp": "2026-04-16T12:00:00Z",
+  "type": "subscribe",
+  "id": "req-12345",
+  "payload": {}
+}
+```
+
+### 3.1 Frame Types
+
+| `type` | Direction | Meaning |
+|---|---|---|
+| `subscribe` | client -> server | Open a live subscription on one channel |
+| `unsubscribe` | client -> server | Close one live subscription |
+| `query` | client -> server | One-shot read of a projection, Engram, or heuristic |
+| `publish` | client -> server | Publish a user-originated Pulse; allowed on bidirectional transports |
+| `state` | server -> client | Full state snapshot, usually the first reply for a projection |
+| `delta` | server -> client | Incremental update for a projection |
+| `pulse` | server -> client | Raw topic or stream item that is not a projection delta |
+| `ack` | server -> client | Success confirmation for subscribe, unsubscribe, or publish |
+| `error` | server -> client | Request-local failure without killing the connection |
+| `ping` / `pong` | both | Heartbeat for long-lived sockets |
+
+### 3.2 Subscribe
+
+Every client must be able to `subscribe` with an explicit `channel` and an optional `cursor`:
+
+```json
+{
+  "type": "subscribe",
+  "id": "sub-abc",
   "payload": {
-    "c_factor": 1.23,
-    "agent_roster": [],
-    "delivery_rate": 0.98
+    "channel": "projection:cohort_health",
+    "filter": {"tenant": "acme"},
+    "cursor": "0x04f1",
+    "mode": "Coalesce"
   }
 }
 ```
 
-Later messages switch `kind` to `delta` and send the projection-specific delta payload. This is the transport-level contract that lets the TUI, Web UI, Slack adapters, and external dashboards share code and resume logic.
+The server replies with:
 
-### Filters
+- `state` followed by `delta` for projection channels
+- `ack` followed by `pulse` for raw topic channels
+- `error` if the identity is not allowed to view that channel or filter
 
-Clients may scope subscriptions by the same server-side filters defined by StateHub:
+The key guarantee is transport parity: a browser client and a gRPC consumer should get the same logical stream when they subscribe to the same channel with the same cursor.
 
-```json
-{
-  "projection": "agent_trails",
-  "filter": {"user": "me"},
-  "cursor": "0x1a2a..."
-}
-```
+### 3.3 Query
 
-Allowed filters should include tenant, role, user, lineage, topic, and time range. The client does not subscribe to everything and filter locally.
-
-### `/ws/agent/:id` — Agent Output Stream
-
-This endpoint is best treated as a convenience alias over `agent_trails` with an agent-specific filter. It remains useful for bidirectional control because the client may stream state and send commands on the same socket.
-
-Live output from a specific agent. Includes:
-- Raw text output (stdout/stderr)
-- Tool call traces (tool name, arguments, result)
-- Gate verdicts as they complete
-- Daimon state changes (PAD vector updates, behavioral state transitions)
-- Token usage per turn
-
-This endpoint is bidirectional — clients can send messages to the agent:
-
-```json
-{"type": "inject", "content": "Focus on the error handling in auth.rs first"}
-{"type": "pause"}
-{"type": "resume"}
-```
-
-### `/ws/cfactor` — Live C-Factor Dashboard
-
-This endpoint is best treated as a convenience alias over `cohort_health`. The durable contract is the `cohort_health` projection; `/ws/cfactor` is just a narrower transport affordance.
-
-Real-time collective intelligence metrics:
+`query` is the one-shot read complement to `subscribe`:
 
 ```json
 {
-  "cfactor": 1.23,
-  "cscore": {
-    "gate_pass": 0.94,
-    "cost_efficiency": 0.82,
-    "speed": 0.76,
-    "first_try_rate": 0.88,
-    "knowledge_growth": 0.65
-  },
-  "diagnostics": {
-    "turn_taking_equality": 0.91,
-    "knowledge_flow_rate": 0.73,
-    "cross_domain_transfer": 0.45,
-    "emergent_coordination": 0.62
-  },
-  "agent_contributions": [
-    {"agent": "rust-impl-01", "contribution": 0.34},
-    {"agent": "reviewer-01", "contribution": 0.28}
-  ]
+  "type": "query",
+  "id": "q-ghi",
+  "payload": {
+    "target": "projection:gate_pipeline",
+    "filter": {"session": "sess_xyz"},
+    "at_cursor": "0x04f1"
+  }
 }
 ```
 
-Updates push every time the C-Factor snapshot is refreshed (typically every 30 seconds during active work).
+Projection targets return `state`. Raw stream targets may return a single `pulse` frame or a bounded list, depending on the target family.
 
-### `/ws/spectre/:id` — Live Spectre Creature State
+### 3.4 Publish
 
-This endpoint can remain renderer-friendly, but it should still fold through StateHub so TUI and Web renderers share the same cursor, auth rules, and replay semantics.
-
-Real-time Spectre visualization state for a specific agent. Provides the data needed for any renderer (TUI ASCII, Web Portal WebGL, or custom) to display the agent's Spectre creature:
+`publish` is the asymmetric inbound path that makes external UIs and bots first-class participants rather than passive observers.
 
 ```json
 {
-  "agent_id": "rust-impl-01",
-  "behavioral_state": "Engaged",
-  "pad": {"pleasure": 0.7, "arousal": 0.5, "dominance": 0.8},
-  "body": {
-    "shape_seed": "a3f2b1c4d5e6f789",
-    "symmetry": "bilateral",
-    "limb_count": 4,
-    "domain_texture": "geometric"
-  },
-  "animation": {
-    "breathing_rate": 0.7,
-    "eye_state": "open",
-    "glow_color": "#c77d8f",
-    "glow_intensity": 0.8,
-    "tendril_activity": 0.3
-  },
-  "knowledge": {
-    "persistent": 23,
-    "consolidated": 0,
-    "working": 89,
-    "transient": 30
-  },
-  "mesh_connections": ["reviewer-01", "researcher-01"],
-  "pheromone_emission": {"type": "Wisdom", "intensity": 0.4}
+  "type": "publish",
+  "id": "pub-def",
+  "payload": {
+    "topic": "user.prompt",
+    "body": {"text": "Focus on auth.rs first"},
+    "source": "portal"
+  }
 }
 ```
 
-**Status**: Endpoint exists as scaffold. Full Spectre state model not yet implemented.
+Rules:
 
----
+- `publish` is required for `WebSocket`.
+- `publish` is optional for bidirectional `gRPC`.
+- `SSE` remains receive-only.
+- published Pulses are rate-limited, topic-allow-listed, schema-validated, and audited.
 
-## Server-Sent Events
+## 4. Channel Taxonomy
 
-### `/projections/:name/stream` — SSE Projection Stream
+The subscription unit is a `channel` string. The channel is not a replacement for `Topic`; it is the external selector that points at a projection, filtered Topic view, or stream.
 
-The SSE binding should provide the same projection stream as WebSocket but over HTTP SSE. This is preferred for:
-- Headless monitoring (curl, httpie)
-- CI/CD pipelines
-- Environments where WebSocket support is limited
-- One-directional event consumption
+| Prefix | Meaning | Example |
+|---|---|---|
+| `projection:` | Named `StateHub` projection | `projection:cohort_health` |
+| `topic:` | Raw Bus Topic stream, pattern allowed | `topic:gate.failed.*` |
+| `engram-stream:` | Live filtered Substrate writes | `engram-stream:kind=heuristic` |
+| `agent:` | Per-agent activity feed | `agent:agt_042` |
+| `session:` | Per-session conversation and progress | `session:sess_xyz` |
 
-```bash
-curl -N -H "Authorization: Bearer roko_sk_..." \
-  http://localhost:8080/projections/gate_pipeline/stream
-```
+Consumers may mix multiple channel kinds on one connection. The server owns the fanout; the client should not open one transport connection per subscription unless it has a very specific reason.
 
-Output:
-```
-event: state
-data: {"projection":"gate_pipeline","cursor":"0x10","kind":"state","payload":{"rungs":[]}}
+### 4.1 Projection-First Default
 
-event: delta
-data: {"projection":"gate_pipeline","cursor":"0x11","kind":"delta","payload":{"rung":"compile","passed":true,"duration_ms":4200}}
-```
+Most first-party consumers should subscribe to projections first:
 
-SSE respects the same projection filtering as WebSocket. A browser or dashboard can query the current projection state on mount, then attach to the stream and fold deltas as they arrive.
+- `projection:active_tasks`
+- `projection:agent_trails`
+- `projection:gate_pipeline`
+- `projection:cohort_health`
+- `projection:recent_episodes`
 
----
+That preserves a stable external contract even when internal Topics evolve.
 
-## Reconnection Protocol
+### 4.2 Compatibility Aliases
 
-Both WebSocket and SSE support seamless reconnection:
+Historical route families such as per-agent sockets can remain as convenience aliases, but they should resolve onto the same channel registry. For example:
 
-1. On initial connect, the server emits a per-projection cursor with the initial state.
-2. Each later delta includes a monotonically increasing cursor for that projection.
-3. On reconnect, the client sends the last cursor it has seen for that projection.
-4. The server replays deltas from the projection log or rehydrates state and resumes from the nearest retained cursor.
+- `/ws/agent/:id` is an alias over `agent:<id>` or `projection:agent_trails` with an agent filter
+- `/ws/cfactor` is an alias over `projection:cohort_health`
+- renderer-specific views still fold through the same cursor and auth model
 
-The replay window is a projection concern, not just a raw socket ring buffer. If a cursor is too old, the server should send a fresh `state` envelope and continue from there.
+The public contract is the channel registry, not an ever-growing list of bespoke endpoints.
 
-These cursors are also the continuity mechanism for REF23's named sessions and shareable replays. A session handoff between surfaces should reuse the same stream position rather than starting a fresh observer window.
+## 5. Auth, Authorization, and Safety
 
----
+Connections authenticate once and subscribe many times.
 
-## Event Coalescing
+Supported identity forms:
 
-For high-frequency updates, the server coalesces deltas rather than flooding clients with every raw Pulse:
+- API key for automation and machine consumers
+- OIDC bearer token for user-scoped remote clients
+- session cookie for first-party browser flows
+- per-tenant scoped token when a deployment exposes only part of the channel space
 
-- `agent_trails` token chunks may batch into short windows.
-- `active_tasks` progress deltas may collapse to the latest progress per task.
-- `gate_pipeline` should preserve rung transitions exactly.
-- `cohort_health` may publish on metric refresh rather than every intermediate calculation.
+Authorization is per subscription, not just per connection. The server checks:
 
-This keeps WebSocket bandwidth reasonable even when multiple agents are producing output simultaneously.
+- whether this identity may see the requested channel
+- whether the supplied filter narrows access safely
+- whether `publish` to the requested Topic is allowed
 
----
+If a subscription is denied, the server returns `error` for that request id rather than dropping the whole connection. One bad subscription should not kill the session.
 
-## Backpressure and Flow Control
+Safety rules on the surface:
 
-### Projection Cursor Log for Reconnection Replay
+- no user-supplied filter functions cross process boundaries; filters stay declarative
+- `publish` applies topic allow-lists, payload size limits, and schema validation
+- secret-bearing fields are stripped before messages leave the runtime
+- auth failures and replay denials are rate-limited and traced for audit
 
-```rust
-/// Fixed-capacity replay log for one projection.
-/// Retains last N deltas; older entries are overwritten.
-pub struct ProjectionReplayLog<D> {
-    deltas: Vec<(Cursor, D)>,
-    head: usize,
-    capacity: usize,
-    next_cursor: Cursor,
-}
+See also [../11-safety/INDEX.md](../11-safety/INDEX.md), [../00-architecture/05-provenance-and-attestation.md](../00-architecture/05-provenance-and-attestation.md), and [tmp/refinements/32-safety-sandbox-provenance.md](../../tmp/refinements/32-safety-sandbox-provenance.md).
 
-impl<D: Clone> ProjectionReplayLog<D> {
-    pub fn push(&mut self, delta: D) -> Cursor {
-        let cursor = self.next_cursor;
-        self.next_cursor = cursor.next();
-        if self.deltas.len() < self.capacity {
-            self.deltas.push((cursor, delta));
-        } else {
-            self.deltas[self.head] = (cursor, delta);
-        }
-        self.head = (self.head + 1) % self.capacity;
-        cursor
-    }
+## 6. Cursors, Replay, and Back-Pressure
 
-    pub fn replay_from(&self, after: Cursor) -> Vec<&(Cursor, D)> {
-        self.deltas.iter().filter(|(cursor, _)| *cursor > after).collect()
-    }
-}
-```
+Every outbound frame carries a cursor. Clients persist the last cursor they have successfully applied and present it again on reconnect.
 
-### Adaptive Delta Priority
+### 6.1 Resume Rules
 
-Under backpressure, low-priority projection deltas are coalesced or dropped while high-priority transitions are always delivered:
+1. client reconnects
+2. client resends `subscribe` with the last known cursor for that channel
+3. server replays from retained history when possible
+4. if the cursor is too old:
+   - projection channels return a fresh `state` plus the current cursor
+   - raw topic channels return `error` plus the current cursor so the client can re-query or accept a gap
 
-| Projection / delta kind | Priority | Coalesce Window | Drop Under Pressure? |
-|---|---|---|---|
-| `gate_pipeline` rung transition | 10 | None | Never |
-| `active_tasks` phase transition | 9 | None | Never |
-| `cohort_health` metric update | 7 | 30s | Never |
-| `recent_episodes` append | 6 | None | Never |
-| `agent_trails` token chunk | 3 | 100ms | Yes (batch) |
+`SSE` uses its standard resume header to carry the cursor automatically. `WebSocket` and `gRPC` carry it in the subscribe payload.
 
----
+### 6.2 Back-Pressure Modes
 
-## Test Criteria
+Back-pressure is explicit because different consumers need different tradeoffs:
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+| Mode | Behavior | Typical use |
+|---|---|---|
+| `AtMostOnce` | Oldest messages may drop under pressure | live dashboards and decorative views |
+| `Coalesce` | Projection deltas may collapse into a newer delta or fresh state | browser dashboards and mobile feeds |
+| `ResumeRequired` | Server disconnects or errors once the client falls too far behind | audit, replication, and compliance flows |
 
-    #[test]
-    fn projection_log_wraps_correctly() {
-        let mut buf = ProjectionReplayLog::new(3);
-        for i in 0..5 { buf.push(CohortHealthDelta::MetricRefresh { seq: i }); }
-        let replay = buf.replay_from(Cursor::from(2));
-        assert_eq!(replay.len(), 2);
-    }
+Recommended defaults:
 
-    #[test]
-    fn projection_log_replay_from_zero_returns_all() {
-        let mut buf = ProjectionReplayLog::new(100);
-        for i in 0..10 { buf.push(CohortHealthDelta::MetricRefresh { seq: i }); }
-        assert_eq!(buf.replay_from(Cursor::from(0)).len(), 9);
-    }
+- `agent_trails` token chunks coalesce in short windows
+- `cohort_health` metric updates coalesce aggressively
+- `gate_pipeline` rung transitions should not be dropped
+- `engram-stream:*` for audit or replication should prefer `ResumeRequired`
 
-    #[test]
-    fn projection_filter_respects_query_param() {
-        let filter = parse_projection_filter("user:me,topic:gate.verdict.emitted");
-        assert!(filter.accepts_user("me"));
-        assert!(filter.accepts_topic("gate.verdict.emitted"));
-        assert!(!filter.accepts_topic("agent.msg.chunk"));
-    }
+These rules keep the external surface honest about delivery guarantees instead of hiding drops behind best-effort transport behavior.
 
-    #[test]
-    fn projection_subscription_message_parses() {
-        let msg = r#"{"projection":"gate_pipeline","filter":{"user":"me"},"cursor":"0x11"}"#;
-        let sub: ProjectionSubscription = serde_json::from_str(msg).unwrap();
-        assert_eq!(sub.projection, "gate_pipeline");
-    }
-}
-```
+## 7. Heartbeats and Presence
 
----
+Long-lived subscriptions need an explicit liveness contract:
 
-## Current Status and Gaps
+- `WebSocket` uses `ping` / `pong`
+- `SSE` uses comment heartbeats so proxies do not treat the stream as idle
+- `gRPC` uses transport keep-alive plus application-level stream timeouts
 
-**Built:**
-- WebSocket route handler (`roko-serve/src/routes/ws.rs`)
-- SSE route handler (`roko-serve/src/routes/sse.rs`)
-- Bus-backed transport scaffolding
+Presence is reserved as a namespaced channel family rather than a one-off feature:
 
-**Not yet complete:**
-- StateHub-backed projection registry and typed envelopes
-- Query-plus-stream projection endpoints
-- Bidirectional agent control via WebSocket (inject, pause, resume)
-- Spectre state endpoint (requires Spectre implementation)
-- Projection-delta coalescing
-- Projection cursor replay
+- `topic:presence.*` for low-level connection presence
+- `projection:session_presence` for UI-friendly summaries such as "3 viewers on this plan"
 
----
+Presence is useful, but it is not the core of the protocol. The core remains query, subscribe, resume, and publish.
 
-## Cross-References
+## 8. First-Party Client Shape
 
-- See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for REST API
-- See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) for the projection contract
-- See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre state model
-- See [13-web-portal.md](./13-web-portal.md) for WebSocket consumption in the Portal
-- See [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for `Pulse`, `Bus`, `StateHub`, and `projection` vocabulary
-- See [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the canonical REF26 proposal
+The first-party client libraries should hide the transport choice behind one subscription API.
+
+Common responsibilities:
+
+- choose `WebSocket`, `SSE`, or `gRPC` based on environment and use case
+- expose typed `subscribe(channel, filter, handler)` and `query(target, filter)` helpers
+- reconnect with exponential backoff
+- resume with the last applied cursor
+- translate `error` frames into idiomatic exceptions or callbacks
+- rate-limit publishes client-side before the server rejects them
+
+The first three client targets are:
+
+- TypeScript for Web and browser extensions
+- Python for scripts, bots, and analytics jobs
+- Rust for native apps and server-to-server consumers
+
+Those clients should share the same schema definitions as the StateHub projection layer so projection state does not get hand-transcribed in multiple places.
+
+## 9. Recommended Consumer Patterns
+
+| Consumer | Preferred transport | Typical channels |
+|---|---|---|
+| Web UI | `WebSocket` | `projection:*`, plus `publish` for user input |
+| Mobile or passive browser view | `SSE` | `projection:cohort_health`, `projection:active_tasks` |
+| Slack or chat bot | `WebSocket` | `topic:gate.failed.*`, `topic:safety.approval.requested` |
+| Grafana or metrics-tail consumer | `SSE` | `projection:bus_stats`, `projection:substrate_stats` |
+| Audit log or compliance sink | `gRPC` | `engram-stream:*`, `topic:safety.*` |
+| Cross-instance replication | `gRPC` | `engram-stream:*` with kind filters |
+| Browser extension | `WebSocket` | `session:*`, `projection:active_tasks` |
+
+The transport choice is a deployment detail. The channel vocabulary is the product contract.
+
+## 10. Edge Cases Worth Documenting Once
+
+The server and first-party clients should absorb the common operational sharp edges:
+
+- browsers limit concurrent `SSE` connections per origin, so multiplex subscriptions
+- many reverse proxies buffer `SSE` unless buffering is disabled
+- reconnect backoff should cap instead of growing forever
+- the cursor format is opaque to clients even though it must remain valid for the retention window
+- unknown fields and unknown frame kinds must be ignored so additive protocol evolution stays non-breaking
+
+This is where the wire contract becomes a force multiplier: custom surfaces can inherit sane behavior instead of rediscovering it.
+
+## 11. Observability and Stability
+
+The realtime surface is part of the production control plane and needs its own telemetry:
+
+| Metric | Meaning |
+|---|---|
+| `roko.realtime.connections` | open transport connections |
+| `roko.realtime.subscriptions` | active subscriptions by channel family |
+| `roko.realtime.messages_per_second` | inbound and outbound traffic rate |
+| `roko.realtime.cursor_lag` | how far behind consumers are |
+| `roko.realtime.auth_failures` | failed auth or subscribe attempts |
+
+The wire contract also needs an explicit stability bar:
+
+- adding fields is non-breaking
+- removing or renaming public fields is breaking
+- frame meaning must not silently change under an existing `type`
+- clients must ignore unknown fields
+- servers must continue accepting previously emitted cursors for the retention window
+
+That is the only way downstream consumers can build against the surface with confidence.
+
+## 12. Cross-References
+
+- [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) — canonical source for this chapter.
+- [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) — projection contract carried by the realtime surface.
+- [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) — control-plane routes and auth integration.
+- [13-web-portal.md](./13-web-portal.md) — first-party browser consumer of the realtime surface.
+- [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) — `watch` as the cross-surface live-progress verb.
+- [../19-deployment/11-remote-orchestrator.md](../19-deployment/11-remote-orchestrator.md) — deployment-facing guidance for exposing the surface remotely.
+- [../19-deployment/12-production-hardening.md](../19-deployment/12-production-hardening.md) — operational concerns such as proxying, cursor retention, and telemetry.

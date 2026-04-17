@@ -27,8 +27,10 @@
 > [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md),
 > [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md),
 > [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md),
+> [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md),
 > [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md),
 > [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md),
+> [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -158,6 +160,8 @@ crates directly.
 | `TypedContext` | Structured situation payload | Domain-tagged key/value context passed to composers, gates, and heuristics so matching happens on typed fields instead of free-text parsing. |
 | `Custody` | Chain-of-custody record | Auditable record of who approved an action, which heuristics and claims influenced it, what simulation ran, and what witness or result was observed. |
 | `Projection` | Named live-updating view | A typed `State` plus `Delta` fold over Bus + Substrate that consumers query and subscribe to through StateHub. |
+| `Cursor` | Realtime resume token | Opaque position marker carried on projection and stream replies so clients can resume after reconnect. |
+| `Realtime surface` | External streaming contract | Shared `query`, `subscribe`, and `publish` vocabulary carried over WebSocket, SSE, or optional gRPC. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -206,7 +210,7 @@ legacy contexts like this table, do not use these names in new prose.
 | `Roko Chat` | Conversational surface over the shared session and Bus stream |
 | `Roko Portal` | Web dashboard and browser surface |
 | `HTTP API` | Programmatic control plane |
-| `WebSocket` / `SSE` surfaces | Live Pulse delivery to clients and observers |
+| `Realtime surface` | Shared transport contract for live Pulse delivery to clients and observers |
 
 ---
 
@@ -339,6 +343,7 @@ prefixes without coordination.
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
 | `StateHub` | Kernel projection layer that turns Bus pulses and Substrate history into named consumer-facing views. |
+| `Cursor` | Opaque resume token carried by the realtime surface so clients can continue from a known stream position. |
 | `Prediction Error` | The residual between predicted and observed outcomes, published as `prediction.error.*` when it becomes a first-class runtime signal. |
 | `Profile` | Deployment-shape configuration preset selected by name rather than by building a different binary. |
 | `SecretStore` | Secret backend abstraction that keeps layered credential resolution off the main config path. |
@@ -370,4 +375,6 @@ prefixes without coordination.
 - [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md) for layered secret resolution and shared-server credential handling
 - [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md) for the deployment-UX refinement proposal
 - [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the StateHub projection-layer proposal
+- [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) for the shared realtime transport proposal
+- [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md) for the interface-facing realtime surface contract
 - [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md) for the interface-facing projection-layer contract

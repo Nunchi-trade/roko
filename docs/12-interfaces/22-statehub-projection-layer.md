@@ -1,6 +1,6 @@
 # StateHub Projection Layer
 
-> **Abstract:** This chapter propagates `tmp/refinements/26-statehub-rearchitecture.md` into the canonical docs tree. StateHub is no longer a TUI-only cache; it is the kernel projection layer that turns Bus + Substrate into typed, queryable, live-updating views for the TUI, Web Portal, and external consumers. The stable contract is a named projection with `State`, `Delta`, a reducer, filters, and replay cursors. See also [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the shared kernel vocabulary.
+> **Abstract:** This chapter propagates `tmp/refinements/26-statehub-rearchitecture.md` into the canonical docs tree. StateHub is no longer a TUI-only cache; it is the kernel projection layer that turns Bus + Substrate into typed, queryable, live-updating views for the TUI, Web Portal, and external consumers. The stable contract is a named projection with `State`, `Delta`, a reducer, filters, and replay cursors. REF27 then carries that same contract over the shared realtime surface defined in [06-websocket-streaming.md](./06-websocket-streaming.md). See also [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the shared kernel vocabulary.
 
 **Topic**: [12-interfaces](./INDEX.md)  
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [13-web-portal.md](./13-web-portal.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)  
@@ -88,6 +88,8 @@ The read side and the stream side are two faces of the same contract:
 
 The API can be transported over HTTP, WebSocket, SSE, gRPC, or in-process channels. The transport changes, but the projection name and the state shape do not.
 
+On the wire, clients should `subscribe` to a projection-backed `channel` rather than inventing per-surface socket shapes. This chapter owns the projection semantics; [06-websocket-streaming.md](./06-websocket-streaming.md) owns the transport vocabulary and auth/resume behavior.
+
 ## 5. Filters And Delivery
 
 Subscriptions need to be narrower than "everything." StateHub should accept server-side filters that slice the projection by tenant, role, user, lineage, Topic, or time range.
@@ -169,8 +171,7 @@ Without StateHub, each surface invents its own state cache and its own partial p
 ## 10. Related Refinements
 
 - [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) — canonical source for this chapter.
+- [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) — transport layer that carries these projections remotely.
 - [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) — Bus, Topic, TopicFilter, Datum, and PulseSource vocabulary.
-- [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) — the streaming transport that can carry remote projection updates.
 - [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md) — web pages that should consume shared projections rather than reimplementing state.
 - [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md) — UI primitives that become simpler when projections are already typed and queryable.
-
