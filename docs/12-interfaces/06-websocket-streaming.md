@@ -1,6 +1,6 @@
 # WebSocket and SSE Streaming
 
-> Real-time event streaming via WebSocket and Server-Sent Events — live agent output, C-Factor updates, and Spectre creature state.
+> Real-time StateHub projection streaming via WebSocket and Server-Sent Events for live agent output, c-factor dashboards, gate views, and Spectre state.
 
 
 > **Implementation**: Scaffold
@@ -13,17 +13,19 @@
 
 ## Abstract
 
-Roko provides two real-time streaming mechanisms: WebSocket for bidirectional communication and Server-Sent Events (SSE) for unidirectional event feeds. Both consume the same internal event bus, ensuring consistent event delivery regardless of transport. WebSocket endpoints support live agent interaction, while SSE provides a lightweight alternative for headless operation and monitoring dashboards.
+Roko provides two real-time streaming mechanisms: WebSocket for bidirectional communication and Server-Sent Events (SSE) for unidirectional feeds. Under REF26, both are transport bindings for StateHub projections rather than raw internal event fanout. WebSocket endpoints support live agent interaction and projection subscription; SSE provides a lightweight alternative for headless operation and monitoring dashboards.
 
-The streaming architecture is designed for multiple concurrent consumers — the TUI, Web Portal, external dashboards, and CI systems can all subscribe to the same event stream simultaneously without interference.
+The streaming architecture is designed for multiple concurrent consumers. The TUI, Web Portal, external dashboards, and CI systems should all subscribe to the same named projections and see the same typed `State` plus `Delta` sequence, with reconnection handled by per-projection cursors rather than transport-local sequence IDs.
 
 REF23 turns that into a product rule rather than an implementation detail: CLI, TUI, Chat, and Web all render the same progress stream, so `watch` is a shared surface capability rather than a one-off endpoint feature. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+REF26 adds the missing contract for that stream: `watch` should usually attach to a projection such as `active_tasks`, `agent_trails`, `gate_pipeline`, or `cohort_health`, with current state fetched first and later updates streamed as deltas. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
 
 ---
 
 ## Canonical `watch` Stream
 
-The shared `watch` experience should surface the same event categories regardless of transport:
+The shared `watch` experience should surface the same categories regardless of transport, but the wire contract is projection-first rather than event-first:
 
 | Category | What the user sees |
 |---|---|
@@ -33,33 +35,67 @@ The shared `watch` experience should surface the same event categories regardles
 | Episode and heuristic events | Episode creation, heuristic application, challenge, or calibration signals |
 | Checkpoint prompts | Permission or ambiguity checkpoints that pause work pending user choice |
 
-The transport may differ by surface, but the semantics must not. A user switching from CLI to TUI or Web mid-task should see the same session continue from the same cursor and the same sequence IDs.
+In practice:
+
+- `active_tasks` carries task progress, ETAs, and state transitions.
+- `agent_trails` carries token chunks, tool banners, and current action context.
+- `gate_pipeline` carries rung status and pass/fail counts.
+- `recent_episodes` carries newly completed or resumed work.
+
+The transport may differ by surface, but the semantics must not. A user switching from CLI to TUI or Web mid-task should see the same session continue from the same projection cursor and the same folded state.
 
 ---
 
-## WebSocket Endpoints
+## Projection Stream Endpoints
 
-### `/ws/events` — System-Wide Event Stream
+### Canonical path
 
-All server events as a unified stream. Clients receive `ServerEvent` variants serialized as JSON:
+The canonical external shape is a projection stream, not a raw event tap:
 
-```json
-{"type": "agent_spawned", "agent_id": "rust-impl-01", "template": "code-implementer"}
-{"type": "agent_output", "agent_id": "rust-impl-01", "text": "Analyzing auth module..."}
-{"type": "gate_result", "plan": "01", "gate": "compile", "passed": true, "duration_ms": 4200}
-{"type": "plan_phase", "plan": "01", "phase": "complete", "iterations": 2}
-{"type": "cfactor_update", "value": 1.23, "delta": 0.04}
+```text
+GET /projections/:name
+GET /projections/:name/stream
 ```
 
-Clients can filter by event type using a subscription message on connect:
+The server answers `GET /projections/:name` with the current typed `State`, then upgrades `GET /projections/:name/stream` to WebSocket or SSE and emits `Delta` envelopes for the same projection. One-off WebSocket families can survive as compatibility aliases, but the public contract should resolve to the same projection registry.
+
+### Envelope
+
+Every streamed message should carry the same projection envelope:
 
 ```json
-{"subscribe": ["agent_output", "gate_result", "cfactor_update"]}
+{
+  "projection": "cohort_health",
+  "cursor": "0x1a2b...",
+  "kind": "state",
+  "timestamp": "2026-04-16T12:00:00Z",
+  "payload": {
+    "c_factor": 1.23,
+    "agent_roster": [],
+    "delivery_rate": 0.98
+  }
+}
 ```
 
-Without a subscription message, the client receives all events.
+Later messages switch `kind` to `delta` and send the projection-specific delta payload. This is the transport-level contract that lets the TUI, Web UI, Slack adapters, and external dashboards share code and resume logic.
+
+### Filters
+
+Clients may scope subscriptions by the same server-side filters defined by StateHub:
+
+```json
+{
+  "projection": "agent_trails",
+  "filter": {"user": "me"},
+  "cursor": "0x1a2a..."
+}
+```
+
+Allowed filters should include tenant, role, user, lineage, topic, and time range. The client does not subscribe to everything and filter locally.
 
 ### `/ws/agent/:id` — Agent Output Stream
+
+This endpoint is best treated as a convenience alias over `agent_trails` with an agent-specific filter. It remains useful for bidirectional control because the client may stream state and send commands on the same socket.
 
 Live output from a specific agent. Includes:
 - Raw text output (stdout/stderr)
@@ -77,6 +113,8 @@ This endpoint is bidirectional — clients can send messages to the agent:
 ```
 
 ### `/ws/cfactor` — Live C-Factor Dashboard
+
+This endpoint is best treated as a convenience alias over `cohort_health`. The durable contract is the `cohort_health` projection; `/ws/cfactor` is just a narrower transport affordance.
 
 Real-time collective intelligence metrics:
 
@@ -106,6 +144,8 @@ Real-time collective intelligence metrics:
 Updates push every time the C-Factor snapshot is refreshed (typically every 30 seconds during active work).
 
 ### `/ws/spectre/:id` — Live Spectre Creature State
+
+This endpoint can remain renderer-friendly, but it should still fold through StateHub so TUI and Web renderers share the same cursor, auth rules, and replay semantics.
 
 Real-time Spectre visualization state for a specific agent. Provides the data needed for any renderer (TUI ASCII, Web Portal WebGL, or custom) to display the agent's Spectre creature:
 
@@ -144,9 +184,9 @@ Real-time Spectre visualization state for a specific agent. Provides the data ne
 
 ## Server-Sent Events
 
-### `/api/sse/events` — SSE Event Stream
+### `/projections/:name/stream` — SSE Projection Stream
 
-The SSE endpoint provides the same event stream as `/ws/events` but over HTTP SSE. This is preferred for:
+The SSE binding should provide the same projection stream as WebSocket but over HTTP SSE. This is preferred for:
 - Headless monitoring (curl, httpie)
 - CI/CD pipelines
 - Environments where WebSocket support is limited
@@ -154,22 +194,19 @@ The SSE endpoint provides the same event stream as `/ws/events` but over HTTP SS
 
 ```bash
 curl -N -H "Authorization: Bearer roko_sk_..." \
-  http://localhost:8080/api/sse/events
+  http://localhost:8080/projections/gate_pipeline/stream
 ```
 
 Output:
 ```
-event: agent_spawned
-data: {"agent_id":"rust-impl-01","template":"code-implementer"}
+event: state
+data: {"projection":"gate_pipeline","cursor":"0x10","kind":"state","payload":{"rungs":[]}}
 
-event: agent_output
-data: {"agent_id":"rust-impl-01","text":"Analyzing auth module..."}
-
-event: gate_result
-data: {"plan":"01","gate":"compile","passed":true,"duration_ms":4200}
+event: delta
+data: {"projection":"gate_pipeline","cursor":"0x11","kind":"delta","payload":{"rung":"compile","passed":true,"duration_ms":4200}}
 ```
 
-SSE respects the same event filtering as WebSocket — pass `?filter=agent_output,gate_result` as a query parameter.
+SSE respects the same projection filtering as WebSocket. A browser or dashboard can query the current projection state on mount, then attach to the stream and fold deltas as they arrive.
 
 ---
 
@@ -177,12 +214,12 @@ SSE respects the same event filtering as WebSocket — pass `?filter=agent_outpu
 
 Both WebSocket and SSE support seamless reconnection:
 
-1. On initial connect, the server assigns a sequence number starting at the latest event
-2. Each event includes a monotonically increasing `seq` field
-3. On reconnect, the client sends `{"resume_from": <last_seq>}` (WebSocket) or `Last-Event-ID: <last_seq>` (SSE)
-4. The server replays events from the ring buffer starting at the requested sequence
+1. On initial connect, the server emits a per-projection cursor with the initial state.
+2. Each later delta includes a monotonically increasing cursor for that projection.
+3. On reconnect, the client sends the last cursor it has seen for that projection.
+4. The server replays deltas from the projection log or rehydrates state and resumes from the nearest retained cursor.
 
-The ring buffer retains the last 10,000 events by default. Events older than the buffer are lost — clients that disconnect for extended periods receive events from the buffer start, not from their last sequence.
+The replay window is a projection concern, not just a raw socket ring buffer. If a cursor is too old, the server should send a fresh `state` envelope and continue from there.
 
 These cursors are also the continuity mechanism for REF23's named sessions and shareable replays. A session handoff between surfaces should reuse the same stream position rather than starting a fresh observer window.
 
@@ -190,12 +227,12 @@ These cursors are also the continuity mechanism for REF23's named sessions and s
 
 ## Event Coalescing
 
-For high-frequency events (agent output, token counting), the server coalesces updates to prevent flooding:
+For high-frequency updates, the server coalesces deltas rather than flooding clients with every raw Pulse:
 
-- Agent output: batched into 100ms windows
-- Token counts: accumulated and sent every 500ms
-- Daimon state: sent on state transitions, not on every PAD vector update
-- C-Factor: sent on snapshot refresh (every 30s)
+- `agent_trails` token chunks may batch into short windows.
+- `active_tasks` progress deltas may collapse to the latest progress per task.
+- `gate_pipeline` should preserve rung transitions exactly.
+- `cohort_health` may publish on metric refresh rather than every intermediate calculation.
 
 This keeps WebSocket bandwidth reasonable even when multiple agents are producing output simultaneously.
 
@@ -203,49 +240,48 @@ This keeps WebSocket bandwidth reasonable even when multiple agents are producin
 
 ## Backpressure and Flow Control
 
-### Ring Buffer for Reconnection Replay
+### Projection Cursor Log for Reconnection Replay
 
 ```rust
-/// Fixed-capacity ring buffer for event replay on reconnection.
-/// Retains last N events; older events are overwritten.
-pub struct EventRingBuffer {
-    events: Vec<(u64, ServerEvent)>,  // (seq, event) pairs
+/// Fixed-capacity replay log for one projection.
+/// Retains last N deltas; older entries are overwritten.
+pub struct ProjectionReplayLog<D> {
+    deltas: Vec<(Cursor, D)>,
     head: usize,
-    capacity: usize,                   // default: 10_000
-    next_seq: u64,
+    capacity: usize,
+    next_cursor: Cursor,
 }
 
-impl EventRingBuffer {
-    pub fn push(&mut self, event: ServerEvent) -> u64 {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        if self.events.len() < self.capacity {
-            self.events.push((seq, event));
+impl<D: Clone> ProjectionReplayLog<D> {
+    pub fn push(&mut self, delta: D) -> Cursor {
+        let cursor = self.next_cursor;
+        self.next_cursor = cursor.next();
+        if self.deltas.len() < self.capacity {
+            self.deltas.push((cursor, delta));
         } else {
-            self.events[self.head] = (seq, event);
+            self.deltas[self.head] = (cursor, delta);
         }
         self.head = (self.head + 1) % self.capacity;
-        seq
+        cursor
     }
 
-    /// Replay events since `after_seq` for reconnecting clients.
-    pub fn replay_from(&self, after_seq: u64) -> Vec<&(u64, ServerEvent)> {
-        self.events.iter().filter(|(seq, _)| *seq > after_seq).collect()
+    pub fn replay_from(&self, after: Cursor) -> Vec<&(Cursor, D)> {
+        self.deltas.iter().filter(|(cursor, _)| *cursor > after).collect()
     }
 }
 ```
 
-### Adaptive Event Priority
+### Adaptive Delta Priority
 
-Under backpressure, low-priority events are coalesced or dropped while high-priority events are always delivered:
+Under backpressure, low-priority projection deltas are coalesced or dropped while high-priority transitions are always delivered:
 
-| Event Type | Priority | Coalesce Window | Drop Under Pressure? |
+| Projection / delta kind | Priority | Coalesce Window | Drop Under Pressure? |
 |---|---|---|---|
-| `GateResult` | 10 | None | Never |
-| `PlanPhaseChange` | 9 | None | Never |
-| `CFactorUpdate` | 7 | 30s | Never |
-| `AgentSpawned` | 6 | None | Never |
-| `AgentOutput` | 3 | 100ms | Yes (batch) |
+| `gate_pipeline` rung transition | 10 | None | Never |
+| `active_tasks` phase transition | 9 | None | Never |
+| `cohort_health` metric update | 7 | 30s | Never |
+| `recent_episodes` append | 6 | None | Never |
+| `agent_trails` token chunk | 3 | 100ms | Yes (batch) |
 
 ---
 
@@ -257,33 +293,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ring_buffer_wraps_correctly() {
-        let mut buf = EventRingBuffer::new(3);
-        for i in 0..5 { buf.push(ServerEvent::CFactorUpdate { value: i as f64 }); }
-        let replay = buf.replay_from(2);
+    fn projection_log_wraps_correctly() {
+        let mut buf = ProjectionReplayLog::new(3);
+        for i in 0..5 { buf.push(CohortHealthDelta::MetricRefresh { seq: i }); }
+        let replay = buf.replay_from(Cursor::from(2));
         assert_eq!(replay.len(), 2);
     }
 
     #[test]
-    fn ring_buffer_replay_from_zero_returns_all() {
-        let mut buf = EventRingBuffer::new(100);
-        for i in 0..10 { buf.push(ServerEvent::CFactorUpdate { value: i as f64 }); }
-        assert_eq!(buf.replay_from(0).len(), 9);
+    fn projection_log_replay_from_zero_returns_all() {
+        let mut buf = ProjectionReplayLog::new(100);
+        for i in 0..10 { buf.push(CohortHealthDelta::MetricRefresh { seq: i }); }
+        assert_eq!(buf.replay_from(Cursor::from(0)).len(), 9);
     }
 
     #[test]
-    fn sse_filter_respects_query_param() {
-        let filter = parse_sse_filter("agent_output,gate_result");
-        assert!(filter.accepts("agent_output"));
-        assert!(filter.accepts("gate_result"));
-        assert!(!filter.accepts("cfactor_update"));
+    fn projection_filter_respects_query_param() {
+        let filter = parse_projection_filter("user:me,topic:gate.verdict.emitted");
+        assert!(filter.accepts_user("me"));
+        assert!(filter.accepts_topic("gate.verdict.emitted"));
+        assert!(!filter.accepts_topic("agent.msg.chunk"));
     }
 
     #[test]
-    fn ws_subscription_message_parses() {
-        let msg = r#"{"subscribe":["agent_output","gate_result"]}"#;
-        let sub: Subscription = serde_json::from_str(msg).unwrap();
-        assert_eq!(sub.events.len(), 2);
+    fn projection_subscription_message_parses() {
+        let msg = r#"{"projection":"gate_pipeline","filter":{"user":"me"},"cursor":"0x11"}"#;
+        let sub: ProjectionSubscription = serde_json::from_str(msg).unwrap();
+        assert_eq!(sub.projection, "gate_pipeline");
     }
 }
 ```
@@ -295,18 +331,23 @@ mod tests {
 **Built:**
 - WebSocket route handler (`roko-serve/src/routes/ws.rs`)
 - SSE route handler (`roko-serve/src/routes/sse.rs`)
-- Event bus with publish-subscribe
+- Bus-backed transport scaffolding
 
 **Not yet complete:**
+- StateHub-backed projection registry and typed envelopes
+- Query-plus-stream projection endpoints
 - Bidirectional agent control via WebSocket (inject, pause, resume)
 - Spectre state endpoint (requires Spectre implementation)
-- Event coalescing (events sent raw without batching)
-- Reconnection ring buffer
+- Projection-delta coalescing
+- Projection cursor replay
 
 ---
 
 ## Cross-References
 
 - See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for REST API
+- See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) for the projection contract
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre state model
 - See [13-web-portal.md](./13-web-portal.md) for WebSocket consumption in the Portal
+- See [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for `Pulse`, `Bus`, `StateHub`, and `projection` vocabulary
+- See [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the canonical REF26 proposal

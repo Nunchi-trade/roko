@@ -3,8 +3,9 @@
 > **Abstract:** This document is the authoritative naming map for Roko's kernel vocabulary.
 > Use `Engram` for the durable record, `Pulse` for the ephemeral wire medium, `Substrate` for
 > storage, `Bus` for transport, `Topic` for routing, `TopicFilter` for subscription matching,
-> `Datum` for Engram-or-Pulse operator inputs, and `PulseSource` for transport-time producer
-> attribution. For the heuristic, falsifier, and worldview vocabulary used in learning
+> `Datum` for Engram-or-Pulse operator inputs, `PulseSource` for transport-time producer
+> attribution, and `StateHub` for the kernel projection layer that bridges Bus + Substrate to
+> consumer surfaces. For the heuristic, falsifier, and worldview vocabulary used in learning
 > refinements, see also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md). For the paper,
 > claim, and replication-ledger vocabulary used in research-to-runtime work, see also
 > [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md). For the plugin and SPI extension
@@ -25,7 +26,9 @@
 > [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md),
 > [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md),
 > [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md),
+> [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md),
 > [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md),
+> [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -129,6 +132,7 @@ crates directly.
 | `Pulse` | Ephemeral transport medium | Topic-addressed, sequence-bearing, ring-buffered, and not persisted by default. |
 | `Substrate` | Storage fabric | Persists Engrams and supports durable queries. |
 | `Bus` | Transport fabric | Publishes, subscribes, and replays Pulses by Topic. |
+| `StateHub` | Kernel projection layer | Hydrates named projections from Substrate, folds Bus deltas, and serves typed views to consumers. |
 | `Topic` | Routing handle | Dot-separated lowercase identifier such as `gate.verdict.emitted`. |
 | `TopicFilter` | Subscription and replay selector | Declarative matcher for Bus consumers. |
 | `Datum<'a>` | Either-medium operator input | `enum Datum<'a> { Engram(&'a Engram), Pulse(&'a Pulse) }`. |
@@ -153,6 +157,7 @@ crates directly.
 | `TenantCtx` | Tenant-scoped request context | Identity, role, quota, and audit information propagated through auth, `Substrate`, and control-plane spans. |
 | `TypedContext` | Structured situation payload | Domain-tagged key/value context passed to composers, gates, and heuristics so matching happens on typed fields instead of free-text parsing. |
 | `Custody` | Chain-of-custody record | Auditable record of who approved an action, which heuristics and claims influenced it, what simulation ran, and what witness or result was observed. |
+| `Projection` | Named live-updating view | A typed `State` plus `Delta` fold over Bus + Substrate that consumers query and subscribe to through StateHub. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -333,6 +338,7 @@ prefixes without coordination.
 | `SDK` | The four-layer Rust developer surface that lets Rust users start with a one-liner and descend only as far as builder, trait impl, or runtime impl work requires. |
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
+| `StateHub` | Kernel projection layer that turns Bus pulses and Substrate history into named consumer-facing views. |
 | `Prediction Error` | The residual between predicted and observed outcomes, published as `prediction.error.*` when it becomes a first-class runtime signal. |
 | `Profile` | Deployment-shape configuration preset selected by name rather than by building a different binary. |
 | `SecretStore` | Secret backend abstraction that keeps layered credential resolution off the main config path. |
@@ -363,3 +369,5 @@ prefixes without coordination.
 - [../19-deployment/INDEX.md](../19-deployment/INDEX.md) for deployment profiles, five shapes, and state portability
 - [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md) for layered secret resolution and shared-server credential handling
 - [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md) for the deployment-UX refinement proposal
+- [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the StateHub projection-layer proposal
+- [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md) for the interface-facing projection-layer contract

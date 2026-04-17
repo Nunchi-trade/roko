@@ -81,9 +81,9 @@ The important properties are:
 
 This is intentionally modeled on familiar-first agent UX: the user should be able to do something useful immediately, then deepen setup only when needed.
 
-## 4. Live Progress On The Bus
+## 4. Live Progress Through StateHub
 
-Users should not stare at a spinner while the agent works. Every surface should render the same live progress feed from the shared Bus and its emitted Pulses.
+Users should not stare at a spinner while the agent works. Every surface should render the same live progress feed, but REF26 makes the contract more specific: surfaces subscribe to shared `StateHub` projections that fold `Bus` Pulses together with durable `Substrate` state.
 
 The live feed should include:
 
@@ -94,7 +94,17 @@ The live feed should include:
 - Heuristic application notices when a belief affects the decision.
 - Profile activation notices when a bundle is installed, composed, or revalidated.
 
-The important design point is that this is one stream, not four different status systems. CLI prints it linearly, TUI renders it in panes, Chat interleaves it with conversation, and Web turns it into a real-time page. That keeps the user oriented when they move between surfaces mid-task.
+In practice, `watch` should compose from canonical projections such as:
+
+- `active_tasks` for task progress and ETA.
+- `agent_trails` for token chunks, tool banners, and current action.
+- `gate_pipeline` for rung status and pass/fail counts.
+- `recent_episodes` for completed or resumed work.
+- `cohort_health` for c-factor and roster context when work spans a fleet.
+
+The important design point is that this is one state model, not four different status systems. CLI prints it linearly, TUI renders it in panes, Chat interleaves it with conversation, and Web turns it into a real-time page. That keeps the user oriented when they move between surfaces mid-task.
+
+`watch` should therefore follow a `query + subscribe` pattern: fetch current state first, then fold projection deltas as they arrive. That is what makes surface handoff, replay, reconnect, and shareable sessions behave like one product instead of four shells around the same runtime. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
 
 ## 5. Checkpoints And Permissions
 
@@ -160,7 +170,7 @@ CLI remains the most direct automation surface. It should prioritize predictable
 
 ### TUI
 
-TUI should be a control surface, not a read-only dashboard. If the CLI can do it, the TUI should provide a binding or action for it. That includes replaying episodes, editing plans, adjusting thresholds, jumping between active sessions, and selecting or composing profiles with a visible collision summary.
+TUI should be a control surface, not a read-only dashboard. If the CLI can do it, the TUI should provide a binding or action for it. That includes replaying episodes, editing plans, adjusting thresholds, jumping between active sessions, and selecting or composing profiles with a visible collision summary. The TUI should consume the same in-process StateHub projections as the remote surfaces rather than maintaining a private dashboard-only state tree.
 
 ### Chat
 
@@ -168,7 +178,7 @@ Chat should support multi-agent interaction, live streaming, slash commands, and
 
 ### Web
 
-Web should behave like the browser counterpart to the same runtime state, not a separate product. The browser view should show active sessions, live progress, plans, episodes, heuristics, settings, and profile composition without inventing alternate semantics. The same `TypedContext` and `Custody` summary that CLI can inspect should be visible in the browser.
+Web should behave like the browser counterpart to the same runtime state, not a separate product. The browser view should show active sessions, live progress, plans, episodes, heuristics, settings, and profile composition without inventing alternate semantics. The same `TypedContext` and `Custody` summary that CLI can inspect should be visible in the browser, and the browser should consume the same named StateHub projections that the TUI and external dashboards read.
 
 ## 9. Related Refinements
 
@@ -182,4 +192,4 @@ Web should behave like the browser counterpart to the same runtime state, not a 
 
 ## 10. Implementation Notes
 
-This chapter is the canonical user-facing framing for REF23. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, and undo part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens.
+This chapter is the canonical user-facing framing for REF23. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `StateHub`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, and undo part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens.

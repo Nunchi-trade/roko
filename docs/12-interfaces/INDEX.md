@@ -1,18 +1,19 @@
 # Topic 12: Interfaces
 
-> CLI, HTTP API, TUI dashboard, Web Portal, Spectre creatures, sonification, and generative UI — every way an operator interacts with Roko's cognitive agents.
+> CLI, HTTP API, TUI dashboard, Web Portal, Spectre creatures, sonification, StateHub projections, and generative UI — every way an operator interacts with Roko's cognitive agents.
 
 ---
 
 ## Overview
 
-This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), chat-oriented interaction surfaces, the Web Portal, the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. REF23 makes the chapter's primary UX claim explicit: Roko has four surfaces — CLI, TUI, Chat, and Web — exposing one unified verb set over the same Bus-backed progress stream and the same durable session/episode state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md). REF24 adds the deployment-facing complement: those same surfaces should configure and observe the same binary across five shapes — laptop, single-server, container, clustered, and edge — through profile-aware config and standard control-plane endpoints. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md), [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md), and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md). REF25 adds the domain-specific-agent complement: onboarding and day-two control surfaces should let users install a domain profile, compose multiple profiles, inspect `TypedContext`, and review `Custody` for auditable actions. See [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [../02-agents/INDEX.md](../02-agents/INDEX.md), [../18-tools/INDEX.md](../18-tools/INDEX.md), and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md). All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, knowledge tiers, and domain-profile metadata).
+This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), chat-oriented interaction surfaces, the Web Portal, the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. REF23 makes the chapter's primary UX claim explicit: Roko has four surfaces — CLI, TUI, Chat, and Web — exposing one unified verb set over the same Bus-backed progress stream and the same durable session/episode state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md). REF24 adds the deployment-facing complement: those same surfaces should configure and observe the same binary across five shapes — laptop, single-server, container, clustered, and edge — through profile-aware config and standard control-plane endpoints. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md), [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md), and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md). REF25 adds the domain-specific-agent complement: onboarding and day-two control surfaces should let users install a domain profile, compose multiple profiles, inspect `TypedContext`, and review `Custody` for auditable actions. See [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [../02-agents/INDEX.md](../02-agents/INDEX.md), [../18-tools/INDEX.md](../18-tools/INDEX.md), and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md). REF26 adds StateHub as the kernel projection layer that lets TUI, Web, and external consumers share typed live views over Bus + Substrate. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md). All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, knowledge tiers, domain-profile metadata, and StateHub projections).
 
 **Key design principles:**
 - **Progressive disclosure**: Overview first, detail on demand
 - **One verb set, four surfaces**: `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, `connect`
 - **ROSEDUST everywhere**: One design language across TUI, Web, and CLI
 - **Real-time**: WebSocket and SSE feeds for live agent monitoring
+- **Shared projections**: StateHub gives TUI, Web, and external consumers the same typed live views
 - **Spectre as readout**: Every agent has a procedurally generated creature that encodes cognitive state
 - **No ending framing**: Spectres stay continuous; music reflects engagement, not lifecycle
 
@@ -43,6 +44,7 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 | 18 | [18-ux-innovation-proposals.md](./18-ux-innovation-proposals.md) | 7 UX innovations — Conversational Development, Time-Travel Debugging, Dream Journal, Agent Garden, Pair Programming with Affect, Collaborative Planning, Knowledge Map |
 | 19 | [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) | Four-layer Rust SDK — one-liner, builder, trait impl, runtime impl, typed errors, docs/examples discipline, `cargo roko`, macros, testing ergonomics, tracing, release compatibility |
 | 21 | [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) | REF23 canonical user-UX chapter — four surfaces, unified verb set, interactive first-run, live progress, checkpoints, undo, named/shareable sessions, accessibility, and domain-profile install/composition flows from REF25 |
+| 22 | [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) | REF26 canonical StateHub chapter — projection trait, canonical projections, query+subscribe, filters, transport-agnostic delivery, replay/snapshot/testing, and shared TUI/Web/external consumers |
 
 ---
 
@@ -121,3 +123,7 @@ REF25 adds the domain-profile install/composition framing; start with
 [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md),
 [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), and
 [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
+REF26 adds the StateHub projection layer; start with
+[22-statehub-projection-layer.md](./22-statehub-projection-layer.md),
+[../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and
+[tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).

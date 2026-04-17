@@ -6,8 +6,12 @@
 > connect, where they should connect but don't, and what new connections would produce the
 > highest leverage improvement. The earlier engine/event-bus proposal is now the promoted
 > kernel `Bus` trait at L0: the transport fabric beside `Substrate`, with `Topic`,
-> `TopicFilter`, and bounded replay on the Bus ring as the coordination vocabulary.
-> See also `tmp/refinements/03-bus-as-first-class.md`,
+> `TopicFilter`, and bounded replay on the Bus ring as the coordination vocabulary. REF26
+> adds `StateHub` as the typed projection layer between Bus + Substrate and consumer
+> surfaces, so Interfaces consume named projections instead of bespoke fanout paths. See
+> also `tmp/refinements/03-bus-as-first-class.md`,
+> `tmp/refinements/26-statehub-rearchitecture.md`,
+> and [22-statehub-projection-layer](../12-interfaces/22-statehub-projection-layer.md),
 > `tmp/refinements/09-phase-2-implications.md`, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
@@ -63,7 +67,7 @@ Substrate consumers or backends:
 | Dreams | Substrate scan remains the complete consolidation source | Bus subscription to `substrate.engram.stored` wakes Delta work reactively | Delta-speed can be threshold-triggered instead of fixed polling |
 | Coordination | Pheromones persist as Engrams in shared Substrates | `mesh.pheromone.deposited` and related Pulses alert nearby agents | Stigmergy becomes literal storage plus transport rather than custom plumbing |
 | Heartbeat | Tick history may still persist as Engrams when needed | `HeartbeatPolicy` publishes `heartbeat.{gamma,theta,delta}.tick` Pulses | Clock consumers subscribe by topic instead of importing a scheduler |
-| Interfaces | REST reads and durable writes project Substrate state | WebSocket and SSE streams project Bus subscriptions | `roko-serve` becomes a thin projection layer rather than a custom fanout path |
+| Interfaces | REST and query APIs hydrate StateHub projections from Substrate while Bus topics feed live deltas | WebSocket and SSE stream the same typed projections to TUI, web, audit, and analytics consumers | `roko-serve` becomes a StateHub consumer bridge rather than a custom fanout path |
 
 This overlay is the architecture-level summary of `tmp/refinements/09-phase-2-implications.md`.
 
@@ -227,6 +231,26 @@ Pulses on the Bus. The map below highlights the Phase-2 flows that REF09 clarifi
 | 16-Heartbeat | `heartbeat.gamma.tick`, `heartbeat.theta.tick`, `heartbeat.delta.tick` Pulses | Bus | 07-Conductor, 09-Daimon, 10-Dreams | Proposed |
 | 20-Tech Analysis | `Kind::Prediction` | Substrate | 05-Learning, 16-Heartbeat | Partial |
 
+### 3.4 StateHub Projection Flows
+
+REF26 promotes StateHub from a TUI helper to the consumer-facing projection layer that
+bridges Bus and Substrate. The same typed projection can hydrate from durable Engrams,
+listen for Bus-delivered deltas, and serve multiple consumers without each surface inventing
+its own fanout path.
+
+| Flow | Source | StateHub role | Consumer examples | Status |
+|---|---|---|---|---|
+| Hydration | Substrate | Builds initial `State` for a named projection from durable history | TUI, web UI, audit log, analytics backend | Proposed |
+| Live deltas | Bus | Folds topic-addressed Pulses into typed `Delta` updates | CLI, TUI, WebSocket, SSE, Grafana | Proposed |
+| Query + subscribe | StateHub registry | Returns the current projection snapshot and a cursor for catch-up | `roko-cli`, `roko-serve`, external dashboards | Proposed |
+| Fanout replacement | StateHub subscription API | Replaces per-surface bespoke state fanout with shared projection contracts | `12-Interfaces` surfaces and adapters | Proposed |
+
+Canonical projection names come from `tmp/refinements/26-statehub-rearchitecture.md`, the
+projection-layer doc in [22-statehub-projection-layer](../12-interfaces/22-statehub-projection-layer.md),
+and the glossary in [01-naming-and-glossary.md](./01-naming-and-glossary.md). Examples include
+`cohort_health`, `active_tasks`, `gate_pipeline`, `recent_episodes`, `heuristic_library`,
+`bus_stats`, and `substrate_stats`.
+
 ---
 
 ## 4. Trait Usage Map
@@ -278,7 +302,7 @@ transport alike.
 | 03-Composition | Scorer, Substrate | 00, 06 |
 | 04-Verification | Gate (self), Substrate | 04, 00 |
 | 05-Learning | Scorer, Policy (self) | 00, 05 |
-| 12-Interfaces | Substrate (read-only) | 00, 06 |
+| 12-Interfaces | StateHub projections over Bus + Substrate | 00, 06, 12 |
 | 16-Heartbeat | All six traits | 00, 03, 04, 05, 06, 07 |
 | 07-Conductor | Bus, Policy | 00, 05, 07 |
 
@@ -360,8 +384,8 @@ connection limits the system's self-improvement capability. Feasibility measures
 existing code can be reused.
 
 REF09 changes the shape of several entries: Chain, Dreams, Coordination, Heartbeat, and
-Interfaces no longer need bespoke side channels or new trait families. They reduce to Bus
-topics, Bus projections, and backend swaps on the existing two-fabric kernel.
+Interfaces no longer need bespoke side channels or new trait families. They reduce to
+StateHub projections, Bus topics, and backend swaps on the existing two-fabric kernel.
 
 | # | Missing Integration | From → To | Impact | Feasibility | LOC Est. | Tier |
 |---|---|---|---|---|---|---|

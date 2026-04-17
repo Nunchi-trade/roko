@@ -1,6 +1,6 @@
 # HTTP API — `roko-serve`
 
-> The `roko-serve` crate provides the HTTP server exposing REST endpoints, WebSocket streaming, and SSE event feeds for remote control of Roko.
+> The `roko-serve` crate provides the HTTP server exposing REST endpoints plus StateHub-backed WebSocket and SSE projection streams for remote control of Roko.
 
 
 > **Implementation**: Scaffold
@@ -13,9 +13,9 @@
 
 ## Abstract
 
-`roko-serve` is the HTTP server crate that exposes the Roko cognitive agent framework as a REST API with real-time streaming. It is started via `roko serve` or `roko daemon --start` and provides endpoints for agent management, plan orchestration, PRD lifecycle, knowledge queries, provider monitoring, and real-time event streaming via WebSocket and SSE.
+`roko-serve` is the HTTP server crate that exposes the Roko cognitive agent framework as a REST API with real-time streaming. It is started via `roko serve` or `roko daemon --start` and provides endpoints for agent management, plan orchestration, PRD lifecycle, knowledge queries, provider monitoring, and StateHub projection delivery via WebSocket and SSE.
 
-The server is built on `axum` (Tokio-based async HTTP framework), uses `tower-http` for middleware (CORS, tracing), and provides an event bus for broadcasting internal events to connected clients. The architecture follows the `ServerBuilder` pattern, allowing configuration of auth, CORS origins, and event sources before binding.
+The server is built on `axum` (Tokio-based async HTTP framework), uses `tower-http` for middleware (CORS, tracing), and should expose the kernel's two-fabric reality directly: writes land in `Substrate`, live changes travel on the `Bus`, and remote consumers read typed `StateHub` projections instead of bespoke per-surface fanout. The architecture follows the `ServerBuilder` pattern, allowing configuration of auth, CORS origins, and projection transports before binding.
 
 `roko-serve` sits at the Application layer and consumes the same runtime abstractions that `roko-cli` uses. The `CliRuntime` trait bridges the server to the CLI's `run_once`, status, and dashboard functions. This means the HTTP API drives the exact same cognitive loop as the CLI — same Engram pipeline, same gates, same learning.
 
@@ -31,6 +31,8 @@ not fork the core runtime. See [../19-deployment/INDEX.md](../19-deployment/INDE
 [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md),
 and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
 
+REF26 adds the missing middle layer: HTTP clients should usually talk to `StateHub` projections, not raw internal Pulses. `roko-serve` therefore becomes the transport binding for `query + subscribe` over named projections such as `active_tasks`, `gate_pipeline`, `agent_trails`, `cohort_health`, and `cost_meter`. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
+
 ---
 
 ## Surface Parity Contract
@@ -42,7 +44,7 @@ and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux
 | `ask` | `POST /api/run` plus stream subscription | Single-turn query with optional live output. |
 | `plan` | `POST /api/plans` or plan-generation route | Proposal without mandatory execution. |
 | `do` | `POST /api/plans/:id/run` or equivalent task execution route | Starts real work. |
-| `watch` | WebSocket or SSE subscription with cursors | Progress is streamed, not polled. |
+| `watch` | `GET /projections/:name` plus `GET /projections/:name/stream` | Progress is queried, then streamed from typed projections with cursors. |
 | `inspect` | Episode, Engram, heuristic, and agent detail reads | Durable artifact drill-down. |
 | `replay` | Episode replay endpoint family | Re-run a prior episode from stored inputs and context. |
 | `learn` | Learning and heuristic endpoints | Curate heuristics, playbooks, experiments, and calibration state. |
@@ -78,6 +80,30 @@ shapes themselves. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md) an
 
 ---
 
+## Projection Surface Contract
+
+REF26 makes projections the canonical live-read surface for remote clients:
+
+```text
+GET /projections/cohort_health
+GET /projections/cohort_health?filter=tenant:acme
+GET /projections/active_tasks?filter=user:me
+GET /projections/gate_pipeline/stream
+GET /projections/agent_trails/stream?filter=lineage:<engram-hash>
+```
+
+The rule is:
+
+- `GET /projections/:name` returns the current `State` for a named projection.
+- `GET /projections/:name/stream` upgrades to WebSocket or SSE and emits typed `Delta` envelopes.
+- Filters execute server-side by tenant, role, user, lineage, topic, or time range.
+- Each envelope carries a cursor so reconnecting clients resume per projection rather than per raw socket.
+- Projection updates are trace-linked back to the causing `Engram` or `Pulse`.
+
+This keeps `roko-serve` small: command verbs mutate the runtime; projections report the runtime.
+
+---
+
 ## Architecture
 
 ```
@@ -93,13 +119,14 @@ shapes themselves. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md) an
 │  └────────────────��────────────────────────┘ │
 ├──────────────────────────────────────────────┤
 │              AppState                        │
-│  ┌────────────┬──────────┬────────────────┐ │
-│  │ SignalStore │ EventBus │ RokoConfig     │ │
-│  │ (Substrate)│ (pubsub) │ (hot-reloadable│ │
-│  └────────────┴──────��───┴────────────────┘ │
+│  ┌───────────┬────────┬───────────┬───────┐ │
+│  │ Substrate │  Bus   │ StateHub  │ Config│ │
+│  │ Engrams   │ Pulses │ projections│      │ │
+│  └───────────┴────────┴───────────┴───────┘ │
 ├─────────��─────────────────────────────────��──┤
 │  CliRuntime (bridge to roko-cli)             │
 │  TemplateAgentDispatcher                     │
+│  Projection transport bindings               │
 │  EventSource dispatch loop                   │
 │  Feedback loop                               │
 └──────────────────────────────���───────────────┘
@@ -107,7 +134,7 @@ shapes themselves. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md) an
 
 ### Route Groups
 
-The router is assembled in `roko-serve/src/routes/mod.rs` from 12 route modules:
+The router is assembled in `roko-serve/src/routes/mod.rs` from route modules including:
 
 | Module | Prefix | Purpose |
 |---|---|---|
@@ -120,10 +147,11 @@ The router is assembled in `roko-serve/src/routes/mod.rs` from 12 route modules:
 | `learning` | `/api/learning` | Episodes, routing, experiments |
 | `config` | `/api/config` | Configuration management |
 | `templates` | `/api/templates` | Agent templates |
-| `subscriptions` | `/api/subscriptions` | Event subscriptions |
+| `subscriptions` | `/api/subscriptions` | Compatibility route family; should resolve to named projection subscriptions |
+| `projections` | `/projections/*` | Query current projection state and subscribe to typed deltas |
 | `deployments` | `/api/deployments` | Cloud deployments |
-| `sse` | `/api/sse` | Server-Sent Events stream |
-| `ws` | `/ws/*` | WebSocket endpoints |
+| `sse` | `/api/sse` | Server-Sent Events binding for projection streams |
+| `ws` | `/ws/*` | WebSocket binding for projection streams and bidirectional controls |
 | `webhooks` | `/webhooks/*` | Incoming webhook handlers |
 
 ---
@@ -284,24 +312,22 @@ and cluster operators all exercise the same runtime behavior.
 
 ---
 
-## Event Bus
+## StateHub Projection Layer
 
-The server maintains an internal event bus (`roko-serve/src/event_bus.rs`) for broadcasting events to connected WebSocket and SSE clients. The bus uses a publish-subscribe pattern:
+`roko-serve` should treat StateHub as the authoritative live-read boundary:
 
-```rust
-pub enum ServerEvent {
-    AgentSpawned { agent_id: String },
-    AgentOutput { agent_id: String, text: String },
-    AgentExited { agent_id: String, code: i32 },
-    GateResult { plan: String, gate: String, passed: bool },
-    PlanPhaseChange { plan: String, phase: String },
-    WebhookReceived { signal: Signal },
-    CFactorUpdate { value: f64 },
-    // ... more event types
-}
-```
+- The `Bus` remains the raw transport fabric for Pulses inside the runtime.
+- `StateHub` subscribes to those Topics, folds them with durable `Substrate` reads, and computes typed projection state.
+- HTTP, WebSocket, and SSE then expose the projection registry rather than documenting raw transport internals as the public contract.
 
-Clients subscribe to event categories. On reconnection, the server replays recent events from a ring buffer.
+For example:
+
+- `cohort_health` serves c-factor, roster, and delivery metrics to dashboards.
+- `active_tasks` serves progress, ETA, and operator-facing task state to CLI, TUI, Chat, and Web `watch`.
+- `gate_pipeline` serves rung counts and failures to CI-style views.
+- `agent_trails` serves per-agent live timelines to chat and replay tooling.
+
+One-off endpoint families may still exist, but they should be treated as compatibility shims or convenience aliases over the same projection registry.
 
 ---
 
@@ -313,9 +339,9 @@ The `TemplateAgentDispatcher` (`roko-serve/src/dispatch.rs`) monitors the Substr
 2. Matches the Engram to a subscription rule
 3. Instantiates the appropriate agent template
 4. Runs the cognitive loop
-5. Persists results and publishes events
+5. Persists results and publishes Pulses plus final Engrams
 
-Built-in event sources (cron scheduler, file watcher) are started automatically from `roko.toml` configuration.
+Built-in event sources (cron scheduler, file watcher) are started automatically from `roko.toml` configuration. As durable task Engrams are created and Pulses are emitted during execution, StateHub folds them into `active_tasks`, `recent_episodes`, and `agent_trails` so every consumer sees the same task state.
 
 ---
 
@@ -323,8 +349,8 @@ Built-in event sources (cron scheduler, file watcher) are started automatically 
 
 **Built (scaffold):**
 - Server framework (axum, CORS, auth middleware, secret scrubbing)
-- Route structure (all 12 modules exist)
-- Event bus with pub/sub
+- Core route structure
+- Bus-backed streaming internals
 - Template agent dispatcher with dispatch loop
 - Cron and file-watch event sources
 - Deployment backends (Railway, manual)
@@ -332,6 +358,8 @@ Built-in event sources (cron scheduler, file watcher) are started automatically 
 
 **Not yet complete:**
 - Full implementation of all route handlers (many return placeholder responses)
+- StateHub projection registry and typed transport bindings
+- Server-side projection filters, replay cursors, and projection auth scoping
 - Mesh endpoints (requires Agent Mesh, Tier 5)
 - Spectre state endpoint (requires Spectre implementation)
 - WebSocket bidirectional control
@@ -341,6 +369,9 @@ Built-in event sources (cron scheduler, file watcher) are started automatically 
 ## Cross-References
 
 - See [06-websocket-streaming.md](./06-websocket-streaming.md) for real-time streaming
+- See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) for the projection contract
 - See [00-cli-overview.md](./00-cli-overview.md) for `roko serve` command
+- See [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for `Pulse`, `Bus`, `StateHub`, and `projection` terminology
 - See topic [01-orchestration](../01-orchestration/INDEX.md) for plan execution
 - See topic [19-deployment](../19-deployment/INDEX.md) for cloud deployment
+- See [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) for the canonical REF26 proposal

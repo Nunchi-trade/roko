@@ -85,6 +85,14 @@ chain-of-custody record for auditable actions. Start with
 [`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
 [`18-tools/05-tool-profiles.md`](18-tools/05-tool-profiles.md), and
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/26-statehub-rearchitecture.md` promotes `StateHub` from a TUI helper to the
+kernel projection layer that folds Bus Pulses and Substrate state into typed, filterable,
+replayable views for every surface. Start with
+[`12-interfaces/22-statehub-projection-layer.md`](12-interfaces/22-statehub-projection-layer.md),
+[`12-interfaces/05-http-api-roko-serve.md`](12-interfaces/05-http-api-roko-serve.md),
+[`12-interfaces/06-websocket-streaming.md`](12-interfaces/06-websocket-streaming.md),
+[`00-architecture/24-cross-section-integration-map.md`](00-architecture/24-cross-section-integration-map.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
 which primitives are genuinely new, which are integrations of prior art, and which claims
 deserve publication-grade evidence. Start with
@@ -149,7 +157,7 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
 - [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, StateHub projection layer, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence
