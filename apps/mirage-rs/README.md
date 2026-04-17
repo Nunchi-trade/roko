@@ -258,6 +258,16 @@ By default, validation is relaxed (same as Anvil's default behavior) so you can 
 
 Subsystems default to off even when compiled in — you must set the flags explicitly when you want them active.
 
+### Persistence options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--state-dir` | `.roko/state/` | Directory for snapshot files |
+| `--snapshot-interval-secs` | `30` | Seconds between periodic snapshots |
+| `--no-persist` | `false` | Disable disk persistence entirely |
+
+See [State persistence](#state-persistence) below for a full walkthrough.
+
 ### Resource profiles
 
 | Flag | Default | Description |
@@ -1875,6 +1885,112 @@ On startup, mirage writes two files:
 
 Both are cleaned up on shutdown. Use the status file for CI health checks or orchestrator readiness probes.
 
+## State persistence
+
+mirage-rs can persist all in-memory state to a single JSON snapshot file so that data survives process restarts. This is especially useful on platforms like Railway where deploys wipe ephemeral filesystem state.
+
+### What is persisted
+
+| Persisted | Skipped (rebuilt on startup) |
+|---|---|
+| Dirty accounts (balances, nonces, code, storage) | Read cache (LRU+TTL, re-fetched from upstream) |
+| Local transactions, receipts, blocks | Event bus channels (reconnected) |
+| Impersonated accounts | Speculative executor cache |
+| Watch list and unwatch list | EVM revert snapshots |
+| Deployed contract bytecode | Upstream RPC handle |
+| Fork metadata (block number, chain ID, timestamp) | |
+| Knowledge store entries (insights) | HDC/HNSW indices (recomputed from entries) |
+| Pheromone field (stigmergic signals) | |
+| Agent registry (identities, traces, stats) | |
+| Task store (all tasks + state) | |
+| Prediction store (sessions + claims) | |
+
+### How it works
+
+1. **Periodic snapshots**: A background task captures state every `--snapshot-interval-secs` seconds (default 30). Serialization happens outside any lock, so RPC serving is never blocked.
+2. **Atomic writes**: Each snapshot is written to a `.tmp` file, then renamed to the final path. If the process crashes mid-write, the previous valid snapshot is preserved.
+3. **Shutdown snapshot**: On graceful shutdown (SIGTERM or Ctrl+C), a final snapshot is written before the process exits.
+4. **Startup restore**: On startup, mirage looks for a snapshot in `--state-dir`. If found, it restores all state and sets the block number so the targeted follower catches up from where it left off.
+
+The snapshot file is plain JSON (~5-50 KB for typical usage, larger with many deployed contracts), readable with `cat` or `jq` for debugging.
+
+### Quick example
+
+```bash
+# Start mirage with persistence (default: .roko/state/, 30s interval)
+mirage-rs --rpc-url https://ethereum-rpc.publicnode.com \
+  --enable-hdc --enable-knowledge --enable-stigmergy
+
+# Seed some data (agents, insights, deploy contracts, etc.)
+# ...
+
+# Kill and restart — all state is preserved
+kill $(cat /tmp/mirage-8545.pid)
+mirage-rs --rpc-url https://ethereum-rpc.publicnode.com \
+  --enable-hdc --enable-knowledge --enable-stigmergy
+# Logs will show: "restored snapshot from .roko/state"
+```
+
+### Customizing persistence
+
+```bash
+# Custom state directory and faster snapshots
+mirage-rs --state-dir /data/mirage --snapshot-interval-secs 10
+
+# Disable persistence entirely (useful for tests)
+mirage-rs --no-persist
+
+# Inspect a snapshot file
+jq '.fork.local_block_number, .chain.knowledge.entries | length' \
+  .roko/state/mirage-snapshot.json
+```
+
+### Deploying on Railway
+
+Railway wipes the filesystem on each deploy, but you can persist state using a Railway volume:
+
+1. **Create a volume** in the Railway dashboard, mounted at `/workspace/.roko` (or any path).
+2. **Set the state dir** to point inside the volume:
+
+```bash
+# In your Railway service start command or Dockerfile CMD:
+mirage-rs --host 0.0.0.0 --port 8545 \
+  --enable-hdc --enable-knowledge --enable-stigmergy \
+  --state-dir /workspace/.roko/state \
+  --snapshot-interval-secs 15
+```
+
+3. On deploy, mirage picks up the previous snapshot from the volume and resumes from where it left off. Seeded agents, insights, pheromones, tasks, deployed contracts, and account state all survive.
+
+Railway gives 10 seconds of SIGTERM grace on shutdown — the final snapshot is written within that window. With a 15-second interval, worst-case data loss is 15 seconds of state (and that state is typically recoverable since block data can be replayed from upstream).
+
+### Docker Compose
+
+The `docker/docker-compose.yml` already mounts a named volume. Add persistence flags to the mirage service:
+
+```yaml
+services:
+  mirage:
+    # ...existing config...
+    volumes:
+      - mirage-state:/workspace/.roko
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8545"
+      - "--enable-hdc"
+      - "--enable-knowledge"
+      - "--enable-stigmergy"
+      - "--state-dir"
+      - "/workspace/.roko/state"
+      - "--snapshot-interval-secs"
+      - "15"
+
+volumes:
+  mirage-state:
+```
+
 ## Anvil compatibility at a glance
 
 | Capability | Anvil | mirage-rs |
@@ -1892,3 +2008,4 @@ Both are cleaned up on shutdown. Use the status file for CI health checks or orc
 | ERC-20 balance slot detection + mint | No | Yes (`mirage_mintERC20`) |
 | Memory pressure management | No | Yes (tiered eviction/demotion) |
 | Resource profiles | No | Yes (`micro` / `standard` / `power`) |
+| State persistence across restarts | No (`--dump-state` file only) | Yes (periodic atomic JSON snapshots) |

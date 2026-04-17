@@ -43,6 +43,36 @@ First build pulls the Rust toolchain and warms the cargo registry/target caches
 | `GF_SECURITY_ADMIN_USER` | grafana | `admin` | Grafana admin user. |
 | `GF_SECURITY_ADMIN_PASSWORD` | grafana | `admin` | Grafana admin password — override in prod. |
 
+## State persistence
+
+mirage-rs supports periodic atomic snapshots of all in-memory state (dirty accounts, deployed contracts, chain extension data) to a single JSON file. This lets seeded data survive container restarts.
+
+To enable persistence in Docker Compose, add a named volume and pass `--state-dir`:
+
+```yaml
+services:
+  mirage:
+    volumes:
+      - mirage-state:/workspace/.roko
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8545"
+      - "--enable-hdc"
+      - "--enable-knowledge"
+      - "--enable-stigmergy"
+      - "--state-dir"
+      - "/workspace/.roko/state"
+      - "--snapshot-interval-secs"
+      - "15"
+
+volumes:
+  mirage-state:
+```
+
+See `apps/mirage-rs/README.md` > "State persistence" for full details on what is persisted, Railway deployment, and configuration options.
+
 ## Healthcheck
 
 `mirage` has a healthcheck that invokes `mirage-rs healthcheck --url http://127.0.0.1:8545`,

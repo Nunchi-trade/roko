@@ -465,6 +465,7 @@ pub async fn spawn_mirage_test_instance(
     command
         .arg("--port")
         .arg(port.to_string())
+        .arg("--no-persist")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command.env("BARDO_AVAILABLE_MEMORY_BYTES", "8589934592");

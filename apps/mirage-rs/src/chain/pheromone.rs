@@ -69,7 +69,7 @@ impl PheromoneKind {
 pub struct PheromoneId(pub u64);
 
 /// A single pheromone deposit.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pheromone {
     /// Unique id within the field.
     pub id: PheromoneId,
@@ -278,6 +278,39 @@ impl PheromoneField {
     #[must_use]
     pub fn get(&self, id: PheromoneId) -> Option<&Pheromone> {
         self.pheromones.get(&id)
+    }
+}
+
+/// Serialisable snapshot of a [`PheromoneField`] for disk persistence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PheromoneFieldSnapshot {
+    /// All live pheromones.
+    pub pheromones: Vec<Pheromone>,
+    /// Monotonic id counter.
+    pub next_id: u64,
+}
+
+impl PheromoneField {
+    /// Captures a serialisable snapshot of the field.
+    #[must_use]
+    pub fn snapshot(&self) -> PheromoneFieldSnapshot {
+        let mut pheromones: Vec<Pheromone> = self.pheromones.values().cloned().collect();
+        pheromones.sort_by_key(|p| p.id);
+        PheromoneFieldSnapshot {
+            pheromones,
+            next_id: self.next_id,
+        }
+    }
+
+    /// Restores a field from a snapshot.
+    #[must_use]
+    pub fn from_snapshot(snap: PheromoneFieldSnapshot, prune_threshold: f32) -> Self {
+        let pheromones = snap.pheromones.into_iter().map(|p| (p.id, p)).collect();
+        Self {
+            pheromones,
+            next_id: snap.next_id,
+            prune_threshold,
+        }
     }
 }
 

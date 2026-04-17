@@ -14,6 +14,7 @@ use mirage_rs::{
     ClassificationConfig, DiffClassifier, MirageError,
     events::MirageTelemetryEvent,
     fork::{ForkState, HybridDB, MirageFork},
+    persist,
     provider::UpstreamRpc,
     replay::{FollowerConfig, TargetedFollower},
     resources::{MirageMode, Profile, ResourceModel},
@@ -101,6 +102,15 @@ struct Cli {
     #[cfg(feature = "chain")]
     #[arg(long, default_value_t = 100_000)]
     chain_hnsw_threshold: usize,
+    /// Interval in seconds between periodic state snapshots (default 30).
+    #[arg(long, default_value_t = 30)]
+    snapshot_interval_secs: u64,
+    /// Directory for persistent state snapshots (default `.roko/state/`).
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// Disable disk persistence entirely.
+    #[arg(long, default_value_t = false)]
+    no_persist: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -185,7 +195,40 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         Profile::from(cli.profile),
         Duration::from_secs(cli.cache_ttl_secs),
     );
-    let head = {
+    // --- Persistence: resolve state directory and load prior snapshot ---
+    let state_dir = cli
+        .state_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".roko/state"));
+    let loaded_snapshot = if cli.no_persist {
+        None
+    } else {
+        match persist::load_snapshot(&state_dir) {
+            Ok(Some(snap)) => {
+                tracing::info!(
+                    version = snap.version,
+                    created_at = snap.created_at,
+                    block = snap.fork.local_block_number,
+                    "restored snapshot from {}",
+                    state_dir.display(),
+                );
+                Some(snap)
+            }
+            Ok(None) => {
+                tracing::info!("no prior snapshot found in {}", state_dir.display());
+                None
+            }
+            Err(e) => {
+                tracing::warn!("failed to load snapshot, starting fresh: {e}");
+                None
+            }
+        }
+    };
+
+    let head = if let Some(ref snap) = loaded_snapshot {
+        // Use the snapshot's block number so the follower catches up from there.
+        snap.fork.local_block_number
+    } else {
         let upstream = Arc::clone(&upstream);
         let require_probe = cli.rpc_url.is_some();
         tokio::task::spawn_blocking(move || resolve_initial_head(&upstream, require_probe))
@@ -207,6 +250,11 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     fork.strict_balance = cli.strict_balance;
     fork.verify_signatures = cli.verify_signatures;
 
+    // Apply fork snapshot if one was loaded.
+    if let Some(ref snap) = loaded_snapshot {
+        persist::apply_fork_snapshot(&mut fork, snap.fork.clone());
+    }
+
     let mode = MirageMode::from(cli.mode);
     let telemetry_bus = EventBus::<MirageTelemetryEvent>::new(TELEMETRY_BUS_CAPACITY);
     let mirage = MirageFork::with_telemetry(fork, resource_model, mode, telemetry_bus.sender());
@@ -214,7 +262,7 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     let bind = format!("{}:{}", cli.host, cli.port);
 
     #[cfg(feature = "chain")]
-    let (addr, handle) = {
+    let (addr, handle, chain_ctx_for_persist) = {
         let toggles = mirage_rs::chain_rpc::ChainToggles {
             hdc: cli.enable_hdc,
             knowledge: cli.enable_knowledge,
@@ -222,10 +270,19 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         };
         if toggles.any_enabled() {
             let chain_ctx = {
-                let mut ctx = mirage_rs::chain_rpc::ChainContext::with_hnsw(
-                    toggles,
-                    cli.chain_hnsw_threshold,
-                );
+                // Restore from snapshot if available, otherwise create fresh.
+                let mut ctx = if let Some(chain_snap) = loaded_snapshot
+                    .as_ref()
+                    .and_then(|s| s.chain.clone())
+                {
+                    tracing::info!("restoring chain context from snapshot");
+                    persist::chain_context_from_snapshot(chain_snap, cli.chain_hnsw_threshold)
+                } else {
+                    mirage_rs::chain_rpc::ChainContext::with_hnsw(
+                        toggles,
+                        cli.chain_hnsw_threshold,
+                    )
+                };
                 // Install subscription buses so WebSocket streaming (/api/ws) and
                 // JSON-RPC chain_subscribe* methods are available.
                 #[cfg(feature = "roko")]
@@ -244,18 +301,21 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
                 hnsw_threshold = cli.chain_hnsw_threshold,
                 "chain extensions enabled"
             );
-            mirage_rs::rpc::start_rpc_server_with_chain(
+            let persist_ctx = std::sync::Arc::clone(&chain_ctx);
+            let (addr, handle) = mirage_rs::rpc::start_rpc_server_with_chain(
                 &bind,
                 mirage.clone(),
                 shutdown_tx.clone(),
                 chain_ctx,
             )
             .await
-            .with_context(|| format!("failed to bind {bind}"))?
+            .with_context(|| format!("failed to bind {bind}"))?;
+            (addr, handle, Some(persist_ctx))
         } else {
-            start_rpc_server(&bind, mirage.clone(), shutdown_tx.clone())
+            let (addr, handle) = start_rpc_server(&bind, mirage.clone(), shutdown_tx.clone())
                 .await
-                .with_context(|| format!("failed to bind {bind}"))?
+                .with_context(|| format!("failed to bind {bind}"))?;
+            (addr, handle, None)
         }
     };
 
@@ -297,6 +357,31 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
 
     write_artifacts(addr.port(), cli.chain_id).context("failed to write startup artifacts")?;
     tracing::info!("mirage ready port={} chain={}", addr.port(), cli.chain_id);
+
+    // --- Spawn periodic persistence loop ---
+    if !cli.no_persist {
+        let interval = Duration::from_secs(cli.snapshot_interval_secs);
+        tracing::info!(
+            interval_secs = cli.snapshot_interval_secs,
+            dir = %state_dir.display(),
+            "persistence loop started"
+        );
+        #[cfg(feature = "chain")]
+        persist::spawn_persistence_loop(
+            mirage.clone(),
+            chain_ctx_for_persist.clone(),
+            state_dir.clone(),
+            interval,
+            shutdown_tx.subscribe(),
+        );
+        #[cfg(not(feature = "chain"))]
+        persist::spawn_persistence_loop(
+            mirage.clone(),
+            state_dir.clone(),
+            interval,
+            shutdown_tx.subscribe(),
+        );
+    }
 
     if let Some(timeout_secs) = cli.watchdog_timeout {
         let mirage = mirage.clone();
@@ -373,6 +458,31 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         }
     }
     drop(shutdown_guard);
+
+    // --- Final snapshot on shutdown ---
+    if !cli.no_persist {
+        tracing::info!("writing final snapshot before exit");
+        #[cfg(feature = "chain")]
+        {
+            let snap = match chain_ctx_for_persist.as_ref() {
+                Some(ctx) => {
+                    let chain = ctx.read();
+                    persist::capture_snapshot(&mirage, Some(&*chain))
+                }
+                None => persist::capture_snapshot(&mirage, None),
+            };
+            if let Err(e) = persist::write_snapshot(&snap, &state_dir) {
+                tracing::warn!("final snapshot failed: {e}");
+            }
+        }
+        #[cfg(not(feature = "chain"))]
+        {
+            let snap = persist::capture_snapshot(&mirage);
+            if let Err(e) = persist::write_snapshot(&snap, &state_dir) {
+                tracing::warn!("final snapshot failed: {e}");
+            }
+        }
+    }
 
     cleanup_artifacts(addr.port());
     handle.stop().context("failed to stop RPC server")?;

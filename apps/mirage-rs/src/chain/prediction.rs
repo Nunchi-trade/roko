@@ -527,6 +527,49 @@ fn compute_difficulty(interval_width: f64, sample_count: u64, domain_stddev: f64
     category_variance * novelty * tightness
 }
 
+/// Serialisable snapshot of a [`PredictionStore`] for disk persistence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PredictionStoreSnapshot {
+    /// All sessions.
+    pub sessions: Vec<PredictionSession>,
+    /// All claims.
+    pub claims: Vec<PredictionClaim>,
+    /// Monotonic session id counter.
+    pub next_session_id: u64,
+    /// Monotonic claim id counter.
+    pub next_claim_id: u64,
+}
+
+impl PredictionStore {
+    /// Captures a serialisable snapshot of the store.
+    #[must_use]
+    pub fn snapshot(&self) -> PredictionStoreSnapshot {
+        let mut sessions: Vec<PredictionSession> = self.sessions.values().cloned().collect();
+        sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut claims: Vec<PredictionClaim> = self.claims.values().cloned().collect();
+        claims.sort_by(|a, b| a.id.cmp(&b.id));
+        PredictionStoreSnapshot {
+            sessions,
+            claims,
+            next_session_id: self.next_session_id,
+            next_claim_id: self.next_claim_id,
+        }
+    }
+
+    /// Restores a store from a snapshot.
+    #[must_use]
+    pub fn from_snapshot(snap: PredictionStoreSnapshot) -> Self {
+        let sessions = snap.sessions.into_iter().map(|s| (s.id.clone(), s)).collect();
+        let claims = snap.claims.into_iter().map(|c| (c.id.clone(), c)).collect();
+        Self {
+            sessions,
+            claims,
+            next_session_id: snap.next_session_id,
+            next_claim_id: snap.next_claim_id,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
