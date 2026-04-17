@@ -1,0 +1,17 @@
+name: tui-parity dry-run
+
+on:
+  pull_request:
+    paths:
+      - "tmp/tui-parity/**"
+      - "tmp/ux-followup-runner/**"
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dry-run tui-parity runner
+        run: bash tmp/tui-parity/run-tui-parity.sh --dry-run
+      - name: dry-run ux-followup runner
+        run: bash tmp/ux-followup-runner/run-ux-followup.sh --dry-run
