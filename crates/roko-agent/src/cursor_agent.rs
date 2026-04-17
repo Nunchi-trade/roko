@@ -44,13 +44,18 @@ use crate::agent::{Agent, AgentResult};
 #[cfg(test)]
 use crate::http::HttpPostError;
 use crate::http::{HttpPoster, ReqwestPoster};
+use crate::streaming::{StreamAccumulator, StreamChunk, parse_sse_line};
+use crate::tool_loop::{LlmBackend, LlmError};
+use crate::translate::{BackendResponse, RenderedTools, SessionState};
 use crate::usage::Usage;
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 /// Default Cursor ACP endpoint host.
 pub const DEFAULT_BASE_URL: &str = "https://api.cursor.sh";
@@ -107,6 +112,13 @@ struct PromptRequest<'a> {
     protocol: &'a str,
     model: &'a str,
     prompt: RequestPrompt<'a>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StreamResponseMetadata {
+    response_id: Option<String>,
+    session_id: Option<String>,
+    thread_id: Option<String>,
 }
 
 // ─── CursorAgent ───────────────────────────────────────────────────────────
@@ -232,6 +244,10 @@ impl CursorAgent {
         format!("{}/v1/prompt", self.base_url)
     }
 
+    fn chat_completion_endpoint(&self) -> String {
+        format!("{}/v1/chat/completions", self.base_url)
+    }
+
     fn headers(&self) -> Vec<(String, String)> {
         let mut headers = vec![
             (
@@ -246,6 +262,112 @@ impl CursorAgent {
         ];
         headers.extend(self.extra_headers.iter().cloned());
         headers
+    }
+
+    fn build_chat_completion_body(
+        &self,
+        messages: &[Value],
+        tools: &RenderedTools,
+        stream: bool,
+    ) -> Result<Vec<u8>, LlmError> {
+        let RenderedTools::JsonArray(tools) = tools else {
+            return Err(LlmError::Backend("expected json tool array".into()));
+        };
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+        });
+        if stream && let Some(body_obj) = body.as_object_mut() {
+            body_obj.insert("stream".to_string(), Value::Bool(true));
+        }
+
+        serde_json::to_vec(&body).map_err(|err| LlmError::Backend(format!("serialize: {err}")))
+    }
+
+    fn capture_stream_metadata(line: &[u8], metadata: &mut StreamResponseMetadata) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches(['\r', '\n']);
+        let Some(line) = line.strip_prefix("data:").map(str::trim_start) else {
+            return;
+        };
+        if line.is_empty() || line == "[DONE]" {
+            return;
+        }
+
+        let Ok(json) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+
+        if let Some(response_id) = json.get("id").and_then(Value::as_str) {
+            metadata.response_id = Some(response_id.to_string());
+        }
+        if let Some(session_id) = json.get("session_id").and_then(Value::as_str) {
+            metadata.session_id = Some(session_id.to_string());
+        }
+        if let Some(thread_id) = json.get("thread_id").and_then(Value::as_str) {
+            metadata.thread_id = Some(thread_id.to_string());
+        }
+    }
+
+    fn push_stream_line(
+        line: &[u8],
+        accumulator: &mut StreamAccumulator,
+        event_tx: &mpsc::UnboundedSender<StreamChunk>,
+    ) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            return;
+        }
+
+        if let Some(chunk) = parse_sse_line(line) {
+            accumulator.push(chunk.clone());
+            let _ = event_tx.send(chunk);
+            return;
+        }
+
+        if let Some(data) = line.strip_prefix("data:").map(str::trim_start)
+            && !data.is_empty()
+            && data != "[DONE]"
+        {
+            tracing::warn!("dropping malformed Cursor SSE frame: {}", data);
+        }
+    }
+
+    fn stream_response_to_json(
+        response: crate::chat_types::ChatResponse,
+        metadata: StreamResponseMetadata,
+    ) -> Result<Value, LlmError> {
+        let message = response
+            .raw_assistant_message
+            .clone()
+            .unwrap_or_else(|| response.as_assistant_message());
+        let message = serde_json::to_value(message)
+            .map_err(|err| LlmError::Backend(format!("serialize streamed response: {err}")))?;
+
+        let mut json = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason_to_wire(&response.finish_reason),
+            }],
+            "usage": usage_to_wire(&response.usage),
+        });
+        if let Some(body) = json.as_object_mut() {
+            if let Some(response_id) = metadata.response_id {
+                body.insert("id".to_string(), Value::String(response_id));
+            }
+            if let Some(session_id) = metadata.session_id {
+                body.insert("session_id".to_string(), Value::String(session_id));
+            }
+            if let Some(thread_id) = metadata.thread_id {
+                body.insert("thread_id".to_string(), Value::String(thread_id));
+            }
+        }
+
+        Ok(json)
     }
 
     fn fail(&self, input: &Engram, reason: &str, started: Instant) -> AgentResult {
@@ -369,6 +491,143 @@ impl Agent for CursorAgent {
 
     fn supports_streaming(&self) -> bool {
         true
+    }
+}
+
+fn finish_reason_to_wire(finish_reason: &crate::chat_types::FinishReason) -> String {
+    match finish_reason {
+        crate::chat_types::FinishReason::Stop => "stop".to_string(),
+        crate::chat_types::FinishReason::Length => "length".to_string(),
+        crate::chat_types::FinishReason::ToolCalls => "tool_calls".to_string(),
+        crate::chat_types::FinishReason::ContentFilter => "content_filter".to_string(),
+        crate::chat_types::FinishReason::Error(reason) => reason.clone(),
+    }
+}
+
+fn usage_to_wire(usage: &Usage) -> Value {
+    serde_json::json!({
+        "prompt_tokens": usage.input_tokens,
+        "completion_tokens": usage.output_tokens,
+        "total_tokens": usage.input_tokens + usage.output_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": usage.cache_read_tokens,
+        },
+    })
+}
+
+fn extract_session(response: &Value) -> SessionState {
+    SessionState {
+        session_id: response
+            .pointer("/session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        thread_id: response
+            .pointer("/thread_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        conversation_id: response
+            .pointer("/id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+#[async_trait]
+impl LlmBackend for CursorAgent {
+    async fn send_turn(
+        &self,
+        messages: &[Value],
+        tools: &RenderedTools,
+        _session: &SessionState,
+    ) -> Result<BackendResponse, LlmError> {
+        let body = self.build_chat_completion_body(messages, tools, false)?;
+        let raw = self
+            .poster
+            .post_json(
+                &self.chat_completion_endpoint(),
+                &self.headers(),
+                &body,
+                self.timeout_ms,
+            )
+            .await
+            .map_err(|err| LlmError::Network(err.to_string()))?;
+
+        let json =
+            serde_json::from_str(&raw).map_err(|err| LlmError::Backend(format!("parse response: {err}")))?;
+        Ok(BackendResponse::Json(json))
+    }
+
+    async fn send_turn_streaming(
+        &self,
+        messages: &[Value],
+        tools: &RenderedTools,
+        _session: &SessionState,
+        event_tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<BackendResponse, LlmError> {
+        let body = self.build_chat_completion_body(messages, tools, true)?;
+
+        let mut req = reqwest::Client::new()
+            .post(self.chat_completion_endpoint())
+            .timeout(Duration::from_millis(self.timeout_ms));
+        for (key, value) in self.headers() {
+            req = req.header(key, value);
+        }
+
+        let response = req.body(body).send().await.map_err(|err| {
+            let message = format!("request failed: {err}");
+            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            LlmError::Network(message)
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.map_err(|err| {
+                let message = format!("read body failed: {err}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone()));
+                LlmError::Network(message)
+            })?;
+            let message = crate::http::HttpPostError::http(status.as_u16(), text).to_string();
+            let _ = event_tx.send(StreamChunk::Error(message.clone()));
+            return Err(LlmError::Network(message));
+        }
+
+        let mut response = response;
+        let mut pending = Vec::new();
+        let mut accumulator = StreamAccumulator::new();
+        let mut metadata = StreamResponseMetadata::default();
+
+        loop {
+            let chunk = response.chunk().await.map_err(|err| {
+                let message = format!("read chunk failed: {err}");
+                let _ = event_tx.send(StreamChunk::Error(message.clone()));
+                LlmError::Network(message)
+            })?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+
+            pending.extend_from_slice(&chunk);
+            while let Some(newline_idx) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=newline_idx).collect();
+                Self::capture_stream_metadata(&line, &mut metadata);
+                Self::push_stream_line(&line, &mut accumulator, &event_tx);
+            }
+        }
+
+        if !pending.is_empty() {
+            Self::capture_stream_metadata(&pending, &mut metadata);
+            Self::push_stream_line(&pending, &mut accumulator, &event_tx);
+        }
+
+        let json = Self::stream_response_to_json(accumulator.finalize(), metadata)?;
+        Ok(BackendResponse::Json(json))
+    }
+
+    fn extract_session(&self, response: &BackendResponse) -> SessionState {
+        match response {
+            BackendResponse::Json(json) => extract_session(json),
+            BackendResponse::StreamJson(_) | BackendResponse::Text(_) => SessionState::default(),
+        }
     }
 }
 
