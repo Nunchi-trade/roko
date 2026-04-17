@@ -1,8 +1,9 @@
 # 16 — Plugin Loading Mechanisms
 
-> Three mechanisms: Cargo workspace (compile-time), config-declared (runtime),
-> MCP discovery (runtime). Lifecycle, validation, and hot-reload.
-
+> Discovery-first loading for the five-tier SPI. Manifests are the source of truth; `roko.toml`
+> is runtime configuration, not the plugin catalog. See also
+> [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md)
+> and [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 > **Implementation**: Specified
 
@@ -10,347 +11,170 @@
 
 ## Overview
 
-Roko supports three mechanisms for loading plugins, each with different tradeoffs between
-type safety, deployment flexibility, and isolation. These mechanisms are not mutually
-exclusive — a production deployment typically uses all three simultaneously.
+Roko loads plugins by discovering manifests, validating their declared tier and permissions,
+and then selecting the matching loader and sandbox. That is the canonical flow.
+
+The loader does not depend on a single config file listing every plugin. Instead:
+
+- Tier 1 and Tier 2 are data bundles discovered from plugin roots.
+- Tier 3 manifests declare declarative tools or MCP servers.
+- Tier 4 manifests declare native trait implementations and their ABI bridge.
+- Tier 5 manifests declare WASM modules and host capability grants.
+
+The `roko plugin` CLI sits on top of this flow and gives operators a discovery and lifecycle
+surface without exposing internal loader details.
 
 ---
 
-## Mechanism 1: Cargo Workspace Members (Compile-Time)
+## Discovery Sources
 
-Domain plugins implemented as workspace crates are compiled directly into the binary.
+Discovery is driven by file layout and install metadata.
 
-### How It Works
-
-```toml
-# Cargo.toml (workspace root)
-[workspace]
-members = [
-    # Core crates
-    "crates/roko-core",
-    "crates/roko-std",
-    "crates/roko-agent",
-    # Domain plugins (compile-time)
-    "crates/roko-domain-chain",
-    "crates/roko-domain-medical",
-    "crates/roko-domain-legal",
-]
-```
-
-At build time, Cargo compiles all workspace members. Domain plugins register their components
-at application startup:
-
-```rust
-fn main() {
-    let mut engine = Engine::new(config);
-
-    // Register domain plugins at startup
-    roko_domain_chain::register_domain(&mut engine);
-    roko_domain_medical::register_domain(&mut engine);
-
-    engine.run().await;
-}
-```
-
-### Registration Pattern
-
-Each domain plugin exports a `register_domain` function:
-
-```rust
-// crates/roko-domain-chain/src/lib.rs
-pub fn register_domain(engine: &mut Engine) {
-    // Register custom Engram kinds
-    engine.register_kind(Kind::Custom("chain.transaction"));
-    engine.register_kind(Kind::Custom("chain.block_event"));
-
-    // Register gates
-    engine.register_gate(Box::new(TxSimGate::new()));
-    engine.register_gate(Box::new(WalletGate::new()));
-    engine.register_gate(Box::new(VerifyChainGate::new()));
-
-    // Register scorer
-    engine.register_scorer(Box::new(ChainRelevanceScorer));
-
-    // Register tools (423+ chain domain tools)
-    for tool_def in chain_tools::ALL_TOOL_DEFS.iter() {
-        engine.register_tool(tool_def);
-    }
-
-    // Register T0 probes
-    for probe in chain_probes::probes() {
-        engine.register_probe(probe);
-    }
-
-    // Register somatic dimensions
-    engine.register_somatic_space(ChainSomaticSpace::dimensions());
-}
-```
-
-### Properties
-
-| Property | Value |
-|---|---|
-| **Type safety** | Full — compiler checks all trait implementations |
-| **Performance** | Maximum — no IPC, no serialization overhead |
-| **Hot-reload** | No — requires recompilation |
-| **Isolation** | None — runs in-process |
-| **Distribution** | Via Cargo crate (crates.io or git) |
-| **Best for** | First-party domain plugins, performance-critical tools |
-
----
-
-## Mechanism 2: Config-Declared (Runtime)
-
-Plugins declared in `roko.toml` are loaded at runtime via dynamic linking (shared libraries).
-
-### How It Works
-
-```toml
-# roko.toml
-[[plugins]]
-name = "medical"
-path = "./plugins/libroko_domain_medical.so"  # .dylib on macOS
-config = { reference_db = "/data/medical-refs.db" }
-
-[[plugins]]
-name = "custom-scorer"
-path = "./plugins/libcustom_scorer.so"
-config = { threshold = 0.85 }
-```
-
-At startup, the runtime loads each declared plugin:
-
-```rust
-pub async fn load_plugins(config: &AppConfig, engine: &mut Engine) -> Result<()> {
-    for plugin_config in &config.plugins {
-        // Load the shared library
-        let lib = unsafe { libloading::Library::new(&plugin_config.path)? };
-
-        // Get the registration function
-        let register: libloading::Symbol<fn(&mut Engine, &serde_json::Value)> =
-            unsafe { lib.get(b"register_plugin")? };
-
-        // Call registration with plugin-specific config
-        register(engine, &plugin_config.config);
-
-        info!(name = %plugin_config.name, path = %plugin_config.path.display(), "loaded plugin");
-    }
-
-    Ok(())
-}
-```
-
-### Plugin ABI Contract
-
-Dynamic plugins must export a C-compatible registration function:
-
-```rust
-// In the plugin crate
-#[no_mangle]
-pub extern "C" fn register_plugin(engine: &mut Engine, config: &serde_json::Value) {
-    let reference_db = config["reference_db"].as_str().unwrap();
-    let gate = MedicalAccuracyGate::new(reference_db);
-    engine.register_gate(Box::new(gate));
-    // ... register other components
-}
-```
-
-### Properties
-
-| Property | Value |
-|---|---|
-| **Type safety** | Partial — ABI contract checked at load time |
-| **Performance** | Near-native — function pointer calls |
-| **Hot-reload** | Possible — unload and reload the shared library |
-| **Isolation** | Minimal — shares process memory |
-| **Distribution** | Via shared library file |
-| **Best for** | Third-party plugins, hot-swappable components |
-
-### Platform Considerations
-
-| Platform | Library Extension | Notes |
+| Tier | Discovery source | Loader action |
 |---|---|---|
-| Linux | `.so` | Standard ELF shared object |
-| macOS | `.dylib` | Mach-O dynamic library |
-| Windows | `.dll` | PE dynamic link library |
+| 1 | `plugins/prompts/**/manifest.toml` | Load Markdown or front-matter bundles |
+| 2 | `plugins/profiles/**/manifest.toml` | Merge profile defaults into runtime settings |
+| 3 | `plugins/tools/**/manifest.toml` and `plugins/mcp/**/manifest.toml` | Spawn subprocesses or MCP servers and expose tools |
+| 4 | `plugins/native/**/manifest.toml` or workspace-local extension crates | Resolve ABI bridge, load native trait implementation |
+| 5 | `plugins/wasm/**/manifest.toml` | Instantiate module inside capability sandbox |
+
+This keeps discovery local, inspectable, and auditable. A plugin can be installed, listed, and
+enabled without editing a global registry by hand.
 
 ---
 
-## Mechanism 3: MCP Tool Discovery (Runtime)
+## CLI Surface
 
-MCP servers are discovered and loaded at runtime via the Model Context Protocol.
+The canonical user workflow is the `roko plugin` command group:
 
-### How It Works
-
-```toml
-# roko.toml
-[[agent.mcp_servers]]
-name = "medical-tools"
-command = "roko-mcp-medical"
-args = ["--db", "/data/medical.db"]
-env = { MEDICAL_API_KEY = "${MEDICAL_API_KEY}" }
+```bash
+roko plugin list
+roko plugin search <query>
+roko plugin install <id>
+roko plugin enable <id>
+roko plugin disable <id>
+roko plugin uninstall <id>
+roko plugin info <id>
+roko plugin audit
 ```
 
-At agent startup:
-1. The MCP client spawns the server process
-2. Sends `tools/list` to discover available tools
-3. Converts MCP tool schemas to Roko ToolDef format
-4. Merges discovered tools into the agent's tool registry
-5. Tool calls are dispatched via `tools/call` over stdio
+The commands map directly to discovery and policy:
 
-```rust
-pub async fn load_mcp_tools(
-    servers: &[McpServerConfig],
-    registry: &mut MergedToolRegistry,
-) -> Result<Vec<McpServerHandle>> {
-    let mut handles = Vec::new();
+- `list` and `search` are read-only discovery operations.
+- `install` fetches a manifest bundle into the local plugin root or registry cache.
+- `enable` and `disable` toggle the manifest without mutating the bundle itself.
+- `audit` reports permissions, sandbox requirements, ABI version, and any policy conflicts.
 
-    for server_config in servers {
-        // Spawn the MCP server process
-        let handle = McpServerHandle::spawn(server_config).await?;
-
-        // Discover tools
-        let tools = handle.client.discover_tools().await?;
-
-        // Convert and register
-        for mcp_tool in tools {
-            let tool_def = convert_mcp_tool(&mcp_tool, &server_config.name);
-            registry.add_mcp_tool(tool_def);
-        }
-
-        handles.push(handle);
-    }
-
-    Ok(handles)
-}
-```
-
-### Properties
-
-| Property | Value |
-|---|---|
-| **Type safety** | None — JSON Schema validation only |
-| **Performance** | IPC overhead (~1-5ms per call via stdio) |
-| **Hot-reload** | Yes — restart the server process |
-| **Isolation** | Full — separate process, separate permissions |
-| **Distribution** | Via binary or container image |
-| **Best for** | Untrusted plugins, cross-language tools, security-sensitive operations |
+`roko.toml` may still set defaults such as plugin roots or registry mirrors, but it is not the
+canonical place to enumerate every extension.
 
 ---
 
-## Mechanism Comparison
+## Loading Lifecycle
 
-| Aspect | Workspace | Config-Declared | MCP Discovery |
-|---|---|---|---|
-| Load time | Compile time | Application startup | Agent session startup |
-| Language | Rust only | Rust only (ABI) | Any language |
-| Type checking | Full (compiler) | Partial (ABI contract) | None (JSON Schema) |
-| IPC cost | Zero | Negligible | ~1-5ms per call |
-| Process isolation | No | No | Yes |
-| Hot-reload | No | Possible | Yes |
-| Security | High trust | Medium trust | Low trust (sandboxable) |
-| Memory sharing | Full | Full | None |
-| Debugging | Standard Rust tools | dlopen debugging | Process debugging |
+The runtime follows one lifecycle for all tiers:
+
+1. Discover manifests from plugin roots or installed metadata.
+2. Parse the manifest and confirm the declared tier.
+3. Validate the capability claims and permissions.
+4. Select the loader for the tier.
+5. Apply the tier-specific sandbox.
+6. Instantiate the extension.
+7. Register the exposed capability with the relevant subsystem.
+8. Monitor health and unload on shutdown or policy failure.
+
+```text
+discover -> validate -> sandbox -> instantiate -> register -> monitor -> unload
+```
+
+The actual registration target depends on the tier:
+
+- Tier 1 updates prompt and template surfaces.
+- Tier 2 updates profile resolution.
+- Tier 3 adds tools or MCP-backed capabilities.
+- Tier 4 registers kernel traits.
+- Tier 5 registers sandboxed host functions and tool surfaces.
 
 ---
 
-## Plugin Lifecycle
+## Sandbox Model
 
-All three mechanisms follow the same lifecycle:
+The sandbox is selected from the manifest, not from the call site.
 
-```
-Discovery → Validation → Initialization → Running → Shutdown
-```
-
-### Discovery
-
-| Mechanism | Discovery Method |
-|---|---|
-| Workspace | Cargo build graph + explicit `register_domain()` calls |
-| Config-declared | `[[plugins]]` entries in `roko.toml` |
-| MCP | `[[agent.mcp_servers]]` entries + `tools/list` protocol call |
-
-### Validation
-
-On load, plugins are validated regardless of mechanism:
-
-```rust
-pub fn validate_plugin(plugin: &dyn Plugin) -> Result<Vec<Warning>> {
-    let mut warnings = Vec::new();
-
-    // Check version compatibility
-    if plugin.api_version() != ROKO_PLUGIN_API_VERSION {
-        return Err(PluginError::IncompatibleVersion {
-            expected: ROKO_PLUGIN_API_VERSION,
-            actual: plugin.api_version(),
-        });
-    }
-
-    // Check for tool name conflicts
-    for tool in plugin.tools() {
-        if engine.has_tool(tool.name) {
-            warnings.push(Warning::ToolNameConflict {
-                name: tool.name.to_string(),
-                existing_source: engine.tool_source(tool.name),
-                new_source: plugin.name().to_string(),
-            });
-        }
-    }
-
-    // Check required capabilities
-    for cap in plugin.required_capabilities() {
-        if !engine.has_capability(cap) {
-            warnings.push(Warning::MissingCapability {
-                capability: cap.to_string(),
-                plugin: plugin.name().to_string(),
-            });
-        }
-    }
-
-    Ok(warnings)
-}
-```
-
-### Initialization
-
-Each plugin receives its configuration and initializes:
-
-```rust
-#[async_trait]
-pub trait Plugin: Send + Sync {
-    fn name(&self) -> &str;
-    fn api_version(&self) -> u32;
-    fn tools(&self) -> &[ToolDef];
-    fn required_capabilities(&self) -> &[&str];
-
-    async fn init(&self, config: &serde_json::Value) -> Result<()>;
-    async fn shutdown(&self) -> Result<()>;
-}
-```
-
-### Health Monitoring
-
-The runtime monitors plugin health:
-
-| Check | Frequency | Action on Failure |
+| Tier | Default sandbox | Enforcement notes |
 |---|---|---|
-| Heartbeat (MCP) | Every 30s | Restart server process |
-| Error rate | Continuous | Circuit breaker (5 errors → pause 60s) |
-| Memory usage | Every 60s | Warning at 80% of limit |
-| Response time | Per call | Warning at >5s, timeout at configurable limit |
+| 1 | None | Pure data |
+| 2 | None | Pure data |
+| 3 | Existing tool safety layer | Role allowlists, file bounds, network bounds, timeout controls |
+| 4 | Process isolation + ABI bridge | Native code stays behind a stable bridge and policy checks |
+| 5 | WASM capability sandbox | Memory, CPU, time, and host-import limits are enforced |
+
+Tier 3 and Tier 5 are the most important operational boundaries:
+
+- Tier 3 can still call out to subprocesses or MCP servers, so permissions must be explicit.
+- Tier 5 can execute arbitrary logic, but only through bounded host imports such as Bus publish,
+  Bus subscribe, Substrate query, logging, and time.
 
 ---
 
-## Recommended Loading Strategy
+## Tier-Specific Loaders
 
-| Plugin Type | Recommended Mechanism | Rationale |
-|---|---|---|
-| Core domain (chain, coding) | **Workspace** | Performance-critical, heavily tested |
-| Custom domain (medical, legal) | **Workspace** or **Config** | Depends on deployment model |
-| Operations tools (GitHub, Slack) | **MCP** | Process isolation, language flexibility |
-| Community plugins | **MCP** | Untrusted code, easy distribution |
-| Experimental tools | **MCP** | Easy to swap, no recompilation |
-| Performance-sensitive tools | **Workspace** | Zero IPC overhead |
+### Tier 1 And 2
 
-The typical production deployment uses workspace for core domains, MCP for operations
-integrations, and potentially config-declared for hot-swappable custom components.
+The loader reads the manifest, loads the data bundle, and merges it into the prompt or profile
+surface. No code is executed.
+
+### Tier 3
+
+The loader resolves the entrypoint, spawns the subprocess or MCP server, and converts the
+declared tool schema into the runtime tool registry.
+
+### Tier 4
+
+The loader resolves the ABI bridge, checks the ABI version, and loads the native implementation
+either from an installed package or a workspace-local crate. If the ABI version mismatches, the
+plugin is rejected before registration.
+
+### Tier 5
+
+The loader instantiates the WASM module with the declared capability grants and resource caps.
+Any host call outside the manifest is denied.
+
+---
+
+## Validation Rules
+
+Every plugin is validated before activation:
+
+- the manifest parses,
+- the tier matches the entrypoint type,
+- declared capabilities are internally consistent,
+- permissions are within policy,
+- ABI versions match for native extensions,
+- and the sandbox requested by the manifest is available on the current platform.
+
+Validation failures are surfaced through `roko plugin audit` and the runtime logs.
+
+---
+
+## Recommended Strategy
+
+The recommended loading strategy is the same as the extension strategy:
+
+- prefer Tier 1 when the change is pure text,
+- prefer Tier 2 when the change is a profile,
+- prefer Tier 3 when the extension can be declarative,
+- use Tier 4 only when direct trait participation is required,
+- and use Tier 5 when untrusted code needs bounded logic.
+
+That choice keeps the platform easy to extend without collapsing safety into configuration
+sprawl.
+
+---
+
+## Cross References
+
+- `docs/18-tools/14-plugin-sdk.md` defines the SPI and manifest shape in more detail.
+- `docs/00-architecture/01-naming-and-glossary.md` is the canonical vocabulary reference.
+- `tmp/refinements/17-plugin-extension-architecture.md` is the source refinement for this chapter.
+- `docs/12-interfaces/INDEX.md` owns the user-facing CLI surfaces that drive this loader.

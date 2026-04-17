@@ -38,6 +38,14 @@ and replication ledgers track whether the system's own trials replicate the sour
 [`05-learning/20-research-to-runtime.md`](05-learning/20-research-to-runtime.md),
 [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
 and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/17-plugin-extension-architecture.md` adds a five-tier plugin SPI so prompts,
+profiles, declarative tools, native trait implementations, and WASM extensions can all be
+discovered, audited, and sandboxed without forking core. Start with
+[`18-tools/14-plugin-sdk.md`](18-tools/14-plugin-sdk.md),
+[`18-tools/16-plugin-loading.md`](18-tools/16-plugin-loading.md),
+[`12-interfaces/00-cli-overview.md`](12-interfaces/00-cli-overview.md),
+[`12-interfaces/01-cli-command-reference.md`](12-interfaces/01-cli-command-reference.md),
+and [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md).
 
 ## Start Here
 

@@ -3,8 +3,9 @@
 > **Abstract:** Roko is implemented as an 18+ crate Rust workspace. Each crate maps to one
 > or more architectural layers, follows strict downward-only dependency rules, and implements
 > one or more of the six Synapse traits. This document provides the complete crate map, layer
-> assignments, dependency relationships, test coverage, and the dissolution of the legacy
-> `roko-golem` umbrella crate into standalone components.
+> assignments, dependency relationships, test coverage, the dissolution of the legacy
+> `roko-golem` umbrella crate into standalone components, and the five-tier plugin SPI that
+> lets third parties extend Roko safely without forking the kernel.
 
 
 > **Implementation**: Shipping
@@ -60,6 +61,23 @@ crate also provides HDC-based fingerprinting for code symbols and documents.
 tracks spawned agent processes, handles graceful shutdown, and implements the adaptive clock
 that manages the three cognitive speeds (Gamma at ~5-15s, Theta at ~75s, Delta at hours).
 The event bus enables publish-subscribe communication within a single agent process.
+
+#### 1.1.1 Extension SPI and host boundary
+
+The plugin architecture uses a shared contract crate plus two runtime boundaries:
+
+| Crate | Status | Tests | Purpose | Primary Traits |
+|---|---|---|---|---|
+| `roko-spi` | Scaffold | — | Stable SPI contracts: `Extension`, `Capability`, `Permissions`, manifest vocabulary, and discovery metadata | Shared contracts for plugin loading |
+| `roko-extension-abi` | Scaffold | — | Narrow C-FFI bridge for Tier 4 native extensions, including versioning and vtables | Native extension boundary |
+| `roko-wasm-host` | Scaffold | — | Tier 5 WASM host surface that enforces capability limits while exposing Bus and Substrate host imports | Sandbox host boundary |
+
+`roko-spi` is the naming and contract layer that every extension tier shares. Declarative Tier 3
+plugins and more powerful Tier 4/5 extensions all describe themselves with the same manifest
+vocabulary, then load through the appropriate boundary. Tier 3 stays inside the existing tool
+sandbox, Tier 4 implements kernel traits such as `Substrate`, `Bus`, `Scorer`, `Gate`, `Router`,
+`Composer`, or `Policy`, and Tier 5 runs through `roko-wasm-host`, which turns Bus publish /
+subscribe and Substrate query / put access into capability-limited host imports.
 
 ### 1.2 Kernel
 
@@ -227,7 +245,10 @@ enabling the forensic AI capability.
 
 | Crate | Status | Tests | Purpose |
 |---|---|---|---|
-| `roko-plugin` | Built | — | Event source framework: file watch, cron scheduling, webhook ingestion |
+| `roko-plugin` | Built | — | Plugin discovery and loading surface, plus legacy event-source ingestion (file watch, cron, webhook) |
+| `roko-spi` | Scaffold | — | Shared SPI contracts, plugin manifests, capabilities, permissions, and extension metadata |
+| `roko-extension-abi` | Scaffold | — | Native ABI bridge for Tier 4 loadable extensions that implement kernel traits |
+| `roko-wasm-host` | Scaffold | — | WASM host boundary for Tier 5 sandboxed extensions that call Bus/Substrate imports |
 | `roko-index` | Built | — | Code parsing (tree-sitter), symbol graph construction, HDC fingerprinting for code |
 | `roko-lang-rust` | Built | — | Rust language support: Cargo integration, module resolution, type extraction |
 | `roko-lang-typescript` | Built | — | TypeScript language support: npm/pnpm integration, type extraction |
@@ -236,6 +257,18 @@ enabling the forensic AI capability.
 | `roko-mcp-github` | Scaffold | — | MCP server for GitHub integration |
 | `roko-mcp-slack` | Scaffold | — | MCP server for Slack integration |
 | `roko-mcp-scripts` | Scaffold | — | MCP server for script execution |
+
+The extension tiers split by power and loading model:
+
+- Tier 3 extensions are declarative prompts, profiles, tools, and MCP manifests. They load by
+  discovery, stay inside the existing tool safety layer, and do not implement kernel traits.
+- Tier 4 extensions are native Rust implementations of kernel traits. They use `roko-extension-abi`
+  when loaded out of tree, or the same contract vocabulary when built in-tree.
+- Tier 5 extensions are WASM sandboxed modules. They load through `roko-wasm-host`, which exposes
+  Bus and Substrate access through capability-limited host imports instead of direct process access.
+
+For the plugin SPI proposal that motivated this split, see
+[tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 
 ### 1.10 Applications
 
@@ -394,4 +427,6 @@ their `roko-*` equivalents.
 - See [06-synapse-traits](./06-synapse-traits.md) for the trait definitions that crates implement
 - See [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) for the layer assignments
 - See [01-naming-and-glossary](./01-naming-and-glossary.md) for the complete old→new naming map
+- See [01-naming-and-glossary](./01-naming-and-glossary.md) for the SPI and plugin extension terms
+- See [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md) for the full five-tier SPI proposal
 - See topic [17-lifecycle](../17-lifecycle/INDEX.md) for the roko-golem dissolution plan

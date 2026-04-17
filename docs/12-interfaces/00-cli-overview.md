@@ -1,6 +1,6 @@
 # CLI Overview — `roko` as Primary Interface
 
-> The `roko` binary is the primary interface to the Roko cognitive agent framework, supporting five interaction modes from one-shot commands to long-lived daemon services.
+> The `roko` binary is the primary interface to the Roko cognitive agent framework, supporting five interaction modes plus a first-class plugin surface for discovery, install, audit, and extension management.
 
 
 > **Implementation**: Scaffold
@@ -13,9 +13,9 @@
 
 ## Abstract
 
-The `roko` binary is a single Rust executable that serves as the canonical entry point for all Roko operations. It is built with `clap` for argument parsing and exposes a rich subcommand tree covering agent lifecycle management, plan orchestration, PRD-driven development, knowledge operations, research, deployment, and system introspection. Unlike systems that separate CLI, TUI, and server into different binaries, Roko unifies them: the same binary that runs `roko run "fix the bug"` also hosts `roko dashboard` (the interactive TUI), `roko serve` (the HTTP API), and `roko daemon --start` (the background service).
+The `roko` binary is a single Rust executable that serves as the canonical entry point for all Roko operations. It is built with `clap` for argument parsing and exposes a rich subcommand tree covering agent lifecycle management, plan orchestration, PRD-driven development, knowledge operations, research, deployment, system introspection, and plugin lifecycle operations. Unlike systems that separate CLI, TUI, and server into different binaries, Roko unifies them: the same binary that runs `roko run "fix the bug"` also hosts `roko dashboard` (the interactive TUI), `roko serve` (the HTTP API), `roko daemon --start` (the background service), and `roko plugin install <id>` (the ecosystem entry point).
 
-The CLI is designed around the principle of **progressive disclosure**: beginners see three commands (`roko init`, `roko run`, `roko status`), intermediates configure behavior through `roko.toml`, and advanced users compose custom Synapse trait implementations in Rust. This layered approach ensures that Roko is approachable for a developer who just wants to run an agent against their codebase, while providing full architectural control for those building domain-specific cognitive systems.
+The CLI is designed around the principle of **progressive disclosure**: beginners see three commands (`roko init`, `roko run`, `roko status`), intermediates configure behavior through `roko.toml` and install ready-made plugins, and advanced users author Tier 4 or Tier 5 extensions against the stable plugin SPI. This layered approach ensures that Roko is approachable for a developer who just wants to run an agent against their codebase, while providing full architectural control for those building domain-specific cognitive systems. See also [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md), [16-plugin-loading.md](../18-tools/16-plugin-loading.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 
 The CLI sits at the **Application layer** — above L4 Orchestration. It consumes crates from every layer: `roko-core` (L0/L1), `roko-compose` (L2), `roko-gate` (L3), `roko-orchestrator` (L4), and the cognitive cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`). The `roko-serve` crate provides the HTTP server that `roko serve` starts.
 
@@ -93,6 +93,7 @@ The `roko` CLI organizes its subcommands into logical groups. The full command r
 | Group | Commands | Purpose |
 |---|---|---|
 | **Getting Started** | `init`, `run`, `status`, `config wizard`, `explain` | Zero-to-agent in 60 seconds |
+| **Plugins** | `plugin list`, `plugin search`, `plugin install`, `plugin enable`, `plugin disable`, `plugin audit` | Discover, install, and govern five-tier extensions |
 | **Scaffolding** | `new domain`, `new gate`, `new scorer`, `new router`, `new policy`, `new substrate`, `new probe`, `new event-source`, `new template` | Generate working boilerplate |
 | **Orchestration** | `plan list`, `plan show`, `plan create`, `plan generate`, `plan run` | DAG-based multi-task execution |
 | **PRD Lifecycle** | `prd idea`, `prd list`, `prd draft new`, `prd draft promote`, `prd plan`, `prd status`, `prd consolidate` | Idea → draft → plan pipeline |
@@ -122,6 +123,31 @@ Every subcommand inherits these global flags:
 
 ---
 
+## Plugin Workflow
+
+REF17 promotes plugins from an implementation detail to a first-class operator workflow. The CLI
+assumes a five-tier plugin SPI:
+
+| Tier | What operators install | Discovery root | Typical command path |
+|---|---|---|---|
+| 1 | Prompt and template bundles | `plugins/prompts/**` | `roko plugin install <id>` |
+| 2 | Configuration profiles | `plugins/profiles/**` | `roko plugin install <id>` |
+| 3 | Declarative tools and MCP manifests | `plugins/tools/**` | `roko plugin install <id>` then `roko plugin audit` |
+| 4 | Native Rust trait implementations | `plugins/native/**` | `roko plugin install <id>` or project-local drop-in |
+| 5 | WASM sandboxed extensions | `plugins/wasm/**` | `roko plugin install <id>` with host-enforced limits |
+
+The operator workflow is discovery-first, not config-first. The runtime walks `plugins/**`,
+loads manifests, validates permissions, and wires capabilities without requiring a manual
+`roko.toml` edit for the common case. Disabling is either a marker file under the plugin
+directory or `roko plugin disable <id>`.
+
+The most important ergonomics path is Tier 3: a declarative tool manifest or MCP wrapper that
+ships as data, advertises permissions up front, and enters the tool registry through the same
+CLI flow as any other plugin. Tier 4 and Tier 5 are reserved for extensions that need more
+power than pure manifests can provide.
+
+---
+
 ## Zero-to-Agent in 60 Seconds
 
 The CLI is designed so that a developer can go from zero to a running agent in under a minute:
@@ -138,7 +164,7 @@ roko run "Add error handling to the auth module"   # runs agent with smart defau
 - **Model** — defaults to `claude-sonnet-4-6` (configurable)
 - **Gates** — enables compile + test gates matching the detected language
 
-This auto-detection is implemented in `roko-cli/src/config.rs`. The `load_layered` function resolves configuration from multiple sources in priority order (see [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md)).
+This auto-detection is implemented in `roko-cli/src/config.rs`. The `load_layered` function resolves configuration from multiple sources in priority order (see [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md)). Plugin discovery stays separate: installed plugins are discovered from `plugins/**`, then optional config layers override only the pieces that need site-specific tuning.
 
 ### Starter Templates
 
@@ -202,8 +228,8 @@ The CLI follows six design principles from `refactoring-prd/10-developer-guide.m
 | Level | What You Do | What You Get |
 |---|---|---|
 | **Beginner** | `roko init` + `roko run "prompt"` | Working agent with smart defaults |
-| **Intermediate** | Edit `roko.toml` to configure gates, routing, models | Customized agent behavior without code |
-| **Advanced** | Implement Synapse traits in Rust, create domain plugins | Full control over every cognitive function |
+| **Intermediate** | Edit `roko.toml`, install Tier 1-3 plugins | Customized behavior without writing Rust |
+| **Advanced** | Author Tier 4 native or Tier 5 WASM plugins | Full control over every operator and fabric integration |
 
 Most users never need Level 3. The defaults handle 80% of use cases.
 

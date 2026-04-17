@@ -7,7 +7,9 @@
 > attribution. For the heuristic, falsifier, and worldview vocabulary used in learning
 > refinements, see also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md). For the paper,
 > claim, and replication-ledger vocabulary used in research-to-runtime work, see also
-> [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md).
+> [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md). For the plugin and SPI extension
+> vocabulary used in the five-tier extension architecture, see also
+> [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 > When another document
 > disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
@@ -74,6 +76,10 @@ The naming contract for the kernel crates is:
 | `roko-daimon` | PAD-vector affect and behavioral modulation |
 | `roko-dreams` | Delta-speed replay, synthesis, and consolidation |
 | `roko-chain` | Durable chain integration plus chain-facing Bus backends |
+| `roko-plugin` | Plugin discovery/loading surface, manifest ingestion, and legacy event-source framework |
+| `roko-spi` | Stable extension contracts: manifests, capabilities, permissions, and versioned plugin metadata |
+| `roko-extension-abi` | Native ABI bridge for Tier 4 loadable extensions |
+| `roko-wasm-host` | WASM host boundary for Tier 5 sandboxed extensions and capability-limited Bus/Substrate access |
 
 User-facing docs should describe those crates in current vocabulary rather than older umbrella
 names. When a concept spans multiple crates, describe the concept first and the crate boundary
@@ -115,6 +121,9 @@ crates directly.
 | `Heuristic` | Learned rule of thumb | Structured precondition-plus-prediction knowledge with calibration from lived episodes. |
 | `Falsifier` | Counterexample or test signal | A deliberate challenge that can violate a heuristic and force recalibration. |
 | `Worldview` | Heuristic cluster | A co-citation cluster of heuristics that holds up in a shared domain. |
+| `Plugin` | Loadable extension package | A discoverable extension bundle described by a manifest and loaded at a specific tier. |
+| `SPI` | Stable plugin interface | The shared contract layer for plugin discovery, capabilities, permissions, and versioning. |
+| `Manifest` | Extension descriptor | Declarative metadata that identifies a plugin, its tier, and its permissions. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -217,6 +226,7 @@ The following names are load-bearing additions in the current architecture:
 | `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
+| `Extension tier` | Extension loading class | One of the five extension tiers: prompts, profiles, declarative tools/MCP, native Rust, or WASM sandboxing. |
 | `c-factor` | Continuously measured cohort-process metric learned from turn-taking entropy, peer prediction accuracy, citation reciprocity, delivery rate, and HDC diversity. |
 | `Compounding loop` | A feedback loop where each successful cycle improves the next cycle's cost, latency, or quality rather than merely repeating it. |
 | `Superlinear return` | A scaling regime where accumulated usage, connected deployments, or added plugins produce more than proportional capability or efficiency gains. |

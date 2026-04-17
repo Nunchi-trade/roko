@@ -6,7 +6,7 @@
 
 ## Overview
 
-This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), the Web Portal (React 19 / Next.js 15.5+), the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, behavioral states, C-Factor metrics, knowledge tiers).
+This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), the Web Portal (React 19 / Next.js 15.5+), the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, and knowledge tiers).
 
 **Key design principles:**
 - **Progressive disclosure**: Overview first, detail on demand
@@ -21,8 +21,8 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 
 | # | Document | Summary |
 |---|---|---|
-| 00 | [00-cli-overview.md](./00-cli-overview.md) | CLI as primary interface — 5 operating modes, command groups, global flags, event system, zero-to-agent quickstart |
-| 01 | [01-cli-command-reference.md](./01-cli-command-reference.md) | Full command reference organized by group — Getting Started, Scaffolding, Orchestration, PRD, Research, Knowledge, Infrastructure, Debugging, Deployment |
+| 00 | [00-cli-overview.md](./00-cli-overview.md) | CLI as primary interface — 5 operating modes, plugin workflow, command groups, global flags, event system, zero-to-agent quickstart |
+| 01 | [01-cli-command-reference.md](./01-cli-command-reference.md) | Full command reference organized by group — Getting Started, Plugins, Scaffolding, Orchestration, PRD, Research, Knowledge, Infrastructure, Debugging, Deployment |
 | 02 | [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md) | `roko new` scaffolder specifications for all 9 types (domain, gate, scorer, router, policy, substrate, probe, event-source, template) with generated code examples |
 | 03 | [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) | Progressive disclosure help system — `roko explain` 3-level output, error-as-teacher format, config wizard, TeachingError struct |
 | 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), `ROKO_*` env vars, full `roko.toml` schema with all sections, auto-detection |
@@ -103,3 +103,6 @@ This topic was generated from:
 - Active code: `roko-cli/src/tui/`, `roko-serve/src/routes/`, `roko-cli/src/main.rs`
 
 All naming follows the authoritative naming map: bardo→Roko, golem→agent, grimoire→Neuro, Signal→Engram, clade→collective/mesh, mori→Roko Orchestrator. Mortality and death references have been removed per the reframe rules. Sonification presets have been remapped from lifecycle phases to behavioral states.
+REF17 adds the interface-side plugin surface; start with [00-cli-overview.md](./00-cli-overview.md),
+[01-cli-command-reference.md](./01-cli-command-reference.md), and
+[tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).

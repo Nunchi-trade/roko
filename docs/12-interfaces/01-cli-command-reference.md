@@ -15,6 +15,13 @@
 
 This document is the canonical command reference for the `roko` CLI. Every subcommand, flag, and argument is listed with its type, default value, and purpose. Commands are organized by functional group. The reference reflects both the current implementation in `roko-cli/src/main.rs` and the target specification from `refactoring-prd/06-interfaces.md`. Where the spec describes commands not yet implemented, they are marked as such.
 
+REF17 extends this surface with a dedicated plugin command family so operators can discover,
+install, enable, disable, and audit extensions without manually editing `roko.toml`. The
+underlying plugin SPI is described in [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md) and
+[16-plugin-loading.md](../18-tools/16-plugin-loading.md). See also
+[01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) and
+[tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
+
 The `roko` binary uses `clap` for parsing and supports both positional arguments and named flags. All subcommands inherit the global flags described in [00-cli-overview.md](./00-cli-overview.md).
 
 ---
@@ -85,6 +92,30 @@ roko config <SUBCOMMAND>
 | `config set-secret <KEY> <VALUE>` | Set a secret value (stored encrypted) |
 | `config init` | Create a default config file |
 
+### `roko plugin`
+
+Discover, install, and govern five-tier plugins.
+
+```
+roko plugin <SUBCOMMAND>
+```
+
+| Subcommand | Syntax | Description |
+|---|---|---|
+| `list` | `roko plugin list` | List installed plugins discovered from `plugins/**` with tier, state, and health |
+| `search <QUERY>` | `roko plugin search kubernetes` | Search a registry or GitHub-backed source for installable plugins |
+| `install <ID>` | `roko plugin install cargo.udeps` | Install a plugin into `./plugins` without editing `roko.toml` |
+| `uninstall <ID>` | `roko plugin uninstall cargo.udeps` | Remove an installed plugin |
+| `enable <ID>` | `roko plugin enable cargo.udeps` | Re-enable a previously disabled plugin |
+| `disable <ID>` | `roko plugin disable cargo.udeps` | Disable a plugin via loader state rather than deleting files |
+| `info <ID>` | `roko plugin info cargo.udeps` | Show manifest, permissions, capabilities, tier, and health status |
+| `audit` | `roko plugin audit` | Review requested permissions, sandbox class, and risky access patterns |
+
+The common path is discovery-first: install a manifest-backed plugin into `plugins/**`, let the
+runtime validate it, then use `roko plugin audit` before enabling it in production. Tier 1 and
+Tier 2 plugins are pure data; Tier 3 plugins declare tool or MCP behavior; Tier 4 plugins bind
+native Rust implementations; Tier 5 plugins run inside the WASM host.
+
 ### `roko explain`
 
 Learn about Roko concepts. Progressive disclosure — starts simple, adds detail on request.
@@ -135,6 +166,10 @@ Each scaffold generates:
 - A test file with basic passing tests
 - A `Cargo.toml` entry if creating a new crate
 - A README explaining the generated code
+
+The scaffolding story now aligns to the plugin SPI as well: prompt bundles and profile bundles
+cover the low-power tiers, while native crates and WASM modules cover the high-power tiers.
+That keeps the authoring path consistent with `roko plugin install` and `roko plugin audit`.
 
 See [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md) for detailed examples.
 
@@ -425,6 +460,8 @@ The `--quiet` flag suppresses non-essential output (progress indicators, banners
 ## Current Status and Gaps
 
 All subcommands in the "Orchestration", "PRD Lifecycle", "Research", "Knowledge", "Infrastructure", and "Debugging" groups are implemented and functional. The "Getting Started" group is mostly implemented except for `roko explain` and `roko config wizard`. The "Scaffolding" group (`roko new`) is not yet implemented.
+The plugin command family is part of the target CLI surface for the extension architecture and
+depends on the five-tier SPI described in topic 18.
 
 ---
 

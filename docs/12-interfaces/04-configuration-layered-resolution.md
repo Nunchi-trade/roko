@@ -15,7 +15,13 @@
 
 Roko configuration follows the **convention over configuration** principle: sensible defaults for everything, with a layered override system that lets users change only what they need. The configuration system resolves values from four layers, highest priority first: CLI flags, environment variables (`ROKO_*` prefix), the `roko.toml` file, and compiled-in defaults.
 
-The `roko.toml` file is the primary configuration surface. It uses TOML format and is organized into sections that map to Roko subsystems: agent, gates, router, composer, Daimon, Neuro, Dreams, providers, server, and plugins. Auto-detection fills in language-specific defaults so most users need only a few lines of configuration.
+The `roko.toml` file is the primary configuration surface for runtime behavior, but REF17 makes
+plugin discovery separate from configuration. Standard plugin installs land under `plugins/**`
+and are discovered automatically; `roko.toml` provides overrides and site policy, not the
+default install path. See [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md),
+[16-plugin-loading.md](../18-tools/16-plugin-loading.md),
+[01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and
+[tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 
 ---
 
@@ -35,6 +41,10 @@ This layering means:
 - A project can standardize settings in `roko.toml` (checked into version control)
 - A CI system can override per-run with environment variables
 - A specific invocation can override everything with CLI flags
+
+For plugins, this layering applies after discovery. The loader first walks `plugins/**`, reads
+manifests, validates permissions, and classifies the plugin tier. Config layers then decide
+which plugins are preferred, constrained, or disabled for a given deployment.
 
 ### Environment Variable Convention
 
@@ -64,6 +74,16 @@ model = "claude-sonnet-4-6"
 ```
 
 Everything else is auto-detected or uses defaults.
+
+For plugins, the minimal path is often no config at all:
+
+```bash
+roko plugin install cargo.udeps
+roko plugin audit
+```
+
+That flow installs a manifest-backed plugin into `./plugins`, after which the loader discovers
+it automatically on the next run.
 
 ### Full Configuration Reference
 

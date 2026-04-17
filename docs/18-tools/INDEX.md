@@ -1,7 +1,8 @@
 # Topic 18 — Tools, Plugins & Integrations
 
 > The complete tool system: architecture, built-in tools, domain plugins, MCP integration,
-> service integrations, agent templates, event sources, and plugin SDK.
+> service integrations, agent templates, and the five-tier plugin SPI. See also
+> [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 
 ---
 
@@ -23,10 +24,10 @@
 | 11 | [11-mcp-slack.md](11-mcp-slack.md) | roko-mcp-slack | ~230 | 8 tools: post_message, update_message, reply_thread, add_reaction, upload_file, get_channel_history, get_thread, lookup_user. Socket Mode + HTTP Mode, rate limits, Block Kit |
 | 12 | [12-mcp-scripts.md](12-mcp-scripts.md) | roko-mcp-scripts | ~230 | Config-driven tool wrappers, scripts.toml format, executor with timeout/isolation, collaboration repo scripts (6), knowledge-base scripts (5), discovery mechanism |
 | 13 | [13-mcp-stdio.md](13-mcp-stdio.md) | roko-mcp-stdio | ~210 | Scaffold crate: McpToolHandler trait, McpServerBuilder, JSON-RPC protocol handler, tool registry, error codes, middleware extension points |
-| 14 | [14-plugin-sdk.md](14-plugin-sdk.md) | roko-plugin SDK | ~280 | EventSource, FeedbackCollector, Integration traits. 8-step domain plugin pattern (medical domain walkthrough), three plugin loading mechanisms, plugin lifecycle |
+| 14 | [14-plugin-sdk.md](14-plugin-sdk.md) | roko-plugin SDK | ~280 | Five-tier SPI: prompts, profiles, declarative tools/MCPs, native trait implementations, WASM sandboxed extensions. Manifest shape, permissions, discovery-not-configuration, ABI bridge, host imports |
 | 15 | [15-event-sources.md](15-event-sources.md) | Event Sources | ~280 | 5 event source types: Cron (tokio-cron-scheduler), FileWatch (notify), GitHub webhooks, Slack events, generic webhooks. Subscription configuration, dispatch loop, multi-repository support |
 | 15-16 | [15-16-agent-templates.md](15-16-agent-templates.md) | Agent Templates | ~420 | 18 templates: 6 collaboration (doc-lifecycle, digest, meeting, sync, conflict-detector, freshness), 5 knowledge-base (pm-board, enrich, triage, pm-health, action-tracker), 7 roko (pr-review, slack-notify, auto-plan, code-implementer, gate-fixer, prd-ingestion, review-response). Full system prompts, triggers, subscription summary |
-| 16 | [16-plugin-loading.md](16-plugin-loading.md) | Plugin Loading Mechanisms | ~250 | Three mechanisms: Cargo workspace (compile-time), config-declared (runtime dynamic linking), MCP discovery (runtime IPC). Comparison matrix, lifecycle, health monitoring, recommended strategy |
+| 16 | [16-plugin-loading.md](16-plugin-loading.md) | Plugin Loading Mechanisms | ~250 | Discovery-first loader for the five-tier SPI. Manifest roots, `roko plugin` CLI surface, validation, sandbox selection, native ABI loading, WASM instantiation |
 
 ---
 
@@ -44,6 +45,7 @@
 | Dreams (offline learning) | `docs/08-dreams/` | 02-tool-categories, 05-tool-profiles |
 | Innovations (16 T0 Probes, etc.) | `docs/09-innovations/` | 00-tool-architecture, 14-plugin-sdk |
 | Developer Guide | `docs/10-developer-guide/` | 14-plugin-sdk, 16-plugin-loading |
+| Plugin SPI / naming | `docs/00-architecture/01-naming-and-glossary.md` | 14-plugin-sdk, 16-plugin-loading |
 | C-Factor | `docs/12-c-factor/` | 15-16-agent-templates |
 | Interfaces (CLI, TUI) | `docs/06-interfaces/` | 00-tool-architecture |
 | Korai/Daeji (chain) | `docs/15-chain/` | 06-wallet-management |
@@ -110,4 +112,5 @@
 - **Agent template count**: 18 templates total (16 original from phase-3-4 plan + 2 additional: prd-ingestion-agent, review-response-agent).
 - **Chain domain framing**: All 423+ DeFi tools are framed as ONE domain plugin. The core framework (roko-core, roko-std) is domain-agnostic.
 - **MCP server status**: MCP client is built and wired in roko-agent. MCP server crates (roko-mcp-github, roko-mcp-slack, roko-mcp-scripts) are planned with complete specs but not yet implemented as code.
+- **Plugin SPI**: The canonical five-tier plugin story is documented in 14-plugin-sdk and 16-plugin-loading; discovery is manifest-driven, not central-config-driven.
 - **Mortality reframe**: All legacy mortality-phase references (Conservation, Declining, Terminal) have been translated to Daimon behavioral states (Struggling, Resting, etc.) per `refactoring-prd/08-translation-guide.md`.
