@@ -1,7 +1,12 @@
 # Neuro — Cognitive Knowledge Layer
 
-> Neuro (`roko-neuro`) is the agent's persistent, tiered, HDC-indexed knowledge system. It classifies knowledge by type (Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge), validates it through four tiers (Transient → Working → Consolidated → Persistent), and treats every Engram as carrying a 10,240-bit HDC fingerprint for native similarity, consensus, and analogy. Neuro now treats demurrage and balance as the primary freshness mechanism, with Ebbinghaus curves shaping the drain rate rather than defining the whole retention model.
-> REF14 extends that story by making heuristic calibration, falsifier handling, and worldview clustering explicit; see `../../tmp/refinements/14-worldview-validation.md`, [12-4-tier-distillation-pipeline](./12-4-tier-distillation-pipeline.md), and [Naming Map and Glossary](../00-architecture/01-naming-and-glossary.md).
+> Neuro (`roko-neuro`) is the agent's persistent, tiered knowledge system. Shipping pieces include `KnowledgeEntry`, `KnowledgeKind`, `KnowledgeStore`, `Distiller`, tier progression, and HDC-backed encoding/query support in parts of the stack. The broader design in this topic treats universal per-Engram fingerprints, demurrage/balance freshness, and worldview-aware heuristic memory as target-state extensions rather than fully implemented behavior.
+> REF14 contributes useful direction here, but the near-term layer is heuristic calibration and contradiction tracking around existing knowledge structures, not a finished worldview stack.
+>
+> **Implementation status**
+> - **Shipping**: typed knowledge entries, tier progression, distillation, storage, and partial HDC-backed retrieval/encoding.
+> - **Target-state**: richer heuristic calibration, explicit contradiction/falsifier records, and worldview-aware organization.
+> - **Deferred**: demurrage/balance freshness as the primary memory model and worldview cold-tier preservation.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -12,7 +17,7 @@
 
 ## Abstract
 
-Neuro is the cognitive knowledge layer of the Roko agent framework. While episode logs capture raw agent turns and Dreams drives offline consolidation, Neuro is the subsystem that transforms experience into **durable, typed, validated, searchable knowledge**. Every piece of knowledge an agent retains passes through Neuro's classification, validation, encoding, and balance-bearing freshness pipeline.
+Neuro is the cognitive knowledge layer of the Roko agent framework. While episode logs capture raw agent turns and Dreams drives offline consolidation, Neuro is the subsystem that transforms experience into **durable, typed, validated, searchable knowledge**. Every piece of knowledge an agent retains passes through Neuro's classification, validation, encoding, and freshness pipeline; the balance-bearing demurrage model described in some design docs is deferred.
 
 Neuro is framed as a neuroscience-inspired durable knowledge layer, aligned with the research traditions that underpin its design: Complementary Learning Systems theory (McClelland et al. 1995), Ebbinghaus forgetting curves (1885), hyperdimensional computing (Kanerva 2009, Kleyko et al. 2022), somatic markers (Damasio 1994), and hippocampal replay (Mattar & Daw 2018).
 
@@ -31,12 +36,12 @@ Neuro spans all five architectural layers (L0 Runtime through L4 Orchestration) 
 | 04 | [HDC/VSA Foundations](./04-hdc-vsa-foundations.md) | BSC algebra, 10,240-bit fingerprints, capacity bounds, SIMD performance, consensus currency |
 | 05 | [HDC Operations](./05-hdc-operations.md) | Bind (XOR), Bundle (majority vote), Permute (cyclic shift), Similarity (Hamming) — Rust implementation |
 | 06 | [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md) | Default encoder, per-Engram fingerprints, role-filler bindings, similarity, consensus, analogy |
-| 07 | [Demurrage with Tier Shaping](./07-ebbinghaus-decay-with-tier.md) | Demurrage/balance freshness, Ebbinghaus rate shaping, freeze/thaw, HDC novelty reinforcement |
+| 07 | [Demurrage with Tier Shaping](./07-ebbinghaus-decay-with-tier.md) | Target-state demurrage/balance freshness, Ebbinghaus rate shaping, freeze/thaw, HDC novelty reinforcement |
 | 08 | [Cross-Domain HDC Transfer](./08-cross-domain-hdc-transfer.md) | Structural analogy detection, abstract role vectors, insight resonance, analogical reasoning |
 | 09 | [False Positive Math](./09-false-positive-math.md) | Threshold selection (0.526), Bonferroni correction, Johnson-Lindenstrauss validation |
 | 10 | [Knowledge Query API](./10-knowledge-query-api.md) | NeuroStore trait, fingerprint queries, KnowledgeStore JSONL backend, ContextAssembler |
 | 11 | [AntiKnowledge Challenge](./11-antiknowledge-challenge.md) | Challenge mechanism, refutation warnings, epistemic parasite detection, Price equation |
-| 12 | [4-Tier Distillation Pipeline](./12-4-tier-distillation-pipeline.md) | Episodes→Insights→Heuristics→PLAYBOOK.md with calibration, falsifiers, worldview clustering, and HDC novelty |
+| 12 | [4-Tier Distillation Pipeline](./12-4-tier-distillation-pipeline.md) | Current distillation pipeline plus target-state heuristic calibration, contradiction handling, worldview clustering, and HDC novelty extensions |
 | 13 | [Somatic Integration](./13-somatic-integration.md) | SomaticLandscape k-d tree, PAD vector, mood-congruent retrieval, 15% contrarian |
 | 14 | [Library of Babel](./14-library-of-babel.md) | Cross-collective knowledge, 5 inflow channels, confidence discounting, publishing policies |
 | 15 | [Knowledge Backup/Restore](./15-knowledge-backup-restore.md) | 4-step BACKUP→DELETE→CREATE→RESTORE, replacing succession, mesh sharing |
@@ -102,9 +107,9 @@ This topic connects to:
 
 ## Current Status and Implementation Gaps
 
-**Core knowledge system**: The `KnowledgeEntry`, `KnowledgeKind`, and `NeuroStore` trait are implemented. The JSONL storage backend (`KnowledgeStore`) is functional with decay, GC, and HDC fingerprint indexing, and the docs now describe retention through demurrage and balance rather than Ebbinghaus alone. The distillation pipeline (`Distiller`, `TierProgression`) provides three-stage episode→insight→heuristic→playbook progression.
+**Core knowledge system**: The `KnowledgeEntry`, `KnowledgeKind`, and `NeuroStore` trait are implemented. The JSONL storage backend (`KnowledgeStore`) is functional with decay, GC, and HDC indexing support, and the distillation pipeline (`Distiller`, `TierProgression`) provides episode→insight→heuristic→playbook progression. The docs in this topic also describe a broader demurrage/balance model, but that part remains deferred.
 
-**HDC subsystem**: The `HdcVector` (10,240-bit BSC) is fully implemented with all four operations, deterministic seeding, serde, and rkyv zero-copy support. Every Engram is modeled as carrying a first-class fingerprint, and the same vector space underpins similarity search, consensus bundling, and analogy. Code symbol fingerprinting is implemented in `roko-index`.
+**HDC subsystem**: The `HdcVector` (10,240-bit BSC) is fully implemented with all four operations, deterministic seeding, serde, and rkyv zero-copy support. The docs model every Engram as carrying a first-class fingerprint, but in current code HDC support is partial rather than universal. Code symbol fingerprinting is implemented in `roko-index`.
 
 **Key gaps**: The foundational refactor items are now in place: `KnowledgeEntry` has tiers plus emotional provenance, the PRD-native knowledge kinds are present, `ContextAssembler` is implemented in `roko-neuro`, ingest persists HDC fingerprints, CausalLinks now carry directional HDC encodings, Neuro's local context allocator now uses auction-style budget selection plus mood-congruent scoring, direct somatic re-ranking, and a contrarian affect slice, and `PromptComposer` now runs a shared bidder-aware cross-subsystem auction over composed prompt sections with PAD urgency / affect modulation and diagnostic externality payments. Daimon now also owns a real 8D `SomaticLandscape`, config-backed strategy-space registration, and a shared strategy-space computer for routing-time affective bias, runtime somatic events, dream-time depotentiation, and role-aware non-coding projection. The remaining gaps are the higher-order features: exact welfare-maximizing/fair VCG settlement, broader consolidation policy, fuller active inference, true domain-native extractors, and cross-domain resonance.
 

@@ -3,12 +3,14 @@
 > **REF16 source:** `../../tmp/refinements/16-research-to-runtime.md`
 > **Glossary:** [Naming and Glossary](../00-architecture/01-naming-and-glossary.md)
 > **Cross-references:** [18-self-learning-cybernetic-loops](18-self-learning-cybernetic-loops.md), [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md), [16-predictive-foraging](16-predictive-foraging.md), [25-research-to-runtime](../21-references/25-research-to-runtime.md), [12-4-tier-distillation-pipeline](../06-neuro/12-4-tier-distillation-pipeline.md)
+>
+> **Implementation status**: Target-state concept. No `Claim`, `Paper`, or replication-ledger code exists. The provenance-backed heuristic idea is valuable; the full paper economy (claims, replication trials, ledger) is deferred.
 
 ---
 
 ## Purpose
 
-REF16 makes research part of the learning loop rather than a one-time influence. The system should ingest papers continuously, extract testable claims, lift validated claims into heuristics, and keep the resulting evidence live through replication-ledger feedback. In that framing, a paper is not just a citation. It is a durable Engram, a claim is a structured hypothesis, a trial is an episode or Bus-observed outcome, and calibration is the ongoing decision about whether the claim still earns influence in this deployment.
+REF16 describes a target-state way to make research part of the learning loop rather than a one-time influence. In that design, the system would ingest papers continuously, extract testable claims, lift validated claims into heuristics, and keep the resulting evidence live through replication-ledger feedback. Today, the most practical slice is narrower: keep provenance visible when papers inform heuristics or parameters.
 
 This chapter is the learning-layer bridge between academic provenance and runtime behavior. It explains how paper-backed ideas become parameter choices, heuristics, and calibration records that can be checked, revised, or retired when the live system disagrees.
 
@@ -22,9 +24,9 @@ The proposed flow is:
 4. **Trial** - run the heuristic against real episodes, gates, and outcome Pulses.
 5. **Calibration** - update confidence, confidence bounds, and trust based on what actually happened.
 
-The key point is that the same evidence can move through the stack more than once. A claim may begin as a paper-backed prior, then become a heuristic, then be revised by trial results, then be demoted or promoted by its replication ledger.
+The key point is that the same evidence can move through the stack more than once. A claim may begin as a paper-backed prior, then become a heuristic, then be revised by trial results, then be demoted or promoted by its replication ledger. That full lifecycle is deferred for now.
 
-## Paper As Engram
+## Paper As Engram (Target-State)
 
 Papers live in the same durable substrate as other long-lived records. That means the source itself stays addressable, citeable, and comparable over time.
 
@@ -41,7 +43,7 @@ pub struct Paper {
 
 The important behavior is not the exact schema. It is that the source paper remains available for later review, so the system can distinguish "this was a paper-backed idea" from "this worked in our stack."
 
-## Claim As Hypothesis
+## Claim As Hypothesis (Target-State)
 
 A claim is the paper's runtime-facing unit of meaning. It should be small enough to test and explicit enough to fail.
 
@@ -71,7 +73,7 @@ That is the same REF14 machinery, but with a research-specific origin story.
 
 ## Replication Ledger
 
-The replication ledger is the bridge between external research and local calibration. It records how the paper's reported effect compares with the effect observed in Roko's actual deployment.
+In the target-state design, the replication ledger is the bridge between external research and local calibration. It records how the paper's reported effect compares with the effect observed in Roko's actual deployment.
 
 ```rust
 pub struct ReplicationLedger {
@@ -96,11 +98,11 @@ Some runtime defaults should be resolved from claims rather than literals. The d
 let epsilon = claim!("auer2002", "epsilon_greedy", default = 0.1)?;
 ```
 
-If the claim's replication ledger weakens or local calibration drifts too far, the resolver should fall back to a safe default or a lower-trust value. That keeps paper-backed parameters auditable without making them sticky.
+If the claim's replication ledger weakens or local calibration drifts too far, the target-state resolver should fall back to a safe default or a lower-trust value. That keeps paper-backed parameters auditable without making them sticky.
 
 ## Calibration Feedback
 
-Calibration should consume both local trials and replication-ledger updates.
+In the target-state design, calibration should consume both local trials and replication-ledger updates.
 
 - Local trials say whether the heuristic works in this deployment.
 - Replication-ledger entries say whether the paper's claim still matches the deployed reality.

@@ -3,14 +3,16 @@
 > **REF10 source:** `../../tmp/refinements/10-self-learning-cybernetic-loops.md`
 > **Glossary:** [Naming and Glossary](../00-architecture/01-naming-and-glossary.md)
 > **Cross-references:** [16-predictive-foraging](16-predictive-foraging.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md), [15-collective-calibration-31x](15-collective-calibration-31x.md), [17-adas-and-autocatalytic](17-adas-and-autocatalytic.md), [20-research-to-runtime](20-research-to-runtime.md), `../../tmp/refinements/16-research-to-runtime.md`
+>
+> **Implementation status**: Active inference exists in `roko-learn` (`active_inference.rs`, ~255 lines) as a working Bayesian tier selector. Prediction tracking exists in `prediction.rs`. The per-operator predict-publish-correct doctrine described here is **target-state**; today the Router has the richest prediction/outcome signals, while Bus/Pulse-mediated calibration across every operator remains planned.
 
 ---
 
 ## Purpose
 
-REF10 turns learning in Roko from a set of partially connected subsystems into a Bus-backed feedback nervous system. The key move is simple: every operator becomes a predictor. It publishes a prediction Pulse, later receives an outcome Pulse, and then updates from the prediction error. That makes active inference literal rather than metaphorical: the system predicts, acts, observes, and corrects on the same transport fabric.
+REF10 describes a target-state extension that would turn learning in Roko into a Bus-backed feedback nervous system. The key move is simple: every operator becomes a predictor. It publishes a prediction Pulse, later receives an outcome Pulse, and then updates from the prediction error. That is broader than the current code: active inference already exists, but narrowly, as a routing component rather than a universal operator doctrine.
 
-Roko already had three partial learners:
+The refinement text centers three anchor learners, but the shipping learning subsystem is broader than that framing suggests. `roko-learn` already includes routing, prediction tracking, runtime feedback, bandits, drift detection, pattern discovery, skill accumulation, and provider-health handling. Within that larger crate, three obvious anchor learners are:
 
 1. `CascadeRouter` learned which model tier to pick.
 2. `EpisodeLogger` accumulated completed runs for replay and distillation.
@@ -44,7 +46,7 @@ The Bus makes per-operator calibration cheap enough to do everywhere, not just i
 
 This is the missing middle between fixed heuristics and heavyweight model retraining. The calibration target is not just “did the task pass?” but “which operator was systematically overconfident, underconfident, or stale?”
 
-The same calibration machinery also applies to research-derived defaults. If a runtime threshold or routing constant comes from a paper-backed claim, it should not live as an untracked literal; it should resolve through a claim ID or `claim!`-style lookup, so the system can see when the supporting claim's replication ledger weakens and fall back to a safer default.
+The same calibration machinery could eventually apply to research-derived defaults. That depends on the separate research-to-runtime work landing first; today there is no `claim!`-style runtime resolver or replication ledger in the codebase.
 
 ## CalibrationPolicy
 
@@ -64,7 +66,7 @@ The concrete implementation details can vary, but the structure should not:
 - calibration updates are separate Pulses, not hidden side effects
 - the policy itself is just another Bus subscriber
 
-That same policy can ingest replication-ledger outcomes for paper-derived claims. If a claim-backed heuristic or parameter repeatedly diverges from local reality, the ledger should push the associated calibration downward instead of letting the claim keep authority by citation alone.
+That same policy could eventually ingest research-derived outcomes for paper-backed claims. The replication-ledger portion of that design is deferred for now.
 
 That separation matters because it keeps learning composable. Operators do not need to know who is measuring them. They only need to publish predictions and react to calibration updates.
 
@@ -104,8 +106,8 @@ This chapter is the learning-layer expression of the broader two-fabric design:
 
 - the Bus carries prediction and outcome Pulses
 - the Substrate retains durable records when lineage matters
-- active inference becomes a literal feedback loop rather than a metaphor
-- every operator can be calibrated independently
+- active inference is already real for routing, while broader operator coverage remains target-state
+- every operator can eventually be calibrated independently once the transport and outcome surfaces exist
 - existing learners can cooperate without tight coupling
 
 The result is a self-modeling system. Prediction error is no longer an incidental byproduct; it is the signal that keeps the system honest.
@@ -116,5 +118,5 @@ The result is a self-modeling system. Prediction error is no longer an incidenta
 - [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md) catalogs the current wiring gaps that REF10 turns into Bus-backed learner loops.
 - [15-collective-calibration-31x](15-collective-calibration-31x.md) applies calibration at the collective level.
 - [17-adas-and-autocatalytic](17-adas-and-autocatalytic.md) frames the compound effect of the loops as autocatalytic growth.
-- [20-research-to-runtime](20-research-to-runtime.md) defines the paper → claim → heuristic → trial → calibration pipeline and the replication ledger that feeds back into calibration.
+- [20-research-to-runtime](20-research-to-runtime.md) sketches the target-state paper → claim → heuristic → trial → calibration pipeline and the deferred replication-ledger layer.
 - See also `tmp/refinements/10-self-learning-cybernetic-loops.md` for the full proposal.

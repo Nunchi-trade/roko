@@ -1,10 +1,10 @@
 # Decay Variants
 
-> **Abstract:** This chapter now treats demurrage as the primary memory model for durable Engrams. Every stored record carries a balance, pays holding cost over time, and regains credit when it is used, cited, or reinforced. That replaces the old decay-first framing for durable memory. TTL, LRU, and half-life style controls still matter for bounded-lived artifacts, but they are secondary mechanisms, not the core model for long-lived knowledge. See also
+> **Abstract:** This chapter documents a target-state demurrage extension for durable Engrams. Current shipping retention in the codebase is still time-based via the `Decay` enum; the balance-bearing model below is future work rather than current behavior. See also
 > [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md)
 > and [01-naming-and-glossary.md](01-naming-and-glossary.md).
-
-> **Implementation**: Shipping
+>
+> **Implementation status**: The shipping `Decay` enum (`None`, `HalfLife`, `Ttl`, `Ebbinghaus`) exists in `roko-core`. The demurrage extension (`balance`, reinforcement, cold-tier freeze/thaw) described in this doc is **deferred**; there is no demurrage code in the current codebase.
 
 ---
 
@@ -25,7 +25,7 @@ That is the right model for durable memory. Half-life, TTL, and LRU are still us
 
 ## 2. The Demurrage State
 
-The durable record carries explicit attention-economy state:
+In this deferred design, the durable record carries explicit attention-economy state:
 
 ```rust
 pub struct Engram {
@@ -43,7 +43,7 @@ pub struct Engram {
 }
 ```
 
-The storage side exposes demurrage directly:
+In the same deferred design, the storage side would expose demurrage directly:
 
 ```rust
 pub trait Demurrage {
@@ -134,7 +134,7 @@ This is the anti-hoarding mechanism. High-balance memory has to keep paying for 
 
 ## 5. Cold Tier, Freeze, Thaw
 
-When balance reaches the floor, the Engram should not disappear from the system model. It should move to cold storage.
+In this deferred model, when balance reaches the floor, the Engram should not disappear from the system model. It should move to cold storage.
 
 ```rust
 pub trait ColdSubstrate: Substrate {
@@ -177,6 +177,8 @@ Examples of appropriate secondary use:
 ---
 
 ## 7. Configuration Surface
+
+Proposed configuration surface:
 
 ```toml
 [demurrage]

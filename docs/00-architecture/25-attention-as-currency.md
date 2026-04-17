@@ -9,8 +9,8 @@
 > keep its seat for free. The result is an attention market that enables principled,
 > incentive-compatible allocation of cognitive resources across competing goals, agents, and
 > timescales.
-
-> **Implementation**: Specified
+>
+> **Implementation status**: Target-state concept. No demurrage, balance, or attention-currency code exists. This doc describes a deferred research direction.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [08-scorer-gate-router-composer-policy](./08-scorer-gate-router-composer-policy.md), [09-universal-cognitive-loop](./09-universal-cognitive-loop.md), [10-three-cognitive-speeds](./10-three-cognitive-speeds.md)
@@ -41,11 +41,11 @@ a separate memory-side ledger:
    Designed to allocate "attention slots" among competing Engrams, but never wired to the
    actual Router or Composer.
 
-4. **Neuro demurrage** (see [04-decay-variants](./04-decay-variants.md),
+4. **Proposed Neuro demurrage** (see [04-decay-variants](./04-decay-variants.md),
    [18-decay-tier-matrix](./18-decay-tier-matrix.md), [Topic 06: Neuro](../06-neuro/INDEX.md),
    and [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md)):
-   Durable Engrams carry `balance`, a holding-cost ledger that decays when memory sits idle and
-   is reinforced by use, citation, retrieval, or surprise.
+   The deferred design says durable Engrams would carry `balance`, a holding-cost ledger that
+   decays when memory sits idle and is reinforced by use, citation, retrieval, or surprise.
 
 These mechanisms make locally rational decisions that are globally incoherent. An agent
 might cascade to T2 for every tick (CascadeRouter thinks it's optimal), while the budget is
@@ -145,8 +145,8 @@ impl Default for AttentionBudget {
 
 ### 2.3 The Memory Ledger
 
-Attention tokens buy compute inside a tick. Demurrage taxes the right to keep a durable Engram
-warm after the tick ends.
+Attention tokens buy compute inside a tick. In the deferred companion design, demurrage would tax
+the right to keep a durable Engram warm after the tick ends.
 
 ```text
 balance(t + Δt) = balance(t) - r·Δt - β·balance(t)·Δt + reinforcement

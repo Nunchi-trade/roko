@@ -3,14 +3,16 @@
 > **REF14 source:** `../../tmp/refinements/14-worldview-validation.md`
 > **Glossary:** [Naming and Glossary](../00-architecture/01-naming-and-glossary.md)
 > **Cross-references:** [01-playbook-system](01-playbook-system.md), [16-predictive-foraging](16-predictive-foraging.md), [18-self-learning-cybernetic-loops](18-self-learning-cybernetic-loops.md), [20-research-to-runtime](20-research-to-runtime.md), [12-4-tier-distillation-pipeline](../06-neuro/12-4-tier-distillation-pipeline.md), [14-c-factor-collective-intelligence](../00-architecture/14-c-factor-collective-intelligence.md), [25-attention-as-currency](../00-architecture/25-attention-as-currency.md), `../../tmp/refinements/16-research-to-runtime.md`
+>
+> **Implementation status**: `HeuristicRule` exists in `roko-neuro`. The full worldview/falsifier/dissonance stack described here is **target-state**. Near-term: typed heuristic specs and contradiction tracking. Deferred: worldview clustering, dissonance algebra, and belief export/import.
 
 ---
 
 ## Purpose
 
-Episodes tell Roko what happened. Playbooks tell it which concrete sequences have worked before. REF14 adds the missing middle: `Heuristic` Engrams that capture a reusable claim, the conditions where it applies, the predicted outcome, and the calibration record showing whether lived experience keeps confirming it. See `tmp/refinements/14-worldview-validation.md` for the canonical proposal.
+Episodes tell Roko what happened. Playbooks tell it which concrete sequences have worked before. REF14 proposes a richer missing middle: `Heuristic` Engrams that capture a reusable claim, the conditions where it applies, the predicted outcome, and the calibration record showing whether lived experience keeps confirming it. The near-term version of that idea builds on the existing `HeuristicRule` in `roko-neuro` with typed specs and contradiction tracking. See `tmp/refinements/14-worldview-validation.md` for the full proposal.
 
-REF16 extends that middle into the research pipeline. Papers are first-class Engrams, claims are structured hypotheses with explicit falsifiers, and validated claims can lift into heuristics once local trials and replication-ledger evidence support them. See `../../tmp/refinements/16-research-to-runtime.md` for the canonical pipeline.
+REF16 extends that middle into a research pipeline. That full paper/claim/replication-ledger stack is deferred, but the provenance instinct remains useful: heuristics should be able to point back to source material when that source materially informed the rule.
 
 This matters because playbooks alone are too concrete. They bind to particular tools, paths, and workflow orderings. Heuristics are more abstract: they say what to check, what to expect, and what would count as being wrong. That gives the learning stack a durable library of priors that can survive tool churn, compose across domains, and be inspected by the user.
 
@@ -65,7 +67,7 @@ Three details are load-bearing:
 - `prediction` says what should happen if the heuristic is correct.
 - `receipts` preserve the episode lineage that justified the heuristic in the first place.
 
-Because heuristics are Engrams, they inherit the rest of the durable-memory stack: HDC fingerprint similarity, demurrage balance, provenance, lineage, and cold-tier retention.
+Because heuristics are Engrams, they can share the rest of the durable-memory stack: HDC fingerprint similarity where available, provenance, lineage, and tiered retention. The demurrage-balance model described elsewhere remains deferred.
 
 ## Predicates and Falsifiers
 
@@ -94,7 +96,7 @@ That gives the system a consistent contract:
 - A calibrator decides whether those outcomes confirmed, violated, or refined the claim.
 - The falsifier record is durable and queryable after the fact.
 
-This is the REF14 synergy with REF10 and the two-fabric model: heuristics are durable Engrams, while the Bus delivers the reality-check Pulses that can confirm or falsify them.
+This is the REF14 synergy with REF10 and the two-fabric model: heuristics are durable Engrams, while the runtime can eventually deliver the reality-check signals that confirm, contradict, or refine them.
 
 ## Heuristic Lifecycle
 
@@ -108,7 +110,7 @@ Heuristics enter the system in three ways:
 
 Fresh heuristics should start advisory rather than dominant. They need receipts, trials, and calibration before they earn prompt weight.
 
-When a heuristic is imported from research, its receipts should include the source paper, the derived claim, and the replication ledger entry that explains why the claim is still trusted. That keeps "paper-backed" from becoming a synonym for "implicitly authoritative."
+When a heuristic is imported from research, its receipts should at minimum include the source paper or note that informed it. The fuller replication-ledger story is deferred.
 
 ### Test
 
@@ -140,17 +142,17 @@ Calibration should be empirical and incremental:
 - `violations` increments when the falsifier surface fired.
 - Brier score and Wilson confidence intervals track both sharpness and reliability.
 
-Paper-derived heuristics use the same calibration path. Their replication ledger should update the same confidence record that local heuristics use, so a claim that stops replicating in the live deployment naturally cools, regardless of how strong the original citation looked.
+Paper-derived heuristics can eventually use the same calibration path. For now, the practical goal is simpler provenance plus local confirmation and contradiction tracking rather than a full replication ledger.
 
 Prompt weighting should follow the confidence lower bound, not raw win rate. That keeps young heuristics usable without letting a tiny sample masquerade as certainty.
 
 ### Retire
 
-Retirement is not deletion. A refuted heuristic should lose influence through demurrage, fall toward colder tiers, and remain resolvable by content hash so old receipts and citations still make sense. History is preserved; attention is reallocated.
+Retirement is not deletion. A refuted heuristic should lose influence through the existing confidence and tiering machinery, remain resolvable by content hash, and preserve the receipts that explain why it was trusted and later challenged. History is preserved; attention is reallocated.
 
 ## Worldviews As Co-Citation Clusters
 
-A worldview is a cluster of heuristics that keep appearing together in successful episodes. It is not a handcrafted persona. It is an observed structure in the heuristic citation graph.
+In the target-state design, a worldview is a cluster of heuristics that keep appearing together in successful episodes. It is not a handcrafted persona. It is an observed structure in the heuristic citation graph.
 
 ```rust
 pub struct Worldview {
@@ -162,7 +164,7 @@ pub struct Worldview {
 }
 ```
 
-REF14 adds three practical uses for worldview clustering:
+REF14 adds three practical uses for worldview clustering once the underlying data exists:
 
 - Router can pick the worldview whose `domain_fingerprint` best matches the incoming task.
 - Composer can inject the worldview's core heuristics as a coherent prior set rather than a random pile of tips.
@@ -172,7 +174,7 @@ This is the link to REF13's c-factor work. Diversity is not treated as noise to 
 
 ## Dissonance and Active Learning
 
-REF14 makes contradictions visible instead of smoothing them away. When two active heuristics predict incompatible outcomes for the same situation, the system should emit a dissonance record:
+REF14 makes contradictions visible instead of smoothing them away. Near-term, that means contradiction tracking around heuristic calibration. In the fuller target-state design, when two active heuristics predict incompatible outcomes for the same situation, the system would emit a dissonance record:
 
 ```rust
 pub struct Dissonance {
@@ -201,17 +203,17 @@ Heuristics should be externally inspectable in a way playbooks alone are not. A 
 
 That implies a first-class query surface such as `roko heuristic list`, `show`, `stats`, `similar`, `export`, and `import`. Imported heuristics should retain their receipts and calibration metadata but enter with a configurable trust discount until local evidence revalidates them.
 
-For research-derived runtime defaults, the same logic can be applied at lookup time: a `claim!`-style resolver can map a config key to a claim ID, then materialize the parameter only if the claim's replication ledger and local calibration are still inside tolerance. If the claim degrades, the resolver should fall back to a safe default rather than silently preserving stale provenance.
+If REF16 lands, the same logic can be applied to research-derived runtime defaults: a `claim!`-style resolver could map a config key to a claim ID, then materialize the parameter only if the claim's replication ledger and local calibration are still inside tolerance. If the claim degrades, the resolver should fall back to a safe default rather than silently preserving stale provenance.
 
-This export/import flow is the basis of a heuristic commons. It also composes directly with REF16's replication-ledger framing: a heuristic backed by many independent confirmations is more trustworthy than a fresh untested claim.
+This export/import flow is a longer-range idea. It also composes with REF16's deferred replication-ledger framing, but that paper-economy layer is not current architecture.
 
 ## Interaction With Playbooks, Neuro, and Profiles
 
 REF14 does not remove playbooks. It narrows their role:
 
-- Heuristics are the primary durable belief objects.
+- Heuristics are a promising durable belief layer to strengthen on top of today's `HeuristicRule` machinery.
 - Playbooks are compiled procedural projections of heuristics and strategy fragments.
-- Neuro stores and clusters heuristics as durable Engrams with HDC fingerprints and demurrage balance.
+- Neuro stores heuristics and related knowledge as durable Engrams; broader clustering and demurrage-balance semantics remain target-state.
 - Domain profiles seed an initial heuristic library, but calibration remains per heuristic rather than per profile.
 
 That separation gives the docs a cleaner architecture story. Learning owns episode feedback, calibration, worldview competition, and externalization of beliefs. Neuro owns durable storage, similarity, and tier movement. Playbooks remain the human-readable, highly concrete output surface rather than the only memory object worth preserving.
@@ -221,7 +223,7 @@ That separation gives the docs a cleaner architecture story. Learning owns episo
 - [01-playbook-system](01-playbook-system.md) now reads playbooks as compiled downstream artifacts rather than the only validated knowledge tier.
 - [16-predictive-foraging](16-predictive-foraging.md) covers Brier scores and prediction quality at task level; heuristics reuse the same calibration logic at belief level.
 - [18-self-learning-cybernetic-loops](18-self-learning-cybernetic-loops.md) explains how the Bus carries the outcome Pulses and calibration topics that falsify or reinforce heuristics.
-- [20-research-to-runtime](20-research-to-runtime.md) defines the paper → claim → heuristic → trial → calibration pipeline and the replication ledger format that keeps research provenance live.
+- [20-research-to-runtime](20-research-to-runtime.md) sketches the target-state paper → claim → heuristic → trial → calibration pipeline and the deferred replication-ledger format.
 - [12-4-tier-distillation-pipeline](../06-neuro/12-4-tier-distillation-pipeline.md) describes how Neuro distills, stores, and cools the durable heuristic library.
 - [14-c-factor-collective-intelligence](../00-architecture/14-c-factor-collective-intelligence.md) provides the cohort-level reason to keep challenger and niche worldviews active.
 - See also `tmp/refinements/14-worldview-validation.md` for the full proposal.

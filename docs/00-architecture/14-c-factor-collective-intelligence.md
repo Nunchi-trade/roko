@@ -1,8 +1,8 @@
 # C-Factor: Collective Intelligence
 
-> **Abstract:** c-factor is a continuously measured cohort metric for Roko agent collectives. It is computed from Bus and Substrate statistics over a task-aligned cohort window, then learned into a scalar score that Policy can monitor and use as a diagnostic. The measurement model uses five process variables: turn-taking equality, social perceptiveness, trust calibration, channel openness, and cognitive diversity. The operational claim is simple: if the Bus is the conversation floor and the Substrate is the durable record, then collective intelligence can be measured, compared, and improved from the artifacts the runtime already produces. See also [01-naming-and-glossary](./01-naming-and-glossary.md) and [tmp/refinements/13-collective-intelligence-c-factor.md](../../tmp/refinements/13-collective-intelligence-c-factor.md).
-
-> **Implementation**: Shipping
+> **Abstract:** This chapter documents a broader target-state c-factor doctrine for Roko collectives. Shipping code already computes c-factor-like summaries and uses `CFactorPolicy` as a routing signal, but the Bus/Substrate-wide measurement and intervention story described below is still more ambitious than the current implementation. See also [01-naming-and-glossary](./01-naming-and-glossary.md) and [tmp/refinements/13-collective-intelligence-c-factor.md](../../tmp/refinements/13-collective-intelligence-c-factor.md).
+>
+> **Implementation status**: `CFactorPolicy` exists in `roko-core` and is wired into the routing stack as a live signal. The broader c-factor doctrine described here (continuous Woolley-style measurement, Bus/Substrate statistics, conditional Policy intervention) is **target-state**. Current recommendation: treat c-factor as an observability metric first, a control input second.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [06-synapse-traits](./06-synapse-traits.md), [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md), [01-naming-and-glossary](./01-naming-and-glossary.md)
@@ -18,7 +18,7 @@
 
 Woolley et al. (2010) showed that group performance across varied tasks loads onto a single collective factor, c. The important result is not that larger groups are automatically better. The important result is that process matters: how turns are shared, how well members predict one another, how often they cite one another correctly, how open the channel is, and how diverse the working set is.
 
-Roko has direct observability into all of those process variables. The Bus exposes turns and delivery. The Substrate exposes durable artifacts, lineage, and retrieval. Together they make c-factor a runtime measurement problem rather than a human-subjects mystery. This chapter defines c-factor as a cohort-level diagnostic, then shows how the Policy layer can react to it without turning it into a brittle single-objective reward.
+Roko has partial observability into some of those process variables today, and the target-state architecture would make the rest explicit through Bus and Substrate artifacts. This chapter defines c-factor as a cohort-level diagnostic, then shows how the Policy layer could react to it without turning it into a brittle single-objective reward.
 
 The key design choice is deliberate: c-factor is a covariate and a diagnostic, not a direct objective. Policy should watch it, correlate it with outcomes, and apply process levers when low c-factor coincides with degraded task results. That keeps the system from gaming the metric by routing easy work, suppressing dissent, or narrowing task scope.
 
@@ -71,7 +71,7 @@ c-factor is the reported scalar for a cohort over a window. It is computed from 
 c_factor(cohort, window) = f(CohortMetrics, CohortWeights)
 ```
 
-In the simplest form, the learned scalar is a weighted combination of the five process variables plus bias. The weights are fitted from observed cohort outcomes, so the number is not hand-tuned.
+In the target-state design, the learned scalar is a weighted combination of the five process variables plus bias. The weights would be fitted from observed cohort outcomes instead of being hand-tuned.
 
 ### 2.2 The five process variables
 
@@ -87,7 +87,7 @@ These are the same five signals described in the refinement source, expressed in
 
 ### 2.3 The metric is continuous
 
-c-factor is not a one-off benchmark. It is tracked continuously on a rolling cadence:
+In the target-state design, c-factor is not a one-off benchmark. It is tracked continuously on a rolling cadence:
 
 1. collect Bus and Substrate events for the cohort window
 2. derive process variables from those events
@@ -117,7 +117,7 @@ The metrics are intentionally simple. They are meant to be computed from existin
 
 ### 3.1 Learned scalar
 
-c-score is the learned mapping from `CohortMetrics` to a scalar that predicts cohort outcome quality. In practice, the docs use c-factor and c-score closely together because both refer to the same learned measurement surface: one is the published metric, the other is the fitted model behind it.
+c-score is the target-state learned mapping from `CohortMetrics` to a scalar that predicts cohort outcome quality. In practice, the docs use c-factor and c-score closely together because both refer to the same measurement surface: one is the published metric, the other is the fitted model behind it.
 
 ```rust
 pub struct CohortWeights {

@@ -3,20 +3,25 @@
 > **Crate:** `roko-learn` · **Path:** `crates/roko-learn/src/`
 > **Persistence root:** `.roko/learn/`
 > **Entry point:** `LearningRuntime` in `runtime_feedback.rs`
+>
+> **Implementation status**
+> - **Shipping**: `roko-learn` is already one of the largest subsystems in the repo at roughly 42 modules and 35,847 LOC. Shipping pieces include `cascade_router`, `runtime_feedback`, `skill_library`, `episode_logger`, bandits, prediction tracking, active inference, drift detection, pattern discovery, and provider health.
+> - **Target-state**: Bus-backed cross-operator calibration, typed heuristic specs, and richer provenance-backed research ingestion.
+> - **Deferred**: demurrage as the governing memory model, worldview clustering and dissonance algebra as a canonical layer, and the full Paper/Claim/replication-ledger stack.
 
 ---
 
 ## Overview
 
-The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. REF10 adds a Bus-backed predict-publish-correct loop: operators publish prediction Pulses, outcomes close the loop, and `prediction.error.*` becomes a first-class calibration signal. REF16 extends that loop into research ingestion: papers become Engrams, claims become testable hypotheses with falsifiers, and replication ledgers feed back into calibration instead of leaving research as folklore. See `../../tmp/refinements/10-self-learning-cybernetic-loops.md`, `../../tmp/refinements/16-research-to-runtime.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the Bus/Pulse and research vocabulary. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
+The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, and each routing decision produces a new episode. That core loop already ships in a substantial form rather than as a nascent sketch: `roko-learn` currently spans roughly 42 modules and 35,847 LOC, including `cascade_router` (3-stage model routing), `runtime_feedback`, `skill_library`, `episode_logger`, bandits, prediction tracking, active inference, drift detection, pattern discovery, and provider-health circuit breaking.
 
-REF12 extends that learning story with demurrage-governed freshness for playbooks and distilled knowledge: useful rules keep earning `balance`, stale ones cool and eventually leave the hot path, and retention is driven by use rather than a fixed-age window. See also [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [04-decay-variants](../00-architecture/04-decay-variants.md), and [25-attention-as-currency](../00-architecture/25-attention-as-currency.md).
+REF10, REF14, and REF16 still matter here, but mainly as target-state design docs layered on top of that existing crate. REF10 describes a Bus-backed predict-publish-correct architecture for broader cross-operator calibration; today active inference and prediction tracking are real, but the Router has the richest prediction/outcome signal and the universal Bus/Pulse doctrine remains planned. REF16 similarly describes a richer provenance path from research into runtime behavior, but the Paper/Claim/replication-ledger stack is still deferred.
 
-REF14 adds a first-class belief layer on top of those loops: `Heuristic` Engrams with explicit preconditions, predictions, falsifier surfaces, and calibration records. Matching heuristics are injected as advisory priors, outcome Pulses update their track record, worldview clusters keep multiple coherent prior sets alive, and playbooks become the concrete downstream projection rather than the only durable learning surface. See [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md), `../../tmp/refinements/14-worldview-validation.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
+REF12's demurrage framing is explicitly deferred. Current learning and memory code uses existing decay, confidence, and store-specific retention behavior rather than a balance-bearing attention economy. See also [04-decay-variants](../00-architecture/04-decay-variants.md) and [25-attention-as-currency](../00-architecture/25-attention-as-currency.md) for the deferred design.
 
-REF16 adds the research-to-runtime pipeline underneath those beliefs: paper Engrams carry provenance, claims carry falsifiers, trial results become replication-ledger entries, and claim-resolved runtime parameters stay auditable through a `claim!`-style lookup instead of hardcoded literals. See [20-research-to-runtime](20-research-to-runtime.md), `../../tmp/refinements/16-research-to-runtime.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
+REF14 is most useful in a narrower form. `HeuristicRule` already exists in `roko-neuro`, and near-term value comes from typed heuristic specs plus contradiction and calibration tracking. Worldview clustering, dissonance algebra, and heuristic export/import remain target-state rather than current runtime behavior. See [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md) and [20-research-to-runtime](20-research-to-runtime.md) for those scoped designs.
 
-The subsystem is organized around four durable learning surfaces (episodes → patterns → heuristics/worldviews → playbook projections), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
+The docs describe four durable learning surfaces, but they are not all equally mature yet: episodes and metrics are **shipping**; patterns, bandits, and routing baselines are **shipping**; heuristic/playbook distillation exists in partial form today and is the main **ship soon** layer; worldviews and replication-ledger-backed research ingestion are **planned/deferred**. The crate also includes three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops described as a target architecture rather than a fully unified present-tense doctrine.
 
 ---
 
@@ -27,7 +32,7 @@ The subsystem is organized around four durable learning surfaces (episodes → p
 | # | Document | What it covers |
 |---|----------|---------------|
 | [00](00-episode-logger.md) | **Episode Logger** | Append-only JSONL episode log, HDC fingerprinting, crash-safe writes, tolerant reader. The foundational data substrate for all learning. |
-| [01](01-playbook-system.md) | **Playbook System** | Playbook rules with globset trigger matching, demurrage-driven freshness, bounded confidence dynamics (validate +0.05, contradict −0.10, ceiling 0.95), and TOML persistence. Three-tier memory: episodes → patterns → rules, with attention-economy self-trimming. |
+| [01](01-playbook-system.md) | **Playbook System** | Playbook rules with globset trigger matching, bounded confidence dynamics (validate +0.05, contradict −0.10, ceiling 0.95), and TOML persistence. Demurrage-style freshness remains a deferred design rather than current behavior. |
 | [02](02-skill-library-voyager.md) | **Skill Library (Voyager)** | Voyager-style skill accumulation (Wang et al. 2023). Monotonically growing library of reusable capabilities with prompt templates, tool dependencies, usage telemetry, and deduplication. |
 
 ### Bandit Algorithms
@@ -64,7 +69,7 @@ The subsystem is organized around four durable learning surfaces (episodes → p
 
 | # | Document | What it covers |
 |---|----------|---------------|
-| [20](20-research-to-runtime.md) | **Research-to-Runtime Pipeline** | Paper → Claim → Heuristic → Trial → Calibration, paper Engrams, falsifiers, replication ledger, and claim-resolved runtime parameters. |
+| [20](20-research-to-runtime.md) | **Research-to-Runtime Pipeline** | Target-state provenance flow from paper-backed ideas into heuristics and calibration. The full Paper/Claim/replication-ledger model is deferred. |
 
 ### Cybernetic Architecture
 
@@ -75,8 +80,8 @@ The subsystem is organized around four durable learning surfaces (episodes → p
 | [15](15-collective-calibration-31x.md) | **Collective Calibration (31.6×)** | CLT-inspired heuristic `accuracy(t) = 1 − 1/√(N×t)`. Explicit caveats (independence, stationarity, aggregation). C-Factor composite metric with 11 components and leave-one-out agent contributions. |
 | [16](16-predictive-foraging.md) | **Predictive Foraging** | Falsifiable predictions (duration, complexity, gate outcome, conflict). CalibrationTracker, arithmetic corrector (~50ns). Brier score calibration metric, reliability diagrams. |
 | [17](17-adas-and-autocatalytic.md) | **ADAS and Autocatalytic Thesis** | ADAS meta-architecture search (Hu et al. ICLR 2025, +14% ARC). EvoSkills (Chen et al. 2023). Autocatalytic sets (Kauffman 1993). Compound math: 0.9⁴ = 0.656. Ten flywheel mechanisms. Empirical testability via C-Factor trend. |
-| [18](18-self-learning-cybernetic-loops.md) | **Self-Learning & Cybernetic Feedback Loops** | Predict-publish-correct loop, per-operator calibration, `CalibrationPolicy`, `prediction.error.*`, and Bus-backed learners (`CascadeRouter`, `EpisodeLogger`, `ExperimentStore`). |
-| [19](19-heuristics-worldviews-and-falsifiers.md) | **Heuristics, Worldviews, and Falsifiers** | First-class `Heuristic` Engrams, explicit falsifier surfaces, `Calibrator` verdicts, worldview clustering, dissonance detection, and inspectable belief export/import. |
+| [18](18-self-learning-cybernetic-loops.md) | **Self-Learning & Cybernetic Feedback Loops** | Target-state predict-publish-correct architecture. Shipping today: routing-side active inference and prediction tracking; deferred: universal per-operator Bus calibration. |
+| [19](19-heuristics-worldviews-and-falsifiers.md) | **Heuristics, Worldviews, and Falsifiers** | Near-term value: typed heuristic specs and contradiction tracking around existing heuristic distillation. Deferred: worldview clustering, dissonance algebra, and belief export/import. |
 ---
 
 ## LearningRuntime: The Integration Hub

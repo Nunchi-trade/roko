@@ -1,8 +1,11 @@
 # Four-Tier Distillation Pipeline
 
-> Episodes are distilled into Insights, Insights are promoted into calibrated Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files. Durable knowledge keeps its receipts, its falsifiers, and its worldview history.
-
-> **Implementation**: Built
+> Episodes are distilled into Insights, Insights are promoted into Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files. Durable knowledge keeps its receipts today; explicit falsifier records, worldview history, and demurrage-governed freshness are target-state extensions described in this doc.
+>
+> **Implementation status**
+> - **Shipping**: episode distillation, `InsightRecord`, `HeuristicRule`, and playbook compilation in `roko-neuro`.
+> - **Target-state**: richer typed heuristics, explicit falsifier records, and worldview clustering.
+> - **Deferred**: demurrage/balance freshness as the governing model, worldview cold-tier preservation, and HDC novelty-weighted reinforcement.
 
 **Topic**: [Neuro - Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md), [02-four-validation-tiers.md](./02-four-validation-tiers.md)
@@ -21,9 +24,9 @@
 
 ## Abstract
 
-The distillation pipeline turns raw agent experience into durable, inspectable knowledge. In the current Neuro story, `Heuristic` is a first-class durable knowledge kind rather than a derived side effect. A heuristic stores a claim, preconditions, a prediction, calibration history, episode receipts, and lineage. Episodes feed evidence into that record, and later episodes either confirm it, violate it, refine it, or refute it.
+The distillation pipeline turns raw agent experience into durable, inspectable knowledge. In the expanded target-state design, `Heuristic` is a first-class durable knowledge kind rather than a derived side effect. A heuristic stores a claim, preconditions, a prediction, calibration history, episode receipts, and lineage. Episodes feed evidence into that record, and later episodes either confirm it, violate it, refine it, or refute it.
 
-This chapter follows the refinement in `tmp/refinements/14-worldview-validation.md` and keeps the earlier HDC and demurrage changes in view. The point is not just to promote useful patterns. The point is to preserve what worked, preserve what was falsified, and make the difference explicit. That means the pipeline has to surface falsifiers, keep receipts attached to each heuristic, and cluster heuristics into worldviews that can later be thawed from cold storage when the same domain shows up again.
+This chapter follows the refinement in `tmp/refinements/14-worldview-validation.md` and keeps the earlier HDC and demurrage changes in view. The shipping pipeline is narrower than that full design: it already promotes useful patterns and keeps receipts, while the richer falsifier, worldview, and demurrage layers remain target-state. The point is still to preserve what worked, preserve what was challenged, and make the difference explicit.
 
 The pipeline still has three major stages:
 
@@ -31,7 +34,7 @@ The pipeline still has three major stages:
 2. **D2: Insights -> Heuristics** - promote repeated patterns into durable heuristics with calibration and contradiction handling
 3. **D3: Heuristics -> PLAYBOOK.md** - compile validated heuristics into a human-readable playbook without deleting the underlying durable records
 
-This is CLS-style consolidation with more structure than a plain semantic memo. HDC fingerprints keep the promotion path structural rather than textual. Demurrage ensures that durable knowledge keeps earning its place through retrieval, citation, surprise, and gate survival. Worldviews add a higher-order cluster over heuristics so the system can keep plural, domain-shaped belief sets instead of collapsing into one monolithic rule library.
+This is CLS-style consolidation with more structure than a plain semantic memo. HDC fingerprints can keep the promotion path structural rather than textual where they are available. The deferred demurrage model would make durable knowledge earn its place through retrieval, citation, surprise, and gate survival. Worldviews are likewise a higher-order target-state cluster over heuristics rather than a current shipping object.
 
 See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md), [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md), [Temporal Knowledge Topology](../00-architecture/27-temporal-knowledge-topology.md), [04-decay-variants.md](../00-architecture/04-decay-variants.md), [18-decay-tier-matrix.md](../00-architecture/18-decay-tier-matrix.md), and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
 
@@ -104,7 +107,7 @@ The D2 stage uses `PatternMiner` from `roko-learn` to identify clusters of relat
 4. Extract the common pattern from each qualifying cluster
 5. Emit a durable Heuristic record with calibration metadata and receipts
 
-The HDC fingerprint matters twice here. First, it keeps D2 structural instead of lexical. Second, it provides the novelty signal that makes reinforcement balance-aware. A cluster that is coherent but redundant earns less balance than a cluster that is coherent and meaningfully novel. That is also why a heuristic must keep receipts: the system should be able to point back to the concrete episode trail that made the heuristic worth keeping.
+The HDC fingerprint matters twice in the fuller design. First, it keeps D2 structural instead of lexical. Second, it can provide a novelty signal for a future balance-aware reinforcement model. That is also why a heuristic must keep receipts: the system should be able to point back to the concrete episode trail that made the heuristic worth keeping.
 
 ### HeuristicRule
 
@@ -161,7 +164,7 @@ Replay runs during the Dreams cycle so it does not interfere with online task ex
 
 ## Worldviews and cold tier preservation
 
-A worldview is a cluster of heuristics that repeatedly co-occur in successful episodes. The cluster is not manually declared; it is observed from the co-citation graph and from repeated episode overlap.
+Target-state: a worldview is a cluster of heuristics that repeatedly co-occur in successful episodes. The cluster is not manually declared; it is observed from the co-citation graph and from repeated episode overlap.
 
 Worldviews matter because they let Neuro reason above a single heuristic:
 
@@ -172,7 +175,7 @@ Worldviews matter because they let Neuro reason above a single heuristic:
 
 Cold-tier preservation is important for two reasons. First, it prevents good but currently quiet worldviews from being forgotten just because another domain is active today. Second, it lets the router thaw a preserved worldview when the current task fingerprint matches again. That keeps the knowledge store plural by construction instead of collapsing into monoculture.
 
-The cold-tier rule follows demurrage. Inactive worldviews lose attention budget, not identity. Their receipts, calibration history, and lineage remain valid even while their retrieval priority is reduced.
+The cold-tier rule in this design follows demurrage. That storage model is deferred, but the intent is clear: inactive worldviews would lose retrieval priority, not identity. Their receipts, calibration history, and lineage would remain valid even while they cool.
 
 ---
 
@@ -191,7 +194,7 @@ pub struct PlaybookCompilation {
 }
 ```
 
-Compiled playbooks are not exempt from demurrage. They remain part of the semantic memory economy, and each rule has to keep earning balance through retrieval, citation, surprise, or gate survival. When a rule stops paying rent, it should cool into a lower tier or cold storage instead of occupying the attention budget forever. The heuristic record itself remains in Neuro even if the playbook projection gets rewritten.
+Compiled playbooks are not exempt from retention pressure, but the current system uses existing decay/confidence behavior rather than the full demurrage economy described here. In the deferred design, each rule would keep earning balance through retrieval, citation, surprise, or gate survival. The heuristic record itself would remain in Neuro even if the playbook projection gets rewritten.
 
 ### Freshness and balance
 
@@ -292,10 +295,10 @@ The distillation pipeline runs both online after episode completion and offline 
 
 1. NREM replay re-processes recent episodes, prioritized by the Mattar-Daw utility formula
 2. Consolidation runs D1 and D2 on replayed episodes, with D2 grouping by fingerprint similarity and updating heuristic calibration
-3. Pruning charges demurrage, freezes cold knowledge, preserves cold-tier worldviews, and thaws only what is still earning balance
+3. Target-state pruning charges demurrage, freezes cold knowledge, preserves cold-tier worldviews, and thaws only what is still earning balance
 4. Playbook update runs D3 to recompile PLAYBOOK.md with new heuristics while keeping the underlying durable records intact
 
-This mirrors sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995). In Neuro terms, Dreams also re-checks which entries are still earning balance and which should move to cold storage.
+This mirrors sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995). In Neuro terms, the deferred balance model would also re-check which entries are still earning their place and which should move to colder storage.
 
 ---
 
