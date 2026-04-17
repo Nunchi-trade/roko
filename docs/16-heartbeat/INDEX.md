@@ -2,7 +2,7 @@
 
 > The heartbeat is the agent's autonomous decision cycle — in the two-fabric model it is driven by Bus-published tick Pulses at three concurrent timescales (Gamma, Theta, Delta), with dual-process tier gating that makes ~80% of ticks free and active inference determining compute investment.
 
-> See `tmp/refinements/05-loop-retold.md` for the seven-step retelling, `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ Bus-consumer framing, and `../00-architecture/01-naming-and-glossary.md` for canonical heartbeat terms.
+> See `tmp/refinements/05-loop-retold.md` for the seven-step retelling, `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ Bus-consumer framing, `tmp/refinements/10-self-learning-cybernetic-loops.md` for the prediction/outcome/error learning loop, and `../00-architecture/01-naming-and-glossary.md` for canonical heartbeat terms.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -46,7 +46,7 @@ This topic spans L0 Runtime (HeartbeatPolicy, adaptive clock, CorticalState, Bus
 | 08 | [Dual-Process T0/T1/T2](./08-dual-process-t0-t1-t2.md) | LLM-Last architecture. Tier enum. Adaptive gating threshold. Cost model. FrugalGPT validation. Interaction with Synapse traits. Active inference connection. |
 | 09 | [16 T0 Probes](./09-16-t0-probes.md) | All 16 zero-LLM probes specified: 8 chain (price, TVL, position health, gas, credit, RSI, MACD, circuit breaker), 6 coding (build, tests, complexity, deps, coverage, error rate), 2 universal (world model drift, causal consistency). Probe trait. Registry extensibility. |
 | 10 | [Active Inference: Compute Allocation](./10-active-inference-compute-allocation.md) | Expected Free Energy formula. Zero-hyperparameter exploration/exploitation. EFE for context selection. PredictiveScorer. Connection to CascadeRouter. Rational inattention (Sims 2003). |
-| 11 | [Active Inference: State Space](./11-active-inference-state-space.md) | Factorized discrete POMDP: TaskPhase × ContextQuality × Uncertainty = 90 states. A/B/C/D matrices from pymdp. EFE computation in microseconds. Bayesian matrix learning. |
+| 11 | [Active Inference: State Space](./11-active-inference-state-space.md) | Factorized discrete POMDP: TaskPhase × ContextQuality × Uncertainty = 90 states. A/B/C/D matrices from pymdp. Prediction/outcome topic families, `prediction.error.*`, Bus joins, and Bayesian matrix learning. |
 | 12 | [Attention Auction & CorticalState](./12-attention-auction-and-gating.md) | VCG truthful bidding for context budget. Eight bidding subsystems. Affect-modulated bids. Context governor. CorticalState 32-signal atomic struct. Meta-cognition hook. Frequency scheduler. |
 
 ---
@@ -58,7 +58,7 @@ Before reading this topic, we recommend:
 - [Topic 00: Architecture](../00-architecture/INDEX.md) — for the core Synapse Architecture concepts (Engrams, 6 traits, cognitive loop, 5 layers)
 - [Topic 09: Daimon](../09-daimon/INDEX.md) — for the PAD affect model, ALMA layers, and behavioral states
 - [Topic 06: Neuro](../06-neuro/INDEX.md) — for knowledge tiers, HDC vectors, and tier progression
-- [Topic 05: Learning](../05-learning/INDEX.md) — for episodes, CascadeRouter, playbooks, and calibration
+- [Topic 05: Learning](../05-learning/INDEX.md) — for episodes, CascadeRouter, playbooks, calibration policies, and prediction-error feedback loops
 - [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) — canonical terms for Bus, Pulse, Topic, and the heartbeat vocabulary
 
 ---
@@ -72,7 +72,7 @@ This topic connects to:
 - [Topic 02: Agents](../02-agents/INDEX.md) — agent types, LLM backends, dispatch
 - [Topic 03: Composition](../03-composition/INDEX.md) — context engineering, prompt assembly, Composer trait
 - [Topic 04: Verification](../04-verification/INDEX.md) — gate pipeline, adaptive thresholds, ratcheting
-- [Topic 05: Learning](../05-learning/INDEX.md) — episodes, CascadeRouter, playbooks, bandits, calibration
+- [Topic 05: Learning](../05-learning/INDEX.md) — episodes, CascadeRouter, playbooks, bandits, calibration, and `prediction.error.*` consumers
 - [Topic 06: Neuro](../06-neuro/INDEX.md) — knowledge store, tier progression, HDC encoding
 - [Topic 07: Conductor](../07-conductor/INDEX.md) — reactive watchers, circuit breakers
 - [Topic 08: Chain](../08-chain/INDEX.md) — chain-specific heartbeat, SIMULATE/VALIDATE steps, mirage-rs

@@ -1,6 +1,6 @@
 # Active Inference State Space: Factorized Discrete POMDP
 
-> A 90-state tractable model that makes active inference practical — not modeling the world, but modeling the agent's epistemic situation.
+> A 90-state tractable model that makes active inference practical - not modeling the world, but modeling the agent's epistemic situation.
 
 
 > **Implementation**: Specified
@@ -13,16 +13,16 @@
 
 ## Abstract
 
-Active inference promises principled, zero-hyperparameter compute allocation — but na??ve implementation is intractable. A real-world agent state space (all possible configurations of tasks, knowledge, predictions, affect) is effectively infinite. The key insight from Koudahl et al. (2024, arXiv:2412.10425) and VERSES AI's Genius platform is: **don't model the world — model the agent's epistemic situation.**
+Active inference promises principled, zero-hyperparameter compute allocation, but naive implementation is intractable. A real-world agent state space (all possible configurations of tasks, knowledge, predictions, affect) is effectively infinite. The key insight from Koudahl et al. (2024, arXiv:2412.10425) and VERSES AI's Genius platform is: **don't model the world - model the agent's epistemic situation.**
 
 Instead of tracking the full state of the environment (impossible), track three dimensions that fully characterize what the agent needs to know to make good decisions:
 1. **Where am I in the task lifecycle?** (TaskPhase)
 2. **How good is my current context?** (ContextQuality)
 3. **How uncertain am I?** (Uncertainty)
 
-This factorized state space has only 6 × 5 × 3 = **90 states** — completely tractable for standard active inference POMDP matrices. The agent maintains a belief distribution over these 90 states and selects actions (tier, context strategy, model) that minimize expected free energy.
+This factorized state space has only 6 × 5 × 3 = **90 states** - completely tractable for standard active inference POMDP matrices. The agent maintains a belief distribution over these 90 states and selects actions (tier, context strategy, model) that minimize expected free energy.
 
-This document specifies the factorized state space, the four standard POMDP matrices (A, B, C, D from the pymdp framework), the action space, and the observation model.
+This document specifies the factorized state space, the four standard POMDP matrices (A, B, C, D from the pymdp framework), the action space, and the observation model. In the Roko implementation, the observation model is concrete: it is assembled from Bus topic joins over `prediction.*`, `outcome.*`, and `prediction.error.*` Pulses.
 
 ---
 
@@ -79,6 +79,25 @@ Following the pymdp framework (Heins et al. 2022, "pymdp: A Python library for a
 
 The A matrix maps hidden states to observable signals. It answers: "Given that I'm in state (TaskPhase=implementing, ContextQuality=adequate, Uncertainty=medium), what observations do I expect?"
 
+### Bus-backed observation model
+
+The concrete observables are not raw environment state. They are Pulses on the Bus, joined by lineage and operator identity:
+
+- `prediction.<operator>` Pulses publish the expected outcome of an operator.
+- `outcome.<operator>` Pulses publish the later observation that closes the loop.
+- `prediction.error.<operator>` Pulses publish the residual after joining prediction and outcome.
+- Calibration and scheduling policies subscribe to those topic families and join them by `lineage_hint`, task hash, or operator name.
+
+That means the A matrix is learned from topic-family joins, not from a monolithic world-state snapshot. A single observation row can be expressed as:
+
+```text
+observation = join(
+  prediction.<operator>,
+  outcome.<operator>,
+  prediction.error.<operator>
+)
+```
+
 Observable signals for each state combination:
 
 ```
@@ -86,7 +105,7 @@ Observations:
 - compilation_result ∈ {success, warning, failure, not_applicable}
 - test_pass_rate ∈ {high, medium, low, not_applicable}
 - embedding_similarity ∈ {high, medium, low}  // similarity between task and retrieved context
-- prediction_error_level ∈ {low, medium, high}
+- prediction.error.<operator> ∈ {low, medium, high}
 - gate_verdict ∈ {pass, fail, not_applicable}
 ```
 
@@ -95,10 +114,10 @@ Example A matrix entries:
 P(compilation_result=success | implementing, comprehensive, low) = 0.8
 P(compilation_result=failure | implementing, insufficient, high) = 0.6
 P(test_pass_rate=high | verifying, adequate, low) = 0.7
-P(prediction_error=low | understanding, comprehensive, low) = 0.9
+P(prediction.error.low | understanding, comprehensive, low) = 0.9
 ```
 
-The A matrix is initialized from domain heuristics and updated from actual observations via Bayesian learning.
+The A matrix is initialized from domain heuristics and updated from actual Bus observations via Bayesian learning. A low prediction-error topic family means the predicted and observed Pulses aligned; a high prediction-error family means the join exposed a mismatch worth learning from.
 
 ### B Matrix (Transitions): Actions → State Changes
 
@@ -122,7 +141,7 @@ P(uncertainty=low | uncertainty=medium, run_tests) = 0.5
 P(phase=complete | phase=verifying, run_tests, gate_pass=true) = 0.8
 ```
 
-The B matrix encodes domain knowledge about how actions change the agent's epistemic situation. It is updated from actual transitions observed during gamma ticks.
+The B matrix encodes domain knowledge about how actions change the agent's epistemic situation. It is updated from actual transitions observed during gamma ticks and correlated against the same Bus joins that feed the A matrix.
 
 ### C Matrix (Preferences): Desired Observations
 
@@ -132,13 +151,13 @@ The C matrix encodes what the agent wants to observe — its goals. For Roko age
 C (preferred observations):
 - compilation_result=success:    high preference (+2.0)
 - test_pass_rate=high:          high preference (+2.0)
-- prediction_error=low:         moderate preference (+1.0)
+- prediction.error.low:         moderate preference (+1.0)
 - gate_verdict=pass:            highest preference (+3.0)
 - compilation_result=failure:    negative preference (-2.0)
 - gate_verdict=fail:            negative preference (-3.0)
 ```
 
-The C matrix is the "goal specification" — it tells the active inference system what observations to seek and what to avoid. For a coding task, gate pass is the highest-preference outcome. For a research task, high embedding similarity (good context retrieval) might receive higher preference.
+The C matrix is the "goal specification" - it tells the active inference system what observations to seek and what to avoid. For a coding task, gate pass is the highest-preference outcome. For a research task, high embedding similarity (good context retrieval) might receive higher preference. In the self-learning framing from `tmp/refinements/10-self-learning-cybernetic-loops.md`, low prediction error is also a preference signal because it marks beliefs that match the Bus.
 
 ### D Matrix (Initial Beliefs): Prior State Distribution
 
@@ -233,7 +252,7 @@ The EFE approach outperforms the heuristic threshold in several scenarios:
 
 ## Learning the Matrices
 
-The POMDP matrices are not static — they are learned from the agent's experience:
+The POMDP matrices are not static - they are learned from the agent's experience:
 
 ### A Matrix Learning
 
@@ -242,7 +261,7 @@ After each gamma tick, update the likelihood matrix:
 A[observation, state] += learning_rate × (observed_obs == predicted_obs)
 ```
 
-This makes the A matrix more accurate over time — the agent learns what observations to expect in each state.
+This makes the A matrix more accurate over time - the agent learns what Bus observations to expect in each state.
 
 ### B Matrix Learning
 
@@ -251,13 +270,14 @@ After each state transition, update the transition matrix:
 B[next_state, current_state, action] += learning_rate × (transition_actually_occurred)
 ```
 
-This makes the B matrix more accurate — the agent learns the actual effects of its actions.
+This makes the B matrix more accurate - the agent learns the actual effects of its actions.
 
 ### C Matrix Learning
 
 The C matrix updates slowly based on task outcomes:
 - Tasks where gate_pass=true had high C[gate_pass]: increase C[gate_pass] preference
 - Tasks where retrieval led to better outcomes: increase C[high_similarity] preference
+- Tasks with lower prediction.error.* over time can raise preference for the operator-state combinations that generated them
 
 ### D Matrix Learning
 
@@ -278,7 +298,7 @@ All learning is Bayesian: count-based updates with Dirichlet priors, yielding we
 | Thompson sampling | Prior distribution | Posterior sampling | Not integrated | Beta distribution per arm |
 | **Active inference EFE** | **0** | **Emergent from EFE** | **Integrated via cost term** | **90-state POMDP** |
 
-Active inference's zero-hyperparameter property is its distinguishing feature. All other approaches require tuning the exploration/exploitation tradeoff. EFE provides a principled, information-theoretic answer that adapts automatically.
+Active inference's zero-hyperparameter property is its distinguishing feature. All other approaches require tuning the exploration/exploitation tradeoff. EFE provides a principled, information-theoretic answer that adapts automatically, especially when the observation stream is built from Bus joins over prediction, outcome, and prediction-error topic families.
 
 ---
 
@@ -316,3 +336,4 @@ Active inference's zero-hyperparameter property is its distinguishing feature. A
 - See [08-dual-process-t0-t1-t2.md](./08-dual-process-t0-t1-t2.md) for the heuristic threshold (Stage 1)
 - See [09-16-t0-probes.md](./09-16-t0-probes.md) for probe signals that map to observations
 - See topic [05-learning](../05-learning/INDEX.md) for CascadeRouter and bandit algorithms
+- See `tmp/refinements/10-self-learning-cybernetic-loops.md` for the predict-publish-correct loop, per-operator calibration, and Bus-backed observation model

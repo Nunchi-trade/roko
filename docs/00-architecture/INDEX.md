@@ -10,6 +10,8 @@
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion and two-fabric kernel,
 > `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
 > `tmp/refinements/05-loop-retold.md` for the seven-step loop, co-equal PERSIST/BROADCAST, and
+> `tmp/refinements/10-self-learning-cybernetic-loops.md` for Bus-backed prediction, outcome,
+> calibration, and `prediction.error.*` loops across operators,
 > cross-cut injection model, `tmp/refinements/09-phase-2-implications.md` for how Chain,
 > Dreams, Coordination, and Heartbeat collapse onto that same kernel, and
 > `tmp/refinements/06-refactoring-plan.md` plus `tmp/refinements/21-from-scratch-redesigns.md`
@@ -68,12 +70,12 @@ loop, and the frontier innovations that emerge from the architecture.
 | 08 | [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md) | Detailed specs for the five non-Substrate operators after REF04: `Datum`-aware scoring/composition, stream Gates, Pulse routing, and `PolicyOutputs` |
 | 09 | [Universal Cognitive Loop](./09-universal-cognitive-loop.md) | Seven-step loop specification with SENSE, ASSESS, COMPOSE, ACT, VERIFY, co-equal PERSIST/BROADCAST, REACT, plus three-speed and shipping `loop_tick` guidance |
 | 10 | [Three Cognitive Speeds](./10-three-cognitive-speeds.md) | Gamma (~5-15s), Theta (~75s), Delta (hours): frequency selection, adaptive clock, turn limits, neuroscience inspiration |
-| 11 | [Dual-Process and Active Inference](./11-dual-process-and-active-inference.md) | T0/T1/T2 tiers, EFE formula, 16 T0 probes, Kahneman mapping, classical architectures (ACT-R, SOAR, CLARION, GWT, modern agent-systems comparison), LLM-era architectures |
+| 11 | [Dual-Process and Active Inference](./11-dual-process-and-active-inference.md) | T0/T1/T2 tiers, EFE formula, 16 T0 probes, literal predict/publish/correct active inference on the Bus, per-operator calibration, Kahneman mapping, classical architectures, LLM-era architectures |
 | 12 | [Five-Layer Taxonomy](./12-five-layer-taxonomy.md) | L0-L4 detailed specifications, cognitive cross-cuts table, operator × layer map, dependency rules, 18-crate map by layer |
 | 13 | [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md) | Neuro, Daimon, and Dreams as injected cross-cuts rather than loop steps: knowledge retrieval/composition, affect-biased assessment and act gating, and Delta-speed consolidation |
 | 14 | [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md) | Two-level metric (C-Factor ratio + C-Score composite), four diagnostic indicators, 31.6× collective calibration, network flywheel |
 | 15 | [Crate Map](./15-crate-map.md) | 18+ crates by layer with status, test counts, dependency graph, legacy umbrella-crate dissolution, legacy naming |
-| 16 | [Autocatalytic Improvement and Cybernetics](./16-autocatalytic-and-cybernetics.md) | Kauffman autocatalytic sets, compound improvement (0.9^4), Ashby's Law, Good Regulator Theorem, Beer VSM, Free Energy Principle, stigmergy |
+| 16 | [Autocatalytic Improvement and Cybernetics](./16-autocatalytic-and-cybernetics.md) | Kauffman autocatalytic sets, compound improvement (0.9^4), Ashby's Law, Good Regulator Theorem, Beer VSM, Bus-centered feedback nervous system, Free Energy Principle, stigmergy |
 | 17 | [Design Principles and Frontier Summary](./17-design-principles-and-frontier-summary.md) | 7 design principles (P1-P7), 14 Blue Ocean innovations with details, interconnection map, empirical validation status |
 | 18 | [Decay-Tier Matrix](./18-decay-tier-matrix.md) | 4×4 matrix: four decay variants × four knowledge tiers, Ebbinghaus parameters, promotion/demotion rules |
 | 19 | [Compositional Kinds](./19-compositional-kinds.md) | Kind::Compound variant for cross-domain records, filter matching, scoring, migration path |
@@ -120,7 +122,7 @@ This topic connects to:
 - [Topic 02: Agents](../02-agents/INDEX.md) — Agent types built on the Synapse Architecture
 - [Topic 03: Composition](../03-composition/INDEX.md) — Context engineering and the Composer trait in depth
 - [Topic 04: Verification](../04-verification/INDEX.md) — Gate pipeline and verification strategies
-- [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, skills, bandits
+- [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, skills, bandits, calibration policies, predict/publish/correct loops
 - [Topic 06: Neuro](../06-neuro/INDEX.md) — Knowledge management cross-cut in depth
 - [Topic 09: Daimon](../09-daimon/INDEX.md) — Motivation and affect cross-cut in depth
 - [Topic 10: Dreams](../10-dreams/INDEX.md) — Offline learning cross-cut in depth

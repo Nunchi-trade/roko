@@ -3,7 +3,7 @@
 > **PRD source:** `refactoring-prd/09-innovations.md` §VII
 > **Implementation plan:** `modelrouting/12-advanced-patterns.md` (tasks 2J.04–2J.06)
 > **Theoretical basis:** Optimal Foraging Theory (MacArthur & Pianka 1966), Calibration (Gneiting & Raftery 2007)
-> **Cross-references:** [04-cascade-router](04-cascade-router.md), [15-collective-calibration-31x](15-collective-calibration-31x.md), [14-stability-mechanisms](14-stability-mechanisms.md)
+> **Cross-references:** [04-cascade-router](04-cascade-router.md), [15-collective-calibration-31x](15-collective-calibration-31x.md), [14-stability-mechanisms](14-stability-mechanisms.md), [18-self-learning-cybernetic-loops](18-self-learning-cybernetic-loops.md)
 
 
 > **Implementation**: Shipping
@@ -15,6 +15,8 @@
 Predictive Foraging turns every orchestrator decision into a falsifiable prediction. Before each task, the system predicts: duration, complexity, gate outcome, and merge conflict probability. After execution, predictions are compared against actual outcomes. The gap between prediction and reality — the calibration error — becomes a learning signal that feeds back into the prediction models.
 
 The name "foraging" comes from optimal foraging theory: an agent foraging for resources (information, successful outcomes) must decide where to invest its attention. A well-calibrated predictor directs foraging effort toward the highest-value opportunities, avoiding areas that look promising but consistently disappoint.
+
+This is the task-level slice of the Bus-backed predict-publish-correct loop described in [18-self-learning-cybernetic-loops](18-self-learning-cybernetic-loops.md); see [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the two-fabric vocabulary. See `../../tmp/refinements/10-self-learning-cybernetic-loops.md` for the full proposal. In that wider loop, `prediction.error.*` is a first-class signal family rather than just a local calibration metric.
 
 ---
 

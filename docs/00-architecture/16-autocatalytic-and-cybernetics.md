@@ -42,7 +42,10 @@ cross-cuts reach the threshold of catalytic diversity needed for self-improvemen
 
 Third, active inference and the Free Energy Principle (Friston 2010) provide the theoretical
 framework for self-modeling agents — systems that minimize surprise by maintaining and
-updating an internal model of themselves and their environment.
+updating an internal model of themselves and their environment. In Roko's current
+vocabulary, the Bus is the feedback nervous system and the autocatalytic medium that carries
+prediction, outcome, prediction-error, algedonic, and calibration update Pulses across
+Gamma, Theta, and Delta.
 
 ---
 
@@ -75,6 +78,10 @@ catalyzes improvement in other layers:
 | **More learning signal** catalyzes | **Better knowledge** (Neuro) | Dreams consolidation has more episodes to process; knowledge tiers fill faster |
 | **Better knowledge** (Neuro) catalyzes | **Better predictions** (T0 probes) | Richer knowledge reduces world-model drift; T0 probes suppress more accurately |
 | **Better predictions** catalyze | **Higher gate pass rates** (L3) | Better-calibrated agents produce fewer failures; the cycle begins again |
+
+The Bus is the medium that makes these arrows operational: predictions are published as
+Pulses, outcomes arrive as Pulses, and the mismatch becomes prediction-error Pulses that
+drive calibration updates. That feedback loop is the architecture's autocatalytic core.
 
 ### 1.3 The Diversity Threshold
 
@@ -240,6 +247,22 @@ The T0/T1/T2 tier selection can be derived from EFE: T0 is selected when both pr
 epistemic value are low (nothing to do, nothing to learn); T2 is selected when epistemic
 value is high (much to learn from deep reasoning).
 
+### 3.4 The Bus-centered feedback loop
+
+The Bus turns active inference into a concrete feedback nervous system. A predictor publishes
+a `prediction.*` Pulse, reality answers on the matching `outcome.*` Pulse, and the learning
+policy joins them by lineage to publish `prediction.error.*` and `calibration.*` Pulses. When
+the mismatch is large enough to require escalation, the same Bus carries an algedonic Pulse
+that bypasses the normal cadence and asks the next layer to re-plan.
+
+That same structure runs at all three speeds:
+
+- **Gamma**: turn-level prediction, outcome, and prediction-error Pulses
+- **Theta**: plan-level calibration updates and algedonic escalation
+- **Delta**: consolidation of calibration history into Neuro and Dreams
+
+See also: [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md)
+
 ---
 
 ## 4. Beer's Viable System Model
@@ -271,8 +294,12 @@ execution is a miniature viable system:
 - **S4** (intelligence): `Substrate.query()` — gather information
 - **S5** (policy): `Policy.decide()` + `Daimon.assess()` — meta-management
 
-This recursion repeats at every timescale: within a single gamma tick, across a theta
-reflection cycle, and through a delta consolidation period.
+This recursion repeats at every timescale: within a single Gamma tick, across a Theta
+reflection cycle, and through a Delta consolidation period. At each speed, the Bus carries
+the same feedback shape: prediction, outcome, prediction-error, algedonic, and calibration
+update Pulses. Gamma keeps the loop tight enough for turn-by-turn correction, Theta folds
+those corrections into planning and routing, and Delta consolidates the resulting calibration
+history into durable knowledge.
 
 ### 4.3 Variety Engineering
 
@@ -341,48 +368,21 @@ markers) that guide future agent behavior without requiring centralized planning
 
 ## 6. The Autocatalytic Feedback Diagram
 
-The complete feedback structure connects all architectural layers:
+The complete feedback structure is Bus-centered: the Bus is the feedback nervous system and
+the autocatalytic medium that makes prediction, outcome, error, and calibration visible to
+the architecture.
 
 ```
-T0 Probes ──→ Tier Router ──→ VCG Auction ──→ Context Assembly
-    │              │              │                   │
-    │              │              │                   ▼
-    │              │              │            LLM Execution
-    │              │              │                   │
-    │              │              │                   ▼
-    │              │              │             Gate Verify
-    │              │              │                   │
-    ▼              ▼              ▼                   ▼
-Prediction    Affect         Somatic          Causal Replay
- Foraging     Engine        Landscape          (forensic)
-    │              │              │                   │
-    ▼              ▼              ▼                   ▼
-Calibration   Dream         Emotion           Compliance
- Tracker     Engine          Memory            Reports
-    │              │              │                   │
-    └──────┬───────┴──────┬───────┘                   │
-           │              │                           │
-           ▼              ▼                           │
-      Neuro Store    Skill Library                    │
-           │              │                           │
-           └──────┬───────┘                           │
-                  ▼                                   │
-            Korai Chain ◄─────────────────────────────┘
-                  │
-                  ▼
-         Collective Calibration (31.6×)
-                  │
-                  ▼
-         Cross-Domain Resonance
-                  │
-                  ▼
-         Network Flywheel (O(N²))
+Gamma: prediction.* → outcome.* → prediction.error.* → calibration.*
+Theta: prediction.error.* → algedonic.* → policy / routing updates
+Delta: calibration.* → Neuro / Dreams consolidation → updated priors
 ```
 
-Every innovation feeds every other. T0 probes enable cheap monitoring → Tier Router saves
-80% of LLM costs → savings fund more agents → more agents produce more knowledge →
-knowledge compounds on Korai → better calibration → better T0 probes. **The system is
-autocatalytic.**
+Every innovation feeds every other through the Bus. Prediction Pulses create comparison
+points; outcome Pulses close the loop; prediction-error Pulses expose drift; algedonic Pulses
+force escalation when drift is unacceptable; calibration update Pulses rewrite the next
+round of predictions. That closed loop is autocatalytic because each correction becomes the
+next training input.
 
 ---
 
@@ -457,9 +457,12 @@ experience into reusable knowledge. Neither SOFAI nor classical cognitive archit
 ### 8.2 Metacognitive Learning
 
 SOFAI's metacognitive module learns to deploy fast vs. slow solvers. In Roko, this maps to
-the CascadeRouter + adaptive gate thresholds. The key autocatalytic property: **the
-metacognitive decision of which speed to use is itself learnable**, creating a second-order
-improvement loop.
+the CascadeRouter + adaptive gate thresholds. The Bus makes the hierarchy explicit: Gamma
+publishes prediction/outcome Pulses for turn-level correction, Theta folds accumulated
+prediction.error.* and algedonic Pulses into routing and policy updates, and Delta
+consolidates the resulting calibration history into Neuro and Dreams. The key autocatalytic
+property: **the metacognitive decision of which speed to use is itself learnable**, creating
+a second-order improvement loop.
 
 ```
 First-order:  Better context → better outputs → higher gate pass rate
@@ -488,8 +491,10 @@ intelligent systems." npj Artificial Intelligence.
 - **Stigmergy**: Engram decay acts as pheromone evaporation. Pheromone constants defined
   (THREAT 2h, OPPORTUNITY 4h, WISDOM 24h). Multi-agent stigmergic coordination depends on
   the Agent Mesh (Tier 4+ feature).
-- **Active inference**: EFE formula specified for context selection. Not yet wired into the
-  shipping Composer. Current context selection uses score-based ranking rather than EFE.
+- **Active inference**: EFE formula specified for context selection. The Bus-centered
+  prediction, outcome, prediction-error, algedonic, and calibration update loop is specified
+  across Gamma, Theta, and Delta, but the shipping Composer still uses score-based ranking
+  rather than EFE.
 - **Empirical validation**: The compound improvement claim requires measurement. An A/B
   comparison of agents with/without autocatalytic features would validate whether the
   theoretical improvement materializes.
@@ -501,8 +506,10 @@ intelligent systems." npj Artificial Intelligence.
 ## Cross-References
 
 - See [00-vision-and-thesis](./00-vision-and-thesis.md) for the core thesis that scaffolding determines performance
+- See [01-naming-and-glossary](./01-naming-and-glossary.md) for the current two-fabric vocabulary
 - See [11-dual-process-and-active-inference](./11-dual-process-and-active-inference.md) for the EFE formula and active inference details
 - See [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) for the VSM-mapped five-layer structure
 - See [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) for the three cognitive subsystems that enable self-improvement
 - See [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) for the C-Factor metric that tracks collective improvement
+- See [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md) for the Bus-centered self-learning loop, prediction-error Pulses, and `CalibrationPolicy`
 - See topic [13-coordination](../13-coordination/INDEX.md) for stigmergic multi-agent coordination

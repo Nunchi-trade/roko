@@ -16,6 +16,8 @@ from the retired "one noun, six verbs" mnemonic into the current two-medium, two
 architecture story, and
 `tmp/refinements/06-refactoring-plan.md` records the phased landing sequence now summarized
 in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-plan-phases.md).
+`tmp/refinements/10-self-learning-cybernetic-loops.md` extends that story by making prediction,
+outcome, calibration, and `prediction.error.*` topics first-class across learning and heartbeat.
 
 ## Start Here
 
@@ -41,7 +43,7 @@ in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-pl
 - [`02-agents/`](02-agents/INDEX.md) — 02 — Agents
 - [`03-composition/`](03-composition/INDEX.md) — 03 — Composition: Scaffold Layer (L2) — Prompt Assembly & Context Engineering
 - [`04-verification/`](04-verification/INDEX.md) — 04 — Verification (L3 Harness)
-- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning
+- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, calibration policies, and prediction-error feedback
 - [`06-neuro/`](06-neuro/INDEX.md) — Neuro — Cognitive Knowledge Layer
 - [`07-conductor/`](07-conductor/INDEX.md) — 07 — Conductor Subsystem
 - [`08-chain/`](08-chain/INDEX.md) — Topic 08: Chain Layer (Korai)

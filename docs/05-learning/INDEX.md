@@ -8,7 +8,7 @@
 
 ## Overview
 
-The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
+The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. REF10 adds a Bus-backed predict-publish-correct loop: operators publish prediction Pulses, outcomes close the loop, and `prediction.error.*` becomes a first-class calibration signal. See `../../tmp/refinements/10-self-learning-cybernetic-loops.md` for the full proposal, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the Bus/Pulse vocabulary. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
 
 The subsystem is organized around three tiers of memory (episodes → patterns → playbook rules), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
 
@@ -59,10 +59,11 @@ The subsystem is organized around three tiers of memory (episodes → patterns �
 | # | Document | What it covers |
 |---|----------|---------------|
 | [13](13-8-missing-feedback-loops.md) | **Eight Missing Feedback Loops** | Health→Routing, Conductor→Routing, Section→Scaffold, Failure→Replanning, Skills→Prompts, Cost→Routing, Latency→Reward, Experiments→Static. Status of each loop. |
-| [14](14-stability-mechanisms.md) | **Stability Mechanisms** | Hysteresis (10% score delta to switch), frequency separation (every 1/5/20/50 episodes), EMA damping, anti-patterns (lock-in, explosion, death spiral, collapse). |
+| [14](14-stability-mechanisms.md) | **Stability Mechanisms** | Hysteresis (10% score delta to switch), frequency separation (every 1/5/20/50 episodes), EMA damping, anti-patterns (lock-in, explosion, feedback collapse). |
 | [15](15-collective-calibration-31x.md) | **Collective Calibration (31.6×)** | CLT-inspired heuristic `accuracy(t) = 1 − 1/√(N×t)`. Explicit caveats (independence, stationarity, aggregation). C-Factor composite metric with 11 components and leave-one-out agent contributions. |
 | [16](16-predictive-foraging.md) | **Predictive Foraging** | Falsifiable predictions (duration, complexity, gate outcome, conflict). CalibrationTracker, arithmetic corrector (~50ns). Brier score calibration metric, reliability diagrams. |
 | [17](17-adas-and-autocatalytic.md) | **ADAS and Autocatalytic Thesis** | ADAS meta-architecture search (Hu et al. ICLR 2025, +14% ARC). EvoSkills (Chen et al. 2023). Autocatalytic sets (Kauffman 1993). Compound math: 0.9⁴ = 0.656. Ten flywheel mechanisms. Empirical testability via C-Factor trend. |
+| [18](18-self-learning-cybernetic-loops.md) | **Self-Learning & Cybernetic Feedback Loops** | Predict-publish-correct loop, per-operator calibration, `CalibrationPolicy`, `prediction.error.*`, and Bus-backed learners (`CascadeRouter`, `EpisodeLogger`, `ExperimentStore`). |
 
 ---
 
@@ -111,7 +112,7 @@ CompletedRunInput
 
 | Topic | Relationship |
 |-------|-------------|
-| [00-architecture](../00-architecture/INDEX.md) | Engram/Signal data model that episodes extend |
+| [00-architecture](../00-architecture/INDEX.md) | Engram data model that episodes extend |
 | [02-agents](../02-agents/INDEX.md) | Agent dispatch produces the episodes that learning consumes |
 | [03-composition](../03-composition/INDEX.md) | Prompt assembly uses skills and playbook rules from learning |
 | [04-verification](../04-verification/INDEX.md) | Gate pipeline produces GateVerdict records consumed by learning |

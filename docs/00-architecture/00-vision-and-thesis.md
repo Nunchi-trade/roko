@@ -153,14 +153,19 @@ Karl Friston's Free Energy Principle (Friston 2010, Nature Reviews Neuroscience 
 provides the theoretical foundation for Roko's approach to attention and action selection.
 The core insight: self-organizing systems minimize the divergence between their predictions
 and their observations. Prediction error — the surprise signal — drives learning, attention,
-and action.
+and action. See also `tmp/refinements/10-self-learning-cybernetic-loops.md` for the Bus-driven
+predict/publish/correct framing that makes active inference concrete across operators.
 
-Roko uses active inference as a **conceptual framework**, not as a literal computational
-target. Computing exact variational free energy over a complex generative model is
-intractable. What Roko implements instead:
+Roko does not attempt exact variational free-energy minimization over a fully general world
+model. Instead, it makes active inference **literal at the systems layer**: operators publish
+prediction Pulses, later Pulses resolve those predictions with outcomes, and learning policies
+publish calibration updates plus `prediction.error.*` signals back onto the Bus. That keeps
+the implementation tractable while still treating prediction error as a first-class runtime
+signal rather than a loose metaphor.
 
 - **Prediction error as a learning signal**: Every observation resolves a prediction. The
-  residual feeds automatic calibration via conformal prediction (Vovk et al. 2005).
+  residual feeds automatic calibration, per-operator updates, and topic-level
+  `prediction.error.*` streams.
 
 - **Prediction error as an attention signal**: Items with high prediction error receive more
   computational resources. Items with low error receive less. This approximates the
@@ -435,7 +440,7 @@ it has not solved.
 | Lee et al. 2026 (arXiv:2603.28052) | Meta-Harness: +7.7 pts from harness optimization alone, 4× fewer tokens. Direct evidence for the scaffold thesis. |
 | Chen et al. 2023 (arXiv:2305.05176) | FrugalGPT: cascade routing matches GPT-4 at 2% cost. Foundation for CascadeRouter. |
 | Sumers et al. 2023 (arXiv:2309.02427) | CoALA: cognitive architecture framework for language agents. Structural blueprint for the universal cognitive loop. |
-| Friston 2010, Nature Reviews Neuroscience 11(2) | Free Energy Principle: prediction error drives learning and attention. Conceptual framework for active inference in Roko. |
+| Friston 2010, Nature Reviews Neuroscience 11(2) | Free Energy Principle: prediction error drives learning and attention. Foundation for Roko's Bus-level prediction/outcome/error loops. |
 | Clark 2013, Behavioral and Brain Sciences 36(3) | Predictive Processing: brain as prediction machine. Supports prediction-error-based attention allocation. |
 | Kauffman 1993, The Origins of Order, OUP | Autocatalytic sets: self-sustaining improvement cycles. Mathematical foundation for compound improvement. |
 | Zaharia et al. 2024 | Compound AI Systems thesis: SOTA from systems, not models. Strategic framing for Roko's approach. |

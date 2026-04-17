@@ -6,6 +6,7 @@
 > `Datum` for Engram-or-Pulse operator inputs, and `PulseSource` for transport-time producer
 > attribution. When another document disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
+> [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
@@ -208,6 +209,10 @@ Canonical Topic strings should be lowercase and dot-separated. Example prefixes 
 | `safety.*` | Approvals, taint, custody, and permissions |
 | `conductor.*` | Runtime health and breaker signals |
 | `heartbeat.*` | Cognitive clock ticks and timing telemetry |
+| `prediction.*` | Operator predictions published before downstream reality resolves them |
+| `outcome.*` | Reality-side or verification-side Pulses that close a prediction loop |
+| `prediction.error.*` | Joined residuals, drift, and high-surprise signals derived from prediction/outcome pairs |
+| `calibration.*` | Operator calibration updates emitted by learning policies |
 | `substrate.*` | Durable storage lifecycle events |
 | `chain.*` | Phase 2+ chain forwarding topics |
 | `mesh.*` | Phase 2+ multi-agent mesh topics |
@@ -232,6 +237,7 @@ prefixes without coordination.
 | `Neuro` | Durable knowledge cross-cut that influences storage reads and composition. |
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
+| `Prediction Error` | The residual between predicted and observed outcomes, published as `prediction.error.*` when it becomes a first-class runtime signal. |
 | `Substrate` | Storage fabric for Engrams and durable retrieval. |
 | `Synapse Architecture` | The kernel framing of two mediums, two fabrics, six operators, five layers, three speeds, and three cross-cuts. |
 | `Topic` | Routing handle for Pulses on the Bus. |
