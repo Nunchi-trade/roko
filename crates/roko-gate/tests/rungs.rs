@@ -227,6 +227,7 @@ fn test_integration_ok() {
         fact_check_oracle: Some(search_oracle(
             "The library shipped stable APIs in April 2024.",
         )),
+        fact_check_min_confidence: Some(0.5),
         llm_judge_oracle: Some(judge_oracle(0.9)),
         llm_judge_min_score: Some(0.5),
         integration_test_pattern: Some("test_integration_ok".into()),

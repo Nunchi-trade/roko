@@ -47,6 +47,8 @@ pub struct RungExecutionConfig {
     pub verify_chain_fallback: Option<Arc<dyn Gate>>,
     /// Search oracle for `FactCheckGate`.
     pub fact_check_oracle: Option<Arc<dyn SearchOracle>>,
+    /// Fact-check confidence threshold. Defaults to the gate's builtin value.
+    pub fact_check_min_confidence: Option<f64>,
     /// Judge oracle for `LlmJudgeGate`.
     pub llm_judge_oracle: Option<Arc<dyn JudgeOracle>>,
     /// Judge threshold. Defaults to `0.8`.
@@ -178,7 +180,10 @@ async fn run_fact_check_gate(
     let Some(oracle) = config.fact_check_oracle.clone() else {
         return stub_verdict("fact_check", "no fact-check oracle configured");
     };
-    FactCheckGate::new(oracle, FactCheckGate::DEFAULT_MIN_CONFIDENCE)
+    let min_confidence = config
+        .fact_check_min_confidence
+        .unwrap_or(FactCheckGate::DEFAULT_MIN_CONFIDENCE);
+    FactCheckGate::new(oracle, min_confidence)
         .verify(signal, ctx)
         .await
 }

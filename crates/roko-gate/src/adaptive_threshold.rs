@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// EMA decay factor. 0.1 means recent observations weigh more heavily.
@@ -20,6 +21,7 @@ const SKIP_STREAK_THRESHOLD: u32 = 20;
 
 /// Per-rung statistics tracked by the adaptive threshold system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RungStats {
     /// Exponential moving average of the pass rate (0.0 to 1.0).
     pub ema_pass_rate: f64,
@@ -43,6 +45,7 @@ impl Default for RungStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveThresholds {
     /// Per-rung statistics, keyed by rung number.
+    #[serde(default)]
     rungs: HashMap<u32, RungStats>,
 }
 
@@ -54,12 +57,18 @@ impl AdaptiveThresholds {
         }
     }
 
+    /// Load from a JSON file.
+    ///
+    /// Returns `NotFound` if the file does not exist and `InvalidData` if the
+    /// file exists but does not contain valid adaptive-threshold JSON.
+    pub fn load(path: &Path) -> Result<Self, io::Error> {
+        let file = std::fs::File::open(path)?;
+        serde_json::from_reader(file).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
     /// Load from a JSON file, or create new if missing/corrupt.
     pub fn load_or_new(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        Self::load(path).unwrap_or_default()
     }
 
     /// Save to a JSON file (atomic write).
@@ -70,13 +79,25 @@ impl AdaptiveThresholds {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)?;
+        let mut tmp_file = std::fs::File::create(&tmp)?;
+        tmp_file.write_all(json.as_bytes())?;
+        tmp_file.sync_all()?;
+        drop(tmp_file);
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
+    /// Return the current threshold for a rung.
+    ///
+    /// Unknown rungs default to the neutral threshold of `0.5`.
+    pub fn threshold_for(&self, rung: u32) -> f64 {
+        self.rungs
+            .get(&rung)
+            .map_or(0.5, |stats| stats.ema_pass_rate)
+    }
+
     /// Update statistics for a rung after a gate run.
-    pub fn update(&mut self, rung: u32, passed: bool) {
+    pub fn observe(&mut self, rung: u32, passed: bool) {
         let stats = self.rungs.entry(rung).or_default();
         let value = if passed { 1.0 } else { 0.0 };
 
@@ -93,6 +114,11 @@ impl AdaptiveThresholds {
         } else {
             stats.consecutive_passes = 0;
         }
+    }
+
+    /// Backwards-compatible alias for `observe`.
+    pub fn update(&mut self, rung: u32, passed: bool) {
+        self.observe(rung, passed);
     }
 
     /// Suggest a maximum retry count for a rung based on its historical pass rate.
@@ -154,6 +180,7 @@ mod tests {
     #[test]
     fn new_rung_starts_neutral() {
         let at = AdaptiveThresholds::new();
+        assert_eq!(at.threshold_for(0), 0.5);
         assert_eq!(at.suggested_max_retries(0), 3); // Default for unknown.
         assert!(!at.should_skip_rung(0));
     }

@@ -12261,7 +12261,7 @@ impl PlanRunner {
         }
         let payload_sig = maybe_attest_engram(payload_builder.build());
 
-        let verdicts = Self::run_gate_rung(&payload_sig, rung).await;
+        let verdicts = self.run_gate_rung(&payload_sig, rung).await;
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_gate_verdicts = verdicts
                 .iter()
@@ -12439,7 +12439,7 @@ impl PlanRunner {
             .tag("rung", "post-merge")
             .build();
 
-        let verdicts = Self::run_gate_rung(&payload_sig, 3).await;
+        let verdicts = self.run_gate_rung(&payload_sig, 3).await;
         let merged_at_ms = now_unix_ms_i64();
         let (_check, follow_up) =
             self.post_merge
@@ -12523,10 +12523,33 @@ impl PlanRunner {
         Ok(handle.path)
     }
 
-    async fn run_gate_rung(payload_sig: &Engram, rung: u32) -> Vec<Verdict> {
+    fn gate_rung_config(&self, rung: u32) -> RungExecutionConfig {
+        let nominal = self.adaptive_thresholds.threshold_for(rung);
+        let mut config = RungExecutionConfig::default();
+        if rung == 5 {
+            config.fact_check_min_confidence = Some(nominal);
+        }
+        if rung == 6 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            {
+                config.llm_judge_min_score = Some(nominal as f32);
+            }
+        }
+        config
+    }
+
+    async fn run_gate_rung(&self, payload_sig: &Engram, rung: u32) -> Vec<Verdict> {
         let ctx = Context::now();
         let inputs = RungExecutionInputs::default();
-        let config = RungExecutionConfig::default();
+        if rung > 6 {
+            let mut verdicts = Vec::new();
+            for current_rung in 0..=6 {
+                let config = self.gate_rung_config(current_rung);
+                verdicts.extend(run_rung(payload_sig, &ctx, current_rung, &inputs, &config).await);
+            }
+            return verdicts;
+        }
+        let config = self.gate_rung_config(rung);
         run_rung(payload_sig, &ctx, rung, &inputs, &config).await
     }
 
