@@ -31,6 +31,7 @@ members = [
     # Opt-in `chain` feature adds HDC / InsightEntry / pheromone subsystems.
     # Opt-in `roko` feature bridges to roko-core traits (Gate, Substrate).
     "apps/mirage-rs",
+    "apps/agent-relay",
     # roko-chain-watcher: long-running agent that observes a mirage chain and
     # posts insights back via HTTP JSON-RPC.
     "apps/roko-chain-watcher",
