@@ -12,8 +12,16 @@
 > also `tmp/refinements/03-bus-as-first-class.md`,
 > `tmp/refinements/26-statehub-rearchitecture.md`,
 > and [22-statehub-projection-layer](../12-interfaces/22-statehub-projection-layer.md),
-> `tmp/refinements/09-phase-2-implications.md`, and
+> `tmp/refinements/09-phase-2-implications.md`,
+> [34-synergy-integration-map](./34-synergy-integration-map.md),
+> `tmp/refinements/31-synergy-integration-map.md`, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
+
+> REF31 adds a separate primitive-level synergy map for the ten load-bearing primitives
+> (Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics, c-factor,
+> replication ledger, and plugin SPI). This section stays at the section-to-section layer:
+> it answers which docs, crates, and subsystems depend on each other, while the synergy map
+> answers which primitives reinforce each other and why the moat comes from interaction density.
 
 > **Implementation**: Reference
 
@@ -53,8 +61,6 @@ map covers all pairwise relationships between these 22 sections.
 | 20 | Technical Analysis | `roko-oracle` (planned) | Prediction, calibration, domain oracles | L2/L3 |
 | 21 | References | (docs only) | Master citation index | Documentation |
 
----
-
 ### 1.1 REF09 Overlay: Phase-2 Systems on the Same Kernel
 
 REF09 removes the need to treat Chain, Dreams, Coordination, Heartbeat, and the HTTP control
@@ -70,6 +76,23 @@ Substrate consumers or backends:
 | Interfaces | REST and query APIs hydrate StateHub projections from Substrate while Bus topics feed live deltas | WebSocket and SSE stream the same typed projections to TUI, web, audit, and analytics consumers | `roko-serve` becomes a StateHub consumer bridge rather than a custom fanout path |
 
 This overlay is the architecture-level summary of `tmp/refinements/09-phase-2-implications.md`.
+
+---
+
+### 1.2 Section-Level vs Primitive-Level Mapping
+
+This chapter maps section-level dependencies: it shows how documentation sections, crates,
+configuration surfaces, and missing integrations relate at the subsystem boundary.
+
+By contrast, [34-synergy-integration-map](./34-synergy-integration-map.md) and
+`tmp/refinements/31-synergy-integration-map.md` map primitive-level synergies. That chapter
+tracks how load-bearing primitives reinforce one another inside the architecture, including
+the ten-node matrix and the named interactions such as Demurrage × HDC and
+Heuristic × Pulse × Bus.
+
+Use this chapter when you need to answer "what depends on what across sections?" Use the
+synergy map when you need to answer "which primitives compose into the moat, and what
+mechanisms make the composition compounding?"
 
 ---
 
@@ -1069,6 +1092,7 @@ Total expected zero-dependency pairs: ~180 (39% of the 462-pair space).
 
 - [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) — The three cross-cuts and their interaction model
 - [23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md) — Coherence analysis and gap identification
+- [34-synergy-integration-map](./34-synergy-integration-map.md) — Primitive-level synergy matrix and named interactions
 - [05-learning/13-8-missing-feedback-loops](../05-learning/13-8-missing-feedback-loops.md) — The eight feedback loops (subset of this map)
 - [16-heartbeat/00-coala-9-step-pipeline](../16-heartbeat/00-coala-9-step-pipeline.md) — The per-tick cross-section traversal
 - [16-heartbeat/01-universal-loop-mapping](../16-heartbeat/01-universal-loop-mapping.md) — Trait-to-step mapping

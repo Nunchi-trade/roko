@@ -136,6 +136,11 @@ deserve publication-grade evidence. Start with
 [`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
 [`00-architecture/30-cross-pollination-innovations.md`](00-architecture/30-cross-pollination-innovations.md),
 and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/00-vision-ta-generalized.md).
+`tmp/refinements/31-synergy-integration-map.md` then makes the interaction-density moat
+explicit: the architecture's edge comes from the synergy matrix across the load-bearing
+primitives, not from any single feature in isolation. Start with
+[`00-architecture/24-cross-section-integration-map.md`](00-architecture/24-cross-section-integration-map.md)
+and [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy-integration-map.md).
 
 ## Start Here
 
@@ -179,10 +184,15 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 > [`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
 > [`00-architecture/30-cross-pollination-innovations.md`](00-architecture/30-cross-pollination-innovations.md),
 > and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/00-vision-ta-generalized.md).
+> REF31 adds the explicit synergy matrix across Engram, Pulse, Bus, Substrate, HDC fingerprint,
+> demurrage, heuristics, c-factor, the replication ledger, and the plugin SPI. That chapter
+> makes the interaction-density moat concrete; start with
+> [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy-integration-map.md)
+> and [`tmp/refinements/31-synergy-integration-map.md`](../tmp/refinements/31-synergy-integration-map.md).
 
 ## Topics
 
-- [`00-architecture/`](00-architecture/INDEX.md) — Architecture
+- [`00-architecture/`](00-architecture/INDEX.md) — Architecture, synergy matrix, and interaction-density moat
 - [`01-orchestration/`](01-orchestration/INDEX.md) — 01-orchestration — L4 Orchestration Layer
 - [`02-agents/`](02-agents/INDEX.md) — 02 — Agents, role taxonomy, domain profiles, TypedContext, and Custody-aware agent composition
 - [`03-composition/`](03-composition/INDEX.md) — 03 — Composition: Scaffold Layer (L2) — Prompt Assembly & Context Engineering

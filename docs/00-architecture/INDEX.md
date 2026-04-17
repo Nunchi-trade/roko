@@ -58,6 +58,11 @@ This topic is the entry point for understanding Roko. It covers the theoretical 
 (Engram, Score, Decay, Provenance, ContentHash), the operator composition model, the cognitive
 loop, and the frontier innovations that emerge from the architecture.
 
+REF31 adds the synergy matrix for those primitives and makes the interaction-density moat
+explicit: the architecture's edge comes from the reinforcing weave between the load-bearing
+primitives, not from any single feature in isolation. See
+`tmp/refinements/31-synergy-integration-map.md` and the new synergy chapter below.
+
 See also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the learning-side heuristic,
 falsifier, and worldview framing, and [Naming and Glossary](./01-naming-and-glossary.md) for
 the canonical vocabulary. The developer-facing Rust SDK framing that maps these kernel concepts
@@ -108,6 +113,7 @@ onto one-liner, builder, trait impl, and runtime impl entry points lives in
 | 31 | [Implementation Readiness Audit](./31-implementation-readiness-audit.md) | Section scorecard, readiness criteria, rewrite-track candidates, gap analysis, crate status, and implementation sequencing |
 | 32 | [Comprehensive Test Strategy](./32-comprehensive-test-strategy.md) | Per-crate unit test specs, property-based testing (proptest), integration matrix, performance benchmarks (criterion/iai), adversarial/safety testing (ATLAS-mapped), regression prevention for self-improving agents, test count roadmap 1,568→2,810 |
 | 33 | [Refactor Plan Phases](./33-refactor-plan-phases.md) | Phase A/B/C/D rollout sequence, rollback plan, risk notes, and dependency ordering; see `tmp/refinements/06-refactoring-plan.md` |
+| 34 | [Synergy & Integration Map](./34-synergy-integration-map.md) | REF31's 10-primitive synergy matrix, ten named synergies, loop-level composition, non-synergies, and interaction-density moat framing; see `tmp/refinements/31-synergy-integration-map.md` |
 
 ---
 
@@ -125,7 +131,8 @@ mediums, the six operators, the two fabrics, and the five-layer taxonomy.
 5. Read [09-universal-cognitive-loop](./09-universal-cognitive-loop.md) through [11-dual-process-and-active-inference](./11-dual-process-and-active-inference.md) for the cognitive loop
 6. Read [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) through [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) for the architectural layers
 7. Read [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) through [17-design-principles-and-frontier-summary](./17-design-principles-and-frontier-summary.md) for metrics, crates, theory, and innovations
-8. Read [31-implementation-readiness-audit](./31-implementation-readiness-audit.md) and [33-refactor-plan-phases](./33-refactor-plan-phases.md) for the current-state scorecard and phased landing sequence
+8. Read [24-cross-section-integration-map](./24-cross-section-integration-map.md) and [34-synergy-integration-map](./34-synergy-integration-map.md) for the cross-section matrix and interaction-density moat
+9. Read [31-implementation-readiness-audit](./31-implementation-readiness-audit.md) and [33-refactor-plan-phases](./33-refactor-plan-phases.md) for the current-state scorecard and phased landing sequence
 
 ---
 

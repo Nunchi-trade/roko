@@ -223,6 +223,11 @@ The moat is not any one primitive innovation by itself. The moat is the composit
 Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics/falsifiers, c-factor,
 the replication ledger, and the plugin SPI. Those pieces reinforce one another:
 
+REF31 turns that composition claim into an explicit architecture artifact: see
+[34-synergy-integration-map](./34-synergy-integration-map.md) and
+[tmp/refinements/31-synergy-integration-map.md](../../tmp/refinements/31-synergy-integration-map.md)
+for the 10-primitive matrix and the named mechanisms behind this moat framing.
+
 | Primitive / invariant | Composed capability it enables | Moat effect |
 |---|---|---|
 | Engram / Pulse / Bus / Substrate | Forensic AI, live coordination, durable replay | Separating durable record from ephemeral transport makes the system auditable without freezing runtime traffic. |
