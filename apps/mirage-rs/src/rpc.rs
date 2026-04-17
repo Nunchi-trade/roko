@@ -1567,7 +1567,21 @@ fn register_state_mutation_methods(
     }
     for method in ["hardhat_setNonce", "anvil_setNonce"] {
         module.register_async_method(method, |params, ctx, _| async move {
-            let (address, nonce): (Address, u64) = params.parse().map_err(invalid_params)?;
+            let (address, raw): (Address, serde_json::Value) =
+                params.parse().map_err(invalid_params)?;
+            let nonce = match &raw {
+                serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| {
+                    invalid_params(MirageError::InvalidParams("nonce out of u64 range".into()))
+                })?,
+                serde_json::Value::String(s) => {
+                    parse_hex_quantity(s).map_err(invalid_params)?
+                }
+                _ => {
+                    return Err(invalid_params(MirageError::InvalidParams(
+                        "nonce must be a number or hex string".into(),
+                    )));
+                }
+            };
             with_state_write(&ctx.state, |state| {
                 state.fork.db.set_nonce(address, nonce);
             })
@@ -1748,6 +1762,16 @@ fn register_snapshot_methods(
             state.fork.timestamp = timestamp;
         })
         .await;
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+    // Anvil/Hardhat mining-mode stubs. mirage-rs automines every block so
+    // these are accepted for compatibility but are effectively no-ops.
+    module.register_async_method("evm_setAutomine", |params, _ctx, _| async move {
+        let (_enabled,): (bool,) = params.parse().map_err(invalid_params)?;
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+    module.register_async_method("evm_setIntervalMining", |params, _ctx, _| async move {
+        let (_interval_ms,): (u64,) = params.parse().map_err(invalid_params)?;
         Ok::<_, ErrorObjectOwned>(true)
     })?;
     Ok(())
