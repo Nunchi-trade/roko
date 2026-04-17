@@ -207,6 +207,12 @@ and [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy
 > [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy-integration-map.md)
 > and [`tmp/refinements/31-synergy-integration-map.md`](../tmp/refinements/31-synergy-integration-map.md).
 
+For canonical vocabulary, start with
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+That chapter is the authoritative glossary for current architecture terms, the A-Z lookup for
+newer primitives, and the explicit retired terminology map used across the docs. REF34
+consolidates that role; see [`tmp/refinements/34-glossary.md`](../tmp/refinements/34-glossary.md).
+
 ## Topics
 
 - [`00-architecture/`](00-architecture/INDEX.md) — Architecture, synergy matrix, and interaction-density moat

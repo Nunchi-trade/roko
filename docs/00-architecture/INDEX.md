@@ -63,6 +63,11 @@ explicit: the architecture's edge comes from the reinforcing weave between the l
 primitives, not from any single feature in isolation. See
 `tmp/refinements/31-synergy-integration-map.md` and the new synergy chapter below.
 
+The canonical glossary for this topic is [Naming and Glossary](./01-naming-and-glossary.md).
+Use it as the authoritative vocabulary reference for current terms, A-Z definitions, and the
+retired naming table before introducing or revising architecture language elsewhere. REF34
+consolidates that glossary role; see [tmp/refinements/34-glossary.md](../../tmp/refinements/34-glossary.md).
+
 See also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the learning-side heuristic,
 falsifier, and worldview framing, and [Naming and Glossary](./01-naming-and-glossary.md) for
 the canonical vocabulary. The developer-facing Rust SDK framing that maps these kernel concepts
@@ -78,7 +83,7 @@ onto one-liner, builder, trait impl, and runtime impl entry points lives in
 | # | Sub-doc | What It Covers |
 |---|---|---|
 | 00 | [Vision and Core Thesis](./00-vision-and-thesis.md) | "The scaffold IS the product" thesis, empirical evidence, modern agent-systems mapping, active inference foundations, design principles overview |
-| 01 | [Naming and Glossary](./01-naming-and-glossary.md) | Complete retired→current naming map, HDC fingerprint vocabulary, crate dissolution, glossary of all terms |
+| 01 | [Naming and Glossary](./01-naming-and-glossary.md) | Canonical glossary and vocabulary reference: A-Z terms, current naming, and explicitly retired terminology; see `tmp/refinements/34-glossary.md` |
 | 02 | [Engram Data Type](./02-engram-data-type.md) | The durable content-addressed record medium: struct fields, ContentHash (BLAKE3), HDC fingerprint, Kind enum, Body enum, lineage DAG, and builder pattern |
 | 02b | [Pulse Ephemeral Event Medium](./02b-pulse-ephemeral-event.md) | The durable-versus-ephemeral medium split: Pulse, graduation rules, and the storage/stream boundary between Substrate and Bus |
 | 03 | [Score: 7-Axis Appraisal](./03-score-7-axis-appraisal.md) | 4 stable axes (confidence, novelty, utility, reputation) + 3 extended (precision, salience, coherence), effective formula, arithmetic, constants |
