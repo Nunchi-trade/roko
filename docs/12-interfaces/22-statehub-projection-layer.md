@@ -1,16 +1,18 @@
 # StateHub Projection Layer
 
-> **Abstract:** This chapter propagates `tmp/refinements/26-statehub-rearchitecture.md` and `tmp/refinements/30-rich-ux-primitives.md` into the canonical docs tree. StateHub is the kernel projection layer that turns Bus + Substrate into typed, queryable, live-updating read models for the TUI, the first-party Web Portal, and external consumers. The stable contract is a named projection with `State`, `Delta`, a reducer, filters, replay cursors, freshness metadata, and degradation rules. REF27 carries that same contract over the shared realtime surface defined in [06-websocket-streaming.md](./06-websocket-streaming.md), and REF29 uses those projections to drive the five-page browser surface in [13-web-portal.md](./13-web-portal.md). See also [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the shared kernel vocabulary.
+> **Abstract:** This chapter keeps REF26 as one of the strongest interface directions. `StateHub` already exists and already serves shared dashboard state. The near-term work is to harden that live state path and, over time, evolve it toward smaller named projections with clearer query and replay contracts.
 
 **Topic**: [12-interfaces](./INDEX.md)  
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [13-web-portal.md](./13-web-portal.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)  
 **Key sources**: `tmp/refinements/26-statehub-rearchitecture.md`, `tmp/refinements/30-rich-ux-primitives.md`
 
+> **Implementation status**: `StateHub` already exists in `crates/roko-core/src/state_hub.rs` and currently publishes `DashboardSnapshot` plus broadcast events that feed the TUI, WebSocket, SSE, and REST status views. This chapter describes the **target evolution** from that shipping hub toward smaller typed projections. Keep the direction; do not read the named projection catalog below as fully implemented today.
+
 ---
 
 ## 1. What StateHub Is
 
-StateHub is the shared projection service that sits between the Bus and the user-facing surfaces. It listens to Pulses, folds them into typed state, and serves those states through a consistent read model.
+Today, `StateHub` is a shared dashboard hub that sits between the runtime event flow and the user-facing surfaces. Target-state, it evolves into a more explicit projection service with smaller typed read models.
 
 The important boundary is simple:
 

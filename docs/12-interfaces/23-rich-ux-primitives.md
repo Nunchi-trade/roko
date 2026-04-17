@@ -1,10 +1,12 @@
 # Rich UX Primitives
 
-> **Abstract:** This chapter propagates `tmp/refinements/30-rich-ux-primitives.md` into the canonical docs tree. Roko's interface quality does not come from a generic chat box. It comes from a shared vocabulary of small, reusable affordances that make long-running, probabilistic, tool-using agents legible: reasoning streams, tool-call banners, gate badges, heuristic footnotes, uncertainty bars, replay scrubbers, alternative renderings, confidence-weighted aggregation, progressive disclosure, and spatial memory. These primitives sit on top of `Pulse`, `Bus`, `StateHub`, and durable episode or annotation Engrams so every surface can show the same work with the amount of detail the user actually wants. See also [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [13-web-portal.md](./13-web-portal.md), and [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
+> **Abstract:** This chapter keeps the useful design instinct behind REF30 while narrowing its claims. A few primitives are clearly worth preserving as target direction, but most of this chapter depends on projection and telemetry contracts that do not exist yet as stable product surfaces.
 
 **Topic**: [12-interfaces](./INDEX.md)  
 **Prerequisites**: [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [13-web-portal.md](./13-web-portal.md), [17-accessibility-and-current-status.md](./17-accessibility-and-current-status.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)  
 **Key sources**: `tmp/refinements/30-rich-ux-primitives.md`, `tmp/refinements/26-statehub-rearchitecture.md`, `tmp/refinements/27-realtime-event-surface.md`, `tmp/refinements/29-web-ui-architecture.md`
+
+> **Implementation status**: This chapter is **target-state**. The current shipping subset is much smaller: the TUI already renders progress, task, diff, and gate-oriented widgets, and tool/gate visibility exists in rough form. Reasoning streams, uncertainty bars, replay scrubbers, explainability panels, browser-native renderings, and shared shortcut registries depend on StateHub projections and shared telemetry contracts that are not in place yet.
 
 ---
 

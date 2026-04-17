@@ -1,16 +1,18 @@
 # Web Portal
 
-> **Abstract:** This chapter propagates `tmp/refinements/29-web-ui-architecture.md` into the canonical docs tree and layers in `tmp/refinements/30-rich-ux-primitives.md`. The `Web Portal` is not a second server or a browser-only product fork. It is the first-party web UI: a deliberate small reference implementation that sits on top of `StateHub`, the shared realtime surface, and the existing HTTP control plane. The initial scope is five pages only: `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. See also [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [06-websocket-streaming.md](./06-websocket-streaming.md), and [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
+> **Abstract:** This chapter is a deferred target-state spec for a first-party browser surface. If built later, it should stay small and sit on top of the existing HTTP API plus the evolving StateHub/realtime contracts rather than forking the backend model.
 
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [07-rosedust-design-language.md](./07-rosedust-design-language.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)
 **Key sources**: `tmp/refinements/29-web-ui-architecture.md`, `tmp/refinements/26-statehub-rearchitecture.md`, `tmp/refinements/27-realtime-event-surface.md`, `tmp/refinements/30-rich-ux-primitives.md`
 
+> **Implementation status**: **Deferred**. Zero frontend code exists. No SvelteKit app, no HTML templates, and no browser build target are present in the workspace. `roko-serve` provides an API-only HTTP surface with 200+ routes; this chapter describes a future browser client on top of that backend.
+
 ---
 
 ## 1. What The Web Portal Is For
 
-The browser surface exists because not every operator lives in a terminal and not every stakeholder should need a local Rust install. The first-party web UI serves five concrete use cases:
+If and when a browser surface is built, it should exist because not every operator lives in a terminal and not every stakeholder should need a local Rust install. The first-party web UI would serve five concrete use cases:
 
 - First-time users who want to observe Roko before installing the CLI.
 - Non-developer stakeholders who need visibility without direct operation.

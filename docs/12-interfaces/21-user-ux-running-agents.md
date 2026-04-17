@@ -1,15 +1,17 @@
 # User UX: Running Agents
 
-> **Abstract:** This chapter propagates `tmp/refinements/23-user-ux-running-agents.md` into the canonical docs tree, then extends it with the familiar-first CLI parity framing from `tmp/refinements/28-cli-parity-familiar-workflows.md`. Roko should present one unified verb set across four surfaces, `CLI`, `TUI`, `Chat`, and `Web`, so users learn the interaction model once and carry that muscle memory anywhere they work. The goal is familiar-first onboarding: a first-time `roko` session should produce useful output in under 30 seconds, with `roko` itself feeling like the obvious entry point for Claude Code, Aider, Cursor, and Codex-style workflows.
+> **Abstract:** This chapter carries over the target UX direction from `tmp/refinements/23-user-ux-running-agents.md` and the kept familiar-first CLI parity framing from `tmp/refinements/28-cli-parity-familiar-workflows.md`. Near-term work is narrower than the full four-surface redesign: improve `roko chat`, make `roko init` interactive, and make bare `roko` feel familiar to Claude Code, Aider, Cursor, and Codex-style workflows.
 
 **Topic**: [12-interfaces](./INDEX.md)  
 **Prerequisites**: [00-cli-overview.md](./00-cli-overview.md), [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md), [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [08-tui-main-layout.md](./08-tui-main-layout.md), [13-web-portal.md](./13-web-portal.md), [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [17-accessibility-and-current-status.md](./17-accessibility-and-current-status.md), [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md), [../17-lifecycle/03-configuration-and-operator-model.md](../17-lifecycle/03-configuration-and-operator-model.md), [../17-lifecycle/05-knowledge-backup-export.md](../17-lifecycle/05-knowledge-backup-export.md), [../17-lifecycle/08-selective-restore.md](../17-lifecycle/08-selective-restore.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)
 
+> **Implementation status**: CLI (`roko`, 40+ subcommands) and TUI (22K LOC ratatui UI) are **shipping**. Chat (`crates/roko-cli/src/chat.rs`, 131 lines) is **minimal**. Web is **not started** as a first-party surface; `roko-serve` is API-only. Near-term work: improve chat with streaming and basic slash commands, add interactive `roko init`, and preserve familiar CLI muscle memory. The nine-verb universal surface is **target-state**.
+
 ## 1. Canonical Interaction Model
 
-Roko's user UX is built around one verb set rendered four ways. The surface changes, but the verbs do not. That gives CLI users, terminal users, chat users, and web users the same mental model and keeps discovery consistent across sessions. REF28 sharpens the claim: the `roko` CLI should feel familiar to users of Claude Code, Aider, Cursor agent mode, and Codex-style tools, then layer Roko-specific planning, heuristics, and multi-agent control on top.
+The long-term UX target is one verb set rendered four ways. The surface changes, but the verbs should not. REF28 is the kept near-term piece of that story: the `roko` CLI should feel familiar to users of Claude Code, Aider, Cursor agent mode, and Codex-style tools, then layer Roko-specific planning and review flows on top.
 
-The canonical verb set is:
+The target-state verb set is:
 
 | Verb | Meaning | Typical output |
 |---|---|---|
@@ -29,16 +31,16 @@ Every surface exposes those verbs, even when the chrome differs. A user who lear
 
 ## 2. The Four Surfaces
 
-The current product already has four user-facing surfaces:
+The UX story spans four surfaces, but their maturity is uneven today:
 
-| Surface | Current role | What must be consistent |
-|---|---|---|
-| `CLI` | Primary scripting and automation surface | Command names, help text, output shape, error recovery, and script parity |
-| `TUI` | Interactive terminal control surface | The same verbs, the same session state, the same progress feed, and the same approvals |
-| `Chat` | Conversational surface for humans and agents | Slash commands, streaming, inline artifacts, permissions, and profile confirmation |
-| `Web` | Browser surface on top of StateHub, the realtime surface, and the HTTP control plane | The same verb set, live status, session continuity, diff review, and profile composition |
+| Surface | Current status | Current role | What must be consistent later |
+|---|---|---|---|
+| `CLI` | Shipping | Primary scripting and automation surface | Command names, help text, output shape, error recovery, and script parity |
+| `TUI` | Shipping | Interactive terminal control surface | Shared actions, session state, progress feed, and approvals |
+| `Chat` | Minimal | Conversational REPL on top of `roko-serve` | Streaming, basic slash commands, and inline artifacts |
+| `Web` | Not started | Deferred browser surface on top of the HTTP API | Live status, session continuity, and diff review if built later |
 
-The key requirement is not visual uniformity. It is semantic uniformity. If a command exists in one surface, it needs a discoverable equivalent in the others. If a user pauses a task in Chat, the same session should be visible in TUI and Web. If a plan is inspectable in Web, the same underlying data should be reachable from CLI. If the CLI shows a diff hunk for approval, the same hunk-level decision should be visible in Chat and Web.
+The key requirement is not visual uniformity. It is semantic continuity where the workflows really overlap. In the near term, the important gaps are much smaller: make `roko init` interactive, make `roko chat` usable, and make bare `roko` the familiar interactive entry point.
 
 ## 3. Familiar-First Defaults
 
@@ -79,7 +81,6 @@ The important properties are:
 - Partial success should be durable. If the user stops midway, already-completed steps remain committed.
 - Remote checks should time out quickly and offer retry or bypass choices.
 - The result should point to the next useful command, such as `roko ask`, `roko dashboard`, or `roko plugin list`.
-- The selected profile should carry a `TypedContext` schema and any `Custody` expectations into later inspect and replay flows.
 - `roko` should preserve familiar CLI muscle memory: slash commands like `/edit`, `/run`, `/undo`, `/compact`, and `/help`; per-hunk approval for diffs; transcript logging; and a resumable session list when the user re-enters the workspace.
 - Budget visibility should be explicit. Interactive sessions should surface a running per-turn and per-session budget, and non-interactive invocations should fail or degrade predictably when the configured limit is exhausted.
 - Piped and scripted usage should not be second-class. `roko --format json`, stdin-driven prompts, and `--non-interactive` should all expose the same underlying action contract, only with different presentation and prompt behavior.
@@ -88,7 +89,7 @@ This is intentionally modeled on familiar-first agent UX: the user should be abl
 
 ## 4. Live Progress Through StateHub
 
-Users should not stare at a spinner while the agent works. Every surface should render the same live progress feed, but REF26 makes the contract more specific: surfaces subscribe to shared `StateHub` projections that fold `Bus` Pulses together with durable `Substrate` state.
+Users should not stare at a spinner while the agent works. REF26 is the kept part of this chapter: harden the shared progress feed around the existing `StateHub`, then evolve it toward smaller named projections over time.
 
 REF30 adds the rendering rule on top of that transport rule: the shared live feed should decompose into reusable rich UX primitives rather than one opaque log. In practice that means reasoning streams, tool-call banners, gate badges, heuristic footnotes, uncertainty bars, replay scrubbers, and progressive disclosure all ride on the same shared state contract. The surface can choose density, but it should not invent a different meaning for the same underlying event. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) and [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).
 
@@ -111,7 +112,7 @@ In practice, `watch` should compose from canonical projections such as:
 
 The important design point is that this is one state model, not four different status systems. CLI prints it linearly, TUI renders it in panes, Chat interleaves it with conversation, and Web turns it into a real-time page. That keeps the user oriented when they move between surfaces mid-task and makes the familiar-first contract hold across renderers.
 
-`watch` should therefore follow a `query + subscribe` pattern: fetch current state first, then fold projection deltas as they arrive. That is what makes surface handoff, replay, reconnect, and shareable sessions behave like one product instead of four shells around the same runtime. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
+`watch` should therefore follow a `query + subscribe` pattern: fetch current state first, then fold projection deltas as they arrive. That is what makes surface handoff, replay, and reconnect feel like one product instead of four shells around the same runtime. See [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
 
 ## 5. Checkpoints And Permissions
 
@@ -129,7 +130,7 @@ Roko should treat dangerous or uncertain actions as explicit checkpoints. The us
 | Send a prompt or email on the user's behalf | Always ask | Never |
 | Override a failing gate | Ask | Session and gate rung |
 
-Every denial should include the literal command or action the user can take next. Every approval should still emit a visible Pulse so the UI shows what happened, and sensitive actions should attach custody metadata so inspect and replay can reconstruct who approved what and why. The permissions model is part of the UX, not a hidden backend rule.
+Every denial should include the literal command or action the user can take next. Every approval should still emit a visible event so the UI shows what happened, and sensitive actions should remain inspectable during replay. The permissions model is part of the UX, not a hidden backend rule.
 
 ## 6. Undo, Replay, And Sessions
 
@@ -141,7 +142,7 @@ Three undo levels matter:
 - `roko replay <episode>` re-runs a prior session from its recorded state.
 - `roko revert <episode>` undoes the diffs associated with a prior episode.
 
-Sessions should also be first-class objects. Named sessions let a user attach to a recurring context such as `research-q2`, and the same session should be visible in CLI, TUI, Chat, and Web. Shareable sessions should export to a portable transcript format and replay later on another machine or by another user. The transcript is not just an audit artifact; it is the resumption record that restores the prompt history, approvals, and session identity when the user returns.
+Sessions should also be first-class objects, but the scope should stay honest. Durable episodes and transcripts already matter today. Named sessions, portable share flows, and cross-machine replay are target-state extensions rather than current product guarantees.
 
 Interactive resumption should mirror familiar tools: show the prior sessions, indicate which ones completed or paused, and let the user continue by index, hash, or name. CLI, TUI, Chat, and Web should all honor that same resumption contract.
 
@@ -157,7 +158,7 @@ Minimum expectations:
 - Screen-reader-friendly markup in Web.
 - Keyboard-only navigation everywhere that is interactive.
 - Every critical action exposed as a CLI command, even if a richer surface exists.
-- Internationalizable strings in user-facing paths.
+- Internationalizable strings in user-facing paths if and when the surfaces stabilize enough to justify extraction.
 
 Roko should also adopt familiar key conventions instead of inventing its own where there is no benefit:
 
@@ -189,17 +190,17 @@ REF30 adds the TUI-specific rendering vocabulary: reasoning streams belong in a 
 
 ### Chat
 
-Chat should support multi-agent interaction, live streaming, slash commands, and inline artifacts. If the agent emits a code block or a diff, the surface should offer affordances to apply, copy, or inspect it instead of flattening everything into text. Profile install, profile activation, and custody confirmation should be represented as explicit chat actions, not hidden side effects. Chat should also preserve slash-command muscle memory from CLI, so `/edit`, `/plan`, `/replay`, `/inspect`, and `/undo` remain first-class even when the user types natural language first.
+Chat is the weakest current surface and the most obvious near-term UX target. It should gain live streaming, basic slash commands, and inline artifact handling before the broader multi-surface redesign expands further.
 
 REF30 makes the transcript structure more explicit: chat responses should layer short answers over inline progressive disclosure, with reasoning streams, heuristic footnotes, gate badges, and uncertainty bars expanding in place instead of forcing the user into separate screens for every inspection step. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md).
 
 ### Web
 
-Web should behave like the browser counterpart to the same runtime state, not a separate product. REF29 makes the first-party scope explicit: the shipped browser surface is a five-page reference UI made of `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. Those pages are not separate micro-products; they are browser renderings of the same verbs, sessions, approvals, and replay semantics the CLI and TUI already expose.
+Web should behave like the browser counterpart to the same runtime state, not a separate product. REF29's design target is a five-page reference UI made of `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. Those pages are not separate micro-products; they are browser renderings of the same verbs, sessions, approvals, and replay semantics the CLI and TUI already expose.
 
-That means the browser should consume the same named StateHub projections that the TUI and external dashboards read, then route mutations back through the same control plane. `Home` is the observation-first pulse view, `Chat` is the streaming interactive surface, `Plans` is the orchestration view, `Beliefs` is the heuristic and worldview browser, and `Settings` is the minimal control surface for config, plugins, budgets, and credentials. The same `TypedContext` and `Custody` summary that CLI can inspect should be visible in the browser, and diff-first review, hunk-level acceptance, transcripts, resume prompts, and visible budget state should all remain part of the browser contract rather than being dropped as "desktop-only" features. See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
+The browser chapter remains target-state. If a first-party web surface is built later, it should consume the same `StateHub`-derived state and route mutations through the same control plane, rather than inventing a separate product model. See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
 
-REF30 then adds the browser-facing primitive layer on top of that page model: reasoning streams, tool-call banners, gate badges, heuristic footnotes, replay scrubbers, confidence-weighted aggregation, and a persistent explainability panel all belong inside the same five-page surface rather than in a separate "advanced mode." See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) and [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).
+REF30 then adds a browser-facing primitive layer on top of that page model: reasoning streams, tool-call banners, gate badges, heuristic footnotes, replay scrubbers, confidence-weighted aggregation, and a persistent explainability panel. Those remain target-state UI ideas rather than current browser capabilities. See [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) and [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).
 
 ## 9. Related Refinements
 
@@ -214,4 +215,4 @@ REF30 then adds the browser-facing primitive layer on top of that page model: re
 
 ## 10. Implementation Notes
 
-This chapter is the canonical user-facing framing for REF23 and the surface-level parity framing for REF28. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `StateHub`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, undo, transcripts, slash commands, and hunk-level review part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens. REF29 then fixes the browser scope: the first-party web UI is a deliberate five-page surface, not an unbounded dashboard sprawl. REF30 adds the shared rich-UX vocabulary each surface should compose from rather than reinvent.
+This chapter keeps REF28 intact and narrows REF23 to the work that matters now: a stronger CLI entry, a usable chat surface, interactive init, and shared progress semantics. The full four-surface verb symmetry remains a target-state reference, not a description of current product parity.

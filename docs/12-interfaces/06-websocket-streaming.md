@@ -1,26 +1,28 @@
 # WebSocket, SSE, and gRPC Realtime Surface
 
-> **Abstract:** This chapter propagates `tmp/refinements/27-realtime-event-surface.md` into the canonical docs tree. Roko exposes one realtime surface over three co-equal transports: `WebSocket` for full-duplex browser and chat clients, `SSE` for one-way feeds that survive common proxies, and optional `gRPC` streaming for typed server-to-server consumers. The frame vocabulary, auth rules, cursor semantics, and back-pressure contract stay the same across transports. See also [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) for the projection layer this wire surface carries and [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for shared terms such as `Pulse`, `Bus`, `Topic`, `TopicFilter`, and `StateHub`.
+> **Abstract:** This chapter documents the target-state shared realtime protocol. Today, Roko ships WebSocket and SSE endpoints in `roko-serve`; gRPC is deferred. The useful near-term work is to harden the existing transports and document their shared cursor and replay behavior clearly.
 
-> **Implementation**: Specified
+> **Implementation**: Partial today, broader protocol target-state
 
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [13-web-portal.md](./13-web-portal.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [22-statehub-projection-layer.md](./22-statehub-projection-layer.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)
 **Key sources**: `tmp/refinements/27-realtime-event-surface.md`, `tmp/refinements/26-statehub-rearchitecture.md`
 
+> **Implementation status**: WebSocket and SSE are the current realtime transports. gRPC (`tonic`) is **deferred**; no `tonic` dependency or protobuf service exists in the workspace. Treat the gRPC parts of this chapter as target-state protocol notes, not current implementation.
+
 ---
 
-## 1. Why Three Transports
+## 1. Why Multiple Transports
 
-REF27 turns realtime delivery into a first-class external contract instead of a handful of ad hoc socket endpoints.
+REF27 turns realtime delivery into a first-class external contract instead of a handful of ad hoc socket endpoints. Today, that means two real transports and one deferred option.
 
 The rule is simple:
 
 - `WebSocket` is the default for interactive clients that both read and publish Pulses.
 - `SSE` is the default for dashboards, lightweight observers, and browser contexts that benefit from plain HTTP plus native reconnect behavior.
-- `gRPC` streaming is the optional typed transport for server-to-server, audit ingestion, and higher-throughput consumers.
+- `gRPC` streaming is a deferred typed transport for server-to-server or audit consumers if demand justifies it later.
 
-Those transports are co-equal. They carry the same conceptual protocol:
+WebSocket and SSE are the current transports. The protocol notes below also sketch how a future gRPC transport could map onto the same conceptual contract:
 
 - `query` current state
 - `subscribe` to a channel

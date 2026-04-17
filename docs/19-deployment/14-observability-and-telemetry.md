@@ -9,7 +9,9 @@
 > canonical vocabulary, see [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 > See also `../../tmp/refinements/33-observability-telemetry.md`.
 
-> **Implementation**: Specified
+> **Implementation**: Baseline exists; advanced exporters are target-state
+
+> **Implementation status**: The current observability baseline is narrower than this chapter originally implied. Shipping today: JSONL episode logs, efficiency events, the existing `StateHub`/dashboard path, and tracing-based structured logs. Not shipped as deployment defaults: a stable Prometheus `/metrics` endpoint, shipped alert rules, or an OTLP exporter. Treat Prometheus and OpenTelemetry sections below as **target-state** operator surfaces unless a concrete subdocument says otherwise.
 
 ---
 
@@ -31,11 +33,24 @@ forgetting appropriately, spending within budget, and drifting away from calibra
 
 ---
 
+## Current Baseline
+
+The current codebase already has a usable observability baseline:
+
+- JSONL episode logs for durable run history
+- efficiency events in `.roko/learn/efficiency.jsonl`
+- the existing `StateHub` plus `DashboardSnapshot` path used by TUI, SSE, WebSocket, and REST status views
+- tracing-based structured logs
+
+The rest of this chapter describes how that baseline could grow into a fuller deployment observability surface.
+
+---
+
 ## Telemetry Surfaces by Deployment Shape
 
-Every deployment shape ships the same telemetry contract, but the default sinks differ:
+Target-state, every deployment shape should expose the same telemetry contract, even though the default sinks may differ:
 
-| Shape | Default operator posture | Default telemetry surfaces |
+| Shape | Default operator posture | Target telemetry surfaces |
 |---|---|---|
 | laptop-local | human-driven inspection and postmortem | human or JSON logs, local metrics endpoint, optional OTLP traces, local replay |
 | single-server | one long-lived service with local state | JSON logs, `/metrics`, OTLP exporter, StateHub projections, alert rules |
@@ -85,12 +100,12 @@ events, but production profiles should still default to bounded-volume structure
 
 ## Metrics
 
-Prometheus-compatible metrics are the deployment surface for trendlines, SLOs, dashboards, and
-alerts. Roko needs both generic process metrics and Roko-specific metrics.
+Prometheus-compatible metrics are a target-state deployment surface for trendlines, SLOs, dashboards, and
+alerts. Roko needs both generic process metrics and Roko-specific metrics, but this chapter should not be read as claiming a shipped `/metrics` endpoint today.
 
 ### Generic Runtime Metrics
 
-Every deployment should expose the table-stakes runtime signals:
+If and when a stable Prometheus surface is exposed, it should include the table-stakes runtime signals:
 
 | Metric | Type | Purpose |
 |---|---|---|
@@ -103,8 +118,8 @@ Every deployment should expose the table-stakes runtime signals:
 
 ### Roko-Specific Metrics
 
-The deployment chapter needs the metrics that justify running Roko instead of a generic agent
-wrapper. The most important families are:
+The deployment chapter needs the metrics that would justify running Roko instead of a generic agent
+wrapper. The most important families below are target-state examples, not a claim that every metric already exists today:
 
 | Metric | Type | Why operators care |
 |---|---|---|
@@ -130,7 +145,7 @@ economic signals are legible, not merely one whose process is up.
 
 ## Traces
 
-OpenTelemetry traces explain operator latency and call structure across the seven-step loop.
+OpenTelemetry traces are the target-state export surface for operator latency and call structure across the seven-step loop.
 Every operator boundary should emit spans, with the trace id flowing through Bus and Substrate
 interactions:
 
@@ -144,7 +159,7 @@ interactions:
 - `op.react` for policy reactions
 
 Span attributes should include `operator_id`, `principal_id`, `content_hash`, `pulse_seq`,
-topic, and deployment-shape identifiers. OTLP is the default export contract; Jaeger, Zipkin,
+topic, and deployment-shape identifiers. OTLP is the intended export contract if tracing exporters are added later; Jaeger, Zipkin,
 Tempo, and other OTLP-compatible collectors can sit downstream.
 
 For clustered deployments, traces are the primary tool for answering cross-node questions such
@@ -155,11 +170,9 @@ caused a gate stall.
 
 ## Events and StateHub
 
-Logs, metrics, and traces are generic observability surfaces. Roko adds a typed event surface:
-Bus Pulses folded into `StateHub` projections. This matters because many operators want live,
-queryable telemetry rather than scrape-based aggregation.
+Logs, metrics, and traces are generic observability surfaces. The current Roko-specific baseline is the existing `StateHub` and `DashboardSnapshot` path. A richer named-projection catalog remains the target evolution because many operators want live, queryable telemetry rather than scrape-based aggregation.
 
-Key deployment projections include:
+Target-state deployment projections include:
 
 | Projection | Operator use |
 |---|---|
@@ -269,9 +282,9 @@ island:
 
 | Existing stack | Roko surface | Deployment integration |
 |---|---|---|
-| Prometheus + Grafana | `/metrics` and shipped alert rules | scrape, alert, and dashboard timeseries |
+| Prometheus + Grafana | planned `/metrics` endpoint and alert rules | scrape, alert, and dashboard timeseries once that surface exists |
 | Loki, Elastic, Datadog Logs | structured stdout/stderr JSON | standard container or system log shipping |
-| Jaeger, Zipkin, Tempo, Honeycomb | OTLP traces | point the runtime at the collector endpoint |
+| Jaeger, Zipkin, Tempo, Honeycomb | planned OTLP traces | point the runtime at the collector endpoint once exporter support exists |
 | Sentry or Bugsnag | crash output plus plugin hook | exception and crash reporting |
 | Slack or PagerDuty | Alertmanager receivers | route alert notifications to operators |
 | custom dashboards and clients | `StateHub` projections plus realtime surface | subscribe to typed telemetry directly |
@@ -286,9 +299,9 @@ StateHub when Roko-specific semantics matter.
 An operator-ready deployment should satisfy the following:
 
 1. Logs are structured by default and safe to aggregate.
-2. `/metrics` is enabled anywhere a long-lived service runs.
-3. OTLP export is configured for remote or clustered shapes.
-4. `StateHub` telemetry projections are exposed to first-party surfaces.
+2. add `/metrics` anywhere a long-lived service runs once the Prometheus surface is implemented.
+3. add OTLP export for remote or clustered shapes once exporter support exists.
+4. expose the current `StateHub` telemetry baseline to first-party surfaces, then split it into finer projections only when needed.
 5. Replay retention is sized to support postmortem windows.
 6. Cost, safety, gate, Bus, and calibration dashboards exist before production cutover.
 7. Alerting is wired before unattended operation begins.

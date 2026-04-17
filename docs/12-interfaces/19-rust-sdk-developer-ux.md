@@ -2,11 +2,13 @@
 
 > Four ergonomic entry points for Rust developers building on Roko: one-liner, builder, trait impl, and runtime impl. The goal is not just API shape, but time to first working agent in under 60 seconds for anyone with `cargo` installed.
 
-> **Implementation**: Scaffold
+> **Implementation**: Deferred target-state
 
 **Topic**: [12-interfaces](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Engram, Pulse, Substrate, and Bus; [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for shared vocabulary
 **Key source**: [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md)
+
+> **Implementation status**: The 6 kernel traits in `crates/roko-core/src/traits.rs` are the current extension surface. No `roko::run()` one-liner, `Agent::builder()`, proc macros, or `cargo roko` plugin exist. This chapter describes a **deferred** SDK surface for future external users. Near-term useful work: better public error types, `#[warn(missing_docs)]`, and a small set of runnable examples.
 
 ---
 
