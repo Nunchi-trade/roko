@@ -5,8 +5,8 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
 use serde::Serialize;
+use serde_json::{Value, json};
 use utoipa::ToSchema;
 use validator::{ValidationErrors, ValidationErrorsKind};
 

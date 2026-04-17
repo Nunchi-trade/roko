@@ -93,7 +93,7 @@ use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
-use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore};
+use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
@@ -2323,44 +2323,6 @@ fn build_strategy_fragment_context(
     }
 }
 
-fn render_playbook_context(playbook: &Playbook) -> String {
-    let mut parts = vec![
-        format!("Name: {}", playbook.name),
-        format!("Goal: {}", playbook.goal),
-        format!(
-            "Success rate: {:.0}%",
-            (playbook.success_rate().unwrap_or(0.0).clamp(0.0, 1.0) * 100.0).round()
-        ),
-    ];
-
-    if !playbook.steps.is_empty() {
-        let mut steps = String::from("Steps:\n");
-        for step in &playbook.steps {
-            steps.push_str(&format!(
-                "- {}. [{}] {}\n",
-                step.index, step.action_kind, step.description
-            ));
-            if !step.expected_signals.is_empty() {
-                steps.push_str(&format!(
-                    "  Signals: {}\n",
-                    step.expected_signals.join(", ")
-                ));
-            }
-        }
-        parts.push(steps.trim_end().to_string());
-    }
-
-    parts.join("\n\n")
-}
-
-fn render_playbook_contexts(playbooks: &[Playbook]) -> String {
-    playbooks
-        .iter()
-        .map(render_playbook_context)
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
-}
-
 fn playbook_query(
     task: &str,
     task_text: &str,
@@ -2380,6 +2342,25 @@ fn playbook_query(
         }
     }
     parts.join("\n")
+}
+
+fn playbook_query_context(
+    role: AgentRole,
+    task: &str,
+    task_text: &str,
+    task_def: Option<&crate::task_parser::TaskDef>,
+) -> QueryContext {
+    let task_title = task_def
+        .map(|task_def| task_def.title.clone())
+        .unwrap_or_else(|| task.to_string());
+    QueryContext::new(
+        task,
+        task_title,
+        playbook_query(task, task_text, task_def),
+        role.label(),
+        10,
+        3,
+    )
 }
 
 fn build_task_playbook(task_def: &crate::task_parser::TaskDef) -> Playbook {
@@ -11299,25 +11280,14 @@ impl PlanRunner {
         // ── Dispatch-time skill hint from successful prior tasks ──────
         let prior_skills =
             select_prompt_skills(&self.skill_library, task_def.as_ref(), &task_text, 5);
-        let playbook_query = playbook_query(task, &task_text, task_def.as_ref());
-        let playbook_context_section = match self.playbook.relevant(&playbook_query, 3).await {
-            Ok(playbooks) if !playbooks.is_empty() => {
-                let playbook_text = render_playbook_contexts(&playbooks);
-                let playbook_text_len = playbook_text.len();
-                Some((
-                    PromptSection::new("playbook", playbook_text)
-                        .with_priority(SectionPriority::Low)
-                        .with_placement(Placement::Middle)
-                        .with_hard_cap(1024),
-                    playbook_text_len,
-                ))
-            }
-            Ok(_) => None,
+        let playbook_query = playbook_query_context(role, task, &task_text, task_def.as_ref());
+        let relevant_playbooks = match self.playbook.query(&playbook_query).await {
+            Ok(playbooks) => playbooks,
             Err(err) => {
                 tracing::warn!(
                     "[orchestrate] failed to lookup relevant playbooks for task {task}: {err}"
                 );
-                None
+                Vec::new()
             }
         };
 
@@ -11627,6 +11597,7 @@ impl PlanRunner {
                 Some(task_affect_state),
                 task_def.as_ref(),
                 &prior_skills,
+                &relevant_playbooks,
                 context_window_tokens,
                 Some(&section_effectiveness),
             )?
@@ -11658,20 +11629,10 @@ impl PlanRunner {
             );
         }
 
-        if let Some((playbook_section, playbook_text_len)) = playbook_context_section {
-            sections.push(
-                apply_section_effectiveness_to_prompt_section(
-                    playbook_section,
-                    &role_key,
-                    &section_effectiveness,
-                )
-                .with_bidder(AttentionBidder::PlaybookRules)
-                .into_signal()
-                .map_err(|e| anyhow!("playbook section: {e}"))?,
-            );
+        if !relevant_playbooks.is_empty() {
             tracing::info!(
-                "[orchestrate] injected playbook context ({} chars)",
-                playbook_text_len
+                playbook_count = relevant_playbooks.len(),
+                "[orchestrate] resolved prompt-time playbooks"
             );
         }
 
@@ -14180,6 +14141,7 @@ fn build_system_prompt_with_context_validated(
     affect_state: Option<PadState>,
     task_def: Option<&crate::task_parser::TaskDef>,
     relevant_skills: &[Skill],
+    relevant_playbooks: &[Playbook],
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
 ) -> Result<String> {
@@ -14197,6 +14159,7 @@ fn build_system_prompt_with_context_validated(
             affect_state,
             extra_conventions: task_dispatch_conventions(task_def),
             relevant_skills: relevant_skills.to_vec(),
+            relevant_playbooks: relevant_playbooks.to_vec(),
             ..PromptBuildOptions::default()
         },
         context_window_tokens,
@@ -14583,6 +14546,7 @@ impl PlanRunner {
                     "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.".to_string(),
                 ],
                 relevant_skills: Vec::new(),
+                relevant_playbooks: Vec::new(),
             },
         )
     }

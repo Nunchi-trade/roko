@@ -17,8 +17,8 @@
 use roko_agent::{Agent, ExecAgent, MockAgent};
 use roko_compose::{CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority};
 use roko_core::{
-    Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind, Policy,
-    Provenance, Query, Substrate, Verdict,
+    Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind, Policy, Provenance,
+    Query, Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, CompileGate, GatePayload};

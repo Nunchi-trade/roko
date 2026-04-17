@@ -130,11 +130,20 @@ timeout_ms = 5000
     )
     .expect("write roko.toml");
 
-    let episodes_path = tmp.path().join(".roko").join("memory").join("episodes.jsonl");
+    let episodes_path = tmp
+        .path()
+        .join(".roko")
+        .join("memory")
+        .join("episodes.jsonl");
     let before = fs::read_to_string(&episodes_path).unwrap_or_default();
     run_roko(
         tmp.path(),
-        &["run", "write a hello function", "--workdir", tmp.path().to_str().expect("workdir")],
+        &[
+            "run",
+            "write a hello function",
+            "--workdir",
+            tmp.path().to_str().expect("workdir"),
+        ],
     )
     .success();
     let after = fs::read_to_string(&episodes_path).expect("read episodes.jsonl");
@@ -279,7 +288,11 @@ fn item_06_plan_run_persists_learning_feedback() {
 
     let _report = run_sample_plan(tmp.path());
 
-    let efficiency_path = tmp.path().join(".roko").join("learn").join("efficiency.jsonl");
+    let efficiency_path = tmp
+        .path()
+        .join(".roko")
+        .join("learn")
+        .join("efficiency.jsonl");
     let efficiency = fs::read_to_string(&efficiency_path).expect("read efficiency.jsonl");
     assert!(
         !efficiency.trim().is_empty(),
@@ -336,8 +349,11 @@ async fn item_08_agent_sidecar_starts_and_reports_health() {
         .expect("build agent server");
 
     let task = tokio::spawn(async move { server.serve().await });
-    let response =
-        wait_for_http_ok(&format!("http://127.0.0.1:{port}/health"), Duration::from_secs(5)).await;
+    let response = wait_for_http_ok(
+        &format!("http://127.0.0.1:{port}/health"),
+        Duration::from_secs(5),
+    )
+    .await;
 
     assert!(
         response.status().is_success(),
@@ -354,8 +370,11 @@ async fn item_09_roko_serve_serves_api_status() {
     init_workspace(tmp.path());
 
     let serve = spawn_roko_serve_on_random_port(tmp.path());
-    let response =
-        wait_for_http_ok(&format!("{}/api/status", serve.base_url), Duration::from_secs(10)).await;
+    let response = wait_for_http_ok(
+        &format!("{}/api/status", serve.base_url),
+        Duration::from_secs(10),
+    )
+    .await;
     let status: serde_json::Value = response.json().await.expect("status json");
 
     assert!(

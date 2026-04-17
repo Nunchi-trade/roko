@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use validator::Validate;
 
 use crate::error::{ApiError, validate_path_segment};
-use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::plan_types::{Plan, PlanTask};
 use crate::runtime::RunResult;
 use crate::state::{AppState, OperationHandle, OperationStatus, PlanHandle};
@@ -71,9 +71,15 @@ async fn get_plan(
 
 #[derive(Deserialize, Validate)]
 struct CreatePlanRequest {
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     title: String,
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     description: String,
     #[serde(default)]
     #[validate(nested)]
@@ -88,7 +94,10 @@ impl RequestPayload for CreatePlanRequest {
 
 #[derive(Deserialize, Validate)]
 struct CreateTaskEntry {
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     id: String,
     #[serde(default)]
     description: String,
@@ -221,7 +230,10 @@ async fn plan_status(
 
 #[derive(Deserialize, Validate)]
 struct GenerateRequest {
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     slug: String,
 }
 

@@ -1068,15 +1068,14 @@ mod tests {
 
         let blocked_semaphores = Arc::clone(&semaphores);
         let blocked = tokio::spawn(async move {
-            timeout(
-                Duration::from_millis(50),
-                blocked_semaphores.acquire("zai"),
-            )
-            .await
+            timeout(Duration::from_millis(50), blocked_semaphores.acquire("zai")).await
         });
         tokio::time::advance(Duration::from_millis(50)).await;
         assert!(
-            blocked.await.expect("blocked acquisition task should join").is_err(),
+            blocked
+                .await
+                .expect("blocked acquisition task should join")
+                .is_err(),
             "fourth request should block while all permits are held"
         );
 

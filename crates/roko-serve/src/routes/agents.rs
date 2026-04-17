@@ -209,7 +209,10 @@ async fn proxy_agent_logs(
 #[derive(Debug, Deserialize, Validate)]
 struct SendMessageRequest {
     #[serde(alias = "content")]
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     message: String,
     #[serde(default)]
     context: Option<Value>,
@@ -315,7 +318,10 @@ fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) ->
 
 #[derive(Debug, Deserialize, Validate)]
 struct RegisterAgentRequest {
-    #[validate(length(min = 1, max = 128), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1, max = 128),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     agent_id: String,
     #[serde(default)]
     label: Option<String>,

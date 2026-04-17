@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{OpenApi, ToSchema};
@@ -171,16 +171,16 @@ struct ApiDoc;
 macro_rules! doc_get {
     ($name:ident, $path:literal, $tag:literal) => {
         #[utoipa::path(
-            get,
-            path = $path,
-            tag = $tag,
-            responses(
-                (status = 200, description = "Successful response", body = Value),
-                (status = 400, description = "Bad request", body = ApiErrorResponse),
-                (status = 404, description = "Not found", body = ApiErrorResponse),
-                (status = 500, description = "Internal error", body = ApiErrorResponse)
-            )
-        )]
+                    get,
+                    path = $path,
+                    tag = $tag,
+                    responses(
+                        (status = 200, description = "Successful response", body = Value),
+                        (status = 400, description = "Bad request", body = ApiErrorResponse),
+                        (status = 404, description = "Not found", body = ApiErrorResponse),
+                        (status = 500, description = "Internal error", body = ApiErrorResponse)
+                    )
+                )]
         fn $name() {}
     };
 }
@@ -188,17 +188,17 @@ macro_rules! doc_get {
 macro_rules! doc_get_param {
     ($name:ident, $path:literal, $tag:literal, $param:literal) => {
         #[utoipa::path(
-            get,
-            path = $path,
-            tag = $tag,
-            params(($param = String, Path, description = "Path parameter")),
-            responses(
-                (status = 200, description = "Successful response", body = Value),
-                (status = 400, description = "Bad request", body = ApiErrorResponse),
-                (status = 404, description = "Not found", body = ApiErrorResponse),
-                (status = 500, description = "Internal error", body = ApiErrorResponse)
-            )
-        )]
+                    get,
+                    path = $path,
+                    tag = $tag,
+                    params(($param = String, Path, description = "Path parameter")),
+                    responses(
+                        (status = 200, description = "Successful response", body = Value),
+                        (status = 400, description = "Bad request", body = ApiErrorResponse),
+                        (status = 404, description = "Not found", body = ApiErrorResponse),
+                        (status = 500, description = "Internal error", body = ApiErrorResponse)
+                    )
+                )]
         fn $name() {}
     };
 }
@@ -206,21 +206,21 @@ macro_rules! doc_get_param {
 macro_rules! doc_post_value {
     ($name:ident, $path:literal, $tag:literal) => {
         #[utoipa::path(
-            post,
-            path = $path,
-            tag = $tag,
-            request_body = Value,
-            responses(
-                (status = 200, description = "Successful response", body = Value),
-                (status = 201, description = "Created", body = Value),
-                (status = 202, description = "Accepted", body = Value),
-                (status = 400, description = "Bad request", body = ApiErrorResponse),
-                (status = 401, description = "Unauthorized", body = ApiErrorResponse),
-                (status = 404, description = "Not found", body = ApiErrorResponse),
-                (status = 409, description = "Conflict", body = ApiErrorResponse),
-                (status = 500, description = "Internal error", body = ApiErrorResponse)
-            )
-        )]
+                    post,
+                    path = $path,
+                    tag = $tag,
+                    request_body = Value,
+                    responses(
+                        (status = 200, description = "Successful response", body = Value),
+                        (status = 201, description = "Created", body = Value),
+                        (status = 202, description = "Accepted", body = Value),
+                        (status = 400, description = "Bad request", body = ApiErrorResponse),
+                        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+                        (status = 404, description = "Not found", body = ApiErrorResponse),
+                        (status = 409, description = "Conflict", body = ApiErrorResponse),
+                        (status = 500, description = "Internal error", body = ApiErrorResponse)
+                    )
+                )]
         fn $name() {}
     };
 }
@@ -228,17 +228,17 @@ macro_rules! doc_post_value {
 macro_rules! doc_put_value {
     ($name:ident, $path:literal, $tag:literal) => {
         #[utoipa::path(
-            put,
-            path = $path,
-            tag = $tag,
-            request_body = Value,
-            responses(
-                (status = 200, description = "Successful response", body = Value),
-                (status = 400, description = "Bad request", body = ApiErrorResponse),
-                (status = 404, description = "Not found", body = ApiErrorResponse),
-                (status = 500, description = "Internal error", body = ApiErrorResponse)
-            )
-        )]
+                    put,
+                    path = $path,
+                    tag = $tag,
+                    request_body = Value,
+                    responses(
+                        (status = 200, description = "Successful response", body = Value),
+                        (status = 400, description = "Bad request", body = ApiErrorResponse),
+                        (status = 404, description = "Not found", body = ApiErrorResponse),
+                        (status = 500, description = "Internal error", body = ApiErrorResponse)
+                    )
+                )]
         fn $name() {}
     };
 }
@@ -246,17 +246,17 @@ macro_rules! doc_put_value {
 macro_rules! doc_delete {
     ($name:ident, $path:literal, $tag:literal) => {
         #[utoipa::path(
-            delete,
-            path = $path,
-            tag = $tag,
-            params(("id" = String, Path, description = "Path parameter")),
-            responses(
-                (status = 200, description = "Successful response", body = Value),
-                (status = 400, description = "Bad request", body = ApiErrorResponse),
-                (status = 404, description = "Not found", body = ApiErrorResponse),
-                (status = 500, description = "Internal error", body = ApiErrorResponse)
-            )
-        )]
+                    delete,
+                    path = $path,
+                    tag = $tag,
+                    params(("id" = String, Path, description = "Path parameter")),
+                    responses(
+                        (status = 200, description = "Successful response", body = Value),
+                        (status = 400, description = "Bad request", body = ApiErrorResponse),
+                        (status = 404, description = "Not found", body = ApiErrorResponse),
+                        (status = 500, description = "Internal error", body = ApiErrorResponse)
+                    )
+                )]
         fn $name() {}
     };
 }
@@ -287,9 +287,18 @@ doc_post_value!(deploy_template, "/templates/{name}/deploy", "templates");
 
 doc_get!(list_deployments, "/deployments", "deployments");
 doc_get_param!(get_deployment, "/deployments/{id}", "deployments", "id");
-doc_get_param!(get_deployment_logs, "/deployments/{id}/logs", "deployments", "id");
+doc_get_param!(
+    get_deployment_logs,
+    "/deployments/{id}/logs",
+    "deployments",
+    "id"
+);
 doc_post_value!(proxy_task, "/deployments/{id}/task", "deployments");
-doc_post_value!(receive_callback, "/deployments/{id}/callback", "deployments");
+doc_post_value!(
+    receive_callback,
+    "/deployments/{id}/callback",
+    "deployments"
+);
 
 doc_get!(list_managed_agents, "/managed-agents", "agents");
 doc_post_value!(register_agent, "/agents/register", "agents");
@@ -316,8 +325,16 @@ doc_get!(list_subscriptions, "/subscriptions", "subscriptions");
 doc_post_value!(create_subscription, "/subscriptions", "subscriptions");
 doc_put_value!(update_subscription, "/subscriptions/{id}", "subscriptions");
 doc_delete!(delete_subscription, "/subscriptions/{id}", "subscriptions");
-doc_post_value!(enable_subscription, "/subscriptions/{id}/enable", "subscriptions");
-doc_post_value!(disable_subscription, "/subscriptions/{id}/disable", "subscriptions");
+doc_post_value!(
+    enable_subscription,
+    "/subscriptions/{id}/enable",
+    "subscriptions"
+);
+doc_post_value!(
+    disable_subscription,
+    "/subscriptions/{id}/disable",
+    "subscriptions"
+);
 
 doc_get!(list_prds, "/prds", "prds");
 doc_post_value!(post_idea, "/prds/ideas", "prds");
@@ -339,20 +356,41 @@ doc_get!(explain_routing, "/routing/explain", "providers");
 doc_get!(diagnosis_recent, "/diagnosis/recent", "diagnosis");
 
 doc_get!(learning_efficiency, "/learning/efficiency", "learning");
-doc_get!(learning_cascade_router, "/learning/cascade-router", "learning");
+doc_get!(
+    learning_cascade_router,
+    "/learning/cascade-router",
+    "learning"
+);
 doc_get!(learning_cascade, "/learning/cascade", "learning");
 doc_get!(learning_cost_tiers, "/learning/cost-tiers", "learning");
 doc_get!(learning_experiments, "/learning/experiments", "learning");
-doc_get!(learning_adaptive_thresholds, "/learning/adaptive-thresholds", "learning");
-doc_get!(learning_gate_thresholds, "/learning/gate-thresholds", "learning");
+doc_get!(
+    learning_adaptive_thresholds,
+    "/learning/adaptive-thresholds",
+    "learning"
+);
+doc_get!(
+    learning_gate_thresholds,
+    "/learning/gate-thresholds",
+    "learning"
+);
 
 doc_get!(list_agents, "/agents", "aggregator");
 doc_get!(agent_topology, "/agents/topology", "aggregator");
 doc_get_param!(agent_stats, "/agents/{id}/stats", "aggregator", "id");
 doc_get_param!(agent_skills, "/agents/{id}/skills", "aggregator", "id");
-doc_get_param!(agent_heartbeat, "/agents/{id}/heartbeat", "aggregator", "id");
+doc_get_param!(
+    agent_heartbeat,
+    "/agents/{id}/heartbeat",
+    "aggregator",
+    "id"
+);
 doc_get_param!(agent_trace, "/agents/{id}/trace", "aggregator", "id");
-doc_get!(list_prediction_sessions, "/predictions/sessions", "aggregator");
+doc_get!(
+    list_prediction_sessions,
+    "/predictions/sessions",
+    "aggregator"
+);
 doc_get_param!(
     get_prediction_session,
     "/predictions/sessions/{id}",

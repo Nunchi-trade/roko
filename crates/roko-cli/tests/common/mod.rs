@@ -1,6 +1,6 @@
+use assert_cmd::Command;
 use assert_cmd::assert::Assert;
 use assert_cmd::cargo::cargo_bin;
-use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,7 +85,11 @@ pub fn run_process(workdir: &Path, args: &[&str]) {
         .args(rest)
         .status()
         .unwrap_or_else(|err| panic!("spawn {program}: {err}"));
-    assert!(status.success(), "{program} {:?} failed with {status}", rest);
+    assert!(
+        status.success(),
+        "{program} {:?} failed with {status}",
+        rest
+    );
 }
 
 pub fn process_stdout(workdir: &Path, args: &[&str]) -> String {
@@ -207,12 +211,8 @@ pub fn run_sample_plan(workdir: &Path) -> Value {
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     let json_start = stdout.rfind("\n{").map_or(0, |idx| idx + 1);
-    serde_json::from_str(&stdout[json_start..]).unwrap_or_else(|err| {
-        panic!(
-            "parse sample plan JSON stdout: {err}\n{}",
-            stdout
-        )
-    })
+    serde_json::from_str(&stdout[json_start..])
+        .unwrap_or_else(|err| panic!("parse sample plan JSON stdout: {err}\n{}", stdout))
 }
 
 pub fn run_roko(workdir: &Path, args: &[&str]) -> Assert {

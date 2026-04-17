@@ -18,8 +18,8 @@ use tokio::task::JoinHandle;
 use validator::Validate;
 
 use crate::error::{ApiError, validate_path_segment};
-use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::state::{AppState, OperationHandle, OperationStatus};
 use parking_lot::Mutex;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -313,7 +313,10 @@ async fn get_prd(
 
 #[derive(Deserialize, Validate)]
 struct IdeaRequest {
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     text: String,
 }
 

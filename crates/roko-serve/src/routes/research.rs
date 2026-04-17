@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use validator::{Validate, ValidationError};
 
 use crate::error::{ApiError, validate_path_segment};
-use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::state::{AppState, OperationHandle, OperationStatus};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -62,7 +62,10 @@ async fn list_research(State(state): State<Arc<AppState>>) -> Result<Json<Value>
 
 #[derive(Deserialize, Validate)]
 struct TopicRequest {
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     topic: String,
     #[serde(default = "default_intent")]
     #[validate(custom(function = "validate_intent"))]

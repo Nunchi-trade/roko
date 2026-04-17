@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use validator::Validate;
 
 use crate::error::ApiError;
-use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::state::{AppState, OperationStatus, RunHandle};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -24,7 +24,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 #[derive(Deserialize, Validate)]
 struct RunRequest {
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     prompt: String,
     #[serde(default)]
     workdir: Option<String>,

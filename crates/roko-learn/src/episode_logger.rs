@@ -1166,15 +1166,18 @@ mod tests {
     #[tokio::test]
     async fn legacy_json_without_backend_defaults_to_empty_string() {
         let (_dir, path) = tmp_log();
-        let mut episode = serde_json::to_value(sample("agent-a", "task-1", true))
-            .expect("serialize episode");
+        let mut episode =
+            serde_json::to_value(sample("agent-a", "task-1", true)).expect("serialize episode");
         episode
             .as_object_mut()
             .expect("episode object")
             .remove("backend");
         tokio::fs::write(
             &path,
-            format!("{}\n", serde_json::to_string(&episode).expect("serialize legacy episode")),
+            format!(
+                "{}\n",
+                serde_json::to_string(&episode).expect("serialize legacy episode")
+            ),
         )
         .await
         .expect("write legacy episode");

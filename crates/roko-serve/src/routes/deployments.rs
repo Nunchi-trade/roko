@@ -16,8 +16,8 @@ use validator::Validate;
 
 use crate::deploy::{DeploySpec, DeploymentStatus};
 use crate::error::ApiError;
-use crate::extract::{ApiJson, RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
+use crate::extract::{ApiJson, RequestPayload, ValidJson, validate_with_validator};
 use crate::state::AppState;
 use crate::templates::TemplateRegistry;
 
@@ -41,7 +41,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[derive(Deserialize, Validate)]
 struct CreateDeploymentRequest {
     /// Template name to deploy.
-    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     template: String,
     /// Parameters to interpolate into the template.
     #[serde(default)]
