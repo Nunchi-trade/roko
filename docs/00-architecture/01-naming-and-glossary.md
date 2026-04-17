@@ -8,6 +8,9 @@
 > **First-time readers**: this chapter is an A-Z lookup. Start here when another architecture
 > doc uses a term you do not recognize, then follow the cited home doc for depth.
 >
+> **Public alias convention**: Some entries include a public alias used in user-facing docs, CLI
+> output, and UI. The internal term remains canonical in code and architecture docs.
+>
 > **Source of this consolidation**: REF34 makes this file the canonical glossary chapter. See
 > [tmp/refinements/34-glossary.md](../../tmp/refinements/34-glossary.md).
 
@@ -35,12 +38,14 @@ is still planned.
 | `Datum` | `[planned]` | Target-state polymorphic `Engram` or `Pulse` input | one-off sum types |
 | `PulseSource` | `[planned]` | Target-state lightweight Pulse origin attribution | overloaded provenance terms |
 | `Neuro` | `[shipping]` | Durable knowledge cross-cut | `Grimoire` (retired) |
-| `Daimon` | `[built]` | Affect cross-cut | old loop-step framing for affect |
+| `Daimon` | `[built]` | Affect cross-cut; public alias `AffectBias` | old loop-step framing for affect |
 | `Dreams` | `[built]` | Delta-speed consolidation cross-cut | treating Dreams as a loop step |
 | `Mesh` | `[planned]` | Agent-network layer | `Styx` (retired) |
 | `Fleet` | `[planned]` | Agent roster | `Clade` (retired) |
 | `StateHub` | `[built]` | Current dashboard/event hub; target-state projection layer over Bus + Substrate | TUI-only framing |
-| `TypedContext` | `[planned]` | Structured domain situation payload | free-text-only context matching |
+| `TypedContext` | `[planned]` | Structured domain situation payload; public alias `Situation` | free-text-only context matching |
+| `Calibrator` | `[planned]` | Target-state learning logic split from `Policy` | treating `Policy` as both control and learning |
+| `runtime shape` | `[planned]` | Deployment form such as laptop/server/container/cluster | overloading `profile` |
 | `Custody` | `[planned]` | Chain-of-custody audit record | informal approval prose |
 
 See also [07-naming](../../tmp/refinements/07-naming.md),
@@ -59,6 +64,8 @@ See also [07-naming](../../tmp/refinements/07-naming.md),
   - `[retired]` = historical term deliberately replaced by newer vocabulary.
 - Each entry cites a home doc. Refinement proposals use bare filenames in the label and a link
   to `tmp/refinements/...`; canonical architecture chapters use normal doc links.
+- `Public alias:` marks the clearer user-facing name to use in docs, CLI output, and UI while
+  keeping the glossary term canonical in code and architecture prose.
 - `(historical)` marks a retired or legacy term that may still appear in old docs or code.
 - `(new)` marks a term introduced by the refinement series.
 - Retired terms belong only in explicitly retired, historical, deprecated, legacy, formerly,
@@ -131,12 +138,14 @@ publish order. Home: [03-bus-as-first-class](../../tmp/refinements/03-bus-as-fir
 ## C
 
 **c-factor** [built] — Collective-intelligence factor computed continuously from Bus and Substrate
-statistics for agent cohorts. Home:
+statistics for agent cohorts. Public alias: **coordination health** in user-facing docs and UI;
+keep `c-factor` as the internal metric name. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md) and
 [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md).
 
-**Calibrator** [planned] — Policy that updates a Heuristic's `Calibration` after observing predictions
-versus outcomes. Home:
+**Calibrator** [planned] — Proposed learning-logic split from `Policy`: `Policy` reacts and
+decides, while `Calibrator` updates heuristics, thresholds, and related `Calibration` records
+after observing predictions versus outcomes. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md) and
 [10-self-learning-cybernetic-loops](../../tmp/refinements/10-self-learning-cybernetic-loops.md).
 
@@ -204,7 +213,8 @@ what simulation ran, what result occurred, and what witness exists. Home:
 ## D
 
 **Daimon** — Affect cross-cut that maintains PAD state, biases `Scorer`, and gates actions.
-Home: [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md).
+Public alias: **AffectBias** in user-facing docs. Home:
+[Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md).
 
 **`Datum`** [planned] *(new)* — `enum Datum<'a> { Engram(&'a Engram), Pulse(&'a Pulse) }` used by
 polymorphic operators. Home:
@@ -223,7 +233,8 @@ Home: [Three Cognitive Speeds](./10-three-cognitive-speeds.md).
 [StateHub Projection Layer](../12-interfaces/22-statehub-projection-layer.md).
 
 **Demurrage** [planned] *(new)* — Economic memory rule that taxes idle Engram balance over time and
-restores weight through reinforcement. Home:
+restores weight through reinforcement. Public alias: **retention pressure** when the docs need a
+clearer operator-facing term for the same target-state idea. Home:
 [12-knowledge-demurrage](../../tmp/refinements/12-knowledge-demurrage.md) and
 [Attention as Universal Cognitive Currency](./25-attention-as-currency.md).
 
@@ -274,7 +285,7 @@ name. Home: [07-naming](../../tmp/refinements/07-naming.md).
 [03-bus-as-first-class](../../tmp/refinements/03-bus-as-first-class.md).
 
 **Falsifier** [planned] — Predicate attached to a `Claim` or `Heuristic` that specifies what observable
-would refute it. Home:
+would refute it. Public alias: **counterexample check** in user-facing docs. Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md) and
 [16-research-to-runtime](../../tmp/refinements/16-research-to-runtime.md).
 
@@ -460,9 +471,10 @@ model is still target-state. Home:
 [26-statehub-rearchitecture](../../tmp/refinements/26-statehub-rearchitecture.md) and
 [StateHub Projection Layer](../12-interfaces/22-statehub-projection-layer.md).
 
-**Profile** — Named bundle of defaults. Use the bare term for deployment shapes such as
-`laptop`, `single-server`, `container`, `clustered`, or `edge`; say `domain profile` when the
-bundle customizes agent behavior instead. Home:
+**Profile** — Named bundle of defaults. Avoid the bare term when precision matters: use
+`domain profile` for tools, roles, gates, and defaults tied to a work domain, and use
+`runtime shape` for deployment forms such as `laptop`, `single-server`, `container`,
+`clustered`, or `edge`. Home:
 [24-deployment-ux](../../tmp/refinements/24-deployment-ux.md) and
 [25-domain-specific-agents](../../tmp/refinements/25-domain-specific-agents.md).
 
@@ -510,6 +522,11 @@ effect, confidence interval, and replication status. Home:
 
 **Runtime** — Layer-0 subsystem containing the process supervisor, cancellation, `Bus`, and
 `Substrate`. Home: [Five-Layer Taxonomy](./12-five-layer-taxonomy.md).
+
+**Runtime shape** [planned] — Deployment form such as `laptop`, `single-server`, `container`,
+`clustered`, or `edge`. Use this instead of bare `profile` when the docs mean host topology
+rather than a domain bundle. Home:
+[24-deployment-ux](../../tmp/refinements/24-deployment-ux.md).
 
 ## S
 
@@ -584,7 +601,8 @@ and c-factor analysis. Home:
 
 **TypedContext** [planned] *(new)* — Structured domain situation data, usually
 `{ domain, fields: BTreeMap<Key, Value> }`, so gates and heuristics match on typed predicates
-instead of free text. Home:
+instead of free text. Public alias: **Situation** in user-facing docs, CLI output, and UI.
+Home:
 [25-domain-specific-agents](../../tmp/refinements/25-domain-specific-agents.md).
 
 ## U
@@ -621,7 +639,8 @@ finalized. Home:
 [13-collective-intelligence-c-factor](../../tmp/refinements/13-collective-intelligence-c-factor.md).
 
 **Worldview** [planned] *(new)* — Co-citation cluster of mutually supporting heuristics that dominates a
-domain-fingerprinted region of situations. Home:
+domain-fingerprinted region of situations. Public alias: **belief bundle** in user-facing docs.
+Home:
 [14-worldview-validation](../../tmp/refinements/14-worldview-validation.md).
 
 **Witness** — See chain witness. Home:

@@ -22,10 +22,10 @@ The server is built on `axum` (Tokio-based async HTTP framework), uses `tower-ht
 REF23 makes this more explicit: the HTTP API is the transport layer behind the Web surface and the bridge that keeps CLI, TUI, Chat, and Web on the same verb set and the same live progress stream. The API should expose the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions instead of inventing a separate mental model. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
 
 REF24 adds the deployment-side constraint: `roko serve` is not a separate product tier, but the
-same Rust binary expressed through different deployment profiles. In practice that means the HTTP
-surface must remain profile-aware for laptop, single-server, container, clustered, and edge
-shapes; it must surface readiness, tenancy, budgets, and portable state flows in a way that does
-not fork the core runtime. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+same Rust binary expressed through different deployment runtime shapes. In practice that means
+the HTTP surface must remain runtime-shape-aware for laptop, single-server, container,
+clustered, and edge deployments; it must surface readiness, tenancy, budgets, and portable
+state flows in a way that does not fork the core runtime. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md),
 [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
 [../19-deployment/12-production-hardening.md](../19-deployment/12-production-hardening.md),
 [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md),
@@ -335,7 +335,7 @@ GET /api/cost/report
 ```
 
 - `/healthz` is liveness: the process is up enough for the supervisor to keep it running.
-- `/readyz` is readiness: the selected profile has its `Substrate`, `Bus`, and auth dependencies ready.
+- `/readyz` is readiness: the selected runtime shape has its `Substrate`, `Bus`, and auth dependencies ready.
 - `/metrics` exposes Prometheus-compatible metrics using stable `roko.*` names across all shapes.
 - State export/import endpoints mirror the CLI portability flow so laptop-to-server promotion does not require out-of-band tooling.
 - Cost reporting belongs here because deployment trust depends on visible spend, especially in shared or clustered environments.

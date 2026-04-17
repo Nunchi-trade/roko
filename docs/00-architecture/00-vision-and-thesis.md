@@ -154,14 +154,16 @@ provides the theoretical foundation for Roko's approach to attention and action 
 The core insight: self-organizing systems minimize the divergence between their predictions
 and their observations. Prediction error — the surprise signal — drives learning, attention,
 and action. See also `tmp/refinements/10-self-learning-cybernetic-loops.md` for the Bus-driven
-predict/publish/correct framing that makes active inference concrete across operators.
+predict/publish/correct framing that informs the target-state architecture.
 
 Roko does not attempt exact variational free-energy minimization over a fully general world
-model. Instead, it makes active inference **literal at the systems layer**: operators publish
-prediction Pulses, later Pulses resolve those predictions with outcomes, and learning policies
-publish calibration updates plus `prediction.error.*` signals back onto the Bus. That keeps
-the implementation tractable while still treating prediction error as a first-class runtime
-signal rather than a loose metaphor.
+model. Instead, the near-term engineering mechanism is simpler: operators keep
+expectation/outcome records, then update calibration when outcomes diverge from expectations.
+The richer target-state form makes that loop more explicit at the systems layer: operators
+publish prediction Pulses, later Pulses resolve those predictions with outcomes, and learning
+policies publish calibration updates plus `prediction.error.*` signals back onto the Bus. That
+keeps the implementation tractable while still treating prediction error as a first-class
+runtime signal rather than a loose metaphor.
 
 - **Prediction error as a learning signal**: Every observation resolves a prediction. The
   residual feeds automatic calibration, per-operator updates, and topic-level
@@ -189,7 +191,9 @@ Where:
 This decomposes naturally into Roko's dual-process cognition
 (see [11-dual-process-and-active-inference.md](11-dual-process-and-active-inference.md)):
 high-certainty situations (low epistemic value) route to fast processing (T0/T1), while
-high-uncertainty situations (high epistemic value) route to deep reasoning (T2).
+high-uncertainty situations (high epistemic value) route to deep reasoning (T2). In practice,
+Roko should approximate this with observable expectation/outcome mismatches and calibration
+records before claiming universal active-inference coverage across every operator.
 
 ### 3.3 The Autocatalytic Thesis
 

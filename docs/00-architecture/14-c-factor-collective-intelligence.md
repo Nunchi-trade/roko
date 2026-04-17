@@ -18,9 +18,9 @@
 
 Woolley et al. (2010) showed that group performance across varied tasks loads onto a single collective factor, c. The important result is not that larger groups are automatically better. The important result is that process matters: how turns are shared, how well members predict one another, how often they cite one another correctly, how open the channel is, and how diverse the working set is.
 
-Roko has partial observability into some of those process variables today, and the target-state architecture would make the rest explicit through Bus and Substrate artifacts. This chapter defines c-factor as a cohort-level diagnostic, then shows how the Policy layer could react to it without turning it into a brittle single-objective reward.
+Roko has partial observability into some of those process variables today, and the target-state architecture would make the rest explicit through Bus and Substrate artifacts. This chapter defines c-factor as a cohort-level diagnostic, then shows how the Policy layer could eventually react to it without turning it into a brittle single-objective reward.
 
-The key design choice is deliberate: c-factor is a covariate and a diagnostic, not a direct objective. Policy should watch it, correlate it with outcomes, and apply process levers when low c-factor coincides with degraded task results. That keeps the system from gaming the metric by routing easy work, suppressing dissent, or narrowing task scope.
+The key design choice is deliberate: c-factor is a covariate and a diagnostic, not a direct objective. Near-term, treat it as an observability metric, or in public-facing language, a coordination-health signal. Once the signal matures, Policy can optionally use it as an intervention input when low c-factor coincides with degraded task results. That keeps the system from gaming the metric by routing easy work, suppressing dissent, or narrowing task scope.
 
 ---
 
@@ -163,6 +163,10 @@ That is the operational split:
 - `CohortWeights` adapt
 - c-factor reports
 - c-score predicts
+
+Near-term, that means dashboards, alerts, and operator review should lead. Automatic policy
+actuation belongs behind explicit evidence that the signal is stable enough to govern runtime
+behavior.
 
 ---
 

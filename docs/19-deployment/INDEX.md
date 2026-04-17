@@ -1,13 +1,13 @@
 # 19 — Deployment
 
-> How Roko is packaged, distributed, and deployed across five shapes: laptop-local,
-> single-server, container, clustered, and edge. The chapter is profile-driven: one Rust
+> How Roko is packaged, distributed, and deployed across five runtime shapes: laptop-local,
+> single-server, container, clustered, and edge. The chapter is runtime-shape-driven: one Rust
 > binary plus packaging artifacts, with configuration selecting the shape instead of forking
 > the codebase. See also `../../tmp/refinements/24-deployment-ux.md` and
 > `../../tmp/refinements/27-realtime-event-surface.md`, and
 > `../../tmp/refinements/33-observability-telemetry.md`.
 
-> **Implementation status**: Only the laptop-local shape is currently tested end to end. Docker and server-oriented packaging exist in partial form, but the full five-shape profile story remains a target-state deployment model. Read single-server, clustered, WASM, and edge sections as design targets unless a subdocument says otherwise.
+> **Implementation status**: Only the laptop-local shape is currently tested end to end. Docker and server-oriented packaging exist in partial form, but the full five-shape deployment story remains a target-state model. Read single-server, clustered, WASM, and edge sections as design targets unless a subdocument says otherwise.
 
 ---
 
@@ -18,7 +18,7 @@
 | 00 | [00-packaging-and-distribution.md](00-packaging-and-distribution.md) | Packaging and Distribution | Cargo workspace packaging, crates.io publishing, release pipeline (release-plz + cargo-dist + git-cliff), Homebrew tap, GitHub Releases, Docker images, self-update via axoupdater, shell completions. The path from source to a shape-specific artifact. |
 | 01 | [01-native-x86-arm.md](01-native-x86-arm.md) | Native Deployment (x86_64 and aarch64) | Native build configuration for 6 platform targets (macOS Intel/ARM, Linux glibc/musl). Feature flags, cross-compilation (cargo-zigbuild, cross), release profile optimization, binary sizes, memory usage, and development build workflow. |
 | 02 | [02-wasm-browser-edge.md](02-wasm-browser-edge.md) | WASM Deployment (Browser and Edge) | Target-state WASM deployment sketch: core primitives that might eventually compile, current gaps, and size-budget constraints. |
-| 03 | [03-docker.md](03-docker.md) | Docker Deployment | Container shape as a profile-driven packaging target: image variants, build caching, registry naming, compose bundles, state volumes, observability hooks, and operator access. |
+| 03 | [03-docker.md](03-docker.md) | Docker Deployment | Container shape as a runtime-shape packaging target: image variants, build caching, registry naming, compose bundles, state volumes, observability hooks, and operator access. |
 | 04 | [04-daemon-launchd-macos.md](04-daemon-launchd-macos.md) | Daemon Mode: launchd (macOS) | Persistent background daemon on macOS. launchd plist generation (`dev.nunchi.roko`), lifecycle commands (install/start/stop/uninstall), IPC over Unix domain socket, DaemonCmd protocol, log management, graceful shutdown, environment variable handling. |
 | 05 | [05-daemon-systemd-linux.md](05-daemon-systemd-linux.md) | Daemon Mode: systemd (Linux) | Persistent background daemon on Linux. systemd user unit file generation, exponential restart backoff, journald log integration, watchdog (sd_notify), security hardening (NoNewPrivileges, ProtectSystem), lingering for headless servers. Comparison table: launchd vs systemd. |
 | 06 | [06-cloud-fly-io.md](06-cloud-fly-io.md) | Cloud Deployment: Fly.io | Target-state Fly.io deployment plan: proposed service topology, scripts, and runtime layout rather than a verified current deployment. |
@@ -36,7 +36,7 @@
 ## Key Concepts
 
 - **Synapse Architecture**: Roko's 6-trait composition system (Substrate, Scorer, Gate, Router, Composer, Policy) enables flexible deployment, and each trait can be implemented differently per target.
-- **Profiles**: A profile is the intended packaging model for the five shapes; today, laptop-local is the only fully tested shape.
+- **Runtime shape**: The deployment form for the same binary: laptop-local, single-server, container, clustered, or edge.
 - **Engram**: The durable record flows through all deployment targets unchanged. Content-addressed hashing keeps identity consistent across native, container, clustered, and edge environments.
 - **Current observability baseline**: JSONL episode logs, efficiency events, tracing-based logs, and the existing `StateHub`/dashboard path are the real operator surfaces today. Broader telemetry and projection catalogs remain future work.
 - **State portability**: Substrate state, bus queues, and config are exported as an archive so laptop-to-server and server-to-server moves are operational, not architectural.

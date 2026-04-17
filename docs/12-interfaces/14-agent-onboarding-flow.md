@@ -1,6 +1,6 @@
 # Agent Onboarding Flow
 
-> The journey from "new agent" to "fully operational Spectre-bearing cognitive agent" - domain/profile selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, and first-task execution.
+> The journey from "new agent" to "fully operational Spectre-bearing cognitive agent" - domain-profile selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, and first-task execution.
 
 
 > **Implementation**: Scaffold
@@ -13,9 +13,9 @@
 
 ## Abstract
 
-Agent onboarding is the process of bringing a new cognitive agent from zero to operational. This includes choosing the agent's domain and role, selecting or installing a profile bundle, composing profiles when needed, selecting a template, configuring model routing, bootstrapping initial knowledge, generating the Spectre creature identity, and executing the first task to validate the setup.
+Agent onboarding is the process of bringing a new cognitive agent from zero to operational. This includes choosing the agent's domain and role, selecting or installing a domain-profile bundle, composing domain profiles when needed, selecting a template, configuring model routing, bootstrapping initial knowledge, generating the Spectre creature identity, and executing the first task to validate the setup.
 
-This chapter follows the refinements in [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md): onboarding should feel familiar-first, interactive, fast, provider/plugin/MCP-aware, profile-aware, and resumable. The same underlying verbs should be reachable from all four surfaces, so a user can start in CLI and continue in TUI, Chat, or Web without relearning the workflow. The target is first useful output in under 30 seconds, with domain profile install and composition treated as part of first-run rather than a separate admin task.
+This chapter follows the refinements in [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md): onboarding should feel familiar-first, interactive, fast, provider/plugin/MCP-aware, domain-profile-aware, and resumable. The same underlying verbs should be reachable from all four surfaces, so a user can start in CLI and continue in TUI, Chat, or Web without relearning the workflow. The target is first useful output in under 30 seconds, with domain-profile install and composition treated as part of first-run rather than a separate admin task.
 
 ---
 
@@ -31,7 +31,7 @@ The canonical verb set for the onboarding surfaces is:
 - `replay` for rerunning a prior session or episode
 - `learn` for heuristic and playbook curation
 - `tune` for configuration changes
-- `connect` for plugins, MCP servers, credentials, and profile bundles
+- `connect` for plugins, MCP servers, credentials, and domain-profile bundles
 
 That verb set is rendered differently in CLI, TUI, Chat, and Web, but it should behave like one system rather than four separate ones. See also the glossary at [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the canonical terms used here.
 
@@ -49,8 +49,8 @@ roko ask "Add error handling to the auth module"
 What happens automatically:
 1. `roko plugin install` adds a domain profile bundle and records its declared tools, gates, heuristics, and templates
 2. `roko init` opens an interactive setup flow and creates `.roko/` plus a resumable `roko.toml`
-3. The setup flow auto-detects the project domain and preferred model providers, then offers the matching profile or a blank starter
-4. If the user accepts the defaults, Roko chooses a safe starter template, a working provider configuration, and a profile-specific `TypedContext`
+3. The setup flow auto-detects the project domain and preferred model providers, then offers the matching domain profile or a blank starter
+4. If the user accepts the defaults, Roko chooses a safe starter template, a working provider configuration, and a domain-profile-specific `TypedContext`
 5. The init flow checks plugins and MCP servers opportunistically, but never blocks first success on a failed remote check
 6. The first `roko ask` or `roko do` can start immediately, with live output visible on every surface and custody records attached to any sensitive activation
 
@@ -136,7 +136,7 @@ Which providers should we check?
   [x] Local Ollama
   [ ] Other
 
-Should we look for plugins, profiles, and MCP servers?
+Should we look for plugins, domain profiles, and MCP servers?
   [x] Yes, auto-discover
   [ ] No, configure later
 ```
@@ -152,9 +152,9 @@ The practical rule is simple: no single setup check should block the user from r
 
 ---
 
-## Stage 1: Profile Selection and Domain Mapping
+## Stage 1: Domain-Profile Selection and Domain Mapping
 
-The first onboarding decision is choosing the agent's primary profile. That choice should be made once, then carried with the session as the user moves across CLI, TUI, Chat, and Web. A profile may be a single domain bundle or a composition of multiple bundles when the project spans more than one domain.
+The first onboarding decision is choosing the agent's primary domain profile. That choice should be made once, then carried with the session as the user moves across CLI, TUI, Chat, and Web. A domain profile may be a single domain bundle or a composition of multiple bundles when the project spans more than one domain.
 
 ### Auto-Detection
 
@@ -196,9 +196,9 @@ roko init --profile blank     # No domain-specific configuration
 
 ## Stage 2: Template Instantiation
 
-Agent templates define the role, tools, and behavioral profile of an agent. In the profile-first
-flow, templates are the lower-level defaults that a profile bundle exports for a particular task
-shape. The profile can supply a template directly, override specific fields, or offer a small set
+Agent templates define the role, tools, and behavioral bias of an agent. In the domain-profile-first
+flow, templates are the lower-level defaults that a domain-profile bundle exports for a particular task
+shape. The domain profile can supply a template directly, override specific fields, or offer a small set
 of template choices inside the same wizard.
 
 ### Built-in Templates

@@ -83,11 +83,13 @@ roko init [PATH] [--cloud] [--template T] [--profile P]
 | `PATH` | PathBuf | Current directory | Directory to initialize |
 | `--cloud` | bool | false | Generate cloud-ready defaults for deployment |
 | `--template` | String | (auto-detect) | Template: `coding`, `research`, `ops`, `chain`, `blank` |
-| `--profile` | String | (auto-detect) | Domain profile to install or activate: `coding`, `research`, `blockchain`, `data`, `ops`, `writing`, or `blank` |
+| `--profile` | String | (auto-detect) | Domain-profile bundle to install or activate during onboarding: `coding`, `research`, `blockchain`, `data`, `ops`, `writing`, or `blank` |
+
+Here, `--profile` means a domain profile bundle, not the deployment `profile = ...` setting in `roko.toml`.
 
 Auto-detects language, build system, gates, and matching profile options from project files (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`). Creates the `.roko/` directory tree with `roko.toml`, signal storage, learning state, and knowledge store.
 
-REF23 raises the bar for `roko init`: provider checks, MCP autodiscovery, heuristic-starter import, and secret collection should all degrade gracefully with explicit `skip` or `configure later` exits. REF25 adds profile install and composition to that same contract. Partial success is valid; setup state should be persisted incrementally so the next `roko init` can resume instead of restarting.
+REF23 raises the bar for `roko init`: provider checks, MCP autodiscovery, heuristic-starter import, and secret collection should all degrade gracefully with explicit `skip` or `configure later` exits. REF25 adds domain-profile install and composition to that same contract. Partial success is valid; setup state should be persisted incrementally so the next `roko init` can resume instead of restarting.
 
 ### `roko ask`
 
@@ -222,7 +224,7 @@ roko tune <SUBCOMMAND>
 
 ### `roko connect`
 
-Add a plugin, profile bundle, MCP server, provider, or credential source.
+Add a plugin, domain-profile bundle, MCP server, provider, or credential source.
 
 ```
 roko connect <SUBCOMMAND>

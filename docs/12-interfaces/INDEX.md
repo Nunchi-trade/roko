@@ -46,8 +46,8 @@ The audit narrows or defers the rest:
 | 01 | [01-cli-command-reference.md](./01-cli-command-reference.md) | Full command reference organized by group — bare `roko`, slash commands, completion, getting started, plugins, orchestration, replay, import, non-interactive output modes, and CI parity |
 | 02 | [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md) | `roko new` scaffolder specifications for all 9 types (domain, gate, scorer, router, policy, substrate, probe, event-source, template) with generated code examples |
 | 03 | [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) | Progressive disclosure help system — `roko explain` 3-level output, error-as-teacher format, diff-review explainability, config wizard, and TeachingError struct |
-| 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), profile-aware deployment overlays for laptop/single-server/container/clustered/edge, `ROKO_*` env vars, full `roko.toml` schema, auto-detection |
-| 05 | [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) | roko-serve architecture — axum HTTP server, 12 route groups, REST endpoints, authentication, deployment probes, and profile-aware control-plane behavior |
+| 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), runtime-shape-aware deployment overlays for laptop/single-server/container/clustered/edge, `ROKO_*` env vars, full `roko.toml` schema, auto-detection |
+| 05 | [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) | roko-serve architecture — axum HTTP server, 12 route groups, REST endpoints, authentication, deployment probes, and runtime-shape-aware control-plane behavior |
 | 06 | [06-websocket-streaming.md](./06-websocket-streaming.md) | Shared realtime surface — shipping WebSocket + SSE today, with gRPC explicitly deferred and documented only as target-state protocol shape |
 | 07 | [07-rosedust-design-language.md](./07-rosedust-design-language.md) | ROSEDUST design system — void-black palette, rose accents, glass morphism (CSS + Rust), motion system, typography, RosedustTheme struct |
 | 08 | [08-tui-main-layout.md](./08-tui-main-layout.md) | TUI main layout — 3 regions (sidebar, detail, Spectre viewport), rendering architecture, 60fps frame budget, bloom composite, responsive breakpoints |
@@ -132,7 +132,7 @@ REF17 adds the interface-side plugin surface; start with [00-cli-overview.md](./
 [01-cli-command-reference.md](./01-cli-command-reference.md), and
 [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 REF22 adds the Rust SDK developer-UX chapter; start with [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) and [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md).
-REF24 adds the profile-aware deployment and control-plane framing; start with
+REF24 adds the runtime-shape-aware deployment and control-plane framing; start with
 [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md),
 [05-http-api-roko-serve.md](./05-http-api-roko-serve.md),
 [../19-deployment/INDEX.md](../19-deployment/INDEX.md),

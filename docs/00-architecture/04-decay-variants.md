@@ -12,6 +12,10 @@
 
 Durable memory should not behave like a cache with a fixed expiry. If the system keeps everything forever, retrieval quality drops and stale knowledge crowds out current relevance. If the system uses only TTL or LRU, it throws away useful rare knowledge because the wall clock ran out or the cache was full.
 
+The simpler near-term mechanism is retention tiers (hot / warm / cold) with promotion and
+demotion thresholds plus optional retention pressure. Full demurrage economics is a target-state
+extension, not the first thing the implementation needs to ship.
+
 Demurrage gives the system a different incentive structure:
 
 - Useful Engrams stay warm because they are read, cited, and reinforced.
@@ -19,7 +23,9 @@ Demurrage gives the system a different incentive structure:
 - Knowledge that stops paying for its keep moves toward cold storage.
 - The retrieval surface favors currently useful knowledge over historically cached knowledge.
 
-That is the right model for durable memory. Half-life, TTL, and LRU are still useful, but only as constrained policies for transient artifacts or fixed-validity records.
+That target-state model is stronger than a pure cache metaphor. Half-life, TTL, and LRU are
+still useful, but only as constrained policies for transient artifacts or fixed-validity
+records.
 
 ---
 
@@ -193,7 +199,11 @@ surprised_bonus       = 0.15
 agent_quoted_bonus    = 0.08
 ```
 
-These rates are not static doctrine. They can be tuned from retrieval quality, citation frequency, and thaw rate. The important point is that the system learns its own forgetting pressure instead of treating memory as a binary keep-or-drop store.
+These rates are not static doctrine. They can be tuned from retrieval quality, citation
+frequency, and thaw rate. The important point is that the system can learn its own forgetting
+pressure instead of treating memory as a binary keep-or-drop store. In the near term, the same
+operational goals can be met with tiered retention and explicit thresholds before introducing the
+full economic model.
 
 ---
 

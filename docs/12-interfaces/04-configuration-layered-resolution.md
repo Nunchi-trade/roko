@@ -25,7 +25,7 @@ default install path. See [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md),
 
 REF24 adds a deployment-aware rule on top of that baseline: the same `roko.toml` should be able
 to drive laptop, single-server, container, clustered, and edge deployments by selecting a
-`profile` and overriding only the values that differ for that shape. The control plane stays
+deployment `runtime shape` and overriding only the values that differ for that shape. The control plane stays
 declarative, while the underlying `Substrate`, `Bus`, auth, secret resolution, and observability
 backends swap by config rather than by code fork. See
 [../19-deployment/INDEX.md](../19-deployment/INDEX.md),
@@ -57,19 +57,19 @@ For plugins, this layering applies after discovery. The loader first walks `plug
 manifests, validates permissions, and classifies the plugin tier. Config layers then decide
 which plugins are preferred, constrained, or disabled for a given deployment.
 
-### Profile-Aware Resolution
+### Runtime-Shape-Aware Resolution
 
 REF24 keeps the global four-layer model, but refines what happens *inside* the config-file layer:
 
-1. CLI flags pick the active deployment `profile` when explicitly set.
-2. Environment variables can override profile selection or individual keys.
-3. `roko.toml` merges user overrides on top of the chosen profile block.
-4. The chosen profile supplies shape defaults for laptop, single-server, container, clustered, or edge.
+1. CLI flags pick the active deployment runtime shape when explicitly set.
+2. Environment variables can override runtime-shape selection or individual keys.
+3. `roko.toml` merges user overrides on top of the chosen shape block.
+4. The chosen runtime shape supplies defaults for laptop, single-server, container, clustered, or edge.
 5. Compiled defaults fill any remaining gaps.
 
 That means the user mental model stays simple: one binary, one config file, one selected shape.
 Moving from laptop-local to single-server or from container to clustered should mostly be a matter
-of changing a profile plus a few backend values, not rewriting the deployment story from scratch.
+of changing the runtime shape plus a few backend values, not rewriting the deployment story from scratch.
 
 ### Environment Variable Convention
 
@@ -100,7 +100,7 @@ model = "claude-sonnet-4-6"
 
 Everything else is auto-detected or uses defaults.
 
-For deployment-oriented setups, the minimum useful config becomes a selected profile plus any
+For deployment-oriented setups, the minimum useful config becomes a selected runtime shape plus any
 local override:
 
 ```toml
@@ -113,7 +113,7 @@ substrate = { kind = "sqlite", path = "/var/lib/roko/state.db" }
 bus = { kind = "in-memory" }
 ```
 
-The profile carries the shape defaults; the rest of the file is where the operator specializes
+The runtime shape carries the deployment defaults; the rest of the file is where the operator specializes
 that shape for a team, tenant boundary, or hosting platform.
 
 For plugins, the minimal path is often no config at all:
@@ -310,8 +310,8 @@ REF24 turns a few config areas into first-class deployment surfaces instead of a
 
 | Section | Purpose |
 |---|---|
-| `profile` | Selects one of the five supported deployment shapes and provides its default backend bundle. |
-| `profile.<name>` | Captures per-shape defaults such as listen address, auth mode, `Substrate`, and `Bus`. |
+| `profile` | Selects one of the five supported deployment runtime shapes and provides its default backend bundle. |
+| `profile.<name>` | Captures per-runtime-shape defaults such as listen address, auth mode, `Substrate`, and `Bus`. |
 | `auth` | Declares multi-user auth mode for single-server and clustered deployments, including OIDC and trusted-header modes. |
 | `observability` | Standardizes `/metrics`, `/healthz`, `/readyz`, structured logs, and OTLP export without changing the binary. |
 | `state` | Controls export/import archive location, signing, merge policy, and portability workflows such as laptop-to-server migration. |

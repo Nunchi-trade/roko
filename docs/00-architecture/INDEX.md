@@ -1,31 +1,11 @@
 # Architecture
 
-> The Synapse Architecture is Roko's compositional foundation: two mediums (Engram, durable
-> content-addressed and balance-bearing under demurrage; Pulse, ephemeral topic-addressed and sequenced), two fabrics (Substrate
-> for storage; Bus for transport), six operators, five layers, three speeds, and three
-> cross-cuts. The canonical wire vocabulary is `Engram`, `Pulse`, `Bus`, `Topic`,
-> `TopicFilter`, `Datum`, and `PulseSource`; see also `tmp/refinements/07-naming.md` for the
-> naming decisions that standardize them, `tmp/refinements/01-critique-one-noun.md` for the
-> original framing critique, `tmp/refinements/02-engram-vs-pulse.md` for the medium split,
-> `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion and two-fabric kernel,
-> `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
-> `tmp/refinements/05-loop-retold.md` for the seven-step loop, co-equal PERSIST/BROADCAST, and
-> `tmp/refinements/10-self-learning-cybernetic-loops.md` for Bus-backed prediction, outcome,
-> calibration, and `prediction.error.*` loops across operators,
-> `tmp/refinements/12-knowledge-demurrage.md` for the attention-economy view of durable memory,
-> cross-cut injection model, `tmp/refinements/09-phase-2-implications.md` for how Chain,
-> Dreams, Coordination, and Heartbeat collapse onto that same kernel, and
-> `tmp/refinements/13-collective-intelligence-c-factor.md` for continuous c-factor
-> measurement from cohort Bus/Substrate statistics and conditional Policy intervention,
-> `tmp/refinements/06-refactoring-plan.md` plus `tmp/refinements/21-from-scratch-redesigns.md`
-> for the rollout and rewrite-track sequencing. This topic covers the complete architectural
-> specification from the core data types through the layer taxonomy, cognitive cross-cuts,
-> collective intelligence metrics, research-to-runtime provenance, crate map, cybernetic
-> foundations, and the frontier innovations that distinguish Roko from every other agent
-> framework. See also `tmp/refinements/16-research-to-runtime.md` for the paper → claim →
-> heuristic → trial → calibration pipeline and replication ledger, and
-> `tmp/refinements/18-competitive-moat.md` for the synthesis that turns those primitives into
-> a structural moat rather than a feature list.
+> Roko's architecture is organized around two mediums: durable `Engram` records and a
+> target-state ephemeral `Pulse` stream. Those mediums move through two fabrics:
+> `Substrate` for storage and a planned `Bus` abstraction for transport. Six operators
+> coordinate the system across five layers, three speeds, and three cross-cuts. Use
+> [Naming and Glossary](./01-naming-and-glossary.md) for canonical vocabulary, status tags,
+> and public aliases.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -36,16 +16,12 @@
 
 ## Abstract
 
-Roko is a Rust toolkit for building cognitive agents that build themselves. Its architecture
-— the Synapse Architecture — is built around two mediums: `Engram`, the durable
-content-addressed record whose effective weight is shaped by demurrage `balance`, and `Pulse`, the ephemeral topic-addressed transport medium. Those mediums
-move through two fabrics, `Substrate` for storage and `Bus` for transport, with six operators
-coordinating the system across five layers, three speeds, and three cross-cuts. `Topic` and
-`TopicFilter` govern routing on the Bus, `Datum` abstracts over Engram-or-Pulse inputs where
-operators need to handle both, and `PulseSource` names the producer side of the ephemeral
-stream. Engrams carry lineage through a DAG; Pulses carry ordering through Bus sequence
-numbers; Pulses graduate to Engrams when lineage matters. See also
-`tmp/refinements/07-naming.md` and `tmp/refinements/12-knowledge-demurrage.md`.
+Roko is a Rust toolkit for building cognitive agents that improve through use. Its architecture
+centers durable `Engram` records and a target-state ephemeral `Pulse` stream. In the current
+codebase, `Substrate` is the durable storage seam and `EventBus<E>` is the live transport
+implementation; `Bus` remains the planned transport abstraction. Where target-state terms such
+as `Pulse`, `Bus`, `Topic`, `TopicFilter`, `Datum`, or `PulseSource` appear in this topic, they
+are marked explicitly in the linked chapters.
 
 The architecture is organized into five layers (Runtime, Framework, Scaffold, Harness,
 Orchestration) with strictly downward dependencies. Three cognitive cross-cuts (Neuro for
@@ -53,28 +29,21 @@ knowledge, Daimon for motivation, Dreams for offline learning) are injected acro
 layers via trait objects, providing the self-improving capabilities that make Roko more than a
 static framework.
 
-This topic is the entry point for understanding Roko. It covers the theoretical foundations
-(cybernetics, active inference, autocatalytic improvement), the concrete data structures
-(Engram, Score, Decay, Provenance, ContentHash), the operator composition model, the cognitive
-loop, and the frontier innovations that emerge from the architecture.
-
-REF31 adds the synergy matrix for those primitives and makes the interaction-density moat
-explicit: the architecture's edge comes from the reinforcing weave between the load-bearing
-primitives, not from any single feature in isolation. See
-`tmp/refinements/31-synergy-integration-map.md` and the new synergy chapter below.
+This topic is the entry point for understanding Roko. It covers the core data structures
+(`Engram`, `Score`, `Decay`, `Provenance`, `ContentHash`), the operator composition model, the
+cognitive loop, layer boundaries, and the main cross-cuts. It is also the place where the docs
+separate shipped implementation from target-state architecture so readers can see what exists
+today versus what is still planned.
 
 The canonical glossary for this topic is [Naming and Glossary](./01-naming-and-glossary.md).
-Use it as the authoritative vocabulary reference for current terms, A-Z definitions, and the
-retired naming table before introducing or revising architecture language elsewhere. REF34
-consolidates that glossary role; see [tmp/refinements/34-glossary.md](../../tmp/refinements/34-glossary.md).
+Use it as the authoritative vocabulary reference for current terms, A-Z definitions, retired
+names, and public aliases before introducing or revising architecture language elsewhere.
 
-See also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the learning-side heuristic,
-falsifier, and worldview framing, and [Naming and Glossary](./01-naming-and-glossary.md) for
-the canonical vocabulary. The developer-facing Rust SDK framing that maps these kernel concepts
-onto one-liner, builder, trait impl, and runtime impl entry points lives in
-[Topic 12: Rust SDK Developer UX](../12-interfaces/19-rust-sdk-developer-ux.md) and
-[Topic 02: Extensibility](../02-agents/12-extensibility.md); see also
-[tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md). REF23 then carries the same kernel model up into user-facing operation: four surfaces, one unified verb set, and one live event stream over named sessions. See [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+For adjacent views of the same system, see [05-learning/INDEX](../05-learning/INDEX.md) for
+heuristics and calibration, [Topic 12: Rust SDK Developer UX](../12-interfaces/19-rust-sdk-developer-ux.md)
+for developer-facing entry points, and
+[12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) for
+the shared session and surface model.
 
 ---
 

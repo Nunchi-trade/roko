@@ -168,72 +168,34 @@ and [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy
 
 ## Current Framing
 
-> **Kernel framing:** Roko's architecture is best read as two mediums (durable Engram and
-> ephemeral Pulse) moving through two fabrics (Substrate and Bus), acted on by six operators.
-> See [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md)
-> for the canonical terminology map and [`00-architecture/02b-pulse-ephemeral-event.md`](00-architecture/02b-pulse-ephemeral-event.md)
-> for the medium split. The storage and transport fabric deep dives live in
-> [`00-architecture/07-substrate-trait.md`](00-architecture/07-substrate-trait.md) and
-> [`00-architecture/07b-bus-transport-fabric.md`](00-architecture/07b-bus-transport-fabric.md).
-> REF11 adds that every durable Engram carries an HDC fingerprint for native similarity,
-> clustering, and consensus; see [`00-architecture/02-engram-data-type.md`](00-architecture/02-engram-data-type.md)
-> and [`06-neuro/INDEX.md`](06-neuro/INDEX.md). REF12 adds that durable Engrams also carry
-> demurrage `balance`, so freshness is earned through use rather than preserved by age-only
-> decay; start with [`00-architecture/04-decay-variants.md`](00-architecture/04-decay-variants.md),
-> [`00-architecture/25-attention-as-currency.md`](00-architecture/25-attention-as-currency.md),
-> and [`05-learning/INDEX.md`](05-learning/INDEX.md). REF13 adds c-factor as a cohort-level
-> measurement of collective process quality computed from Bus and Substrate traces; start with
-> [`00-architecture/14-c-factor-collective-intelligence.md`](00-architecture/14-c-factor-collective-intelligence.md)
-> and [`13-coordination/11-collective-intelligence-metrics.md`](13-coordination/11-collective-intelligence-metrics.md).
-> REF14 adds explicit heuristics, falsifiers, and worldview clustering as the inspectable belief
-> layer over that feedback system; start with
-> [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
-> [`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
-> and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
-> REF20 adds the crate-boundary cleanup pass: the target dep graph makes `roko-bus`,
-> `roko-hdc`, and `roko-spi` explicit kernel crates, keeps implementation crates from importing
-> one another, and splits defaults/tools plus compose/templates so data and engines evolve
-> independently. Start with [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md),
-> [`00-architecture/12-five-layer-taxonomy.md`](00-architecture/12-five-layer-taxonomy.md), and
-> [`00-architecture/23-architectural-analysis-improvements.md`](00-architecture/23-architectural-analysis-improvements.md).
-> REF19 adds the net-new innovation catalog and the rule that novelty claims should distinguish
-> genuinely new primitives from carefully integrated prior art; start with
-> [`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
-> [`00-architecture/30-cross-pollination-innovations.md`](00-architecture/30-cross-pollination-innovations.md),
-> and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/00-vision-ta-generalized.md).
-> REF31 adds the explicit synergy matrix across Engram, Pulse, Bus, Substrate, HDC fingerprint,
-> demurrage, heuristics, c-factor, the replication ledger, and the plugin SPI. That chapter
-> makes the interaction-density moat concrete; start with
-> [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy-integration-map.md)
-> and [`tmp/refinements/31-synergy-integration-map.md`](../tmp/refinements/31-synergy-integration-map.md).
-> REF35 adds the sequencing layer over that architecture story: use the architecture backmatter
-> roadmap in [`00-architecture/35-consolidated-roadmap.md`](00-architecture/35-consolidated-roadmap.md), then read
-> [`00-architecture/31-implementation-readiness-audit.md`](00-architecture/31-implementation-readiness-audit.md)
-> for readiness and rewrite-vs-incremental posture, and
-> [`tmp/refinements/35-consolidated-roadmap.md`](../tmp/refinements/35-consolidated-roadmap.md)
-> for the authoritative Q1-Q4 roadmap and quarter-by-quarter dependency ordering.
-
-For canonical vocabulary, start with
-[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
-That chapter is the authoritative glossary for current architecture terms, the A-Z lookup for
-newer primitives, and the explicit retired terminology map used across the docs. REF34
-consolidates that role; see [`tmp/refinements/34-glossary.md`](../tmp/refinements/34-glossary.md).
+> The architecture is organized around:
+>
+> | Concept | What | Key docs |
+> |---|---|---|
+> | **Two mediums** | `Engram` (durable) + `Pulse` (ephemeral, planned) | [02-engram](00-architecture/02-engram-data-type.md), [02b-pulse](00-architecture/02b-pulse-ephemeral-event.md) |
+> | **Two fabrics** | `Substrate` (storage) + `Bus` (transport, planned) | [07-substrate](00-architecture/07-substrate-trait.md), [07b-bus](00-architecture/07b-bus-transport-fabric.md) |
+> | **Six operators** | `Scorer`, `Gate`, `Router`, `Composer`, `Policy`, and `Substrate` | [06-traits](00-architecture/06-synapse-traits.md) |
+> | **Learning** | Prediction/outcome loops, bandits, and a growing heuristic library | [05-learning/INDEX](05-learning/INDEX.md) |
+> | **HDC** | 10,240-bit fingerprints for similarity and clustering | [02-engram](00-architecture/02-engram-data-type.md), [06-neuro/INDEX](06-neuro/INDEX.md) |
+> | **Safety** | Contracts, warrants, attestation, and policy checks | [11-safety/INDEX](11-safety/INDEX.md) |
+>
+> For canonical vocabulary and public aliases, see [Naming and Glossary](00-architecture/01-naming-and-glossary.md).
 
 ## Topics
 
 - [`00-architecture/`](00-architecture/INDEX.md) — Architecture, synergy matrix, and interaction-density moat
 - [`01-orchestration/`](01-orchestration/INDEX.md) — 01-orchestration — L4 Orchestration Layer
-- [`02-agents/`](02-agents/INDEX.md) — 02 — Agents, role taxonomy, domain profiles, TypedContext, and Custody-aware agent composition
+- [`02-agents/`](02-agents/INDEX.md) — 02 — Agents, role taxonomy, domain profiles, Situation (`TypedContext`), and Custody-aware agent composition
 - [`03-composition/`](03-composition/INDEX.md) — 03 — Composition: Scaffold Layer (L2) — Prompt Assembly & Context Engineering
 - [`04-verification/`](04-verification/INDEX.md) — 04 — Verification (L3 Harness)
-- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, heuristics, worldview calibration, and prediction-error feedback
+- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, heuristics, belief-bundle (`worldview`) calibration, and prediction-error feedback
 - [`06-neuro/`](06-neuro/INDEX.md) — Neuro — Cognitive Knowledge Layer and durable heuristic library
 - [`07-conductor/`](07-conductor/INDEX.md) — 07 — Conductor Subsystem
 - [`08-chain/`](08-chain/INDEX.md) — Topic 08: Chain Layer (Korai)
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
 - [`11-safety/`](11-safety/INDEX.md) — Safety spine: authorization, sandboxing, taint, attestation, custody, and audit tooling
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, familiar workflow parity, five-page first-party web UI, StateHub projection layer, shared realtime surface, rich UX primitives, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, familiar workflow parity, five-page first-party web UI, StateHub projection layer, shared realtime surface, rich UX primitives, runtime-shape-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence

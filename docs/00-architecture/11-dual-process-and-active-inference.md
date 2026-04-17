@@ -3,11 +3,13 @@
 > **Abstract:** Roko implements dual-process cognition inspired by Kahneman's System 1/
 > System 2 (Kahneman 2011) and CLARION's dual-level architecture (Sun 2002). Three
 > inference tiers -- T0 (no LLM), T1 (fast model), T2 (full model) -- are routed by
-> active inference as a literal target-state Bus-driven predict/publish/correct/update loop:
-> operators would publish `prediction.*` Pulses, later `outcome.*` Pulses would close the loop, and
-> `prediction.error.*` Pulses drive calibration updates. This document specifies the tier
-> model, the Expected Free Energy (EFE) formula that drives routing, the 16 T0 probes,
-> and how uncertainty emerges from the architecture rather than being manually configured.
+> an active-inference-inspired target-state loop: operators would publish `prediction.*`
+> Pulses, later `outcome.*` Pulses would close the loop, and `prediction.error.*` Pulses
+> would drive calibration updates. The near-term engineering mechanism is simpler:
+> expectation/outcome records per operator, with calibration updates on mismatch. This
+> document specifies the tier model, the Expected Free Energy (EFE) formula that informs
+> routing, the 16 T0 probes, and how uncertainty emerges from the architecture rather
+> than being manually configured.
 > See also [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md)
 > and [Naming Map and Glossary](01-naming-and-glossary.md).
 
@@ -55,10 +57,12 @@ This cascade ensures that compute is invested proportionally to difficulty.
 
 ## 2. Active Inference and Expected Free Energy
 
-The routing between tiers is NOT a manual threshold — it emerges from active inference.
-In Roko, that is not just a metaphor. It is a target-state Bus-driven predict/publish/correct/update
-loop where operators would emit `prediction.*` Pulses, reality would answer with `outcome.*` Pulses,
-and a calibration policy would turn the mismatch into update Pulses.
+The routing between tiers should not depend only on fixed manual thresholds. The target-state
+theory behind that is active inference, but the near-term engineering mechanism is smaller:
+operators keep expectation/outcome records, then update calibration when reality diverges from
+the expectation. In the more ambitious Bus-driven design, operators would emit
+`prediction.*` Pulses, reality would answer with `outcome.*` Pulses, and a calibration policy
+would turn the mismatch into update Pulses.
 
 ### 2.1 The EFE Formula
 
@@ -84,10 +88,11 @@ Where:
 | Large surprise, unknown territory | Unknown | High (much to learn) | High (uncertain) | T2 |
 | High stakes, low confidence | Low (risky) | High | High | T2 |
 
-The key insight: EFE provides a **zero-hyperparameter** routing criterion. The agent does
-not need manually-tuned thresholds for "when to use GPT-4 vs Haiku." Instead, the agent's
-internal uncertainty -- as measured by prediction accuracy, confidence trends, and novelty
-Pulses -- naturally drives the escalation decision.
+The key insight: EFE provides a principled routing criterion. The agent should not need a large
+bag of hand-tuned "when to use GPT-4 vs Haiku" switches. Instead, uncertainty -- as measured by
+prediction accuracy, confidence trends, and novelty Pulses -- should drive the escalation
+decision. In practice this remains an approximation, not a proof that all routing can be reduced
+to one scalar.
 
 In the target-state Bus implementation, this becomes observable and joinable:
 
@@ -111,9 +116,11 @@ computation. In the target-state design, the Bus does the bookkeeping; the tier 
 
 ### 2.4 Per-operator calibration
 
-The same loop applies to every operator, not just the Scorer. Each one can publish its own
-prediction topic family, receive a matching outcome family, and consume
-`prediction.error.*` updates through a calibration policy.
+Operators that make discrete, measurable choices benefit most from this loop, especially the
+Router and other components with clear expectation/outcome pairs. Universal operator prediction
+remains a target-state aspiration, not a first-pass requirement. Where the signal is clean,
+each operator can publish its own prediction topic family, receive a matching outcome family,
+and consume `prediction.error.*` updates through a calibration policy.
 
 | Operator | Prediction topic | Outcome topic | Update policy |
 |---|---|---|---|
@@ -237,7 +244,7 @@ prediction-error stream, and the routing logic.
 |---|---|
 | Kahneman 2011, Thinking, Fast and Slow | Dual-process theory: System 1 (fast, automatic) / System 2 (slow, deliberate). |
 | Sun 2002, Duality of the Mind, Erlbaum | CLARION: dual-level cognitive architecture (explicit + implicit). |
-| Friston 2010, Nature Reviews Neuroscience 11(2) | Free Energy Principle: prediction error drives attention and action; Roko implements that loop through Bus topics and calibration updates. |
+| Friston 2010, Nature Reviews Neuroscience 11(2) | Free Energy Principle: prediction error drives attention and action; Roko uses it as theory, while the engineering path is expectation/outcome records with calibration updates. |
 | Chen et al. 2023 (arXiv:2305.05176) | FrugalGPT: cascade routing for cost-efficient LLM use. |
 | Sumers et al. 2023 (arXiv:2309.02427) | CoALA: cognitive architecture framework for language agents. |
 | Anderson 1983, The Architecture of Cognition | ACT-R: production system cognitive architecture. |
@@ -255,7 +262,8 @@ prediction-error stream, and the routing logic.
 - **Implemented**: `InferenceTier` enum (T0/T1/T2) in the legacy crate path `bardo-primitives`. Operating
   frequency → inference tier mapping. CascadeRouter with confidence-based cascade.
 - **Wired**: Tier routing in the orchestrator via CascadeRouter.
-- **Target-state**: `prediction.*`, `outcome.*`, and `prediction.error.*` Pulses form the calibration surface for active inference.
+- **Target-state**: `prediction.*`, `outcome.*`, and `prediction.error.*` Pulses form the richer calibration surface for active inference.
+- **Near-term mechanism**: expectation/outcome records and operator-local calibration loops are enough to ship useful routing and learning behavior before universal Bus-wide prediction is wired.
 - **Gap**: The 16 T0 probes are specified but not all implemented as a unified probe system.
 - **Gap**: Exact EFE is still approximated via confidence/novelty/arousal, but the prediction/outcome loop is the implementation path.
 
