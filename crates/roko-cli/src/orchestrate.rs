@@ -91,6 +91,7 @@ use roko_learn::efficiency::{
 };
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
+use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
@@ -1426,6 +1427,7 @@ struct ParallelTaskResult {
 #[derive(Debug)]
 struct DispatchOutcome {
     backend_id: String,
+    prompt_text: String,
     result: AgentResult,
 }
 
@@ -1476,10 +1478,15 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> DispatchOutcome {
             Ok(agent) => {
                 let backend_id = agent.backend_id().to_string();
                 let result = agent.run(&prompt_signal, &ctx).await;
-                DispatchOutcome { backend_id, result }
+                DispatchOutcome {
+                    backend_id,
+                    prompt_text: cfg.prompt,
+                    result,
+                }
             }
             Err(err) => DispatchOutcome {
                 backend_id: "unknown".to_string(),
+                prompt_text: cfg.prompt,
                 result: AgentResult::fail(
                     prompt_signal
                         .derive(
@@ -1532,10 +1539,15 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> DispatchOutcome {
             Ok(agent) => {
                 let backend_id = agent.backend_id().to_string();
                 let result = agent.run(&prompt_signal, &ctx).await;
-                DispatchOutcome { backend_id, result }
+                DispatchOutcome {
+                    backend_id,
+                    prompt_text: cfg.prompt,
+                    result,
+                }
             }
             Err(err) => DispatchOutcome {
                 backend_id: "unknown".to_string(),
+                prompt_text: cfg.prompt,
                 result: AgentResult::fail(
                     prompt_signal
                         .derive(
@@ -1577,10 +1589,15 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> DispatchOutcome {
             Ok(agent) => {
                 let backend_id = agent.backend_id().to_string();
                 let result = agent.run(&prompt_signal, &ctx).await;
-                DispatchOutcome { backend_id, result }
+                DispatchOutcome {
+                    backend_id,
+                    prompt_text: cfg.prompt,
+                    result,
+                }
             }
             Err(err) => DispatchOutcome {
                 backend_id: "unknown".to_string(),
+                prompt_text: cfg.prompt,
                 result: AgentResult::fail(
                     prompt_signal
                         .derive(
@@ -1622,10 +1639,15 @@ async fn run_prepared_agent(cfg: AgentRunConfig) -> DispatchOutcome {
             Ok(agent) => {
                 let backend_id = agent.backend_id().to_string();
                 let result = agent.run(&prompt_signal, &ctx).await;
-                DispatchOutcome { backend_id, result }
+                DispatchOutcome {
+                    backend_id,
+                    prompt_text: cfg.prompt,
+                    result,
+                }
             }
             Err(err) => DispatchOutcome {
                 backend_id: "unknown".to_string(),
+                prompt_text: cfg.prompt,
                 result: AgentResult::fail(
                     prompt_signal
                         .derive(
@@ -2893,6 +2915,19 @@ fn somatic_episode_hash(
     discriminator: &str,
 ) -> ContentHash {
     ContentHash::of(format!("somatic:{plan_id}:{task_id}:{outcome}:{discriminator}").as_bytes())
+}
+
+fn attach_episode_hdc_fingerprint(episode: &mut Episode, prompt: &str, outcome: &str) {
+    let fingerprint = fingerprint_episode(prompt, outcome);
+    episode.hdc_fingerprint = Some(encode_hdc_fingerprint(&fingerprint));
+}
+
+fn episode_output_text(output: &Engram) -> String {
+    output
+        .body
+        .as_text()
+        .map(str::to_owned)
+        .unwrap_or_else(|_| output.id.to_hex())
 }
 
 fn cascade_context_vec(
@@ -6186,8 +6221,12 @@ impl PlanRunner {
                             .and_then(|tracker| tracker.last_impl_output_hash)
                             .map(|hash| hash.to_string())
                             .unwrap_or_else(|| plan_id.clone());
+                        let gate_prompt = format!("plan_id={plan_id}\nrung={rung}");
+                        let gate_outcome = if passed { "passed" } else { "failed" };
                         let gate_input = self.enrich_completed_run(
                             ep,
+                            &gate_prompt,
+                            gate_outcome,
                             &plan_id,
                             &format!("rung-{rung}"),
                             "gate",
@@ -6751,7 +6790,7 @@ impl PlanRunner {
                 plan_id,
                 role,
                 "enrich",
-                Some(enrichment_user_prompt),
+                Some(enrichment_user_prompt.clone()),
                 None,
                 None,
                 Some(enrichment_system_prompt),
@@ -6759,6 +6798,7 @@ impl PlanRunner {
             .await
         {
             Ok(dispatch) => {
+                let prompt_text = dispatch.prompt_text;
                 let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -6775,9 +6815,12 @@ impl PlanRunner {
                 self.stamp_episode_affect(&mut ep, "enrich", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
+                let outcome = episode_output_text(&result.output);
                 let model = self.effective_model();
                 let input = self.enrich_completed_run(
                     ep,
+                    &prompt_text,
+                    &outcome,
                     plan_id,
                     "enrich",
                     "Strategist",
@@ -7063,6 +7106,12 @@ impl PlanRunner {
             .as_ref()
             .map(|task| task.tier.clone())
             .unwrap_or_else(|| "focused".to_string());
+        let base_prompt_text = task_def
+            .as_ref()
+            .map(|task| task.build_prompt(plan_id, &self.workdir))
+            .unwrap_or_else(|| {
+                format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
+            });
         let base_retry_model = self.task_retry_model(plan_id, task_id);
         let mut retry_model = base_retry_model.clone();
         let mut retry_prompt_override: Option<String> = None;
@@ -7075,8 +7124,17 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] task worktree acquisition failed for {plan_id}/{task_id}: {e}"
                 );
-                self.record_task_failure(plan_id, task_id, None, None, &e, &started, "", None)
-                    .await;
+                self.record_task_failure(
+                    plan_id,
+                    task_id,
+                    Some(base_prompt_text.as_str()),
+                    None,
+                    &e,
+                    &started,
+                    "",
+                    None,
+                )
+                .await;
                 self.apply_event_and_emit(
                     plan_id,
                     task_id,
@@ -7099,6 +7157,10 @@ impl PlanRunner {
             }
 
             let prompt_override = retry_prompt_override.take();
+            let prompt_text = prompt_override
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| base_prompt_text.clone());
             let model_override = prompt_override.as_ref().map(|_| retry_model.clone());
             total_dispatches += 1;
 
@@ -7130,7 +7192,7 @@ impl PlanRunner {
                         self.record_task_failure(
                             plan_id,
                             task_id,
-                            None,
+                            Some(prompt_text.as_str()),
                             Some(retry_model.as_str()),
                             &e,
                             &started,
@@ -7153,6 +7215,7 @@ impl PlanRunner {
                         .record_task_success(
                             plan_id,
                             task_id,
+                            &prompt_text,
                             &result,
                             &dispatch.backend_id,
                             &started,
@@ -7329,7 +7392,7 @@ impl PlanRunner {
             self.record_task_failure(
                 plan_id,
                 task_id,
-                None,
+                Some(base_prompt_text.as_str()),
                 Some(retry_model.as_str()),
                 error,
                 &started,
@@ -7640,6 +7703,7 @@ impl PlanRunner {
                     .record_task_success(
                         plan_id,
                         tid,
+                        &task_result.prompt_text,
                         &task_result.result,
                         &task_result.backend_id,
                         &started,
@@ -7708,6 +7772,8 @@ impl PlanRunner {
     fn enrich_completed_run(
         &self,
         mut ep: Episode,
+        prompt: &str,
+        outcome: &str,
         plan_id: &str,
         task_id: &str,
         role: &str,
@@ -7742,6 +7808,7 @@ impl PlanRunner {
         ep.extra
             .entry("task_category".to_string())
             .or_insert_with(|| serde_json::json!(default_task_category(role)));
+        attach_episode_hdc_fingerprint(&mut ep, prompt, outcome);
 
         let provider = self.provider_id_for_model(model);
         let cost = CostRecord {
@@ -8280,6 +8347,7 @@ impl PlanRunner {
         &mut self,
         plan_id: &str,
         task_id: &str,
+        prompt_text: &str,
         result: &AgentResult,
         backend_id: &str,
         started: &std::time::Instant,
@@ -8451,6 +8519,7 @@ impl PlanRunner {
         self.stamp_episode_affect(&mut ep, "task_success", Some(&result.output));
         ep.input_signal_hash = plan_id.to_string();
         ep.output_signal_hash = result.output.id.to_string();
+        let outcome = episode_output_text(&result.output);
         if cascade_router_observed {
             ep.extra.insert(
                 "cascade_router_observed".to_string(),
@@ -8460,6 +8529,8 @@ impl PlanRunner {
         let model = self.effective_model();
         let input = self.enrich_completed_run(
             ep,
+            prompt_text,
+            &outcome,
             plan_id,
             task_id,
             "Implementer",
@@ -9371,7 +9442,7 @@ impl PlanRunner {
                     },
                 );
 
-                let mut ep = Episode::new("Strategist", &task_id).failed(skip_reason);
+                let mut ep = Episode::new("Strategist", &task_id).failed(skip_reason.clone());
                 ep.kind = "replan".to_string();
                 self.stamp_episode_affect(&mut ep, "task_skipped", None);
                 ep.input_signal_hash = plan_id.to_string();
@@ -9415,8 +9486,24 @@ impl PlanRunner {
                     "resulting_subtasks".to_string(),
                     serde_json::Value::Array(Vec::new()),
                 );
+                let prompt_text = if let Some(task) = task_def.as_ref() {
+                    format!(
+                        "{}\n\n## Replan context\nstrategy={}\nattempt={}\nplan_id={plan_id}\noriginal_task_id={task_id}",
+                        task.build_prompt(plan_id, &self.workdir),
+                        ReplanStrategy::Skip,
+                        failure_count
+                    )
+                } else {
+                    format!(
+                        "plan_id={plan_id}\noriginal_task_id={task_id}\nstrategy={}\nattempt={failure_count}",
+                        ReplanStrategy::Skip
+                    )
+                };
+                attach_episode_hdc_fingerprint(&mut ep, &prompt_text, &skip_reason);
                 let input = self.enrich_completed_run(
                     ep,
+                    &prompt_text,
+                    &skip_reason,
                     plan_id,
                     &task_id,
                     "Strategist",
@@ -10020,8 +10107,22 @@ impl PlanRunner {
         let model = selected_model
             .map(str::to_owned)
             .unwrap_or_else(|| self.effective_model());
+        let prompt_text = task_text
+            .map(str::to_owned)
+            .or_else(|| {
+                task_def
+                    .as_ref()
+                    .map(|task| task.build_prompt(plan_id, &self.workdir))
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "Plan: {plan_id}\nTask: {task_id}\n\nInvestigate the failure and record it."
+                )
+            });
         let input = self.enrich_completed_run(
             ep,
+            &prompt_text,
+            &error.to_string(),
             plan_id,
             task_id,
             "Implementer",
@@ -10244,7 +10345,7 @@ impl PlanRunner {
                 plan_id,
                 AgentRole::AutoFixer,
                 "fix",
-                Some(fix_prompt),
+                Some(fix_prompt.clone()),
                 Some(fix_model),
                 None,
                 None,
@@ -10252,6 +10353,7 @@ impl PlanRunner {
             .await
         {
             Ok(dispatch) => {
+                let prompt_text = dispatch.prompt_text;
                 let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -10268,9 +10370,12 @@ impl PlanRunner {
                 self.stamp_episode_affect(&mut ep, "autofix", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
+                let outcome = episode_output_text(&result.output);
                 let model = self.effective_model();
                 let input = self.enrich_completed_run(
                     ep,
+                    &prompt_text,
+                    &outcome,
                     plan_id,
                     "fix",
                     "AutoFixer",
@@ -10310,6 +10415,7 @@ impl PlanRunner {
             .await
         {
             Ok(dispatch) => {
+                let prompt_text = dispatch.prompt_text;
                 let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -10326,9 +10432,12 @@ impl PlanRunner {
                 self.stamp_episode_affect(&mut ep, "regen_verify", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
+                let outcome = episode_output_text(&result.output);
                 let model = self.effective_model();
                 let input = self.enrich_completed_run(
                     ep,
+                    &prompt_text,
+                    &outcome,
                     plan_id,
                     "regen-verify",
                     "AutoFixer",
@@ -10440,7 +10549,7 @@ impl PlanRunner {
                 plan_id,
                 AgentRole::Auditor,
                 "review",
-                Some(review_prompt),
+                Some(review_prompt.clone()),
                 None,
                 None,
                 None,
@@ -10448,6 +10557,7 @@ impl PlanRunner {
             .await
         {
             Ok(dispatch) => {
+                let prompt_text = dispatch.prompt_text;
                 let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -10492,9 +10602,12 @@ impl PlanRunner {
                 self.stamp_episode_affect(&mut ep, "review", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
+                let outcome = episode_output_text(&result.output);
                 let model = self.effective_model();
                 let input = self.enrich_completed_run(
                     ep,
+                    &prompt_text,
+                    &outcome,
                     plan_id,
                     "review",
                     "Auditor",
@@ -10555,7 +10668,7 @@ impl PlanRunner {
                 plan_id,
                 AgentRole::Scribe,
                 "docs",
-                Some(doc_prompt),
+                Some(doc_prompt.clone()),
                 None,
                 None,
                 None,
@@ -10563,6 +10676,7 @@ impl PlanRunner {
             .await
         {
             Ok(dispatch) => {
+                let prompt_text = dispatch.prompt_text;
                 let result = dispatch.result;
                 *self.per_plan_agents.entry(plan_id.to_string()).or_default() += 1;
                 self.agent_calls += 1;
@@ -10579,9 +10693,12 @@ impl PlanRunner {
                 self.stamp_episode_affect(&mut ep, "docs", Some(&result.output));
                 ep.input_signal_hash = plan_id.to_string();
                 ep.output_signal_hash = result.output.id.to_string();
+                let outcome = episode_output_text(&result.output);
                 let model = self.effective_model();
                 let input = self.enrich_completed_run(
                     ep,
+                    &prompt_text,
+                    &outcome,
                     plan_id,
                     "docs",
                     "Scribe",
@@ -10612,6 +10729,8 @@ impl PlanRunner {
         let mut last_error = String::new();
         let mut succeeded = false;
         let started = std::time::Instant::now();
+        let prompt_text =
+            format!("Plan: {plan_id}\nTask: {task}\n\nGeneric fallback agent execution.");
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
@@ -10651,8 +10770,11 @@ impl PlanRunner {
                     ep.output_signal_hash = result.output.id.to_string();
                     let model = self.effective_model();
                     let role_str = format!("{role:?}");
+                    let outcome = episode_output_text(&result.output);
                     let input = self.enrich_completed_run(
                         ep,
+                        &prompt_text,
+                        &outcome,
                         plan_id,
                         task,
                         &role_str,
@@ -10689,6 +10811,8 @@ impl PlanRunner {
                         let role_str = format!("{role:?}");
                         let input = self.enrich_completed_run(
                             ep,
+                            &prompt_text,
+                            &e.to_string(),
                             plan_id,
                             task,
                             &role_str,
@@ -12406,7 +12530,11 @@ impl PlanRunner {
             }
         }
 
-        Ok(DispatchOutcome { backend_id, result })
+        Ok(DispatchOutcome {
+            backend_id,
+            prompt_text: prompt.body.as_text().unwrap_or_default().to_string(),
+            result,
+        })
     }
 
     /// Run per-task verification steps.
@@ -15429,6 +15557,22 @@ acceptance = []
         assert_eq!(
             scrubbed.trace[0].body.as_text().expect("trace text"),
             "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn episode_hdc_fingerprint_round_trips_through_episode() {
+        let mut episode = Episode::new("agent-a", "task-1");
+        attach_episode_hdc_fingerprint(&mut episode, "prompt body", "successful outcome");
+
+        let encoded = episode
+            .hdc_fingerprint
+            .as_deref()
+            .expect("episode fingerprint should be populated");
+        let decoded = roko_learn::hdc_fingerprint::decode(encoded).expect("decode");
+        assert_eq!(
+            decoded,
+            roko_learn::hdc_fingerprint::fingerprint_episode("prompt body", "successful outcome")
         );
     }
 

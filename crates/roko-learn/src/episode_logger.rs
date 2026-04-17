@@ -239,6 +239,9 @@ pub struct Episode {
     /// Optional short reasoning summary for auditing and debugging.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
+    /// Optional opaque HDC fingerprint derived from the episode prompt/outcome pair.
+    #[serde(default)]
+    pub hdc_fingerprint: Option<String>,
     /// Optional affect signature captured when the episode completed.
     #[serde(default)]
     pub emotional_tag: Option<EmotionalTag>,
@@ -289,6 +292,7 @@ impl Episode {
             external_actions: Vec::new(),
             failure_reason: None,
             reasoning_summary: None,
+            hdc_fingerprint: None,
             emotional_tag: None,
             headline: false,
             extra: HashMap::new(),
@@ -1093,6 +1097,9 @@ pub struct CompactStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hdc_fingerprint::{
+        decode as decode_hdc_fingerprint, encode as encode_hdc_fingerprint, fingerprint_episode,
+    };
     use roko_core::{Body, Engram, Kind};
     use tempfile::TempDir;
 
@@ -1161,6 +1168,24 @@ mod tests {
         let all = EpisodeLogger::read_all(&path).await.expect("read");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].backend, "anthropic");
+    }
+
+    #[tokio::test]
+    async fn hdc_fingerprint_round_trips_through_jsonl_append_and_read() {
+        let (_dir, path) = tmp_log();
+        let logger = EpisodeLogger::new(&path);
+        let mut ep = sample("agent-a", "task-1", true);
+        let vector = fingerprint_episode("prompt body", "successful outcome");
+        let encoded = encode_hdc_fingerprint(&vector);
+        let decoded = decode_hdc_fingerprint(&encoded).expect("decode");
+        assert_eq!(vector, decoded);
+
+        ep.hdc_fingerprint = Some(encoded.clone());
+        logger.append(&ep).await.expect("append");
+
+        let all = EpisodeLogger::read_all(&path).await.expect("read");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].hdc_fingerprint.as_deref(), Some(encoded.as_str()));
     }
 
     #[tokio::test]

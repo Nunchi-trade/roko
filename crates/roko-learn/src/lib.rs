@@ -91,6 +91,8 @@ pub mod event_subscriber;
 /// Unified learning events emitted by routing, evaluation, and runtime feedback.
 pub mod events;
 pub mod hdc_clustering;
+/// HDC fingerprint helpers for episode memory.
+pub mod hdc_fingerprint;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
