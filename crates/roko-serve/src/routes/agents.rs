@@ -11,10 +11,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use validator::Validate;
 
 use roko_runtime::process::ProcessId;
 
 use crate::error::ApiError;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::routes::run::spawn_background_run;
 use crate::state::{AgentRegistrationRecord, AppState};
 
@@ -48,12 +50,8 @@ async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> 
 /// `POST /api/agents/register` — upsert a discovery entry for an agent server.
 async fn register_agent(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RegisterAgentRequest>,
+    ValidJson(req): ValidJson<RegisterAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    if req.agent_id.trim().is_empty() {
-        return Err(ApiError::bad_request("agent_id must not be empty"));
-    }
-
     let agent = state
         .upsert_discovered_agent(AgentRegistrationRecord {
             agent_id: req.agent_id.clone(),
@@ -208,9 +206,10 @@ async fn proxy_agent_logs(
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 struct SendMessageRequest {
     #[serde(alias = "content")]
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     message: String,
     #[serde(default)]
     context: Option<Value>,
@@ -220,16 +219,18 @@ struct SendMessageRequest {
     response_mode: Option<String>,
 }
 
+impl RequestPayload for SendMessageRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
+}
+
 /// `POST /api/agents/{id}/message` — send a message to a registered agent or fall back to a run.
 async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
-    Json(req): Json<SendMessageRequest>,
+    ValidJson(req): ValidJson<SendMessageRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if req.message.trim().is_empty() {
-        return Err(ApiError::bad_request("message must not be empty"));
-    }
-
     if let Some(agent) = state.discovered_agent(&agent_id).await
         && let Some(rest) = agent.endpoints.rest
     {
@@ -312,8 +313,9 @@ fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) ->
     prompt
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 struct RegisterAgentRequest {
+    #[validate(length(min = 1, max = 128), custom(function = "crate::extract::validate_non_blank"))]
     agent_id: String,
     #[serde(default)]
     label: Option<String>,
@@ -337,6 +339,12 @@ struct RegisterAgentRequest {
     mcp_endpoint: Option<String>,
     #[serde(default)]
     issue_token: Option<bool>,
+}
+
+impl RequestPayload for RegisterAgentRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
 }
 
 #[cfg(test)]
@@ -446,7 +454,7 @@ mod tests {
         let response = send_message(
             State(Arc::clone(&state)),
             Path("agent-1".to_string()),
-            Json(SendMessageRequest {
+            ValidJson(SendMessageRequest {
                 message: "hello".into(),
                 context: Some(json!({ "source": "dashboard" })),
                 conversation_id: Some("conv-1".into()),
@@ -495,7 +503,7 @@ mod tests {
 
         let _ = register_agent(
             State(Arc::clone(&state)),
-            Json(RegisterAgentRequest {
+            ValidJson(RegisterAgentRequest {
                 agent_id: "agent-2".into(),
                 label: Some("agent-two".into()),
                 process_id: None,
@@ -601,7 +609,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let payload = json_body(response).await?;
-        assert_eq!(payload["error"]["code"], "not_found");
+        assert_eq!(payload["code"], "not_found");
         Ok(())
     }
 

@@ -8,8 +8,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use validator::Validate;
 
 use crate::error::{ApiError, validate_path_segment};
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
 use crate::plan_types::{Plan, PlanTask};
 use crate::runtime::RunResult;
@@ -67,43 +69,42 @@ async fn get_plan(
     Ok(Json(plan_to_json(&plan)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct CreatePlanRequest {
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     title: String,
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     description: String,
     #[serde(default)]
+    #[validate(nested)]
     tasks: Vec<CreateTaskEntry>,
 }
 
-#[derive(Deserialize)]
+impl RequestPayload for CreatePlanRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
+}
+
+#[derive(Deserialize, Validate)]
 struct CreateTaskEntry {
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     id: String,
     #[serde(default)]
     description: String,
     #[serde(default)]
+    #[validate(custom(function = "crate::extract::validate_string_items_non_blank"))]
     depends_on: Vec<String>,
     #[serde(default)]
+    #[validate(custom(function = "crate::extract::validate_string_items_non_blank"))]
     files: Vec<String>,
 }
 
 /// `POST /api/plans` — create a new plan from a JSON body.
 async fn create_plan(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CreatePlanRequest>,
+    ValidJson(body): ValidJson<CreatePlanRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if body.title.trim().is_empty() {
-        return Err(ApiError::bad_request("plan title must not be empty"));
-    }
-    if body.description.trim().is_empty() {
-        return Err(ApiError::bad_request("plan description must not be empty"));
-    }
-    if let Some(task) = body.tasks.iter().find(|task| task.id.trim().is_empty()) {
-        return Err(ApiError::bad_request(format!(
-            "task id must not be empty (description: {})",
-            task.description
-        )));
-    }
-
     let plan_id = uuid::Uuid::new_v4().to_string();
     let mut plan = Plan::new(plan_id.clone(), body.title, body.description);
 
@@ -218,20 +219,23 @@ async fn plan_status(
     )
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct GenerateRequest {
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     slug: String,
+}
+
+impl RequestPayload for GenerateRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
 }
 
 /// `POST /api/plans/generate` — spawn background plan generation from a PRD slug.
 async fn generate_plan(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<GenerateRequest>,
+    ValidJson(body): ValidJson<GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if body.slug.trim().is_empty() {
-        return Err(ApiError::bad_request("slug must not be empty"));
-    }
-
     let (prd_path, prd_content) = find_prd(&state.workdir, &body.slug).await?;
     let op_id = uuid::Uuid::new_v4().to_string();
     let bus = state.event_bus.clone();
@@ -433,11 +437,15 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use axum::Json;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use roko_core::config::ServeAuthConfig;
     use tempfile::tempdir;
     use tokio::sync::Notify;
+    use tower::ServiceExt;
 
     use crate::deploy::create_backend;
+    use crate::routes::build_router;
     use crate::runtime::{CliRuntime, DashboardInfo, NoOpRuntime, RunResult, SessionStatusInfo};
 
     #[derive(Clone)]
@@ -548,7 +556,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_plan_rejects_empty_fields() {
-        let (_dir, state) = test_state();
         let request = CreatePlanRequest {
             title: "   ".into(),
             description: "desc".into(),
@@ -560,28 +567,38 @@ mod tests {
             }],
         };
 
-        let err = match create_plan(State(Arc::clone(&state)), Json(request)).await {
-            Ok(_) => panic!("invalid request should fail"),
-            Err(err) => err,
-        };
+        assert!(request.validate().is_err());
+    }
 
-        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    #[tokio::test]
+    async fn create_plan_route_returns_top_level_validation_error() {
+        let (_dir, state) = test_state();
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/plans")
+                    .body(Body::from(r#"{"title":"   ","description":"desc"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: Value = serde_json::from_slice(&body).expect("parse response body");
+        assert_eq!(payload["code"], "validation_error");
+        assert_eq!(payload["message"], "request body validation failed");
+        assert!(payload.get("error").is_none());
     }
 
     #[tokio::test]
     async fn generate_plan_rejects_empty_slug() {
-        let (_dir, state) = test_state();
-        let err = match generate_plan(
-            State(Arc::clone(&state)),
-            Json(GenerateRequest { slug: "  ".into() }),
-        )
-        .await
-        {
-            Ok(_) => panic!("invalid request should fail"),
-            Err(err) => err,
-        };
-
-        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(GenerateRequest { slug: "  ".into() }.validate().is_err());
     }
 
     #[tokio::test]
@@ -666,7 +683,7 @@ mod tests {
 
         let response = generate_plan(
             State(Arc::clone(&state)),
-            Json(GenerateRequest {
+            ValidJson(GenerateRequest {
                 slug: "demo".into(),
             }),
         )

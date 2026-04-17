@@ -15,8 +15,10 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
+use validator::Validate;
 
 use crate::error::{ApiError, validate_path_segment};
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
 use crate::state::{AppState, OperationHandle, OperationStatus};
 use parking_lot::Mutex;
@@ -309,15 +311,22 @@ async fn get_prd(
     })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct IdeaRequest {
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     text: String,
+}
+
+impl RequestPayload for IdeaRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
 }
 
 /// `POST /api/prds/ideas` — append a line to `.roko/prd/ideas.md`.
 async fn post_idea(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<IdeaRequest>,
+    ValidJson(body): ValidJson<IdeaRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let prd_dir = state.workdir.join(".roko").join("prd");
     tokio::fs::create_dir_all(&prd_dir)

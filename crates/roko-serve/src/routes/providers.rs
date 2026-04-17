@@ -1324,9 +1324,9 @@ mod tests {
             .await
             .expect("body bytes");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("parse response");
-        assert_eq!(payload["error"]["code"], "bad_request");
+        assert_eq!(payload["code"], "bad_request");
         assert_eq!(
-            payload["error"]["message"],
+            payload["message"],
             "provider zai has no configured non-embedding models to test"
         );
     }

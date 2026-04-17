@@ -13,6 +13,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::config::{LoadConfigError, load_config};
 
 use crate::error::ApiError;
+use crate::extract::ApiJson;
 use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -41,7 +42,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
 /// then write the result to `roko.toml`.
 async fn update_config(
     State(state): State<Arc<AppState>>,
-    Json(partial): Json<Value>,
+    ApiJson(partial): ApiJson<Value>,
 ) -> Result<Json<Value>, ApiError> {
     // Read current config, merge the partial update, and write back.
     let cfg = state.load_roko_config();

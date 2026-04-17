@@ -10,8 +10,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use validator::{Validate, ValidationError};
 
 use crate::error::{ApiError, validate_path_segment};
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::events::ServerEvent;
 use crate::state::{AppState, OperationHandle, OperationStatus};
 
@@ -58,11 +60,19 @@ async fn list_research(State(state): State<Arc<AppState>>) -> Result<Json<Value>
     Ok(Json(Value::Array(artifacts)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct TopicRequest {
+    #[validate(length(min = 1), custom(function = "crate::extract::validate_non_blank"))]
     topic: String,
     #[serde(default = "default_intent")]
+    #[validate(custom(function = "validate_intent"))]
     intent: String,
+}
+
+impl RequestPayload for TopicRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
 }
 
 fn default_intent() -> String {
@@ -72,19 +82,9 @@ fn default_intent() -> String {
 /// `POST /api/research/topic` — spawn background topic research.
 async fn research_topic(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<TopicRequest>,
+    ValidJson(body): ValidJson<TopicRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let topic = body.topic.trim();
-    if topic.is_empty() {
-        return Err(ApiError::bad_request("topic must not be empty"));
-    }
-    if !VALID_INTENTS.contains(&body.intent.as_str()) {
-        return Err(ApiError::bad_request(format!(
-            "invalid intent: '{}'. Must be one of: {:?}",
-            body.intent, VALID_INTENTS
-        )));
-    }
-
     let prompt = build_topic_prompt(&state.workdir, topic, &body.intent);
     let (status, payload) = spawn_research_op(
         &state,
@@ -100,6 +100,16 @@ async fn research_topic(
             "intent": body.intent,
         })),
     ))
+}
+
+fn validate_intent(value: &str) -> Result<(), ValidationError> {
+    if VALID_INTENTS.contains(&value) {
+        Ok(())
+    } else {
+        let mut error = ValidationError::new("intent");
+        error.message = Some(format!("must be one of: {}", VALID_INTENTS.join(", ")).into());
+        Err(error)
+    }
 }
 
 /// `POST /api/research/enhance-prd/:slug` — enhance a PRD with research.
@@ -649,7 +659,7 @@ mod tests {
 
         let response = research_topic(
             State(Arc::clone(&state)),
-            Json(TopicRequest {
+            ValidJson(TopicRequest {
                 topic: "Model Routing".into(),
                 intent: "position".into(),
             }),
@@ -682,22 +692,14 @@ mod tests {
 
     #[tokio::test]
     async fn topic_research_rejects_invalid_intent() {
-        let (_dir, state, _runtime) = test_state_with_runtime();
-
-        let err = match research_topic(
-            State(Arc::clone(&state)),
-            Json(TopicRequest {
+        assert!(
+            TopicRequest {
                 topic: "Model Routing".into(),
                 intent: "bogus".into(),
-            }),
-        )
-        .await
-        {
-            Ok(_) => panic!("invalid intent should be rejected"),
-            Err(err) => err,
-        };
-
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[tokio::test]

@@ -915,7 +915,6 @@ struct RungThresholdSummary {
 mod tests {
     use super::*;
     use anyhow::anyhow;
-    use chrono::Utc;
     use roko_core::OperatingFrequency;
     use std::error::Error;
     use std::sync::Arc;

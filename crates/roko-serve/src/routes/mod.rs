@@ -42,6 +42,7 @@ pub fn build_router(
     let cors = middleware::cors_layer(cors_origins);
 
     let api = Router::new()
+        .merge(crate::openapi::routes())
         .merge(status::routes())
         .merge(plans::routes())
         .merge(prds::routes())
