@@ -23,6 +23,7 @@
 > [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md),
+> [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -139,6 +140,9 @@ crates directly.
 | `SPI` | Stable plugin interface | The shared contract layer for plugin discovery, capabilities, permissions, and versioning. |
 | `Manifest` | Extension descriptor | Declarative metadata that identifies a plugin, its tier, and its permissions. |
 | `dep graph` | Planned crate dependency graph | The target import topology that keeps kernel crates narrow, implementation crates swappable, and higher layers decoupled through traits and fabrics. |
+| `Surface` | User interaction rendering | One of CLI, TUI, Chat, or Web presenting the same verbs over shared state. |
+| `Verb set` | Cross-surface action vocabulary | The shared `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` contract. |
+| `Session` | Cross-surface continuity artifact | Named, replayable unit of user-visible work spanning prompts, checkpoints, and progress streams. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -184,6 +188,7 @@ legacy contexts like this table, do not use these names in new prose.
 |---|---|
 | `Roko CLI` | Command-line entry point and scripting surface |
 | `Roko TUI` | Terminal dashboard and interactive console |
+| `Roko Chat` | Conversational surface over the shared session and Bus stream |
 | `Roko Portal` | Web dashboard and browser surface |
 | `HTTP API` | Programmatic control plane |
 | `WebSocket` / `SSE` surfaces | Live Pulse delivery to clients and observers |
@@ -259,6 +264,9 @@ The following names are load-bearing additions in the current architecture:
 | `Superlinear return` | A scaling regime where accumulated usage, connected deployments, or added plugins produce more than proportional capability or efficiency gains. |
 | `Heuristic commons` | The cross-deployment pool of exportable heuristics and calibration data that bootstraps new Roko installations. |
 | `Synapse Architecture` | The architecture story of two mediums, two fabrics, and six operators. |
+| `Surface` | One of the four user renderings: CLI, TUI, Chat, or Web. |
+| `Verb set` | The unified cross-surface action vocabulary: `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, `connect`. |
+| `Session` | The user-facing continuity object whose state can be resumed, watched, exported, shared, and replayed across surfaces. |
 
 ### 9.1 Topic Namespace Guidance
 
@@ -328,4 +336,6 @@ prefixes without coordination.
 - [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md) for the paper, claim, and replication ledger pipeline
 - [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md) for the canonical naming proposal
 - [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the fingerprint-first HDC proposal
+- [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) for the four surfaces and unified verb set
+- [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the user-UX refinement proposal
 - [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) for the Rust SDK framing and developer-UX proposal

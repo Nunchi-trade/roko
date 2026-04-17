@@ -15,7 +15,24 @@
 
 The Roko Portal is a web-based dashboard that provides the same monitoring and control capabilities as the TUI, with richer visualization affordances. Built on React 19 and Next.js 15.5+, it uses the ROSEDUST design language adapted for CSS/Tailwind, renders Spectre creatures in WebGL, and consumes real-time data via WebSocket connections to roko-serve.
 
-The Portal is designed for three personas: **operators** monitoring active agent execution, **analysts** reviewing historical performance data, and **administrators** configuring the system. It provides 9 primary pages that map to the TUI's 6 window regions, with additional depth afforded by the web's richer interaction model (mouse, touch, drag-and-drop, hover, modals).
+The Portal is designed for three personas: **operators** monitoring active agent execution, **analysts** reviewing historical performance data, and **administrators** configuring the system. Under REF23, the initial first-party web scope should stay small and discoverable: a Web rendering of the same unified verb set and the same named sessions used by CLI, TUI, and Chat. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## REF23 Scope Reset
+
+The first-party Web surface should start with a compact page set that covers the shared verb set cleanly:
+
+| Page | Primary verbs |
+|---|---|
+| Home | `watch`, `inspect` |
+| Ask | `ask`, `watch` |
+| Plans | `plan`, `do`, `watch` |
+| Episodes | `inspect`, `replay` |
+| Heuristics | `learn`, `inspect` |
+| Settings | `tune`, `connect` |
+
+Richer pages remain valid later, but parity and continuity matter more than page count. The web UI should feel like the same product, not a second product.
 
 ---
 
@@ -106,7 +123,7 @@ module.exports = {
 
 ---
 
-## Page Structure (9 Pages)
+## Page Structure
 
 ### Page 1: Dashboard (Home)
 
@@ -231,6 +248,8 @@ Historical analysis — equivalent to TUI Screen 1.5 with richer analysis.
 - Performance trends (charts over time)
 - Cost analysis (breakdowns by period, agent, model, plan)
 - Learning metrics (prediction accuracy, gate pass rate trends)
+
+The six-page REF23 scope above is the first release bar. Additional pages and richer visualizations should be layered in only after the shared verb set, live progress, and session continuity are solid.
 
 ---
 

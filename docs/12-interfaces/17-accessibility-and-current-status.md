@@ -15,6 +15,19 @@
 
 Roko's interfaces target WCAG 2.1 AA compliance across the Web Portal, with equivalent access goals for the TUI and CLI. This document specifies accessibility requirements for each interface, including keyboard navigation, screen reader support, color contrast, reduced motion, and alternative text. It also provides the comprehensive port allocation table and the current implementation status of all interface components.
 
+REF23 adds a cross-surface requirement: every critical action available in TUI, Chat, or Web must also remain available as a CLI command, and the same verb set must be reachable through keyboard-only interaction on every surface. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## Cross-Surface Accessibility Commitments
+
+- The four surfaces share one verb set, so accessibility documentation should describe equivalent actions, not separate products.
+- Every permission checkpoint, ambiguity checkpoint, undo action, replay action, and session switch must have a keyboard-only path.
+- High-contrast mode applies to TUI and Web, not just browser CSS.
+- Live progress streams need screen-reader-safe summaries for token output, tool banners, and gate failures.
+- User-facing strings should remain internationalizable; no surface should hardcode prose in ways the others cannot match.
+- The CLI stays the accessibility backstop: if a graphical or chat surface cannot present an action clearly, the command form must still exist.
+
 ---
 
 ## WCAG 2.1 AA Compliance (Web Portal)

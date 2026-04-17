@@ -1,6 +1,6 @@
 # Agent Lifecycle
 
-> **Abstract:** The Agent Lifecycle topic documents how Roko agents are created, configured, funded, operated, backed up, deleted, and recreated — and how knowledge flows between agent generations through user-controlled backup/restore. This topic replaces the legacy Bardo "mortality" system entirely. Where the old architecture treated agents as mortal organisms with death clocks and succession protocols, the new architecture treats agents as user-directed software processes with explicit lifecycle commands. Every academic citation from the mortality research (130+ papers) is preserved and reframed: Ebbinghaus curves now govern knowledge freshness instead of agent lifespan, somatic markers drive strategy retrieval instead of mortality anxiety, and the Baldwin Effect describes backup/restore capacity transfer instead of death-triggered succession.
+> **Abstract:** The Agent Lifecycle topic documents how Roko agents are created, configured, funded, operated, backed up, deleted, and recreated — and how knowledge flows between agent generations through user-controlled backup/restore. It also provides the lifecycle-side counterpart to REF23's named sessions, resumable work, session-scoped remembers, and replay/share flows across CLI, TUI, Chat, and Web. This topic replaces the legacy Bardo "mortality" system entirely. Historical note: where the legacy architecture treated agents as mortal organisms with death clocks and succession protocols, the current architecture treats agents as user-directed software processes with explicit lifecycle commands. Every academic citation from the historical mortality research (130+ papers) is preserved and reframed: Ebbinghaus curves now govern knowledge freshness instead of agent lifespan, somatic markers drive strategy retrieval instead of mortality anxiety, and the Baldwin Effect describes backup/restore capacity transfer instead of historical death-triggered succession. See [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
 
 ---
 
@@ -65,6 +65,8 @@ The four-step knowledge transfer process replaces legacy "succession":
 ```
 
 Live agents can also share knowledge via the Agent Mesh (`09-knowledge-transfer-via-mesh.md`).
+
+REF23 adds a parallel but distinct artifact: shareable sessions. Sessions carry the user-visible continuity needed to move between CLI, TUI, Chat, and Web without state loss; backups carry durable knowledge continuity between agents.
 
 ---
 

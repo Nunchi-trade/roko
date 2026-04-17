@@ -19,6 +19,28 @@ The CLI is designed around the principle of **progressive disclosure**: beginner
 
 The CLI sits at the **Application layer** — above L4 Orchestration. It consumes crates from every layer: `roko-core` (L0/L1), `roko-compose` (L2), `roko-gate` (L3), `roko-orchestrator` (L4), and the cognitive cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`). The `roko-serve` crate provides the HTTP server that `roko serve` starts.
 
+REF23 reframes the CLI as one rendering of a unified verb set shared by four surfaces: CLI, TUI, Chat, and Web. The CLI keeps the canonical command names, while the other surfaces render the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions over the same Bus-backed progress stream and the same session state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## Unified Verbs on the CLI
+
+REF23's user-facing rule is simple: learn one verb set once, then carry it between the CLI, TUI, Chat, and Web surfaces.
+
+| Unified verb | CLI rendering | Notes |
+|---|---|---|
+| `ask` | `roko ask <prompt>` or the legacy `roko run <prompt>` path | Single-turn work; `roko run` remains a compatibility-oriented execution noun until the surface names converge. |
+| `plan` | `roko plan ...` | Proposal and inspection without committing to execution. |
+| `do` | `roko do ...` or `roko plan run ...` | Execute a task or approved plan. |
+| `watch` | `roko watch <session-or-episode>` | Render live Bus activity as a continuous progress stream. |
+| `inspect` | `roko inspect <episode|engram|heuristic>` | Drill into durable records and supporting evidence. |
+| `replay` | `roko replay <episode>` | Re-run a prior episode, optionally with changed inputs. |
+| `learn` | `roko learn ...` | Browse heuristics, playbooks, experiments, and calibration state. |
+| `tune` | `roko tune ...` or `roko config ...` | Adjust routing, thresholds, permissions, and other operator settings. |
+| `connect` | `roko connect ...` or `roko plugin ...` | Add plugins, MCP servers, credentials, and provider links. |
+
+The exact command tree can stay broader than the verb set. What matters is that every high-frequency workflow has a stable canonical verb and every help page teaches the adjacent verb, not an isolated silo.
+
 ---
 
 ## Five CLI Modes
@@ -103,6 +125,8 @@ The `roko` CLI organizes its subcommands into logical groups. The full command r
 | **Debugging** | `replay`, `inject`, `dashboard`, `repl` | Introspection and interactive control |
 | **Deployment** | `deploy`, `worker` | Cloud deployment and worker mode |
 
+The long command tree is an implementation detail. The user-facing mental model should stay the REF23 verb set above, with deeper subcommands nested under the verb that best describes user intent.
+
 ### Global Flags
 
 Every subcommand inherits these global flags:
@@ -154,8 +178,8 @@ The CLI is designed so that a developer can go from zero to a running agent in u
 
 ```bash
 # In any project directory:
-roko init                          # creates .roko/ + roko.toml with detected defaults
-roko run "Add error handling to the auth module"   # runs agent with smart defaults
+roko init                          # interactive first-run, provider/plugin/MCP checks
+roko ask "Add error handling to the auth module"   # runs agent with smart defaults
 ```
 
 `roko init` performs auto-detection:
@@ -165,6 +189,8 @@ roko run "Add error handling to the auth module"   # runs agent with smart defau
 - **Gates** — enables compile + test gates matching the detected language
 
 This auto-detection is implemented in `roko-cli/src/config.rs`. The `load_layered` function resolves configuration from multiple sources in priority order (see [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md)). Plugin discovery stays separate: installed plugins are discovered from `plugins/**`, then optional config layers override only the pieces that need site-specific tuning.
+
+REF23 tightens the first-run bar: `roko init` should be interactive, never dead-end, always offer a skip/configure-later path, and commit partial progress as each step succeeds so a cancelled setup can resume cleanly. The onboarding details and failure-recovery prompts live in [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md) and [21-user-ux-running-agents.md](./21-user-ux-running-agents.md).
 
 ### Starter Templates
 
@@ -209,6 +235,8 @@ All five CLI modes consume the same event stream. The orchestrator emits `AgentE
 The TUI renders these events visually. Headless mode serializes them as JSON lines. Serve mode streams them over SSE or WebSocket. Same events, different consumers.
 
 This unified event architecture means that what you see in the TUI is exactly what gets logged in headless mode and streamed via the API. There is no special rendering path or separate data model.
+
+Under REF23, this stream is the source of truth for live progress across all four surfaces. `watch` is therefore not a CLI-only feature; it is the CLI rendering of the same token streaming, tool banners, gate feedback, and episode events that the TUI, Chat, and Web surfaces render differently.
 
 ---
 

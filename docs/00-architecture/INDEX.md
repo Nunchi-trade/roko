@@ -64,7 +64,7 @@ the canonical vocabulary. The developer-facing Rust SDK framing that maps these 
 onto one-liner, builder, trait impl, and runtime impl entry points lives in
 [Topic 12: Rust SDK Developer UX](../12-interfaces/19-rust-sdk-developer-ux.md) and
 [Topic 02: Extensibility](../02-agents/12-extensibility.md); see also
-[tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md).
+[tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md). REF23 then carries the same kernel model up into user-facing operation: four surfaces, one unified verb set, and one live event stream over named sessions. See [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
 
 ---
 
@@ -135,7 +135,7 @@ This topic connects to:
 
 - [Topic 01: Orchestration](../01-orchestration/INDEX.md) — L4 orchestration layer details (plan DAG, parallel executor, merge queue)
 - [Topic 02: Agents](../02-agents/INDEX.md) — Agent types built on the Synapse Architecture
-- [Topic 12: Interfaces](../12-interfaces/INDEX.md) — Interface surfaces, including the four-layer Rust SDK and `cargo roko` developer workflow
+- [Topic 12: Interfaces](../12-interfaces/INDEX.md) — Interface surfaces, including the four surfaces user-UX chapter, unified verb set, and the four-layer Rust SDK
 - [Topic 03: Composition](../03-composition/INDEX.md) — Context engineering and the Composer trait in depth
 - [Topic 04: Verification](../04-verification/INDEX.md) — Gate pipeline and verification strategies
 - [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, heuristics, falsifier-driven calibration, worldview clustering, bandits, predict/publish/correct loops

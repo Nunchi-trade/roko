@@ -24,13 +24,33 @@ underlying plugin SPI is described in [14-plugin-sdk.md](../18-tools/14-plugin-s
 
 The `roko` binary uses `clap` for parsing and supports both positional arguments and named flags. All subcommands inherit the global flags described in [00-cli-overview.md](./00-cli-overview.md).
 
+REF23 adds a unified user verb set across CLI, TUI, Chat, and Web. The CLI remains the canonical naming surface for those verbs, even when some command families keep compatibility aliases or broader subcommand trees. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## Canonical User Verbs
+
+These verbs are the user-facing contract that should survive across surfaces and future command-tree cleanup:
+
+| Verb | CLI shape | Status |
+|---|---|---|
+| `ask` | `roko ask <prompt>` | Target-state canonical single-turn noun; `roko run` remains a compatibility path. |
+| `plan` | `roko plan ...` | Current command family. |
+| `do` | `roko do ...` or `roko plan run ...` | Target-state execution noun over task or plan work. |
+| `watch` | `roko watch <session|episode>` | Target-state live-progress surface over the shared event stream. |
+| `inspect` | `roko inspect <episode|engram|heuristic>` | Target-state drill-down verb for durable artifacts. |
+| `replay` | `roko replay <episode>` | Current debugging verb; promoted to first-class user verb. |
+| `learn` | `roko learn ...` | Target-state surface for heuristics, playbooks, and experiments. |
+| `tune` | `roko tune ...` or `roko config ...` | Target-state configuration noun; `config` remains the detailed subtree. |
+| `connect` | `roko connect ...` or `roko plugin ...` | Target-state add/integrate noun for providers, MCP servers, and plugins. |
+
 ---
 
 ## Getting Started
 
 ### `roko init`
 
-Scaffold a new Roko project by creating `.roko/` and a default `roko.toml`.
+Interactively scaffold a new Roko project by creating `.roko/`, a default `roko.toml`, and the first session-safe runtime state.
 
 ```
 roko init [PATH] [--cloud] [--template T]
@@ -43,6 +63,25 @@ roko init [PATH] [--cloud] [--template T]
 | `--template` | String | (auto-detect) | Template: `coding`, `research`, `ops`, `chain`, `blank` |
 
 Auto-detects language, build system, and gates from project files (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`). Creates the `.roko/` directory tree with `roko.toml`, signal storage, learning state, and knowledge store.
+
+REF23 raises the bar for `roko init`: provider checks, MCP autodiscovery, heuristic-starter import, and secret collection should all degrade gracefully with explicit `skip` or `configure later` exits. Partial success is valid; setup state should be persisted incrementally so the next `roko init` can resume instead of restarting.
+
+### `roko ask`
+
+Single-turn query on the unified verb set.
+
+```
+roko ask <PROMPT> [--stream] [--save] [--context PATH]
+```
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `PROMPT` | String | (required) | The user prompt text |
+| `--stream` | bool | true in TTY | Stream tokens and tool banners as they arrive |
+| `--save` | bool | false | Persist the turn as an episode and retain session continuity |
+| `--context <PATH>` | PathBuf | none | Add file or directory context for this turn |
+
+`roko ask` is the canonical REF23 spelling for "run one thing now." Existing `roko run` flows can map here until the command surface is consolidated.
 
 ### `roko run`
 
@@ -58,6 +97,8 @@ roko run <PROMPT> [--workdir PATH]
 | `--workdir` | PathBuf | Current directory | Override working directory |
 
 Runs: query → score → route → compose → act → verify → persist. Returns exit code 0 on success, 1 on agent/gate failure, 2 on system error. Respects `--json` for structured output and `--effort` for reasoning depth.
+
+**REF23 note:** keep `roko run` as a compatibility-friendly execution noun, but teach `roko ask` in help, onboarding, and related-command output.
 
 ### `roko status`
 
@@ -115,6 +156,52 @@ The common path is discovery-first: install a manifest-backed plugin into `plugi
 runtime validate it, then use `roko plugin audit` before enabling it in production. Tier 1 and
 Tier 2 plugins are pure data; Tier 3 plugins declare tool or MCP behavior; Tier 4 plugins bind
 native Rust implementations; Tier 5 plugins run inside the WASM host.
+
+### `roko watch`
+
+Attach to a running session or episode and stream live progress.
+
+```
+roko watch <SESSION_OR_EPISODE> [--format human|json|yaml] [--resume-from SEQ]
+```
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `SESSION_OR_EPISODE` | String | (required) | Session name, session ID, or episode ID |
+| `--format` | enum | `human` | Human-first stream or structured output |
+| `--resume-from` | u64 | latest | Resume from a Bus sequence number or cursor |
+
+`watch` renders the same shared progress stream used by TUI, Chat, and Web: token streaming, tool call banners, gate feedback, and episode/heuristic events.
+
+### `roko inspect`
+
+Inspect a durable record or session artifact.
+
+```
+roko inspect <episode|engram|heuristic|session> [ID]
+```
+
+Use this verb for drill-down workflows that would otherwise be scattered across `episode`, `neuro`, and diagnostics subtrees.
+
+### `roko tune`
+
+Adjust configuration, thresholds, routing, and permissions.
+
+```
+roko tune <SUBCOMMAND>
+```
+
+`tune` is the user-facing REF23 verb. The detailed implementation surface can remain under `roko config` while the verbs converge.
+
+### `roko connect`
+
+Add a plugin, MCP server, provider, or credential source.
+
+```
+roko connect <SUBCOMMAND>
+```
+
+`connect` is the unified integration verb. In current docs, it maps most directly to `roko plugin`, provider setup, and MCP-related configuration.
 
 ### `roko explain`
 

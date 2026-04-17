@@ -19,6 +19,28 @@ The server is built on `axum` (Tokio-based async HTTP framework), uses `tower-ht
 
 `roko-serve` sits at the Application layer and consumes the same runtime abstractions that `roko-cli` uses. The `CliRuntime` trait bridges the server to the CLI's `run_once`, status, and dashboard functions. This means the HTTP API drives the exact same cognitive loop as the CLI — same Engram pipeline, same gates, same learning.
 
+REF23 makes this more explicit: the HTTP API is the transport layer behind the Web surface and the bridge that keeps CLI, TUI, Chat, and Web on the same verb set and the same live progress stream. The API should expose the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions instead of inventing a separate mental model. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## Surface Parity Contract
+
+`roko-serve` exists so the Web surface can be first-party without becoming conceptually separate. The parity rule is:
+
+| User verb | HTTP / stream shape | Notes |
+|---|---|---|
+| `ask` | `POST /api/run` plus stream subscription | Single-turn query with optional live output. |
+| `plan` | `POST /api/plans` or plan-generation route | Proposal without mandatory execution. |
+| `do` | `POST /api/plans/:id/run` or equivalent task execution route | Starts real work. |
+| `watch` | WebSocket or SSE subscription with cursors | Progress is streamed, not polled. |
+| `inspect` | Episode, Engram, heuristic, and agent detail reads | Durable artifact drill-down. |
+| `replay` | Episode replay endpoint family | Re-run a prior episode from stored inputs and context. |
+| `learn` | Learning and heuristic endpoints | Curate heuristics, playbooks, experiments, and calibration state. |
+| `tune` | Config and threshold routes | Operator-level settings. |
+| `connect` | Plugin, MCP, provider, and credential-management routes | Integration surface. |
+
+This keeps the Web UI small and legible: it renders the shared verb set over the same data instead of growing a bespoke page-by-page control plane.
+
 ---
 
 ## Architecture

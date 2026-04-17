@@ -6,10 +6,11 @@
 
 ## Overview
 
-This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), the Web Portal (React 19 / Next.js 15.5+), the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, and knowledge tiers).
+This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), chat-oriented interaction surfaces, the Web Portal, the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. REF23 makes the chapter's primary UX claim explicit: Roko has four surfaces — CLI, TUI, Chat, and Web — exposing one unified verb set over the same Bus-backed progress stream and the same durable session/episode state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md). All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, and knowledge tiers).
 
 **Key design principles:**
 - **Progressive disclosure**: Overview first, detail on demand
+- **One verb set, four surfaces**: `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, `connect`
 - **ROSEDUST everywhere**: One design language across TUI, Web, and CLI
 - **Real-time**: WebSocket and SSE feeds for live agent monitoring
 - **Spectre as readout**: Every agent has a procedurally generated creature that encodes cognitive state
@@ -41,6 +42,7 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 | 17 | [17-accessibility-and-current-status.md](./17-accessibility-and-current-status.md) | WCAG 2.1 AA targets, keyboard nav, screen reader support, reduced motion, port allocation, comprehensive implementation status |
 | 18 | [18-ux-innovation-proposals.md](./18-ux-innovation-proposals.md) | 7 UX innovations — Conversational Development, Time-Travel Debugging, Dream Journal, Agent Garden, Pair Programming with Affect, Collaborative Planning, Knowledge Map |
 | 19 | [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) | Four-layer Rust SDK — one-liner, builder, trait impl, runtime impl, typed errors, docs/examples discipline, `cargo roko`, macros, testing ergonomics, tracing, release compatibility |
+| 21 | [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) | REF23 canonical user-UX chapter — four surfaces, unified verb set, interactive first-run, live progress, checkpoints, undo, named/shareable sessions, accessibility |
 
 ---
 

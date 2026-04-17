@@ -302,8 +302,24 @@ The backup captures the Neuro store (Engrams, scores, tiers, decay state, proven
 - **Dream journal**: Current dream cycle state (dreams are consolidated into Engrams)
 - **Mesh connections**: Peer topology, gossip state (re-established on reconnect)
 - **Configuration**: `roko.toml`, `STRATEGY.md` (these are operator-managed files, backed up separately)
+- **Live session UI state**: command-palette history, open views, transient checkpoints, and other surface-local affordances
 
 The rationale: the backup captures knowledge (what the agent has learned), not state (what the agent is doing). A new agent created from a backup starts with the predecessor's knowledge but its own fresh operational state — including a fresh Daimon state that will adapt to current conditions rather than carrying over potentially stale emotional context.
+
+---
+
+## Session Export Is Separate from Neuro Backup
+
+REF23 introduces named, replayable sessions as a user-facing artifact, but they are not the same thing as a Neuro backup. The distinction matters:
+
+| Artifact | Purpose | Typical command |
+|---|---|---|
+| Neuro backup | Durable knowledge transfer between agents | `roko neuro backup` |
+| Session export | Replay or share an operator-visible run history | `roko session export`, `roko session share`, `roko session replay` |
+
+Session export captures the interaction log, checkpoints, progress stream cursors, and operator-visible sequence of work for reproducibility and support. Neuro backup captures durable Engrams and their metadata for long-term knowledge transfer. Both are exportable; only the latter is the canonical knowledge-preservation artifact in lifecycle docs.
+
+See [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the cross-surface session model.
 
 ---
 

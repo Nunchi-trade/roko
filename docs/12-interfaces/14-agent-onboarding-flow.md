@@ -13,48 +13,59 @@
 
 ## Abstract
 
-Agent onboarding is the process of bringing a new cognitive agent from zero to operational. This includes: choosing the agent's domain and role, selecting a template, configuring model routing, bootstrapping initial knowledge, generating the Spectre creature identity, and executing the first task to validate the setup.
+Agent onboarding is the process of bringing a new cognitive agent from zero to operational. This includes choosing the agent's domain and role, selecting a template, configuring model routing, bootstrapping initial knowledge, generating the Spectre creature identity, and executing the first task to validate the setup.
 
-The onboarding flow is designed for progressive disclosure — a minimal onboarding path requires only a project name and a prompt, while the full path exposes every configuration knob. Both the CLI and Web Portal provide onboarding flows, with the CLI optimized for speed and the Portal optimized for visual guidance.
+This chapter follows the refinement in [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md): onboarding should feel familiar-first, interactive, fast, provider/plugin/MCP-aware, and resumable. The same underlying verbs should be reachable from all four surfaces, so a user can start in CLI and continue in TUI, Chat, or Web without relearning the workflow. The target is first useful output in under 30 seconds.
 
 ---
 
 ## Onboarding Paths
 
-### Minimal Path (CLI, ~30 seconds)
+The canonical verb set for the onboarding surfaces is:
+
+- `ask` for a single-turn request
+- `plan` for a proposal without execution
+- `do` for execution
+- `watch` for progress
+- `inspect` for episodes, Engrams, and heuristics
+- `replay` for rerunning a prior session or episode
+- `learn` for heuristic and playbook curation
+- `tune` for configuration changes
+- `connect` for plugins, MCP servers, and credentials
+
+That verb set is rendered differently in CLI, TUI, Chat, and Web, but it should behave like one system rather than four separate ones. See also the glossary at [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the canonical terms used here.
+
+### Minimal Path (CLI, under 30 seconds)
 
 ```bash
 # Initialize project
 roko init
 
-# Run first task — agent is created automatically
-roko run "Add error handling to the auth module"
+# Ask the first useful question
+roko ask "Add error handling to the auth module"
 ```
 
 What happens automatically:
-1. `roko init` creates `.roko/` directory and default `roko.toml`
-2. `roko run` auto-detects language (Rust), creates a default coding agent
-3. Agent receives default template (`code-implementer`), default model (`sonnet-4.6`)
-4. Spectre is generated from agent ID hash
-5. Task executes through the universal cognitive loop
+1. `roko init` opens an interactive setup flow and creates `.roko/` plus a resumable `roko.toml`
+2. The setup flow auto-detects the project domain and preferred model providers
+3. If the user accepts the defaults, Roko chooses a safe starter template and a working provider configuration
+4. The init flow checks plugins and MCP servers opportunistically, but never blocks first success on a failed remote check
+5. The first `roko ask` or `roko do` can start immediately, with live output visible on every surface
 
 ### Standard Path (CLI, ~2 minutes)
 
 ```bash
-# Initialize with domain
+# Initialize with guided choices
 roko init --domain rust
 
-# Configure models
-roko config set agent.models.t1 "claude-sonnet-4-6"
-roko config set agent.models.t2 "claude-opus-4-6"
+# Review the proposed setup
+roko inspect onboarding
 
-# Create a plan
-roko prd idea "Implement authentication middleware"
-roko prd draft new "auth-middleware"
-roko prd plan auth-middleware
+# Propose work
+roko plan "Implement authentication middleware"
 
-# Execute with multiple agents
-roko plan run plans/auth-middleware/
+# Execute the first task
+roko do "Implement authentication middleware"
 ```
 
 ### Full Path (CLI or Portal, ~5 minutes)
@@ -90,14 +101,56 @@ roko config set budget.daily_limit_usd 50.00
 roko config set budget.alert_threshold 0.8
 
 # 7. Run
-roko plan run plans/
+roko do "Run the first validated task"
 ```
+
+---
+
+## Interactive `roko init`
+
+`roko init` should behave as an onboarding assistant, not a static scaffold command. The flow should:
+
+- Detect the project domain from the working tree, then let the user override it.
+- Probe provider availability, including local and remote model options, and keep the best working choice.
+- Offer to import or defer plugin and MCP setup, with a visible skip path for every failed probe.
+- Write onboarding state incrementally so an interrupted setup can resume from the last successful step.
+- Surface the same choices in CLI, TUI, Chat, and Web so the user can move between surfaces without losing context.
+
+The first screen should be concise and interactive, not a wall of flags:
+
+```text
+Welcome to Roko. Let's set up your first agent.
+
+What would you like to do?
+  [x] Start with a fast default setup
+  [ ] Choose providers, templates, and tools manually
+  [ ] Import an existing project or session
+
+Which providers should we check?
+  [x] Anthropic
+  [x] OpenAI
+  [x] Local Ollama
+  [ ] Other
+
+Should we look for plugins and MCP servers?
+  [x] Yes, auto-discover
+  [ ] No, configure later
+```
+
+Every failure state should be recoverable in place:
+
+- Missing API key: offer paste now, open docs, skip, or configure later.
+- Local model unavailable: offer retry, skip, or continue with remote providers.
+- Plugin or MCP probe failure: offer retry, skip errored entries, or open diagnostics.
+- Interruptions: preserve progress so `roko init` can resume from the last completed step.
+
+The practical rule is simple: no single setup check should block the user from reaching their first useful output.
 
 ---
 
 ## Stage 1: Domain Selection
 
-The first onboarding decision is choosing the agent's primary domain.
+The first onboarding decision is choosing the agent's primary domain. That choice should be made once, then carried with the session as the user moves across CLI, TUI, Chat, and Web.
 
 ### Auto-Detection
 
@@ -124,6 +177,7 @@ The selected domain configures:
 | **System prompt** | Domain-specific context in the system prompt builder |
 | **Knowledge types** | Domain-relevant heuristics pre-loaded |
 | **Index settings** | Code parser configuration for `roko-index` |
+| **Session defaults** | The same onboarding session can be resumed from any surface |
 
 ### Manual Override
 
@@ -184,6 +238,8 @@ Layer 6: Behavioral directives (from Daimon state, risk tolerance)
 
 **Source**: `roko-compose/src/system_prompt_builder.rs`, `RoleSystemPromptSpec` in `roko-cli/src/orchestrate.rs`
 
+The onboarding flow should keep template selection lightweight. A first-time user should be able to accept a default template, get the session moving, and refine templates later through `tune` or `learn`.
+
 ---
 
 ## Stage 3: Model Routing Configuration
@@ -235,6 +291,8 @@ cascade_threshold = 0.7
 router_state = ".roko/learn/cascade-router.json"
 ```
 
+`roko init` should probe the common providers up front and only surface working model choices. If a provider is missing credentials or unreachable, the flow should explain the issue, suggest a next command, and let the user continue with the remaining providers.
+
 ### CascadeRouter Learning
 
 The CascadeRouter uses LinUCB (contextual bandit) to learn which model to route to, based on:
@@ -273,6 +331,17 @@ roko neuro import --from /other/project/.roko/neuro/
 # Seed specific knowledge types
 roko neuro inject --type Heuristic --content "Always check error returns in Go"
 ```
+
+### Provider, Plugin, and MCP Discovery
+
+The onboarding flow should treat provider checks, plugin setup, and MCP discovery as related setup tasks, not separate product surfaces. Users should be able to:
+
+- Import a known provider configuration from a prior session or another project.
+- Auto-discover MCP servers and accept the working ones while skipping failures.
+- Add plugins and credentials later without restarting the onboarding flow.
+- Resume discovery after an interruption without repeating completed steps.
+
+This is especially important for the Web surface, which should present the same setup state as CLI and TUI rather than a separate wizard model.
 
 ### Knowledge Types Available at Bootstrap
 
@@ -333,13 +402,13 @@ Resting:           Transition:        Engaged:
 
 ### Spectre Persistence
 
-The Spectre identity (shape seed) persists across sessions in `.roko/agents/{agent-id}.json`. The same agent always produces the same Spectre body, allowing operators to recognize agents visually across sessions.
+The Spectre identity (shape seed) persists across sessions in `.roko/agents/{agent-id}.json`. The same agent always produces the same Spectre body, allowing operators to recognize agents visually across sessions and across surfaces.
 
 ---
 
 ## Stage 6: First Task Execution
 
-The onboarding is validated by executing the first task through the full cognitive loop.
+The onboarding is validated by executing the first task through the full cognitive loop. The result should be visible as live progress in CLI, TUI, Chat, and Web without the user needing to re-enter the task.
 
 ### Validation Checklist
 
@@ -347,15 +416,14 @@ The first task exercises every critical path:
 
 | Step | Validation | What it proves |
 |---|---|---|
-| PERCEIVE | Substrate query returns project context | Knowledge store is connected |
-| EVALUATE | Scorer rates context relevance | Scorer is configured |
-| ATTEND | Router selects relevant context | Router is working |
-| INTEGRATE | Composer builds prompt under budget | Context engineering is functional |
+| SENSE | Substrate query returns project context | Knowledge store is connected |
+| ASSESS | Scorer rates context relevance | Scorer is configured |
+| COMPOSE | Composer builds prompt under budget | Context engineering is functional |
 | ACT | LLM produces output | Model routing is connected |
 | VERIFY | Gate pipeline runs | Gates are configured |
 | PERSIST | Output stored as Engram | Substrate write is working |
-| ADAPT | Policy emits learning events | Learning loop is connected |
-| META-COGNIZE | Daimon updates PAD vector | Behavioral system is functional |
+| BROADCAST | Bus publishes progress pulses | Live progress is visible on every surface |
+| REACT | Policy emits learning events | Learning loop is connected |
 
 ### First-Task Output
 
@@ -366,12 +434,13 @@ After the first task, the agent has:
 - Initial CascadeRouter state
 - Gate pass/fail history
 - First knowledge entries (if any insights were generated)
+- A shared session record that can be resumed from CLI, TUI, Chat, or Web
 
 ---
 
 ## Portal Onboarding Wizard
 
-The Web Portal provides a visual wizard for the full onboarding path:
+The Web surface provides a visual wizard for the full onboarding path, but it should mirror the same state machine as `roko init` rather than inventing a parallel setup flow.
 
 ### Step 1: Welcome
 
@@ -380,7 +449,7 @@ The Web Portal provides a visual wizard for the full onboarding path:
 │                                          │
 │          Welcome to Roko                 │
 │                                          │
-│  Let's set up your cognitive agents.    │
+│  Let's set up your first agent.         │
 │                                          │
 │  [Start Setup →]                         │
 │                                          │
@@ -397,6 +466,7 @@ The Web Portal provides a visual wizard for the full onboarding path:
 │           [○ Python ○ Generic]          │
 │                                          │
 │  Detected: Rust (Cargo.toml found)      │
+│  Session:  [resume from CLI ▾]          │
 │                                          │
 │  [← Back]  [Next →]                     │
 │                                          │
@@ -412,7 +482,7 @@ The Web Portal provides a visual wizard for the full onboarding path:
 │                                          │
 │  ┌─ Implementer ──────────────────────┐ │
 │  │ Model: [claude-sonnet-4-6 ▾]      │ │
-│  │ Tools: [read ✓] [write ✓] [bash ✓]│ │
+│  │ Tools: [read ✓] [write ✓] [bash ✓] │ │
 │  │ Max turns: [50____]               │ │
 │  └────────────────────────────────────┘ │
 │                                          │
@@ -504,9 +574,11 @@ roko neuro import --from /old/project/.roko/neuro/
 When multiple developers work on the same roko project:
 
 1. `roko.toml` is committed to version control
-2. Each developer runs `roko init` (detects existing config)
-3. API keys are configured locally (`roko config set auth.api_key "..."`)
-4. Knowledge store is shared via `.roko/` directory (or synced via mesh)
+2. Each developer runs `roko init`, which detects existing state and offers to resume instead of starting over
+3. API keys are configured locally, with provider checks handled in the same onboarding session
+4. Knowledge store is shared via `.roko/` directory, and the same session can be picked up in CLI, TUI, Chat, or Web
+
+For shared work, the important property is continuity: a user should be able to start onboarding on one surface, finish provider setup on another, and pick up the same session later without losing the setup state.
 
 ---
 
@@ -523,18 +595,18 @@ When multiple developers work on the same roko project:
 - Basic agent lifecycle (spawn → execute → gate → persist)
 
 **Not yet built:**
-- Portal onboarding wizard
+- Fully interactive, resumable onboarding across all four surfaces
+- Provider-aware setup that degrades gracefully when keys or local runtimes are missing
+- Plugin and MCP discovery with skip/retry/diagnostic flows
+- First-party Web onboarding wizard that mirrors CLI state
+- Session continuity across onboarding and the first task
 - Visual template editor
-- Knowledge bootstrapping (auto-sharing across agents)
-- Spectre generation from identity hash
-- First-task validation checklist
-- Migration import tools
-- Team onboarding flow
 
 ---
 
 ## Cross-References
 
+- See [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the full proposal
 - See [00-cli-overview.md](./00-cli-overview.md) for the CLI command structure
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for the configuration system
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre generation

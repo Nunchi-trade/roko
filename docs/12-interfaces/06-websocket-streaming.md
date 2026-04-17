@@ -17,6 +17,24 @@ Roko provides two real-time streaming mechanisms: WebSocket for bidirectional co
 
 The streaming architecture is designed for multiple concurrent consumers — the TUI, Web Portal, external dashboards, and CI systems can all subscribe to the same event stream simultaneously without interference.
 
+REF23 turns that into a product rule rather than an implementation detail: CLI, TUI, Chat, and Web all render the same progress stream, so `watch` is a shared surface capability rather than a one-off endpoint feature. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## Canonical `watch` Stream
+
+The shared `watch` experience should surface the same event categories regardless of transport:
+
+| Category | What the user sees |
+|---|---|
+| Token streaming | Partial model output with a visible cursor while generation is active |
+| Tool call banners | Short, literal progress banners such as file reads, commands, and external calls |
+| Gate feedback | Immediate pass/fail/pending updates with counts and next-step hints |
+| Episode and heuristic events | Episode creation, heuristic application, challenge, or calibration signals |
+| Checkpoint prompts | Permission or ambiguity checkpoints that pause work pending user choice |
+
+The transport may differ by surface, but the semantics must not. A user switching from CLI to TUI or Web mid-task should see the same session continue from the same cursor and the same sequence IDs.
+
 ---
 
 ## WebSocket Endpoints
@@ -165,6 +183,8 @@ Both WebSocket and SSE support seamless reconnection:
 4. The server replays events from the ring buffer starting at the requested sequence
 
 The ring buffer retains the last 10,000 events by default. Events older than the buffer are lost — clients that disconnect for extended periods receive events from the buffer start, not from their last sequence.
+
+These cursors are also the continuity mechanism for REF23's named sessions and shareable replays. A session handoff between surfaces should reuse the same stream position rather than starting a fresh observer window.
 
 ---
 

@@ -59,6 +59,13 @@ kernel parts, and a runtime impl boundary for alternate execution hosts. Start w
 [`12-interfaces/19-rust-sdk-developer-ux.md`](12-interfaces/19-rust-sdk-developer-ux.md),
 [`02-agents/12-extensibility.md`](02-agents/12-extensibility.md), and
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/23-user-ux-running-agents.md` then unifies user operation around one verb set
+across four surfaces: CLI, TUI, Chat, and Web. It makes interactive first-run, live `watch`
+streams, checkpoints, undo, and shareable sessions first-class instead of per-surface accidents.
+Start with [`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
+[`12-interfaces/14-agent-onboarding-flow.md`](12-interfaces/14-agent-onboarding-flow.md),
+[`17-lifecycle/05-knowledge-backup-export.md`](17-lifecycle/05-knowledge-backup-export.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
 which primitives are genuinely new, which are integrations of prior art, and which claims
 deserve publication-grade evidence. Start with
@@ -123,7 +130,7 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
 - [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, real-time clients, and Rust SDK developer UX
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, real-time clients, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence
