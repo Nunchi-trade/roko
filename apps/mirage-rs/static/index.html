@@ -18,11 +18,12 @@
     </div>
   </div>
   <div class="conn">
-    <input id="rpc-url" type="text" value="http://127.0.0.1:8545" spellcheck="false">
-    <button id="btn-reconnect" class="btn sm">RECONNECT</button>
+    <input id="rpc-url" type="text" value="http://127.0.0.1:8545" spellcheck="false" title="Remote Mirage base URL">
+    <button id="btn-reconnect" class="btn sm">APPLY</button>
   </div>
   <div class="header-actions">
     <span id="conn-chip" class="chip err"><span class="dot"></span><span id="conn-label">CONNECTING…</span></span>
+    <span id="net-chip" class="chip"><span class="dot"></span><span id="net-label">/api + /relay</span></span>
     <span id="fork-chip" class="chip"><span class="dot"></span>fork · mainnet</span>
     <span id="agents-chip" class="chip"><span class="dot"></span>0 agents</span>
     <button id="btn-ws" class="btn ghost sm">WS LIVE</button>
@@ -136,13 +137,13 @@
   <!-- === AGENT REGISTRY === -->
   <div class="panel" style="margin-bottom:20px">
     <div class="panel-head">
-      <div class="panel-title"><span class="icon"></span>Agent Registry · registered agents with stats &amp; traces</div>
-      <div class="panel-meta" id="agent-reg-meta">loading…</div>
+      <div class="panel-title"><span class="icon"></span>Agent Discovery · ERC-8004 identity + live relay reachability</div>
+      <div class="panel-meta" id="agent-reg-meta">loading discovery…</div>
     </div>
     <div style="overflow-x:auto">
       <table class="kinds-table" style="width:100%">
-        <thead><tr><th>Agent</th><th>Role</th><th>Status</th><th>Tasks OK</th><th>Tasks Fail</th><th>Tokens</th><th>Cost (USD)</th><th>Last Seen</th><th>Traces</th></tr></thead>
-        <tbody id="agent-reg-tbody"><tr><td colspan="9" style="color:var(--text-faint)">loading…</td></tr></tbody>
+        <thead><tr><th>Agent</th><th>Passport</th><th>Sources</th><th>Transport</th><th>Capabilities</th><th>Card URI</th><th>Direct</th><th>Action</th></tr></thead>
+        <tbody id="agent-reg-tbody"><tr><td colspan="8" style="color:var(--text-faint)">loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -428,12 +429,18 @@
     </div>
 
     <div class="panel ctrl-panel">
-      <div class="panel-title" style="margin-bottom:10px">Register Agent · POST /api/agents</div>
+      <div class="panel-title" style="margin-bottom:10px">Agent Messaging · direct or relay</div>
       <div class="ctrl-row">
-        <div><label>Agent ID</label><input id="reg-id" type="text" placeholder="roko-alpha"></div>
-        <div><label>Role</label><input id="reg-role" type="text" value="watcher"></div>
+        <div><label>Agent</label><select id="msg-agent"><option value="">loading…</option></select></div>
+        <div><label>Path</label><select id="msg-path"><option value="auto">AUTO</option></select></div>
       </div>
-      <button class="btn" id="btn-register">REGISTER AGENT</button>
+      <label>Prompt</label>
+      <textarea id="msg-prompt" placeholder="say hello from the static demo…"></textarea>
+      <div class="ctrl-btn-row">
+        <button class="btn" id="btn-send-agent">SEND</button>
+      </div>
+      <div id="msg-note" style="color:var(--text-dim);font-size:12px;margin-top:8px">select a discovered agent to test transport</div>
+      <pre id="msg-result" style="margin-top:10px;max-height:220px;overflow:auto;background:rgba(255,255,255,0.03);padding:10px;border-radius:10px;color:var(--text);font-size:12px">waiting for discovery…</pre>
     </div>
   </div>
 
