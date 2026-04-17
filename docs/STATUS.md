@@ -1,6 +1,6 @@
 # Roko Implementation Status
 
-> **Last updated**: 2026-04-14
+> **Last updated**: 2026-04-17
 >
 > Single source of truth for what's implemented vs. specified across the Roko system.
 > For naming conventions, see [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
@@ -29,14 +29,14 @@
 | 02 | [Agents](02-agents/INDEX.md) | **Shipping** | `roko-agent` (346 tests) | [15-status-gaps.md](02-agents/15-status-gaps.md) |
 | 03 | [Composition](03-composition/INDEX.md) | **Shipping** | `roko-compose` (23 tests) | [13-current-status-and-gaps.md](03-composition/13-current-status-and-gaps.md) |
 | 04 | [Verification](04-verification/INDEX.md) | **Shipping** | `roko-gate` (200 tests), `roko-fs` (37 tests) | — |
-| 05 | [Learning](05-learning/INDEX.md) | **Shipping** | `roko-learn` (101 tests) | — |
+| 05 | [Learning](05-learning/INDEX.md) | **Shipping** | `roko-learn` (42 modules, 35,847 LOC) | — |
 | 06 | [Neuro](06-neuro/INDEX.md) | **Built** | `roko-neuro` | [16-current-status-and-gaps.md](06-neuro/16-current-status-and-gaps.md) |
 | 07 | [Conductor](07-conductor/INDEX.md) | **Built** | `roko-conductor` | — |
 | 08 | [Chain](08-chain/INDEX.md) | **Built** | `roko-chain` (52 tests) | — |
 | 09 | [Daimon](09-daimon/INDEX.md) | **Built** | `roko-daimon` | [13-current-status-and-gaps.md](09-daimon/13-current-status-and-gaps.md) |
 | 10 | [Dreams](10-dreams/INDEX.md) | **Scaffold** | `roko-dreams` | [16-implementation-status.md](10-dreams/16-implementation-status.md) |
 | 11 | [Safety](11-safety/INDEX.md) | **Shipping** (core) / **Specified** (advanced) | `roko-agent` (safety layer) | — |
-| 12 | [Interfaces](12-interfaces/INDEX.md) | **Scaffold** | `roko-cli` (text dashboard) | — |
+| 12 | [Interfaces](12-interfaces/INDEX.md) | **Shipping** (CLI/TUI/API) / **Specified** (web portal) | `roko-cli` (ratatui TUI), `roko-serve` (200+ routes) | — |
 | 13 | [Coordination](13-coordination/INDEX.md) | **Specified** | — | [12-current-status-and-gaps.md](13-coordination/12-current-status-and-gaps.md) |
 | 14 | [Identity & Economy](14-identity-economy/INDEX.md) | **Deferred** | — | — |
 | 15 | [Code Intelligence](15-code-intelligence/INDEX.md) | **Built** | `roko-index`, `roko-lang-*` | [10-current-status-and-gaps.md](15-code-intelligence/10-current-status-and-gaps.md) |
@@ -50,6 +50,8 @@
 ---
 
 ## Detailed Breakdown
+
+Audit baseline as of 2026-04-17: ~322K Rust LOC across 36 workspace members and 3,761 test functions.
 
 ### Shipping (end-to-end wired, CLI-accessible)
 
@@ -67,6 +69,8 @@ These components form the working self-hosting loop: `roko prd` → `roko plan r
 | 19 built-in tools (file, shell, search, MCP) | `roko-std` | 96 | — (tool dispatch) |
 | ProcessSupervisor + event bus + cancellation | `roko-runtime` | — | — (infra) |
 | Safety layer (role auth + pre/post checks) | `roko-agent` | — | — (integrated) |
+| HTTP control plane (200+ routes) + SSE/WebSocket | `roko-serve` | — | `roko serve` |
+| Interactive dashboard (ratatui TUI, F1-F7 tabs) | `roko-cli` | — | `roko dashboard` |
 | PRD lifecycle (idea/draft/plan) | `roko-cli` | 38 | `roko prd` |
 | Research agent (topic/enhance) | `roko-cli` | — | `roko research` |
 | Session persistence + resume | `roko-cli` | — | `roko plan run --resume` |
@@ -92,8 +96,6 @@ These components form the working self-hosting loop: `roko prd` → `roko plan r
 |-----------|-------|-----|
 | Dream engine (NREM/REM/integration) | `roko-dreams` | Runner + cycle facades exist; core algorithms unimplemented |
 | MCP servers (GitHub, Slack, Scripts, Stdio) | `roko-mcp-*` | Crate stubs, no implementation |
-| HTTP server + REST API | `roko-serve` | Crate exists, no routes |
-| Text dashboard (TUI) | `roko-cli` | Renders text pages, no interactive terminal UI |
 
 ### Specified (PRD docs only, no code)
 
@@ -127,6 +129,8 @@ These components form the working self-hosting loop: `roko prd` → `roko plan r
 
 ## Test Coverage Summary
 
+Selected crate counts below are the legacy per-crate figures retained in this status doc; the audited workspace total is 3,761 test functions.
+
 | Crate | Tests | Layer |
 |-------|-------|-------|
 | `roko-core` | 376 | Kernel |
@@ -140,21 +144,21 @@ These components form the working self-hosting loop: `roko prd` → `roko plan r
 | `roko-cli` | 38 | L4 Application |
 | `roko-fs` | 37 | L3 Harness |
 | `roko-compose` | 23 | L2 Scaffold |
-| **Total** | **1,568** | |
+| **Workspace total** | **3,761** | |
 
 ---
 
 ## Critical Path to Full Self-Hosting
 
-The self-hosting loop works today (`prd` → `plan run` → gate → persist → resume`). Three capabilities would close the remaining gaps:
+The self-hosting loop works today (`prd` → `plan run` → gate → persist → resume`). Three capabilities defined the remaining gaps; one is already closed:
 
-1. **Interactive TUI** (Section 12) — Wire `ratatui` into the text dashboard scaffold. Currently `roko dashboard` outputs plain text.
+1. ~~**Interactive TUI**~~ (Section 12) — Done. `roko dashboard` is a wired ratatui TUI with F1-F7 tabs and live runtime integration.
 
 2. **Automatic plan generation** (Section 01) — Trigger `prd plan` automatically when a PRD is published, removing the manual step.
 
 3. **Failure feedback** (Section 05) — Gate failures already trigger retries/re-plans in orchestrate.rs; the remaining work is richer failure analysis and context enrichment, not basic loop wiring.
 
-After these three, Roko can fully self-host: read its own PRDs, generate plans, execute them, validate results, learn from failures, and iterate — without human intervention beyond initial PRD creation.
+With item 1 shipped and items 2-3 completed, Roko can fully self-host: read its own PRDs, generate plans, execute them, validate results, learn from failures, and iterate — without human intervention beyond initial PRD creation.
 
 ---
 

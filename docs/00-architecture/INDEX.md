@@ -197,15 +197,15 @@ This topic connects to:
 - **roko-learn** (101 tests): Episodes, playbooks, skills, bandits, experiments, efficiency.
 - **roko-std** (96 tests): Default trait impls, 19 built-in tools.
 - **roko-chain** (52 tests): ChainClient/ChainWallet, chain witness.
+- **roko-serve**: **Shipping**: 200+ REST routes, SSE, WebSocket on :6677.
+- **TUI**: **Shipping**: ratatui interactive TUI with F1-F7 tabs, WebSocket, themes, modals.
 - **roko-daimon**: PAD vector, 6 behavioral states, somatic markers (972 lines).
 - **roko-neuro**: Knowledge store, 6 types, 4 tiers, HDC encoding.
-- Total: ~1,568 tests, ~177K LOC across 18+ crates.
+- Total: 3,761 test functions, ~322K LOC across 36 workspace members.
 
 ### What's Scaffold
 - **roko-dreams**: Three-phase cycle specified, not shipping.
-- **roko-serve**: HTTP API not wired.
 - **roko-mcp-***: Basic transport only.
-- **TUI**: Text-mode dashboard only, no interactive terminal UI.
 
 ### What's Not Started
 - Kernel v2 cutover decision and vocabulary alignment (Tier 0D).
@@ -221,9 +221,9 @@ This topic connects to:
 
 ## Generation Notes
 
-- **Generated**: 2026-04-11
+- **Generated**: 2026-04-17
 - **Model**: Claude Opus 4.6
-- **Sub-docs produced**: 29
+- **Sub-docs produced**: 36
 - **Total lines**: ~10,500+
 - **Primary sources consulted**:
   - `/Users/will/dev/nunchi/roko/refactoring-prd/00-overview.md` through `09-innovations.md`
