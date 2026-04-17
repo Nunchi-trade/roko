@@ -12,6 +12,7 @@ use super::{ApiState, now_secs};
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
+/// Node in the derived agent interaction graph returned by `/api/agents/topology`.
 pub struct AgentNode {
     /// Agent identifier (author bytes as UTF-8 lossy string).
     pub id: String,
@@ -28,6 +29,7 @@ pub struct AgentNode {
 }
 
 #[derive(Serialize)]
+/// Directed edge in the derived agent interaction graph.
 pub struct AgentEdge {
     /// Source agent id.
     pub from: String,
@@ -41,12 +43,17 @@ pub struct AgentEdge {
 }
 
 #[derive(Serialize)]
+/// Response payload for `/api/agents/topology`.
 pub struct TopologyResponse {
+    /// Derived graph nodes keyed by agent identity.
     pub nodes: Vec<AgentNode>,
+    /// Directed confirmation/challenge edges between agents.
     pub edges: Vec<AgentEdge>,
+    /// Unix timestamp at which the topology snapshot was generated.
     pub timestamp: u64,
 }
 
+/// Computes the current knowledge-derived interaction topology for all known agents.
 pub async fn agent_topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
     let now = now_secs();
     let chain = state.chain.read();

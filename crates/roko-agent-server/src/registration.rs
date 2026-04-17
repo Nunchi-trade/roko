@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use alloy_primitives::keccak256;
+use alloy_primitives::{U256, keccak256};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::Engine;
@@ -185,16 +185,25 @@ fn tx_hash_string(hash: &TxHash) -> String {
 }
 
 fn build_update_agent_card_uri_calldata(passport_id: &str, card_uri: &str) -> Vec<u8> {
-    let selector = &keccak256("updateAgentCardUri(string,string)".as_bytes())[..4];
-    let encoded_passport = abi_encode_string(passport_id);
+    let selector = &keccak256("updateAgentCardUri(uint256,string)".as_bytes())[..4];
+    let encoded_passport = encode_passport_id_word(passport_id);
     let encoded_card_uri = abi_encode_string(card_uri);
-    let mut data = Vec::with_capacity(4 + 64 + encoded_passport.len() + encoded_card_uri.len());
+    let mut data = Vec::with_capacity(4 + 64 + encoded_card_uri.len());
     data.extend_from_slice(selector);
-    data.extend_from_slice(&encode_word(64));
-    data.extend_from_slice(&encode_word(64 + encoded_passport.len() as u64));
     data.extend_from_slice(&encoded_passport);
+    data.extend_from_slice(&encode_word(64));
     data.extend_from_slice(&encoded_card_uri);
     data
+}
+
+fn encode_passport_id_word(passport_id: &str) -> [u8; 32] {
+    let trimmed = passport_id.trim();
+    let value = if let Some(hex) = trimmed.strip_prefix("0x") {
+        U256::from_str_radix(hex, 16).expect("passport_id should be a valid hex uint256")
+    } else {
+        U256::from_str_radix(trimmed, 10).expect("passport_id should be a valid decimal uint256")
+    };
+    value.to_be_bytes::<32>()
 }
 
 fn abi_encode_string(value: &str) -> Vec<u8> {
@@ -219,11 +228,13 @@ mod tests {
 
     #[test]
     fn calldata_contains_selector_and_dynamic_offsets() {
-        let calldata = build_update_agent_card_uri_calldata("passport-1", "https://card");
+        let calldata = build_update_agent_card_uri_calldata("7", "https://card");
         assert_eq!(
             &calldata[..4],
-            &keccak256("updateAgentCardUri(string,string)".as_bytes())[..4]
+            &keccak256("updateAgentCardUri(uint256,string)".as_bytes())[..4]
         );
+        assert_eq!(&calldata[4..36], &U256::from(7_u64).to_be_bytes::<32>());
+        assert_eq!(&calldata[36..68], &encode_word(64));
         assert_eq!(calldata.len() % 32, 4);
     }
 }

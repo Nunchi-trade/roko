@@ -1,5 +1,7 @@
 //! Prediction session and claim tracking for the dashboard backend.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

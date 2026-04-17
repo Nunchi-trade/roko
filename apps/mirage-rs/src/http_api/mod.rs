@@ -33,6 +33,8 @@
 //! | GET    | `/api/stats`            | Combined dashboard statistics              |
 //! | WS     | `/api/ws`               | Live event stream (roko feature)           |
 
+#![allow(missing_docs)]
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
