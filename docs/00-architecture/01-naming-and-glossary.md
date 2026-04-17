@@ -29,8 +29,10 @@
 > [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md),
 > [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md),
 > [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md),
+> [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md),
 > [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md),
 > [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md),
+> [../12-interfaces/13-web-portal.md](../12-interfaces/13-web-portal.md),
 > [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
@@ -213,7 +215,8 @@ legacy contexts like this table, do not use these names in new prose.
 | `Roko CLI` | Command-line entry point and scripting surface |
 | `Roko TUI` | Terminal dashboard and interactive console |
 | `Roko Chat` | Conversational surface over the shared session and Bus stream |
-| `Roko Portal` | Web dashboard and browser surface |
+| `Roko Portal` | Stable chapter and product name for the first-party web UI over StateHub, the realtime surface, and the control plane |
+| `Web UI` | Browser rendering of the shared verb set, sessions, and projection state; the current first-party scope is `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings` |
 | `HTTP API` | Programmatic control plane |
 | `Realtime surface` | Shared transport contract for live Pulse delivery to clients and observers |
 
@@ -302,6 +305,7 @@ The following names are load-bearing additions in the current architecture:
 | `Diff-first review` | The rule that code changes are shown as hunks before apply, with per-hunk approval and optional explainability. |
 | `Transcript` | Durable session log carrying prompts, outputs, approvals, budget state, and replay metadata across CLI, TUI, Chat, and Web. |
 | `Budget line` | The visible spend summary shown during interactive and status flows so routing and approvals remain legible to the operator. |
+| `Component library` | Shared browser widgets and review primitives, such as `@roko/ui`, used by the first-party web UI and extension pages. |
 
 ### 9.1 Topic Namespace Guidance
 

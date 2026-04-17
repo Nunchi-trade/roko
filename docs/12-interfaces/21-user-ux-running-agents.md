@@ -23,7 +23,7 @@ The canonical verb set is:
 | `tune` | Change configuration, thresholds, routing, or defaults | Settings editor or config wizard |
 | `connect` | Add a plugin, profile bundle, MCP server, credential, or integration | Connection flow, permission prompt, and diagnostics |
 
-The CLI entrypoint itself is part of the contract. Running `roko` with no subcommand should enter an interactive session, probe the workspace, detect the most likely intent from the first message, and route to the appropriate mode without forcing the user to choose a banner-first menu. A question should stay a question, a small edit should become a diff-first change, and a multi-step task should become a plan with explicit approval gates.
+The CLI entrypoint itself is part of the contract. Running `roko` with no subcommand should enter an interactive session, probe the workspace, detect the most likely intent from the first prompt, and route to the appropriate mode without forcing the user to choose a banner-first menu. A question should stay a question, a small edit should become a diff-first change, and a multi-step task should become a plan with explicit approval gates.
 
 Every surface exposes those verbs, even when the chrome differs. A user who learns `roko ask`, `roko plan`, and `roko do` in CLI should be able to find the same actions in TUI tabs, Chat commands, and Web navigation without learning a second vocabulary.
 
@@ -36,7 +36,7 @@ The current product already has four user-facing surfaces:
 | `CLI` | Primary scripting and automation surface | Command names, help text, output shape, error recovery, and script parity |
 | `TUI` | Interactive terminal control surface | The same verbs, the same session state, the same progress feed, and the same approvals |
 | `Chat` | Conversational surface for humans and agents | Slash commands, streaming, inline artifacts, permissions, and profile confirmation |
-| `Web` | Browser surface on top of the HTTP control plane | The same verb set, live status, session continuity, and profile composition |
+| `Web` | Browser surface on top of StateHub, the realtime surface, and the HTTP control plane | The same verb set, live status, session continuity, diff review, and profile composition |
 
 The key requirement is not visual uniformity. It is semantic uniformity. If a command exists in one surface, it needs a discoverable equivalent in the others. If a user pauses a task in Chat, the same session should be visible in TUI and Web. If a plan is inspectable in Web, the same underlying data should be reachable from CLI. If the CLI shows a diff hunk for approval, the same hunk-level decision should be visible in Chat and Web.
 
@@ -124,7 +124,7 @@ Roko should treat dangerous or uncertain actions as explicit checkpoints. The us
 | Run unrecognized local commands | Ask | Session and command |
 | Network access to a new host | Ask | Session and host |
 | Install or upgrade a plugin or profile | Ask | Never |
-| Send a message or email on the user's behalf | Always ask | Never |
+| Send a prompt or email on the user's behalf | Always ask | Never |
 | Override a failing gate | Ask | Session and gate rung |
 
 Every denial should include the literal command or action the user can take next. Every approval should still emit a visible Pulse so the UI shows what happened, and sensitive actions should attach custody metadata so inspect and replay can reconstruct who approved what and why. The permissions model is part of the UX, not a hidden backend rule.
@@ -187,7 +187,9 @@ Chat should support multi-agent interaction, live streaming, slash commands, and
 
 ### Web
 
-Web should behave like the browser counterpart to the same runtime state, not a separate product. The browser view should show active sessions, live progress, plans, episodes, heuristics, settings, and profile composition without inventing alternate semantics. The same `TypedContext` and `Custody` summary that CLI can inspect should be visible in the browser, and the browser should consume the same named StateHub projections that the TUI and external dashboards read. Diff-first review, hunk-level acceptance, transcripts, resume prompts, and visible budget state should all be represented in the browser so the web surface is a continuation of the CLI contract rather than a separate workflow.
+Web should behave like the browser counterpart to the same runtime state, not a separate product. REF29 makes the first-party scope explicit: the shipped browser surface is a five-page reference UI made of `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`. Those pages are not separate micro-products; they are browser renderings of the same verbs, sessions, approvals, and replay semantics the CLI and TUI already expose.
+
+That means the browser should consume the same named StateHub projections that the TUI and external dashboards read, then route mutations back through the same control plane. `Home` is the observation-first pulse view, `Chat` is the streaming interactive surface, `Plans` is the orchestration view, `Beliefs` is the heuristic and worldview browser, and `Settings` is the minimal control surface for config, plugins, budgets, and credentials. The same `TypedContext` and `Custody` summary that CLI can inspect should be visible in the browser, and diff-first review, hunk-level acceptance, transcripts, resume prompts, and visible budget state should all remain part of the browser contract rather than being dropped as "desktop-only" features. See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
 
 ## 9. Related Refinements
 
@@ -196,9 +198,10 @@ Web should behave like the browser counterpart to the same runtime state, not a 
 - [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md) — projections that carry live progress, permissions, and cross-surface continuity.
 - [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md) — streaming transport for `watch` and browser updates.
 - [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md) — familiar-first CLI parity, slash commands, diff-first review, transcripts, budgets, and piped-mode parity.
+- [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md) — five-page first-party web UI on top of StateHub and the shared realtime surface.
 - [tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md) — rendering primitives for tool banners, uncertainty, and heuristic annotations.
 - [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) — the Rust SDK path for power users who outgrow the shipped surfaces.
 
 ## 10. Implementation Notes
 
-This chapter is the canonical user-facing framing for REF23 and the surface-level parity framing for REF28. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `StateHub`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, undo, transcripts, slash commands, and hunk-level review part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens.
+This chapter is the canonical user-facing framing for REF23 and the surface-level parity framing for REF28. It intentionally uses the current vocabulary from the naming glossary: `Engram`, `Pulse`, `Bus`, `StateHub`, `Topic`, and `Neuro` where relevant. It also treats named sessions as durable user objects and makes replay, share, undo, transcripts, slash commands, and hunk-level review part of the normal interaction model rather than exceptional recovery paths. REF25 adds the interface contract for domain profiles: surfaces should expose the same profile chooser, the same `TypedContext` summary, and the same `Custody` trail wherever setup or inspection happens. REF29 then fixes the browser scope: the first-party web UI is a deliberate five-page surface, not an unbounded dashboard sprawl.

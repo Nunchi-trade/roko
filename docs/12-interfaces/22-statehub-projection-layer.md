@@ -1,6 +1,6 @@
 # StateHub Projection Layer
 
-> **Abstract:** This chapter propagates `tmp/refinements/26-statehub-rearchitecture.md` into the canonical docs tree. StateHub is no longer a TUI-only cache; it is the kernel projection layer that turns Bus + Substrate into typed, queryable, live-updating views for the TUI, Web Portal, and external consumers. The stable contract is a named projection with `State`, `Delta`, a reducer, filters, and replay cursors. REF27 then carries that same contract over the shared realtime surface defined in [06-websocket-streaming.md](./06-websocket-streaming.md). See also [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the shared kernel vocabulary.
+> **Abstract:** This chapter propagates `tmp/refinements/26-statehub-rearchitecture.md` into the canonical docs tree. StateHub is no longer a TUI-only cache; it is the kernel projection layer that turns Bus + Substrate into typed, queryable, live-updating views for the TUI, the first-party Web Portal, and external consumers. The stable contract is a named projection with `State`, `Delta`, a reducer, filters, and replay cursors. REF27 then carries that same contract over the shared realtime surface defined in [06-websocket-streaming.md](./06-websocket-streaming.md), and REF29 uses those projections to drive the five-page browser surface in [13-web-portal.md](./13-web-portal.md). See also [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the shared kernel vocabulary.
 
 **Topic**: [12-interfaces](./INDEX.md)  
 **Prerequisites**: [05-http-api-roko-serve.md](./05-http-api-roko-serve.md), [06-websocket-streaming.md](./06-websocket-streaming.md), [13-web-portal.md](./13-web-portal.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)  
@@ -58,16 +58,23 @@ The kernel should ship with a small set of canonical projections that cover the 
 |---|---|---|
 | `cohort_health` | c-factor, roster, turn stats, delivery rates | team dashboards and collective intelligence |
 | `active_tasks` | running tasks, progress, ETA, current agent | live work tracking |
+| `alerts` | active warnings, gate failures, breaker trips, budget pressure | `Home / Pulse` summary and acknowledgement flows |
 | `gate_pipeline` | rung status, pass/fail counts, pending checks | verification and release visibility |
-| `recent_episodes` | last N episodes, summaries, cursors | TUI lists and replay pickers |
-| `heuristic_library` | calibration histogram, top hits, challenge history | belief review and tuning |
+| `recent_episodes` | last N episodes, summaries, cursors | TUI lists, replay pickers, and browser history cards |
+| `heuristic_library` | calibration histogram, top hits, challenge history | `Beliefs` review and tuning |
+| `worldview_clusters` | clustered heuristic families, dominant beliefs, confidence windows | worldview browsing and skeptical inspection |
+| `replication_ledger` | claim status, tests, witnesses, open questions | research and audit workflows |
+| `plans_list` | selected plans, status counts, next checkpoints | `Plans` sidebar and mobile plan picker |
+| `plan_detail/<id>` | DAG, task ordering, blockers, breakpoints, execution state | selected plan canvas and task focus |
 | `cost_meter` | spend by model, role, and session | budget and usage dashboards |
+| `config_current` | effective config values, profile overlays, gate thresholds | `Settings` forms and read-only summaries |
+| `plugins_list` | installed plugins, versions, permissions, enabled state | plugin management in `Settings` |
+| `secrets_status` | credential presence, rotation status, last validation result | secret management without exposing raw values |
 | `bus_stats` | Pulses/sec by Topic, delivery rate, replay lag | ops and transport health |
 | `substrate_stats` | tier sizes, balance distribution, retention windows | memory health and storage planning |
-| `agent_trails` | per-agent timeline, current action, tool trace | chat and trace views |
-| `replication_ledger` | claim status, tests, witnesses, open questions | research and audit workflows |
+| `agent_trails` | per-agent timeline, current action, tool trace | `Chat` and trace views |
 
-These projections give every surface the same vocabulary. A Web page and a TUI pane should not invent separate ways to represent the same underlying state.
+These projections give every surface the same vocabulary. A Web page and a TUI pane should not invent separate ways to represent the same underlying state. For the REF29 browser surface, the important point is explicit page ownership: `Home / Pulse`, `Chat`, `Plans`, `Beliefs`, and `Settings` compose from shared projections instead of shipping page-local shadow state.
 
 ## 4. Query Plus Subscribe
 

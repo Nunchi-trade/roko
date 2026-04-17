@@ -1,6 +1,6 @@
 # ROSEDUST Design Language
 
-> The visual identity of Roko: rose tones on deep violet-black, glass morphism, luxury motion, dark-only — shared across TUI, Web Portal, and Spectre visualization.
+> The visual identity of Roko: rose tones, deliberate contrast, glass morphism, and luxury motion shared across TUI, the first-party Web Portal, and Spectre visualization. The browser surface is dark-led, but REF29 requires light, dark, and high-contrast variants over the same token system.
 
 
 > **Implementation**: Scaffold
@@ -13,9 +13,9 @@
 
 ## Abstract
 
-ROSEDUST is Roko's design language — a comprehensive visual system that unifies the appearance of every interface surface: the Terminal UI (ratatui), the Web Portal (React/Next.js), Spectre creature visualizations, and CLI output. The name evokes the palette's essential character: rose light on void-black, as if viewing the system through a faintly glowing, dusty lens.
+ROSEDUST is Roko's design language — a comprehensive visual system that unifies the appearance of every interface surface: the Terminal UI (ratatui), the Web Portal, Spectre creature visualizations, and CLI output. The name evokes the palette's essential character: rose light on a deliberate ground plane, as if viewing the system through a faintly glowing, dusty lens.
 
-ROSEDUST is **dark-only**. There is no light mode. The design language is inherently built around contrast between deep backgrounds and glowing accents. The rose palette dominates, accounting for approximately 80% of visible accent color on any screen. Signal colors (jade, amber, crimson, violet, sapphire) provide semantic differentiation without breaking the rose-dominant aesthetic.
+ROSEDUST is **dark-led**, not dark-only. The TUI and Spectre-heavy views still assume deep backgrounds, but the first-party web UI should ship light, dark, and high-contrast variants using the same semantic tokens, spacing rules, motion rules, and accent hierarchy. The rose palette remains the signature accent family, while semantic colors (jade, amber, crimson, violet, sapphire) provide differentiation without breaking the overall identity. See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
 
 The design language was preserved unchanged during the architectural migration from the legacy system. ROSEDUST predates the Roko reframing and was designed specifically for the cognitive agent visualization use case — it maps to Daimon behavioral states, knowledge tier density, and collective intelligence metrics through color, motion, and form.
 
@@ -46,7 +46,7 @@ Rose is the dominant color. It carries meaning: activity, attention, life.
 | `rose-bright` | `#e8a0b2` | (232, 160, 178) | Active, highlighted. Selection. |
 | `rose-glow` | `#ffc0d0` | (255, 192, 208) | Maximum emphasis. Notifications. |
 
-### Signal Colors
+### Semantic Colors
 
 Semantic colors for system state. Used sparingly — rose remains dominant.
 
@@ -82,7 +82,7 @@ Four levels of text contrast for information hierarchy:
 | **Headers** | Uppercase, letter-spaced (0.1em), rose accent color |
 | **Data values** | Tabular numerals for alignment in columns |
 | **Status indicators** | Small caps or Unicode symbols (blocks ▓░, circles ◉○◌, arrows ↑↓) |
-| **Code** | Standard monospace, syntax-highlighted in ROSEDUST signal colors |
+| **Code** | Standard monospace, syntax-highlighted in ROSEDUST semantic colors |
 | **Labels** | Ghost or mist text, reduced size |
 
 ### No Emojis in TUI
@@ -114,7 +114,7 @@ Block::default()
     .style(Style::default().bg(theme.bg_alt))
 ```
 
-The glass effect creates a sense of panels floating over the void-black background. Each panel feels like a separate viewing surface, not a flat grid cell. In the TUI, this is approximated through subtle border coloring and background differentiation. In the Web Portal, full CSS `backdrop-filter` is used.
+The glass effect creates a sense of panels floating over the background plane. Each panel feels like a separate viewing surface, not a flat grid cell. In the TUI, this is approximated through subtle border coloring and background differentiation. In the Web Portal, full CSS `backdrop-filter` is used where performance and accessibility allow it.
 
 ---
 
@@ -177,10 +177,10 @@ pub struct RosedustTheme {
     pub fg_muted: Color,     // Rgb(138, 127, 142) — mist equivalent
     pub rose: Color,         // Rgb(212, 119, 140) — primary accent
     pub rose_muted: Color,   // Rgb(160, 92, 110) — rose-dim equivalent
-    pub gold: Color,         // Rgb(212, 168, 87) — amber signal
-    pub teal: Color,         // Rgb(93, 184, 163) — jade signal
-    pub blue: Color,         // Rgb(107, 143, 189) — sapphire signal
-    pub lavender: Color,     // Rgb(160, 140, 196) — violet signal
+    pub gold: Color,         // Rgb(212, 168, 87) — amber semantic state
+    pub teal: Color,         // Rgb(93, 184, 163) — jade semantic state
+    pub blue: Color,         // Rgb(107, 143, 189) — sapphire semantic state
+    pub lavender: Color,     // Rgb(160, 140, 196) — violet semantic state
     pub coral: Color,        // Rgb(196, 122, 92) — warm accent
     pub success: Color,      // teal
     pub warning: Color,      // gold
@@ -212,9 +212,10 @@ Semantic style helpers map plan phases and agent roles to accent colors:
 The Web Portal (planned, P2) will implement ROSEDUST using:
 
 - **Tailwind CSS 4** with custom theme tokens matching the ROSEDUST palette
-- **CSS custom properties** for dynamic theming (though always dark)
-- **WebGL** via react-three-fiber for Spectre rendering with full glow/bloom effects
-- **Framer Motion** or CSS transitions with the luxury easing curve
+- **CSS custom properties** for light, dark, and high-contrast variants over one token system
+- **SvelteKit** as the reference stack, with React-based implementations still possible later
+- **CSS transitions** with the luxury easing curve, respecting reduced-motion settings
+- Optional richer renderers for Spectre-heavy views rather than making WebGL a baseline requirement for every page
 
 ---
 
@@ -264,7 +265,7 @@ pub fn srgb_to_oklab(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 
 ### Color Harmony Construction
 
-The palette uses **analogous harmony** centered on rose (H ≈ 12°), with signal colors at harmonic intervals:
+The palette uses **analogous harmony** centered on rose (H ≈ 12°), with semantic colors at harmonic intervals:
 
 ```
 Rose family:    H = 8°–15°  (analogous cluster)
@@ -396,5 +397,5 @@ A ROSEDUST-branded heat gradient for sparklines and heat maps, interpolated in O
 
 - See [08-tui-main-layout.md](./08-tui-main-layout.md) for TUI layout using ROSEDUST
 - See [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) for Spectre colors
-- See [13-web-portal.md](./13-web-portal.md) for Web Portal implementation
+- See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md) for the first-party browser implementation
 - See topic [09-daimon](../09-daimon/INDEX.md) for behavioral state → color mappings

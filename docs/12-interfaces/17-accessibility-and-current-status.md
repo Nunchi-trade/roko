@@ -15,7 +15,7 @@
 
 Roko's interfaces target WCAG 2.1 AA compliance across the Web Portal, with equivalent access goals for the TUI and CLI. This document specifies accessibility requirements for each interface, including keyboard navigation, screen reader support, color contrast, reduced motion, and alternative text. It also provides the comprehensive port allocation table and the current implementation status of all interface components.
 
-REF23 adds a cross-surface requirement: every critical action available in TUI, Chat, or Web must also remain available as a CLI command, and the same verb set must be reachable through keyboard-only interaction on every surface. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+REF23 adds a cross-surface requirement: every critical action available in TUI, Chat, or Web must also remain available as a CLI command, and the same verb set must be reachable through keyboard-only interaction on every surface. REF29 then fixes the browser inventory: the first-party web UI should ship as five pages only, `Home`, `Chat`, `Plans`, `Beliefs`, and `Settings`, on top of StateHub and the shared realtime surface. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [13-web-portal.md](./13-web-portal.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md), and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
 
 ---
 
@@ -380,16 +380,6 @@ All CLI commands use standard exit codes for scripting:
 
 | Port | Service | Protocol | Notes |
 |---|---|---|---|
-| **3000** | Roko Portal (static) | HTTP | Next.js static export served by roko-serve |
-| **3001** | Roko Portal (dev) | HTTP | Next.js dev server |
-| **3002** | Reserved | — | Future Portal service |
-| **3003** | Reserved | — | Future Portal service |
-| **3004** | Reserved | — | Future Portal service |
-| **3005** | Reserved | — | Future Portal service |
-| **3006** | Reserved | — | Future Portal service |
-| **3007** | Reserved | — | Future Portal service |
-| **3008** | Reserved | — | Future Portal service |
-| **3009** | Reserved | — | Future Portal service |
 | **8080** | roko-serve API | HTTP/WS | REST, WebSocket, SSE endpoints |
 | **8081** | Reserved (tools) | — | Future tool service |
 | **8082** | Reserved (tools) | — | Future tool service |
@@ -400,12 +390,13 @@ All CLI commands use standard exit codes for scripting:
 
 ### Port Configuration
 
-Ports are configurable in `roko.toml`:
+The stable contract is only that the browser surface talks to the shared control plane and realtime ingress. The exact frontend origin, reverse proxy, or dev-server port is deployment-specific and should not be treated as canonical product API. A local development setup may run a frontend dev server next to `roko-serve`, but production may also serve the web assets through the same ingress.
+
+Back-end ports remain configurable in `roko.toml`:
 
 ```toml
 [serve]
-port = 8080       # API server port
-portal_port = 3000 # Portal static serving port
+port = 8080 # API server port
 
 [chain]
 anvil_port = 8545  # Local EVM port
@@ -446,7 +437,7 @@ roko-serve checks for port conflicts on startup:
 | CORS configuration | **Complete** | `routes/middleware.rs` |
 | WebSocket handler | **Scaffold** | `routes/ws.rs` |
 | SSE handler | **Scaffold** | `routes/sse.rs` |
-| Event bus | **Built** | `event_bus.rs` |
+| Bus relay layer | **Built** | `event_bus.rs` |
 | API endpoint implementations | **Partial** | Status, plans, agents basic |
 
 ### TUI (Scaffold)
@@ -461,7 +452,7 @@ roko-serve checks for port conflicts on startup:
 | Plan list view | **Built** | `tui/views/plans.rs` |
 | Config view | **Built** | `tui/views/config.rs` |
 | Log view | **Built** | `tui/views/logs.rs` |
-| Signal view | **Built** | `tui/views/signals.rs` |
+| Pulse view | **Built** | `tui/views/signals.rs` |
 | Agent grid widget | **Built** | `tui/widgets/agent_grid.rs` |
 | Plan tree widget | **Built** | `tui/widgets/plan_tree.rs` |
 | Status bar widget | **Built** | `tui/widgets/status_bar.rs` |
@@ -483,23 +474,22 @@ roko-serve checks for port conflicts on startup:
 | **System screens** | **Not built** | — |
 | **Spectre viewport** | **Not built** | — |
 
-### Web Portal (Not Built)
+### Web Portal / First-Party Web UI (Not Built)
 
 | Component | Status |
 |---|---|
-| Next.js application | **Not started** |
+| SvelteKit shell | **Not started** |
 | ROSEDUST Tailwind config | **Not started** |
-| Glass morphism components | **Not started** |
-| Dashboard page | **Not started** |
-| Agent Detail page | **Not started** |
-| Plan Detail page | **Not started** |
-| Collective Intelligence page | **Not started** |
-| Knowledge Explorer page | **Not started** |
-| System monitoring page | **Not started** |
-| Configuration page | **Not started** |
-| Episodes page | **Not started** |
-| WebGL Spectre renderer | **Not started** |
-| WebSocket integration | **Not started** |
+| Shared component library | **Not started** |
+| Home page | **Not started** |
+| Chat page | **Not started** |
+| Plans page | **Not started** |
+| Beliefs page | **Not started** |
+| Settings page | **Not started** |
+| Realtime connection and cursor resume | **Not started** |
+| Projection-store client layer | **Not started** |
+| Auth and session cookie flow | **Not started** |
+| PWA asset caching | **Not started** |
 | WCAG 2.1 AA compliance | **Not started** |
 
 ### Spectre System (Not Built)
@@ -524,7 +514,7 @@ roko-serve checks for port conflicts on startup:
 | Five-layer system | **Not started** |
 | Behavioral state presets | **Not started** |
 | Web Audio integration | **Not started** |
-| Event → sound mapping | **Not started** |
+| Pulse → sound mapping | **Not started** |
 
 ### Generative Interfaces / A2UI (Not Built)
 
@@ -546,8 +536,8 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 |---|---|---|
 | 1 | Interactive TUI (render loop, navigation) | Tier 4A |
 | 2 | WebSocket bidirectional agent control | Tier 4A |
-| 3 | Event coalescing and reconnection | Tier 4A |
-| 4 | Web Portal MVP (dashboard, agent detail) | Tier 4B |
+| 3 | Pulse coalescing and reconnection | Tier 4A |
+| 4 | Web Portal MVP (`Home` + `Chat`) | Tier 4B |
 | 5 | Spectre TUI ASCII renderer | Tier 4B |
 | 6 | Spectre WebGL renderer | Tier 4C |
 | 7 | Sonification engine | Tier 5 |
@@ -562,5 +552,5 @@ Based on `refactoring-prd/07-implementation-priorities.md`:
 - See [07-rosedust-design-language.md](./07-rosedust-design-language.md) for the color system and contrast ratios
 - See [08-tui-main-layout.md](./08-tui-main-layout.md) for the TUI rendering architecture
 - See [09-tui-29-screens.md](./09-tui-29-screens.md) for the screen inventory
-- See [13-web-portal.md](./13-web-portal.md) for the Portal technology stack
+- See [13-web-portal.md](./13-web-portal.md) and [tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md) for the first-party web UI scope and technology stack
 - See [16-sonification-reframed.md](./16-sonification-reframed.md) for the audio system
