@@ -110,6 +110,53 @@ weight = score.effective() × decay.apply(ctx.now_ms - created_at_ms)
 Pruning is an explicit storage concern. It is not a transport concern and does not affect
 Bus replay semantics.
 
+### 2.5 REF08 sketch: similarity query and Bus bridge
+
+The next snippet is illustrative, not normative. It shows the kind of extension that
+`tmp/refinements/08-code-sketches.md` sketches for Phase B: a similarity-oriented query
+method on HDC-backed substrates, plus the common "publish a Pulse after successful put"
+bridge used to inform live subscribers.
+
+```rust
+pub trait Substrate: Send + Sync {
+    async fn put(&self, engram: Engram) -> Result<ContentHash>;
+
+    /// Illustrative extension: similarity search over durable records.
+    async fn query_similar(
+        &self,
+        anchor: &ContentHash,
+        limit: usize,
+        ctx: &Context,
+    ) -> Result<Vec<Engram>>;
+}
+
+async fn put_and_broadcast<S: Substrate, B: Bus>(
+    substrate: &S,
+    bus: &B,
+    engram: Engram,
+) -> Result<ContentHash> {
+    let hash = substrate.put(engram.clone()).await?;
+
+    // Best-effort bridge: storage succeeds first, then a Pulse is emitted for live
+    // subscribers. The Pulse carries the stored Engram's identity as lineage.
+    let pulse = engram.to_pulse(
+        Topic::new("substrate.engram.stored"),
+        0,
+        PulseSource {
+            component: "substrate:file".into(),
+            agent_id: None,
+        },
+    );
+    let _ = bus.publish(pulse).await;
+
+    Ok(hash)
+}
+```
+
+That bridge is the important architectural point: Substrate remains the durable store,
+while Bus carries the notification stream that other operators can observe without
+creating a layer violation.
+
 ---
 
 ## 3. Implementations

@@ -10,7 +10,8 @@
 > **See also:** `tmp/refinements/01-critique-one-noun.md` for the diagnosis,
 > `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion,
-> `tmp/refinements/04-operators-generalized.md` for signature generalization, and
+> `tmp/refinements/04-operators-generalized.md` for signature generalization,
+> `tmp/refinements/08-code-sketches.md` for the illustrative Rust sketches, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md) for the canonical terminology map.
 
 > **Implementation:** Shipping v1 interfaces exist today; this document updates the architectural
@@ -78,6 +79,35 @@ The Bus is not a replacement for the six operators. It is the second fabric thos
 work alongside. In other words: six operations plus two fabric traits is the complete kernel
 grammar. REF03 gives Bus the full first-class treatment; REF04 generalizes the operators so the
 trait story matches the two-medium runtime.
+
+### 2.1 Illustrative Rust Shape
+
+REF08 adds the concrete sketch that this section only names. The snippet below is intentionally
+illustrative, not normative, and shows the trait-overview level shape for `Bus`, `Pulse`, and
+`Datum`:
+
+```rust
+pub trait Bus: Send + Sync {
+    async fn publish(&self, pulse: Pulse) -> Result<u64>;
+    async fn subscribe(&self, filter: TopicFilter) -> Result<BusReceiver>;
+}
+
+pub struct Pulse {
+    pub seq: u64,
+    pub topic: Topic,
+    pub kind: Kind,
+    pub body: Body,
+}
+
+pub enum Datum<'a> {
+    Engram(&'a Engram),
+    Pulse(&'a Pulse),
+}
+```
+
+The point is not the exact field list. The point is the separation of concerns: `Bus` carries
+live traffic, `Pulse` is the transport record, and `Datum` is the polymorphic input surface for
+operators that need to work over either medium.
 
 ---
 
@@ -273,6 +303,20 @@ REF02, REF03, and REF04 carry the concrete follow-on work:
 
 This document therefore marks the end of the old full-story claim, not the end of the operator
 model itself. The full story is now explicit: two mediums, two fabrics, six operators.
+
+### 11.4 Migration Note from REF08
+
+The code sketch appendix makes the migration direction easier to read from the trait table:
+
+- `Bus` is the live transport surface for Pulses, so runtime watchers and stream consumers should
+  be described in Bus terms rather than as storage helpers.
+- `Pulse` is the short-lived wire form, so stream-oriented reactions can publish a new Pulse even
+  when no durable record is needed.
+- `Datum` is the mixed-input adapter for operators that may consume either an Engram or a Pulse
+  without forcing a fake storage round-trip first.
+
+That is the practical bridge from the overview in this doc to the fuller sketches in
+`tmp/refinements/08-code-sketches.md`.
 
 ---
 

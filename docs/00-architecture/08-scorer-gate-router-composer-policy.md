@@ -4,7 +4,8 @@
 > kernel is two mediums (`Engram`, `Pulse`) moving through two fabrics (`Substrate`, `Bus`),
 > with six operators acting on them. The five operators here generalize over `Datum` or Pulse
 > streams where appropriate; the fabric traits remain explicit. See
-> `tmp/refinements/04-operators-generalized.md` for the canonical proposal and
+> `tmp/refinements/04-operators-generalized.md` for the canonical proposal,
+> `tmp/refinements/08-code-sketches.md` for illustrative Rust, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md) for the authoritative terminology.
 
 > **Reading order:** Start with [06-synapse-traits.md](./06-synapse-traits.md) for the
@@ -240,6 +241,78 @@ Common examples:
 
 Policy is the only breaking trait migration in this batch. The others are additive.
 
+## 6. REF08 Sketches: Operator Signatures In Motion
+
+REF04 gives the operator surface. REF08 shows how that surface behaves in code once live
+transport is explicit. The snippets below are illustrative excerpts rather than the full sketch;
+use `tmp/refinements/08-code-sketches.md` when you want the end-to-end Rust.
+
+### 6.1 Policy outputs drive the Bus directly
+
+The key operational point is that a reactive policy now consumes Pulse traffic and can emit both
+ephemeral follow-on work and durable records in one pass:
+
+```rust
+pub struct PolicyOutputs {
+    pub pulses: Vec<Pulse>,
+    pub engrams: Vec<Engram>,
+}
+
+pub struct PlanRevisionPolicy<B: Bus> {
+    bus: std::sync::Arc<B>,
+    threshold: usize,
+    failures: parking_lot::Mutex<std::collections::HashMap<String, usize>>,
+}
+```
+
+REF08's `PlanRevisionPolicy` subscribes to `gate.verdict.emitted`, counts consecutive failures,
+and publishes `plan.revision.requested` once a task crosses threshold. That is the clearest
+worked example of the revised `Policy` contract: watch live Pulses, react on the Bus, and
+graduate durable artifacts only when lineage or audit value matters.
+
+### 6.2 Bus mediation dissolves cross-layer imports
+
+The same sketch resolves the old conductor-layer violation by replacing a direct dependency with
+topic-mediated transport:
+
+```rust
+pub struct CircuitBreaker<B: Bus> {
+    bus: std::sync::Arc<B>,
+    threshold: f32,
+    current_rate: std::sync::atomic::AtomicU32,
+}
+```
+
+In the REF08 sketch, a learning-side policy publishes `gate.failure.rate`, while conductor
+subscribes and emits `conductor.circuit.tripped` when the threshold is crossed. No operator
+signature changes for that migration; the fix comes from using `Bus`, `Pulse`, `Topic`, and
+`TopicFilter` as the kernel boundary instead of reaching across layers for private types.
+
+### 6.3 The bridge for durable-first callers
+
+REF08 also sketches the migration bridge for durable-first subsystems:
+
+```rust
+impl Engram {
+    pub fn to_pulse(&self, topic: Topic, seq: u64, source: PulseSource) -> Pulse {
+        Pulse {
+            seq,
+            topic,
+            kind: self.kind.clone(),
+            body: self.body.clone(),
+            emitted_at_ms: self.created_at_ms,
+            source,
+            lineage_hint: Some(self.id.clone()),
+            trace_id: None,
+        }
+    }
+}
+```
+
+That bridge lets a `Substrate.put()` implementation publish `substrate.engram.stored` after a
+successful durable write. Existing durable workflows can therefore cross the cutover through a
+Bus topic instead of a temporary trait fork.
+
 ## Academic Foundations
 
 REF04 does not introduce a new research basis for these traits; it tightens the operator grammar
@@ -302,3 +375,5 @@ delete themselves only after the last caller has moved.
   plug into the current loop framing; REF05 retells that loop in seven steps.
 - `tmp/refinements/04-operators-generalized.md` is the canonical source for this signature
   generalization.
+- `tmp/refinements/08-code-sketches.md` is the canonical source for the illustrative Rust
+  migration sketches referenced here.
