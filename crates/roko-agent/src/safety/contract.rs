@@ -314,7 +314,22 @@ impl GovernanceRule {
                     ));
                 }
             }
-            Self::MaxCostPerTurn(_) | Self::MaxConsecutiveFailures(_) => {}
+            Self::MaxCostPerTurn(max) => {
+                if let Some(estimated_cost_usd) = estimated_cost_usd(call)
+                    && estimated_cost_usd > *max
+                {
+                    return Err(ContractViolation::new(
+                        role,
+                        "MaxCostPerTurn",
+                        format!("{estimated_cost_usd:.4} > {max:.4}"),
+                    ));
+                }
+                // TODO(UX26): enforce cumulative per-turn spend once tool-cost
+                // accounting is threaded into ToolContext.
+            }
+            // TODO(UX26): enforce consecutive-failure caps once dispatcher
+            // failure counters are exposed through ToolContext.
+            Self::MaxConsecutiveFailures(_) => {}
             Self::RequireToolBeforeEdit(required_tool) => {
                 if EDIT_TOOLS.contains(&call.name.as_str()) && !has_prior_tool(ctx, required_tool) {
                     return Err(ContractViolation::new(
@@ -387,6 +402,24 @@ fn estimated_tokens(call: &ToolCall) -> Option<u32> {
         .or_else(|| call.arguments.get("max_tokens").and_then(as_u32))
         .or_else(|| string_token_estimate(call.arguments.get("prompt")))
         .or_else(|| string_token_estimate(call.arguments.get("input")))
+}
+
+fn estimated_cost_usd(call: &ToolCall) -> Option<f64> {
+    call.arguments
+        .get("estimated_cost_usd")
+        .and_then(|value| value.as_f64())
+        .or_else(|| {
+            call.arguments
+                .get("cost_usd")
+                .and_then(|value| value.as_f64())
+        })
+        .or_else(|| {
+            call.arguments
+                .get("estimated_cost_usd_cents")
+                .and_then(|value| value.as_u64())
+                .and_then(|cents| u32::try_from(cents).ok())
+                .map(|cents| f64::from(cents) / 100.0)
+        })
 }
 
 fn as_u32(value: &serde_json::Value) -> Option<u32> {

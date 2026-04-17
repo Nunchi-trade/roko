@@ -3,6 +3,7 @@
 //! Uses exponential moving averages (EMA) per gate rung to track pass rates
 //! and suggest retry budgets and skip decisions.
 
+use roko_core::config::AgentThresholds;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -94,6 +95,24 @@ impl AdaptiveThresholds {
         self.rungs
             .get(&rung)
             .map_or(0.5, |stats| stats.ema_pass_rate)
+    }
+
+    /// Apply a role-local threshold floor over the adaptive EMA baseline.
+    #[must_use]
+    pub fn override_for_role(
+        &self,
+        _role: &str,
+        thresholds: Option<&AgentThresholds>,
+        rung: u32,
+    ) -> f64 {
+        let nominal = self.threshold_for(rung);
+        let Some(floor) = thresholds
+            .and_then(|thresholds| thresholds.gate_pass_rate_floor)
+            .filter(|floor| floor.is_finite())
+        else {
+            return nominal;
+        };
+        nominal.max(floor.clamp(0.0, 1.0))
     }
 
     /// Update statistics for a rung after a gate run.
@@ -237,5 +256,23 @@ mod tests {
 
         let loaded = AdaptiveThresholds::load_or_new(&path);
         assert_eq!(loaded.rung_stats(1).unwrap().total_observations, 10);
+    }
+
+    #[test]
+    fn role_override_raises_floor_without_lowering_nominal_threshold() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(1, false);
+        }
+
+        let strict = AgentThresholds {
+            gate_pass_rate_floor: Some(0.75),
+        };
+        assert_eq!(at.override_for_role("implementer", Some(&strict), 1), 0.75);
+
+        let lenient = AgentThresholds {
+            gate_pass_rate_floor: Some(0.10),
+        };
+        assert!(at.override_for_role("implementer", Some(&lenient), 1) >= at.threshold_for(1));
     }
 }

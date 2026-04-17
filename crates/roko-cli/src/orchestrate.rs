@@ -46,7 +46,9 @@ use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
-use roko_core::config::schema::{LearningConfig as RuntimeLearningConfig, RokoConfig};
+use roko_core::config::schema::{
+    LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
+};
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -782,6 +784,98 @@ fn provider_id_for_routing_model(
             .map(|profile| profile.provider)
             .unwrap_or_else(|| resolved.provider_kind.label().to_owned())
     })
+}
+
+fn find_role_override<'a>(config: &'a RokoConfig, role_label: &str) -> Option<&'a RoleOverride> {
+    config.agent.roles.get(role_label).or_else(|| {
+        config
+            .agent
+            .roles
+            .iter()
+            .find_map(|(section_name, override_cfg)| {
+                (override_cfg.resolved_role_name(section_name) == role_label)
+                    .then_some(override_cfg)
+            })
+    })
+}
+
+fn resolved_role_label(config: &RokoConfig, role_label: &str) -> String {
+    find_role_override(config, role_label)
+        .map(|override_cfg| override_cfg.resolved_role_name(role_label).to_string())
+        .unwrap_or_else(|| role_label.to_string())
+}
+
+fn model_matches_forced_backend(
+    config: &RokoConfig,
+    model_providers: &HashMap<String, String>,
+    model: &str,
+    forced_backend: &str,
+) -> bool {
+    let forced_backend = forced_backend.trim().to_ascii_lowercase();
+    if forced_backend.is_empty() {
+        return false;
+    }
+
+    let provider_id = provider_id_for_routing_model(config, model_providers, model);
+    if provider_id.eq_ignore_ascii_case(&forced_backend) {
+        return true;
+    }
+
+    match resolve_model(config, model).backend {
+        roko_core::agent::AgentBackend::Claude => forced_backend == "claude",
+        roko_core::agent::AgentBackend::Codex => {
+            forced_backend == "codex"
+                || forced_backend == "openai"
+                || forced_backend == "openai_compat"
+        }
+        roko_core::agent::AgentBackend::Cursor => forced_backend == "cursor",
+        roko_core::agent::AgentBackend::Ollama => forced_backend == "ollama",
+        roko_core::agent::AgentBackend::OpenAi => {
+            forced_backend == "openai" || forced_backend == "openai_compat"
+        }
+        roko_core::agent::AgentBackend::Perplexity => {
+            forced_backend == "perplexity" || forced_backend == "sonar"
+        }
+        _ => false,
+    }
+}
+
+fn apply_role_routing_override(
+    config: &RokoConfig,
+    role_label: &str,
+    model_providers: &HashMap<String, String>,
+    candidates: &[String],
+) -> Option<(String, String)> {
+    let role_override = find_role_override(config, role_label)?;
+
+    if let Some(model) = role_override.model.as_deref().map(str::trim)
+        && !model.is_empty()
+    {
+        return Some((model.to_string(), "role_model_override".to_string()));
+    }
+
+    if let Some(routing_overrides) = role_override.routing_overrides.as_ref() {
+        if let Some(force_tier) = routing_overrides.force_tier.as_deref().map(str::trim)
+            && let Some(model) = config.agent.tier_models.get(force_tier)
+        {
+            return Some((model.clone(), "role_force_tier".to_string()));
+        }
+
+        if let Some(force_backend) = routing_overrides.force_backend.as_deref()
+            && let Some(model) = candidates
+                .iter()
+                .find(|model| {
+                    model_matches_forced_backend(config, model_providers, model, force_backend)
+                })
+                .cloned()
+        {
+            // TODO(UX34): persist backend-only overrides into the cascade
+            // router's static role table instead of resolving them per dispatch.
+            return Some((model, "role_force_backend".to_string()));
+        }
+    }
+
+    None
 }
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
@@ -2554,6 +2648,8 @@ struct TaskTracker {
     last_impl_task_id: Option<String>,
     /// Model slug used by the most recently dispatched implementation task.
     last_impl_model_slug: Option<String>,
+    /// Runtime role label used by the most recent agent dispatch for this plan.
+    last_dispatch_role_label: Option<String>,
     /// Output hash from the most recent implementation dispatch.
     last_impl_output_hash: Option<ContentHash>,
     /// Knowledge entry ids surfaced in the most recent task context.
@@ -2805,6 +2901,7 @@ impl TaskTracker {
             last_gate_failure_phase: None,
             last_impl_task_id: None,
             last_impl_model_slug: None,
+            last_dispatch_role_label: None,
             last_impl_output_hash: None,
             last_context_knowledge_ids: Vec::new(),
             last_gate_verdicts: Vec::new(),
@@ -10822,6 +10919,10 @@ impl PlanRunner {
                 RokoConfig::default()
             }
         };
+        let resolved_dispatch_role_label = resolved_role_label(&roko_config, role.label());
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker.last_dispatch_role_label = Some(resolved_dispatch_role_label.clone());
+        }
         let model_providers = routing_model_provider_map(&roko_config);
         let pending_force_model_override =
             if task_def.is_some() && explicit_model_override.is_none() {
@@ -10846,6 +10947,14 @@ impl PlanRunner {
                 "applying pending cost-anomaly model override before routing"
             );
             selected_model = forced_model;
+        } else if task_def.is_none() {
+            if let Some((role_model, reason)) =
+                apply_role_routing_override(&roko_config, role.label(), &model_providers, &[])
+            {
+                selected_model = role_model;
+                routing_reason = reason;
+                routing_stage = "static".to_string();
+            }
         } else if let Some(td) = task_def.as_ref() {
             let cascade_router = self.learning.cascade_router();
             let mut routing_ctx = cascade_routing_context(self, plan_id, task, role, Some(td));
@@ -10933,77 +11042,90 @@ impl PlanRunner {
                 }
             };
 
-            routing_explanation =
-                Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
-            if let Some(explanation) = routing_explanation.as_ref() {
-                routing_stage = explanation.stage.label().to_string();
-                routing_reason = if cost_spike {
-                    "cost_spike"
-                } else if !routing_bias.deprioritize.is_empty() {
-                    "conductor_deprioritize"
-                } else if routing_bias.prefer_cheaper {
-                    "conductor_prefer_cheaper"
-                } else {
-                    match explanation.stage {
-                        roko_learn::cascade_router::CascadeStage::Static => "role_default",
-                        roko_learn::cascade_router::CascadeStage::Confidence => {
-                            "highest_confidence_score"
-                        }
-                        roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
-                    }
-                }
-                .to_string();
-            }
-            let cfactor_snapshot = match self.learning.latest_cfactor().await {
-                Ok(snapshot) => snapshot,
-                Err(err) => {
-                    tracing::debug!("[orchestrate] failed to read latest C-Factor: {err}");
-                    None
-                }
-            };
-
-            let experiment_store =
-                ModelExperimentStore::load_or_new(&model_experiments_path(&self.workdir));
-            if let Some((experiment_id, variant)) = experiment_store.assign_model_with_experiment(
-                routing_ctx.role.label(),
-                routing_ctx.task_category.label(),
+            if let Some((role_model, reason)) = apply_role_routing_override(
+                &roko_config,
+                role.label(),
+                &model_providers,
+                &healthy_models,
             ) {
-                tracing::info!(
-                    experiment_id = %experiment_id,
-                    variant_id = %variant.id,
-                    model = %variant.slug,
-                    "[orchestrate] model experiment override selected variant"
-                );
-                selected_model_experiment = Some(SelectedModelExperiment {
-                    experiment_id,
-                    variant_id: variant.id.clone(),
-                    model_slug: variant.slug.clone(),
-                });
-                selected_model = variant.slug;
-                routing_reason = "experiment_override".to_string();
+                selected_model = role_model;
+                routing_reason = reason;
+                routing_stage = "static".to_string();
             } else {
-                match cascade_router.select_for_frequency_among(
-                    frequency,
-                    Some(&routing_ctx),
-                    cfactor_snapshot.as_ref(),
-                    Some(agent_id.as_str()),
-                    &healthy_models,
-                ) {
-                    Some(model) => {
-                        tracing::info!(
-                            "[orchestrate] frequency={} model={} healthy_candidates={} (selected via cascade)",
-                            frequency_label(frequency),
-                            model.slug,
-                            healthy_models.len()
-                        );
-                        selected_model = model.slug;
+                routing_explanation =
+                    Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
+                if let Some(explanation) = routing_explanation.as_ref() {
+                    routing_stage = explanation.stage.label().to_string();
+                    routing_reason = if cost_spike {
+                        "cost_spike"
+                    } else if !routing_bias.deprioritize.is_empty() {
+                        "conductor_deprioritize"
+                    } else if routing_bias.prefer_cheaper {
+                        "conductor_prefer_cheaper"
+                    } else {
+                        match explanation.stage {
+                            roko_learn::cascade_router::CascadeStage::Static => "role_default",
+                            roko_learn::cascade_router::CascadeStage::Confidence => {
+                                "highest_confidence_score"
+                            }
+                            roko_learn::cascade_router::CascadeStage::Ucb => "highest_ucb_score",
+                        }
                     }
-                    None => {
-                        tracing::info!(
-                            "[orchestrate] frequency={} (reactive; bypassing model selection)",
-                            frequency_label(frequency)
-                        );
-                        routing_reason = "reactive_bypass".to_string();
+                    .to_string();
+                }
+                let cfactor_snapshot = match self.learning.latest_cfactor().await {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        tracing::debug!("[orchestrate] failed to read latest C-Factor: {err}");
+                        None
+                    }
+                };
+
+                let experiment_store =
+                    ModelExperimentStore::load_or_new(&model_experiments_path(&self.workdir));
+                if let Some((experiment_id, variant)) = experiment_store
+                    .assign_model_with_experiment(
+                        routing_ctx.role.label(),
+                        routing_ctx.task_category.label(),
+                    )
+                {
+                    tracing::info!(
+                        experiment_id = %experiment_id,
+                        variant_id = %variant.id,
+                        model = %variant.slug,
+                        "[orchestrate] model experiment override selected variant"
+                    );
+                    selected_model_experiment = Some(SelectedModelExperiment {
+                        experiment_id,
+                        variant_id: variant.id.clone(),
+                        model_slug: variant.slug.clone(),
+                    });
+                    selected_model = variant.slug;
+                    routing_reason = "experiment_override".to_string();
+                } else {
+                    match cascade_router.select_for_frequency_among(
+                        frequency,
+                        Some(&routing_ctx),
+                        cfactor_snapshot.as_ref(),
+                        Some(agent_id.as_str()),
+                        &healthy_models,
+                    ) {
+                        Some(model) => {
+                            tracing::info!(
+                                "[orchestrate] frequency={} model={} healthy_candidates={} (selected via cascade)",
+                                frequency_label(frequency),
+                                model.slug,
+                                healthy_models.len()
+                            );
+                            selected_model = model.slug;
+                        }
+                        None => {
+                            tracing::info!(
+                                "[orchestrate] frequency={} (reactive; bypassing model selection)",
+                                frequency_label(frequency)
+                            );
+                            routing_reason = "reactive_bypass".to_string();
+                        }
                     }
                 }
             }
@@ -11668,7 +11790,7 @@ impl PlanRunner {
                     bare_mode: self.config.agent.bare_mode,
                     dangerously_skip_permissions: claude_skip_permissions_for_role(role),
                     name: String::new(),
-                    role: Some(role.label().to_string()),
+                    role: Some(resolved_dispatch_role_label.clone()),
                 },
                 format!("create agent for model {selected_model}"),
             )?;
@@ -11750,7 +11872,7 @@ impl PlanRunner {
                         bare_mode: self.config.agent.bare_mode,
                         dangerously_skip_permissions: false,
                         name: String::new(),
-                        role: Some(role.label().to_string()),
+                        role: Some(resolved_dispatch_role_label.clone()),
                     },
                     format!(
                         "create known-protocol subprocess agent for {}",
@@ -11778,7 +11900,7 @@ impl PlanRunner {
                         bare_mode: self.config.agent.bare_mode,
                         dangerously_skip_permissions: false,
                         name: String::new(),
-                        role: Some(role.label().to_string()),
+                        role: Some(resolved_dispatch_role_label.clone()),
                     },
                     format!(
                         "create generic subprocess agent for {}",
@@ -12261,7 +12383,7 @@ impl PlanRunner {
         }
         let payload_sig = maybe_attest_engram(payload_builder.build());
 
-        let verdicts = self.run_gate_rung(&payload_sig, rung).await;
+        let verdicts = self.run_gate_rung(Some(plan_id), &payload_sig, rung).await;
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_gate_verdicts = verdicts
                 .iter()
@@ -12439,7 +12561,7 @@ impl PlanRunner {
             .tag("rung", "post-merge")
             .build();
 
-        let verdicts = self.run_gate_rung(&payload_sig, 3).await;
+        let verdicts = self.run_gate_rung(Some(plan_id), &payload_sig, 3).await;
         let merged_at_ms = now_unix_ms_i64();
         let (_check, follow_up) =
             self.post_merge
@@ -12523,8 +12645,22 @@ impl PlanRunner {
         Ok(handle.path)
     }
 
-    fn gate_rung_config(&self, rung: u32) -> RungExecutionConfig {
-        let nominal = self.adaptive_thresholds.threshold_for(rung);
+    fn gate_rung_config(&self, plan_id: Option<&str>, rung: u32) -> RungExecutionConfig {
+        let nominal = plan_id
+            .and_then(|plan_id| self.task_trackers.get(plan_id))
+            .and_then(|tracker| tracker.last_dispatch_role_label.as_deref())
+            .and_then(|role_label| {
+                let config = load_roko_config(&self.workdir).ok()?;
+                Some(
+                    self.adaptive_thresholds.override_for_role(
+                        role_label,
+                        find_role_override(&config, role_label)
+                            .and_then(|role_override| role_override.thresholds.as_ref()),
+                        rung,
+                    ),
+                )
+            })
+            .unwrap_or_else(|| self.adaptive_thresholds.threshold_for(rung));
         let mut config = RungExecutionConfig::default();
         if rung == 5 {
             config.fact_check_min_confidence = Some(nominal);
@@ -12538,18 +12674,23 @@ impl PlanRunner {
         config
     }
 
-    async fn run_gate_rung(&self, payload_sig: &Engram, rung: u32) -> Vec<Verdict> {
+    async fn run_gate_rung(
+        &self,
+        plan_id: Option<&str>,
+        payload_sig: &Engram,
+        rung: u32,
+    ) -> Vec<Verdict> {
         let ctx = Context::now();
         let inputs = RungExecutionInputs::default();
         if rung > 6 {
             let mut verdicts = Vec::new();
             for current_rung in 0..=6 {
-                let config = self.gate_rung_config(current_rung);
+                let config = self.gate_rung_config(plan_id, current_rung);
                 verdicts.extend(run_rung(payload_sig, &ctx, current_rung, &inputs, &config).await);
             }
             return verdicts;
         }
-        let config = self.gate_rung_config(rung);
+        let config = self.gate_rung_config(plan_id, rung);
         run_rung(payload_sig, &ctx, rung, &inputs, &config).await
     }
 

@@ -33,6 +33,16 @@ focused = "claude-sonnet-4-6"
 integrative = "claude-sonnet-4-6"
 architectural = "claude-opus-4-6"
 
+# Per-role runtime overrides.
+# [agent.roles.implementer]
+# role = "code_implementer"
+# model = "claude-opus-4-6"
+# tools = ["read_file", "edit_file", "git-*"]
+# budget = { max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 500 }
+# thresholds = { gate_pass_rate_floor = 0.70 }
+# routing_overrides = { force_backend = "claude", force_tier = "focused" }
+# legacy: turn_budget_usd = 5.0
+
 # Retry escalation: on failure, escalate to next tier's model
 # mechanical → focused → integrative → architectural → human
 [agent.escalation]

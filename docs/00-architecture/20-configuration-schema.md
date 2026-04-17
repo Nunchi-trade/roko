@@ -70,18 +70,25 @@ pub struct RokoConfig {
 | Parameter | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `default_model` | String | `"claude-sonnet-4-6"` | valid model slug | Default model for all roles |
-| `max_turns` | u32 | `200` | 1 - 1,000 | Max conversation turns per agent |
-| `max_tool_calls` | u32 | `100` | 1 - 500 | Max tool calls per turn |
-| `mcp_config` | Option\<PathBuf\> | None | valid path | Path to MCP server config |
+| `default_backend` | String | `"claude"` | valid backend label | Default backend/provider family |
+| `default_effort` | String | `"medium"` | low, medium, high, max | Default reasoning effort |
+| `context_limit_k` | u32 | `200` | 1 - 1,000 | Context window limit in thousands of tokens |
 | `roles` | HashMap\<String, RoleOverride\> | empty | -- | Per-role model/parameter overrides |
 
 Per-role overrides (`[agent.roles.<name>]`):
 
 | Parameter | Type | Default | Range | Description |
 |---|---|---|---|---|
+| `role` | Option\<String\> | None (use section name) | any non-empty role label | Override the runtime role/contract label |
 | `model` | Option\<String\> | None (use default) | valid model slug | Model override for this role |
-| `temperature` | Option\<f32\> | None | 0.0 - 2.0 | Temperature override |
-| `max_tokens` | Option\<u32\> | None | 1 - 200,000 | Max output tokens override |
+| `backend` | Option\<String\> | None | valid backend label | Backend override for this role |
+| `effort` | Option\<String\> | None | low, medium, high, max | Reasoning effort override |
+| `context_limit_k` | Option\<u32\> | None | 1 - 1,000 | Context window override in thousands of tokens |
+| `tools` | Option\<Vec\<String\>\> | None | tool names / globs | Role-local tool whitelist |
+| `budget` | Option\<AgentBudget\> | None | -- | Per-turn token and cost caps |
+| `thresholds` | Option\<AgentThresholds\> | None | -- | Adaptive gate-threshold overrides |
+| `routing_overrides` | Option\<RoutingOverrides\> | None | -- | Force backend/tier during routing |
+| `turn_budget_usd` | Option\<f32\> | None | 0.0+ | Legacy per-turn USD cap; folded into `budget` |
 
 ### 2.4 Providers (`[providers.<name>]`)
 

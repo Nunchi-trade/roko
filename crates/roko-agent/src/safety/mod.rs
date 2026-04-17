@@ -44,7 +44,7 @@ use roko_core::config::schema::{RokoConfig, RoleOverride};
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
-use self::contract::AgentContract;
+use self::contract::{AgentContract, GovernanceRule, Invariant};
 use self::git::GitPolicy;
 use self::network::NetworkPolicy;
 use self::path::PathPolicy;
@@ -100,6 +100,8 @@ pub struct SafetyLayer {
     pub warrant: Option<AgentWarrant>,
     /// Role-local tool whitelists loaded from config.
     role_tools: HashMap<String, ToolWhitelist>,
+    /// Role overrides keyed by both section name and any explicit role alias.
+    role_overrides: HashMap<String, RoleOverride>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,6 +141,7 @@ impl SafetyLayer {
             contract: AgentContract::permissive("default"),
             warrant: None,
             role_tools: HashMap::new(),
+            role_overrides: HashMap::new(),
         }
     }
 
@@ -147,6 +150,7 @@ impl SafetyLayer {
     pub fn from_config(config: &RokoConfig) -> Self {
         let mut layer = Self::with_defaults();
         layer.role_tools = build_role_tools(&config.agent.roles);
+        layer.role_overrides = build_role_overrides_map(&config.agent.roles);
         layer
     }
 
@@ -154,14 +158,7 @@ impl SafetyLayer {
     #[must_use]
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         let role = role.into();
-        self.contract = AgentContract::load_for_role(&role).unwrap_or_else(|err| {
-            tracing::warn!(
-                %role,
-                %err,
-                "no contract for role; using permissive default"
-            );
-            AgentContract::permissive(role.clone())
-        });
+        self.contract = self.contract_for_role(&role);
         self.role = role;
         self
     }
@@ -319,18 +316,69 @@ impl SafetyLayer {
     pub fn scrub_text(&self, content: &str) -> String {
         scrub::scrub_secrets(content, &self.scrub_policy)
     }
+
+    fn contract_for_role(&self, role: &str) -> AgentContract {
+        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+            tracing::warn!(
+                %role,
+                %err,
+                "no contract for role; using permissive default"
+            );
+            AgentContract::permissive(role.to_string())
+        });
+
+        if let Some(role_override) = self.role_overrides.get(role)
+            && let Some(budget) = role_override.effective_budget()
+        {
+            if let Some(max_tokens) = budget.max_tokens_per_turn {
+                contract
+                    .invariants
+                    .push(Invariant::MaxTokensPerTurn(max_tokens));
+            }
+            if let Some(max_cost_usd) = budget.max_cost_usd_per_turn() {
+                contract
+                    .governance
+                    .push(GovernanceRule::MaxCostPerTurn(max_cost_usd));
+            }
+        }
+
+        contract
+    }
 }
 
 fn build_role_tools(roles: &HashMap<String, RoleOverride>) -> HashMap<String, ToolWhitelist> {
-    roles
-        .iter()
-        .filter_map(|(role, override_cfg)| {
-            override_cfg
-                .tools
-                .as_ref()
-                .map(|tools| (role.clone(), ToolWhitelist::from_patterns(tools)))
-        })
-        .collect()
+    let mut role_tools = HashMap::new();
+    for (role, override_cfg) in roles {
+        let Some(tools) = override_cfg.tools.as_ref() else {
+            continue;
+        };
+        let whitelist = ToolWhitelist::from_patterns(tools);
+        for key in role_override_keys(role, override_cfg) {
+            role_tools.insert(key, whitelist.clone());
+        }
+    }
+    role_tools
+}
+
+fn build_role_overrides_map(
+    roles: &HashMap<String, RoleOverride>,
+) -> HashMap<String, RoleOverride> {
+    let mut role_overrides = HashMap::new();
+    for (role, override_cfg) in roles {
+        for key in role_override_keys(role, override_cfg) {
+            role_overrides.insert(key, override_cfg.clone());
+        }
+    }
+    role_overrides
+}
+
+fn role_override_keys(section_name: &str, override_cfg: &RoleOverride) -> Vec<String> {
+    let mut keys = vec![section_name.to_string()];
+    let resolved = override_cfg.resolved_role_name(section_name);
+    if resolved != section_name {
+        keys.push(resolved.to_string());
+    }
+    keys
 }
 
 fn glob_to_regex(pattern: &str) -> Regex {

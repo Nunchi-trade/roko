@@ -263,13 +263,16 @@ Users can override any role default in `roko.toml`:
 
 ```toml
 [agent.roles.implementer]
+role = "code_implementer"
 model = "claude-opus-4-6"
-timeout_ms = 300000
-budget_usd = 5.00
+tools = ["read_file", "edit_file", "git-*"]
+budget = { max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 500 }
+thresholds = { gate_pass_rate_floor = 0.70 }
+routing_overrides = { force_backend = "claude", force_tier = "focused" }
 
 [agent.roles.conductor]
 model = "claude-haiku-4-5"
-budget_usd = 0.05
+budget = { max_cost_usd_cents_per_turn = 5 }
 ```
 
 The override hierarchy is:

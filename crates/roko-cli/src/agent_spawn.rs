@@ -67,13 +67,25 @@ fn role_scoped_safety_layer(
     role: Option<&str>,
     layer: Option<SafetyLayer>,
 ) -> Option<SafetyLayer> {
-    let role = role.map(str::trim).filter(|role| !role.is_empty());
+    let role = role
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(|role| resolved_role_label(config, role));
     let layer = layer.or_else(|| Some(SafetyLayer::from_config(config)));
-    match (layer, role) {
+    match (layer, role.as_deref()) {
         (Some(layer), Some(role)) => Some(layer.with_role(role)),
         (None, Some(role)) => Some(SafetyLayer::from_config(config).with_role(role)),
         (layer, None) => layer,
     }
+}
+
+fn resolved_role_label(config: &RokoConfig, requested_role: &str) -> String {
+    config
+        .agent
+        .roles
+        .get(requested_role)
+        .map(|role_override| role_override.resolved_role_name(requested_role).to_string())
+        .unwrap_or_else(|| requested_role.to_string())
 }
 
 /// Create an agent under the current scoped safety layer.

@@ -213,10 +213,21 @@ impl RokoConfig {
 
         let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
         let _ = writeln!(out, "# [agent.roles.implementer]");
+        let _ = writeln!(out, "# role = \"implementer\"");
         let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
         let _ = writeln!(out, "# effort = \"high\"");
-        let _ = writeln!(out, "# context_limit_k = 200\n");
-        let _ = writeln!(out, "# tools = [\"read\", \"edit\", \"bash\", \"git-*\"]\n");
+        let _ = writeln!(out, "# context_limit_k = 200");
+        let _ = writeln!(out, "# tools = [\"read\", \"edit\", \"bash\", \"git-*\"]");
+        let _ = writeln!(
+            out,
+            "# budget = {{ max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 500 }}"
+        );
+        let _ = writeln!(out, "# thresholds = {{ gate_pass_rate_floor = 0.65 }}");
+        let _ = writeln!(
+            out,
+            "# routing_overrides = {{ force_backend = \"claude\", force_tier = \"focused\" }}"
+        );
+        let _ = writeln!(out, "# legacy: turn_budget_usd = 5.0\n");
     }
 
     fn write_example_gates(out: &mut String, cfg: &Self) {
@@ -1358,12 +1369,56 @@ impl Default for AgentConfig {
     }
 }
 
+/// Per-role spend and token caps under `[agent.roles.<role>]`.
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f64 via derived helpers
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentBudget {
+    /// Estimated token ceiling for a single turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_turn: Option<u32>,
+    /// Estimated spend ceiling for a single turn, expressed in USD cents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd_cents_per_turn: Option<u32>,
+}
+
+impl AgentBudget {
+    /// Convert the configured USD-cent ceiling into a USD float.
+    #[must_use]
+    pub fn max_cost_usd_per_turn(&self) -> Option<f64> {
+        self.max_cost_usd_cents_per_turn
+            .map(|cents| f64::from(cents) / 100.0)
+    }
+}
+
+/// Per-role adaptive-threshold overrides under `[agent.roles.<role>]`.
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f64
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentThresholds {
+    /// Minimum pass-rate floor applied over adaptive gate thresholds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_pass_rate_floor: Option<f64>,
+}
+
+/// Per-role routing overrides under `[agent.roles.<role>]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingOverrides {
+    /// Force routing to a specific backend/provider family when possible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_backend: Option<String>,
+    /// Force routing to the configured model tier when possible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_tier: Option<String>,
+}
+
 /// Per-role override under `[agent.roles.<role>]`.
 ///
 /// Every field is optional; absent means "use the agent-level default".
-#[allow(clippy::derive_partial_eq_without_eq)] // contains f32
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f32/f64 via nested fields
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoleOverride {
+    /// Explicit runtime role label override; defaults to the section name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Model slug override for this role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1379,9 +1434,58 @@ pub struct RoleOverride {
     /// Role-local tool whitelist; absent means no additional restriction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// Per-turn token and cost caps for this role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<AgentBudget>,
+    /// Per-role adaptive-threshold overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<AgentThresholds>,
+    /// Per-role routing overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_overrides: Option<RoutingOverrides>,
     /// Turn budget override (USD).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_budget_usd: Option<f32>,
+}
+
+impl RoleOverride {
+    /// Resolve the effective runtime role label for this config section.
+    #[must_use]
+    pub fn resolved_role_name<'a>(&'a self, section_name: &'a str) -> &'a str {
+        self.role
+            .as_deref()
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
+            .unwrap_or(section_name)
+    }
+
+    /// Return the effective per-turn budget, folding the legacy
+    /// `turn_budget_usd` field into the nested `budget` block.
+    #[must_use]
+    pub fn effective_budget(&self) -> Option<AgentBudget> {
+        let mut budget = self.budget.clone().unwrap_or_default();
+        if budget.max_cost_usd_cents_per_turn.is_none() {
+            budget.max_cost_usd_cents_per_turn =
+                self.turn_budget_usd.and_then(usd_to_cents_per_turn);
+        }
+        (budget.max_tokens_per_turn.is_some() || budget.max_cost_usd_cents_per_turn.is_some())
+            .then_some(budget)
+    }
+}
+
+fn usd_to_cents_per_turn(usd: f32) -> Option<u32> {
+    let usd = f64::from(usd);
+    if !usd.is_finite() || usd.is_sign_negative() {
+        return None;
+    }
+    let cents = (usd * 100.0).round();
+    if cents > f64::from(u32::MAX) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        Some(cents as u32)
+    }
 }
 
 // ---- [gates] -------------------------------------------------------------
@@ -3393,10 +3497,14 @@ default_model = "claude-opus-4-6"
 default_effort = "high"
 
 [agent.roles.implementer]
+role = "code_implementer"
 model = "claude-sonnet-4-6"
 effort = "max"
 tools = ["read_file", "git-*"]
 context_limit_k = 300
+budget = { max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 550 }
+thresholds = { gate_pass_rate_floor = 0.72 }
+routing_overrides = { force_backend = "claude", force_tier = "focused" }
 
 [agent.roles.architect]
 model = "claude-opus-4-6"
@@ -3407,6 +3515,7 @@ turn_budget_usd = 5.0
         assert_eq!(cfg.agent.default_effort, "high");
 
         let imp = cfg.agent.roles.get("implementer").expect("implementer");
+        assert_eq!(imp.role.as_deref(), Some("code_implementer"));
         assert_eq!(imp.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(imp.effort.as_deref(), Some("max"));
         assert_eq!(
@@ -3414,10 +3523,36 @@ turn_budget_usd = 5.0
             Some(&["read_file".to_string(), "git-*".to_string()][..])
         );
         assert_eq!(imp.context_limit_k, Some(300));
+        assert_eq!(
+            imp.effective_budget(),
+            Some(AgentBudget {
+                max_tokens_per_turn: Some(12_000),
+                max_cost_usd_cents_per_turn: Some(550),
+            })
+        );
+        assert_eq!(
+            imp.thresholds
+                .as_ref()
+                .and_then(|thresholds| thresholds.gate_pass_rate_floor),
+            Some(0.72)
+        );
+        assert_eq!(
+            imp.routing_overrides
+                .as_ref()
+                .and_then(|routing| routing.force_backend.as_deref()),
+            Some("claude")
+        );
 
         let arch = cfg.agent.roles.get("architect").expect("architect");
         assert_eq!(arch.model.as_deref(), Some("claude-opus-4-6"));
         assert!((arch.turn_budget_usd.expect("budget") - 5.0).abs() < f32::EPSILON);
+        assert_eq!(
+            arch.effective_budget(),
+            Some(AgentBudget {
+                max_tokens_per_turn: None,
+                max_cost_usd_cents_per_turn: Some(500),
+            })
+        );
     }
 
     #[test]
@@ -4026,10 +4161,14 @@ model = "opus"
 "#;
         let cfg = RokoConfig::from_toml(toml).expect("parse");
         let imp = cfg.agent.roles.get("implementer").expect("role");
+        assert!(imp.role.is_none());
         assert_eq!(imp.model.as_deref(), Some("opus"));
         assert!(imp.effort.is_none());
         assert!(imp.backend.is_none());
         assert!(imp.context_limit_k.is_none());
+        assert!(imp.budget.is_none());
+        assert!(imp.thresholds.is_none());
+        assert!(imp.routing_overrides.is_none());
         assert!(imp.turn_budget_usd.is_none());
     }
 
