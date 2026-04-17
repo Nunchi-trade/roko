@@ -1,12 +1,25 @@
 # The Universal Cognitive Loop
 
-> **Abstract:** Every agent in Roko runs the same seven-step cognitive loop at its own timescale. This revision replaces the older nine-step framing with a version that treats `Pulse` and `Bus` as first-class, makes `PERSIST` and `BROADCAST` co-equal in step 6, and moves Neuro, Daimon, and Dreams out of the loop sequence and into the operators they actually influence. See also [tmp/refinements/05-loop-retold.md](../../tmp/refinements/05-loop-retold.md) and [Naming Map and Glossary](01-naming-and-glossary.md).
+> **Abstract:** This chapter describes the target seven-step cognitive loop that every agent
+> in Roko should run at its own timescale. It replaces the older nine-step framing with a
+> version that treats `Pulse` and `Bus` as first-class, makes `PERSIST` and `BROADCAST`
+> co-equal in step 6, and moves Neuro, Daimon, and Dreams out of the loop sequence and into
+> the operators they actually influence. See also
+> [tmp/refinements/05-loop-retold.md](../../tmp/refinements/05-loop-retold.md) and
+> [Naming Map and Glossary](01-naming-and-glossary.md).
 
-> **Implementation status:** Shipping
+> **Implementation status**: Mixed current and target-state. The seven-step loop is the target
+> kernel framing. Current runtime behavior still includes Substrate-first/default paths, and
+> Bus-mediated broadcast is only partially wired through `EventBus<RokoEvent>` for
+> `PlanRevision` and `PrdPublished`.
 
 ---
 
 ## 1. The Seven-Step Loop
+
+> **Implementation status**: This loop is the target architecture. It is directionally aligned
+> with the runtime, but the full `Pulse`/`Bus` path is not yet the uniformly shipped control
+> flow.
 
 ```
 1. SENSE      → Substrate.query | Bus.subscribe | external I/O
@@ -65,6 +78,10 @@ This keeps verification tied to the actual action path instead of treating it as
 
 ### Step 6: PERSIST and BROADCAST
 
+> **Implementation status**: `PERSIST` is wired today through the FileSubstrate path.
+> `BROADCAST` as a general Bus-mediated step is target-state; current runtime event emission
+> is limited to `PlanRevision` and `PrdPublished`.
+
 Step 6 is intentionally split into two co-equal operations that happen together.
 
 * `PERSIST` writes Engrams into the Substrate with lineage intact.
@@ -98,9 +115,13 @@ The same seven-step loop runs at three cognitive speeds:
 
 The speed changes the budget and scope, not the structure of the loop.
 
-## 5. Shipping Implementation
+## 5. Target-State Implementation Sketch
 
-The shipping `loop_tick` path should be read as the minimal kernel version of the seven-step model, with Bus integration added alongside the existing Substrate path.
+> **Implementation status**: The code below is an architectural sketch for the Bus-aware
+> target path, not a verbatim description of the current `roko-core` API.
+
+This sketch shows the minimal kernel version of the seven-step model with Bus integration
+added alongside the existing Substrate path.
 
 ```rust
 pub struct TickConfig<'a> {
@@ -167,7 +188,7 @@ The important architectural point is that Bus support is additive, not a replace
 
 ## 6. Why This Is the Right Shape
 
-The revised loop matches the system the runtime actually runs:
+The revised loop describes the system the runtime is targeting:
 
 * It separates durable knowledge from live transport.
 * It collapses score-and-route into one decision point.

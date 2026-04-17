@@ -7,7 +7,10 @@
 > `roko-defaults` + `roko-tools`, `roko-compose` → `roko-compose-core` + `roko-templates`), and a dep graph that
 > keeps implementations replaceable without cross-layer leakage.
 
-> **Implementation**: Shipping for the current workspace; target boundaries are proposed, not all yet shipping.
+> **Implementation status**: Mixed current and target-state. This file documents the current
+> workspace plus the target crate boundaries proposed by REF20. `roko-bus`, `roko-hdc`,
+> `roko-spi`, `roko-defaults`, `roko-tools`, `roko-compose-core`, and `roko-templates` are
+> target crates or target splits unless explicitly marked as existing.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [01-naming-and-glossary](./01-naming-and-glossary.md)
@@ -60,7 +63,8 @@ The current workspace has the following load-bearing crates relevant to the modu
 | `roko-orchestrator` | Planning and scheduling | Application-level coordination. |
 | `roko-conductor` | Reactive watchers | Current audit hotspot for cross-layer leakage. |
 | `roko-learn`, `roko-neuro`, `roko-daimon`, `roko-dreams` | Cross-cuts | Reflective and cognitive subsystems. |
-| `roko-spi`, `roko-extension-abi`, `roko-wasm-host` | Extension surface | SPI and runtime boundaries for plugins. |
+| `roko-plugin` | Extension surface | Current plugin/runtime boundary in the workspace today. |
+| `roko-spi`, `roko-extension-abi`, `roko-wasm-host` | Extension surface | Target crates and host boundaries proposed by REF20; they are not all present in the current workspace. |
 | `roko-cli`, `roko-serve`, `roko-index`, `roko-lang-*`, `roko-plugin`, `roko-chain`, `mirage-rs` | Application and domain crates | Top-level consumers and domain-specific crates. |
 
 This current shape is workable, but the audit shows where the boundary discipline is still fuzzy. The target map below
@@ -75,10 +79,11 @@ REF20 makes four crate surfaces first-class at the kernel boundary:
 | `roko-core` | Kernel contracts, shared types, operator traits | Existing kernel crate. |
 | `roko-bus` | Transport fabric for Pulses, topics, publish/subscribe semantics | New target kernel crate. |
 | `roko-hdc` | Hyperdimensional vector operations, similarity, encoding, fingerprints | New target kernel crate. |
-| `roko-spi` | Plugin and extension SPI contracts | Existing scaffolded contract crate, promoted to the kernel boundary in the target graph. |
+| `roko-spi` | Plugin and extension SPI contracts | New target kernel crate proposed by REF20. |
 
-The target rule is simple: these crates define the shared contracts. Everything else consumes them through traits or
-data boundaries, not by reaching into implementation crates.
+The target rule is simple: these crates define the intended shared contracts. Everything else
+should consume them through traits or data boundaries, not by reaching into implementation
+crates.
 
 ### 1.3 Target Framework Crates
 
@@ -86,18 +91,18 @@ The framework layer stays broad, but its crate boundaries get cleaner:
 
 | Target crate | Role | Target change |
 |---|---|---|
-| `roko-defaults` | Default implementations | Split from `roko-std`; no builtin tool catalog. |
-| `roko-tools` | Builtin tools and tool inventory | Split from `roko-std`; tool additions do not perturb defaults. |
+| `roko-defaults` | Default implementations | Target split from `roko-std`; no builtin tool catalog. |
+| `roko-tools` | Builtin tools and tool inventory | Target split from `roko-std`; tool additions should not perturb defaults. |
 | `roko-agent` | Model/provider integration | Remains a framework crate, but should stop depending on adjacent implementation details. |
-| `roko-plugin` | Plugin discovery and loading | Consumes `roko-spi` rather than defining its own contract vocabulary. |
-| `roko-extension-abi`, `roko-wasm-host` | Native and WASM extension boundaries | Stay as host boundaries for higher-power extensions. |
+| `roko-plugin` | Plugin discovery and loading | Current plugin crate; target direction is to consume `roko-spi` rather than define its own contract vocabulary. |
+| `roko-extension-abi`, `roko-wasm-host` | Native and WASM extension boundaries | Target host boundaries for higher-power extensions. |
 
 ### 1.4 Target Scaffold and Harness Crates
 
 | Target crate | Role | Target change |
 |---|---|---|
-| `roko-compose-core` | Prompt assembly engine | Split from `roko-compose`; keeps the compositional machinery. |
-| `roko-templates` | Role and prompt templates | Split from `roko-compose`; templates become separately versioned data. |
+| `roko-compose-core` | Prompt assembly engine | Target split from `roko-compose`; it would keep the compositional machinery. |
+| `roko-templates` | Role and prompt templates | Target split from `roko-compose`; templates would become separately versioned data. |
 | `roko-gate` | Verification harness | Remains a harness crate. |
 | `roko-fs` | File substrate | Remains a concrete substrate implementation below the kernel contracts. |
 
@@ -146,11 +151,11 @@ supports it.
 
 REF20 proposes the next round of decomposition:
 
-- `roko-bus` extracts transport semantics from the runtime surface.
-- `roko-hdc` extracts HDC math and encoding from the broader primitives bucket.
-- `roko-spi` becomes the shared extension contract surface.
-- `roko-std` splits into `roko-defaults` and `roko-tools`.
-- `roko-compose` splits into `roko-compose-core` and `roko-templates`.
+- `roko-bus` would extract transport semantics from the runtime surface.
+- `roko-hdc` would extract HDC math and encoding from the broader primitives bucket.
+- `roko-spi` would become the shared extension contract surface.
+- `roko-std` would split into `roko-defaults` and `roko-tools`.
+- `roko-compose` would split into `roko-compose-core` and `roko-templates`.
 
 The design goal is not to proliferate crates for its own sake. It is to make the boundary between “contract,”
 “implementation,” and “data” explicit so that changes in one area do not force unrelated recompilation or code
@@ -182,7 +187,8 @@ L0 (Runtime)       → may depend on Kernel only
 Kernel             → depends on nothing
 ```
 
-Here, “Kernel” means `roko-core`, `roko-bus`, `roko-hdc`, and `roko-spi`. Those crates define the shared contract
+Here, “Kernel” means the target kernel boundary: `roko-core` today, plus proposed
+`roko-bus`, `roko-hdc`, and `roko-spi`. Those crates define the intended shared contract
 surface. Every other crate must consume them through traits, data, or host interfaces.
 
 ### 3.2 Target Dep Graph
@@ -210,11 +216,13 @@ The dep graph below is the intended direction of travel, not a snapshot of every
 
 Concrete rules for that graph:
 
-1. `roko-core`, `roko-bus`, `roko-hdc`, and `roko-spi` are the only kernel-tier crates.
+1. `roko-core` is the current kernel-tier crate; `roko-bus`, `roko-hdc`, and `roko-spi`
+   are the proposed target kernel-tier crates.
 2. Runtime and host crates implement the kernel contracts; they do not become new contract surfaces themselves.
 3. Framework crates consume the kernel and should not import each other unless there is a documented reason.
-4. `roko-compose-core` sits above the kernel and below application assembly; templates are data, not engine code.
-5. `roko-defaults` and `roko-tools` should not depend on each other.
+4. In the target graph, `roko-compose-core` sits above the kernel and below application
+   assembly; templates are data, not engine code.
+5. In the target graph, `roko-defaults` and `roko-tools` should not depend on each other.
 6. `roko-conductor` should react through the Bus and topics rather than importing `roko-learn` internals.
 7. Cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`) may read kernel contracts and inject behavior, but they do
    not define new kernel types.
@@ -225,7 +233,7 @@ REF20 also implies a public-API stability model for the target workspace:
 
 | Tier | Stability | Examples |
 |---|---|---|
-| Core | Semver-major-only breaks | `Engram`, `Substrate`, `Bus`, `Topic`, kernel traits |
+| Core | Semver-major-only breaks | `Engram`, `Substrate`, and today's kernel traits; target core adds `Bus` and `Topic` |
 | Extended | Minor-version breaks with notice | `Pulse`, `TopicFilter`, gate/routing helpers, default compositions |
 | Experimental | Anything goes behind feature flags or scaffolds | future chain, dreams, and host-specific boundaries |
 
@@ -283,7 +291,7 @@ The workspace needs a simple rule for what downstream code may rely on:
 
 | Tier | Stability intent | Boundary examples |
 |---|---|---|
-| Core | Long-lived, semver-stable contracts | `roko-core`, `roko-bus`, `roko-hdc`, `roko-spi` |
+| Core | Long-lived, semver-stable contracts | `roko-core` today; target core adds `roko-bus`, `roko-hdc`, and `roko-spi` |
 | Extended | Compatible, but allowed to evolve with notice | `roko-defaults`, `roko-tools`, `roko-compose-core`, `roko-templates` |
 | Experimental | Internal or feature-gated surfaces | migration shims, scaffolds, future host-specific integrations |
 

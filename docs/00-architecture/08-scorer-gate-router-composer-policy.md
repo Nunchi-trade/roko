@@ -12,14 +12,17 @@
 > two-medium / two-fabric kernel framing, then [07-substrate-trait.md](./07-substrate-trait.md)
 > and [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) for the fabric contracts.
 
-> **Implementation status:** Shipping shape for documentation; kernel migration is phased.
+> **Implementation status**: Target-state operator design. Current operators still accept
+> `&[Engram]` directly in today's codebase. The `Pulse`/`Bus` model and `Datum`-based
+> generalization documented here are planned migration targets rather than uniformly shipped
+> APIs.
 
 ---
 
 ## Kernel Framing
 
-REF04 keeps the existing operator vocabulary but generalizes its signatures so the traits match
-the runtime as it now exists:
+REF04 keeps the existing operator vocabulary but generalizes its signatures as a target-state
+operator model for the runtime:
 
 - `Engram` is the durable medium.
 - `Pulse` is the ephemeral medium.
@@ -53,6 +56,10 @@ That is the complete kernel grammar for this layer of the architecture: six oper
 fabric traits.
 
 ### Datum - Shared Surface For Either Medium
+
+> **Implementation status**: `Datum` is a target-state abstraction. Current operators accept
+> `&[Engram]` directly. The medium-polymorphic `Datum` wrapper is planned but not yet
+> implemented.
 
 Operators that can work polymorphically use `Datum`:
 
@@ -207,6 +214,10 @@ Representative uses:
 
 ## 5. Policy — React to Streams
 
+> **Implementation status**: The `Policy` shape below is the REF04 target contract. Current
+> policy implementations are still Engram-first in today's codebase; stream-reactive `Pulse`
+> inputs remain planned migration work.
+
 Policy is the most consequential signature change in REF04. Reactive logic naturally consumes
 Pulses, not retrospective slices of stored Engrams.
 
@@ -242,6 +253,9 @@ Common examples:
 Policy is the only breaking trait migration in this batch. The others are additive.
 
 ## 6. REF08 Sketches: Operator Signatures In Motion
+
+> **Implementation status**: The examples in this section describe post-migration behavior.
+> They are architectural sketches, not uniformly shipped APIs.
 
 REF04 gives the operator surface. REF08 shows how that surface behaves in code once live
 transport is explicit. The snippets below are illustrative excerpts rather than the full sketch;
@@ -316,7 +330,7 @@ Bus topic instead of a temporary trait fork.
 ## Academic Foundations
 
 REF04 does not introduce a new research basis for these traits; it tightens the operator grammar
-so the documented signatures match the already-adopted two-medium / two-fabric architecture. For
+so the documented signatures match the target two-medium / two-fabric architecture. For
 the broader theoretical background, use [06-synapse-traits.md](./06-synapse-traits.md),
 [09-universal-cognitive-loop.md](./09-universal-cognitive-loop.md), and
 [23-architectural-analysis-improvements.md](./23-architectural-analysis-improvements.md).

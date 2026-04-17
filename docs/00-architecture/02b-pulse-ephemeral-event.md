@@ -11,11 +11,17 @@
 > This doc is the REF02 companion to `tmp/refinements/02-engram-vs-pulse.md`.
 
 
-> **Implementation**: Planned
+> **Implementation status**: Target-state design. No `Pulse` type exists in the codebase yet.
+> The current transport mechanism is `EventBus<RokoEvent>` in
+> `roko-runtime/src/event_bus.rs`, with 2 live runtime event variants:
+> `PlanRevision` and `PrdPublished`.
 
 ---
 
 ## 1. Why Pulse Exists
+
+> **Implementation status**: Pulse is a target-state medium. This chapter defines the intended
+> Bus/Pulse semantics and graduation model; these are not current runtime guarantees.
 
 Engrams are for durable record. Pulse is for live delivery.
 
@@ -188,6 +194,9 @@ The Pulse is for delivery; the Engram is for record.
 ---
 
 ## 4. Graduation Policy
+
+> **Implementation status**: This policy table is target-state guidance, not a shared runtime
+> policy that exists today.
 
 Not every Pulse should graduate. The default policy should keep hot-path noise out of the
 durable DAG and only promote events whose future value outweighs the storage cost.

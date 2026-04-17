@@ -1,21 +1,25 @@
 # The Bus Transport Fabric
 
-> **Abstract:** Bus is the transport fabric and kernel primitive of the runtime. It publishes,
-> subscribes to, and replays Pulses through topics and bounded ring buffers. It is the sibling
-> of `Substrate`, and together they form the two-fabric kernel story described in
+> **Abstract:** This document describes Bus as the target transport fabric and kernel primitive
+> of the runtime. It publishes, subscribes to, and replays Pulses through topics and bounded
+> ring buffers. It is the sibling of `Substrate`, and together they form the two-fabric kernel
+> story described in
 > `tmp/refinements/03-bus-as-first-class.md`.
 > For naming conventions and current terminology, see [01-naming-and-glossary.md](01-naming-and-glossary.md).
 
-> **Implementation**: Documented kernel target over shipping runtime behavior
+> **Implementation status**: Target-state design. The current transport is `EventBus<E>` in
+> `roko-runtime` and `roko-serve`: a concrete generic struct, not a kernel trait. The live
+> `RokoEvent` runtime transport currently has 2 variants: `PlanRevision` and `PrdPublished`.
+> The trait-based `Bus` described here is the target architecture.
 
 ---
 
 ## 1. Role in the Architecture
 
-Bus is the kernel's ephemeral transport fabric at L0. It exists for communication, not
-durable storage. Where Substrate preserves Engrams, Bus delivers Pulses to subscribers
-that care about a topic family. The two fabrics are the complete kernel surface at L0:
-storage lives in Substrate, transport lives in Bus.
+In the target architecture, Bus is the kernel's ephemeral transport fabric at L0. It exists
+for communication, not durable storage. Where Substrate preserves Engrams, Bus delivers
+Pulses to subscribers that care about a topic family. The two fabrics then become the
+complete kernel surface at L0: storage lives in Substrate, transport lives in Bus.
 
 The design separates transport from persistence so that:
 
@@ -23,9 +27,9 @@ The design separates transport from persistence so that:
 - late subscribers can catch up from the bounded replay ring,
 - cross-layer couplings can be expressed as topics instead of direct crate dependencies.
 
-This is the architectural replacement for historical `EventBus<E>`-style plumbing. The
-legacy generic broadcast channel remains as the default in-process implementation, but the
-kernel name is now `Bus`.
+This is the target architectural replacement for today's `EventBus<E>`-style plumbing. The
+legacy generic broadcast channel remains the current in-process implementation; the
+kernel-stable name and trait surface described here have not landed yet.
 
 ### 1.1 Two-Fabric Summary
 
@@ -38,7 +42,11 @@ kernel name is now `Bus`.
 
 ## 2. Trait Surface
 
-REF03 promotes the shipping runtime behavior into the following kernel trait surface:
+> **Implementation status**: This section describes the target `Bus` contract. Today the
+> runtime ships concrete in-process broadcast/replay behavior; the kernel-stable trait names
+> and surface below remain phased migration work.
+
+REF03 promotes today's runtime behavior into the following target kernel trait surface:
 
 ```rust
 #[async_trait]
@@ -137,36 +145,39 @@ The ring buffer is a bounded retention window, not durable storage:
 - replay only covers what remains in the ring,
 - subscribers that fall behind lose history unless the Pulse is also graduated to an Engram.
 
-The default in-process Bus uses a bounded ring over `tokio::sync::broadcast` plus replay
-state. Future backends can use the same semantics with different transport internals.
+The default in-process Bus would use a bounded ring over `tokio::sync::broadcast` plus
+replay state. Future backends can use the same semantics with different transport internals.
 
 ---
 
 ## 4. Backend Families
 
+> **Implementation status**: These backend families are target-state design slots. The current
+> codebase ships concrete `EventBus<E>` implementations rather than this backend matrix.
+
 ### 4.1 BroadcastBus
 
-The default shipping implementation. It wraps in-process broadcast primitives and serves
+Target default in-process implementation. It would wrap broadcast primitives and serve
 single-process agents, tests, and local tooling.
 
 ### 4.2 MemoryBus
 
-Test-only backend with the same trait surface and no background transport task.
+Target test-only backend with the same trait surface and no background transport task.
 
 ### 4.3 MultiBus
 
-An aggregator that merges multiple Bus backends into one stream. Useful when a runtime
+Target aggregator that merges multiple Bus backends into one stream. Useful when a runtime
 needs to see in-process Pulses and remote Pulses together.
 
 ### 4.4 NATS / Kafka / Redpanda
 
-Multi-process and distributed backends. These are the natural fit for remote workers and
-control-plane deployments.
+Target multi-process and distributed backends. These are the natural fit for remote workers
+and control-plane deployments.
 
 ### 4.5 ChainBus
 
-On-chain Pulse transport for Korai-integrated deployments. It maps topics to chain logs
-and replays by block scanning.
+Target on-chain Pulse transport for Korai-integrated deployments. It would map topics to
+chain logs and replay by block scanning.
 
 ---
 
@@ -186,6 +197,10 @@ runtime may hold both handles and use them concurrently.
 
 ## 6. Two-Fabric Kernel Story
 
+> **Implementation status**: This section describes the target two-fabric kernel story. The
+> current runtime still relies on concrete `EventBus<E>` plumbing, and Bus-mediated
+> cross-layer decoupling remains incomplete.
+
 The kernel surface is intentionally small:
 
 - `Substrate` persists durable Engrams.
@@ -195,7 +210,7 @@ This split lets Roko express durable knowledge and live communication without fo
 message through the same mechanism. It also makes cross-layer communication auditable
 through topic names rather than direct dependencies.
 
-The Bus-first framing is what dissolves the old `roko-conductor -> roko-learn` coupling:
+The Bus-first framing is what would dissolve the old `roko-conductor -> roko-learn` coupling:
 the conductor can react to topic streams such as `gate.failure.rate` and
 `gate.verdict.emitted` instead of importing learning types directly.
 
@@ -203,7 +218,8 @@ the conductor can react to topic streams such as `gate.failure.rate` and
 
 ## 7. Current Status and Gaps
 
-- **Implemented today**: in-process broadcast-and-replay behavior in the runtime layer.
+- **Implemented today**: concrete in-process `EventBus<E>` broadcast-and-replay behavior in
+  the runtime layer.
 - **Promoted by REF03**: the stable kernel naming (`Bus`, `Topic`, `TopicFilter`) and the
   trait surface documented in this chapter.
 - **Planned backends**: `MultiBus`, `NATS`/`Kafka`/`Redpanda`, `ChainBus`, and `MemoryBus`.
