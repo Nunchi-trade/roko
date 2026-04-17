@@ -25,6 +25,7 @@ pub mod registration;
 pub mod state;
 
 pub use auth::bearer::BearerAuth;
+pub use features::relay_client::RelayClientConfig;
 pub use registration::{
     AgentCard, AgentCardEndpoints, AgentCardPublisher, AgentRegistration, RegistrationOutcome,
 };
@@ -133,7 +134,7 @@ impl AgentServer {
 
         if let Some(registration) = &self.registration {
             registration
-                .register(&self.state, local_addr)
+                .register(Arc::clone(&self.state), local_addr)
                 .await
                 .context("register agent card")?;
         }

@@ -11,7 +11,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use roko_agent::chat_types::{
-    ChatRequest, ChatResponse, FinishReason, ResponseMetadata, SessionState,
+    ChatRequest, ChatResponse, FinishReason, RequestOptions, ResponseMetadata, SessionState,
+    ToolChoice,
 };
 use roko_agent::dispatcher::ToolDispatcher;
 use roko_agent::streaming::StreamChunk;
@@ -157,6 +158,27 @@ fn response_finish_reason(response: &BackendResponse) -> Option<FinishReason> {
             })
             .map(normalize_finish_reason),
         BackendResponse::StreamJson(_) | BackendResponse::Text(_) => None,
+    }
+}
+
+fn chat_request(prompt: &str, stream: bool) -> ChatRequest {
+    ChatRequest {
+        messages: vec![
+            serde_json::from_value(serde_json::json!({
+                "role": "user",
+                "content": prompt,
+            }))
+            .unwrap_or_else(|error| panic!("valid message request: {error}")),
+        ],
+        model_slug: String::new(),
+        tools: Vec::new(),
+        tool_choice: ToolChoice::Auto,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stop: None,
+        stream,
+        options: RequestOptions::default(),
     }
 }
 
@@ -533,6 +555,22 @@ impl AgentState {
     #[must_use]
     pub fn message_dispatcher(&self) -> Option<Arc<dyn DispatchLike>> {
         self.message_dispatcher.as_ref().map(Arc::clone)
+    }
+
+    /// Dispatch one non-streaming prompt through the configured message seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no dispatcher is configured or when the selected
+    /// backend fails to complete the turn.
+    pub async fn dispatch_prompt(&self, prompt: &str) -> Result<ChatResponse, DispatchError> {
+        self.metrics.record_message();
+        let dispatcher = self.message_dispatcher().ok_or(DispatchError::NotConfigured)?;
+        let response = dispatcher.dispatch(chat_request(prompt, false)).await;
+        let status = if response.is_ok() { "ok" } else { "error" };
+        self.append_log_line(format!("message prompt={prompt:?} status={status}"))
+            .await;
+        response
     }
 
     /// Attach a dispatcher used to service message routes.

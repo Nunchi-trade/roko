@@ -13,6 +13,7 @@ description = "Per-agent HTTP server with feature-gated routes, bearer auth, and
 workspace = true
 
 [dependencies]
+agent-relay = { path = "../../apps/agent-relay" }
 roko-agent = { path = "../roko-agent" }
 roko-chain = { path = "../roko-chain" }
 roko-core = { path = "../roko-core" }
@@ -31,11 +32,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true, features = ["limit", "load-shed", "util"] }
