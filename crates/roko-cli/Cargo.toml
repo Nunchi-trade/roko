@@ -67,3 +67,4 @@ notify-debouncer-full = "0.3"
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+roko-agent-server = { path = "../roko-agent-server" }
