@@ -1,0 +1,59 @@
+{"turn":1,"kind":"reasoning_delta","text":"Inspect the brief. "}
+{"turn":1,"kind":"reasoning_delta","text":"Checkpoint the first state."}
+{"turn":1,"kind":"tool_call","index":0,"id":"codex-call-1","name":"echo","arguments_delta":"{\"turn\":1,"}
+{"turn":1,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-1\"}"}
+{"turn":1,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-1","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":101,"completion_tokens":11,"cached_tokens":1}}
+{"turn":1,"kind":"tool_result","tool_call_id":"codex-call-1","content":"{\"turn\":1,\"note\":\"checkpoint-1\"}"}
+{"turn":2,"kind":"reasoning_delta","text":"Keep the trace consistent. "}
+{"turn":2,"kind":"reasoning_delta","text":"Checkpoint the second state."}
+{"turn":2,"kind":"tool_call","index":0,"id":"codex-call-2","name":"echo","arguments_delta":"{\"turn\":2,"}
+{"turn":2,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-2\"}"}
+{"turn":2,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-2","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":102,"completion_tokens":12,"cached_tokens":2}}
+{"turn":2,"kind":"tool_result","tool_call_id":"codex-call-2","content":"{\"turn\":2,\"note\":\"checkpoint-2\"}"}
+{"turn":3,"kind":"reasoning_delta","text":"Maintain the running summary. "}
+{"turn":3,"kind":"reasoning_delta","text":"Checkpoint the third state."}
+{"turn":3,"kind":"tool_call","index":0,"id":"codex-call-3","name":"echo","arguments_delta":"{\"turn\":3,"}
+{"turn":3,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-3\"}"}
+{"turn":3,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-3","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":103,"completion_tokens":13,"cached_tokens":3}}
+{"turn":3,"kind":"tool_result","tool_call_id":"codex-call-3","content":"{\"turn\":3,\"note\":\"checkpoint-3\"}"}
+{"turn":4,"kind":"reasoning_delta","text":"Advance the recorded state. "}
+{"turn":4,"kind":"reasoning_delta","text":"Checkpoint the fourth state."}
+{"turn":4,"kind":"tool_call","index":0,"id":"codex-call-4","name":"echo","arguments_delta":"{\"turn\":4,"}
+{"turn":4,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-4\"}"}
+{"turn":4,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-4","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":104,"completion_tokens":14,"cached_tokens":4}}
+{"turn":4,"kind":"tool_result","tool_call_id":"codex-call-4","content":"{\"turn\":4,\"note\":\"checkpoint-4\"}"}
+{"turn":5,"kind":"reasoning_delta","text":"Stay on the deterministic path. "}
+{"turn":5,"kind":"reasoning_delta","text":"Checkpoint the fifth state."}
+{"turn":5,"kind":"tool_call","index":0,"id":"codex-call-5","name":"echo","arguments_delta":"{\"turn\":5,"}
+{"turn":5,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-5\"}"}
+{"turn":5,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-5","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":105,"completion_tokens":15,"cached_tokens":5}}
+{"turn":5,"kind":"tool_result","tool_call_id":"codex-call-5","content":"{\"turn\":5,\"note\":\"checkpoint-5\"}"}
+{"turn":6,"kind":"reasoning_delta","text":"Preserve the protocol shape. "}
+{"turn":6,"kind":"reasoning_delta","text":"Checkpoint the sixth state."}
+{"turn":6,"kind":"tool_call","index":0,"id":"codex-call-6","name":"echo","arguments_delta":"{\"turn\":6,"}
+{"turn":6,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-6\"}"}
+{"turn":6,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-6","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":106,"completion_tokens":16,"cached_tokens":6}}
+{"turn":6,"kind":"tool_result","tool_call_id":"codex-call-6","content":"{\"turn\":6,\"note\":\"checkpoint-6\"}"}
+{"turn":7,"kind":"reasoning_delta","text":"Continue the same replay contract. "}
+{"turn":7,"kind":"reasoning_delta","text":"Checkpoint the seventh state."}
+{"turn":7,"kind":"tool_call","index":0,"id":"codex-call-7","name":"echo","arguments_delta":"{\"turn\":7,"}
+{"turn":7,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-7\"}"}
+{"turn":7,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-7","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":107,"completion_tokens":17,"cached_tokens":7}}
+{"turn":7,"kind":"tool_result","tool_call_id":"codex-call-7","content":"{\"turn\":7,\"note\":\"checkpoint-7\"}"}
+{"turn":8,"kind":"reasoning_delta","text":"Keep the streamed deltas aligned. "}
+{"turn":8,"kind":"reasoning_delta","text":"Checkpoint the eighth state."}
+{"turn":8,"kind":"tool_call","index":0,"id":"codex-call-8","name":"echo","arguments_delta":"{\"turn\":8,"}
+{"turn":8,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-8\"}"}
+{"turn":8,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-8","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":108,"completion_tokens":18,"cached_tokens":8}}
+{"turn":8,"kind":"tool_result","tool_call_id":"codex-call-8","content":"{\"turn\":8,\"note\":\"checkpoint-8\"}"}
+{"turn":9,"kind":"reasoning_delta","text":"One more checkpoint remains. "}
+{"turn":9,"kind":"reasoning_delta","text":"Checkpoint the ninth state."}
+{"turn":9,"kind":"tool_call","index":0,"id":"codex-call-9","name":"echo","arguments_delta":"{\"turn\":9,"}
+{"turn":9,"kind":"tool_call","index":0,"arguments_delta":"\"note\":\"checkpoint-9\"}"}
+{"turn":9,"kind":"final","finish_reason":"tool_calls","response_id":"chatcmpl-codex-9","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":109,"completion_tokens":19,"cached_tokens":9}}
+{"turn":9,"kind":"tool_result","tool_call_id":"codex-call-9","content":"{\"turn\":9,\"note\":\"checkpoint-9\"}"}
+{"turn":10,"kind":"reasoning_delta","text":"Summarize the recorded checkpoints. "}
+{"turn":10,"kind":"reasoning_delta","text":"No more tools are needed."}
+{"turn":10,"kind":"draft","text":"Codex replayed "}
+{"turn":10,"kind":"draft","text":"ten turns cleanly."}
+{"turn":10,"kind":"final","finish_reason":"stop","response_id":"chatcmpl-codex-10","session_id":"sess-codex-202604","thread_id":"thread-codex-basic","usage":{"prompt_tokens":120,"completion_tokens":22,"cached_tokens":10}}
