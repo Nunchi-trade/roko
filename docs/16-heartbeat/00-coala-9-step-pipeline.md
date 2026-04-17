@@ -1,13 +1,13 @@
 # CoALA 9-Step Cognitive Pipeline
 
-> The Cognitive Architectures for Language Agents (CoALA) framework provides the organizing taxonomy for every agent's decision cycle in Roko.
+> Historical note: this chapter began as a CoALA-derived 9-step description of the heartbeat. Roko's canonical universal loop is now the seven-step SENSE / ASSESS / COMPOSE / ACT / VERIFY / PERSIST + BROADCAST / REACT loop. See `tmp/refinements/05-loop-retold.md` and `docs/00-architecture/01-naming-and-glossary.md`.
 
 
 > **Implementation**: Specified
 
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture fundamentals
-**Key sources**: Sumers et al. 2023 (arXiv:2309.02427), legacy `bardo-backup/prd/01-golem/02-heartbeat.md`, `refactoring-prd/01-synapse-architecture.md` §3
+**Key sources**: Sumers et al. 2023 (arXiv:2309.02427), legacy `bardo-backup/prd/01-golem/02-heartbeat.md`, `refactoring-prd/01-synapse-architecture.md` §3, `tmp/refinements/05-loop-retold.md`
 
 ---
 
@@ -17,9 +17,9 @@ Every Roko agent — coding, chain, research, operations, or custom — executes
 
 The organizing framework for this loop is CoALA (Cognitive Architectures for Language Agents), proposed by Sumers, Yao, Narasimhan, and Griffiths in 2023 (arXiv:2309.02427). CoALA draws on decades of cognitive architecture research — Soar (Laird 2012), ACT-R (Anderson 2007), CLARION (Sun et al. 2005) — to formalize what a language agent IS and how its decision cycle should be structured.
 
-Roko adopts the CoALA framework as its primary organizing taxonomy because it provides a rigorous, research-grounded structure for agent cognition that maps cleanly onto the Synapse Architecture's six composable traits. The 9-step pipeline described in this document is the concrete realization of CoALA within Roko's trait-based composition system.
+Roko adopted the CoALA framework as an early organizing taxonomy because it provides a rigorous, research-grounded structure for agent cognition that maps cleanly onto the Synapse Architecture's traits. This chapter now retells that lineage against the canonical seven-step loop rather than treating the historical 9-step pipeline as the current truth.
 
-This document describes the 9 steps of the CoALA-derived pipeline as implemented in Roko, explains the academic predecessors that influenced the design, and articulates why CoALA was chosen as the organizing framework over alternatives.
+This document explains why the older 9-step CoALA-derived framing is now historical, how the heartbeat chapter maps onto the canonical seven-step universal loop, and why CoALA still matters as the theoretical lineage behind the heartbeat design.
 
 ---
 
@@ -94,36 +94,41 @@ The Cognitive Workspace paper (2025, arXiv:2508.13171) validated this approach c
 
 ---
 
-## The 9-Step Pipeline
+## The Canonical Seven-Step Loop
 
-Each heartbeat tick executes a 9-step pipeline. The steps map to CoALA's decision cycle phases, extended with Roko-specific verification and meta-cognition:
+Each heartbeat tick used to be described as a 9-step pipeline. That framing is retained here only as historical scaffolding. The canonical loop now has seven steps, with PERSIST and BROADCAST co-equal at step 6 and cross-cuts injected into operators rather than sequenced as step 9.
 
 ```
-Step 1: OBSERVE    — Read environment state, evaluate probes, detect regime changes
-Step 2: RETRIEVE   — Pull relevant knowledge from Neuro using multi-factor scoring
-Step 3: ANALYZE    — Compute prediction error (how surprising is this observation?)
-Step 4: GATE       — Decide cognitive tier (T0: suppress, T1: analyze, T2: deliberate)
-Step 5: SIMULATE   — [Domain-specific] Pre-flight verification (mirage-rs for chain, dry-run for code)
-Step 6: VALIDATE   — [T1/T2] Check safety constraints, position limits, capability tokens
-Step 7: EXECUTE    — [If validated] Execute tool calls with capability authorization
-Step 8: VERIFY     — [If acted] Ground truth verification (compiler, test suite, blockchain receipt)
-Step 9: REFLECT    — Build DecisionCycleRecord, update affect, fire learning hooks
+1. SENSE          — Substrate.query | Bus.subscribe | external I/O
+2. ASSESS         — Scorer.score + Router.select
+3. COMPOSE        — Assemble the prompt/context under budget
+4. ACT            — LLM, tool, or chain action
+5. VERIFY         — Gate pipeline + stream-gates
+6. PERSIST        — Store Engrams in Substrate
+   BROADCAST      — Publish Pulses on the Bus
+7. REACT          — Policy.decide, emit follow-on Pulses + Engrams
 ```
 
-Steps 5-8 are conditional: in a T0 tick (no LLM call), only steps 1-4 and 9 execute. This is what makes ~80% of ticks nearly free ($0.00 inference cost).
+The older 9-step list in this chapter was a CoALA-adjacent way to explain the same runtime, but it hid the Bus, split scoring from routing too aggressively, and treated cross-cuts as sequential. The seven-step version matches the canonical architecture and keeps the transport fabric visible.
 
-### Step 1: OBSERVE
+### Step 1: SENSE
 
-Read the current environment state through deterministic probes. For a coding agent, this means checking build status, test results, complexity metrics, and coverage deltas. For a chain agent, this means reading prices, liquidity, position health, and gas costs. For any agent, the 16 T0 probes (see [09-16-t0-probes.md](./09-16-t0-probes.md)) run at every tick.
+`SENSE` has three inputs, not one:
 
-Each probe is a pure function: `fn probe(state: &EngineState) -> f32`. No LLM call, no network I/O, no blocking. The observation is the agent's "peripheral vision" — always running, always cheap.
+- durable retrieval through `Substrate.query()` for plans, episodes, heuristics, and prior verdicts;
+- live delivery through `Bus.subscribe()` for tick Pulses, turn output, approvals, cancellation, and other in-flight signals;
+- external I/O that has not yet been normalized into either fabric, such as subprocess output, filesystem watches, or inbound HTTP requests.
 
-**Synapse trait**: `Substrate.query()` — fetch current state from storage.
+For any agent, the 16 T0 probes (see [09-16-t0-probes.md](./09-16-t0-probes.md)) are part of this sensing surface. They keep the runtime's "peripheral vision" cheap and always on.
+
+**Synapse traits**: `Substrate.query()` and `Bus.subscribe()`.
 **Layer**: L0 Runtime.
 
-### Step 2: RETRIEVE
+### Step 2: ASSESS
 
-Pull relevant knowledge from the Neuro store (formerly Grimoire) using multi-factor scoring:
+`ASSESS` combines what the older pipeline separated into retrieval, analysis, and gating. The runtime scores candidate Engrams and Pulses, computes surprise/confidence, and routes toward the next action or tier in one joint decision point.
+
+Multi-factor scoring can still look like:
 
 ```
 score = w_recency × recency(Ebbinghaus_decay)
@@ -132,14 +137,16 @@ score = w_recency × recency(Ebbinghaus_decay)
       + w_emotional × PAD_cosine(current_mood, entry_affect)
 ```
 
-The last factor — emotional congruence — implements Bower's (1981) mood-congruent memory: the agent's current emotional state biases which memories surface. An anxious agent retrieves warnings and past failures; a confident agent retrieves successes and validated heuristics. This is not a bug — it is how biological memory works, and it is computationally efficient. Every 100 ticks, mandatory 15% contrarian retrieval forces mood-OPPOSITE entries to prevent rumination.
+The last factor — emotional congruence — implements Bower's (1981) mood-congruent memory: the agent's current emotional state biases which memories surface. An anxious agent retrieves warnings and past failures; a confident agent retrieves successes and validated heuristics. This is not a bug — it is how biological memory works, and it is computationally efficient. Every 100 ticks, mandatory 15% contrarian retrieval forces mood-opposite entries to prevent rumination.
 
-**Synapse trait**: `Scorer.score()` — evaluate relevance of each retrieved Engram.
-**Layer**: L2 Scaffold.
+Prediction error is also computed here: how surprising is this observation compared to what the agent expected? That signal helps drive the T0/T1/T2 choice inside the same ASSESS boundary rather than living in a separate loop step.
 
-### Step 3: ANALYZE
+**Synapse traits**: `Scorer.score()` and `Router.select()`.
+**Layer**: L2 Scaffold + L1 Framework.
 
-Compute prediction error: how SURPRISING is this observation compared to what the agent expected? This is the core signal that drives the System 1 / System 2 gating decision in Step 4.
+### Step 3: COMPOSE
+
+`COMPOSE` turns the selected material into a prompt Engram or other action bundle under budget. This is where context assembly becomes explicit instead of being implied by retrieval and analysis.
 
 Prediction error is a scalar in [0.0, 1.0] that aggregates weighted sources of surprise. The exact sources depend on the domain:
 
@@ -149,12 +156,16 @@ Prediction error is a scalar in [0.0, 1.0] that aggregates weighted sources of s
 
 Friston's free-energy principle (2010) provides the theoretical foundation: the brain continuously generates predictions about incoming sensory data and computes the discrepancy — the prediction error — between expected and observed. Large prediction errors signal novelty, danger, or opportunity and demand attention. Small prediction errors mean the environment matches expectations and no additional processing is needed.
 
-**Synapse trait**: Part of `Scorer.score()` and Daimon cross-cut.
-**Layer**: L2 Scaffold + Cognitive cross-cut.
+The output of COMPOSE is usually a `Kind::Prompt` Engram for an LLM call, but it can also be a fully described tool, chain, or filesystem action.
 
-### Step 4: GATE
+**Synapse trait**: `Composer.compose()`.
+**Layer**: L2 Scaffold.
 
-The gating step implements Kahneman's (2011) dual-process theory via Friston's (2010) precision-weighted prediction error framework. The question: "Is this observation surprising enough to warrant expensive LLM deliberation, or can I handle it with cheap heuristics?"
+### Step 4: ACT
+
+`ACT` executes the composed work. In the common case this is an LLM call, but the same step also covers direct tool calls, chain transactions, and other effectful actions.
+
+The dual-process thresholding still matters here. ASSESS decides whether the system stays at T0, escalates to T1, or pays for T2:
 
 ```
 error < 0.2  → T0 (suppress, no LLM)     ~80% of ticks
@@ -162,61 +173,44 @@ error < 0.6  → T1 (fast model, shallow)   ~15% of ticks
 error ≥ 0.6  → T2 (full model, deep)      ~5% of ticks
 ```
 
-The adaptive threshold considers:
+The adaptive threshold still considers:
 - **Cognitive pressure**: Under budget pressure, the threshold lowers — the agent thinks harder about fewer things.
 - **Arousal**: High arousal (surprise) lowers the threshold — the agent pays more attention.
 - **Strategy confidence**: High confidence raises the threshold — the agent coasts on proven patterns.
 - **Daimon behavioral state**: Struggling agents have a lower T2 trigger (escalate sooner). Coasting agents have a higher trigger (stay cheap longer).
 
-**Synapse trait**: `Router.select()` — choose the cognitive tier.
+During ACT, the runtime emits live Pulses such as `agent.msg.chunk`, `tool.call.started`, and `agent.turn.completed`, and it also produces the final Engram that VERIFY will evaluate.
+
+**Synapse trait**: `Agent.execute()`.
 **Layer**: L1 Framework.
 
-### Step 5: SIMULATE (Domain-Specific)
+### Step 5: VERIFY
 
-Pre-flight verification before committing to action. This step exists because some actions are irreversible — you cannot undo a blockchain transaction or a deployed contract.
+This is the canonical verification boundary. The older 9-step narration split it into four labels, but the universal loop treats pre-flight checks, safety checks, stream-gates, and ground-truth verification as one coherent phase.
 
 - **Chain agents**: Run proposed transactions in a local EVM fork via mirage-rs. Catches revert scenarios, unexpected gas costs, sandwich attack vulnerability.
 - **Coding agents**: May run dry-run compilation or quick test suites before committing changes.
-- **Research agents**: Typically skip this step (research actions are reversible).
+- **Research agents**: Typically skip the pre-flight parts of this step because research actions are usually reversible.
+- **Safety checks**: Capability tokens, position limits, file permission checks, and policy enforcement run before the action is allowed to proceed.
+- **Ground truth**: Compiler, test suite, blockchain receipt, and linter results confirm the action's outcome against external truth.
 
-This step does not exist in the universal loop — it is a domain-specific extension point between ATTEND and ACT. See [02-chain-heartbeat-variant.md](./02-chain-heartbeat-variant.md) for the full chain mapping.
-
-### Step 6: VALIDATE
-
-Check safety constraints. Every action passes through the safety layer before execution:
-
-- Capability tokens (typed, unforgeable authorization — see topic [11-safety](../11-safety/INDEX.md))
-- Position limits and approved asset lists (chain domain)
-- File permission checks and scope limits (coding domain)
-- Policy enforcement via `Policy.decide()` → permit/deny/modify/log
-
-**Synapse trait**: `Gate.verify()` (safety pre-check).
+**Synapse trait**: `Gate.verify()` plus stream-gates for live Pulse monitoring.
 **Layer**: L3 Harness.
 
-### Step 7: EXECUTE
+### Step 6: PERSIST + BROADCAST
 
-If validated, execute tool calls with capability authorization. The agent calls the LLM (for T1/T2 ticks), which produces tool invocations, which are executed through the tool dispatcher with full capability checking.
+Persist durable outputs and broadcast live Pulses at the same time. The canonical loop makes both outputs explicit instead of burying broadcast inside reflection.
 
-**Synapse trait**: `Agent.execute()` — call LLM backend, produce output.
-**Layer**: L1 Framework.
+- **PERSIST**: Store the finished Engram in the Substrate with lineage and provenance.
+- **BROADCAST**: Publish the matching Pulse on the Bus so live subscribers can react.
+- **Examples**: `gate.verdict.emitted`, `agent.turn.completed`, `plan.revision.requested`, and other tick-delivery Pulses.
 
-### Step 8: VERIFY
+**Synapse traits**: `Substrate.put()` and `Bus.publish()`.
+**Layer**: L0 Runtime.
 
-Ground truth verification from external sources. This is NOT self-assessment — it is external truth:
+### Step 7: REACT
 
-- **Compiler**: Did it compile? Zero compiler errors?
-- **Test suite**: Did tests pass? How many? Any regressions?
-- **Blockchain**: Did the transaction succeed? What was the actual outcome vs. expected?
-- **Linter**: Does the code meet quality standards?
-
-This is where Roko differs fundamentally from frameworks that rely on self-evaluation. The Gate pipeline provides external ground truth that the agent cannot manipulate or self-rationalize.
-
-**Synapse trait**: `Gate.verify()` — check against external ground truth.
-**Layer**: L3 Harness.
-
-### Step 9: REFLECT
-
-Build the `DecisionCycleRecord` — a typed, self-contained record of everything that happened during this tick. Then fire the learning hooks:
+Build the `DecisionCycleRecord` - a typed, self-contained record of everything that happened during this tick. Then fire the learning hooks:
 
 - **Episode logging**: Record the full tick as an episode Engram in `.roko/episodes.jsonl`.
 - **Daimon update**: Update the PAD affect vector based on outcome (success → pleasure increase; failure → pleasure decrease, arousal increase).
@@ -224,24 +218,24 @@ Build the `DecisionCycleRecord` — a typed, self-contained record of everything
 - **Router feedback**: Update bandit arms in the CascadeRouter based on which model tier succeeded or failed.
 - **Prediction update**: Compare prediction (from Step 3) against actual outcome to calibrate the prediction engine.
 
-**Synapse trait**: `Policy.decide()` — observe Engram streams, emit new Engrams. Plus `Substrate.put()` — persist output with lineage.
-**Layer**: L3-L4 Harness/Orchestration + L0 Runtime (for persistence).
+**Synapse trait**: `Policy.decide()` - observe Engram and Pulse streams, emit new Engrams and Pulses.
+**Layer**: L3-L4 Harness/Orchestration.
 
 ---
 
 ## The OODA Loop Mapping
 
-Boyd's Observe-Orient-Decide-Act (OODA) loop maps directly onto the pipeline, with one critical addition: the REFLECT step closes the learning loop that OODA leaves open.
+Boyd's Observe-Orient-Decide-Act (OODA) loop maps directly onto the canonical heartbeat, with one critical addition: REACT closes the learning loop that OODA leaves open.
 
 | OODA Phase | Pipeline Steps | What Happens |
 |---|---|---|
-| **Observe** | OBSERVE | Deterministic probes capture environment state |
-| **Orient** | RETRIEVE + ANALYZE | Neuro retrieval + prediction error orient the agent |
-| **Decide** | GATE + SIMULATE + VALIDATE | Adaptive threshold + pre-flight + safety → select action |
-| **Act** | EXECUTE + VERIFY | Execute with capability tokens + ground truth verification |
-| _(missing in OODA)_ | REFLECT | DecisionCycleRecord + learning hooks close the loop |
+| **Observe** | SENSE | Deterministic probes, live Pulses, and external I/O capture current state |
+| **Orient** | ASSESS + COMPOSE | Scoring, routing, and context assembly orient the agent toward a bounded action |
+| **Decide** | ACT | The runtime commits to the selected action or suppresses expensive work |
+| **Act** | VERIFY + PERSIST/BROADCAST | Effects are checked against reality, then written durably and delivered live |
+| _(missing in OODA)_ | REACT | DecisionCycleRecord, policy outputs, and learning hooks close the loop |
 
-The REFLECT step is what makes Roko agents self-improving rather than merely reactive. Every tick that resolves — whether the agent acted or suppressed — produces data that improves future ticks. This is the cybernetic feedback loop that Boyd's OODA framework lacks.
+The REACT step is what makes Roko agents self-improving rather than merely reactive. Every tick that resolves - whether the agent acted or suppressed - produces data that improves future ticks. This is the cybernetic feedback loop that Boyd's OODA framework lacks.
 
 ---
 
@@ -273,7 +267,7 @@ CoALA provides the most complete mapping from cognitive science to agent impleme
 
 ## Cost Model
 
-The 9-step pipeline with T0/T1/T2 gating produces a favorable cost distribution:
+The historical 9-step framing with T0/T1/T2 gating produced a favorable cost distribution. The canonical seven-step loop preserves the same gating economics while making broadcast explicit:
 
 | Tier | Handler | Model | Cost/Call | Frequency | Trigger |
 |------|---------|-------|-----------|-----------|---------|
@@ -308,13 +302,15 @@ Without gating (every tick at T2): daily cost would be $100-500+ depending on ti
 
 ## Pipeline Instrumentation: CognitiveCycleSpan
 
-Every execution of the 9-step pipeline must be instrumented for observability, cost tracking, and dual-process validation. The `CognitiveCycleSpan` record captures per-step latency, token accounting, and tier routing metadata — the missing bridge between per-turn `AgentEfficiencyEvent` (which covers an entire turn) and per-tool `ToolTrace` (which covers one tool call).
+Every execution of the heartbeat should be instrumented for observability, cost tracking, and dual-process validation. The `CognitiveCycleSpan` record captures per-step latency, token accounting, and tier routing metadata - the missing bridge between per-turn `AgentEfficiencyEvent` (which covers an entire turn) and per-tool `ToolTrace` (which covers one tool call). The schema below is historical in its field names, but the canonical loop should treat PERSIST and BROADCAST as co-equal outputs.
 
 This design follows the OpenTelemetry gen_ai semantic conventions (OTel SIG, 2025) which define a span hierarchy: `invoke_agent` → `chat` → `execute_tool`, plus the ABBench/TAMAS paper (arXiv:2503.06745) which found 63% coefficient of variation in agent execution flow, making per-step instrumentation essential for understanding non-deterministic paths.
 
 ```rust
-/// One complete CoALA decision cycle: OBSERVE → RETRIEVE → ANALYZE → GATE
-/// → [SIMULATE] → [VALIDATE] → EXECUTE → VERIFY → REFLECT.
+/// One complete historical CoALA decision cycle.
+///
+/// Canonical Roko loop: SENSE → ASSESS → COMPOSE → ACT → VERIFY
+/// → PERSIST + BROADCAST → REACT.
 ///
 /// Emitted once per cycle within a multi-turn agent session.
 /// Complements `AgentEfficiencyEvent` (entire turn) and `ToolTrace` (one tool call).
@@ -400,7 +396,7 @@ The instrumentation bridges CoALA's theoretical phases to concrete, measurable q
 
 | CoALA Step | Roko Step | Key Metrics | OTel Span Kind |
 |---|---|---|---|
-| OBSERVE | `Substrate.query()` | `observe_latency_ms`, probe count, anomaly count | INTERNAL |
+| OBSERVE | `Substrate.query()` + `Bus.subscribe()` | `observe_latency_ms`, probe count, anomaly count | INTERNAL |
 | RETRIEVE | `Scorer.score()` | `retrieve_latency_ms`, candidates scored, retrieval tokens | CLIENT (if Neuro RPC) |
 | ANALYZE | Daimon cross-cut | `analyze_latency_ms`, prediction error, PAD delta | INTERNAL |
 | GATE | `Router.select()` | `gate_latency_ms`, tier selected, threshold, confidence | INTERNAL |
@@ -422,14 +418,14 @@ invoke_agent {roko-agent}                          [CLIENT span]
 │   │   roko.cycle.frequency = "gamma"
 │   │   roko.cycle.tier = "T2"
 │   │
-│   ├── perceive                                    [INTERNAL]
+│   ├── sense                                       [INTERNAL]
 │   │       roko.probes.anomaly_count = 3
-│   ├── evaluate                                    [INTERNAL]
+│   ├── assess                                      [INTERNAL]
 │   │       roko.retrieval.candidates = 42
-│   ├── attend                                      [INTERNAL]
+│   ├── compose                                     [INTERNAL]
 │   │       roko.gating.prediction_error = 0.35
 │   │       roko.gating.tier = "T2"
-│   ├── integrate                                   [INTERNAL]
+│   ├── act                                         [INTERNAL]
 │   │       roko.context.tokens = 28500
 │   ├── chat {claude-opus-4-6}                      [CLIENT]
 │   │   │   gen_ai.usage.input_tokens = 28500
@@ -440,7 +436,8 @@ invoke_agent {roko-agent}                          [CLIENT span]
 │   │       roko.gate.name = "CompileGate"
 │   │       roko.gate.passed = true
 │   ├── persist                                     [INTERNAL]
-│   └── reflect                                     [INTERNAL]
+│   ├── broadcast                                  [INTERNAL]
+│   └── react                                       [INTERNAL]
 │           roko.episodes_written = 1
 │
 ├── cognitive_cycle {cycle_index=1, tier="T0"}      [INTERNAL span]
@@ -530,6 +527,8 @@ pub enum TransitionTrigger {
 - See [02-chain-heartbeat-variant.md](./02-chain-heartbeat-variant.md) for the chain-specific SIMULATE/VALIDATE extension
 - See [08-dual-process-t0-t1-t2.md](./08-dual-process-t0-t1-t2.md) for the full dual-process tier routing specification
 - See [09-16-t0-probes.md](./09-16-t0-probes.md) for the 16 zero-cost deterministic probes
+- See `tmp/refinements/05-loop-retold.md` for the canonical seven-step retelling
+- See [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for canonical heartbeat terms
 - See topic [00-architecture](../00-architecture/INDEX.md) for the Synapse Architecture foundation
 - See topic [02-agents](../02-agents/INDEX.md) for agent type compositions
 - See topic [05-learning](../05-learning/INDEX.md) for the cybernetic feedback loops

@@ -2,6 +2,8 @@
 
 > The heartbeat is the agent's autonomous decision cycle — in the two-fabric model it is driven by Bus-published tick Pulses at three concurrent timescales (Gamma, Theta, Delta), with dual-process tier gating that makes ~80% of ticks free and active inference determining compute investment.
 
+> See `tmp/refinements/05-loop-retold.md` for the seven-step retelling and `../00-architecture/01-naming-and-glossary.md` for canonical heartbeat terms.
+
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
 **Last generated**: 2026-04-12
@@ -15,7 +17,7 @@ The heartbeat topic covers the core cognitive loop that every Roko agent execute
 
 The heartbeat is organized around three key ideas:
 
-1. **The 9-step CoALA-derived pipeline** (Sumers et al. 2023, arXiv:2309.02427): PERCEIVE → EVALUATE → ATTEND → INTEGRATE → ACT → VERIFY → PERSIST → ADAPT → META-COGNIZE. Every tick executes this loop when the corresponding tick Pulse arrives on the Bus, mapped to the six Synapse traits (Substrate, Scorer, Gate, Router, Composer, Policy) plus the Daimon cognitive cross-cut.
+1. **The canonical seven-step loop** (retold from the chapter's historical CoALA framing): SENSE → ASSESS → COMPOSE → ACT → VERIFY → PERSIST + BROADCAST → REACT. Every tick executes this loop when the corresponding tick Pulse arrives on the Bus, mapped to the two fabrics and the six operators, with Neuro, Daimon, and Dreams injected as cross-cuts rather than sequenced as extra steps.
 
 2. **Three cognitive speeds** (Buzsáki 2006): Gamma (~5-15s, reactive perception), Theta (~75s, reflective planning), and Delta (~hours, offline consolidation). All three run concurrently as topic subscribers driven by the `HeartbeatPolicy` in `roko-runtime`.
 
@@ -31,11 +33,11 @@ This topic spans L0 Runtime (HeartbeatPolicy, adaptive clock, CorticalState, Bus
 
 | # | Sub-doc | What it covers |
 |---|---|---|
-| 00 | [CoALA 9-Step Pipeline](./00-coala-9-step-pipeline.md) | The Cognitive Architectures for Language Agents framework. Academic predecessors (Soar, ACT-R, CLARION). Why decision cycles, not conversation turns. The 9-step pipeline specification. OODA loop mapping. |
-| 01 | [Universal Loop Mapping](./01-universal-loop-mapping.md) | Side-by-side CoALA → Synapse translation. Which Synapse trait implements each step. Layer traversal. Domain parameterization (coding, chain, research). |
-| 02 | [Chain Heartbeat Variant](./02-chain-heartbeat-variant.md) | Chain agents add SIMULATE (mirage-rs) and VALIDATE (PolicyCage) between ATTEND and ACT. The 11-step chain heartbeat. Three custody modes. Sleepwalker 3-step variant (OBSERVE → REFLECT → PUBLISH). |
+| 00 | [CoALA 9-Step Pipeline](./00-coala-9-step-pipeline.md) | Historical CoALA-derived heartbeat framing, now retold against Roko's canonical seven-step SENSE / ASSESS / COMPOSE / ACT / VERIFY / PERSIST + BROADCAST / REACT loop. Academic predecessors (Soar, ACT-R, CLARION). OODA loop mapping. |
+| 01 | [Universal Loop Mapping](./01-universal-loop-mapping.md) | CoALA-to-universal-loop translation for the seven-step canonical heartbeat, with BROADCAST co-equal to PERSIST and cross-cuts injected rather than sequenced. Layer traversal. Domain parameterization (coding, chain, research). |
+| 02 | [Chain Heartbeat Variant](./02-chain-heartbeat-variant.md) | Chain-specific heartbeat extensions, including historical SIMULATE/VALIDATE pre-flight checks, custody modes, and the Sleepwalker 3-step variant (OBSERVE → REFLECT → PUBLISH). |
 | 03 | [Three Cognitive Speeds](./03-three-cognitive-speeds.md) | Gamma (5-15s reactive), Theta (75s reflective), Delta (hours consolidation). Nested hierarchy. Bus topics and topic subscribers. Cost model per speed. |
-| 04 | [Gamma Reactive Loop](./04-gamma-reactive-loop.md) | Main orchestration loop. Full 9-step execution per tick. Adaptive interval computation. DecisionCycleRecord. Ten cognitive mechanisms. OODA correspondence. |
+| 04 | [Gamma Reactive Loop](./04-gamma-reactive-loop.md) | Main orchestration loop at Gamma speed. The doc still carries older per-tick terminology, but it should now be read through the canonical seven-step heartbeat framing. Adaptive interval computation. DecisionCycleRecord. OODA correspondence. |
 | 05 | [Theta Reflective Loop](./05-theta-reflective-loop.md) | Five-phase reflection: summarize gamma, update Daimon affect (ALMA layers), check prediction calibration, re-evaluate plan, trigger interventions. Adaptive interval by regime. |
 | 06 | [Delta Consolidation Loop](./06-delta-consolidation-loop.md) | Three-phase dream cycle: NREM replay (Mattar-Daw), REM imagination (Boden + Pearl), integration staging. Knowledge tier promotion. Playbook compilation. Non-blocking architecture. |
 | 07 | [Adaptive Clock](./07-adaptive-clock.md) | The `HeartbeatPolicy` publishes `heartbeat.gamma.tick` / `heartbeat.theta.tick` / `heartbeat.delta.tick` Pulses on the Bus. Regime detection. Frequency adjustment rules. Budget-aware throttling. Topic subscriptions. |

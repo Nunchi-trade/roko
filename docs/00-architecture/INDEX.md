@@ -10,6 +10,8 @@
 > framework. See also `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion and two-fabric kernel,
 > `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
+> `tmp/refinements/05-loop-retold.md` for the seven-step loop, co-equal PERSIST/BROADCAST, and
+> cross-cut injection model,
 > `tmp/refinements/09-phase-2-implications.md` for how Chain, Dreams, Coordination, and
 > Heartbeat collapse onto that same kernel,
 > `tmp/refinements/06-refactoring-plan.md` for the phased refactoring plan and rollout
@@ -60,11 +62,11 @@ loop, and the frontier innovations that emerge from the architecture.
 | 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | The durable storage fabric: Substrate's trait surface, backends, concurrency, pruning, and its relationship to the Bus sibling fabric |
 | 07b | [Bus Transport Fabric](./07b-bus-transport-fabric.md) | The transport fabric: Bus trait, Topic and TopicFilter routing, replay/ring semantics, backend families, and topic-driven decoupling |
 | 08 | [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md) | Detailed specs for the five non-Substrate operators after REF04: `Datum`-aware scoring/composition, stream Gates, Pulse routing, and `PolicyOutputs` |
-| 09 | [Universal Cognitive Loop](./09-universal-cognitive-loop.md) | 9-step loop specification with trait mappings, shipping loop_tick code, TickOutcome struct, loop at three speeds, universality |
+| 09 | [Universal Cognitive Loop](./09-universal-cognitive-loop.md) | Seven-step loop specification with SENSE, ASSESS, COMPOSE, ACT, VERIFY, co-equal PERSIST/BROADCAST, REACT, plus three-speed and shipping `loop_tick` guidance |
 | 10 | [Three Cognitive Speeds](./10-three-cognitive-speeds.md) | Gamma (~5-15s), Theta (~75s), Delta (hours): frequency selection, adaptive clock, turn limits, neuroscience inspiration |
 | 11 | [Dual-Process and Active Inference](./11-dual-process-and-active-inference.md) | T0/T1/T2 tiers, EFE formula, 16 T0 probes, Kahneman mapping, classical architectures (ACT-R, SOAR, CLARION, GWT, modern agent-systems comparison), LLM-era architectures |
 | 12 | [Five-Layer Taxonomy](./12-five-layer-taxonomy.md) | L0-L4 detailed specifications, cognitive cross-cuts table, operator × layer map, dependency rules, 18-crate map by layer |
-| 13 | [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md) | Neuro (6 knowledge types, 4 tiers, HDC), Daimon (PAD, 6 states, somatic markers), Dreams (NREM/REM/Integration, hypnagogia), cross-cut interactions |
+| 13 | [Cognitive Cross-Cuts](./13-cognitive-cross-cuts.md) | Neuro, Daimon, and Dreams as injected cross-cuts rather than loop steps: knowledge retrieval/composition, affect-biased assessment and act gating, and Delta-speed consolidation |
 | 14 | [C-Factor: Collective Intelligence](./14-c-factor-collective-intelligence.md) | Two-level metric (C-Factor ratio + C-Score composite), four diagnostic indicators, 31.6× collective calibration, network flywheel |
 | 15 | [Crate Map](./15-crate-map.md) | 18+ crates by layer with status, test counts, dependency graph, legacy umbrella-crate dissolution, legacy naming |
 | 16 | [Autocatalytic Improvement and Cybernetics](./16-autocatalytic-and-cybernetics.md) | Kauffman autocatalytic sets, compound improvement (0.9^4), Ashby's Law, Good Regulator Theorem, Beer VSM, Free Energy Principle, stigmergy |

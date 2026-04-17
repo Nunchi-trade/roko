@@ -8,6 +8,8 @@
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion that makes the transport
 > fabric a first-class kernel surface beside Substrate,
 > `tmp/refinements/04-operators-generalized.md` for the `Datum` and `PolicyOutputs` operator
+> `tmp/refinements/05-loop-retold.md` for the seven-step loop vocabulary (`SENSE`,
+> `BROADCAST`, and cross-cuts as injections rather than loop steps),
 > generalization, and
 > `tmp/refinements/09-phase-2-implications.md` for how Chain, Dreams, Coordination, and
 > Heartbeat land on the same two-fabric kernel.
@@ -142,7 +144,7 @@ These names are preserved from the original architecture with no rename needed:
 | Name | What It Is |
 |---|---|
 | **Mirage** / **mirage-rs** | In-process EVM simulator for transaction testing. |
-| **Heartbeat** | The agent's cognitive loop — one complete cycle of perceive → evaluate → attend → integrate → act → verify → persist → adapt → meta-cognize. |
+| **Heartbeat** | The agent's cognitive loop — one complete seven-step cycle of SENSE → ASSESS → COMPOSE → ACT → VERIFY → PERSIST/BROADCAST → REACT, run at Gamma, Theta, or Delta speed. |
 | **CoALA** | Cognitive Architecture for Language Agents (Sumers et al. 2023). The theoretical framework underlying the universal cognitive loop. |
 | **Pheromone system** | Stigmergic coordination: agents leave decaying signals in shared substrate for indirect communication (Grassé 1959, Parunak et al. 2007). |
 | **Sleepwalker** | Reduced-capability sleep mode for agents during low-activity periods. |
@@ -179,6 +181,7 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **C-Factor** | Collective intelligence ratio metric (Woolley et al. 2010, Science 330). |
 | **C-Score** | Composite optimization metric for collective performance. |
 | **Three Cognitive Speeds** | Gamma (~5-15s reactive) / Theta (~75s reflective) / Delta (hours consolidation). |
+| **Seven-Step Loop** | The canonical universal loop: SENSE → ASSESS → COMPOSE → ACT → VERIFY → PERSIST/BROADCAST → REACT. Cross-cuts inject into the operators around this loop; they are not extra sequential steps. |
 | **16 T0 Probes** | Zero-LLM diagnostic probes that suppress ~80% of ticks to T0 (no inference call). |
 | **VCG Attention Auction** | Vickrey-Clarke-Groves mechanism for truthful context budget allocation. |
 | **Somatic Landscape** | k-d tree over 8D strategy space with 15% contrarian retrieval for diversity. |
@@ -222,7 +225,7 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **CascadeRouter** | Multi-stage model routing: confidence threshold → contextual bandit (LinUCB) → cost-aware selection. Persisted to `.roko/learn/cascade-router.json`. |
 | **ChainBus** | Bus backend that turns Korai or Daeji log streams into topic-addressed Pulses such as `chain.deposit.emitted`. It is the transport sibling to `ChainSubstrate`, not a replacement for durable on-chain storage. |
 | **ChainSubstrate** | Substrate backend for durable on-chain Engrams such as attestations, transactions, insights, bounties, and pheromones. Queries durable chain state; live chain notifications belong on `ChainBus`. |
-| **Cognitive Loop** | The 9-step universal loop: PERCEIVE → EVALUATE → ATTEND → INTEGRATE → ACT → VERIFY → PERSIST → ADAPT → META-COGNIZE. |
+| **Cognitive Loop** | The universal seven-step loop: SENSE → ASSESS → COMPOSE → ACT → VERIFY → PERSIST/BROADCAST → REACT. It draws from CoALA but treats cross-cuts such as Neuro, Daimon, and Dreams as injected concerns rather than sequential loop steps. |
 | **Collective** | A group of cooperating agents. Replaces "Clade." |
 | **Composer** | Synapse trait. Combines `Datum` inputs into one durable Engram under Budget constraints. Synchronous. Takes `&dyn Scorer`. |
 | **ContentHash** | 32-byte BLAKE3 digest identifying an Engram. Computed from kind + body + author + tags. Score and decay are excluded. |
