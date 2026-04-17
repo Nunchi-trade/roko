@@ -1,8 +1,18 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "docker/roko.Dockerfile"
-watchPatterns = ["crates/**", "Cargo.toml", "Cargo.lock", "docker/roko.Dockerfile"]
+dockerfilePath = "docker/mirage.Dockerfile"
+watchPatterns = [
+  "apps/mirage-rs/**",
+  "apps/agent-relay/**",
+  "crates/roko-runtime/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "docker/mirage.Dockerfile",
+  "docker/start-mirage-with-relay.sh",
+]
 
 [deploy]
+healthcheckPath = "/relay/health"
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

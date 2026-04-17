@@ -27,10 +27,11 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{Request, Response, StatusCode},
+    http::{HeaderMap, Request, Response, StatusCode, Uri},
     response::IntoResponse,
-    routing::{delete, get},
+    routing::{any, delete, get},
 };
+use futures_util::{SinkExt, StreamExt};
 use jsonrpsee::{
     RpcModule,
     core::{RegisterMethodError, SubscriptionError},
@@ -39,7 +40,18 @@ use jsonrpsee::{
 };
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use parking_lot::RwLock;
+use reqwest::header::{
+    CONNECTION, CONTENT_LENGTH, HOST, HeaderName as ReqwestHeaderName, TRANSFER_ENCODING, UPGRADE,
+};
 use tokio::sync::broadcast;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Message as TungsteniteMessage,
+        client::IntoClientRequest,
+        protocol::{CloseFrame as TungsteniteCloseFrame, frame::coding::CloseCode},
+    },
+};
 use tower::Service;
 use tower_http::cors::CorsLayer;
 
@@ -87,6 +99,40 @@ struct StagedErc20Mint {
     balance_slot: Option<U256>,
     storage_writes: Vec<(U256, U256)>,
 }
+
+#[derive(Clone, Debug)]
+struct RelayProxyState {
+    upstream_http: String,
+    client: reqwest::Client,
+}
+
+impl RelayProxyState {
+    fn from_env() -> Self {
+        let upstream_http = std::env::var("ROKO_AGENT_RELAY_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:9011".to_owned());
+        Self {
+            upstream_http,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn upstream_http_url(&self, uri: &Uri) -> String {
+        format!("{}{}", self.upstream_http.trim_end_matches('/'), uri)
+    }
+
+    fn upstream_ws_url(&self, uri: &Uri) -> String {
+        let base = if let Some(rest) = self.upstream_http.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.upstream_http.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            format!("ws://{}", self.upstream_http.trim_start_matches('/'))
+        };
+        format!("{}{}", base.trim_end_matches('/'), uri)
+    }
+}
+
+const RELAY_PROXY_BODY_LIMIT: usize = 8 * 1024 * 1024;
 
 /// Canonical ERC-8004 Identity Registry address used by the Ethereum-fork demo path.
 pub const ERC8004_IDENTITY_REGISTRY: Address =
@@ -345,6 +391,256 @@ async fn dashboard_cache_control(
     response
 }
 
+fn build_relay_proxy_router() -> Router<()> {
+    build_relay_proxy_router_with_state(RelayProxyState::from_env())
+}
+
+/// Builds the same-origin `/relay/*` proxy router against an explicit relay upstream.
+///
+/// This exists so integration tests can exercise the real mirage relay-forwarding
+/// handlers without relying on process-global environment mutation.
+#[doc(hidden)]
+#[must_use]
+pub fn build_relay_proxy_router_for_tests(upstream_http: String) -> Router<()> {
+    build_relay_proxy_router_with_state(RelayProxyState {
+        upstream_http,
+        client: reqwest::Client::new(),
+    })
+}
+
+fn build_relay_proxy_router_with_state(state: RelayProxyState) -> Router<()> {
+    Router::new()
+        .route("/relay/agents/ws", get(relay_proxy_ws))
+        .route("/relay/events/ws", get(relay_proxy_ws))
+        .route("/relay", any(relay_proxy_http))
+        .route("/relay/{*path}", any(relay_proxy_http))
+        .with_state(state)
+}
+
+async fn relay_proxy_http(
+    State(state): State<RelayProxyState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let upstream_url = state.upstream_http_url(&parts.uri);
+    let body = match axum::body::to_bytes(body, RELAY_PROXY_BODY_LIMIT).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read relay proxy request body");
+            return relay_proxy_error(StatusCode::BAD_REQUEST, "invalid relay request body");
+        }
+    };
+
+    let mut upstream = state.client.request(parts.method.clone(), upstream_url);
+    for (name, value) in &parts.headers {
+        if is_hop_by_hop_header(name) {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+
+    let upstream_response = match upstream.body(body).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "relay proxy upstream request failed");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay upstream unavailable");
+        }
+    };
+
+    let status = upstream_response.status();
+    let headers = upstream_response.headers().clone();
+    let body = match upstream_response.bytes().await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read relay proxy upstream response body");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay upstream response invalid");
+        }
+    };
+
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    for (name, value) in &headers {
+        if is_hop_by_hop_header(name) {
+            continue;
+        }
+        response.headers_mut().append(name, value.clone());
+    }
+    response
+}
+
+async fn relay_proxy_ws(
+    State(state): State<RelayProxyState>,
+    ws: WebSocketUpgrade,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let upstream_url = state.upstream_ws_url(&uri);
+    let mut upstream_request = match upstream_url.clone().into_client_request() {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%error, "failed to construct relay websocket request");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket request invalid");
+        }
+    };
+    if let Some(protocol) = headers.get(axum::http::header::SEC_WEBSOCKET_PROTOCOL) {
+        upstream_request.headers_mut().insert(
+            axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+            protocol.clone(),
+        );
+    }
+
+    let upstream_socket = match connect_async(upstream_request).await {
+        Ok((socket, _response)) => socket,
+        Err(error) => {
+            tracing::warn!(%error, %upstream_url, "failed to connect relay websocket upstream");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket unavailable");
+        }
+    };
+
+    ws.on_upgrade(move |socket| bridge_relay_websocket(socket, upstream_socket))
+        .into_response()
+}
+
+async fn bridge_relay_websocket(
+    downstream: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) {
+    let (mut downstream_tx, mut downstream_rx) = downstream.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+
+    loop {
+        tokio::select! {
+            message = downstream_rx.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        if forward_downstream_ws(message, &mut upstream_tx).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "relay proxy downstream websocket receive failed");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            message = upstream_rx.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        if forward_upstream_ws(message, &mut downstream_tx).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "relay proxy upstream websocket receive failed");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+async fn forward_downstream_ws(
+    message: Message,
+    upstream_tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        TungsteniteMessage,
+    >,
+) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error> {
+    match message {
+        Message::Text(text) => upstream_tx
+            .send(TungsteniteMessage::Text(text.to_string().into()))
+            .await,
+        Message::Binary(binary) => upstream_tx
+            .send(TungsteniteMessage::Binary(binary))
+            .await,
+        Message::Ping(payload) => upstream_tx.send(TungsteniteMessage::Ping(payload)).await,
+        Message::Pong(payload) => upstream_tx.send(TungsteniteMessage::Pong(payload)).await,
+        Message::Close(frame) => {
+            let frame = frame.map(|frame| TungsteniteCloseFrame {
+                code: axum_close_code_to_tungstenite(frame.code),
+                reason: frame.reason.to_string().into(),
+            });
+            upstream_tx.send(TungsteniteMessage::Close(frame)).await
+        }
+    }
+}
+
+async fn forward_upstream_ws(
+    message: TungsteniteMessage,
+    downstream_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> std::result::Result<(), axum::Error> {
+    match message {
+        TungsteniteMessage::Text(text) => downstream_tx
+            .send(Message::Text(text.to_string().into()))
+            .await,
+        TungsteniteMessage::Binary(binary) => downstream_tx.send(Message::Binary(binary)).await,
+        TungsteniteMessage::Ping(payload) => downstream_tx.send(Message::Ping(payload)).await,
+        TungsteniteMessage::Pong(payload) => downstream_tx.send(Message::Pong(payload)).await,
+        TungsteniteMessage::Close(frame) => {
+            let frame = frame.map(|frame| axum::extract::ws::CloseFrame {
+                code: tungstenite_close_code_to_axum(frame.code),
+                reason: frame.reason.to_string().into(),
+            });
+            downstream_tx.send(Message::Close(frame)).await
+        }
+        TungsteniteMessage::Frame(_) => Ok(()),
+    }
+}
+
+fn relay_proxy_error(status: StatusCode, message: &'static str) -> Response<Body> {
+    let mut response = Response::new(Body::from(message));
+    *response.status_mut() = status;
+    response
+}
+
+fn is_hop_by_hop_header(name: &ReqwestHeaderName) -> bool {
+    matches!(name, &CONNECTION | &CONTENT_LENGTH | &HOST | &TRANSFER_ENCODING | &UPGRADE)
+}
+
+fn axum_close_code_to_tungstenite(code: u16) -> CloseCode {
+    match code {
+        1000 => CloseCode::Normal,
+        1001 => CloseCode::Away,
+        1002 => CloseCode::Protocol,
+        1003 => CloseCode::Unsupported,
+        1005 => CloseCode::Status,
+        1006 => CloseCode::Abnormal,
+        1007 => CloseCode::Invalid,
+        1008 => CloseCode::Policy,
+        1009 => CloseCode::Size,
+        1010 => CloseCode::Extension,
+        1011 => CloseCode::Error,
+        1012 => CloseCode::Restart,
+        1013 => CloseCode::Again,
+        1015 => CloseCode::Tls,
+        value => CloseCode::Library(value),
+    }
+}
+
+fn tungstenite_close_code_to_axum(code: CloseCode) -> u16 {
+    match code {
+        CloseCode::Normal => 1000,
+        CloseCode::Away => 1001,
+        CloseCode::Protocol => 1002,
+        CloseCode::Unsupported => 1003,
+        CloseCode::Status => 1005,
+        CloseCode::Abnormal => 1006,
+        CloseCode::Invalid => 1007,
+        CloseCode::Policy => 1008,
+        CloseCode::Size => 1009,
+        CloseCode::Extension => 1010,
+        CloseCode::Error => 1011,
+        CloseCode::Restart => 1012,
+        CloseCode::Again => 1013,
+        CloseCode::Tls => 1015,
+        CloseCode::Reserved(value) | CloseCode::Iana(value) | CloseCode::Library(value) => value,
+        CloseCode::Bad(value) => value,
+    }
+}
+
 async fn finish_start_rpc_server(
     address: SocketAddr,
     module: RpcModule<ServerContext>,
@@ -381,6 +677,7 @@ async fn finish_start_rpc_server(
         .route("/events/{stream_id}", get(event_ws_handler))
         .route("/events/{stream_id}", delete(unsubscribe_event_handler))
         .with_state(local_state);
+    app = app.merge(build_relay_proxy_router());
     if let Some(api) = api_router {
         app = app.nest("/api", api);
     }

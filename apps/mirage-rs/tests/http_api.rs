@@ -6,21 +6,28 @@
 #![cfg(all(test, feature = "chain"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
-    body::Body,
-    http::{Request, StatusCode},
+    Json, Router,
+    body::{Body, Bytes as AxumBytes},
+    extract::OriginalUri,
+    http::{HeaderMap, Method, Request, StatusCode},
+    routing::{any, get},
 };
 use parking_lot::RwLock;
 use serde_json::Value;
 use tower::ServiceExt;
+use tokio::{net::TcpListener, task::JoinHandle};
 
 use mirage_rs::{
     chain::{KnowledgeKind, PheromoneKind, projection::project_tokens},
     chain_rpc::{ChainContext, ChainToggles},
     http_api::{self, ApiState},
+    rpc::build_relay_proxy_router_for_tests,
 };
 
 // ---------------------------------------------------------------------------
@@ -167,6 +174,82 @@ async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode
         )
     });
     (status, json)
+}
+
+struct MockRelayServer {
+    base_url: String,
+    task: JoinHandle<()>,
+}
+
+impl MockRelayServer {
+    async fn spawn() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock relay listener");
+        let addr = listener.local_addr().expect("read mock relay address");
+        let base_url = format!("http://{addr}");
+        let app = Router::new()
+            .route("/relay/health", any(mock_relay_health))
+            .route("/relay/{*tail}", any(mock_relay_echo));
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock relay");
+        });
+
+        let server = Self { base_url, task };
+        server.wait_until_ready().await;
+        server
+    }
+
+    async fn wait_until_ready(&self) {
+        for _ in 0..50 {
+            match reqwest::Client::new()
+                .get(format!("{}/relay/health", self.base_url))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => return,
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        panic!("mock relay did not become ready");
+    }
+}
+
+impl Drop for MockRelayServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn mock_relay_health() -> &'static str {
+    "ok"
+}
+
+async fn mock_relay_echo(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    body: AxumBytes,
+) -> (StatusCode, Json<Value>) {
+    let body_json = serde_json::from_slice::<Value>(&body).ok();
+    (
+        if method == Method::POST {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(serde_json::json!({
+            "method": method.as_str(),
+            "path": uri.0.path(),
+            "query": uri.0.query(),
+            "content_type": headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            "body_json": body_json,
+        })),
+    )
 }
 
 // ===========================================================================
@@ -1079,4 +1162,80 @@ async fn test_deposit_pheromone_empty_content() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["error"].as_str().unwrap().contains("content"));
+}
+
+#[tokio::test]
+async fn relay_proxy_get_preserves_path_and_query() {
+    let relay = MockRelayServer::spawn().await;
+    let router = Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .merge(build_relay_proxy_router_for_tests(relay.base_url.clone()));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/relay/cards/agent-proxy?view=full&source=dashboard")
+        .body(Body::empty())
+        .expect("build proxied relay GET request");
+    let response = router
+        .oneshot(req)
+        .await
+        .expect("execute proxied relay GET");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+        .await
+        .expect("read proxied relay GET body");
+    let body: Value = serde_json::from_slice(&body).expect("decode proxied relay GET");
+    assert_eq!(body["method"], "GET");
+    assert_eq!(body["path"], "/relay/cards/agent-proxy");
+    assert_eq!(body["query"], "view=full&source=dashboard");
+    assert_eq!(body["body_json"], Value::Null);
+}
+
+#[tokio::test]
+async fn relay_proxy_leaves_non_relay_routes_local() {
+    let relay = MockRelayServer::spawn().await;
+    let router = Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .merge(build_relay_proxy_router_for_tests(relay.base_url.clone()));
+    let (status, body) = get_json(&router, "/health").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn relay_proxy_post_preserves_json_and_status() {
+    let relay = MockRelayServer::spawn().await;
+    let router = Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .merge(build_relay_proxy_router_for_tests(relay.base_url.clone()));
+    let request_body = serde_json::json!({
+        "agent_id": "agent-relay",
+        "message": {
+            "prompt": "summarize relay status"
+        }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/relay/messages?timeout_ms=2500")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&request_body).expect("serialize proxied relay POST"),
+        ))
+        .expect("build proxied relay POST request");
+    let response = router
+        .oneshot(req)
+        .await
+        .expect("execute proxied relay POST");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+        .await
+        .expect("read proxied relay POST body");
+    let body: Value = serde_json::from_slice(&body).expect("decode proxied relay POST");
+    assert_eq!(body["method"], "POST");
+    assert_eq!(body["path"], "/relay/messages");
+    assert_eq!(body["query"], "timeout_ms=2500");
+    assert_eq!(body["content_type"], "application/json");
+    assert_eq!(body["body_json"], request_body);
 }
