@@ -7,7 +7,7 @@
 
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture, [06-neuro](../06-neuro/INDEX.md) for HDC knowledge encoding
-**Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4, `bardo-backup/prd/23-ta/00-witness-as-technical-analyst.md`, `refactoring-prd/09-innovations.md`
+**Key sources**: `refactoring-prd/03-cognitive-subsystems.md` §4, legacy source `bardo-backup/prd/23-ta/00-witness-as-technical-analyst.md`, `refactoring-prd/09-innovations.md`
 
 ---
 
@@ -17,7 +17,7 @@ Technical analysis (TA) originated as a financial discipline — chart patterns,
 
 The core insight: code, markets, research, and operations all share the same structural properties that make TA useful. They are structured systems with measurable state variables, feedback loops, non-stationary dynamics, and adversarial participants. A build time trend is structurally analogous to a price trend. A test failure probability is structurally analogous to a risk assessment. A dependency vulnerability score is structurally analogous to portfolio risk. The mathematics is the same; the domain vocabulary changes.
 
-This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. We lead with the universal `Oracle` trait, then show how domain-specific instances (chain oracles, coding oracles, research oracles) implement the same interface.
+This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. Under the two-mediums/two-fabrics framing in the [glossary](../00-architecture/01-naming-and-glossary.md), TA is one of the places where Roko's compounding and superlinear product claim becomes measurable: each prediction, correction, and replay cycle should make the next cycle cheaper, faster, and better. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md).
 
 ---
 
@@ -131,23 +131,30 @@ Dreams (offline learning) consolidate oracle performance:
 
 ---
 
-## The universal loop with oracles
+## The seven-step loop with oracles
 
-The 9-step universal cognitive loop (Synapse Loop) integrates oracles at every stage:
+The seven-step loop is where TA turns usage into compounding returns:
 
 ```
-1. PERCEIVE      → Substrate.query()       Oracle reads current state
-2. EVALUATE      → Scorer.score()          PredictiveScorer weights by prediction accuracy
-3. ATTEND        → Router.select()         Oracle predictions bias attention to uncertain areas
-4. INTEGRATE     → Composer.compose()      EFE-weighted context includes prediction context
-5. ACT           → Agent.execute()         Agent makes prediction BEFORE acting
-6. VERIFY        → Gate.verify()           Prediction resolved against external outcome
-7. PERSIST       → Substrate.put()         Prediction + outcome stored as Engrams
-8. ADAPT         → Policy.decide()         Residual correction updates calibration
-9. META-COGNIZE  → Daimon.assess()         Prediction accuracy updates cognitive state
+1. SENSE      → Substrate.query() + Bus.subscribe()
+               Oracle reads state, prior Engrams, and live Pulses
+2. ASSESS     → Scorer.score() + Router.select()
+               PredictiveScorer weights uncertainty, drift, and likely payoff
+3. COMPOSE    → Composer.compose()
+               EFE-weighted context includes the smallest prediction-relevant slice
+4. ACT        → Agent.execute()
+               Agent emits prediction Pulses and final task output
+5. VERIFY     → Gate.verify()
+               Outcome closes the prediction and emits verdict Engrams/Pulses
+6. PERSIST    → Substrate.put()
+               Prediction, outcome, and calibration artifacts graduate to Engrams
+   BROADCAST  → Bus.publish()
+               Residuals, anomalies, and calibration Pulses feed other agents
+7. REACT      → Policy.decide()
+               Residual correction, heuristic updates, and routing changes fire
 ```
 
-This maps to CoALA cognitive architecture (Sumers et al., 2023, arXiv:2309.02427) with the prediction loop inspired by active inference (Friston Free Energy Principle) and the Good Regulator Theorem (Conant & Ashby, 1970).
+This mapping keeps TA aligned with the current architecture story in [00-architecture](../00-architecture/INDEX.md): Engrams carry durable prediction history in the Substrate, Pulses carry ephemeral prediction and outcome traffic on the Bus, and Policy closes the learning loop. See also [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) for the detailed prediction-resolution-calibration path.
 
 ---
 
@@ -170,6 +177,59 @@ error ≥ 0.6  → T2 (full model, deep)      ~5% of ticks
 ```
 
 This means 80% of cognitive cycles cost nothing — the oracle decides no action is needed based on pure Rust probes running in microseconds.
+
+---
+
+## Why TA is a compounding system
+
+REF15 makes an explicit product claim: Roko should improve superlinearly on real workloads because multiple feedback loops reinforce each other. Technical analysis is the instrumentation layer for that claim because each loop depends on prediction, verification, or calibration:
+
+| REF15 loop | TA contribution | What should improve with use |
+|---|---|---|
+| Demurrage-weighted retrieval | Oracles measure which memories still predict useful outcomes | Fewer wasted tokens, better retrieval precision |
+| Heuristic calibration | Prediction/outcome joins tighten confidence intervals | Better priors on similar tasks |
+| HDC codebook cleanup | Oracle outcomes add cleaner labels to each HDC fingerprint | Faster cache hits and better analogical matches |
+| c-factor feedback | Shared prediction accuracy reveals which cohorts learn well together | Better routing across agents and domains |
+| Playbook distillation | Repeated predictions collapse into reusable strategy templates | Lower time-to-solution for recurring task classes |
+| Cross-deployment heuristic commons | Portable calibration data bootstraps new deployments | Better first-week performance on fresh installs |
+| Plugin ecosystem | Each plugin adds new measurable state and new verification surfaces | More domains that feed the same learning machinery |
+
+The point is not just that these loops exist. The point is that they are observable. If TA cannot show improving slopes, then the broader compounding claim has not actually landed.
+
+### Scaling dashboards
+
+The technical-analysis chapter is the right home for the operator dashboards that REF15 calls out:
+
+| Dashboard line | Interpretation | Failure signal |
+|---|---|---|
+| Retrieval quality vs. episode count | Demurrage and HDC are improving effective recall | Flat slope means retrieval is not learning |
+| Mean calibration CI width per heuristic | Heuristic calibration is tightening with trials | Flat or rising width means the Calibrator lacks fresh trials |
+| c-factor trend on sampled cohorts | Coordination is turning better predictions into better group output | Rising c with flat gate outcomes suggests reward hacking |
+| HDC cleanup hit rate | The codebook is helping later retrieval and composition | Falling hit rate implies noisy fingerprints or poor cleanup |
+| Mean time to first successful PR on a new codebase | Headline composite KPI across all loops | Flat curve means the product claim is not compounding |
+
+### Anti-metrics
+
+Superlinear capability gains are only credible if a few resource curves stay bounded:
+
+| Anti-metric | Why it should stay flat or shrink |
+|---|---|
+| Warm-tier episode count | Demurrage should keep the working set bounded |
+| Heuristic count with confirmations below 3 | Weak hypotheses should either be tested quickly or decay away |
+| Mean lineage depth per response | Context depth should only grow when it buys quality |
+
+If these anti-metrics blow out while the headline metrics improve, the system is probably cheating by hoarding context or retaining low-value memory.
+
+### Evaluation guardrails
+
+The compounding claim is only testable on real workloads with preserved state:
+
+1. Evals must span sessions and days, not reset the Substrate between runs.
+2. Each benchmark should be attempted multiple times so the slope of `time_to_solve` is measurable.
+3. Commons-on versus commons-off runs should be compared explicitly to isolate the value of shared heuristics.
+4. Operator dashboards should be read alongside task difficulty buckets so easier task selection cannot masquerade as progress.
+
+Without those guardrails, TA can still report local prediction quality, but it cannot justify the stronger superlinear product claim.
 
 ---
 
@@ -216,8 +276,9 @@ The Oracle trait abstracts over these differences. Domain-specific implementatio
 - Domain-specific oracle implementations (chain, coding, research)
 - Active inference state space (factorized POMDP, 90 states)
 - EFE-based context selection with pragmatic + epistemic - ambiguity decomposition
+- Cross-session scaling dashboards for compounding, anti-metrics, and commons-on/off comparisons
 
-See `tmp/implementation-plans/modelrouting/12-advanced-patterns.md` for the Thompson Sampling and predictive foraging calibration implementation plan.
+See `tmp/implementation-plans/modelrouting/12-advanced-patterns.md` for the Thompson Sampling and predictive foraging calibration implementation plan. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) for the canonical superlinear-scaling framing this chapter now measures.
 
 ---
 
@@ -227,6 +288,8 @@ See `tmp/implementation-plans/modelrouting/12-advanced-patterns.md` for the Thom
 - See [02-chain-oracles.md](./02-chain-oracles.md) for chain-specific TA primitives
 - See [03-coding-oracles.md](./03-coding-oracles.md) for coding equivalents of TA primitives
 - See [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) for the full prediction loop
+- See [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for the current two-mediums/two-fabrics vocabulary
 - See topic [00-architecture](../00-architecture/INDEX.md) for the Synapse Architecture overview
 - See topic [05-learning](../05-learning/INDEX.md) for the cybernetic feedback loops
 - See topic [06-neuro](../06-neuro/INDEX.md) for HDC cross-domain transfer
+- See [../../tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) for the canonical REF15 proposal

@@ -4,7 +4,7 @@
 >
 > **Scope**: Multi-agent coordination in Roko — stigmergy theory, digital pheromones,
 > pheromone types and scoping, Agent Mesh transport, morphogenetic specialization,
-> exponential flywheel mechanisms, collective intelligence metrics, and current
+> the REF15 compounding flywheel, collective intelligence metrics, and current
 > implementation status.
 
 ---
@@ -24,11 +24,10 @@ Activation (profitable strategies reinforce slowly via experience) and inhibitio
 wide pheromone signals propagate fast via the Agent Mesh) satisfy Turing's instability
 condition, causing stable specialist patterns to emerge without central role assignment.
 
-The **exponential flywheel** describes ten mechanisms (autocatalytic knowledge networks,
-superlinear scaling, Reed's Law, knowledge distillation cascades, evolutionary dynamics,
-collective calibration, cross-domain resonance, niche construction, information-theoretic
-compounding, transactive memory) that produce superlinear growth in collective intelligence.
-The **c-factor** chapter reframes coordination metrics around continuously measured cohort
+The **exponential flywheel** now uses REF15's seven-loop framing: demurrage-weighted
+retrieval, heuristic calibration, HDC codebook cleanup, c-factor feedback, playbook
+distillation, cross-deployment heuristic commons, and the plugin ecosystem. The
+**c-factor** chapter reframes coordination metrics around continuously measured cohort
 process quality: turn-taking equality, peer prediction accuracy, citation reciprocity,
 delivery rate, and HDC diversity computed from Bus and Substrate traces.
 
@@ -59,7 +58,7 @@ delivery rate, and HDC diversity computed from Bus and Substrate traces.
 | 07 | [07-morphogenetic-specialization.md](07-morphogenetic-specialization.md) | Morphogenetic Specialization | ~660 | Turing 1952 reaction-diffusion, strategy concentration vector (8 dimensions), Gierer-Meinhardt kinetics, update rule with activation/inhibition/decay/noise, niche competition, role coordination messages, resource pressure modulation, convergence analysis, **Turing pattern stability analysis** (linear stability, pitchfork bifurcation, Hopf oscillatory instability, Lyapunov stability monitoring, pattern selection), DeLanda assemblage theory |
 | 08 | [08-permissioned-subnets.md](08-permissioned-subnets.md) | Permissioned Subnets | ~240 | Private Mesh scopes, access control models (invite/role/reputation), internal reputation, opt-in publishing, scope boundary enforcement, organizational patterns, club goods theory |
 | 09 | [09-stigmergy-scaling.md](09-stigmergy-scaling.md) | Stigmergy Scaling | ~250 | O(N×M) vs O(N²) analysis, pheromone field scaling, transport scaling (relay vs gossip), morphogenetic scaling, knowledge sync scaling, practical limits, comparison with consensus and pub-sub |
-| 10 | [10-exponential-flywheel.md](10-exponential-flywheel.md) | Exponential Flywheel | ~280 | 10 mechanisms for superlinear growth: autocatalytic networks (Kauffman), superlinear scaling (West/Bettencourt β≈1.15), Reed's Law (2^N), distillation cascades (Hinton), evolutionary dynamics, collective calibration (31.6×), cross-domain resonance (HDC 0.526), niche construction, information-theoretic compounding, transactive memory |
+| 10 | [10-exponential-flywheel.md](10-exponential-flywheel.md) | Exponential Flywheel | ~200 | REF15 coordination framing for superlinear growth: seven compounding loops, Phase 2 amplifiers, north-star and secondary KPIs, anti-metrics, failure modes, and the operating rule for real persistent workloads |
 | 11 | [11-collective-intelligence-metrics.md](11-collective-intelligence-metrics.md) | Collective Intelligence Metrics | ~640 | Continuous c-factor measurement for cohorts: five-axis `CohortMetrics`, online `CohortWeightsLearner`, WisdomGate checks, groupthink countermeasures, and dashboard/API/Prometheus surfacing built from Bus plus Substrate instrumentation |
 | 12 | [12-current-status-and-gaps.md](12-current-status-and-gaps.md) | Current Status and Gaps | ~250 | Per-feature implementation status (Wired/Scaffold/Design/Gap), 5-tier implementation priority, existing code assets, key gaps (no pheromone types, no transport, no morphogenetic code, no metrics), open questions and decisions |
 

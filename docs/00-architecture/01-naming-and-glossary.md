@@ -212,6 +212,9 @@ The following names are load-bearing additions in the current architecture:
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
 | `c-factor` | Continuously measured cohort-process metric learned from turn-taking entropy, peer prediction accuracy, citation reciprocity, delivery rate, and HDC diversity. |
+| `Compounding loop` | A feedback loop where each successful cycle improves the next cycle's cost, latency, or quality rather than merely repeating it. |
+| `Superlinear return` | A scaling regime where accumulated usage, connected deployments, or added plugins produce more than proportional capability or efficiency gains. |
+| `Heuristic commons` | The cross-deployment pool of exportable heuristics and calibration data that bootstraps new Roko installations. |
 | `Synapse Architecture` | The architecture story of two mediums, two fabrics, and six operators. |
 
 ### 9.1 Topic Namespace Guidance
