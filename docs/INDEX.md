@@ -92,6 +92,16 @@ vocabulary. Start with [`11-safety/INDEX.md`](11-safety/INDEX.md),
 [`00-architecture/05-provenance-and-attestation.md`](00-architecture/05-provenance-and-attestation.md),
 [`00-architecture/26-cognitive-immune-system.md`](00-architecture/26-cognitive-immune-system.md),
 and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/33-observability-telemetry.md` consolidates the operator-facing legibility
+story: structured logs, Prometheus-compatible metrics, OpenTelemetry traces, Bus-backed event
+telemetry, replay, and first-class cost visibility become one instrumentation contract instead
+of deployment-specific fragments. It also makes the Roko-specific surfaces explicit, especially
+`roko.c_factor`, demurrage balance histograms, heuristic calibration drift, and projection-fed
+cost dashboards. Start with [`19-deployment/INDEX.md`](19-deployment/INDEX.md),
+[`19-deployment/12-production-hardening.md`](19-deployment/12-production-hardening.md),
+[`00-architecture/21-performance-numerical-stability.md`](00-architecture/21-performance-numerical-stability.md),
+[`00-architecture/32-comprehensive-test-strategy.md`](00-architecture/32-comprehensive-test-strategy.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/26-statehub-rearchitecture.md` promotes `StateHub` from a TUI helper to the
 kernel projection layer that folds Bus Pulses and Substrate state into typed, filterable,
 replayable views for every surface. Start with

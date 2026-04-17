@@ -3,7 +3,8 @@
 > Cross-cutting — All Layers
 > Status: **Specification** — informs all crate-level testing, benchmarking, and safety verification
 > Canonical source: workspace root `Cargo.toml`, all `crates/*/tests/`, `crates/*/benches/`
-> Last updated: 2026-04-13
+> Last updated: 2026-04-17
+> Observability note: telemetry contracts, replay-as-test, and observability-stack failure cases are part of the core testing story in this chapter; see [tmp/refinements/33-observability-telemetry.md](../../tmp/refinements/33-observability-telemetry.md) and [01-naming-and-glossary.md](./01-naming-and-glossary.md) for shared vocabulary.
 
 > **Implementation**: Specified
 
@@ -18,6 +19,11 @@ or gate thresholds can degrade capabilities while all unit tests still pass. Thi
 specifies the complete testing strategy: what to test per crate, property-based testing
 candidates, cross-crate integration scenarios, performance benchmarks, adversarial/safety testing,
 and regression prevention mechanisms designed specifically for an evolving cognitive architecture.
+
+The test strategy must also verify the observability claim itself. If logs, metrics, traces,
+Pulses, replay outputs, or StateHub projections drift from their contracts, Roko becomes hard to
+debug, hard to audit, and impossible to trust in production. Tests therefore need to assert both
+behavior and the telemetry that explains behavior.
 
 ### The testing paradox of self-improving systems
 
@@ -76,6 +82,7 @@ preservation across self-modification cycles).
 | Benchmarks | Missing entirely | No `benches/`, no `criterion`, no `iai` anywhere |
 | Fuzzing | Missing entirely | No `cargo-fuzz` targets |
 | Mutation testing | Missing entirely | No `cargo-mutants` configuration |
+| Observability contract tests | Missing entirely | No schema checks for structured logs, Prometheus metrics, traces, Pulses, StateHub projections, alert rules, or replay fidelity |
 | Mocks | Partial | `MockAgent`, `MockToolDispatcher`, `mock_provider` (wiremock) |
 | Fixtures | Partial | 15 JSON response files in `roko-agent/tests/fixtures/` |
 | CI matrix | Not in repo | No `.github/workflows/` visible |
@@ -429,6 +436,8 @@ identifies the highest-value cross-crate integrations.
 | **CascadeRouter → Model selection → Cost tracking** | agent (router) → learn (efficiency + bandit) | Not tested | P1 |
 | **SystemPromptBuilder → Agent dispatch** | compose → agent | Not tested | P1 |
 | **Episode logging → Skill extraction** | learn (episodes + skills) → compose (injection) | Not tested | P2 |
+| **Replay-as-test with override** | cli → orchestrator → fs → learn → Bus | Not tested | P0 |
+| **Telemetry contract verification** | orchestrator → agent → gate → Bus → StateHub | Not tested | P0 |
 | **Signal write → Query → Decay → GC** | core → fs → core (decay) | Not tested | P2 |
 | **ProcessSupervisor → Agent lifecycle** | bardo-runtime → agent → orchestrator | Not tested | P2 |
 | **Conductor watchers → Circuit breaker → Agent throttle** | conductor → agent | Not tested | P2 |
@@ -520,6 +529,37 @@ async fn test_concurrent_plan_execution() {
 }
 ```
 
+#### Scenario E2E-5: Telemetry contract on a successful turn
+
+```rust
+/// Exercises: one full plan run with observability sinks enabled
+/// Expects: structured logs, metrics, traces, Pulses, and projections all agree on the same turn
+#[tokio::test]
+async fn test_turn_emits_valid_telemetry_contract() {
+    // Setup: run a single-task plan against test sinks for logs, metrics, OTLP, and StateHub
+    // Verify: each JSON log line includes ts/level/target/fields and trace linkage where present
+    // Verify: Prometheus scrape includes roko.gate.*, roko.bus.*, roko.cost.*, and at least one Roko-specific metric
+    // Verify: trace tree contains op.sense → op.assess → op.compose → op.act → op.verify → op.persist/op.broadcast → op.react
+    // Verify: Bus Pulses land on the expected Topic and the projection snapshot matches the streamed deltas
+}
+```
+
+#### Scenario E2E-6: Replay with override
+
+```rust
+/// Exercises: episode replay plus a targeted config override
+/// Expects: the replay remains auditably grounded in the original episode while the override changes only the intended dimension
+#[tokio::test]
+async fn test_replay_with_override() {
+    // Setup: record an episode containing gate feedback, cost accounting, and Bus traffic
+    // Replay: roko replay <episode_id> --trace
+    // Replay: roko replay <episode_id> --override "demurrage.flat_tax=0.02"
+    // Verify: baseline replay reproduces the original verdict and telemetry summary
+    // Verify: override replay preserves provenance while changing only the expected balance/cost outputs
+    // Verify: both runs produce comparable audit artifacts for postmortem review
+}
+```
+
 ### 4.3 Workspace-level integration tests
 
 Located at `/Users/will/dev/nunchi/roko/roko/tests/tests/`. Currently 3 files, 19 tests.
@@ -534,6 +574,26 @@ Located at `/Users/will/dev/nunchi/roko/roko/tests/tests/`. Currently 3 files, 1
 | `learning_loop.rs` (NEW) | Episode → pattern → skill → injection | 0 | 10 |
 
 Target: 19 → 65 workspace-level integration tests.
+
+Reserve a meaningful slice of that expansion for observability-oriented suites: telemetry
+contract tests, replay-with-override cases, projection snapshot/stream equivalence checks, alert
+rule fixtures, and degraded-sink recovery scenarios. These can live in dedicated workspace tests
+or be folded into the existing end-to-end suite, but they should be treated as release-blocking.
+
+### 4.4 Observability verification
+
+Observability is part of the product contract, not optional tooling around the product. A plan
+run that returns the correct answer but emits malformed logs, missing metrics, broken traces, or
+non-replayable telemetry is a failed test.
+
+| Surface | Contract under test | Representative assertions |
+|---------|---------------------|---------------------------|
+| Structured logs | JSON log lines stay schema-stable and correlate with trace/span context | Required keys (`ts`, `level`, `target`, `fields`) present; large payloads summarized by hash/length; safety decisions, cost-bearing actions, Engram writes, Pulse publishes, and gate verdicts include their shared labels |
+| Metrics | Prometheus exposition remains name-, type-, and label-stable | `roko.c_factor`, `roko.demurrage.*`, `roko.prediction.*`, `roko.gate.*`, `roko.bus.*`, and `roko.cost.*` appear when a scenario should emit them; counters are monotonic; histograms expose expected buckets |
+| Traces | Seven-step loop emits the expected span tree and attributes | Operator spans exist for SENSE/ASSESS/COMPOSE/ACT/VERIFY/PERSIST/BROADCAST/REACT; `operator_id`, `principal_id`, `content_hash`, and `pulse_seq` are attached where relevant |
+| Pulses + projections | Bus traffic and StateHub views stay typed, filterable, and replayable | Topic/TopicFilter matching holds; projection snapshots equal the folded stream of deltas; a replayed episode rebuilds the same view |
+| Replay | Episode replay is deterministic by default and sensitivity-tested under override | Baseline replay reproduces verdicts and telemetry summaries; override replay records the changed config, preserves provenance, and isolates the expected difference |
+| Alerts | Alert rules compile, fire, and clear on synthetic telemetry | Rule fixtures cover threshold boundaries, runbook annotations are present, and recovery cases clear the alert rather than leaving it latched |
 
 ---
 
@@ -872,6 +932,48 @@ mod corruption_tests {
 }
 ```
 
+#### 6.2.5 Observability stack failure handling
+
+```rust
+#[cfg(test)]
+mod observability_failure_tests {
+    /// Test: log backpressure does not crash the runtime and is itself observable
+    #[test]
+    fn log_queue_overflow_is_counted() {
+        // Fill the log sink faster than it can drain
+        // Verify: dropped-line counter increments and the turn still completes
+    }
+
+    /// Test: trace exporter outage degrades readiness instead of silently black-holing spans
+    #[test]
+    fn trace_exporter_failure_flips_readiness() {
+        // Simulate OTLP exporter unavailable beyond threshold
+        // Verify: spans are buffered or dropped with counters, /readyz becomes not ready
+    }
+
+    /// Test: metrics scraping failure stays bounded and visible
+    #[test]
+    fn metrics_scrape_timeout_is_bounded() {
+        // Simulate a slow or unavailable metrics collector
+        // Verify: scrape duration stays observable and the runtime does not deadlock serving /metrics
+    }
+
+    /// Test: projection lag is bounded and surfaced
+    #[test]
+    fn projection_delta_latency_is_exposed() {
+        // Stall a projection consumer
+        // Verify: projection latency rises and health surfaces the degraded state
+    }
+
+    /// Test: replay still works after Pulse ring wrap if required history graduated
+    #[test]
+    fn replay_recovers_after_ring_wrap() {
+        // Force bounded Pulse retention to wrap
+        // Verify: replay reconstructs the episode from graduated Engrams plus surviving Pulses
+    }
+}
+```
+
 ### 6.3 Adversarial testing framework
 
 Drawing on MITRE ATLAS v5.1.0 (16 tactics, 84 techniques, 14 agentic-specific attack patterns)
@@ -919,6 +1021,8 @@ struct SafetyMonitor {
     out_of_bounds_writes: AtomicU64,
     /// Invariant 4: Gate ratchet never regresses
     ratchet_regressions: AtomicU64,
+    /// Invariant 5: Required telemetry surfaces never go dark during an integration test
+    telemetry_contract_failures: AtomicU64,
 }
 
 impl SafetyMonitor {
@@ -931,6 +1035,8 @@ impl SafetyMonitor {
             "files written outside workspace boundary");
         assert_eq!(self.ratchet_regressions.load(Ordering::SeqCst), 0,
             "gate ratchet regression detected");
+        assert_eq!(self.telemetry_contract_failures.load(Ordering::SeqCst), 0,
+            "required telemetry contract failed during integration test");
     }
 }
 ```
@@ -999,6 +1105,7 @@ struct GoldenTestCase {
 | **Cost efficiency** | 10 tasks with known cost baselines, verify no cost regression > 20% | 3 | — | ≤1.2× baseline |
 | **Resume correctness** | 5 interrupted plans → resume → verify no duplicate work | 5 | 1.00 | 1.00 |
 | **Safety invariants** | 20 adversarial inputs, verify all blocked | 5 | 1.00 | 1.00 |
+| **Observability fidelity** | 10 golden runs, verify log/metric/trace/Pulse/projection contracts and replay audit completeness | 3 | 1.00 | 1.00 |
 
 ### 7.3 Regression detection pipeline
 
@@ -1047,13 +1154,16 @@ struct MonotonicInvariants {
     /// 3. Safety test golden set always passes at 100%
     safety_pass_rate: f64, // 1.00
 
-    /// 4. Resume correctness always passes at 100%
+    /// 4. Observability contract golden set always passes at 100%
+    observability_pass_rate: f64, // 1.00
+
+    /// 5. Resume correctness always passes at 100%
     resume_pass_rate: f64, // 1.00
 
-    /// 5. Total test count never decreases (tests are additive)
+    /// 6. Total test count never decreases (tests are additive)
     min_test_count: usize, // current count at time of check
 
-    /// 6. No capability dimension drops below its min_pass_rate
+    /// 7. No capability dimension drops below its min_pass_rate
     capability_floors: HashMap<String, f64>,
 }
 
@@ -1083,6 +1193,12 @@ impl MonotonicInvariants {
         if after.safety_pass_rate < self.safety_pass_rate {
             violations.push(Violation::SafetyRegression {
                 pass_rate: after.safety_pass_rate,
+            });
+        }
+
+        if after.observability_pass_rate < self.observability_pass_rate {
+            violations.push(Violation::ObservabilityRegression {
+                pass_rate: after.observability_pass_rate,
             });
         }
 
@@ -1132,8 +1248,8 @@ Aligning with the Gauntlet model from `docs/04-verification/09-evaluation-lifecy
 | Tier | Trigger | Budget | What runs |
 |------|---------|--------|-----------|
 | **Smoke** | Pre-commit hook, `cargo test --workspace --lib` | < 2 min | All unit tests (inline `#[test]`), compilation check |
-| **Nightly** | Scheduled CI (daily) | < 30 min | Smoke + integration tests + property-based tests + benchmark regression |
-| **Full** | Pre-release, weekly | < 2 hr | Nightly + adversarial tests + golden set regression + mutation testing + fuzzing |
+| **Nightly** | Scheduled CI (daily) | < 30 min | Smoke + integration tests + telemetry contract checks + replay-with-override scenarios + property-based tests + benchmark regression |
+| **Full** | Pre-release, weekly | < 2 hr | Nightly + adversarial tests + alert-rule fixtures + observability-sink failure cases + golden set regression + mutation testing + fuzzing |
 
 ### 8.2 Test tagging convention
 
@@ -1320,7 +1436,7 @@ Focus: integration tests, E2E scenarios, benchmark suite.
 
 | Action | Tests added |
 |--------|-----------|
-| E2E scenarios (E2E-1 through E2E-4) | +40 |
+| E2E scenarios (E2E-1 through E2E-6) | +40 |
 | `roko-orchestrator` integration (lifecycle, resume, concurrency) | +40 |
 | `roko-conductor` integration (watcher → breaker → throttle) | +30 |
 | `roko-learn` integration (episode → pattern → skill) | +30 |
@@ -1328,7 +1444,7 @@ Focus: integration tests, E2E scenarios, benchmark suite.
 | Full benchmark suite (all 5 hot paths) | +20 |
 | Fuzz targets (6 remaining) | +15 |
 | Adversarial tests (ATLAS-mapped, 8 categories) | +40 |
-| Golden set regression tests (8 capability dimensions) | +40 |
+| Golden set regression tests (9 capability dimensions) | +40 |
 | `roko-neuro` unit tests (knowledge types, tiers, HDC) | +30 |
 | `roko-index` integration (parse → graph → fingerprint) | +15 |
 | `roko-lang-*` basic parsing tests | +20 |
@@ -1362,7 +1478,7 @@ Focus: mutation testing, full adversarial suite, behavioral fingerprinting.
 | Fuzz targets | 0 | 9 | Phase 1-2 |
 | Benchmarks | 0 | 30+ | Phase 1-2 |
 | Mutation kill rate (core) | Unknown | > 85% | Phase 3 |
-| Golden set dimensions | 0 | 8 | Phase 2 |
+| Golden set dimensions | 0 | 9 | Phase 2 |
 | Adversarial test categories | 0 | 8 | Phase 2 |
 
 ---
@@ -1371,6 +1487,7 @@ Focus: mutation testing, full adversarial suite, behavioral fingerprinting.
 
 | Topic | Relevance |
 |-------|-----------|
+| [01-naming-and-glossary.md](./01-naming-and-glossary.md) | Shared vocabulary for Bus, StateHub, TopicFilter, replay, c-factor, and related observability terms |
 | [04-verification/00-gate-trait.md](../04-verification/00-gate-trait.md) | Gate trait contract = primary verification mechanism |
 | [04-verification/02-6-rung-selector.md](../04-verification/02-6-rung-selector.md) | Rung escalation tested by property-based tests |
 | [04-verification/05-ratcheting.md](../04-verification/05-ratcheting.md) | Monotonicity invariant = core regression test |
@@ -1378,9 +1495,11 @@ Focus: mutation testing, full adversarial suite, behavioral fingerprinting.
 | [04-verification/09-evaluation-lifecycle.md](../04-verification/09-evaluation-lifecycle.md) | 14 feedback loops, Gauntlet tiers, Karpathy property |
 | [04-verification/10-autonomous-eval-generation.md](../04-verification/10-autonomous-eval-generation.md) | Test generation by separate agents |
 | [04-verification/11-evoskills.md](../04-verification/11-evoskills.md) | Skill regression = capability dimension testing |
+| [../19-deployment/14-observability-and-telemetry.md](../19-deployment/14-observability-and-telemetry.md) | Deployment-facing observability contract that replay, alert, metrics, trace, and projection tests must uphold |
 | [00-architecture/21-performance-numerical-stability.md](./21-performance-numerical-stability.md) | f32/f64 targets, NaN handling = unit test targets |
 | [00-architecture/22-error-handling-recovery.md](./22-error-handling-recovery.md) | Error recovery = corruption test targets |
 | [00-architecture/26-cognitive-immune-system.md](./26-cognitive-immune-system.md) | 5-layer defense = adversarial test structure |
+| [../../tmp/refinements/33-observability-telemetry.md](../../tmp/refinements/33-observability-telemetry.md) | Canonical observability refinement that defines telemetry surfaces, replay, alerting, and degraded-sink behavior |
 | [05-learning/](../05-learning/) | Learning subsystem = primary self-modification vector |
 | [STATUS.md](../STATUS.md) | Per-crate test counts and tier classification |
 
@@ -1445,6 +1564,10 @@ Focus: mutation testing, full adversarial suite, behavioral fingerprinting.
 | **Convergence thrashing** | Oscillation between fix strategies without monotonic progress |
 | **Threshold erosion** | Gradual weakening of adaptive thresholds due to prolonged success |
 | **Prompt drift** | Behavioral change caused by modified prompt content without source code change |
+| **Telemetry contract test** | Test that treats logs, metrics, traces, Pulses, projections, and replay artifacts as versioned interfaces rather than incidental byproducts |
+| **Replay-with-override** | Deterministic episode replay plus a scoped config override used to test behavioral sensitivity without mutating the original record |
+| **Projection equivalence** | Invariant that a StateHub snapshot matches the result of folding the same Pulse stream from the same cursor |
+| **Observability black hole** | Failure mode where the system continues operating but logs, metrics, traces, or projections stop arriving or become incomplete |
 | **The Gauntlet** | Three-tier test execution model: Smoke, Nightly, Full |
 | **Karpathy property** | Every evaluation metric, if improved, improves end-to-end performance |
 | **EDD** | Evaluation-Driven Development — continuous evaluation as first-class development artifact |

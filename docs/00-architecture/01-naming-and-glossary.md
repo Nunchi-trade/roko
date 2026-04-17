@@ -169,8 +169,10 @@ crates directly.
 | `AttestationLevel` | Audit commitment tier | `LocalAgent`, `OrgRole`, or `ChainWitness`, chosen by kind and action criticality. |
 | `Taint` | Untrusted-input marker | One-way safety label such as `UserInput`, `ExternalFetch`, `ThirdPartyPlugin`, or `LegacyImport` that propagates until explicit human sign-off. |
 | `Projection` | Named live-updating view | A typed `State` plus `Delta` fold over Bus + Substrate that consumers query and subscribe to through StateHub. |
+| `Telemetry surface` | Operator-facing observability contract | The combined logs, metrics, traces, event streams, and replay affordances that make a run inspectable without changing kernel behavior. |
 | `Cursor` | Realtime resume token | Opaque position marker carried on projection and stream replies so clients can resume after reconnect. |
 | `Realtime surface` | External streaming contract | Shared `query`, `subscribe`, and `publish` vocabulary carried over WebSocket, SSE, or optional gRPC. |
+| `Cost meter` | Spend projection and dashboard feed | Named projection and CLI/UI surface exposing per-session, per-task, per-role, and per-model spend plus remaining budget. |
 | `Slash command` | Interactive shell shortcut | Familiar `/<verb>` entry such as `/edit` or `/watch` that maps onto the same canonical CLI verbs. |
 | `Diff-first review` | Proposed-edit presentation style | Show hunks before apply, preserve per-hunk accept/reject/edit decisions in the transcript, and expose `explain` on demand. |
 | `Transcript` | Session interaction log | Human-readable or structured record of prompts, outputs, approvals, budgets, and replay metadata. |
@@ -378,7 +380,9 @@ prefixes without coordination.
 | `Attestation` | Signature metadata proving that a principal committed to a specific durable ContentHash at a given level. |
 | `AttestationLevel` | Verification tier for an attested Engram: local session, human role, or chain witness. |
 | `StateHub` | Kernel projection layer that turns Bus pulses and Substrate history into named consumer-facing views. |
+| `Telemetry surface` | Combined logs, metrics, traces, projection streams, and replay tools that let operators inspect a run and the observability stack itself. |
 | `Cursor` | Opaque resume token carried by the realtime surface so clients can continue from a known stream position. |
+| `Cost meter` | Projection-backed spend view used by CLI, TUI, and web surfaces for budget-versus-burn visibility. |
 | `Slash command` | Interactive `/<verb>` alias such as `/edit`, `/run`, or `/watch` that resolves to the same underlying Roko actions. |
 | `Diff-first review` | Operator-facing review mode where code changes appear as hunks before apply and can be accepted, rejected, or edited individually. |
 | `Transcript` | Persisted session log that captures prompts, outputs, approvals, budgets, and replay metadata for later resume or audit. |
@@ -407,6 +411,7 @@ prefixes without coordination.
 - [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md) for the paper, claim, and replication ledger pipeline
 - [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md) for the canonical naming proposal
 - [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the fingerprint-first HDC proposal
+- [tmp/refinements/33-observability-telemetry.md](../../tmp/refinements/33-observability-telemetry.md) for the consolidated observability and telemetry contract
 - [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) for the four surfaces and unified verb set
 - [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the user-UX refinement proposal
 - [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) for the Rust SDK framing and developer-UX proposal

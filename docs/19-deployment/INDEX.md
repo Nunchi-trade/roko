@@ -4,7 +4,8 @@
 > single-server, container, clustered, and edge. The chapter is profile-driven: one Rust
 > binary plus packaging artifacts, with configuration selecting the shape instead of forking
 > the codebase. See also `../../tmp/refinements/24-deployment-ux.md` and
-> `../../tmp/refinements/27-realtime-event-surface.md`.
+> `../../tmp/refinements/27-realtime-event-surface.md`, and
+> `../../tmp/refinements/33-observability-telemetry.md`.
 
 ---
 
@@ -26,6 +27,7 @@
 | 11 | [11-remote-orchestrator.md](11-remote-orchestrator.md) | Remote Orchestrator | Roko as a long-lived HTTP service. roko-serve crate, REST API, projection queries, shared realtime surface over WebSocket/SSE/optional gRPC, per-subscription auth, cursor resumption, remote-consumer patterns, webhook integration, and cost tracking. |
 | 12 | [12-production-hardening.md](12-production-hardening.md) | Production Hardening | Resilience patterns for production operation. Adaptive timeouts, exponential backoff with full jitter, retry decisions, per-provider concurrency, context overflow handling, zero-downtime upgrades, observability, realtime-surface telemetry, multi-tenant safety, content-addressed dedup cache, and hedged requests. |
 | 13 | [13-current-status-and-port-allocation.md](13-current-status-and-port-allocation.md) | Current Status and Port Allocation | Implementation status matrix for all deployment features, complete port allocation table (8080, 8443, 8545, 3000, 7681, 9090, 9100), Fly.io internal addressing, Tier 3H deployment roadmap (Tier 1 foundation → Tier 2 distribution → Tier 3H daemon/remote → P3 future), configuration file location summary, deployment target summary, test matrix. |
+| 14 | [14-observability-and-telemetry.md](14-observability-and-telemetry.md) | Observability and Telemetry | Deployment-level operator story for structured logs, Prometheus-compatible metrics, OpenTelemetry traces, Bus and StateHub telemetry, replay, cost visibility, alerting, retention and sampling, and integration with existing monitoring stacks. See also `../../tmp/refinements/33-observability-telemetry.md`. |
 
 ---
 
@@ -34,9 +36,10 @@
 - **Synapse Architecture**: Roko's 6-trait composition system (Substrate, Scorer, Gate, Router, Composer, Policy) enables flexible deployment, and each trait can be implemented differently per target.
 - **Profiles**: A profile bundles defaults for one of the five shapes so the same binary can move between laptop-local, single-server, container, clustered, and edge without code forks.
 - **Engram**: The durable record flows through all deployment targets unchanged. Content-addressed hashing keeps identity consistent across native, container, clustered, and edge environments.
+- **Pulse and Bus telemetry**: Live deployment observability follows the ephemeral medium over the transport fabric, then folds Bus activity into typed `StateHub` projections for dashboards, watch modes, and replay.
 - **State portability**: Substrate state, bus queues, and config are exported as an archive so laptop-to-server and server-to-server moves are operational, not architectural.
 - **Realtime surface**: Remote consumers use one cursor-aware protocol over WebSocket, SSE, and optional gRPC instead of deployment-specific socket APIs.
-- **Operational hardening**: Observability, secret handling, and upgrade semantics are part of the deployment story, not separate afterthoughts.
+- **Operational hardening**: Observability, telemetry, secret handling, and upgrade semantics are part of the deployment story, not separate afterthoughts.
 
 ---
 
@@ -46,6 +49,9 @@
 |---|---|
 | REF24 deployment UX | `../../tmp/refinements/24-deployment-ux.md` |
 | REF27 realtime surface | `../../tmp/refinements/27-realtime-event-surface.md` |
+| REF33 observability and telemetry | `../../tmp/refinements/33-observability-telemetry.md` |
+| Deployment telemetry chapter | [14-observability-and-telemetry.md](14-observability-and-telemetry.md) |
+| Canonical vocabulary for Engram, Pulse, Bus, Substrate, and StateHub | [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) |
 | Agent types and deployment flexibility | Agent Types documentation, §8 |
 | Port allocation and interfaces | Interfaces documentation, §7 |
 | Implementation priorities and tiers | Implementation Priorities, Tier 3H |

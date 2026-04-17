@@ -3,7 +3,9 @@
 > When Roko runs in laptop-local, single-server, container, clustered, or edge profiles, the
 > runtime still has to behave like production software: bounded latency, safe retries, clean
 > shutdown, upgradeability, observability, and tenant isolation. See also
-> `../../tmp/refinements/24-deployment-ux.md` and `../../tmp/refinements/27-realtime-event-surface.md`.
+> `../../tmp/refinements/24-deployment-ux.md`,
+> `../../tmp/refinements/27-realtime-event-surface.md`, and
+> `../../tmp/refinements/33-observability-telemetry.md`.
 
 > **Implementation**: Specified
 
@@ -161,6 +163,10 @@ Useful Roko-specific metrics include:
 | `roko.tenant.quota_utilization` | Tenant pressure in shared deployments |
 
 These metrics should carry shape and tenant labels where cardinality is safe.
+
+For the full deployment instrumentation contract, including replay, StateHub projections,
+retention, alerting, and self-observability of the telemetry stack, see
+[14-observability-and-telemetry.md](./14-observability-and-telemetry.md).
 
 ### Realtime Surface Telemetry
 
