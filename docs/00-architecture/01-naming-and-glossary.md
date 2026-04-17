@@ -28,6 +28,7 @@
 > [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md),
 > [tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md),
 > [tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md),
+> [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md),
 > [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md),
 > [../12-interfaces/22-statehub-projection-layer.md](../12-interfaces/22-statehub-projection-layer.md),
 > [../12-interfaces/06-websocket-streaming.md](../12-interfaces/06-websocket-streaming.md),
@@ -162,6 +163,10 @@ crates directly.
 | `Projection` | Named live-updating view | A typed `State` plus `Delta` fold over Bus + Substrate that consumers query and subscribe to through StateHub. |
 | `Cursor` | Realtime resume token | Opaque position marker carried on projection and stream replies so clients can resume after reconnect. |
 | `Realtime surface` | External streaming contract | Shared `query`, `subscribe`, and `publish` vocabulary carried over WebSocket, SSE, or optional gRPC. |
+| `Slash command` | Interactive shell shortcut | Familiar `/<verb>` entry such as `/edit` or `/watch` that maps onto the same canonical CLI verbs. |
+| `Diff-first review` | Proposed-edit presentation style | Show hunks before apply, preserve per-hunk accept/reject/edit decisions in the transcript, and expose `explain` on demand. |
+| `Transcript` | Session interaction log | Human-readable or structured record of prompts, outputs, approvals, budgets, and replay metadata. |
+| `Budget line` | Visible cost state | Prompt or status-surface rendering of current turn or session spend versus configured limit. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -293,6 +298,10 @@ The following names are load-bearing additions in the current architecture:
 | `State portability` | Export/import contract for moving `Substrate` state, queue state, and config between deployment shapes as a signed archive. |
 | `SecretStore` | Swappable secret-resolution backend behind env, config, OS keychain, and external secret managers. |
 | `TenantCtx` | Per-request tenant and role envelope used for scoped storage, budget enforcement, and audit labeling. |
+| `Slash command` | Familiar interactive `/<verb>` form that maps to the same CLI action vocabulary rather than creating a second interface model. |
+| `Diff-first review` | The rule that code changes are shown as hunks before apply, with per-hunk approval and optional explainability. |
+| `Transcript` | Durable session log carrying prompts, outputs, approvals, budget state, and replay metadata across CLI, TUI, Chat, and Web. |
+| `Budget line` | The visible spend summary shown during interactive and status flows so routing and approvals remain legible to the operator. |
 
 ### 9.1 Topic Namespace Guidance
 
@@ -344,6 +353,10 @@ prefixes without coordination.
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
 | `StateHub` | Kernel projection layer that turns Bus pulses and Substrate history into named consumer-facing views. |
 | `Cursor` | Opaque resume token carried by the realtime surface so clients can continue from a known stream position. |
+| `Slash command` | Interactive `/<verb>` alias such as `/edit`, `/run`, or `/watch` that resolves to the same underlying Roko actions. |
+| `Diff-first review` | Operator-facing review mode where code changes appear as hunks before apply and can be accepted, rejected, or edited individually. |
+| `Transcript` | Persisted session log that captures prompts, outputs, approvals, budgets, and replay metadata for later resume or audit. |
+| `Budget line` | Prompt or status readout showing current spend against configured limits for the turn or session. |
 | `Prediction Error` | The residual between predicted and observed outcomes, published as `prediction.error.*` when it becomes a first-class runtime signal. |
 | `Profile` | Deployment-shape configuration preset selected by name rather than by building a different binary. |
 | `SecretStore` | Secret backend abstraction that keeps layered credential resolution off the main config path. |
@@ -371,6 +384,7 @@ prefixes without coordination.
 - [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) for the four surfaces and unified verb set
 - [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the user-UX refinement proposal
 - [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) for the Rust SDK framing and developer-UX proposal
+- [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md) for slash-command, diff-first, and transcript terminology in the CLI parity proposal
 - [../19-deployment/INDEX.md](../19-deployment/INDEX.md) for deployment profiles, five shapes, and state portability
 - [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md) for layered secret resolution and shared-server credential handling
 - [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md) for the deployment-UX refinement proposal

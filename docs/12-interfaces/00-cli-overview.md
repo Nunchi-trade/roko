@@ -1,6 +1,6 @@
 # CLI Overview — `roko` as Primary Interface
 
-> The `roko` binary is the primary interface to the Roko cognitive agent framework, supporting five interaction modes plus a first-class plugin surface for discovery, install, audit, and extension management.
+> The `roko` binary is the primary interface to the Roko cognitive agent framework, supporting a default interactive shell, five additional invocation modes, and a first-class plugin surface for discovery, install, audit, and extension management.
 
 
 > **Implementation**: Scaffold
@@ -20,6 +20,8 @@ The CLI is designed around the principle of **progressive disclosure**: beginner
 The CLI sits at the **Application layer** — above L4 Orchestration. It consumes crates from every layer: `roko-core` (L0/L1), `roko-compose` (L2), `roko-gate` (L3), `roko-orchestrator` (L4), and the cognitive cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`). The `roko-serve` crate provides the HTTP server that `roko serve` starts.
 
 REF23 reframes the CLI as one rendering of a unified verb set shared by four surfaces: CLI, TUI, Chat, and Web. The CLI keeps the canonical command names, while the other surfaces render the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions over the same Bus-backed progress stream and the same session state. REF25 extends that same contract to profile selection and profile composition, so the user can install a domain profile once and carry it between surfaces without relearning setup. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+REF28 tightens the CLI story further: `roko` with no subcommand should feel familiar to users arriving from Claude Code, Aider, Cursor agent mode, Codex CLI, and similar tools. That means a default interactive entry, workspace detection, slash commands such as `/edit`, diff-first review with per-hunk control, visible budget state, transcripts, resumption, and a non-interactive mode that keeps the same verbs for shell pipelines and CI. Roko still differs where it matters — plan workflow, heuristics, c-factor, multi-agent orchestration, and explainable decisions — but the first hour should feel familiar rather than foreign. See [01-cli-command-reference.md](./01-cli-command-reference.md), [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), [../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md).
 
 ---
 
@@ -43,11 +45,61 @@ The exact command tree can stay broader than the verb set. What matters is that 
 
 ---
 
-## Five CLI Modes
+## Familiar Workflow Contract
 
-Roko supports five distinct interaction modes through the same binary. The mode is selected by invocation pattern, not by a separate flag:
+REF28's operator promise is "Claude Code-shaped where possible, Roko-shaped where necessary." The CLI should therefore preserve the common interaction loop most users already know:
 
-### 1. One-Shot Mode
+1. Launch `roko` inside a project directory.
+2. Detect the workspace and summarize what was found.
+3. Open an interactive prompt immediately, without forcing mode selection up front.
+4. Accept natural-language requests plus slash commands.
+5. Render proposed edits as diff-first output with per-hunk control.
+6. Save a transcript and let the operator resume later from the same session chain.
+7. Keep every interactive action scriptable through a direct CLI equivalent.
+
+Roko's additions sit on top of that familiar shell instead of replacing it:
+
+| Familiar expectation | Roko rendering |
+|---|---|
+| Interactive prompt on bare launch | `roko` with no subcommand opens the default session shell |
+| Slash command palette | `/edit`, `/run`, `/undo`, `/compact`, `/plan`, `/execute`, `/watch`, `/inspect`, `/explain`, `/heuristics`, `/learn`, `/replay`, `/tune`, `/help`, `/exit` |
+| Diff-first review | Proposed edits render as hunks before apply |
+| Per-hunk approval | Individual hunks can be accepted, rejected, or edited |
+| Session continuity | Transcript plus episode chain plus tool-permission history |
+| Budget awareness | Prompt line and structured output include per-turn and per-session budget state |
+| Pipeline use | The same verbs support `stdin`, JSON output, semantic exit codes, and replay |
+
+The important architectural rule is parity, not imitation. Familiar workflow affordances ride on top of the same `Bus`, `Substrate`, `StateHub`, heuristics, and gate pipeline that make Roko distinct.
+
+---
+
+## Six CLI Modes
+
+Roko supports six distinct interaction modes through the same binary. The mode is selected by invocation pattern, not by a separate flag:
+
+### 1. Default Interactive Mode
+
+```bash
+roko
+```
+
+Running `roko` with no subcommand is the familiar-first entry point. It should detect the workspace, surface recent session state, classify the operator's first turn, and propose the right action before doing work:
+
+```text
+$ roko
+[roko 1.0 — /Users/will/myproject]
+Workspace: Rust, cargo test, dirty git tree, 2 failing tests
+[3 prior sessions found]
+> fix the failing test
+
+Proposed mode: /edit
+Plan: inspect failure, patch code, rerun tests.
+Proceed? [Y/n]
+```
+
+The first-turn classifier routes to `ask`, `/edit`, or `/plan` based on scope. It uses local heuristics plus a soft model check, but the user always sees the chosen mode and can override it. On re-entry, the prompt should offer session resumption from the existing transcript and episode chain rather than pretending every session starts blank.
+
+### 2. One-Shot Mode
 
 ```bash
 roko run "Add error handling to the auth module"
@@ -62,7 +114,7 @@ One-shot mode is implemented in `roko-cli/src/run.rs` via the `run_once` functio
 - `1` — agent or gate failure (the build failed logically)
 - `2` — system error (I/O, config, infrastructure)
 
-### 2. REPL Mode
+### 3. REPL Mode
 
 ```bash
 roko repl
@@ -72,18 +124,18 @@ Opens an interactive read-eval-print loop. Each line entered becomes a prompt th
 
 The REPL is implemented in `roko-cli/src/repl.rs`. It maintains a persistent `FileSubstrate` and `EpisodeLogger` across the session.
 
-### 3. Pipe Mode
+### 4. Pipe Mode
 
 ```bash
 echo "Fix the typo in README.md" | roko
 cat tasks.txt | roko --pipe
 ```
 
-Reads prompts from stdin, one per line or as a single block. Designed for integration with Unix pipelines, CI systems, and scripting. Output goes to stdout in human-readable format by default, or structured JSON with the `--json` flag.
+Reads prompts from stdin, one per line or as a single block. Designed for integration with Unix pipelines, CI systems, and scripting. In piped mode the CLI should suppress TUI chrome, write machine data to stdout, keep progress and diagnostics on stderr, and return semantic exit codes so shell automation can distinguish refusal, gate failure, and budget exhaustion.
 
 Pipe mode is implemented in `roko-cli/src/pipe.rs`. The `stdin_is_tty()` function detects whether input is interactive or piped, automatically selecting the appropriate mode.
 
-### 4. Daemon Mode
+### 5. Daemon Mode
 
 ```bash
 roko daemon --start --port 9090
@@ -95,7 +147,7 @@ Runs Roko as a background service. On macOS, it generates and manages a `launchd
 
 Daemon mode is implemented in `roko-cli/src/daemon/` with platform-specific submodules (`launchd.rs` for macOS). The daemon state machine tracks: `Stopped`, `Starting`, `Running`, `Stopping`.
 
-### 5. Serve Mode
+### 6. Serve Mode
 
 ```bash
 roko serve --port 8080
@@ -114,7 +166,7 @@ The `roko` CLI organizes its subcommands into logical groups. The full command r
 
 | Group | Commands | Purpose |
 |---|---|---|
-| **Getting Started** | `init`, `run`, `status`, `config wizard`, `explain` | Zero-to-agent in 60 seconds |
+| **Getting Started** | `roko`, `init`, `run`, `status`, `config wizard`, `explain` | Zero-to-agent in 60 seconds |
 | **Plugins** | `plugin list`, `plugin search`, `plugin install`, `plugin enable`, `plugin disable`, `plugin audit` | Discover, install, and govern five-tier extensions |
 | **Scaffolding** | `new domain`, `new gate`, `new scorer`, `new router`, `new policy`, `new substrate`, `new probe`, `new event-source`, `new template` | Generate working boilerplate |
 | **Orchestration** | `plan list`, `plan show`, `plan create`, `plan generate`, `plan run` | DAG-based multi-task execution |
@@ -136,12 +188,16 @@ Every subcommand inherits these global flags:
 | `--config <PATH>` | PathBuf | Override the config file (default: `./roko.toml`) |
 | `--role <ROLE>` | String | Set the agent role/persona |
 | `--model <MODEL>` | String | Set the model name |
+| `--budget <AMOUNT>` | String | Cap spend per turn or per session, for example `$0.50` or `$5/session` |
 | `--repo <PATH>` | PathBuf | Set the working directory root |
 | `--resume <ID>` | String | Resume a previous session |
 | `--effort <LEVEL>` | low/medium/high/max | Reasoning effort level |
 | `--json` | bool | Emit JSON output |
+| `--format <FMT>` | human/json/yaml | Force a specific output renderer |
 | `--log-format <FMT>` | text/json | Tracing log format |
 | `--quiet` | bool | Suppress non-essential output |
+| `--non-interactive` | bool | Disable prompts and require flags to answer approval checkpoints |
+| `--record <PATH>` | PathBuf | Write a replayable transcript stream for later `roko replay --assert` |
 | `--no-replan` | bool | Disable re-planning on gate failures |
 | `--headless` | bool | Run as headless daemon |
 
@@ -203,7 +259,7 @@ The CLI is designed so that a developer can go from zero to a running agent in u
 ```bash
 # In any project directory:
 roko init                          # interactive first-run, provider/plugin/MCP checks
-roko ask "Add error handling to the auth module"   # runs agent with smart defaults
+roko                               # workspace-aware interactive shell with resume prompt
 ```
 
 `roko init` performs auto-detection:
@@ -216,7 +272,7 @@ roko ask "Add error handling to the auth module"   # runs agent with smart defau
 
 This auto-detection is implemented in `roko-cli/src/config.rs`. The `load_layered` function resolves configuration from multiple sources in priority order (see [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md)). Plugin discovery stays separate: installed plugins are discovered from `plugins/**`, then optional config layers override only the pieces that need site-specific tuning.
 
-REF23 tightens the first-run bar: `roko init` should be interactive, never dead-end, always offer a skip/configure-later path, and commit partial progress as each step succeeds so a cancelled setup can resume cleanly. The onboarding details and failure-recovery prompts live in [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md) and [21-user-ux-running-agents.md](./21-user-ux-running-agents.md).
+REF23 tightens the first-run bar: `roko init` should be interactive, never dead-end, always offer a skip/configure-later path, and commit partial progress as each step succeeds so a cancelled setup can resume cleanly. REF28 adds that the first useful command should usually be the bare `roko` entry, not a mode-picking subcommand: detect the workspace, show prior transcript history, surface budgets, and let the operator start with a natural-language request immediately. The onboarding details and failure-recovery prompts live in [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), and [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md).
 
 ### Starter Templates
 
@@ -236,21 +292,47 @@ Each template generates a tuned `roko.toml` with appropriate gate pipelines, mod
 .roko/
 ├── roko.toml              # configuration (auto-detected)
 ├── signals.jsonl           # Engram storage (created on first run)
+├── transcripts/            # human-readable and JSONL session transcripts
+│   └── latest.jsonl
 ├── learn/
 │   ├── episodes.jsonl      # episode records
 │   ├── cascade-router.json # model routing state
 │   └── playbook.jsonl      # learned rules
+├── sessions/
+│   └── last-session.json   # resumption cursor, budget state, tool approvals
 ├── neuro/
 │   └── knowledge.jsonl     # knowledge store
 └── state/
     └── executor.json       # resumable execution state
 ```
 
+The transcript is not just a chat log. It should preserve the episode chain, approval checkpoints, diff-first review choices, and budget state that let a later session resume with continuity instead of replaying blind.
+
+---
+
+## Review, Approval, and Resumption
+
+The default interactive shell should be diff-first. Proposed edits render as hunks, not rewritten files, and the operator can accept all, accept a subset, open `/edit`, or ask `/explain` for the heuristic and claim citations behind the proposal.
+
+Per-hunk control is load-bearing because it turns user feedback into structured signal:
+
+- accepted hunks reinforce the path that led there
+- rejected hunks become negative evidence for replay and later heuristic tuning
+- edited hunks preserve the operator's correction inside the transcript
+
+That same transcript powers later resumption. A resumed session should restore:
+
+- the last approved or pending diff-first review state
+- recent `Bus` progress and `StateHub` projections
+- tool approval memory scoped to the session
+- active budget totals and remaining allowance
+- the durable episode chain and any heuristics learned during the run
+
 ---
 
 ## Event System
 
-All five CLI modes consume the same event stream. The orchestrator emits `AgentEvent` variants through async channels:
+All six CLI modes consume the same event stream. The orchestrator emits `AgentEvent` variants through async channels:
 
 - `WaveStart`, `WaveComplete` — plan wave lifecycle
 - `AgentSpawn`, `AgentOutput`, `AgentExit` — agent lifecycle
@@ -268,20 +350,21 @@ Under REF23, this stream is the source of truth for live progress across all fou
 
 ## Design Principles
 
-The CLI follows six design principles from `refactoring-prd/10-developer-guide.md`:
+The CLI follows seven design principles from `refactoring-prd/10-developer-guide.md` plus the familiar-workflow contract from REF28:
 
-1. **Zero to running in 60 seconds** — `roko init && roko run "fix the bug"` works with no configuration.
+1. **Zero to running in 60 seconds** — `roko init && roko` works with no configuration.
 2. **Convention over configuration** — sensible defaults for everything. Only configure what you need to change.
 3. **Progressive disclosure** — beginners see 3 commands. Experts see the full Synapse trait system. Same tool, different depths.
 4. **Generators, not blank files** — `roko new` scaffolds everything with working boilerplate that compiles immediately.
 5. **Errors are instructions** — every error message tells you exactly what to do next (see [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md)).
-6. **Examples are tests** — every example in the documentation compiles and runs in CI.
+6. **Familiar muscle memory first** — slash commands, transcripts, diff-first review, and tab completion should work the way experienced agent-tool users expect.
+7. **Examples are tests** — every example in the documentation compiles and runs in CI.
 
 ### Three Levels of Complexity
 
 | Level | What You Do | What You Get |
 |---|---|---|
-| **Beginner** | `roko init` + `roko run "prompt"` | Working agent with smart defaults |
+| **Beginner** | `roko init` + `roko` | Working agent with smart defaults and an interactive session |
 | **Intermediate** | Edit `roko.toml`, install Tier 1-3 plugins | Customized behavior without writing Rust |
 | **Advanced** | Author Tier 4 native or Tier 5 WASM plugins | Full control over every operator and fabric integration |
 
@@ -356,7 +439,7 @@ roko-cli/src/
 ## Current Status and Gaps
 
 **Built and working (38 tests):**
-- All subcommands listed in the command reference
+- Established one-shot, orchestration, research, infrastructure, and debugging subcommands
 - One-shot, pipe, REPL modes
 - Plan orchestration with DAG execution
 - PRD lifecycle (idea → draft → plan)
@@ -368,6 +451,9 @@ roko-cli/src/
 - Worker mode for cloud deployment
 
 **Scaffold / in progress:**
+- Default `roko` interactive shell with first-turn intent detection
+- Slash commands, diff-first review, and per-hunk approval flows
+- Transcript-backed resumption, visible budget line, and completion refresh
 - Interactive TUI dashboard (ratatui framework exists, text-only rendering)
 - `roko new` scaffolders (not yet implemented — see [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md))
 - `roko explain` command (progressive help system planned)
@@ -386,5 +472,7 @@ roko-cli/src/
 - See [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) for the progressive help system
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for `roko.toml` resolution
 - See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for the HTTP API exposed by `roko serve`
+- See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) for the shared four-surface interaction contract
 - See topic [01-orchestration](../01-orchestration/INDEX.md) for plan execution details
 - See topic [02-agents](../02-agents/INDEX.md) for agent dispatch and LLM backends
+- See [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md) for the canonical familiar-workflows proposal

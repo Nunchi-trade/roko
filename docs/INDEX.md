@@ -102,6 +102,16 @@ cursor-aware protocol for browsers, bots, dashboards, and peer Roko instances. S
 [`19-deployment/11-remote-orchestrator.md`](19-deployment/11-remote-orchestrator.md),
 [`19-deployment/12-production-hardening.md`](19-deployment/12-production-hardening.md), and
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/28-cli-parity-familiar-workflows.md` then makes the default interactive CLI feel
+familiar to users of other agent tools without flattening Roko's distinct model: bare `roko`
+becomes the primary entry, slash commands and diff-first review become first-class, transcripts
+and resumption become normal rather than advanced, and the same verbs stay available in non-
+interactive automation. Start with
+[`12-interfaces/00-cli-overview.md`](12-interfaces/00-cli-overview.md),
+[`12-interfaces/01-cli-command-reference.md`](12-interfaces/01-cli-command-reference.md),
+[`12-interfaces/03-progressive-help-and-explain.md`](12-interfaces/03-progressive-help-and-explain.md),
+[`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
 which primitives are genuinely new, which are integrations of prior art, and which claims
 deserve publication-grade evidence. Start with
@@ -166,7 +176,7 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
 - [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, StateHub projection layer, shared realtime surface, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, familiar workflow parity, StateHub projection layer, shared realtime surface, profile-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence
