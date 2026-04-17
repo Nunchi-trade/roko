@@ -6,7 +6,7 @@
 
 ## Overview
 
-This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), chat-oriented interaction surfaces, the Web Portal, the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. REF23 makes the chapter's primary UX claim explicit: Roko has four surfaces — CLI, TUI, Chat, and Web — exposing one unified verb set over the same Bus-backed progress stream and the same durable session/episode state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md). All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, and knowledge tiers).
+This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), chat-oriented interaction surfaces, the Web Portal, the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. REF23 makes the chapter's primary UX claim explicit: Roko has four surfaces — CLI, TUI, Chat, and Web — exposing one unified verb set over the same Bus-backed progress stream and the same durable session/episode state. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md). REF24 adds the deployment-facing complement: those same surfaces should configure and observe the same binary across five shapes — laptop, single-server, container, clustered, and edge — through profile-aware config and standard control-plane endpoints. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md), [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md), and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md). All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, Pulses, Topics, plugin capabilities, behavioral states, c-factor metrics, and knowledge tiers).
 
 **Key design principles:**
 - **Progressive disclosure**: Overview first, detail on demand
@@ -26,8 +26,8 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 | 01 | [01-cli-command-reference.md](./01-cli-command-reference.md) | Full command reference organized by group — Getting Started, Plugins, Scaffolding, Orchestration, PRD, Research, Knowledge, Infrastructure, Debugging, Deployment |
 | 02 | [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md) | `roko new` scaffolder specifications for all 9 types (domain, gate, scorer, router, policy, substrate, probe, event-source, template) with generated code examples |
 | 03 | [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) | Progressive disclosure help system — `roko explain` 3-level output, error-as-teacher format, config wizard, TeachingError struct |
-| 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), `ROKO_*` env vars, full `roko.toml` schema with all sections, auto-detection |
-| 05 | [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) | roko-serve architecture — axum HTTP server, 12 route groups, REST endpoints, authentication, event bus, dispatch loop |
+| 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), profile-aware deployment overlays for laptop/single-server/container/clustered/edge, `ROKO_*` env vars, full `roko.toml` schema, auto-detection |
+| 05 | [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) | roko-serve architecture — axum HTTP server, 12 route groups, REST endpoints, authentication, deployment probes, and profile-aware control-plane behavior |
 | 06 | [06-websocket-streaming.md](./06-websocket-streaming.md) | Real-time streaming — 4 WebSocket endpoints, SSE endpoint, reconnection protocol with ring buffer, event coalescing |
 | 07 | [07-rosedust-design-language.md](./07-rosedust-design-language.md) | ROSEDUST design system — void-black palette, rose accents, glass morphism (CSS + Rust), motion system, typography, RosedustTheme struct |
 | 08 | [08-tui-main-layout.md](./08-tui-main-layout.md) | TUI main layout — 3 regions (sidebar, detail, Spectre viewport), rendering architecture, 60fps frame budget, bloom composite, responsive breakpoints |
@@ -110,3 +110,9 @@ REF17 adds the interface-side plugin surface; start with [00-cli-overview.md](./
 [01-cli-command-reference.md](./01-cli-command-reference.md), and
 [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 REF22 adds the Rust SDK developer-UX chapter; start with [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) and [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md).
+REF24 adds the profile-aware deployment and control-plane framing; start with
+[04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md),
+[05-http-api-roko-serve.md](./05-http-api-roko-serve.md),
+[../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+[../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
+and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).

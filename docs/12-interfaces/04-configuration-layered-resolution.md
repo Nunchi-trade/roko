@@ -23,6 +23,17 @@ default install path. See [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md),
 [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and
 [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 
+REF24 adds a deployment-aware rule on top of that baseline: the same `roko.toml` should be able
+to drive laptop, single-server, container, clustered, and edge deployments by selecting a
+`profile` and overriding only the values that differ for that shape. The control plane stays
+declarative, while the underlying `Substrate`, `Bus`, auth, secret resolution, and observability
+backends swap by config rather than by code fork. See
+[../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+[../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
+[../19-deployment/12-production-hardening.md](../19-deployment/12-production-hardening.md),
+[../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md),
+and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
+
 ---
 
 ## Resolution Order
@@ -45,6 +56,20 @@ This layering means:
 For plugins, this layering applies after discovery. The loader first walks `plugins/**`, reads
 manifests, validates permissions, and classifies the plugin tier. Config layers then decide
 which plugins are preferred, constrained, or disabled for a given deployment.
+
+### Profile-Aware Resolution
+
+REF24 keeps the global four-layer model, but refines what happens *inside* the config-file layer:
+
+1. CLI flags pick the active deployment `profile` when explicitly set.
+2. Environment variables can override profile selection or individual keys.
+3. `roko.toml` merges user overrides on top of the chosen profile block.
+4. The chosen profile supplies shape defaults for laptop, single-server, container, clustered, or edge.
+5. Compiled defaults fill any remaining gaps.
+
+That means the user mental model stays simple: one binary, one config file, one selected shape.
+Moving from laptop-local to single-server or from container to clustered should mostly be a matter
+of changing a profile plus a few backend values, not rewriting the deployment story from scratch.
 
 ### Environment Variable Convention
 
@@ -75,6 +100,22 @@ model = "claude-sonnet-4-6"
 
 Everything else is auto-detected or uses defaults.
 
+For deployment-oriented setups, the minimum useful config becomes a selected profile plus any
+local override:
+
+```toml
+profile = "single-server"
+
+[profile.single-server]
+listen = "0.0.0.0:6677"
+auth = "basic"
+substrate = { kind = "sqlite", path = "/var/lib/roko/state.db" }
+bus = { kind = "in-memory" }
+```
+
+The profile carries the shape defaults; the rest of the file is where the operator specializes
+that shape for a team, tenant boundary, or hosting platform.
+
 For plugins, the minimal path is often no config at all:
 
 ```bash
@@ -88,6 +129,27 @@ it automatically on the next run.
 ### Full Configuration Reference
 
 ```toml
+profile = "laptop"                    # laptop | single-server | container | clustered | edge
+
+# Optional per-shape defaults. The selected profile is merged before user overrides.
+[profile.laptop]
+state_dir = "./.roko"
+serve = false
+substrate = { kind = "sqlite", path = "./.roko/state.db" }
+bus = { kind = "in-memory" }
+
+[profile.single-server]
+listen = "0.0.0.0:6677"
+auth = "basic"
+substrate = { kind = "sqlite", path = "/var/lib/roko/state.db" }
+bus = { kind = "in-memory" }
+
+[profile.clustered]
+listen = "0.0.0.0:6677"
+auth = "oidc"
+substrate = { kind = "postgres", url = "${ROKO_DATABASE_URL}" }
+bus = { kind = "nats", url = "${ROKO_NATS_URL}" }
+
 # ════════��════════════════════════════════���═════════════════════
 # Agent — LLM backend configuration
 # ═══════════════════════════════════════��═══════════════════════
@@ -203,6 +265,18 @@ cors_origins = ["http://localhost:3000"]
 enabled = false
 api_key = ""
 
+[auth]
+mode = "basic"                        # "basic", "oidc", "pat", "headers"
+
+[observability]
+metrics_bind = "0.0.0.0:9090"
+log_format = "json"
+traces = "otlp"
+
+[state]
+archive_dir = ".roko/archives"
+sign_exports = true
+
 # ══════════════════════════════════════════════���════════════════
 # Scheduler — Cron-based event sources
 # ═════════════════════════════════════════════���═════════════════
@@ -229,6 +303,25 @@ template = "prd-ingestion"
 [deploy]
 backend = "manual"                      # "manual", "railway"
 ```
+
+### Deployment-Specific Sections
+
+REF24 turns a few config areas into first-class deployment surfaces instead of ad hoc overrides:
+
+| Section | Purpose |
+|---|---|
+| `profile` | Selects one of the five supported deployment shapes and provides its default backend bundle. |
+| `profile.<name>` | Captures per-shape defaults such as listen address, auth mode, `Substrate`, and `Bus`. |
+| `auth` | Declares multi-user auth mode for single-server and clustered deployments, including OIDC and trusted-header modes. |
+| `observability` | Standardizes `/metrics`, `/healthz`, `/readyz`, structured logs, and OTLP export without changing the binary. |
+| `state` | Controls export/import archive location, signing, merge policy, and portability workflows such as laptop-to-server migration. |
+
+The deployment chapter is the canonical home for those shape definitions and tradeoffs. This
+chapter only defines how they appear in the config surface. See
+[../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+[../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
+[../19-deployment/12-production-hardening.md](../19-deployment/12-production-hardening.md),
+and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
 
 ---
 

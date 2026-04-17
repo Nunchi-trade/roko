@@ -21,6 +21,16 @@ The server is built on `axum` (Tokio-based async HTTP framework), uses `tower-ht
 
 REF23 makes this more explicit: the HTTP API is the transport layer behind the Web surface and the bridge that keeps CLI, TUI, Chat, and Web on the same verb set and the same live progress stream. The API should expose the same `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` actions instead of inventing a separate mental model. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
 
+REF24 adds the deployment-side constraint: `roko serve` is not a separate product tier, but the
+same Rust binary expressed through different deployment profiles. In practice that means the HTTP
+surface must remain profile-aware for laptop, single-server, container, clustered, and edge
+shapes; it must surface readiness, tenancy, budgets, and portable state flows in a way that does
+not fork the core runtime. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+[../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
+[../19-deployment/12-production-hardening.md](../19-deployment/12-production-hardening.md),
+[../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md),
+and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
+
 ---
 
 ## Surface Parity Contract
@@ -40,6 +50,31 @@ REF23 makes this more explicit: the HTTP API is the transport layer behind the W
 | `connect` | Plugin, MCP, provider, and credential-management routes | Integration surface. |
 
 This keeps the Web UI small and legible: it renders the shared verb set over the same data instead of growing a bespoke page-by-page control plane.
+
+---
+
+## Deployment Surface Contract
+
+`roko-serve` is the control plane used by several REF24 deployment shapes:
+
+| Shape | API expectation | Notes |
+|---|---|---|
+| `laptop` | Optional and local-only by default | `roko serve` is explicit, not ambient. |
+| `single-server` | Stable LAN or VPN endpoint with auth | The first shared-team deployment shape. |
+| `container` | Same API, environment-configured | Health probes and structured logs become mandatory. |
+| `clustered` | Horizontally replicated API nodes | Sticky sessions where needed; otherwise stateless request handling. |
+| `edge` | Minimal feature subset | Usually read-only or short-lived; may omit durable state writes. |
+
+The consequence is architectural rather than cosmetic:
+
+- Health and readiness endpoints are part of the contract, not optional extras.
+- Tenant identity and role context must flow through request handling and tracing.
+- Streaming cursors need to survive reconnects across container and clustered restarts.
+- State export/import has to work whether the request originated from CLI, Web, or an automation client.
+
+This chapter defines the HTTP-facing implications; the deployment chapter owns the operational
+shapes themselves. See [../19-deployment/INDEX.md](../19-deployment/INDEX.md) and
+[tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
 
 ---
 
@@ -210,6 +245,42 @@ api_key = "roko_sk_..."
 When enabled, all `/api/*` routes require a `Authorization: Bearer <key>` header. Webhook routes (`/webhooks/*`) are exempt from API key auth as they use their own signature verification.
 
 The auth middleware is implemented in `roko-serve/src/routes/middleware.rs` using `axum::middleware::from_fn_with_state`. A secret-scrubbing middleware layer also runs on all API responses, redacting API keys and tokens from JSON output.
+
+REF24 extends this into multi-tenant deployment auth for single-server and clustered shapes. The
+important API-facing additions are:
+
+- OIDC and personal access token flows should both produce a `TenantCtx` attached to the request.
+- Tenant identity should scope durable `Substrate` access, budget enforcement, and audit fields.
+- Trusted-header auth is an explicit opt-in for air-gapped or reverse-proxy deployments, not the default path.
+
+The deployment chapter covers the mapping rules and `TenantCtx` examples in more detail. See
+[../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+[../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
+and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
+
+---
+
+## Deployment Endpoints and Probes
+
+Even when the API surface stays small, deployment-facing endpoints need to be first-class:
+
+```text
+GET /healthz
+GET /readyz
+GET /metrics
+POST /api/state/export
+POST /api/state/import
+GET /api/cost/report
+```
+
+- `/healthz` is liveness: the process is up enough for the supervisor to keep it running.
+- `/readyz` is readiness: the selected profile has its `Substrate`, `Bus`, and auth dependencies ready.
+- `/metrics` exposes Prometheus-compatible metrics using stable `roko.*` names across all shapes.
+- State export/import endpoints mirror the CLI portability flow so laptop-to-server promotion does not require out-of-band tooling.
+- Cost reporting belongs here because deployment trust depends on visible spend, especially in shared or clustered environments.
+
+These routes complement, rather than replace, the CLI workflow. They exist so Web, automation,
+and cluster operators all exercise the same runtime behavior.
 
 ---
 

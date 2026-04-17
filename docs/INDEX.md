@@ -66,6 +66,16 @@ Start with [`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-
 [`12-interfaces/14-agent-onboarding-flow.md`](12-interfaces/14-agent-onboarding-flow.md),
 [`17-lifecycle/05-knowledge-backup-export.md`](17-lifecycle/05-knowledge-backup-export.md),
 and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/24-deployment-ux.md` makes the deployment story equally explicit: one Rust
+binary should run in five shapes, `laptop`, `single-server`, `container`, `clustered`, and
+`edge`, with profile-driven config, portable state archives, layered secret resolution, standard
+observability, and explicit multi-tenancy instead of bespoke platform forks. Start with
+[`19-deployment/INDEX.md`](19-deployment/INDEX.md),
+[`19-deployment/10-secret-management.md`](19-deployment/10-secret-management.md),
+[`19-deployment/12-production-hardening.md`](19-deployment/12-production-hardening.md),
+[`12-interfaces/04-configuration-layered-resolution.md`](12-interfaces/04-configuration-layered-resolution.md),
+[`12-interfaces/05-http-api-roko-serve.md`](12-interfaces/05-http-api-roko-serve.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
 which primitives are genuinely new, which are integrations of prior art, and which claims
 deserve publication-grade evidence. Start with
@@ -130,14 +140,14 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
 - [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, real-time clients, and Rust SDK developer UX
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, profile-aware config surfaces, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence
 - [`16-heartbeat/`](16-heartbeat/INDEX.md) — Heartbeat: The Cognitive Clock
 - [`17-lifecycle/`](17-lifecycle/INDEX.md) — Agent Lifecycle
 - [`18-tools/`](18-tools/INDEX.md) — Topic 18 — Tools, Plugins & Integrations
-- [`19-deployment/`](19-deployment/INDEX.md) — 19 — Deployment
+- [`19-deployment/`](19-deployment/INDEX.md) — 19 — Deployment, five shapes, portable state, secrets, observability, and multi-tenancy
 - [`20-technical-analysis/`](20-technical-analysis/INDEX.md) — Topic 20: Technical Analysis — Universal Oracle Primitives, compounding telemetry, and REF19 publishable-claims evidence
 - [`21-references/`](21-references/INDEX.md) — References — Master Citation Index
 

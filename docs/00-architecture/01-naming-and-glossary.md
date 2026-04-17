@@ -24,6 +24,7 @@
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md),
 > [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md),
+> [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -143,6 +144,10 @@ crates directly.
 | `Surface` | User interaction rendering | One of CLI, TUI, Chat, or Web presenting the same verbs over shared state. |
 | `Verb set` | Cross-surface action vocabulary | The shared `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, and `connect` contract. |
 | `Session` | Cross-surface continuity artifact | Named, replayable unit of user-visible work spanning prompts, checkpoints, and progress streams. |
+| `Profile` | Deployment-shape config bundle | A named default set for laptop, single-server, container, clustered, or edge runtime behavior. |
+| `State portability` | Signed import/export workflow | The rule that `Substrate` state, queue state, and deployment config can move between shapes as one auditable archive. |
+| `SecretStore` | Secret backend trait | Layered secret resolver behind OS keychain, vault-style stores, and role-scoped credential injection. |
+| `TenantCtx` | Tenant-scoped request context | Identity, role, quota, and audit information propagated through auth, `Substrate`, and control-plane spans. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -267,6 +272,10 @@ The following names are load-bearing additions in the current architecture:
 | `Surface` | One of the four user renderings: CLI, TUI, Chat, or Web. |
 | `Verb set` | The unified cross-surface action vocabulary: `ask`, `plan`, `do`, `watch`, `inspect`, `replay`, `learn`, `tune`, `connect`. |
 | `Session` | The user-facing continuity object whose state can be resumed, watched, exported, shared, and replayed across surfaces. |
+| `Profile` | Deployment-shape preset that bundles backend, auth, observability, and storage defaults for laptop, single-server, container, clustered, or edge operation. |
+| `State portability` | Export/import contract for moving `Substrate` state, queue state, and config between deployment shapes as a signed archive. |
+| `SecretStore` | Swappable secret-resolution backend behind env, config, OS keychain, and external secret managers. |
+| `TenantCtx` | Per-request tenant and role envelope used for scoped storage, budget enforcement, and audit labeling. |
 
 ### 9.1 Topic Namespace Guidance
 
@@ -317,8 +326,12 @@ prefixes without coordination.
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
 | `Prediction Error` | The residual between predicted and observed outcomes, published as `prediction.error.*` when it becomes a first-class runtime signal. |
+| `Profile` | Deployment-shape configuration preset selected by name rather than by building a different binary. |
+| `SecretStore` | Secret backend abstraction that keeps layered credential resolution off the main config path. |
 | `Substrate` | Storage fabric for Engrams and durable retrieval. |
 | `Synapse Architecture` | The kernel framing of two mediums, two fabrics, six operators, five layers, three speeds, and three cross-cuts. |
+| `State portability` | Ability to export and import durable state, queue state, and config between laptop, single-server, container, clustered, and edge deployments. |
+| `TenantCtx` | Auth-derived tenant context used by multi-tenant control planes to scope storage, quotas, and telemetry. |
 | `Topic` | Routing handle for Pulses on the Bus. |
 | `TopicFilter` | Declarative matcher for Topic-based subscription and replay. |
 
@@ -339,3 +352,6 @@ prefixes without coordination.
 - [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) for the four surfaces and unified verb set
 - [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md) for the user-UX refinement proposal
 - [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) for the Rust SDK framing and developer-UX proposal
+- [../19-deployment/INDEX.md](../19-deployment/INDEX.md) for deployment profiles, five shapes, and state portability
+- [../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md) for layered secret resolution and shared-server credential handling
+- [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md) for the deployment-UX refinement proposal

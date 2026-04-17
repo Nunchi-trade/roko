@@ -1,12 +1,9 @@
 # Production Hardening
 
-> When Roko operates in production — as a daemon, a cloud-deployed server, or an autonomous
-> agent — it must handle provider failures, network issues, resource exhaustion, and unexpected
-> load gracefully. This document covers adaptive timeouts, exponential backoff with full jitter,
-> per-provider concurrency control, context overflow handling, graceful shutdown, content-addressed
-> dedup caching, and hedged requests. These patterns are informed by Dean & Barroso's "The Tail
-> at Scale" (CACM 2013).
-
+> When Roko runs in laptop-local, single-server, container, clustered, or edge profiles, the
+> runtime still has to behave like production software: bounded latency, safe retries, clean
+> shutdown, upgradeability, observability, and tenant isolation. See also
+> `../../tmp/refinements/24-deployment-ux.md`.
 
 > **Implementation**: Specified
 
@@ -14,547 +11,197 @@
 
 ## Adaptive Timeouts
 
-Static timeouts are either too aggressive (causing spurious failures during load spikes) or too
-lenient (wasting time waiting for dead providers). Roko uses adaptive timeouts that track
-provider latency and adjust dynamically.
+Static timeouts are brittle. Roko should track per-provider latency and set timeouts from
+recent observations.
 
 ### Algorithm
 
-The timeout for each provider is set to **p95 latency × 2**, clamped to a [5s, 300s] range:
+Use `p95 latency × 2`, clamped to a sane range:
 
 ```rust
-/// Adaptive timeout calculation per provider.
-pub struct AdaptiveTimeout {
-    /// Recent latency samples (ring buffer, last 100 requests)
-    samples: VecDeque<Duration>,
-    /// Minimum timeout (floor)
-    min_timeout: Duration,
-    /// Maximum timeout (ceiling)
-    max_timeout: Duration,
-    /// Multiplier applied to p95
-    multiplier: f64,
-}
-
-impl AdaptiveTimeout {
-    pub fn new() -> Self {
-        Self {
-            samples: VecDeque::with_capacity(100),
-            min_timeout: Duration::from_secs(5),
-            max_timeout: Duration::from_secs(300),
-            multiplier: 2.0,
-        }
+pub fn timeout_for(samples: &[Duration]) -> Duration {
+    if samples.is_empty() {
+        return Duration::from_secs(30);
     }
 
-    /// Record a completed request's latency.
-    pub fn record(&mut self, latency: Duration) {
-        if self.samples.len() >= 100 {
-            self.samples.pop_front();
-        }
-        self.samples.push_back(latency);
-    }
-
-    /// Calculate the current timeout.
-    pub fn timeout(&self) -> Duration {
-        if self.samples.is_empty() {
-            return Duration::from_secs(30); // Default before any data
-        }
-
-        let mut sorted: Vec<_> = self.samples.iter().copied().collect();
-        sorted.sort();
-
-        let p95_idx = (sorted.len() as f64 * 0.95) as usize;
-        let p95 = sorted[p95_idx.min(sorted.len() - 1)];
-
-        let timeout = Duration::from_secs_f64(p95.as_secs_f64() * self.multiplier);
-        timeout.clamp(self.min_timeout, self.max_timeout)
-    }
+    let mut sorted = samples.to_vec();
+    sorted.sort();
+    let p95_idx = (sorted.len() as f64 * 0.95) as usize;
+    let p95 = sorted[p95_idx.min(sorted.len() - 1)];
+    Duration::from_secs_f64((p95.as_secs_f64() * 2.0).clamp(5.0, 300.0))
 }
 ```
 
 ### Per-Provider Tracking
 
-Each LLM provider (Anthropic, OpenAI, OpenRouter) has its own `AdaptiveTimeout` instance. This
-accounts for the significant latency differences between providers:
-
-| Provider | Typical p95 Latency | Adaptive Timeout |
-|---|---|---|
-| Anthropic Claude Sonnet | ~3-8s | ~6-16s |
-| Anthropic Claude Opus | ~15-45s | ~30-90s |
-| OpenAI GPT-4o | ~5-15s | ~10-30s |
-| OpenRouter (varies by model) | ~10-60s | ~20-120s |
-
-The timeout tracker persists across daemon restarts via `.roko/learn/provider-timeouts.json`.
+Keep separate timeout histories for each provider. Container and clustered deployments benefit
+most because they run many requests concurrently, but the same logic applies in laptop-local
+and single-server profiles.
 
 ---
 
 ## Exponential Backoff with Full Jitter
 
-When a provider request fails (timeout, rate limit, server error), Roko retries with
-exponential backoff and full jitter. The jitter prevents thundering herd problems when multiple
-agents retry simultaneously.
+When a request fails, retry with exponential backoff and full jitter:
 
-### Algorithm
-
-Full jitter (from AWS Architecture Blog, "Exponential Backoff and Jitter"):
-
-```
+```text
 sleep = random_between(0, min(cap, base × 2^attempt))
 ```
 
-```rust
-use rand::Rng;
-
-/// Calculate backoff duration with full jitter.
-pub fn backoff_with_jitter(attempt: u32, base_ms: u64, cap_ms: u64) -> Duration {
-    let exp_backoff = base_ms.saturating_mul(2u64.saturating_pow(attempt));
-    let capped = exp_backoff.min(cap_ms);
-    let jittered = rand::thread_rng().gen_range(0..=capped);
-    Duration::from_millis(jittered)
-}
-```
+The jitter prevents synchronized retries from stampeding a provider during transient failures.
 
 ### Retry Configuration
 
-```rust
-/// Retry policy for provider requests.
-pub struct RetryPolicy {
-    /// Maximum number of retry attempts
-    pub max_retries: u32,
-    /// Base delay for exponential backoff (milliseconds)
-    pub base_delay_ms: u64,
-    /// Maximum delay cap (milliseconds)
-    pub max_delay_ms: u64,
-    /// Which errors are retryable
-    pub retryable: RetryableErrors,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            base_delay_ms: 1000,   // 1 second base
-            max_delay_ms: 60_000,  // 60 second cap
-            retryable: RetryableErrors::default(),
-        }
-    }
-}
-
-/// Which errors trigger a retry.
-#[derive(Debug, Default)]
-pub struct RetryableErrors {
-    pub timeout: bool,            // Request timed out → retry
-    pub rate_limit: bool,         // 429 Too Many Requests → retry with backoff
-    pub server_error: bool,       // 500/502/503 → retry
-    pub connection_error: bool,   // TCP/TLS failure → retry
-    pub auth_error: bool,         // 401/403 → DO NOT retry (key is wrong)
-    pub client_error: bool,       // 400 → DO NOT retry (request is malformed)
-}
-```
-
-### Retry Sequence Example
-
-```
-Attempt 1: Request to Anthropic → 503 Service Unavailable
-  → sleep random(0, min(60000, 1000 × 2^0)) = random(0, 1000) → sleep 423ms
-
-Attempt 2: Request to Anthropic → 503 Service Unavailable
-  → sleep random(0, min(60000, 1000 × 2^1)) = random(0, 2000) → sleep 1847ms
-
-Attempt 3: Request to Anthropic → 200 OK
-  → Success, record latency for adaptive timeout
-```
+Retryable failures should be explicit. Authentication and malformed requests should not be
+retried; timeouts, server errors, and rate limits can be retried or failed over.
 
 ### RetryAction Enum
 
-The `should_retry()` function in `roko-agent` returns a structured decision:
-
-```rust
-/// Decision from the retry policy.
-pub enum RetryAction {
-    /// Retry after the specified delay
-    Retry { delay: Duration, reason: String },
-    /// Do not retry — the error is permanent
-    DoNotRetry { reason: String },
-    /// Switch to a different provider and retry
-    Failover { provider: String, reason: String },
-}
-
-/// Determine the retry action for a provider error.
-pub fn should_retry(
-    error: &ProviderError,
-    attempt: u32,
-    policy: &RetryPolicy,
-) -> RetryAction {
-    if attempt >= policy.max_retries {
-        return RetryAction::DoNotRetry {
-            reason: format!("Max retries ({}) exceeded", policy.max_retries),
-        };
-    }
-
-    match error {
-        ProviderError::RateLimit { retry_after } => {
-            let delay = retry_after.unwrap_or_else(|| {
-                backoff_with_jitter(attempt, policy.base_delay_ms, policy.max_delay_ms)
-            });
-            RetryAction::Retry {
-                delay,
-                reason: "Rate limited".to_string(),
-            }
-        }
-        ProviderError::ServerError(_) => {
-            RetryAction::Retry {
-                delay: backoff_with_jitter(attempt, policy.base_delay_ms, policy.max_delay_ms),
-                reason: "Server error".to_string(),
-            }
-        }
-        ProviderError::Timeout => {
-            RetryAction::Failover {
-                provider: "next_available".to_string(),
-                reason: "Timeout — try different provider".to_string(),
-            }
-        }
-        ProviderError::AuthError(_) => {
-            RetryAction::DoNotRetry {
-                reason: "Authentication failed — check API key".to_string(),
-            }
-        }
-        _ => RetryAction::DoNotRetry {
-            reason: format!("Non-retryable error: {error}"),
-        },
-    }
-}
-```
+Retried requests should return a structured decision so the caller can either retry, fail over,
+or stop immediately.
 
 ---
 
 ## Per-Provider Concurrency Control
 
-Each provider has a maximum number of concurrent requests, enforced by a Tokio semaphore. This
-prevents overwhelming a single provider and respects rate limits proactively.
+Enforce provider-specific concurrency limits with semaphores or equivalent back-pressure.
+That protects both the provider and the local process.
 
-```rust
-use tokio::sync::Semaphore;
+Default limits should be profile-aware:
 
-/// Per-provider concurrency limiter.
-pub struct ProviderConcurrency {
-    /// Semaphore controlling max concurrent requests
-    semaphore: Semaphore,
-    /// Current count of in-flight requests
-    in_flight: AtomicU32,
-}
+| Profile | Typical concurrency posture |
+|---|---|
+| laptop-local | conservative, interactive |
+| single-server | moderate, shared-machine safe |
+| container | tuned for one instance per node |
+| clustered | horizontal scale with per-node caps |
+| edge | minimal, request-scoped |
 
-impl ProviderConcurrency {
-    pub fn new(max_concurrent: usize) -> Self {
-        Self {
-            semaphore: Semaphore::new(max_concurrent),
-            in_flight: AtomicU32::new(0),
-        }
-    }
-
-    /// Acquire a permit before making a request.
-    pub async fn acquire(&self) -> SemaphorePermit<'_> {
-        let permit = self.semaphore.acquire().await.unwrap();
-        self.in_flight.fetch_add(1, Ordering::Relaxed);
-        permit
-    }
-}
-```
-
-Default concurrency limits:
-
-| Provider | Max Concurrent | Rationale |
-|---|---|---|
-| Anthropic | 10 | Anthropic rate limits are per-API-key |
-| OpenAI | 20 | OpenAI allows higher concurrency |
-| OpenRouter | 15 | Varies by underlying model |
-
-These limits are configurable in `roko.toml`:
-
-```toml
-[agent.providers.anthropic]
-max_concurrent = 10
-
-[agent.providers.openai]
-max_concurrent = 20
-```
+Per-tenant quotas layer on top of per-provider concurrency in shared deployments.
 
 ---
 
 ## Context Overflow Handling
 
-When an agent's context window approaches capacity, the system must handle the overflow
-gracefully rather than failing with a truncation error.
+When context approaches capacity, reduce it before the model fails.
 
 ### 80% Trigger Threshold
 
-The Composer monitors context window usage and triggers overflow handling at 80% capacity:
-
-```rust
-/// Check if context is approaching overflow.
-fn check_context_overflow(
-    current_tokens: usize,
-    max_tokens: usize,
-) -> ContextState {
-    let usage_ratio = current_tokens as f64 / max_tokens as f64;
-
-    if usage_ratio >= 0.95 {
-        ContextState::Critical // Must shed context immediately
-    } else if usage_ratio >= 0.80 {
-        ContextState::Warning  // Begin proactive context reduction
-    } else {
-        ContextState::Normal
-    }
-}
-```
+At roughly 80% usage, start summarizing or shedding lower-value context. At critical usage,
+force eviction and continue with the reduced state.
 
 ### Overflow Response
 
-When context reaches the warning threshold:
-
-1. **Summarize old context**: The Composer replaces older, lower-utility Engrams with a
-   summary Engram that captures the key information in fewer tokens
-2. **Decay acceleration**: Engrams below the utility threshold have their decay rates
-   accelerated, causing them to drop out of the active context sooner
-3. **Priority shedding**: The Router's VCG attention auction (see the context engineering
-   documentation) naturally handles this — lower-bid context items are evicted first
-
-When context reaches the critical threshold:
-
-1. **Force eviction**: Drop the lowest-utility 20% of context regardless of bids
-2. **Log the eviction**: Record which Engrams were dropped (for audit trail)
-3. **Continue execution**: The agent continues with reduced context rather than failing
+1. Summarize older context into a smaller prompt Engram.
+2. Accelerate demurrage or decay for low-value material.
+3. Evict the least useful items first and log the decision.
 
 ---
 
 ## Graceful Shutdown
 
-When the server or daemon receives a shutdown signal (SIGTERM, SIGINT), it performs a 3-phase
-graceful shutdown:
+Shutdown should drain work, checkpoint durable state, and then exit.
 
-### Phase 1: Stop Accepting (immediate)
+### Phase 1: Stop Accepting
 
-```rust
-// Set the shutdown flag — new requests get 503 Service Unavailable
-state.shutting_down.store(true, Ordering::SeqCst);
+Mark the service unavailable for new work and flip readiness to false.
 
-// Stop accepting new plan runs
-state.run_queue.lock().close();
+### Phase 2: Drain
 
-// Health check endpoint returns 503 (Fly/Docker stops routing traffic)
-```
-
-### Phase 2: Drain (up to 30 seconds)
-
-```rust
-// Wait for in-flight requests to complete
-let drain_timeout = Duration::from_secs(30);
-let drain_start = Instant::now();
-
-loop {
-    let in_flight = state.in_flight_count.load(Ordering::Relaxed);
-    if in_flight == 0 {
-        break; // All requests completed
-    }
-    if drain_start.elapsed() > drain_timeout {
-        tracing::warn!(
-            in_flight,
-            "Drain timeout exceeded, forcing shutdown"
-        );
-        break;
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-}
-```
+Wait for in-flight requests to finish within a bounded window.
 
 ### Phase 3: Checkpoint and Exit
 
-```rust
-// Kill any remaining agent processes
-state.supervisor.shutdown_all().await;
+Flush durable state, persist executor progress, and close transports cleanly.
 
-// Flush pending signals to disk
-state.substrate.flush().await?;
+The same shutdown path supports regular exits and rolling upgrades.
 
-// Save executor state for resume
-state.executor.checkpoint(".roko/state/executor.json").await?;
+---
 
-// Save learning data
-state.cascade_router.save().await?;
-state.experiment_store.save().await?;
-state.gate_thresholds.save().await?;
+## Zero-Downtime Upgrades
 
-// Close the IPC socket
-state.ipc_server.shutdown().await;
+Single-server and clustered deployments should upgrade without losing in-flight work.
 
-// Exit cleanly
-std::process::exit(0);
-```
+- Drain traffic before terminating the old process.
+- Resume from the last checkpoint or saved state archive.
+- Keep health checks and readiness probes aligned so orchestrators can replace one node at a
+  time.
+- For clustered deployments, do rolling replacement behind the load balancer.
 
-### Shutdown Timeline
+Container deployments should treat upgrades as a new image plus a state handoff, not a manual
+reinstall.
 
-```
-SIGTERM received
-  │
-  ├─ t=0s     Stop accepting new requests (503 for new traffic)
-  │           Health check returns 503 (load balancer drains traffic)
-  │
-  ├─ t=0-30s  Drain in-flight requests
-  │           Agents complete current turns
-  │           Gates complete current verifications
-  │
-  ├─ t=30s    Force-kill remaining agents
-  │           Checkpoint executor state
-  │           Flush signal log
-  │           Save learning data
-  │
-  └─ t=31s    Process exits (exit code 0)
-```
+---
+
+## Observability
+
+Production deployments need the same observability contract in every shape:
+
+- Structured logs to stderr by default.
+- Prometheus-compatible metrics on `/metrics`.
+- OpenTelemetry traces around the operator pipeline.
+- Readiness and liveness probes for orchestrators.
+
+Useful Roko-specific metrics include:
+
+| Metric | Meaning |
+|---|---|
+| `roko.c_factor` | Collective-intelligence health |
+| `roko.bus.pulses_per_second` | Bus throughput |
+| `roko.gate.pass_rate` | Gate success rate |
+| `roko.substrate.query_latency_p99` | Storage latency |
+| `roko.tenant.quota_utilization` | Tenant pressure in shared deployments |
+
+These metrics should carry shape and tenant labels where cardinality is safe.
 
 ---
 
 ## Content-Addressed Dedup Cache
 
-LLM responses are cached using content-addressed keys to deduplicate identical requests:
-
-```rust
-use blake3::Hasher;
-
-/// Generate a cache key from the request parameters.
-fn cache_key(model: &str, messages: &[Message], temperature: f32) -> ContentHash {
-    let mut hasher = Hasher::new();
-    hasher.update(model.as_bytes());
-    for msg in messages {
-        hasher.update(msg.role.as_bytes());
-        hasher.update(msg.content.as_bytes());
-    }
-    hasher.update(&temperature.to_le_bytes());
-    ContentHash::from(hasher.finalize())
-}
-```
-
-The cache is a bounded LRU with configurable maximum entries:
-
-```toml
-[agent.cache]
-enabled = true
-max_entries = 10000
-ttl_seconds = 3600  # 1 hour
-```
-
-Cache hit rates in practice:
-
-| Scenario | Typical Hit Rate | Savings |
-|---|---|---|
-| Repeated gate checks (same code, same test) | ~60-80% | Major cost reduction |
-| Retried agent turns (same context) | ~30-50% | Latency reduction |
-| Cross-agent shared prompts (system prompts) | ~20-30% | Minor savings |
-
-The cache key includes the model name and temperature, so different model configurations
-produce different cache entries. Temperature > 0 requests are not cached by default (non-
-deterministic outputs).
+Duplicate requests should reuse cached responses when the request, model, and parameters match.
+That reduces cost and improves latency in every profile, especially clustered and container
+deployments.
 
 ---
 
 ## Hedged Requests
 
-For latency-critical operations, hedged requests send the same request to multiple providers
-simultaneously and use the first response, canceling the others. This technique is from
-Dean & Barroso's "The Tail at Scale" (Communications of the ACM, 2013).
-
-### Implementation
-
-```rust
-/// Send a hedged request to multiple providers.
-async fn hedged_request(
-    request: &LlmRequest,
-    providers: &[Provider],
-    hedge_delay: Duration,
-) -> Result<LlmResponse> {
-    // Start with the primary provider
-    let primary = providers[0].send(request);
-
-    // After hedge_delay, also send to the secondary provider
-    let hedged = async {
-        tokio::time::sleep(hedge_delay).await;
-        providers[1].send(request).await
-    };
-
-    // Use whichever completes first
-    tokio::select! {
-        result = primary => result,
-        result = hedged => result,
-    }
-}
-```
-
-### When to Hedge
-
-Hedging is not free — it consumes tokens from multiple providers. Use it only when:
-
-1. **The request is latency-critical** (e.g., a gate check blocking the pipeline)
-2. **The primary provider is showing elevated latency** (adaptive timeout reports p95 > 2×
-   normal)
-3. **The cost is acceptable** (simple requests with low token counts)
-
-The hedge delay is set to the primary provider's p50 latency — this means the hedge only fires
-if the primary is slower than median, limiting unnecessary duplicate requests.
-
-```toml
-[agent.hedging]
-enabled = false           # Off by default (opt-in per deployment)
-hedge_delay_percentile = 50  # Fire hedge after p50 latency
-max_hedge_cost_usd = 0.01   # Don't hedge if request would cost more than this
-```
+Hedged requests send the same work to multiple providers when latency matters more than token
+cost. Use them sparingly and only when the deployment profile can afford the duplicate work.
 
 ---
 
 ## Health Check Patterns
 
-Production deployments expose health check endpoints for load balancers and orchestrators:
-
-```rust
-/// Health check endpoint for load balancers.
-async fn health_check(State(state): State<Arc<ServerState>>) -> StatusCode {
-    if state.shutting_down.load(Ordering::Relaxed) {
-        return StatusCode::SERVICE_UNAVAILABLE; // Draining
-    }
-
-    // Check critical subsystems
-    let substrate_ok = state.substrate.ping().await.is_ok();
-    let agents_ok = state.supervisor.healthy();
-
-    if substrate_ok && agents_ok {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    }
-}
-```
+`/healthz` and `/readyz` should mean the same thing across Docker, Compose, Fly.io, systemd,
+and clustered orchestrators.
 
 ### Readiness vs Liveness
 
-| Endpoint | Purpose | Returns 503 When |
-|---|---|---|
-| `/health` (liveness) | "Is the process alive?" | Process is dead or hung |
-| `/ready` (readiness) | "Can it accept work?" | Shutting down, overloaded, or subsystem failure |
+- Readiness answers “should traffic be sent here now?”
+- Liveness answers “is the process still healthy enough to stay up?”
 
-Kubernetes and Fly.io use liveness to decide whether to restart the container and readiness to
-decide whether to route traffic to it.
+During shutdown or upgrade, readiness should fail before liveness does so traffic drains
+cleanly.
+
+---
+
+## Multi-Tenant Safety
+
+Shared single-server and clustered deployments need explicit tenant boundaries:
+
+- Scope substrate keys by tenant.
+- Enforce per-tenant quotas for tokens, spend, and episode counts.
+- Keep auth and role checks tenant-aware.
+- Label metrics and traces with tenant identifiers only where that remains low-cardinality.
+
+The point is isolation without creating a separate codepath per tenant.
 
 ---
 
 ## Current Status
 
-Production hardening features are partially implemented:
+The production-hardening model is profile-aware and shape-aware. The actionable part of the
+deployment chapter is that timeout handling, retries, shutdown, upgrade flow, observability,
+and tenant controls should all work the same way across the five deployment shapes.
 
-| Feature | Status | Location |
-|---|---|---|
-| Adaptive timeouts | **Implemented** | `roko-agent/src/provider/` |
-| Exponential backoff | **Implemented** | `roko-agent/src/provider/` |
-| RetryAction enum | **Implemented** | `roko-agent/src/provider/` (Tier 2G.17) |
-| Per-provider semaphores | **Scaffolded** | Designed, not wired |
-| Context overflow | **Partial** | Composer has budget limits, no 80% trigger |
-| Graceful shutdown | **Partial** | ProcessSupervisor handles agent cleanup |
-| Dedup cache | **Not implemented** | Designed |
-| Hedged requests | **Not implemented** | Designed |
-| Health check endpoints | **Scaffolded** | roko-serve has /health stub |
