@@ -2,13 +2,13 @@
 builder = "DOCKERFILE"
 dockerfilePath = "docker/mirage.Dockerfile"
 watchPatterns = [
-  "apps/mirage-rs/**",
-  "apps/agent-relay/**",
-  "crates/roko-runtime/**",
+  "apps/**",
+  "crates/**",
+  "contracts/**",
+  "docker/**",
+  "railway.toml",
   "Cargo.toml",
   "Cargo.lock",
-  "docker/mirage.Dockerfile",
-  "docker/start-mirage-with-relay.sh",
 ]
 
 [deploy]

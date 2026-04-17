@@ -3,8 +3,9 @@
 # mirage-rs container image (§42.2).
 #
 # Multi-stage build:
-#   builder : rust:1.88-slim-bookworm — compiles `mirage-rs` with the `chain` feature
-#             plus the standalone `agent-relay` binary
+#   builder : rust:1.88-slim-bookworm — compiles `mirage-rs` with the `roko`
+#             feature set (REST API + WebSocket + chain surface) plus the
+#             standalone `agent-relay` binary
 #   runtime : debian:bookworm-slim — minimal, non-root runtime with a small
 #             launcher script so mirage can front a loopback relay on one origin
 #
@@ -12,7 +13,6 @@
 # Build context is expected to be the `roko/` workspace root.
 
 ARG BUILDPLATFORM=linux/amd64
-ARG TARGETPLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM rust:1.88-slim-bookworm AS builder
 WORKDIR /src
@@ -26,18 +26,19 @@ RUN apt-get update \
 
 COPY . .
 
-# Build mirage-rs with the `binary` + `chain` features so the resulting image
-# exposes the chain_* JSON-RPC methods and --enable-hdc/knowledge/stigmergy flags.
+# Build mirage-rs with the `binary` + `roko` features so the resulting image
+# keeps the JSON-RPC chain surface while also mounting the full REST + WebSocket
+# API from main. Build `agent-relay` alongside it for same-origin `/relay/*`.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,chain" \
+    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
     && cargo build --release -p agent-relay --bin agent-relay \
     && cp target/release/mirage-rs /mirage-rs \
     && cp target/release/agent-relay /agent-relay
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/wpank/bardo"
-LABEL org.opencontainers.image.description="mirage-rs and agent-relay co-deployed behind a single public origin"
+LABEL org.opencontainers.image.description="mirage-rs with full roko APIs plus same-origin agent-relay reachability"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 LABEL org.opencontainers.image.title="mirage-rs"
 LABEL org.opencontainers.image.vendor="Bardo"
@@ -72,4 +73,4 @@ VOLUME ["/workspace/.roko"]
 EXPOSE 8545
 
 ENTRYPOINT ["/usr/local/bin/start-mirage-with-relay"]
-CMD []
+CMD ["--chain-id", "88888"]

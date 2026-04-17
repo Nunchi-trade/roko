@@ -295,7 +295,7 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         if toggles.any_enabled() {
             let chain_ctx = {
                 // Restore from snapshot if available, otherwise create fresh.
-                let ctx = if let Some(chain_snap) =
+                let mut ctx = if let Some(chain_snap) =
                     loaded_snapshot.as_ref().and_then(|s| s.chain.clone())
                 {
                     tracing::info!("restoring chain context from snapshot");
