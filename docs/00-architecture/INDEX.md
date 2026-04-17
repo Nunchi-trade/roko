@@ -1,22 +1,22 @@
 # Architecture
 
-> The Synapse Architecture is Roko's compositional foundation: two mediums, two fabrics, six
-> operators, five layers, three speeds, and three cross-cuts. See also
-> `tmp/refinements/01-critique-one-noun.md`; REF02-REF05 and REF07 continue the reframing from
-> the retired "one noun, six verbs" mnemonic into the current architecture story. This topic
-> covers the complete architectural specification from the core data type through the
-> layer taxonomy, cognitive cross-cuts, collective intelligence metrics, crate map, cybernetic
-> foundations, and the frontier innovations that distinguish Roko from every other agent
-> framework. See also `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
+> The Synapse Architecture is Roko's compositional foundation: two mediums (Engram, durable
+> content-addressed and decayed; Pulse, ephemeral topic-addressed and sequenced), two fabrics (Substrate
+> for storage; Bus for transport), six operators, five layers, three speeds, and three
+> cross-cuts. The canonical wire vocabulary is `Engram`, `Pulse`, `Bus`, `Topic`,
+> `TopicFilter`, `Datum`, and `PulseSource`; see also `tmp/refinements/07-naming.md` for the
+> naming decisions that standardize them, `tmp/refinements/01-critique-one-noun.md` for the
+> original framing critique, `tmp/refinements/02-engram-vs-pulse.md` for the medium split,
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion and two-fabric kernel,
 > `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
 > `tmp/refinements/05-loop-retold.md` for the seven-step loop, co-equal PERSIST/BROADCAST, and
-> cross-cut injection model,
-> `tmp/refinements/09-phase-2-implications.md` for how Chain, Dreams, Coordination, and
-> Heartbeat collapse onto that same kernel,
-> `tmp/refinements/06-refactoring-plan.md` for the phased refactoring plan and rollout
-> ordering, and `tmp/refinements/21-from-scratch-redesigns.md` for the rewrite-track
-> alternative and from-scratch sequencing.
+> cross-cut injection model, `tmp/refinements/09-phase-2-implications.md` for how Chain,
+> Dreams, Coordination, and Heartbeat collapse onto that same kernel, and
+> `tmp/refinements/06-refactoring-plan.md` plus `tmp/refinements/21-from-scratch-redesigns.md`
+> for the rollout and rewrite-track sequencing. This topic covers the complete architectural
+> specification from the core data types through the layer taxonomy, cognitive cross-cuts,
+> collective intelligence metrics, crate map, cybernetic foundations, and the frontier
+> innovations that distinguish Roko from every other agent framework.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -28,17 +28,21 @@
 ## Abstract
 
 Roko is a Rust toolkit for building cognitive agents that build themselves. Its architecture
-— the Synapse Architecture — is built around two mediums: durable Engram and ephemeral Pulse.
-Those mediums move through two fabrics, Substrate and Bus, with six operators coordinating the
-system across five layers, three speeds, and three cross-cuts. Every capability in the system,
-from code generation to chain transaction execution to knowledge consolidation, is an
-implementation of that operator/fabric stack.
+— the Synapse Architecture — is built around two mediums: `Engram`, the durable
+content-addressed record, and `Pulse`, the ephemeral topic-addressed message. Those mediums
+move through two fabrics, `Substrate` for storage and `Bus` for transport, with six operators
+coordinating the system across five layers, three speeds, and three cross-cuts. `Topic` and
+`TopicFilter` govern routing on the Bus, `Datum` abstracts over Engram-or-Pulse inputs where
+operators need to handle both, and `PulseSource` names the producer side of the ephemeral
+stream. Engrams carry lineage through a DAG; Pulses carry ordering through Bus sequence
+numbers; Pulses graduate to Engrams when lineage matters. See also
+`tmp/refinements/07-naming.md`.
 
 The architecture is organized into five layers (Runtime, Framework, Scaffold, Harness,
 Orchestration) with strictly downward dependencies. Three cognitive cross-cuts (Neuro for
 knowledge, Daimon for motivation, Dreams for offline learning) are injected across multiple
-layers via trait objects, providing the self-improving capabilities that make Roko more than
-a static framework.
+layers via trait objects, providing the self-improving capabilities that make Roko more than a
+static framework.
 
 This topic is the entry point for understanding Roko. It covers the theoretical foundations
 (cybernetics, active inference, autocatalytic improvement), the concrete data structures
