@@ -380,7 +380,7 @@ code. Per-stratum reporting prevents that.
 Single-codebase evaluation overfits to the codebase's structure. The validation
 suite includes tasks drawn from:
 
-- Roko itself (177K LOC, Rust, deep dependency graph)
+- Roko itself (~322K LOC, Rust, deep dependency graph)
 - External open-source projects (varying languages, sizes, structure quality)
 - Synthetic repositories designed to stress specific capabilities
 

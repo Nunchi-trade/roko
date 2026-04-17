@@ -77,13 +77,13 @@ Sleepwalker mode is signaled to the L0 Runtime via `SIGPAUSE`:
 
 ```rust
 // Signal the runtime that the agent is entering dream mode
-runtime.signal(Signal::Pause { reason: "dream_cycle" });
+runtime.signal(CognitiveSignal::Pause { reason: "dream_cycle" });
 
 // Run the dream cycle
 let report = dream_cycle.run().await?;
 
 // Signal that dreaming is complete
-runtime.signal(Signal::Resume { reason: "dream_complete" });
+runtime.signal(CognitiveSignal::Resume { reason: "dream_complete" });
 ```
 
 ---

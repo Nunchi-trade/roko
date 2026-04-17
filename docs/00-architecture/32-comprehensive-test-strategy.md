@@ -70,7 +70,7 @@ preservation across self-modification cycles).
 | `roko-lang-*` (3) | L2 Scaffold | 0 | 0 | 0 | Zero tests |
 | `roko-mcp-*` (4) | L1 Framework | 0 | 0 | 0 | Stubs only |
 | **Workspace tests** | Cross-crate | — | 19 | 19 | end_to_end, tool_replay, tool_equivalence |
-| **Total** | | | | **~1,568** | |
+| **Total** | | | | **3,761** | |
 
 ### 1.2 Infrastructure gaps
 
@@ -327,7 +327,7 @@ These crates are scaffold/built status. Testing should grow with implementation.
 | Built | conductor, chain, neuro, index, primitives, runtime | ~294 | ~470 | +176 |
 | Scaffold | daimon, dreams, serve, lang-*, mcp-*, plugin | ~24 | ~180 | +156 |
 | Workspace | tests/ | 19 | 50 | +31 |
-| **Total** | | **~1,568** | **~2,810** | **+1,242** |
+| **Total** | | **3,761** | **~2,810** | **+1,242** |
 
 ---
 
@@ -625,24 +625,24 @@ These run millions of times in any session. Sub-microsecond budget.
 
 | Operation | Target | Measurement |
 |-----------|--------|-------------|
-| Signal::builder().build() | < 500ns | criterion |
+| Engram::builder().build() | < 500ns | criterion |
 | ContentHash (BLAKE3, 1KB payload) | < 1μs | criterion |
 | ContentHash (BLAKE3, 1MB payload) | < 500μs | criterion |
 | Score::effective_score() | < 10ns | criterion |
 | Decay::weight_at() (all 4 variants) | < 50ns each | criterion |
-| Signal serialization (serde_json) | < 5μs | criterion |
-| Signal deserialization (serde_json) | < 5μs | criterion |
+| Engram serialization (serde_json) | < 5μs | criterion |
+| Engram deserialization (serde_json) | < 5μs | criterion |
 | Query::matches(signal) | < 100ns | criterion |
 
 ```rust
-// benches/signal_ops.rs
+// benches/engram_ops.rs
 use criterion::{criterion_group, criterion_main, Criterion, black_box};
-use roko_core::{Signal, Kind, Body, Decay, Score};
+use roko_core::{Body, Decay, Engram, Kind, Score};
 
-fn bench_signal_build(c: &mut Criterion) {
-    c.bench_function("signal_build", |b| {
+fn bench_engram_build(c: &mut Criterion) {
+    c.bench_function("engram_build", |b| {
         b.iter(|| {
-            black_box(Signal::builder(Kind::TaskOutput)
+            black_box(Engram::builder(Kind::TaskOutput)
                 .body(Body::Text("hello world".into()))
                 .decay(Decay::HalfLife { half_life_ms: 86_400_000 })
                 .build())
@@ -1361,7 +1361,7 @@ executor state, episode logs, and gate thresholds must not cause panics or undef
 
 | Target | Input | Goal |
 |--------|-------|------|
-| `fuzz_signal_deserialize` | Arbitrary bytes → `serde_json::from_slice::<Signal>` | No panic, no UB |
+| `fuzz_engram_deserialize` | Arbitrary bytes → `serde_json::from_slice::<Engram>` | No panic, no UB |
 | `fuzz_verdict_deserialize` | Arbitrary bytes → `serde_json::from_slice::<Verdict>` | No panic |
 | `fuzz_executor_state` | Arbitrary bytes → `ExecutorState::load()` | Graceful error or valid state |
 | `fuzz_gate_thresholds` | Arbitrary bytes → `AdaptiveThresholds::load()` | Graceful fallback to defaults |
@@ -1389,19 +1389,19 @@ roko-learn = { path = "../crates/roko-learn" }
 arbitrary = { version = "1", features = ["derive"] }
 
 [[bin]]
-name = "fuzz_signal_deserialize"
-path = "fuzz_targets/signal_deserialize.rs"
+name = "fuzz_engram_deserialize"
+path = "fuzz_targets/engram_deserialize.rs"
 ```
 
 ```rust
-// fuzz/fuzz_targets/signal_deserialize.rs
+// fuzz/fuzz_targets/engram_deserialize.rs
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use roko_core::Signal;
+use roko_core::Engram;
 
 fuzz_target!(|data: &[u8]| {
     // Should never panic, regardless of input
-    let _ = serde_json::from_slice::<Signal>(data);
+    let _ = serde_json::from_slice::<Engram>(data);
 });
 ```
 
@@ -1472,7 +1472,7 @@ Focus: mutation testing, full adversarial suite, behavioral fingerprinting.
 
 | Metric | Current | Target | Timeline |
 |--------|---------|--------|----------|
-| Total tests | 1,568 | 2,810 | 8 weeks |
+| Total tests | 3,761 | 2,810 | 8 weeks |
 | Property-based tests | 0 | 110 | Phase 1-2 |
 | Integration tests | ~130 | 300 | Phase 1-3 |
 | Fuzz targets | 0 | 9 | Phase 1-2 |

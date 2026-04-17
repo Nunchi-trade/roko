@@ -30,7 +30,7 @@ machinery to improve themselves over time.
 | **Self-development** | Reads own PRDs, generates plans, executes, validates | No | No | No | No |
 | **Session persistence** | Snapshot + resume, append-only JSONL | Checkpointers (optional) | No built-in | No built-in | No built-in |
 | **Safety model** | Role auth, pre/post checks, taint tracking, capability tokens | No built-in | No built-in | Container sandbox | No built-in |
-| **Test suite** | 1,568 tests across 11 crates | Varies | Minimal | SWE-bench | Minimal |
+| **Test suite** | 3,761 tests across 36 workspace members | Varies | Minimal | SWE-bench | Minimal |
 | **Token budget management** | VCG attention auction, per-section bidding | Manual truncation | No built-in | Context window | No built-in |
 | **Temporal dynamics** | 4 decay models, knowledge half-lives, Ebbinghaus curves | No | No | No | No |
 
@@ -41,7 +41,7 @@ machinery to improve themselves over time.
 ### 1. One Noun, Six Verbs
 
 Most frameworks have many types: tasks, messages, tools, observations, actions, memories.
-Roko has exactly one data type (Engram/Signal) and six trait operations. This enables
+Roko has exactly one data type (Engram) and six trait operations. This enables
 universal composability — any Scorer scores any Engram, any Substrate stores any Engram,
 any Gate verifies any Engram. Components compose freely.
 
@@ -106,7 +106,7 @@ Roko is honest about its limitations:
   Dreams, and Coordination are built or scaffolded but not yet wired into the runtime. See
   [`STATUS.md`](STATUS.md) for the full breakdown.
 - **Rust-only**: No Python SDK. If your stack is Python, this is a barrier.
-- **Steep learning curve**: 22 documentation sections, 18 crates, cognitive science concepts.
+- **Steep learning curve**: 22 documentation sections, 36 workspace members, cognitive science concepts.
   The architecture is powerful but not simple.
 - **Single-developer origin**: Roko was built by one person migrating a prior 108K LOC system.
   Community and ecosystem are nascent.

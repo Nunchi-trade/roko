@@ -13,9 +13,9 @@
 
 ## Abstract
 
-The `roko` binary is a single Rust executable that serves as the canonical entry point for all Roko operations. It is built with `clap` for argument parsing and exposes a rich subcommand tree covering agent lifecycle management, plan orchestration, PRD-driven development, knowledge operations, research, deployment, system introspection, and plugin lifecycle operations. Unlike systems that separate CLI, TUI, and server into different binaries, Roko unifies them: the same binary that runs `roko run "fix the bug"` also hosts `roko dashboard` (the interactive TUI), `roko serve` (the HTTP API), `roko daemon --start` (the background service), and `roko plugin install <id>` (the ecosystem entry point).
+The `roko` binary is a single Rust executable that serves as the canonical entry point for all Roko operations. It is built with `clap` for argument parsing and exposes a rich subcommand tree covering agent lifecycle management, plan orchestration, PRD-driven development, knowledge operations, research, deployment, system introspection, and target-state plugin lifecycle operations. Unlike systems that separate CLI, TUI, and server into different binaries, Roko unifies them: the same binary that runs `roko run "fix the bug"` also hosts `roko dashboard` (the interactive TUI), `roko serve` (the HTTP API), `roko daemon --start` (the background service), and, in the target-state design, `roko plugin install <id>` (the ecosystem entry point).
 
-The CLI is designed around the principle of **progressive disclosure**: beginners see three commands (`roko init`, `roko run`, `roko status`), intermediates configure behavior through `roko.toml` and install ready-made plugins and domain profiles, and advanced users author Tier 4 or Tier 5 extensions against the stable plugin SPI. This layered approach ensures that Roko is approachable for a developer who just wants to run an agent against their codebase, while providing full architectural control for those building domain-specific cognitive systems. See also [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md), [16-plugin-loading.md](../18-tools/16-plugin-loading.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md), and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
+The CLI is designed around the principle of **progressive disclosure**: beginners see three commands (`roko init`, `roko run`, `roko status`), intermediates configure behavior through `roko.toml` and install ready-made plugins and domain profiles in the target-state design, and advanced users author Tier 4 or Tier 5 extensions against the target-state plugin SPI. This layered approach ensures that Roko is approachable for a developer who just wants to run an agent against their codebase, while providing full architectural control for those building domain-specific cognitive systems. See also [14-plugin-sdk.md](../18-tools/14-plugin-sdk.md), [16-plugin-loading.md](../18-tools/16-plugin-loading.md), [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md), and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 The CLI sits at the **Application layer** — above L4 Orchestration. It consumes crates from every layer: `roko-core` (L0/L1), `roko-compose` (L2), `roko-gate` (L3), `roko-orchestrator` (L4), and the cognitive cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`). The `roko-serve` crate provides the HTTP server that `roko serve` starts.
 
@@ -205,8 +205,8 @@ Every subcommand inherits these global flags:
 
 ## Plugin Workflow
 
-REF17 promotes plugins from an implementation detail to a first-class operator workflow. The CLI
-assumes a five-tier plugin SPI:
+REF17 promotes plugins from an implementation detail to a target-state operator workflow. The CLI
+assumes a target-state five-tier plugin SPI:
 
 | Tier | What operators install | Discovery root | Typical command path |
 |---|---|---|---|

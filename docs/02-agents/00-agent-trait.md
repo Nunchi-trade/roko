@@ -14,16 +14,15 @@
 ## Why Agents Are Separate from the Six Synapse Traits
 
 Roko's core architecture is built on six composable verb traits — the
-**Synapse traits** — that process Engrams (currently named `Signal` in code,
-rename tracked as Tier 0D):
+**Synapse traits** — that process Engrams:
 
 | Trait | Verb | Signature shape |
 |---|---|---|
-| Substrate | store / retrieve | `fn query(&self, …) → Vec<Signal>` |
+| Substrate | store / retrieve | `fn query(&self, …) → Vec<Engram>` |
 | Scorer | evaluate | `fn score(&self, signal) → f64` |
 | Gate | accept / reject | `fn check(&self, signal) → Verdict` |
 | Router | direct | `fn route(&self, signal) → Destination` |
-| Composer | assemble | `fn compose(&self, signals) → Signal` |
+| Composer | assemble | `fn compose(&self, engrams) → Engram` |
 | Policy | decide | `fn decide(&self, …) → Action` |
 
 These traits share four properties: they are **synchronous**, **deterministic**
@@ -76,9 +75,9 @@ The trait lives at `crates/roko-agent/src/agent.rs` and has three methods:
 pub trait Agent: Send + Sync {
     /// Run the agent against the input signal.
     ///
-    /// The `input` is typically a `Signal<Kind::Prompt>`, but agents may
-    /// accept any kind (e.g. a `Signal<Kind::Task>` for task-aware agents).
-    async fn run(&self, input: &Signal, ctx: &Context) -> AgentResult;
+    /// The `input` is typically an `Engram<Kind::Prompt>`, but agents may
+    /// accept any kind (e.g. an `Engram<Kind::Task>` for task-aware agents).
+    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult;
 
     /// Human-readable name for logs/metrics.
     fn name(&self) -> &str;
@@ -94,8 +93,8 @@ pub trait Agent: Send + Sync {
 
 - **`Send + Sync`** — Required because the orchestrator runs agents across
   `tokio` tasks. Every concrete implementation must be thread-safe.
-- **`&Signal` input** — The input is borrowed, not consumed. This allows the
-  orchestrator to keep the original prompt signal for logging and DAG lineage
+- **`&Engram` input** — The input is borrowed, not consumed. This allows the
+  orchestrator to keep the original prompt engram for logging and DAG lineage
   while the agent works with a reference.
 - **`&Context` context** — The `Context` carries a timestamp and potentially
   other runtime metadata. It provides a clean injection point for contextual
@@ -114,12 +113,12 @@ The result of running an agent once. Defined at `crates/roko-agent/src/agent.rs`
 ```rust
 #[derive(Clone, Debug)]
 pub struct AgentResult {
-    /// The primary output signal (Kind::AgentOutput with the agent's response).
-    pub output: Signal,
+    /// The primary output engram (Kind::AgentOutput with the agent's response).
+    pub output: Engram,
 
-    /// Intermediate signals emitted during the run (stream messages, tool calls,
+    /// Intermediate engrams emitted during the run (stream messages, tool calls,
     /// diff updates, errors). Ordered chronologically.
-    pub trace: Vec<Signal>,
+    pub trace: Vec<Engram>,
 
     /// Token usage + cost.
     pub usage: Usage,
@@ -134,25 +133,25 @@ pub struct AgentResult {
 
 ```rust
 impl AgentResult {
-    /// Construct a successful result with just an output signal.
-    pub const fn ok(output: Signal) -> Self;
+    /// Construct a successful result with just an output engram.
+    pub const fn ok(output: Engram) -> Self;
 
-    /// Construct a failed result with an output signal describing the failure.
-    pub const fn fail(output: Signal) -> Self;
+    /// Construct a failed result with an output engram describing the failure.
+    pub const fn fail(output: Engram) -> Self;
 
-    /// Attach trace signals.
-    pub fn with_trace(mut self, trace: Vec<Signal>) -> Self;
+    /// Attach trace engrams.
+    pub fn with_trace(mut self, trace: Vec<Engram>) -> Self;
 
     /// Attach usage metrics.
     pub const fn with_usage(mut self, usage: Usage) -> Self;
 
-    /// All signals produced by this run (trace + output), chronological order.
-    pub fn all_signals(&self) -> Vec<Signal>;
+    /// All engrams produced by this run (trace + output), chronological order.
+    pub fn all_engrams(&self) -> Vec<Engram>;
 }
 ```
 
-The `all_signals()` method returns `trace` followed by `output` — the
-chronological order matters for episode logging, where each signal becomes a
+The `all_engrams()` method returns `trace` followed by `output` — the
+chronological order matters for episode logging, where each engram becomes a
 row in `.roko/episodes.jsonl`.
 
 ### Usage tracking
@@ -345,7 +344,7 @@ pub struct SkillSelector {
 impl SkillSelector {
     /// Select top-K skills for a given task, combining semantic similarity
     /// with transition probability from recently-used skills.
-    pub fn select(&self, task: &Signal, recent: &[String], k: usize) -> Vec<&AgentSkill> {
+    pub fn select(&self, task: &Engram, recent: &[String], k: usize) -> Vec<&AgentSkill> {
         // 1. Compute semantic similarity between task and all skills
         // 2. Boost skills that are likely next steps (transition graph)
         // 3. Return top-K, capped at max_skills_per_prompt
@@ -379,7 +378,7 @@ pub enum AgentComposition {
     },
     /// Conditional: route to A or B based on signal properties.
     Conditional {
-        router: Box<dyn Fn(&Signal) -> usize>,
+        router: Box<dyn Fn(&Engram) -> usize>,
         branches: Vec<Box<dyn Agent>>,
     },
     /// Mixture-of-Agents: layer N takes all outputs from layer N-1.
@@ -681,7 +680,7 @@ pub struct RoleProfile {
 
 impl MorphableAgent {
     /// Evaluate whether a role morph is warranted based on task signals.
-    pub fn should_morph(&self, task: &Signal) -> Option<AgentRole> {
+    pub fn should_morph(&self, task: &Engram) -> Option<AgentRole> {
         // 1. Compute task-role alignment for current role
         // 2. Compute alignment for each allowed transition target
         // 3. If a target role has significantly higher alignment, recommend morph

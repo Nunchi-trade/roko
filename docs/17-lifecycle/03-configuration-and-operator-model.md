@@ -99,7 +99,7 @@ network = "base"               # "base" | "base-sepolia" | "anvil"
 
 [chain.korai]
 # KORAI/DAEJI token configuration
-demurrage_rate = 0.01          # 1% annual demurrage
+demurrage_rate = 0.01          # 1% annual demurrage (planned)
 ```
 
 ### Hot-Reload Scope

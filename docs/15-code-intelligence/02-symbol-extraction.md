@@ -201,7 +201,7 @@ pub fn find_symbol<'a>(files: &'a [SourceFile], name: &str) -> Vec<&'a Symbol> {
 
 This function returns all symbols matching the given name across all files. It is intentionally simple — a linear scan — because:
 
-1. **Symbol counts are manageable** — Even a 177K-line workspace produces ~5,000–10,000 top-level symbols. Linear scan over 10K items is sub-millisecond.
+1. **Symbol counts are manageable** — Even a ~322K-line workspace produces ~5,000–10,000 top-level symbols. Linear scan over 10K items is sub-millisecond.
 
 2. **Name collisions are informative** — When multiple symbols share a name, the caller (typically the graph builder) can distinguish them by kind and file path.
 

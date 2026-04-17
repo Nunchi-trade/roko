@@ -13,7 +13,7 @@
 
 ## Abstract
 
-The adaptive clock is the runtime policy in `roko-runtime` (L0 Runtime layer) that publishes the three heartbeat tick Pulses on the Bus. It does not orchestrate cognition directly. Instead, a `HeartbeatPolicy` emits `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` at cadence, and the speed-specific consumers subscribe by topic. That makes the clock a Bus producer, not a special control-flow mechanism.
+The adaptive clock is the runtime policy in `roko-runtime` (L0 Runtime layer) that would publish the three heartbeat tick Pulses on the Bus in the target-state design. It does not orchestrate cognition directly. Instead, a `HeartbeatPolicy` would emit `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` at cadence, and the speed-specific consumers subscribe by topic. That makes the clock a Bus producer, not a special control-flow mechanism.
 
 It still dynamically adjusts each frequency based on environmental regime (calm vs. volatile), resource constraints (approaching budget ceiling), and agent behavioral state (focused vs. resting). The fixed ~60-second heartbeat from simpler agent architectures serves all purposes at one rate. This is wrong. A code compilation check resolves in seconds. A deployment pipeline takes minutes. A research synthesis takes hours. Biology solves this with oscillatory hierarchies (Buzsáki 2006, "Rhythms of the Brain", Oxford University Press): fast gamma oscillations (30-100 Hz) ride on top of slower theta oscillations (4-8 Hz), which ride on top of delta oscillations (0.5-4 Hz). The adaptive clock implements this hierarchy for agent cognition.
 
@@ -241,7 +241,7 @@ When T2 is restricted, the agent falls back to T1 (cheaper model) for situations
 
 ## Cognitive Signals
 
-The three speeds communicate by Bus topic subscription rather than by direct loop-to-loop control. The `HeartbeatPolicy` emits tick Pulses, and each consumer watches the topic it cares about:
+The three speeds communicate by Bus topic subscription rather than by direct loop-to-loop control. In the target-state design, the `HeartbeatPolicy` emits tick Pulses, and each consumer watches the topic it cares about:
 
 ```rust
 let gamma_topic = "heartbeat.gamma.tick";

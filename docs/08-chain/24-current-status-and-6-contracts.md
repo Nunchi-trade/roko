@@ -142,12 +142,12 @@ All Tier 6 items are deferred. The implementation plan (12b-chain-layer.md) cont
 
 **Address**: Predeployed at genesis
 
-**Purpose**: The native token of the Korai chain. Implements ERC-20 with demurrage (1% annual decay) and ERC-3009 (transferWithAuthorization for x402 payments).
+**Purpose**: The native token of the Korai chain. Planned to implement ERC-20 with demurrage (1% annual decay) and ERC-3009 (transferWithAuthorization for x402 payments).
 
 **Key functions**:
 - Standard ERC-20: `transfer`, `approve`, `transferFrom`, `balanceOf`
 - ERC-3009: `transferWithAuthorization(from, to, value, validAfter, validBefore, nonce, v, r, s)`
-- Demurrage: `applyDemurrage(address)` — called at epoch boundaries
+- Demurrage (planned): `applyDemurrage(address)` — called at epoch boundaries
 - Minting: `mint(address, amount)` — called by authorized minting sources (job rewards, registration)
 - Burning: `burn(amount)` — voluntary burn; also triggered by posting fees and slashing
 

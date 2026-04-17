@@ -15,7 +15,7 @@
 
 Roko is a cognitive agent operating system. Its kernel — the Synapse Architecture with Engrams, six composable traits (Substrate, Scorer, Gate, Router, Composer, Policy), five architectural layers (Runtime, Framework, Scaffold, Harness, Orchestration), and three cognitive cross-cuts (Neuro, Daimon, Dreams) — operates identically whether the agent writes code, monitors infrastructure, conducts research, or interacts with blockchains.
 
-The Korai chain is a **domain plugin** that extends this kernel with chain-specific capabilities: on-chain identity, token economics, decentralized job markets, reputation systems, and collective knowledge coordination. It is one instance of the pattern `domain_specific_trait_implementations + domain_specific_configuration = domain_agent`. Coding agents have their own domain plugin (CompileGate, TestGate, SymbolScorer). Chain agents have theirs (TxSimGate, WalletGate, ChainSubstrate). In the two-fabric model, `ChainSubstrate` stores and queries durable on-chain Engrams while `ChainBus` turns chain logs into ordinary Bus Pulses. See `tmp/refinements/09-phase-2-implications.md` and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
+The Korai chain is a **target-state domain plugin** that extends this kernel with chain-specific capabilities: on-chain identity, token economics, decentralized job markets, reputation systems, and collective knowledge coordination. It is one instance of the pattern `domain_specific_trait_implementations + domain_specific_configuration = domain_agent`. Coding agents have their own domain plugin (CompileGate, TestGate, SymbolScorer). Chain agents have theirs in the target-state design (TxSimGate, WalletGate, ChainSubstrate). In the two-fabric model, `ChainSubstrate` would store and query durable on-chain Engrams while `ChainBus` would turn chain logs into ordinary Bus Pulses. See `tmp/refinements/09-phase-2-implications.md` and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 This framing matters because the most powerful agents will span multiple domains simultaneously. A single agent can write Solidity contracts (coding domain), simulate their deployment on mirage-rs (chain domain), monitor on-chain performance (chain domain), and research competing protocols (research domain). The Synapse Architecture makes this composition natural — each domain contributes its Gate, Scorer, and Substrate implementations, while Bus-backed transport keeps live consumers uniform across chain, mesh, and HTTP surfaces.
 
@@ -73,11 +73,11 @@ The Korai chain is a dedicated EVM chain for agent knowledge coordination. Agent
 
 - **ERC-8004 Agent Identity** — on-chain registration with capabilities, endpoints, and reputation
 - **HDC Precompile** — native EVM precompile for 10,240-bit hyperdimensional vector similarity search at ~400 gas
-- **KORAI Token Economics** — demurrage token (1% annual decay) that incentivizes knowledge quality
+- **KORAI Token Economics** — target-state demurrage token (1% annual decay) that incentivizes knowledge quality
 - **Pheromone Contracts** — typed coordination signals with on-chain decay profiles
 - **Reputation Registry** — 7-domain exponential moving average reputation system
 
-Under the two-fabric framing, durable chain records live in `ChainSubstrate` and chain logs become Pulses on `ChainBus`, so chain-log consumers remain ordinary Bus subscribers instead of bespoke watchers. That is the same model the HTTP control plane and agent sidecars use when they project Bus subscriptions over SSE, WebSocket, or local transport.
+Under the two-fabric framing, durable chain records would live in `ChainSubstrate` and chain logs would become Pulses on `ChainBus`, so chain-log consumers remain ordinary Bus subscribers instead of bespoke watchers. That is the same target-state model the HTTP control plane and agent sidecars use when they project Bus subscriptions over SSE, WebSocket, or local transport.
 
 The key design principle: **agents that never interact with a blockchain still benefit from the full Roko cognitive stack**. The Korai chain amplifies collective intelligence but is not required for individual agent operation. Solo coding agents, Bus-reactive operations agents, and local research agents work perfectly without it.
 
@@ -87,8 +87,8 @@ The key design principle: **agents that never interact with a blockchain still b
 
 The two-fabric model does more than rename chain storage. It makes the Phase 2+ shape obvious:
 
-- Chain persistence belongs in `ChainSubstrate`: transactions, attestations, knowledge entries, and other durable on-chain Engrams.
-- Chain transport belongs in `ChainBus`: chain logs and contract events map to typed Pulses on Bus topics such as `chain.deposit.emitted` or `chain.reputation.updated`.
+- Chain persistence belongs in target-state `ChainSubstrate`: transactions, attestations, knowledge entries, and other durable on-chain Engrams.
+- Chain transport belongs in target-state `ChainBus`: chain logs and contract events map to typed Pulses on Bus topics such as `chain.deposit.emitted` or `chain.reputation.updated`.
 - Chain-log consumers stay ordinary Bus subscribers. A dashboard, policy, agent sidecar, or `roko-serve` projection listens to the same topics as any other Bus-backed subsystem.
 - Mesh and chain are both backend choices for the same pub/sub model. Mesh swaps the transport substrate; chain swaps the storage substrate; neither changes the control logic above it.
 - HTTP becomes a projection layer, not a special case. SSE and WebSocket streams forward Bus subscriptions, while REST reads the durable record from Substrate.
@@ -141,11 +141,11 @@ Korai targets 400ms block times — fast enough for agent coordination but slow 
 
 ### 3. Agents as First-Class Citizens
 
-On Korai, agents are not "users pretending to be smart contracts." They are first-class citizens with dedicated identity (ERC-8004 Korai Passport), reputation systems designed for non-human actors, and economic mechanisms (demurrage tokens, job markets, clearing) tuned for autonomous agent behavior.
+On Korai, agents are not "users pretending to be smart contracts." In the target-state design, they are first-class citizens with dedicated identity (ERC-8004 Korai Passport), reputation systems designed for non-human actors, and economic mechanisms (demurrage tokens, job markets, clearing) tuned for autonomous agent behavior.
 
 ### 4. Purpose-Built Economics
 
-KORAI token economics are designed around knowledge quality incentives, not speculation. The 1% annual demurrage ensures that stale, unvalidated knowledge decays economically just as it decays in the NeuroStore's half-life system. Earning mechanisms reward validated knowledge contributions; spending mechanisms create anti-spam barriers.
+KORAI token economics are designed around knowledge quality incentives, not speculation. The planned 1% annual demurrage would ensure that stale, unvalidated knowledge decays economically just as it decays in the NeuroStore's half-life system. Earning mechanisms would reward validated knowledge contributions; spending mechanisms would create anti-spam barriers.
 
 ---
 
@@ -291,8 +291,8 @@ Chain capabilities are implemented as domain-specific trait implementations, jus
 
 | Synapse Trait | Chain Domain Implementation | Coding Domain Equivalent |
 |---|---|---|
-| `Substrate` | `ChainSubstrate` — store and query durable on-chain Engrams via HDC precompile | `FileSubstrate` — JSONL persistence |
-| `Bus` | `ChainBus` — map chain logs and contract events into typed Pulses on Bus topics | `BroadcastBus` — in-process transport |
+| `Substrate` | `ChainSubstrate` (target-state) — store and query durable on-chain Engrams via HDC precompile | `FileSubstrate` — JSONL persistence |
+| `Bus` | `ChainBus` (target-state) — map chain logs and contract events into typed Pulses on Bus topics | `BroadcastBus` — in-process transport |
 | `Scorer` | `ChainScorer` — 4-factor scoring (price, TVL, gas, health) | `CodeScorer` — complexity, coverage, coupling |
 | `Gate` | `TxSimGate` — pre-flight tx simulation via mirage-rs | `CompileGate` — `cargo check` |
 | `Gate` | `WalletGate` — position limits, approved assets | `TestGate` — `cargo test` |

@@ -167,7 +167,7 @@ The circuit breaker is checked at the start of every `evaluate()` call:
 
 ```rust
 impl Conductor {
-    pub fn evaluate(&self, plan_id: &str, stream: &[Signal], ctx: &Context) -> ConductorDecision {
+    pub fn evaluate(&self, plan_id: &str, stream: &[Engram], ctx: &Context) -> ConductorDecision {
         // 1. Check circuit breaker FIRST
         if self.circuit_breaker.is_tripped(plan_id) {
             return ConductorDecision::Fail {

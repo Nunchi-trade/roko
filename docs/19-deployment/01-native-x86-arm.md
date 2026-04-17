@@ -1,6 +1,6 @@
 # Native Deployment (x86_64 and aarch64)
 
-> Native deployment is the default and highest-performance target for Roko. The full 18-crate
+> Native deployment is the default and highest-performance target for Roko. The full 36-workspace-member
 > workspace compiles to a single binary per product, with all features enabled, optimized for
 > the host architecture. This document covers build configuration, target triples, feature
 > flags, performance characteristics, and cross-compilation for native platforms.

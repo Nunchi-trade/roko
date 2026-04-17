@@ -181,7 +181,7 @@ operations per belief update. At ~50ns per operation: **~8μs total per tick**.
 ### Rust Sketch
 
 ```rust
-use roko_core::{Signal, Score, Context, ContentHash};
+use roko_core::{Engram, Score, Context, ContentHash};
 use bardo_primitives::hdc::{HdcVector, hamming_distance, bind, bundle, majority_vote};
 
 /// Belief state encoded as HDC vector with active inference dynamics.
@@ -365,8 +365,8 @@ impl HdcBeliefState {
 
 /// Scorer implementation: beliefs inform scoring via prediction confidence.
 impl Scorer for HdcBeliefState {
-    fn score(&self, signal: &Signal, ctx: &Context) -> Score {
-        let signal_vec = encode_signal_hdc(signal);
+    fn score(&self, engram: &Engram, ctx: &Context) -> Score {
+        let signal_vec = encode_signal_hdc(engram);
         let similarity = 1.0 - (hamming_distance(&self.mu, &signal_vec) as f32
             / HdcVector::TOTAL_BITS as f32);
 
@@ -541,7 +541,7 @@ Steps:
 ### Rust Sketch
 
 ```rust
-use roko_core::Signal;
+use roko_core::Engram;
 use roko_learn::episode::Episode;
 
 /// A node in the affective causal graph.
@@ -863,14 +863,14 @@ Steps:
        verdict = Inconclusive  // Non-critical violations, may still stage
 
   8. EMIT SIGNALS:
-     Signal::new(Kind::GateVerdict, dream_verification_body)
-     If violated: Signal::new(Kind::Custom("DreamVerificationFailure"), details)
+     Engram::new(Kind::GateVerdict, dream_verification_body)
+     If violated: Engram::new(Kind::Custom("DreamVerificationFailure"), details)
 ```
 
 ### Rust Sketch
 
 ```rust
-use roko_core::{Signal, Kind};
+use roko_core::{Engram, Kind};
 use roko_gate::Verdict;
 
 /// An invariant that must hold before, during, or after a strategy.
@@ -1192,7 +1192,7 @@ Steps:
 ### Rust Sketch
 
 ```rust
-use roko_core::Signal;
+use roko_core::Engram;
 
 /// Knowledge concentration across strategy dimensions.
 ///

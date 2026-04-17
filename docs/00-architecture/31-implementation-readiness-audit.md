@@ -1,7 +1,7 @@
 # Implementation Readiness Audit
 
 > Generated 2026-04-13. Covers all 21 doc sections (excluding 21-references), 350+ files,
-> cross-referenced against 18 crates (~177K LOC, ~3,391 tests).
+> cross-referenced against 36 workspace members (~322K LOC, 3,761 tests).
 
 ## Methodology
 
@@ -558,7 +558,7 @@ Cross-referencing docs against actual crate code:
 | Legacy agent scaffold | 7 | ~600 | 3 | **No** | Scaffold |
 | roko-chain | 10 | ~1,200 | ~10 | **No** | Scaffold |
 
-**Key finding:** 12 of 18 crates are Stable/Wired. The remaining 6 break into two categories:
+**Key finding:** 12 of 36 workspace members are Stable/Wired. The remaining 24 break into two categories:
 - **Built/Unwired** (roko-index + 3 lang providers): Complete, tested code with no consumer
 - **Scaffold** (legacy agent scaffold, roko-chain): Phase 2+ placeholder code
 

@@ -319,7 +319,7 @@ When the Conductor makes a non-Continue decision, it emits a signal
 to the stream:
 
 ```rust
-Signal::builder(Kind::Custom("conductor.intervention".into()))
+Engram::builder(Kind::Custom("conductor.intervention".into()))
     .body(Body::text(format!("{watcher_name}: {description}")))
     .tag("watcher", watcher_name)
     .tag("severity", severity_str)

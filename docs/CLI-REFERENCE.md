@@ -105,7 +105,7 @@ roko status --json        # machine-readable output
 
 ### roko replay
 
-Walk the lineage DAG rooted at a signal hash and print it.
+Walk the lineage DAG rooted at an Engram hash and print it.
 
 ```
 roko replay <hash> [--workdir <path>]
@@ -113,7 +113,7 @@ roko replay <hash> [--workdir <path>]
 
 | Flag | Description |
 |------|-------------|
-| `hash` | Signal hash (64 hex chars) to walk |
+| `hash` | Engram hash (64 hex chars) to walk |
 | `--workdir` | Directory containing `.roko/` (default: cwd) |
 
 **Example:**
@@ -1040,7 +1040,7 @@ roko subscription add --template <name> --trigger <glob>
 | Flag | Description |
 |------|-------------|
 | `--template` | Agent template name to invoke |
-| `--trigger` | Signal trigger glob to match |
+| `--trigger` | Engram trigger glob to match |
 
 **Example:**
 
@@ -1106,7 +1106,7 @@ roko inject <session> <payload> [--kind <type>] [--workdir <path>]
 |------|-------------|
 | `session` | Target session ID |
 | `payload` | Payload text |
-| `--kind` | Signal kind: `directive`, `abort`, `context` (default: directive) |
+| `--kind` | Engram kind: `directive`, `abort`, `context` (default: directive) |
 
 **Example:**
 

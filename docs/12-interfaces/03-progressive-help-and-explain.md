@@ -135,7 +135,7 @@ roko new gate <name>    # generates a working Gate implementation
 
 See the developer guide for the full Gate trait:
   trait Gate {
-      async fn verify(&self, output: &Signal, context: &Context) -> Verdict;
+      async fn verify(&self, output: &Engram, context: &Context) -> Verdict;
   }
 ```
 
@@ -220,7 +220,7 @@ Apply? [y/N/edit/explain]
 
 Selecting `explain` should reveal:
 
-- which heuristic or worldview pushed the agent toward this step
+- which heuristic or target-state worldview pushed the agent toward this step
 - which Engrams, episodes, or transcripts were cited as support
 - what gate or role policy is constraining the action
 - what direct command would reproduce or override the decision

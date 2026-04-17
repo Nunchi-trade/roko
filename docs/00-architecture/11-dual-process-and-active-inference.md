@@ -3,8 +3,8 @@
 > **Abstract:** Roko implements dual-process cognition inspired by Kahneman's System 1/
 > System 2 (Kahneman 2011) and CLARION's dual-level architecture (Sun 2002). Three
 > inference tiers -- T0 (no LLM), T1 (fast model), T2 (full model) -- are routed by
-> active inference as a literal Bus-driven predict/publish/correct/update loop:
-> operators publish `prediction.*` Pulses, later `outcome.*` Pulses close the loop, and
+> active inference as a literal target-state Bus-driven predict/publish/correct/update loop:
+> operators would publish `prediction.*` Pulses, later `outcome.*` Pulses would close the loop, and
 > `prediction.error.*` Pulses drive calibration updates. This document specifies the tier
 > model, the Expected Free Energy (EFE) formula that drives routing, the 16 T0 probes,
 > and how uncertainty emerges from the architecture rather than being manually configured.
@@ -56,9 +56,9 @@ This cascade ensures that compute is invested proportionally to difficulty.
 ## 2. Active Inference and Expected Free Energy
 
 The routing between tiers is NOT a manual threshold — it emerges from active inference.
-In Roko, that is not just a metaphor. It is a Bus-driven predict/publish/correct/update
-loop where operators emit `prediction.*` Pulses, reality answers with `outcome.*` Pulses,
-and a calibration policy turns the mismatch into update Pulses.
+In Roko, that is not just a metaphor. It is a target-state Bus-driven predict/publish/correct/update
+loop where operators would emit `prediction.*` Pulses, reality would answer with `outcome.*` Pulses,
+and a calibration policy would turn the mismatch into update Pulses.
 
 ### 2.1 The EFE Formula
 
@@ -89,12 +89,12 @@ not need manually-tuned thresholds for "when to use GPT-4 vs Haiku." Instead, th
 internal uncertainty -- as measured by prediction accuracy, confidence trends, and novelty
 Pulses -- naturally drives the escalation decision.
 
-In the Bus implementation, this becomes observable and joinable:
+In the target-state Bus implementation, this becomes observable and joinable:
 
-1. An operator publishes a `prediction.*` Pulse before acting.
-2. A later `outcome.*` Pulse records what actually happened.
-3. A calibration policy joins the two by lineage and publishes `prediction.error.*`.
-4. The operator consumes the update and adjusts its internal state.
+1. An operator would publish a `prediction.*` Pulse before acting.
+2. A later `outcome.*` Pulse would record what actually happened.
+3. A calibration policy would join the two by lineage and publish `prediction.error.*`.
+4. The operator would consume the update and adjust its internal state.
 
 ### 2.3 Practical Approximation
 
@@ -107,7 +107,7 @@ Computing exact EFE over a full generative model is intractable. Roko approximat
 4. **Daimon arousal**: high arousal (the agent is "surprised") → escalate
 
 These topic families combine in the CascadeRouter to produce a tier decision without explicit EFE
-computation. The Bus does the bookkeeping; the tier router consumes the calibrated result.
+computation. In the target-state design, the Bus does the bookkeeping; the tier router consumes the calibrated result.
 
 ### 2.4 Per-operator calibration
 
@@ -255,7 +255,7 @@ prediction-error stream, and the routing logic.
 - **Implemented**: `InferenceTier` enum (T0/T1/T2) in the legacy crate path `bardo-primitives`. Operating
   frequency → inference tier mapping. CascadeRouter with confidence-based cascade.
 - **Wired**: Tier routing in the orchestrator via CascadeRouter.
-- **Wired**: `prediction.*`, `outcome.*`, and `prediction.error.*` Pulses form the calibration surface for active inference.
+- **Target-state**: `prediction.*`, `outcome.*`, and `prediction.error.*` Pulses form the calibration surface for active inference.
 - **Gap**: The 16 T0 probes are specified but not all implemented as a unified probe system.
 - **Gap**: Exact EFE is still approximated via confidence/novelty/arousal, but the prediction/outcome loop is the implementation path.
 

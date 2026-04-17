@@ -277,7 +277,7 @@ selection reason over structured fields instead of free-text summaries. A blockc
 declares keys like `chain`, `wallet`, and `intent`; a coding profile would declare repo and
 language keys; a writing profile would carry corpus and voice-fingerprint data.
 
-`Custody` is the durable action record attached to tool execution. It captures who acted,
+`Custody` is the target-state durable action record attached to tool execution. It captures who acted,
 why the action was taken, whether simulation ran, what claim or heuristic justified it, and
 what result came back. Tool docs should treat custody as part of the tool contract whenever a
 write path has real consequences.

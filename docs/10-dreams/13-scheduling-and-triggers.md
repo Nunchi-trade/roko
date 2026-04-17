@@ -86,8 +86,8 @@ The trigger side is only half of the two-fabric story. When a dream cycle runs, 
 | Output | Fabric | Purpose |
 |--------|--------|---------|
 | Consolidated `Kind::Insight` / `Kind::Heuristic` Engrams | Substrate | Persist durable dream results with lineage so later cycles can query them completely |
-| `engram.promoted` Pulse | Bus | Notify generic subscribers that a durable Engram graduated |
-| `neuro.insight.promoted` Pulse | Bus | Wake Neuro and Compose refresh paths without waiting for another full Substrate scan |
+| `engram.promoted` Pulse | Bus | Notify generic subscribers that a durable Engram graduated (target-state) |
+| `neuro.insight.promoted` Pulse | Bus | Wake Neuro and Compose refresh paths without waiting for another full Substrate scan (target-state) |
 
 This means Dreams stay complete on the durable side and reactive on the live side. Delta-speed does not poll for its own downstream effects any more than it polls for its wakeup conditions.
 

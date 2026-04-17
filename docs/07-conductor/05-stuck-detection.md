@@ -214,12 +214,12 @@ what a single-agent retry can solve).
 ### Signal Serialization
 
 The `MetaCognitionAssessment` is serializable and can be emitted as
-a Signal:
+an Engram:
 
 ```rust
 impl MetaCognitionAssessment {
-    pub fn to_signal(&self) -> Signal {
-        Signal::builder(Kind::Custom("conductor.meta_cognition".into()))
+    pub fn to_engram(&self) -> Engram {
+        Engram::builder(Kind::Custom("conductor.meta_cognition".into()))
             .body(Body::from_json(self).expect("serialize assessment"))
             .tag("frequency", self.frequency.as_str())
             .tag("action", self.action.as_str())

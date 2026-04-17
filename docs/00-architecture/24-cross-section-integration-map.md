@@ -1038,7 +1038,7 @@ read, but Dreams does not yet have a cursor-based catch-up mechanism (see Propos
 
 ### Grand Total: ~2,070 LOC to wire all 20 missing integrations
 
-This is approximately 1.2% of the current codebase (~177K LOC). The highest-leverage
+This is approximately 1.2% of the current codebase (~322K LOC). The highest-leverage
 investments are Tier 1 (~310 LOC) and the Bus infrastructure (~200 LOC), which together
 would unlock 5 missing connections and make all remaining connections cheaper to wire.
 

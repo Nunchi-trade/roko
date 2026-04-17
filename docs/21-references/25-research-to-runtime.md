@@ -2,8 +2,8 @@
 
 > **Refinement source**: `../../tmp/refinements/16-research-to-runtime.md`
 >
-> This chapter translates research into a runtime loop: `Paper -> Claim -> Heuristic -> Trial -> Calibration`.
-> Papers are stored as Engrams, claims become testable hypotheses, heuristics are the reusable runtime form, trials are episodes, and calibration records whether the claim actually holds in Roko's deployment.
+> This chapter translates research into a target-state runtime loop: `Paper -> Claim -> Heuristic -> Trial -> Calibration`.
+> Papers would be stored as Engrams, claims would become testable hypotheses, heuristics would be the reusable runtime form, trials would be episodes, and calibration would record whether the claim actually holds in Roko's deployment.
 
 **Topic**: [References](./INDEX.md)
 **Prerequisites**: [Architecture glossary](../00-architecture/01-naming-and-glossary.md), [Research-to-Runtime Pipeline](../05-learning/20-research-to-runtime.md), [Heuristics, Worldviews, and Falsifiers](../05-learning/19-heuristics-worldviews-and-falsifiers.md)
@@ -15,15 +15,15 @@
 
 ## Overview
 
-Roko already consumes research implicitly: papers inform architecture, bandits, memory, active inference, collective intelligence, and HDC. This chapter makes that flow explicit and auditable. The core change is simple: the paper itself becomes a first-class Engram, a claim becomes a structured hypothesis with a falsifier, a heuristic becomes the runtime projection of that claim, and repeated trials produce calibration data that can confirm, weaken, or retire the heuristic.
+Roko already consumes research implicitly: papers inform architecture, bandits, memory, active inference, collective intelligence, and HDC. This chapter makes that flow explicit and auditable. The core change is simple: the paper itself would become a first-class Engram, a claim would become a structured hypothesis with a falsifier, a heuristic would become the runtime projection of that claim, and repeated trials would produce calibration data that can confirm, weaken, or retire the heuristic.
 
-The result is a living research loop rather than a one-time literature pass. The system does not merely cite research; it tests it against its own episodes, records the outcome, and keeps a replication ledger for later review.
+The result is a target-state living research loop rather than a one-time literature pass. The system does not merely cite research; it would test research against its own episodes, record the outcome, and keep a replication ledger for later review.
 
 ## Pipeline
 
 ### 1. Paper
 
-A paper is an Engram that captures bibliographic metadata, provenance, and the system's own notes about why the source matters. Papers are content-addressed like other durable knowledge and can be linked through lineage when a claim or heuristic depends on them.
+A paper is a target-state Engram that captures bibliographic metadata, provenance, and the system's own notes about why the source matters. Papers would be content-addressed like other durable knowledge and can be linked through lineage when a claim or heuristic depends on them.
 
 ### 2. Claim
 
@@ -35,11 +35,11 @@ A claim is the smallest testable restatement of a paper result. It should includ
 - the context in which the claim is supposed to apply
 - the observed calibration so far
 
-A claim is not a citation note. It is a runtime hypothesis that can be checked against episodes and metrics.
+A claim is not a citation note. It is a target-state runtime hypothesis that can be checked against episodes and metrics.
 
 ### 3. Heuristic
 
-When a claim is ready for use in the agent loop, it lifts into a Heuristic. This is the operational form that can be injected into prompts, policies, routing, and calibration logic. The heuristic retains lineage back to the paper and carries its own calibration history.
+When a claim is ready for use in the agent loop, it lifts into a Heuristic. This is the target-state operational form that can be injected into prompts, policies, routing, and calibration logic. The heuristic retains lineage back to the paper and carries its own calibration history.
 
 ### 4. Trial
 
@@ -88,7 +88,7 @@ The exact field names can vary by implementation, but the information content sh
 
 ## Replication Ledger
 
-The replication ledger is the persistent record of whether a claim holds up in Roko's environment. It is most useful when it distinguishes several outcomes rather than collapsing everything into success or failure.
+The replication ledger is the target-state persistent record of whether a claim holds up in Roko's environment. It is most useful when it distinguishes several outcomes rather than collapsing everything into success or failure.
 
 - `Untested` means the claim has not yet been exercised.
 - `Insufficient` means there are too few trials to say anything useful.

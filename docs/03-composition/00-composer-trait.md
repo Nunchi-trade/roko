@@ -150,11 +150,11 @@ The primary Composer implementation in `roko-compose` is `PromptComposer`, which
 impl Composer for PromptComposer {
     fn compose(
         &self,
-        signals: &[Signal],
+        signals: &[Engram],
         budget: &Budget,
         scorer: &dyn Scorer,
         ctx: &Context,
-    ) -> Result<Signal> {
+    ) -> Result<Engram> {
         // 1. Decode signals into PromptSections
         // 2. Score each section
         // 3. Partition into Critical and Optional
@@ -162,14 +162,14 @@ impl Composer for PromptComposer {
         // 5. Greedy include under budget (Critical sections never dropped)
         // 6. Order by Placement (Start/Middle/End) for U-shape
         // 7. Concatenate with section headers
-        // 8. Return assembled prompt as a Signal
+        // 8. Return assembled prompt as an Engram
     }
 }
 ```
 
 The implementation is detailed in [01-prompt-composer.md](01-prompt-composer.md).
 
-Note: The current codebase uses `Signal` where the Synapse Architecture PRD specifies `Engram`. The rename from Signal to Engram is tracked as Tier 0D in the implementation priorities. The trait semantics are identical — only the type name changes.
+Note: The current codebase uses `Engram` as the canonical type name. The trait semantics are unchanged.
 
 ---
 

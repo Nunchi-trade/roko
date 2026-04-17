@@ -351,7 +351,7 @@ Scorers are implementations of the `Scorer` trait (see
 
 ```rust
 pub trait Scorer: Send + Sync {
-    fn score(&self, signal: &Signal, ctx: &Context) -> Score;
+    fn score(&self, engram: &Engram, ctx: &Context) -> Score;
     fn name(&self) -> &'static str;
 }
 ```

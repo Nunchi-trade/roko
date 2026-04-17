@@ -199,7 +199,7 @@ operator can reconstruct what an agent saw and why it acted.
 Replay consumes an episode's Engrams and the relevant Pulse history:
 
 - if the Bus ring still holds the Pulses, replay reads them directly
-- if the ring has wrapped, replay reconstructs the episode from graduated Engrams and durable
+- if the ring has wrapped, replay reconstructs the episode from graduated Engrams (target-state) and durable
   projections
 - override-based replay allows operators to test sensitivity to configuration changes such as
   demurrage rates, gate thresholds, or routing policies without mutating live state
@@ -267,7 +267,7 @@ Operational defaults should be conservative:
 
 - traces sampled at a low baseline rate, with 100% capture on errors
 - Bus ring capacity sized to make recent replay practical without unbounded memory growth
-- edge deployments allowed to graduate important Pulses into Engrams earlier when local rings are
+- edge deployments allowed to graduate important Pulses into Engrams earlier (target-state) when local rings are
   small
 - cost, safety, and custody data retained longer than ephemeral transport noise
 

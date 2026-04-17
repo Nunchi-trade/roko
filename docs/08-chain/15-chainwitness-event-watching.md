@@ -17,7 +17,7 @@
 
 ChainWitness is the lowest level of the chain intelligence pipeline. It connects to Ethereum-compatible chains via WebSocket, ingests every block header, and determines which blocks are relevant to the agent. The key innovation is the Binary Fuse pre-screening filter: a probabilistic data structure that tests each block's `logsBloom` (a 2048-bit Bloom filter included in every Ethereum block header) against the agent's set of watched addresses and event topics. The filter achieves <1% false positive rate at 8.7 bits per entry, with **zero false negatives** — no relevant block is ever missed.
 
-On Ethereum mainnet (~7,500 blocks/day), an agent watching 50 addresses and 100 event topics skips >90% of blocks. The remaining ~10% trigger full block fetches. This pre-screening is what makes it feasible for a single agent to monitor multiple chains simultaneously without overwhelming bandwidth or processing capacity. In the two-fabric model, matched logs are not a private side channel: ChainWitness normalizes them into `chain.*` Pulses on `ChainBus`, and downstream triage, sidecars, dashboards, and learning consumers subscribe by topic instead of polling `ChainSubstrate`.
+On Ethereum mainnet (~7,500 blocks/day), an agent watching 50 addresses and 100 event topics skips >90% of blocks. The remaining ~10% trigger full block fetches. This pre-screening is what makes it feasible for a single agent to monitor multiple chains simultaneously without overwhelming bandwidth or processing capacity. In the two-fabric model, matched logs are not a private side channel: ChainWitness would normalize them into `chain.*` Pulses on `ChainBus` (target-state), and downstream triage, sidecars, dashboards, and learning consumers subscribe by topic instead of polling `ChainSubstrate`.
 
 ChainWitness is the renamed equivalent of `bardo-witness` from the legacy architecture (see [naming conventions](../00-architecture/INDEX.md)).
 
@@ -62,12 +62,12 @@ eth_subscribe("newHeads")
         └── hit:
             ├── eth_getBlockByHash(hash, true)     // full block with txs
             ├── eth_getBlockReceipts(hash)          // receipts with logs
-            └── publish normalized `chain.*` Pulses on ChainBus
+            └── publish normalized `chain.*` Pulses on ChainBus (target-state)
 ```
 
 The subscription connection is dedicated to `eth_subscribe("newHeads")` only. Block fetches fan out across a separate query connection pool, so burst block activity cannot starve the subscription.
 
-In REF09 terms, ChainWitness is the ingestion edge for `ChainBus`: it turns raw headers and receipts into ordinary topic-addressed Pulses such as `chain.block.matched` or `chain.deposit.emitted`. Consumers stay generic Bus subscribers, while durable attested outcomes still land in `ChainSubstrate`.
+In REF09 terms, ChainWitness is the ingestion edge for `ChainBus` (target-state): it would turn raw headers and receipts into ordinary topic-addressed Pulses such as `chain.block.matched` or `chain.deposit.emitted`. Consumers stay generic Bus subscribers, while durable attested outcomes still land in `ChainSubstrate`.
 
 ---
 
@@ -169,9 +169,9 @@ Reconnection uses exponential backoff: 3s, 6s, 12s, 30s max.
 
 ---
 
-## Block Normalization and ChainBus Projection
+## Block Normalization and ChainBus Projection (Target-State)
 
-Before publishing to `ChainBus`, the witness normalizes blocks into a chain-agnostic format:
+Before publishing to `ChainBus` (target-state), the witness normalizes blocks into a chain-agnostic format:
 
 ```rust
 pub struct NormalizedBlock {

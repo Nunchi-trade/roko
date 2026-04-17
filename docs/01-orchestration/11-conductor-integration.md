@@ -29,7 +29,7 @@ is reactive (process this event, emit this action). The Conductor is reflective
                  ┌──────────────┐
                  │   Conductor  │
                  │              │
-  Vec<Signal> ──►│  10 Watchers │──► ConductorDecision
+  Vec<Engram> ──►│  10 Watchers │──► ConductorDecision
                  │  DiagnosisEng│
                  │  Circuit Brkr│
                  └──────────────┘
@@ -112,7 +112,7 @@ Cost monitoring is tightly integrated with the conductor:
 ### Budget tracking
 
 ```rust
-fn build_cost_overrun_signals(text: &str, budget_usd: f64) -> Vec<Signal>
+fn build_cost_overrun_engrams(text: &str, budget_usd: f64) -> Vec<Engram>
 ```
 
 Sums the cost from recent efficiency events and emits metric signals:
@@ -128,7 +128,7 @@ fires `conductor:alert:cost_overrun` when the threshold is breached.
 ### Context window pressure
 
 ```rust
-fn build_context_window_pressure_signal(text: &str) -> Option<Signal>
+fn build_context_window_pressure_engram(text: &str) -> Option<Engram>
 ```
 
 Reads the latest efficiency event to extract token usage:

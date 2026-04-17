@@ -268,7 +268,7 @@ When fatigue is detected, the Daimon emits a signal to the JSONL log:
 
 ```rust
 // From roko-golem/src/daimon.rs
-let signal = Signal::builder(Kind::Custom("daimon:affect:confidence".into()))
+let engram = Engram::builder(Kind::Custom("daimon:affect:confidence".into()))
     .body(Body::from_json(&payload)?)
     .provenance(Provenance::trusted("daimon"))
     .tag("task_id", task_id)

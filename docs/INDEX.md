@@ -20,25 +20,25 @@ in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-pl
 outcome, calibration, and `prediction.error.*` topics first-class across learning and heartbeat.
 `tmp/refinements/11-hyperdimensional-substrate.md` extends it further by making the HDC
 fingerprint a first-class Engram field and a native Substrate query primitive.
-`tmp/refinements/12-knowledge-demurrage.md` then recasts durable memory as an attention
-economy: Engrams carry `balance`, demurrage taxes idle knowledge, reinforcement keeps useful
+`tmp/refinements/12-knowledge-demurrage.md` then recasts durable memory as a target-state attention
+economy: Engrams would carry `balance`, demurrage would tax idle knowledge, reinforcement would keep useful
 knowledge warm, and cold-tier freeze/thaw replaces blunt prune-only decay for long-lived stores.
 `tmp/refinements/13-collective-intelligence-c-factor.md` adds c-factor as a continuously
 measured cohort diagnostic derived from Bus and Substrate statistics, with conditional Policy
 interventions when degraded group process correlates with worse outcomes.
 `tmp/refinements/14-worldview-validation.md` adds a first-class heuristic library with
-falsifier-driven calibration, worldview clustering, and inspectable belief export/import;
+falsifier-driven calibration, target-state worldview clustering, and target-state inspectable belief export/import;
 start with [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
 [`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
 and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
-`tmp/refinements/16-research-to-runtime.md` adds the paper-to-calibration pipeline:
-papers become Engrams, claims become falsifiable hypotheses, heuristics carry provenance,
-and replication ledgers track whether the system's own trials replicate the source. Start with
+`tmp/refinements/16-research-to-runtime.md` adds the target-state paper-to-calibration pipeline:
+papers would become Engrams, claims would become falsifiable hypotheses, heuristics would carry provenance,
+and replication ledgers would track whether the system's own trials replicate the source. Start with
 [`21-references/25-research-to-runtime.md`](21-references/25-research-to-runtime.md),
 [`05-learning/20-research-to-runtime.md`](05-learning/20-research-to-runtime.md),
 [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
 and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
-`tmp/refinements/17-plugin-extension-architecture.md` adds a five-tier plugin SPI so prompts,
+`tmp/refinements/17-plugin-extension-architecture.md` adds a target-state five-tier plugin SPI so prompts,
 profiles, declarative tools, native trait implementations, and WASM extensions can all be
 discovered, audited, and sandboxed without forking core. Start with
 [`18-tools/14-plugin-sdk.md`](18-tools/14-plugin-sdk.md),
@@ -78,7 +78,7 @@ observability, and explicit multi-tenancy instead of bespoke platform forks. Sta
 [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/25-domain-specific-agents.md` adds six canonical domain profiles on top of the
 shared kernel: coding, research, blockchain, data/ML, ops, and writing. It also introduces
-`TypedContext` as the typed situation payload that domains share and `Custody` as the shared
+`TypedContext` as the typed situation payload that domains share and `Custody` as the target-state shared
 chain-of-custody record for auditable actions. Start with
 [`02-agents/INDEX.md`](02-agents/INDEX.md),
 [`12-interfaces/14-agent-onboarding-flow.md`](12-interfaces/14-agent-onboarding-flow.md),

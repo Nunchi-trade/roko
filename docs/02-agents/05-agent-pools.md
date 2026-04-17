@@ -201,7 +201,7 @@ Tasks submitted to the pool carry their full specification:
 ```rust
 pub struct AgentTask {
     pub id: AgentInstanceId,
-    pub prompt: Signal,
+    pub prompt: Engram,
     pub context: Context,
     pub priority: u32,
 }

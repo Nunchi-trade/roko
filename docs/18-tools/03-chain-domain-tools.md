@@ -142,7 +142,7 @@ intent from a free-text episode summary, the chain bundle expects explicit keys 
 `chain`, `wallet`, `intent`, `venue`, and `value_limit`. Adapter routing and safety hooks can
 then match on typed predicates, which is more stable than parsing prose.
 
-`Custody` is the provenance record for any action that has consequences. A chain write should
+`Custody` is the target-state provenance record for any action that has consequences. A chain write should
 leave behind who authorized it, what simulation ran, what permit was used, and what outcome
 was verified. That record is what lets domain-specific agents remain auditable when they are
 used as installable bundles rather than ad hoc tool lists.

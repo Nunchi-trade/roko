@@ -190,7 +190,7 @@ async fn run_prepared_agent(cfg: AgentRunConfig, config: &RokoConfig) -> AgentRe
     };
     let agent = create_agent_for_model(config, &cfg.model, options)?;
     let ctx = Context::now();
-    let prompt = Signal::builder(Kind::Task).body(Body::Text(cfg.prompt)).build();
+    let prompt = Engram::builder(Kind::Task).body(Body::Text(cfg.prompt)).build();
     agent.run(&prompt, &ctx).await
 }
 ```

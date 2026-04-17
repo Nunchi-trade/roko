@@ -245,8 +245,7 @@ The Forensic AI capability requires a dedicated replay engine that can efficient
 pub fn temporal_query(
     substrate: &FileSubstrate,
     timestamp_ms: i64,
-) -> Vec<Signal> {
-    // Note: Signal will be renamed to Engram in Tier 0D
+) -> Vec<Engram> {
     substrate
         .query_all()
         .filter(|engram| engram.created_at_ms <= timestamp_ms)

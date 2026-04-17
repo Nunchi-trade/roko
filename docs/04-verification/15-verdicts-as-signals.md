@@ -65,14 +65,14 @@ pub struct GateVerdict {
 
 ### 2.2 Transformation to Signal
 
-When a gate completes, the orchestrator transforms its verdict into a Signal:
+When a gate completes, the orchestrator transforms its verdict into an Engram:
 
 ```
-fn verdict_to_signal(verdict: &GateVerdict, task_signal: &Signal) -> Signal {
-    Signal::builder(Kind::GateVerdict)
+fn verdict_to_engram(verdict: &GateVerdict, task_engram: &Engram) -> Engram {
+    Engram::builder(Kind::GateVerdict)
         .body(Body::json(verdict))
         .decay(Decay::HalfLife { half_life_ms: 86_400_000 })  // 24h
-        .lineage([task_signal.id])   // verdict derives from the task
+        .lineage([task_engram.id])   // verdict derives from the task
         .tag("gate", &verdict.gate)
         .tag("passed", &verdict.passed.to_string())
         .tag("plan_id", &verdict.plan_id)

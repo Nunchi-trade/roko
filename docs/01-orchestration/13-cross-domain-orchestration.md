@@ -236,7 +236,7 @@ implements the `Gate` trait from `roko-core`:
 
 ```rust
 pub trait Gate: Send + Sync {
-    fn check(&self, signal: &Signal, ctx: &Context) -> Verdict;
+    fn check(&self, engram: &Engram, ctx: &Context) -> Verdict;
 }
 ```
 

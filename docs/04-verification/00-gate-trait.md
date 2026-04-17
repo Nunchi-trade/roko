@@ -21,7 +21,7 @@ this verification step?* The answer is always a `Verdict` — never an error, ne
 maybe, never a "could not determine." This design is deliberate and load-bearing.
 
 > **Citation**: Synapse Architecture (refactoring-prd/01-synapse-architecture.md) — "1
-> noun (Signal) + 6 verb traits" composing the universal loop.
+> noun (Engram) + 6 verb traits" composing the universal loop.
 
 ---
 
@@ -31,8 +31,8 @@ maybe, never a "could not determine." This design is deliberate and load-bearing
 // crates/roko-core/src/traits.rs, lines 102–108
 
 pub trait Gate: Send + Sync {
-    /// Verify the signal and return a verdict.
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict;
+    /// Verify the Engram and return a verdict.
+    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict;
 
     /// Human-readable name (appears in verdicts).
     fn name(&self) -> &str;
@@ -283,8 +283,7 @@ verification compound, while the returns to stronger generation plateau**.
 
 ## 9. Future: The Gate Trait in Multi-Language Contexts
 
-The current Gate trait signature accepts `Signal` (which the canonical architecture
-names `Engram`). The signal's body carries a `GatePayload` with `BuildSystem` (Cargo,
+The current Gate trait signature accepts `Engram`. The Engram's body carries a `GatePayload` with `BuildSystem` (Cargo,
 Npm, Go, Make). This means the Gate trait itself is language-agnostic — only the
 concrete implementations (`CompileGate`, `TestGate`, `ClippyGate`) know about specific
 build systems.

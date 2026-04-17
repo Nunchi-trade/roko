@@ -10,7 +10,7 @@
 
 ## Overview
 
-This reference collection catalogs **260+ academic citations** across 26 research domains that ground Roko's cognitive architecture. Each citation appears in exactly one domain sub-doc, with cross-references to related domains. REF16 adds a dedicated research-to-runtime chapter so papers, claims, falsifiers, and the replication ledger stay visible as a live pipeline rather than disappearing into architecture folklore; see `../../tmp/refinements/16-research-to-runtime.md` and [25-research-to-runtime](./25-research-to-runtime.md). Every citation includes:
+This reference collection catalogs **260+ academic citations** across 26 research domains that ground Roko's cognitive architecture. Each citation appears in exactly one domain sub-doc, with cross-references to related domains. REF16 adds a dedicated research-to-runtime chapter so papers, claims, falsifiers, and the replication ledger stay visible as a target-state pipeline rather than disappearing into architecture folklore; see `../../tmp/refinements/16-research-to-runtime.md` and [25-research-to-runtime](./25-research-to-runtime.md). Every citation includes:
 
 1. Standard academic format (authors, year, title, venue, arXiv ID when available)
 2. A 1-2 sentence annotation explaining which Roko subsystem the paper grounds and how
@@ -56,7 +56,7 @@ All mortality-era citations are preserved with reframed annotations: "because th
 | 22 | [Protocol Standards](./22-protocol-standards.md) | ERC-8004, x402, ERC-4337, ERC-721, cryptographic | ERC-8004, x402, Merkle 1987, Goldwasser 1985 | ~16 |
 | 23 | [Generational and Evolutionary](./23-generational-and-evolutionary.md) | Digital evolution, memetics, cultural transmission | Ray 1991, Dawkins 1976, Price 1970, Baldwin 1896 | ~18 |
 | 24 | [2025 Additions](./24-additions-2025.md) | Cross-domain 2024-2025 papers, emerging research frontiers | DR-FREE 2025, NeuroDream 2025, SAMULE 2025, AEX 2025 | ~60 |
-| 25 | [Research to Runtime](./25-research-to-runtime.md) | Paper -> Claim -> Heuristic -> Trial -> Calibration, replication ledger, ingestion lanes, replication contract | Kanerva 2009, Friston 2006, Woolley 2010, Auer 2002 | ~12 |
+| 25 | [Research to Runtime](./25-research-to-runtime.md) | Target-state Paper -> Claim -> Heuristic -> Trial -> Calibration, replication ledger, ingestion lanes, replication contract | Kanerva 2009, Friston 2006, Woolley 2010, Auer 2002 | ~12 |
 
 **Total**: ~260+ unique citations across 26 domains.
 
