@@ -9,6 +9,7 @@
 > (Free Energy Principle, VERSES Genius). This document identifies architectural strengths,
 > coherence gaps, layer violations, rewrite boundaries, and proposes improvements grounded in
 > academic literature. See also `tmp/refinements/01-critique-one-noun.md`,
+> `tmp/refinements/03-bus-as-first-class.md`,
 > `tmp/refinements/21-from-scratch-redesigns.md`, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
@@ -40,8 +41,11 @@ Key findings:
 1. **The current operator set is coherent, but v2 planning changes the question.** The
    from-scratch kernel rewrite in REF21 is the clean path once Pulse and Bus semantics are
    first-class.
-2. **One dependency violation exists.** `roko-conductor` → `roko-learn` breaks the L3→L2 rule.
-   Fixable by extracting an interface trait into L0.
+2. **One dependency violation exists, and the Bus story dissolves it.** `roko-conductor` →
+   `roko-learn` breaks the L3→L2 rule only because circuit-breaker state was modeled as a direct
+   learning dependency. The Bus-first fix routes that state through `gate.verdict.emitted` and
+   `gate.failure.rate` topics on the kernel `Bus` trait, so `roko-conductor` and `roko-learn`
+   stay decoupled at compile time.
 3. **Category theory provides formal grounding.** The pipeline is a composition of morphisms;
    Score is a monoid; cross-cuts are endofunctors. These aren't metaphors — they're structural
    properties that guarantee composability.
@@ -151,26 +155,25 @@ Full Cargo.toml analysis across all 28 crates:
 
 ### 3.2 The roko-conductor Violation
 
-**Root cause**: `roko-conductor` imports learning types for circuit breaker state tracking.
-The Conductor needs to know about historical failure rates (a learning concern) to make
-circuit breaker decisions (a harness concern).
+**Root cause**: `roko-conductor` imports learning types for circuit-breaker state tracking.
+The Conductor needs to react to failure-rate signals, but the current implementation reaches
+across into `roko-learn` instead of consuming a shared transport primitive.
 
-**Fix**: Extract a `HealthMetrics` trait into `roko-core` (L0):
+**Bus-first fix**: publish the circuit-breaker facts on the kernel `Bus` as topics and let both
+subsystems subscribe to the same live stream:
 
-```rust
-// In roko-core/src/traits.rs
-pub trait HealthMetrics: Send + Sync {
-    fn failure_rate(&self, gate: &str, window: Duration) -> f32;
-    fn avg_latency(&self, gate: &str, window: Duration) -> Duration;
-}
-```
+- `gate.verdict.emitted` carries the gate result from the verification path.
+- `gate.failure.rate` carries the learned failure-rate summary that `roko-conductor` needs.
 
-Then `roko-conductor` depends on `&dyn HealthMetrics` (L0 trait), and `roko-learn` implements
-it. The dependency flows downward.
+That dissolves the layer violation without introducing a separate `HealthMetrics` trait in
+`roko-core`. `roko-conductor` depends on the `Bus` trait and a `TopicFilter`; `roko-learn`
+publishes the learned rate as a Pulse. The compile-time dependency between `roko-conductor`
+and `roko-learn` disappears because the shared contract is now the Bus fabric, not a direct
+trait object.
 
-REF01 uses this violation as the second load-bearing data point for the reframing: the conductor
-problem is not just a misplaced import, it is evidence that the architecture already contains
-distinct durable and live-message paths that the old single-medium story does not describe cleanly.
+REF03 is the load-bearing reframing for this section: the architecture already contains two
+fabrics, Substrate for durable Engrams and Bus for ephemeral Pulses, so the conductor problem
+belongs in topic routing rather than in a bespoke health interface.
 
 ### 3.3 Unclassified Crates
 

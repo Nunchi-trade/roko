@@ -8,6 +8,7 @@
 > layer taxonomy, cognitive cross-cuts, collective intelligence metrics, crate map, cybernetic
 > foundations, and the frontier innovations that distinguish Roko from every other agent
 > framework. See also `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
+> `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion and two-fabric kernel,
 > `tmp/refinements/06-refactoring-plan.md` for the phased refactoring plan and rollout
 > ordering, and `tmp/refinements/21-from-scratch-redesigns.md` for the rewrite-track
 > alternative and from-scratch sequencing.
@@ -53,7 +54,8 @@ loop, and the frontier innovations that emerge from the architecture.
 | 04 | [Decay Variants](./04-decay-variants.md) | Four decay variants (None, HalfLife, Ttl, Ebbinghaus), formulas, pheromone constants, knowledge tier interaction, selection guidelines |
 | 05 | [Provenance and Attestation](./05-provenance-and-attestation.md) | Provenance struct (author, trust, tainted, session), four constructors, taint analysis, planned Attestation (Ed25519 + chain), extended fields |
 | 06 | [Synapse Traits](./06-synapse-traits.md) | Six operators across two mediums and two fabrics, the trait composition model, all six trait signatures, trait × layer map, composability example via loop_tick |
-| 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | Full Substrate specification: 7 methods, async rationale, implementations (Memory, File, HDC, Chain), concurrency, idempotence, pruning |
+| 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | The durable storage fabric: Substrate's trait surface, backends, concurrency, pruning, and its relationship to the Bus sibling fabric |
+| 07b | [Bus Transport Fabric](./07b-bus-transport-fabric.md) | The transport fabric: Bus trait, Topic and TopicFilter routing, replay/ring semantics, backend families, and topic-driven decoupling |
 | 08 | [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md) | Detailed specs for the five non-Substrate operators: Scorer composition, 11-gate pipeline, CascadeRouter feedback, Composer budget, Policy batch model |
 | 09 | [Universal Cognitive Loop](./09-universal-cognitive-loop.md) | 9-step loop specification with trait mappings, shipping loop_tick code, TickOutcome struct, loop at three speeds, universality |
 | 10 | [Three Cognitive Speeds](./10-three-cognitive-speeds.md) | Gamma (~5-15s), Theta (~75s), Delta (hours): frequency selection, adaptive clock, turn limits, neuroscience inspiration |
@@ -93,7 +95,7 @@ mediums, the six operators, the two fabrics, and the five-layer taxonomy.
 1. Start with [00-vision-and-thesis](./00-vision-and-thesis.md) for the high-level thesis
 2. Read [01-naming-and-glossary](./01-naming-and-glossary.md) for terminology
 3. Read [02-engram-data-type](./02-engram-data-type.md) and [02b-pulse-ephemeral-event](./02b-pulse-ephemeral-event.md) through [05-provenance-and-attestation](./05-provenance-and-attestation.md) for the core data types and medium split
-4. Read [06-synapse-traits](./06-synapse-traits.md) through [08-scorer-gate-router-composer-policy](./08-scorer-gate-router-composer-policy.md) for the trait system
+4. Read [06-synapse-traits](./06-synapse-traits.md) through [08-scorer-gate-router-composer-policy](./08-scorer-gate-router-composer-policy.md) for the trait system, including the Substrate/Bus fabric split
 5. Read [09-universal-cognitive-loop](./09-universal-cognitive-loop.md) through [11-dual-process-and-active-inference](./11-dual-process-and-active-inference.md) for the cognitive loop
 6. Read [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) through [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) for the architectural layers
 7. Read [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) through [17-design-principles-and-frontier-summary](./17-design-principles-and-frontier-summary.md) for metrics, crates, theory, and innovations

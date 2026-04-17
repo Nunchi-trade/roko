@@ -4,7 +4,9 @@
 > terminology, mapping legacy names to their current equivalents and defining every
 > Roko-specific term, abbreviation, and architectural concept used across the PRD suite.
 > When any other document disagrees with a definition here, this glossary is authoritative.
-> This serves as a quick-reference companion to the full architecture documentation.
+> This serves as a quick-reference companion to the full architecture documentation. See also
+> `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion that makes the transport
+> fabric a first-class kernel surface beside Substrate.
 
 
 > **Implementation**: Shipping
@@ -27,15 +29,19 @@ parenthetical notes when quoting legacy sources).
 | GNOS (token) | **KORAI** (mainnet) / **DAEJI** (testnet) | Token names. KORAI is the mainnet token on the Korai chain. DAEJI is the testnet equivalent on the Daeji testnet. |
 | Korai | **Korai** | Dedicated EVM chain for agent coordination. Mainnet. |
 | Daeji | **Daeji** | Testnet for the Korai chain. |
-| Clade | **Collective** / **Mesh** | Groups of cooperating agents. **Never use "fleet"** — this was an incorrect interim rename. |
-| Signal (code) | **Engram** (docs) | The universal data type. In Rust code it is `Signal` (`roko-core`). In PRD docs it is "Engram." These are **the same concept** — see note below. |
+| Clade (legacy term) | **Fleet** / **Mesh** | Legacy name for cooperating agents. Use **Fleet** for a roster and **Mesh** for the network topology. |
+| Signal (legacy code identifier) | **Engram** | Legacy code name still appears in some Rust paths; documentation uses **Engram** for the durable medium and does not keep the old equivalence disclaimer. |
+| EventBus<E> (legacy transport name) | **Bus** / `BroadcastBus` | Legacy generic naming. User-facing docs use **Bus** for the kernel transport primitive and `BroadcastBus` for the in-process backend. |
+| Envelope<E> (legacy transport wrapper) | **Pulse** | Legacy wrapper name retained only as an implementation detail during migration. |
+| Event / Message (legacy transport nouns) | **Pulse** | Use **Pulse** for the ephemeral wire medium. Use `ChatMessage` only for LLM transcript payloads. |
+| Channel / Subject (legacy routing nouns) | **Topic** | Use **Topic** for the dot-separated routing handle on the Bus. |
 
-> **Signal ↔ Engram:** The Rust codebase uses `Signal` as the struct name for the
-> universal datum (defined in `crates/roko-core/src/signal.rs`). The PRD documentation
-> calls the same concept an **Engram**, emphasizing its neuroscience roots (Semon 1904).
-> Whenever you see `Signal` in code, read it as "Engram." Whenever you see "Engram" in
-> docs, the corresponding Rust type is `Signal`. The six verb traits (`Substrate`,
-> `Scorer`, `Gate`, `Router`, `Composer`, `Policy`) all operate on `Signal` / Engram.
+> **Legacy code note:** some Rust identifiers still use `Signal`, but that is a migration
+> detail rather than an architectural synonym. The durable medium is **Engram**; the
+> ephemeral medium is **Pulse**; the two fabrics are **Substrate** and **Bus**. See
+> [06-synapse-traits.md](./06-synapse-traits.md),
+> [07-substrate-trait.md](./07-substrate-trait.md), and
+> `tmp/refinements/03-bus-as-first-class.md`.
 
 ---
 
@@ -90,11 +96,14 @@ on-chain. Everything flows through the six Synapse traits.
 
 | Old Name | New Name | Notes |
 |---|---|---|
-| `Signal` (as architectural noun) | **Engram** | The canonical architectural term. Used in all documentation. |
-| `Signal` (as Rust type name) | `Signal` (for now) | The Rust type is still named `Signal` in the current codebase. Rename to `Engram` is Tier 0D in the implementation plan. Documentation uses "Engram" with a note about the current code name. |
-| `SignalBuilder` | **EngramBuilder** | Builder pattern for Engram construction. Code currently uses `SignalBuilder`. |
+| `Signal` (legacy architectural noun) | **Engram** | The canonical architectural term is **Engram**. Use the legacy code name only when pointing at current source identifiers. |
+| `Signal` (legacy Rust type name) | `Signal` (for now) | Legacy type name still exists in code. The architectural term remains **Engram** until the code rename lands. |
+| `SignalBuilder` (legacy builder name) | **EngramBuilder** | Builder pattern for Engram construction. Code currently uses the legacy builder identifier. |
 | `signal.rs` | `engram.rs` | Source file rename. |
-| "1 noun, 6 verbs" | **Synapse Architecture** | Architecture branding. The six traits are the "synapses" through which Engrams flow. |
+| `EventBus<E>` (legacy trait name) | **Bus** | The transport fabric is documented as the **Bus** trait; `BroadcastBus` is the default in-process backend. |
+| `Envelope<E>` (legacy wire type) | **Pulse** | The transport datum is a **Pulse**, not a user-facing envelope type. |
+| `channel` / `subject` (legacy routing nouns) | **Topic** | Bus routing uses dot-separated **Topic** strings and `TopicFilter` expressions. |
+| "1 noun, 6 verbs" | **Synapse Architecture** | The current architecture story is two mediums, two fabrics, and six operators rather than a single-medium mnemonic. |
 
 ---
 
@@ -153,7 +162,12 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | Term | Definition |
 |---|---|
 | **Engram** | The core data type — a content-addressed, scored, decaying, lineage-tracked unit of cognition. Replaces "Signal" as the architectural noun. |
-| **Synapse Architecture** | The 6-trait composition model. Replaces "1 noun, 6 verbs." |
+| **Pulse** | The ephemeral medium. A typed, topic-addressed, sequence-numbered wire record carried on a Bus and graduated to an Engram only when durable lineage matters. |
+| **Bus** | The transport fabric and kernel primitive. Kernel trait for publishing, subscribing, and replaying Pulses across topic streams without becoming a persistence surface. |
+| **Topic** | Dot-separated routing handle for Pulses on a Bus, such as `gate.verdict.emitted` or `agent.msg.chunk`. |
+| **TopicFilter** | Declarative Bus subscription filter with `Exact`, `Glob`, `AnyOf`, `All`, `And`, `Or`, and `Not` forms. |
+| **BusReceiver** | Subscriber handle returned by `Bus::subscribe()`. Delivers Pulses in publish order and carries sequence state for bounded replay. |
+| **Synapse Architecture** | Roko's architectural story: two mediums (Engram and Pulse), two fabrics (Substrate and Bus), and six operators. Replaces the older single-medium mnemonic. |
 | **Five Layers** | Runtime (L0) / Framework (L1) / Scaffold (L2) / Harness (L3) / Orchestration (L4). |
 | **Cognitive Cross-Cuts** | Neuro / Daimon / Dreams — subsystems injected across multiple layers. |
 | **C-Factor** | Collective intelligence ratio metric (Woolley et al. 2010, Science 330). |
@@ -190,6 +204,7 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | Term | Definition |
 |---|---|
 | **Body** | The typed payload of an Engram. Variants: Empty (marker), Text (UTF-8), Json (structured), Bytes (binary). |
+| **Bus** | Kernel transport trait and fabric for Pulses. Exposes publish, subscribe, replay, sequencing, and ring-buffer health without becoming a persistence surface. See also [07-substrate-trait.md](./07-substrate-trait.md) and `tmp/refinements/03-bus-as-first-class.md`. |
 | **Budget** | Resource constraints for Composer operations: max_tokens, max_signals, max_bytes, max_wall_ms. |
 
 ### C
@@ -258,6 +273,7 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **Outcome** | Feedback about a prior Router selection. Carries success/failure, reward, cost, and latency. Used by Routers to learn via bandit algorithms. |
 | **Pheromone** | A stigmergic signal with time-based decay. Three types: THREAT (2h half-life), OPPORTUNITY (4h), WISDOM (24h). Agents communicate indirectly by reading and writing pheromones to shared Substrates. |
 | **Policy** | Synapse trait. Watches Engram streams and emits new Engrams in response (interventions, reactions). Synchronous. Batch input. |
+| **Pulse** | Ephemeral medium carried by the Bus. Pulses are topic-addressed, sequence-numbered, ring-buffered for short replay, and not persisted by default. |
 | **Provenance** | Who produced an Engram and how trustworthy they are. Fields: author (String), trust ([0,1]), tainted (bool), session (Option). |
 
 ### Q-R
@@ -276,8 +292,8 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **Scorer** | Synapse trait. Rates an Engram along multiple axes, producing a Score. Synchronous. Pure function of (Engram, Context). |
 | **Selection** | Output of a Router: the chosen Engram's ContentHash, confidence, router name, and optional reasoning. |
 | **Spectre** | Procedurally generated dot-cloud creature per agent. Body encodes cognitive state; eyes encode emotion; clarity encodes prediction accuracy. |
-| **Substrate** | Synapse trait. Stores and queries Engrams. Asynchronous. Multiple backends: MemorySubstrate (testing), FileSubstrate (JSONL persistence), HdcSubstrate (semantic search), ChainSubstrate (on-chain state). |
-| **Synapse Architecture** | The compositional model underlying Roko: one noun (Engram) + six verb traits (Substrate, Scorer, Gate, Router, Composer, Policy). |
+| **Substrate** | Storage fabric and kernel trait for durable Engrams. Multiple backends include MemorySubstrate, FileSubstrate, HdcSubstrate, and ChainSubstrate. |
+| **Synapse Architecture** | The compositional model underlying Roko: two mediums moving through two fabrics, coordinated by six operators across five layers. |
 
 ### T-V
 
@@ -286,6 +302,8 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **T0 / T1 / T2** | Inference tiers. T0: no LLM call (direct tool call, ~80% of ticks). T1: fast model, shallow reasoning (~15%). T2: full model, deep reasoning (~5%). Routing emerges from active inference (EFE). |
 | **Theta** | Reflective cognitive speed. ~75 second timescale. Summarize recent work, update Daimon state, check predictions. |
 | **TickOutcome** | The result of one `loop_tick` invocation. Contains: candidates_examined, composed Engram, Verdict, emitted Engrams, written ContentHashes. |
+| **Topic** | Dot-separated routing handle for Pulses. Topics name transport intent rather than storage identity. |
+| **TopicFilter** | Declarative matcher for Bus subscriptions and replay queries. Supports exact, glob, set, and boolean composition. |
 | **Verdict** | Output of a Gate. Contains: passed (bool), reason (String), gate name, score [0,1], optional detail, optional TestCount, optional error_digest, duration_ms. |
 
 ---
@@ -325,5 +343,8 @@ These terms are introduced in the new architecture and do not appear in legacy d
 
 - [00-vision-and-thesis.md](00-vision-and-thesis.md) — Why the architecture exists
 - [02-engram-data-type.md](02-engram-data-type.md) — Full Engram specification
+- [02b-pulse-ephemeral-event.md](02b-pulse-ephemeral-event.md) — Pulse as the ephemeral medium
 - [03-score-7-axis-appraisal.md](03-score-7-axis-appraisal.md) — Score details
 - [06-synapse-traits.md](06-synapse-traits.md) — The six Synapse traits
+- [07-substrate-trait.md](07-substrate-trait.md) — Substrate as the storage fabric beside Bus
+- [07b-bus-transport-fabric.md](07b-bus-transport-fabric.md) — Bus trait, Topics, and replay semantics

@@ -4,7 +4,10 @@
 > every data flow, trait usage, configuration dependency, and missing integration point.
 > This document is the architectural X-ray — it shows how the system's subsystems actually
 > connect, where they should connect but don't, and what new connections would produce the
-> highest leverage improvement.
+> highest leverage improvement. The earlier engine/event-bus proposal is now the promoted
+> kernel `Bus` trait at L0: the transport fabric beside `Substrate`, with `Topic`,
+> `TopicFilter`, and bounded replay on the Bus ring as the coordination vocabulary.
+> See also `tmp/refinements/03-bus-as-first-class.md` and [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
 > **Implementation**: Reference
 
@@ -209,8 +212,9 @@ Every inter-section data flow carries Engrams of specific Kinds. The complete Ki
 
 ## 4. Trait Usage Map
 
-The six Synapse traits (Substrate, Scorer, Gate, Router, Composer, Policy) are implemented
-across sections and consumed by other sections. This creates a compile-time dependency graph.
+The six Synapse traits plus the kernel `Bus` fabric are implemented across sections and
+consumed by other sections. This creates a compile-time dependency graph for storage and
+transport alike.
 
 ### 4.1 Trait Implementations by Section
 
@@ -220,6 +224,7 @@ across sections and consumed by other sections. This creates a compile-time depe
 | **Substrate** | 06-Neuro | `NeuroStore` (as `FileSubstrate`) | Wired |
 | **Substrate** | 08-Chain | `ChainSubstrate` | Scaffold |
 | **Substrate** | 15-Code Intel | `SymbolSubstrate` | Missing |
+| **Bus** | 00-Architecture | `BroadcastBus` / `MemoryBus` | Wired |
 | **Scorer** | 00-Architecture | `RecencyScorer` | Wired |
 | **Scorer** | 03-Composition | `RelevanceScorer` | Wired |
 | **Scorer** | 06-Neuro | `KnowledgeScorer` (multi-factor) | Missing |
@@ -252,6 +257,7 @@ across sections and consumed by other sections. This creates a compile-time depe
 | 05-Learning | Scorer, Policy (self) | 00, 05 |
 | 12-Interfaces | Substrate (read-only) | 00, 06 |
 | 16-Heartbeat | All six traits | 00, 03, 04, 05, 06, 07 |
+| 07-Conductor | Bus, Policy | 00, 05, 07 |
 
 ### 4.3 Trait Composition Chains
 
@@ -541,59 +547,67 @@ budget-fitted to the token limit.
 
 ## 7. Proposed New Connections
 
-### 7.1 Event Bus as Universal Dependency Inverter
+### 7.1 Bus as a First-Class Kernel Primitive
 
 **Research basis:** Zylos Research 2026 (Event-driven agent architectures), AutoGen v0.4
 (actor model), arXiv:2601.12560 (Agentic AI taxonomies).
 
 **Problem:** Currently, cross-section dependencies are implemented as direct function calls
-in `orchestrate.rs`. This creates a monolithic coordinator that must know about every
-subsystem. Adding a new cross-section connection requires modifying `orchestrate.rs`.
+in `orchestrate.rs`. That makes the coordinator the only place that knows how sections
+couple, which is exactly the compile-time coupling we want to remove.
 
-**Proposal:** Introduce an `EngineEventBus` with typed topic channels that subsystems
-publish to and subscribe from. The event bus inverts dependencies — subsystems do not
-import each other, they subscribe to event topics.
+**Proposal:** Promote the kernel `Bus` trait as the transport fabric for cross-section
+coordination. Subsystems publish and subscribe by `Topic` and `TopicFilter`; replay via
+`replay_since()` provides bounded catch-up from the Bus ring, so they do not import each
+other for live-state exchange. This is the same L0 Bus fabric described in
+[12-five-layer-taxonomy.md](./12-five-layer-taxonomy.md).
 
 ```rust
-/// Typed event topics for cross-section communication
-pub enum EventTopic {
-    TaskDispatched,         // 01 → 02, 05, 07, 09
-    AgentTurnCompleted,     // 02 → 04, 05, 11
-    GateVerdictEmitted,     // 04 → 01, 05, 06, 09
-    KnowledgeUpdated,       // 06 → 03, 10
-    AffectStateChanged,     // 09 → 01, 03, 16
-    DreamCycleCompleted,    // 10 → 06, 09
-    PheromoneEmitted,       // 13 → 01, 06
-    ConductorIntervention,  // 07 → 01
-    BudgetWarning,          // 05 → 01, 02
-    PredictionResolved,     // 20 → 05, 16
-}
+pub const TASK_DISPATCHED: &str = "task.dispatched";
+pub const AGENT_TURN_COMPLETED: &str = "agent.turn.completed";
+pub const GATE_VERDICT_EMITTED: &str = "gate.verdict.emitted";
+pub const GATE_FAILURE_RATE: &str = "gate.failure.rate";
+pub const KNOWLEDGE_UPDATED: &str = "knowledge.updated";
+pub const AFFECT_STATE_CHANGED: &str = "affect.state.changed";
+pub const DREAM_CYCLE_COMPLETED: &str = "dream.cycle.completed";
+pub const PHEROMONE_EMITTED: &str = "pheromone.emitted";
+pub const CONDUCTOR_INTERVENTION: &str = "conductor.intervention";
+pub const BUDGET_WARNING: &str = "budget.warning";
+pub const PREDICTION_RESOLVED: &str = "prediction.resolved";
 
-/// Engine event bus with typed subscriptions
-pub struct EngineEventBus {
-    subscribers: HashMap<EventTopic, Vec<Box<dyn EventHandler>>>,
-}
-
-impl EngineEventBus {
-    pub fn publish(&self, topic: EventTopic, engram: Engram) {
-        if let Some(handlers) = self.subscribers.get(&topic) {
-            for handler in handlers {
-                handler.handle(&engram);
-            }
-        }
-    }
-
-    pub fn subscribe(&mut self, topic: EventTopic, handler: Box<dyn EventHandler>) {
-        self.subscribers.entry(topic).or_default().push(handler);
-    }
+pub trait Bus {
+    async fn publish(&self, pulse: Pulse) -> Result<u64>;
+    async fn subscribe(&self, filter: TopicFilter) -> Result<BusReceiver>;
+    async fn replay_since(
+        &self,
+        since_seq: u64,
+        filter: &TopicFilter,
+    ) -> Result<Vec<Pulse>>;
 }
 ```
 
+The Bus trait is the kernel transport fabric counterpart to `Substrate`: `publish()` and
+`subscribe()` operate on topic-addressed Pulses, `TopicFilter` expresses the subscriber's
+routing contract, and `replay_since()` exposes bounded ring-buffer history for late joins
+or brief disconnects.
+
+**Bus-first wiring:**
+- `roko-gate` publishes `gate.verdict.emitted` on the L0 Bus trait after verification.
+- `roko-learn` publishes `gate.failure.rate` on the L0 Bus trait from rolling gate history.
+- `roko-conductor` subscribes to those topics and adjusts circuit-breaker state.
+- `roko-conductor` no longer imports learning types. The bespoke `roko-conductor` →
+  `roko-learn` coupling dissolves into Bus topics instead of a side interface.
+
 **Benefits:**
-- Adding M1-M20 becomes: register a subscriber, don't modify `orchestrate.rs`.
-- The event bus IS the cross-section integration map — `bus.subscribers` is inspectable.
-- Aligns with the Blackboard architecture pattern (arXiv:2507.01701).
-- The existing `signals.jsonl` becomes the durable backing store for the event bus.
+- Adding M1-M20 becomes: publish a topic and add a subscriber, not a coordinator import.
+- The Bus fabric is inspectable through topics, `TopicFilter`, and bounded replay, so the
+  integration map becomes executable rather than implicit.
+- Topic-driven decoupling keeps live coordination in `Bus`, while durable state still lives
+  in `Substrate`.
+- Topic filters and bounded replay make the transport fabric observable without turning it
+  into persistence.
+- This matches the Blackboard-style indirect coordination pattern without inventing another
+  interface surface.
 
 **Estimated LOC:** ~200 for the bus infrastructure, then each missing integration (M1-M20)
 becomes ~20-40 LOC instead of the current 40-200 LOC estimates.
@@ -689,8 +703,8 @@ can be validated:
 /// The dependency graph is checked at build time.
 pub struct CrateManifest {
     pub section: Section,
-    pub produces: &'static [EventTopic],
-    pub consumes: &'static [EventTopic],
+    pub produces: &'static [&'static str],
+    pub consumes: &'static [&'static str],
     pub trait_impls: &'static [SynapseTrait],
     pub trait_deps: &'static [SynapseTrait],
 }
@@ -698,8 +712,8 @@ pub struct CrateManifest {
 // In roko-gate/src/lib.rs:
 pub const MANIFEST: CrateManifest = CrateManifest {
     section: Section::Verification,
-    produces: &[EventTopic::GateVerdictEmitted],
-    consumes: &[EventTopic::AgentTurnCompleted],
+    produces: &[GATE_VERDICT_EMITTED],
+    consumes: &[AGENT_TURN_COMPLETED],
     trait_impls: &[SynapseTrait::Gate],
     trait_deps: &[SynapseTrait::Substrate],
 };
@@ -707,7 +721,9 @@ pub const MANIFEST: CrateManifest = CrateManifest {
 
 A build script or test can then verify that every consumed topic has at least one producer,
 and every trait dependency has at least one implementation. This makes the dependency matrix
-in Section 2 executable rather than documentary.
+in Section 2 executable rather than documentary. For the Bus-specific pieces, `TopicFilter`
+describes the subscriber's routing contract and the Bus ring provides bounded replay via
+`replay_since()`.
 
 ---
 
@@ -883,10 +899,10 @@ read, but Dreams does not yet have a cursor-based catch-up mechanism (see Propos
 | M5: Neuro→Composition (full) | 06→03 | ~90 | Knowledge types exist |
 | M15: AntiKnowledge→Composition | 06→03 | ~35 | Part of M5 |
 | M8: Code Intel→Composition | 15→03 | ~120 | roko-index exists |
-| M9: Conductor→Routing (direct) | 07→05 | ~45 | SystemLoadSnapshot exists |
+| M9: Conductor→Routing (Bus topics) | 07→05 | ~45 | SystemLoadSnapshot exists |
 | M10: Experiments→Static | 05→00 | ~90 | ExperimentStore exists |
 | M11: Orchestration→Daimon | 01→09 | ~40 | Needs M1 first |
-| Event Bus infrastructure | All | ~200 | Enables all future M-items |
+| Bus infrastructure | All | ~200 | Enables all future M-items |
 | **Tier 2 Total** | | **~620** | |
 
 ### Tier 3: Full Cognitive Loop (enables Dreams and meta-cognition)
@@ -914,7 +930,7 @@ read, but Dreams does not yet have a cursor-based catch-up mechanism (see Propos
 ### Grand Total: ~2,070 LOC to wire all 20 missing integrations
 
 This is approximately 1.2% of the current codebase (~177K LOC). The highest-leverage
-investments are Tier 1 (~310 LOC) and the Event Bus infrastructure (~200 LOC), which together
+investments are Tier 1 (~310 LOC) and the Bus infrastructure (~200 LOC), which together
 would unlock 5 missing connections and make all remaining connections cheaper to wire.
 
 ---
@@ -927,7 +943,7 @@ in Section 05 are a subset of the missing integrations identified here. The mapp
 | Feedback Loop | Integration Map Item | Sections | Additional Scope |
 |---|---|---|---|
 | Loop 1: Health→Routing | (Already wired) | 05↔05 | — |
-| Loop 2: Conductor→Routing | M9 | 07→05 | Extended to include load→scheduling |
+| Loop 2: Conductor→Routing | M9 | 07→05 | Extended to include load→scheduling over Bus topics |
 | Loop 3: Section→Scaffold | (New: M-Section) | 05→03 | Part of M5 (Neuro→Composition) |
 | Loop 4: Failure→Replanning | M3 | 04→01 | Extended with Daimon feedback (M11) |
 | Loop 5: Skills→Prompts | M4 | 05→03 | Extended with HDC cross-domain transfer |
@@ -973,12 +989,12 @@ Total expected zero-dependency pairs: ~180 (39% of the 462-pair space).
 | arXiv:2509.13978 | Workflow provenance: four dimensions (dataflow, control, telemetry, scheduling) inform Section 7.2 |
 | arXiv:2604.05150 (Compiled AI) | Compiled dependency graph: build-time validation of cross-section wiring (Section 7.4) |
 | arXiv:2505.07087 | Cognitive design patterns: catalog of cross-cutting patterns from classical architectures |
-| Zylos Research 2026 | Event-driven agent architecture: blackboard + event sourcing combination (Section 7.1) |
+| Zylos Research 2026 | Event-driven agent architecture: blackboard + Bus topic routing combination (Section 7.1) |
 | arXiv:2507.01701 | Blackboard architecture for multi-agent LLM systems |
 | Conant & Ashby 1970 | Good Regulator Theorem: the dependency map must be a model of the system it regulates |
-| Ashby 1956 | Law of Requisite Variety: the event bus must have at least as many topic types as there are distinct cross-section interaction modes |
+| Ashby 1956 | Law of Requisite Variety: the Bus must have at least as many topic types as there are distinct cross-section interaction modes |
 | Beer 1972 | Viable System Model: the conductor (System 3*) must have monitoring channels to every operational subsystem |
-| Grassé 1959 | Stigmergy: indirect coordination through shared state (the event bus IS the stigmergic medium) |
+| Grassé 1959 | Stigmergy: indirect coordination through shared state (the Bus fabric is the stigmergic medium) |
 
 ---
 

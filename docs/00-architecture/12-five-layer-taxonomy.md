@@ -3,8 +3,13 @@
 > **Abstract:** Roko's crates are organized into five architectural layers with strictly
 > downward dependencies. This document specifies each layer, maps the six Synapse traits
 > to their layer assignments, describes the dependency rules, and provides the complete
-> layer diagram. The five layers map to Beer's Viable System Model (Beer 1972) and provide
-> the structural skeleton for all 18+ crates.
+> layer diagram. L0 is the two-fabric runtime/kernel surface: `Substrate` is the storage
+> fabric for durable Engrams, and the `Bus` trait is the transport fabric for ephemeral
+> Pulses. `Topic` and `TopicFilter` live at this surface, and Bus replay is bounded by the
+> ring. The five layers map to Beer's Viable System Model (Beer 1972) and provide the
+> structural skeleton for all 18+ crates. See
+> also `tmp/refinements/03-bus-as-first-class.md` and
+> [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
 
 > **Implementation**: Shipping
@@ -31,7 +36,7 @@
 │  Connections, roles, tools, model routing, safety    │
 ├──────────────────────────────────────────────────────┤
 │  Layer 0: RUNTIME                                    │
-│  Process lifecycle, events, supervision, I/O, clock  │
+│  Process lifecycle, Substrate, Bus, I/O, clock       │
 └──────────────────────────────────────────────────────┘
 
   COGNITIVE CROSS-CUTS (injected into multiple layers):
@@ -41,26 +46,36 @@
 
 **Dependencies flow STRICTLY downward.** Layer 4 may depend on Layer 3, never the reverse.
 Cross-cutting concerns are injected via trait objects, never via direct imports of higher
-layers.
+layers. Higher-layer communication should flow through `Substrate` and/or `Bus`, not
+through direct crate coupling.
 
 ---
 
 ## 2. Layer 0: Runtime
 
-**Purpose**: Process lifecycle, event bus, supervision, cancellation, I/O, adaptive clock.
+**Purpose**: Process lifecycle, the two-fabric kernel surface, supervision, cancellation,
+I/O, adaptive clock.
 
 **Key Crates**:
+- `roko-core` — `Substrate`, `Bus`, `Topic`, `TopicFilter`, and shared kernel traits
 - `roko-primitives` — HDC vectors, Hamming similarity, inference tiers, shared primitive types
-- `roko-runtime` — Event bus, process supervision, cancellation tokens, adaptive clock
+- `roko-runtime` — process supervision, cancellation tokens, adaptive clock, Bus-backed lifecycle
 
 **What Lives Here**:
 - Process spawning and lifecycle management (`ProcessSupervisor`)
-- Event bus for inter-component communication
+- `Substrate` for durable Engram persistence and query
+- `Bus` for topic-addressed Pulse transport and bounded replay; it is the transport fabric paired with `Substrate` at L0
+- `Topic` as the routing handle for Pulse publication and subscription
+- `TopicFilter` as the subscription and replay selector used by Bus consumers
 - Cancellation tokens and graceful shutdown
 - The adaptive clock that manages Gamma/Theta/Delta frequencies
 - Basic I/O primitives
 
-**Synapse Traits at L0**: `Substrate` (persistence is a runtime concern)
+**Synapse Traits at L0**: `Substrate`, `Bus` (persistence and transport are runtime concerns)
+
+This is the kernel two-fabric surface: durable state stays on `Substrate`, live coordination
+stays on `Bus`, and higher layers communicate through `Topic` / `TopicFilter` instead of
+direct crate imports.
 
 **Beer VSM Mapping**: System 1 (Operations) — the primary activities of the organization.
 
@@ -169,7 +184,8 @@ level. They are provided as trait objects, never as direct imports:
 
 | Trait | L0 Runtime | L1 Framework | L2 Scaffold | L3 Harness | L4 Orchestration |
 |---|---|---|---|---|---|
-| **Substrate** | FileSubstrate, MemorySubstrate | — | — | — | — |
+| **Substrate** | FileSubstrate, MemorySubstrate, HdcSubstrate, ChainSubstrate | — | — | — | — |
+| **Bus** | BroadcastBus, MemoryBus | — | — | — | — |
 | **Scorer** | — | ToolRelevanceScorer | RelevanceScorer, RecencyScorer | — | — |
 | **Gate** | — | — | — | CompileGate, TestGate, etc. | — |
 | **Router** | — | CascadeRouter, LinUCBRouter | — | — | — |
@@ -195,23 +211,24 @@ L0 depends on → (nothing above)
 Cross-cutting crates are NOT layer-bound. They are injected as `&dyn Trait` objects:
 
 ```rust
-// Example: Neuro knowledge injected into Composer via trait object
+// Example: higher-layer knowledge and live coordination injected through fabrics.
 fn compose_with_knowledge(
     composer: &dyn Composer,
-    knowledge: &dyn Substrate, // Neuro's Substrate implementation
-    signals: &[Signal],
+    knowledge: &dyn Substrate,
+    bus: &dyn Bus,
     budget: &Budget,
     scorer: &dyn Scorer,
     ctx: &Context,
-) -> Result<Signal> {
-    // Retrieve relevant knowledge
-    let knowledge_signals = knowledge.query(
-        &Query::of_kind(Kind::Insight).limit(5),
-        ctx,
-    ).await?;
-    // Combine task signals with knowledge
-    let all = [signals, &knowledge_signals].concat();
-    composer.compose(&all, budget, scorer, ctx)
+) -> Result<Engram> {
+    // Retrieve relevant durable knowledge.
+    let knowledge_engrams = knowledge
+        .query(&Query::of_kind(Kind::Insight).limit(5), ctx)
+        .await?;
+    // Retrieve live coordination without importing a higher layer directly.
+    let recent_pulses = bus
+        .replay_since(ctx.checkpoint_seq, &TopicFilter::Glob("gate.verdict.*".into()))
+        .await?;
+    composer.compose_with(knowledge_engrams, recent_pulses, budget, scorer, ctx)
 }
 ```
 
@@ -219,7 +236,9 @@ fn compose_with_knowledge(
 
 Strict layering prevents circular dependencies, ensures each layer can be tested
 independently, and allows layer-level replacement. A team could replace the entire L1
-Framework (e.g., switching LLM backends) without touching L0, L2, L3, or L4.
+Framework (e.g., switching LLM backends) without touching L0, L2, L3, or L4. When a
+higher layer needs durable state or live coordination, it should talk through
+`Substrate` and/or `Bus`, not by importing peer or lower-layer crates directly.
 
 ---
 
@@ -227,9 +246,9 @@ Framework (e.g., switching LLM backends) without touching L0, L2, L3, or L4.
 
 | Layer | Crate | Status | Purpose |
 |---|---|---|---|
+| **Runtime (L0)** | `roko-core` | Built (376 tests) | Engram, Substrate, Bus, and 6 Synapse traits |
 | **Runtime (L0)** | `roko-primitives` | Built | HDC vectors, Hamming similarity, shared types |
-| **Runtime (L0)** | `roko-runtime` | Built | Event bus, supervision, cancellation, adaptive clock |
-| **Kernel** | `roko-core` | Built (376 tests) | Engram + 6 Synapse traits |
+| **Runtime (L0)** | `roko-runtime` | Built | Process supervision, cancellation, Bus-backed lifecycle, adaptive clock |
 | **Framework (L1)** | `roko-std` | Built (96 tests) | Default trait impls, 19 built-in tools |
 | **Framework (L1)** | `roko-agent` | Built (346 tests) | LLM backends, tool dispatch, MCP client |
 | **Scaffold (L2)** | `roko-compose` | Built (23 tests) | Prompt assembly, context engineering |
@@ -258,7 +277,7 @@ layer violations:
 
 | Violation | Severity | Description |
 |---|---|---|
-| `roko-conductor` (L3/L4) → `roko-learn` (L2/Cross-cut) | **Medium** | Conductor imports learning types for circuit breaker state tracking. Should use trait object injection instead of direct dependency. |
+| `roko-conductor` (L3/L4) → `roko-learn` (L2/Cross-cut) | **Medium** | Conductor imports learning types for circuit breaker state tracking. It should instead subscribe to Bus topics such as `gate.failure.rate` and `gate.verdict.emitted` on the L0 Bus trait, dissolving the direct dependency. |
 | `roko-agent` (L1) → `roko-learn` (L2/Cross-cut) [dev-dependency] | **Low** | Framework layer test code depends on Scaffold layer. Move tests to integration test crate. |
 
 ### 11.2 Unclassified Crates
@@ -269,15 +288,17 @@ Six crates exist outside the formal 5-layer taxonomy and need official classific
 |---|---|---|
 | `roko-neuro` | roko-core (L0), roko-fs (L0), roko-agent (L1), roko-learn (L2) | **Cross-cut** (bridges L0-L2; inject via trait objects) |
 | `roko-daimon` | roko-core (L0) | **Cross-cut** (inject via trait objects; no violations) |
-| `roko-dreams` | roko-golem, roko-neuro, roko-learn, roko-agent | **Cross-cut** (depends on multiple layers; inject via trait objects) |
-| `roko-golem` | roko-core (L0) | **Phase 2+** (umbrella for future subsystems) |
+| `roko-dreams` | roko-agent, roko-neuro, roko-learn | **Cross-cut** (depends on multiple layers; inject via trait objects) |
+| `agent session runtime` | roko-core (L0) | **Phase 2+** (umbrella for future agent subsystems) |
 | `roko-chain` | roko-core (L0) | **Domain plugin** (L1 equivalent for chain domain) |
 | `roko-plugin` | roko-core (L0) | **L1 Framework** (plugin SDK) |
 
 ### 11.3 Remediation Plan
 
-1. **Immediate**: Extract an interface trait from `roko-learn` that `roko-conductor` can
-   depend on, placed in `roko-core` (L0). This removes the L3→L2 violation.
+1. **Immediate**: Move the shared failure-rate stream onto `Bus` topics in `roko-core`
+   (L0), so `roko-conductor` can subscribe without importing `roko-learn` directly.
+   This removes the L3→L2 violation by routing the shared state through the L0 Bus trait
+   instead of a compile-time crate dependency.
 2. **Short-term**: Move `roko-agent` dev-dependency tests into a dedicated integration
    test crate at L4 (where cross-layer dependencies are expected).
 3. **Medium-term**: Add all unclassified crates to this document's layer map with explicit
@@ -285,7 +306,7 @@ Six crates exist outside the formal 5-layer taxonomy and need official classific
 
 ### 11.4 Healthy Patterns Observed
 
-- **L0 crates** (`roko-core`, `roko-fs`, `roko-std`, `bardo-runtime`, `bardo-primitives`):
+- **L0 crates** (`roko-core`, `roko-runtime`, `roko-primitives`, `roko-fs`, `roko-std`):
   Zero upward dependencies. Clean.
 - **L1 crates** (`roko-agent`, `roko-index`, `roko-lang-*`): Depend only on L0. Clean
   (except dev-dependency noted above).
@@ -312,6 +333,7 @@ All layers have built crates with passing tests. The primary gaps are:
 - **Cognitive cross-cuts**: `roko-dreams` is scaffold-only.
 - **Chain layer**: Not yet integrated into the main cognitive loop.
 - **Layer violation**: `roko-conductor` (L3/L4) has a direct dependency on `roko-learn` (L2/Cross-cut).
+  It should be dissolved by moving the shared state onto Bus topics rather than direct imports.
   See Section 11 for remediation plan.
 - **Unclassified crates**: Six crates need formal layer assignment (Section 11.2).
 
@@ -320,7 +342,10 @@ All layers have built crates with passing tests. The primary gaps are:
 ## Cross-References
 
 - [00-vision-and-thesis.md](00-vision-and-thesis.md) — Why five layers
+- [01-naming-and-glossary.md](./01-naming-and-glossary.md) — Canonical naming map and glossary
 - [06-synapse-traits.md](06-synapse-traits.md) — Traits distributed across layers
+- [07-substrate-trait.md](07-substrate-trait.md) — Substrate deep dive and kernel fabric details
 - [13-cognitive-cross-cuts.md](13-cognitive-cross-cuts.md) — Cross-cuts injected into layers
 - [15-crate-map.md](15-crate-map.md) — Full crate inventory
 - [23-architectural-analysis-improvements.md](23-architectural-analysis-improvements.md) — Full architectural analysis
+- `tmp/refinements/03-bus-as-first-class.md` — Refinement source for the Bus kernel fabric
