@@ -1,15 +1,12 @@
 # syntax=docker/dockerfile:1.7
 #
-# mirage-rs container image (§42.2).
+# mirage-rs DEMO container image — includes the static dashboard.
 #
-# Multi-stage build:
-#   builder : rust:1.91-slim-bookworm — compiles `mirage-rs` with the `roko`
-#             feature set (REST API + WebSocket + chain surface) plus the
-#             standalone `agent-relay` binary
-#   runtime : debian:bookworm-slim — minimal, non-root runtime with a small
-#             launcher script so mirage can front a loopback relay on one origin
+# This is the Railway deployment Dockerfile. It bundles the dashboard static
+# files so the UI is available at /dashboard on the deployed service.
 #
-# The `mirage-rs` crate's binary is named `mirage-rs` (see apps/mirage-rs/Cargo.toml).
+# For production (no dashboard), use mirage.Dockerfile instead.
+#
 # Build context is expected to be the `roko/` workspace root.
 
 ARG BUILDPLATFORM=linux/amd64
@@ -26,21 +23,16 @@ RUN apt-get update \
 
 COPY . .
 
-# Build mirage-rs with the `binary` + `roko` features so the resulting image
-# keeps the JSON-RPC chain surface while also mounting the full REST + WebSocket
-# API from main. Build `agent-relay` alongside it for same-origin `/relay/*`.
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-target,target=/src/target \
-    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
+RUN cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
     && cargo build --release -p agent-relay --bin agent-relay \
     && cp target/release/mirage-rs /mirage-rs \
     && cp target/release/agent-relay /agent-relay
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/nunchi/roko"
-LABEL org.opencontainers.image.description="mirage-rs with full roko APIs plus same-origin agent-relay reachability"
+LABEL org.opencontainers.image.description="mirage-rs demo with dashboard, roko APIs, and same-origin agent-relay"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
-LABEL org.opencontainers.image.title="mirage-rs"
+LABEL org.opencontainers.image.title="mirage-rs-demo"
 LABEL org.opencontainers.image.vendor="Roko"
 
 RUN apt-get update \
@@ -52,8 +44,10 @@ RUN apt-get update \
 COPY --from=builder /mirage-rs /usr/local/bin/mirage-rs
 COPY --from=builder /agent-relay /usr/local/bin/agent-relay
 COPY docker/start-mirage-with-relay.sh /usr/local/bin/start-mirage-with-relay
+COPY apps/mirage-rs/static/ /usr/local/share/mirage-dashboard/
 
 ENV PORT=8545
+ENV MIRAGE_DASHBOARD_DIR=/usr/local/share/mirage-dashboard
 ENV ROKO_AGENT_RELAY_BIND=127.0.0.1:9011
 ENV ROKO_AGENT_RELAY_URL=http://127.0.0.1:9011
 ENV MIRAGE_STATE_DIR=/workspace/.roko/state
@@ -71,4 +65,4 @@ WORKDIR /workspace
 EXPOSE 8545
 
 ENTRYPOINT ["/usr/local/bin/start-mirage-with-relay"]
-CMD ["--chain-id", "88888"]
+CMD ["--chain-id", "1"]

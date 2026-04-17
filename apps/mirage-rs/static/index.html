@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mirage-rs · roko agents · dashboard</title>
+<script>
+// Set <base> dynamically so relative asset paths (style.css, js/main.js) resolve
+// correctly whether the page is served at /dashboard or /dashboard/.
+(function() {
+  var p = location.pathname;
+  if (p.charAt(p.length - 1) !== '/') p += '/';
+  var b = document.createElement('base');
+  b.href = p;
+  document.head.appendChild(b);
+})();
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 
@@ -18,7 +29,7 @@
     </div>
   </div>
   <div class="conn">
-    <input id="rpc-url" type="text" value="http://127.0.0.1:8545" spellcheck="false" title="Remote Mirage base URL">
+    <input id="rpc-url" type="text" value="" spellcheck="false" title="Remote Mirage base URL">
     <button id="btn-reconnect" class="btn sm">APPLY</button>
   </div>
   <div class="header-actions">

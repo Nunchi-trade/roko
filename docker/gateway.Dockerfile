@@ -10,7 +10,7 @@
 # `--bin roko-gateway` / `/roko-gateway` / `/usr/local/bin/roko-gateway`.
 #
 # Multi-stage build:
-#   builder : rust:1.85-bookworm-slim
+#   builder : rust:1.91-bookworm-slim
 #   runtime : distroless/cc-debian12:nonroot — minimal, non-root, no shell
 #
 # Build context is expected to be the `roko/` workspace root.
@@ -18,7 +18,7 @@
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 
-FROM --platform=$BUILDPLATFORM rust:1.85-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
 WORKDIR /src
 
 RUN apt-get update \
@@ -37,11 +37,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/roko /roko-gateway
 
 FROM gcr.io/distroless/cc-debian12:nonroot
-LABEL org.opencontainers.image.source="https://github.com/wpank/bardo"
+LABEL org.opencontainers.image.source="https://github.com/nunchi/roko"
 LABEL org.opencontainers.image.description="Roko gateway (placeholder: currently shipping roko-cli until roko-gateway crate lands)"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 LABEL org.opencontainers.image.title="roko-gateway"
-LABEL org.opencontainers.image.vendor="Bardo"
+LABEL org.opencontainers.image.vendor="Roko"
 
 COPY --from=builder --chown=nonroot:nonroot /roko-gateway /usr/local/bin/roko-gateway
 

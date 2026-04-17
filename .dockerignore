@@ -1,0 +1,66 @@
+# Build artifacts
+target/
+**/target/
+**/*.rs.bk
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/
+
+# roko state
+.roko/
+**/.roko/
+
+# Git
+.git/
+.gitmodules
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs / temp
+*.log
+*.tmp
+tmp/
+
+# Node
+node_modules/
+*.tsbuildinfo
+.next/
+dist/
+
+# Caches
+.fastembed_cache/
+**/.fastembed_cache/
+.cache/
+**/.cache/
+.roko-local-target/
+.codex-target/
+.cargo-target/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Docker local overrides
+docker/.env
+docker/*.override.yml
+
+# Demo runtime
+demo/.runtime/

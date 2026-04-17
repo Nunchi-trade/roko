@@ -11,7 +11,7 @@
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 
-FROM --platform=$BUILDPLATFORM rust:1.85-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
 WORKDIR /src
 
 RUN apt-get update \
@@ -30,6 +30,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/nunchi/roko"
+LABEL org.opencontainers.image.description="Roko worker agent container"
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
+LABEL org.opencontainers.image.title="roko-worker"
+LABEL org.opencontainers.image.vendor="Roko"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

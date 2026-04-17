@@ -8,6 +8,8 @@ export ROKO_AGENT_RELAY_URL="${ROKO_AGENT_RELAY_URL:-http://127.0.0.1:9011}"
 STATE_DIR="${MIRAGE_STATE_DIR:-/workspace/.roko/state}"
 SNAPSHOT_INTERVAL="${MIRAGE_SNAPSHOT_INTERVAL_SECS:-15}"
 
+ETH_RPC_URL="${ETH_RPC_URL:-}"
+
 mkdir -p "${STATE_DIR}"
 
 cleanup() {
@@ -29,15 +31,21 @@ trap 'cleanup; exit 143' INT TERM
 /usr/local/bin/agent-relay --bind "${RELAY_BIND}" &
 relay_pid=$!
 
-/usr/local/bin/mirage-rs \
-  --host "${MIRAGE_HOST}" \
-  --port "${PUBLIC_PORT}" \
-  --enable-hdc \
-  --enable-knowledge \
-  --enable-stigmergy \
-  --state-dir "${STATE_DIR}" \
-  --snapshot-interval-secs "${SNAPSHOT_INTERVAL}" \
-  "$@" &
+MIRAGE_ARGS=(
+  --host "${MIRAGE_HOST}"
+  --port "${PUBLIC_PORT}"
+  --enable-hdc
+  --enable-knowledge
+  --enable-stigmergy
+  --state-dir "${STATE_DIR}"
+  --snapshot-interval-secs "${SNAPSHOT_INTERVAL}"
+)
+
+if [ -n "${ETH_RPC_URL}" ]; then
+  MIRAGE_ARGS+=(--rpc-url "${ETH_RPC_URL}")
+fi
+
+/usr/local/bin/mirage-rs "${MIRAGE_ARGS[@]}" "$@" &
 mirage_pid=$!
 
 while :; do

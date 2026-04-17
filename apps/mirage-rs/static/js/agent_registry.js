@@ -3,7 +3,7 @@
    source merge rules, and transport selection shared by UI + smoke
    ================================================================ */
 
-export var DEFAULT_REMOTE_BASE = 'http://127.0.0.1:8545';
+export var DEFAULT_REMOTE_BASE = '';
 export var IDENTITY_REGISTRY_CANONICAL = '0x8004A818BFB912233c491871b3d84c89A494Bd9E';
 export var IDENTITY_REGISTRY_ALIAS = '0x000000000000000000000000000000000000A100';
 export var PASSPORT_MINTED_TOPIC =

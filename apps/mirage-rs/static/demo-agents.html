@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Demo Agent Spawner</title>
+<style>
+  body { font-family: monospace; background: #0a0b16; color: #e6e8f0; padding: 20px; }
+  h2 { color: #a594ff; }
+  p { color: #8b8fa8; }
+  pre { background: #121425; padding: 12px; border-radius: 8px; max-height: 60vh; overflow-y: auto; font-size: 13px; line-height: 1.5; }
+  .ok { color: #4ade80; }
+  .err { color: #f87171; }
+  .info { color: #60a5fa; }
+</style>
+</head>
+<body>
+<h2>Demo Agent Spawner</h2>
+<p>This page connects 3 demo agents to the relay via WebSocket. They auto-respond to messages and reconnect on disconnect. Keep this tab open.</p>
+<pre id="log"></pre>
+<script>
+var AGENTS = [
+  { agent_id: "roko-sentinel", name: "Sentinel", capabilities: ["monitor", "alert", "gas-analysis"] },
+  { agent_id: "roko-strategist", name: "Strategist", capabilities: ["defi", "mev", "routing"] },
+  { agent_id: "roko-archivist", name: "Archivist", capabilities: ["index", "search", "hdc"] },
+];
+
+var log = document.getElementById("log");
+function addLog(cls, msg) {
+  var span = document.createElement("span");
+  span.className = cls;
+  span.textContent = new Date().toLocaleTimeString() + " " + msg + "\n";
+  log.appendChild(span);
+  log.scrollTop = log.scrollHeight;
+}
+
+function connectAgent(agent) {
+  var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  var wsUrl = proto + "//" + location.host + "/relay/agents/ws";
+  var ws = new WebSocket(wsUrl);
+
+  ws.onopen = function() {
+    addLog("ok", "[" + agent.name + "] connected");
+    ws.send(JSON.stringify({ type: "hello", agent_id: agent.agent_id, name: agent.name, capabilities: agent.capabilities }));
+  };
+
+  ws.onmessage = function(ev) {
+    var frame = JSON.parse(ev.data);
+    addLog("info", "[" + agent.name + "] " + frame.type + (frame.event ? " " + frame.event : ""));
+
+    if (frame.type === "message") {
+      setTimeout(function() {
+        ws.send(JSON.stringify({
+          type: "response",
+          message_id: frame.message_id,
+          response: { text: agent.name + " acknowledges: " + JSON.stringify(frame.message).slice(0, 80) }
+        }));
+        addLog("ok", "[" + agent.name + "] responded to " + frame.message_id);
+      }, 500 + Math.random() * 1000);
+    }
+  };
+
+  ws.onclose = function() {
+    addLog("err", "[" + agent.name + "] disconnected — reconnecting in 5s");
+    setTimeout(function() { connectAgent(agent); }, 5000);
+  };
+
+  ws.onerror = function() {
+    addLog("err", "[" + agent.name + "] error");
+  };
+
+  // Keepalive ping every 25s
+  var pingTimer = setInterval(function() {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "ping" }));
+    } else {
+      clearInterval(pingTimer);
+    }
+  }, 25000);
+}
+
+AGENTS.forEach(connectAgent);
+</script>
+</body>
+</html>

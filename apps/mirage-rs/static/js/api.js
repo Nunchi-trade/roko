@@ -36,7 +36,7 @@ export function loadInitialRemoteBase() {
     var saved = window.localStorage.getItem(REMOTE_BASE_KEY);
     if (saved) return normalizeRemoteBase(saved);
   } catch (e) { /* ignore */ }
-  return state.remoteBase;
+  return normalizeRemoteBase(state.remoteBase);
 }
 
 export function setRemoteBase(nextBase) {
