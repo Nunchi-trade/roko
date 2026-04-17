@@ -19,6 +19,7 @@
 > [tmp/refinements/13-collective-intelligence-c-factor.md](../../tmp/refinements/13-collective-intelligence-c-factor.md),
 > [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
+> [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
 > [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md), and
 > [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md).
@@ -65,25 +66,35 @@ disclaimer. `Engram` is the durable name; `Pulse` is the ephemeral sibling mediu
 
 ## 3. Crate Names
 
-The naming contract for the kernel crates is:
+The naming contract for the current workspace and the REF20 target dep graph is:
 
 | Crate | Responsibility |
 |---|---|
 | `roko-core` | Core kernel vocabulary including `Engram`, `Pulse`, `Topic`, `TopicFilter`, `Datum`, `PulseSource`, `Substrate`, and `Bus` |
+| `roko-bus` | Proposed kernel transport crate that extracts Bus traits, Topic routing helpers, and replay semantics out of `roko-runtime` so transport is a first-class dependency boundary |
+| `roko-hdc` | Proposed kernel HDC crate that extracts vector operations, encoders, binding, bundling, and similarity out of `roko-primitives` so consumers depend on a minimal semantic-memory surface |
+| `roko-spi` | Stable extension contracts: manifests, capabilities, permissions, and versioned plugin metadata |
 | `roko-agent` | Agent runtime, model/tool execution, and live Pulse production |
+| `roko-defaults` | Proposed split from `roko-std` that holds default operator implementations without pulling in every builtin tool |
+| `roko-tools` | Proposed split from `roko-std` that holds builtin tools as a separately versioned implementation crate |
+| `roko-compose-core` | Proposed split from `roko-compose` that holds prompt assembly, layering, and budgeting logic |
+| `roko-templates` | Proposed split from `roko-compose` that holds role and domain templates as data-first assets above the compose engine |
 | `roko-orchestrator` | Plan DAG execution, scheduling, and orchestration topics |
 | `roko-neuro` | Durable knowledge management and distillation |
 | `roko-daimon` | PAD-vector affect and behavioral modulation |
 | `roko-dreams` | Delta-speed replay, synthesis, and consolidation |
 | `roko-chain` | Durable chain integration plus chain-facing Bus backends |
 | `roko-plugin` | Plugin discovery/loading surface, manifest ingestion, and legacy event-source framework |
-| `roko-spi` | Stable extension contracts: manifests, capabilities, permissions, and versioned plugin metadata |
 | `roko-extension-abi` | Native ABI bridge for Tier 4 loadable extensions |
 | `roko-wasm-host` | WASM host boundary for Tier 5 sandboxed extensions and capability-limited Bus/Substrate access |
 
 User-facing docs should describe those crates in current vocabulary rather than older umbrella
 names. When a concept spans multiple crates, describe the concept first and the crate boundary
 second.
+
+When a crate name is part of the target dep graph rather than the current workspace, label it as
+proposed or target-state rather than implying it already ships. REF20 uses that distinction to
+keep the docs aligned with repository reality while still documenting the intended landing zone.
 
 ---
 
@@ -124,6 +135,7 @@ crates directly.
 | `Plugin` | Loadable extension package | A discoverable extension bundle described by a manifest and loaded at a specific tier. |
 | `SPI` | Stable plugin interface | The shared contract layer for plugin discovery, capabilities, permissions, and versioning. |
 | `Manifest` | Extension descriptor | Declarative metadata that identifies a plugin, its tier, and its permissions. |
+| `dep graph` | Planned crate dependency graph | The target import topology that keeps kernel crates narrow, implementation crates swappable, and higher layers decoupled through traits and fabrics. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -214,6 +226,12 @@ The following names are load-bearing additions in the current architecture:
 | `BusReceiver` | Subscriber handle that yields matching Pulses in order. |
 | `ChainBus` | Bus backend that maps chain logs into `chain.*` Pulses while `ChainSubstrate` handles durable on-chain Engrams. |
 | `HDC fingerprint` | Deterministic 10,240-bit `HdcVector` carried on each Engram for native similarity, clustering, consensus, and analogy. |
+| `roko-bus` | Proposed kernel crate for the transport fabric. |
+| `roko-hdc` | Proposed kernel crate for hyperdimensional operations and similarity. |
+| `roko-defaults` | Proposed crate for default operator implementations split out of `roko-std`. |
+| `roko-tools` | Proposed crate for builtin tools split out of `roko-std`. |
+| `roko-compose-core` | Proposed crate for compose engine mechanics split out of `roko-compose`. |
+| `roko-templates` | Proposed crate for role and domain template packs split out of `roko-compose`. |
 | `Paper` | Durable research source Engram that seeds claims, heuristics, and replication tracking. |
 | `Claim` | Testable hypothesis distilled from a Paper, with context, falsifier, and calibration. |
 | `Replication Ledger` | Per-claim record of paper effect, observed effect, trial count, divergence, and replication status. |

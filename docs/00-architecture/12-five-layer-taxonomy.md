@@ -3,12 +3,15 @@
 > **Abstract:** Roko's crates are organized into five architectural layers with strictly
 > downward dependencies. This document specifies each layer, maps the six Synapse traits
 > to their layer assignments, describes the dependency rules, and provides the complete
-> layer diagram. L0 is the two-fabric runtime/kernel surface: `Substrate` is the storage
+> layer diagram. L0 is the two-medium, two-fabric runtime/kernel surface: `Substrate` is the storage
 > fabric for durable Engrams, and the `Bus` trait is the transport fabric for ephemeral
-> Pulses. `Topic` and `TopicFilter` live at this surface, and Bus replay is bounded by the
-> ring. The five layers map to Beer's Viable System Model (Beer 1972) and provide the
-> structural skeleton for all 18+ crates. See
-> also `tmp/refinements/03-bus-as-first-class.md` and
+> Pulses. In the target dep graph, `roko-core` is joined by proposed kernel crates
+> `roko-bus`, `roko-hdc`, and `roko-spi`; today those responsibilities are still partly
+> split across `roko-runtime`, `roko-primitives`, and the plugin surface. `Topic` and
+> `TopicFilter` live at this surface, and Bus replay is bounded by the ring. The five
+> layers map to Beer's Viable System Model (Beer 1972) and provide the structural skeleton
+> for the workspace. See also `tmp/refinements/03-bus-as-first-class.md`,
+> `../../tmp/refinements/20-modularity-composability.md`, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
 
@@ -35,8 +38,8 @@
 │  Layer 1: FRAMEWORK                                  │
 │  Connections, roles, tools, model routing, safety    │
 ├──────────────────────────────────────────────────────┤
-│  Layer 0: RUNTIME                                    │
-│  Process lifecycle, Substrate, Bus, I/O, clock       │
+│  Layer 0: RUNTIME / KERNEL                           │
+│  Process lifecycle, Substrate, Bus, HDC, I/O, clock   │
 └──────────────────────────────────────────────────────┘
 
   COGNITIVE CROSS-CUTS (injected into multiple layers):
@@ -47,19 +50,24 @@
 **Dependencies flow STRICTLY downward.** Layer 4 may depend on Layer 3, never the reverse.
 Cross-cutting concerns are injected via trait objects, never via direct imports of higher
 layers. Higher-layer communication should flow through `Substrate` and/or `Bus`, not
-through direct crate coupling.
+through direct crate coupling. That is the practical rule behind the dep graph: move shared
+state and live coordination onto the kernel fabrics instead of wiring layers together
+directly.
 
 ---
 
 ## 2. Layer 0: Runtime
 
-**Purpose**: Process lifecycle, the two-fabric kernel surface, supervision, cancellation,
+**Purpose**: Process lifecycle, the two-medium, two-fabric kernel surface, supervision, cancellation,
 I/O, adaptive clock.
 
 **Key Crates**:
-- `roko-core` — `Substrate`, `Bus`, `Topic`, `TopicFilter`, and shared kernel traits
-- `roko-primitives` — HDC vectors, Hamming similarity, inference tiers, shared primitive types
-- `roko-runtime` — process supervision, cancellation tokens, adaptive clock, Bus-backed lifecycle
+- `roko-core` — current kernel crate for `Substrate`, `Bus`, `Topic`, `TopicFilter`, and shared kernel traits
+- `roko-bus` — proposed kernel crate for transport primitives and backend implementations
+- `roko-hdc` — proposed kernel crate for HDC vectors, similarity, and fingerprinting
+- `roko-spi` — proposed kernel crate for stable extension contracts
+- `roko-primitives` — current home for HDC vectors, Hamming similarity, inference tiers, shared primitive types
+- `roko-runtime` — current home for process supervision, cancellation tokens, adaptive clock, Bus-backed lifecycle
 
 **What Lives Here**:
 - Process spawning and lifecycle management (`ProcessSupervisor`)
@@ -67,15 +75,17 @@ I/O, adaptive clock.
 - `Bus` for topic-addressed Pulse transport and bounded replay; it is the transport fabric paired with `Substrate` at L0
 - `Topic` as the routing handle for Pulse publication and subscription
 - `TopicFilter` as the subscription and replay selector used by Bus consumers
+- `HDC` as the similarity and clustering substrate for durable memory search in the target kernel boundary
 - Cancellation tokens and graceful shutdown
 - The adaptive clock that manages Gamma/Theta/Delta frequencies
 - Basic I/O primitives
 
-**Synapse Traits at L0**: `Substrate`, `Bus` (persistence and transport are runtime concerns)
+**Synapse Traits at L0**: `Substrate`, `Bus` (persistence and transport are runtime concerns; in the target dep graph `roko-bus` and `roko-hdc` shrink L0 leakage by moving transport and similarity concerns out of `roko-runtime` and `roko-primitives`)
 
 This is the kernel two-fabric surface: durable state stays on `Substrate`, live coordination
 stays on `Bus`, and higher layers communicate through `Topic` / `TopicFilter` instead of
-direct crate imports.
+direct crate imports. `roko-spi` belongs in the target kernel boundary because extension
+contracts should be stable before framework and scaffold crates build on them.
 
 **Beer VSM Mapping**: System 1 (Operations) — the primary activities of the organization.
 
@@ -87,7 +97,7 @@ direct crate imports.
 
 **Key Crates**:
 - `roko-agent` — Five LLM backends, connection pools, MCP client, tool dispatch loop, safety
-- `roko-std` — Default trait implementations, 19 built-in tools, mock dispatcher
+- `roko-std` — current bundle of default trait implementations plus builtin tools; target split is `roko-defaults` + `roko-tools`
 
 **What Lives Here**:
 - LLM backend connections (Claude, OpenAI, local models, Ollama, ExecAgent)
@@ -108,7 +118,7 @@ together without conflict.
 **Purpose**: Context engineering, prompt assembly, enrichment, memory access.
 
 **Key Crates**:
-- `roko-compose` — Prompt assembly, 9 templates, SystemPromptBuilder, context enrichment
+- `roko-compose` — current prompt assembly crate; target split is `roko-compose-core` + `roko-templates`
 
 **What Lives Here**:
 - SystemPromptBuilder (6-layer prompt assembly with role templates)
@@ -206,6 +216,13 @@ L1 depends on → L0
 L0 depends on → (nothing above)
 ```
 
+Implementation rules for the target dep graph:
+
+- `roko-core`, `roko-bus`, `roko-hdc`, and `roko-spi` are the kernel-tier crates.
+- Impl crates do not import each other across layer boundaries.
+- Higher-layer coordination uses `Bus` and `Substrate` instead of direct crate coupling.
+- The `roko-std` split (`roko-defaults` + `roko-tools`) stays in L1, while the `roko-compose` split (`roko-compose-core` + `roko-templates`) stays in L2.
+
 ### 9.2 Cross-Cut Injection
 
 Cross-cutting crates are NOT layer-bound. They are injected as `&dyn Trait` objects:
@@ -239,6 +256,8 @@ independently, and allows layer-level replacement. A team could replace the enti
 Framework (e.g., switching LLM backends) without touching L0, L2, L3, or L4. When a
 higher layer needs durable state or live coordination, it should talk through
 `Substrate` and/or `Bus`, not by importing peer or lower-layer crates directly.
+That is the rule that keeps the dep graph legible when crates are split: keep kernels
+small, keep impl crates independent, and let coordination flow through the fabrics.
 
 ---
 
@@ -246,12 +265,15 @@ higher layer needs durable state or live coordination, it should talk through
 
 | Layer | Crate | Status | Purpose |
 |---|---|---|---|
-| **Runtime (L0)** | `roko-core` | Built (376 tests) | Engram, Substrate, Bus, and 6 Synapse traits |
-| **Runtime (L0)** | `roko-primitives` | Built | HDC vectors, Hamming similarity, shared types |
-| **Runtime (L0)** | `roko-runtime` | Built | Process supervision, cancellation, Bus-backed lifecycle, adaptive clock |
-| **Framework (L1)** | `roko-std` | Built (96 tests) | Default trait impls, 19 built-in tools |
+| **Runtime / Kernel (L0)** | `roko-core` | Built (376 tests) | Engram, Substrate, Bus, Topic, TopicFilter, and shared kernel traits |
+| **Runtime / Kernel (L0)** | `roko-primitives` | Built | Current HDC vectors, Hamming similarity, shared types; target home shrinks to `roko-hdc` |
+| **Runtime / Kernel (L0)** | `roko-runtime` | Built | Process supervision, cancellation, Bus-backed lifecycle, adaptive clock |
+| **Runtime / Kernel (L0)** | `roko-bus` | Proposed | Target transport crate for Bus backends and Pulse delivery |
+| **Runtime / Kernel (L0)** | `roko-hdc` | Proposed | Target HDC crate for similarity, binding, and fingerprinting |
+| **Runtime / Kernel (L0)** | `roko-spi` | Proposed | Target extension SPI crate for stable plugin contracts |
+| **Framework (L1)** | `roko-std` | Built (96 tests) | Current bundle of default trait impls and built-in tools; target split is `roko-defaults` + `roko-tools` |
 | **Framework (L1)** | `roko-agent` | Built (346 tests) | LLM backends, tool dispatch, MCP client |
-| **Scaffold (L2)** | `roko-compose` | Built (23 tests) | Prompt assembly, context engineering |
+| **Scaffold (L2)** | `roko-compose` | Built (23 tests) | Current prompt assembly crate; target split is `roko-compose-core` + `roko-templates` |
 | **Harness (L3)** | `roko-gate` | Built (200 tests) | Verification pipeline (11+ gates) |
 | **Harness (L3)** | `roko-fs` | Built (37 tests) | JSONL substrate persistence |
 | **Orchestration (L4)** | `roko-orchestrator` | Built (158 tests) | Plan DAG, parallel executor, worktrees |
@@ -302,14 +324,17 @@ Six crates exist outside the formal 5-layer taxonomy and need official classific
 2. **Short-term**: Move `roko-agent` dev-dependency tests into a dedicated integration
    test crate at L4 (where cross-layer dependencies are expected).
 3. **Medium-term**: Add all unclassified crates to this document's layer map with explicit
-   dependency rules.
+   dependency rules, then enforce the target dep graph so impl crates do not import each
+   other.
 
 ### 11.4 Healthy Patterns Observed
 
-- **L0 crates** (`roko-core`, `roko-runtime`, `roko-primitives`, `roko-fs`, `roko-std`):
-  Zero upward dependencies. Clean.
+- **L0 crates** (`roko-core`, `roko-runtime`, `roko-primitives`, `roko-fs`, `roko-std`): Zero
+  upward dependencies today, but the target dep graph pulls transport into `roko-bus`, HDC into
+  `roko-hdc`, and plugin contracts into `roko-spi` to reduce L0 leakage. Clean enough to evolve.
 - **L1 crates** (`roko-agent`, `roko-index`, `roko-lang-*`): Depend only on L0. Clean
-  (except dev-dependency noted above).
+  (except dev-dependency noted above). The future `roko-defaults` and `roko-tools` split stays
+  here.
 - **L4 crate** (`roko-cli`): Depends on all layers. Expected for the entry-point binary.
 - **MCP crates** (`roko-mcp-*`): Zero internal dependencies. Clean utility layer.
 
@@ -332,6 +357,8 @@ Six crates exist outside the formal 5-layer taxonomy and need official classific
 All layers have built crates with passing tests. The primary gaps are:
 - **Cognitive cross-cuts**: `roko-dreams` is scaffold-only.
 - **Chain layer**: Not yet integrated into the main cognitive loop.
+- **Target boundary mismatch**: `roko-core` still carries pieces that the target dep graph assigns
+  to `roko-bus`, `roko-hdc`, and `roko-spi`; this is the main source of L0 leakage.
 - **Layer violation**: `roko-conductor` (L3/L4) has a direct dependency on `roko-learn` (L2/Cross-cut).
   It should be dissolved by moving the shared state onto Bus topics rather than direct imports.
   See Section 11 for remediation plan.
@@ -348,4 +375,5 @@ All layers have built crates with passing tests. The primary gaps are:
 - [13-cognitive-cross-cuts.md](13-cognitive-cross-cuts.md) — Cross-cuts injected into layers
 - [15-crate-map.md](15-crate-map.md) — Full crate inventory
 - [23-architectural-analysis-improvements.md](23-architectural-analysis-improvements.md) — Full architectural analysis
+- `../../tmp/refinements/20-modularity-composability.md` — Refinement source for the target dep graph, crate splits, and kernel boundary cleanup
 - `tmp/refinements/03-bus-as-first-class.md` — Refinement source for the Bus kernel fabric

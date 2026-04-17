@@ -15,6 +15,7 @@
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
 > **Implementation**: Analysis (informing future architectural decisions, including from-scratch sequencing)
+> See also `tmp/refinements/20-modularity-composability.md` for the dep graph rewrite boundary.
 
 **Date**: 2026-04-12
 **Methodology**: Read all 24 architecture docs, all 22 section INDEX files, STATUS/QUICKSTART/COMPARISON,
@@ -143,13 +144,23 @@ a Rust trait system: fine enough for meaningful composition, coarse enough for h
 
 ### 3.1 Dependency Audit
 
-Full Cargo.toml analysis across all 28 crates:
+Full Cargo.toml analysis across all 28 crates shows a mostly clean layer story, but the dep graph still has a few pressure points that should be treated as architectural signals rather than isolated mistakes.
+
+#### 3.1.1 Current-state audit
 
 **Clean layers (no violations):**
 - **L0** (kernel core, filesystem substrate, standard runtime, runtime support, vector-symbolic primitives): Zero upward deps.
 - **L1** (roko-agent, roko-index, roko-lang-*): Depend only on L0. One dev-dependency exception.
 - **L2** (roko-compose, roko-learn): Depend on L0 and L1. Clean.
 - **L4** (roko-cli, roko-orchestrator): Depend on all layers. Expected for entry points.
+
+**Current-state coupling findings:**
+- `roko-agent` reaches into `roko-learn` for persistence-oriented learning hooks, which means the agent side is still writing across a boundary that should be carried by the Bus.
+- `roko-cli` imports from almost everything. Some of that is legitimate for the main entry point, but some of it is accidental coupling that makes the binary look flatter than the architecture really is.
+- `roko-fs` and `roko-std` are too loosely separated in the docs and their surrounding imports. The storage/runtime boundary is correct in spirit, but the present shape does not make it crisp enough.
+- HDC still leaks through `roko-primitives` in places where a focused `roko-hdc` boundary would be cleaner.
+- `roko-compose` still keeps templates too close to the compose engine. That makes role/template growth harder than it should be.
+- There is no `roko-bus` crate yet, so bus behavior still lives inside runtime code instead of having its own kernel-level boundary.
 
 **Violations:**
 
@@ -183,6 +194,8 @@ already contains two mediums and two fabrics, so the conductor problem belongs i
 Datum-aware operator boundaries, and Pulse stream handling rather than in a bespoke health
 interface.
 
+REF20 sharpens that conclusion one level further: this is not just a local fix, it is the kind of dependency-audit failure that becomes trivial once the target dep graph moves bus behavior into `roko-bus` and makes the conductor consume topics instead of learning internals.
+
 ### 3.3 Unclassified Crates
 
 Six crates need formal layer assignment:
@@ -196,7 +209,20 @@ Six crates need formal layer assignment:
 | `roko-chain` | **L1 Domain Plugin** | Analogous to roko-agent for chain domain |
 | `roko-plugin` | **L1 Framework** | Plugin SDK extending the tool/agent system |
 
-### 3.4 Layer Taxonomy Completeness
+### 3.4 Proposed Target Dep Graph
+
+REF20 proposes a clean rewrite boundary for the dep graph rather than another round of ad hoc coupling repairs. The target shape is:
+
+- `roko-core` stays the shared type-and-trait nucleus.
+- `roko-bus` becomes the kernel transport crate for Bus traits, topics, and in-process broadcast primitives.
+- `roko-hdc` becomes the focused hyperdimensional computing crate instead of leaking HDC through `roko-primitives`.
+- `roko-spi` holds the extension SPI so plugins do not need to depend on kernel crates directly.
+- `roko-std` splits into `roko-defaults` and `roko-tools`.
+- `roko-compose` splits into `roko-compose-core` and `roko-templates`.
+
+That target graph makes the kernel boundary explicit: storage, transport, hyperdimensional primitives, and plugin surface are separate crates; implementations sit below them; composition and templates are no longer coupled as one package. In analysis terms, this is the clean rewrite boundary that the current dep graph is trying to imply but has not yet made real.
+
+### 3.5 Layer Taxonomy Completeness
 
 The five layers map cleanly to Beer's VSM:
 

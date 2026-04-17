@@ -46,6 +46,13 @@ discovered, audited, and sandboxed without forking core. Start with
 [`12-interfaces/00-cli-overview.md`](12-interfaces/00-cli-overview.md),
 [`12-interfaces/01-cli-command-reference.md`](12-interfaces/01-cli-command-reference.md),
 and [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md).
+`tmp/refinements/20-modularity-composability.md` then tightens the crate boundary story: the
+target dep graph adds `roko-bus`, `roko-hdc`, and `roko-spi` as explicit kernel crates and
+splits `roko-std` / `roko-compose` so tools and templates stop leaking across layers. Start
+with [`00-architecture/12-five-layer-taxonomy.md`](00-architecture/12-five-layer-taxonomy.md),
+[`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md),
+[`00-architecture/23-architectural-analysis-improvements.md`](00-architecture/23-architectural-analysis-improvements.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 `tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
 which primitives are genuinely new, which are integrations of prior art, and which claims
 deserve publication-grade evidence. Start with
@@ -84,6 +91,12 @@ and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/
 > [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
 > [`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
 > and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+> REF20 adds the crate-boundary cleanup pass: the target dep graph makes `roko-bus`,
+> `roko-hdc`, and `roko-spi` explicit kernel crates, keeps implementation crates from importing
+> one another, and splits defaults/tools plus compose/templates so data and engines evolve
+> independently. Start with [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md),
+> [`00-architecture/12-five-layer-taxonomy.md`](00-architecture/12-five-layer-taxonomy.md), and
+> [`00-architecture/23-architectural-analysis-improvements.md`](00-architecture/23-architectural-analysis-improvements.md).
 > REF19 adds the net-new innovation catalog and the rule that novelty claims should distinguish
 > genuinely new primitives from carefully integrated prior art; start with
 > [`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
