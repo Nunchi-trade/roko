@@ -6,9 +6,7 @@ use agent_relay::protocol::{AgentHello, AgentInboundFrame, RelayOutboundFrame};
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message,
-};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 use crate::registration::AgentCard;
 use crate::state::{AgentState, DispatchError};
@@ -147,7 +145,10 @@ async fn handle_outbound_frame(
 async fn dispatch_relay_message(state: &AgentState, message: Value) -> Result<Value, String> {
     let prompt = extract_prompt(&message)
         .ok_or_else(|| "relay message did not contain a string prompt".to_string())?;
-    let response = state.dispatch_prompt(&prompt).await.map_err(dispatch_error)?;
+    let response = state
+        .dispatch_prompt(&prompt)
+        .await
+        .map_err(dispatch_error)?;
     Ok(json!({
         "response": response.content,
         "reasoning": response.reasoning,
@@ -235,7 +236,9 @@ fn websocket_base_url(base_url: &str) -> Result<String> {
     if base_url.starts_with("ws://") || base_url.starts_with("wss://") {
         return Ok(base_url.trim_end_matches('/').to_string());
     }
-    Err(anyhow!("relay base_url must use http(s) or ws(s): {base_url}"))
+    Err(anyhow!(
+        "relay base_url must use http(s) or ws(s): {base_url}"
+    ))
 }
 
 fn http_base_url(base_url: &str) -> Result<String> {
@@ -248,7 +251,9 @@ fn http_base_url(base_url: &str) -> Result<String> {
     if let Some(rest) = base_url.strip_prefix("wss://") {
         return Ok(format!("https://{}", rest.trim_end_matches('/')));
     }
-    Err(anyhow!("relay base_url must use http(s) or ws(s): {base_url}"))
+    Err(anyhow!(
+        "relay base_url must use http(s) or ws(s): {base_url}"
+    ))
 }
 
 async fn await_hello_ack(socket: &mut RelaySocket) -> Result<()> {

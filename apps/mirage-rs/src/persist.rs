@@ -18,9 +18,7 @@ use std::time::Duration;
 use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
-use crate::fork::{
-    DirtyStore, ForkState, LocalBlock, LocalReceipt, LocalTransaction, MirageFork,
-};
+use crate::fork::{DirtyStore, ForkState, LocalBlock, LocalReceipt, LocalTransaction, MirageFork};
 
 /// Current schema version. Bump when the snapshot format changes.
 pub const SNAPSHOT_VERSION: u32 = 1;
@@ -369,7 +367,13 @@ mod tests {
 
         let upstream = Arc::new(UpstreamRpc::new_with_limits(None, None, 1, 1, 1));
         let mut fork = ForkState::new(
-            HybridDB::new(upstream, 100, Duration::from_secs(12), 1.try_into().unwrap(), 1),
+            HybridDB::new(
+                upstream,
+                100,
+                Duration::from_secs(12),
+                1.try_into().unwrap(),
+                1,
+            ),
             42,
             1,
         );
@@ -418,7 +422,10 @@ mod tests {
         write_snapshot(&snap, dir.path()).expect("write");
 
         let tmp_path = dir.path().join(format!("{SNAPSHOT_FILE}.tmp"));
-        assert!(!tmp_path.exists(), ".tmp file should be cleaned up by rename");
+        assert!(
+            !tmp_path.exists(),
+            ".tmp file should be cleaned up by rename"
+        );
 
         let final_path = dir.path().join(SNAPSHOT_FILE);
         assert!(final_path.exists());

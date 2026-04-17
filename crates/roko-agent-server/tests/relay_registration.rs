@@ -34,7 +34,9 @@ impl TestRelay {
         let base_url = format!("http://{addr}");
         let state = Arc::new(RelayState::new());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app(state)).await.expect("serve relay");
+            axum::serve(listener, app(state))
+                .await
+                .expect("serve relay");
         });
 
         let relay = Self {
@@ -165,7 +167,10 @@ async fn wallet_free_relay_registration_hosts_card_and_keeps_direct_routes_worki
     let connected = relay.wait_for_agent("agent-relay").await;
     assert!(connected.relay_backed);
     assert_eq!(connected.rest_endpoint, None);
-    assert_eq!(connected.card_uri.as_deref(), Some(expected_card_uri.as_str()));
+    assert_eq!(
+        connected.card_uri.as_deref(),
+        Some(expected_card_uri.as_str())
+    );
 
     let card: Value = relay
         .client
@@ -231,7 +236,10 @@ async fn wallet_backed_relay_registration_submits_target_abi_with_relay_card_uri
     let _agent = RunningAgent::spawn("wallet-agent", registration, "wallet-backed").await;
 
     let connected = relay.wait_for_agent("wallet-agent").await;
-    assert_eq!(connected.card_uri.as_deref(), Some(expected_card_uri.as_str()));
+    assert_eq!(
+        connected.card_uri.as_deref(),
+        Some(expected_card_uri.as_str())
+    );
 
     let submitted = wallet.submitted();
     assert_eq!(submitted.len(), 1);
@@ -247,10 +255,7 @@ fn assert_update_agent_card_uri_calldata(data: &[u8], passport_id: u64, card_uri
         &data[..4],
         &keccak256("updateAgentCardUri(uint256,string)".as_bytes())[..4]
     );
-    assert_eq!(
-        &data[4..36],
-        &U256::from(passport_id).to_be_bytes::<32>()
-    );
+    assert_eq!(&data[4..36], &U256::from(passport_id).to_be_bytes::<32>());
     assert_eq!(&data[36..68], &encode_word(64));
 
     let encoded_length = U256::from_be_slice(&data[68..100]);

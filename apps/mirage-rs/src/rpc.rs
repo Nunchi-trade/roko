@@ -483,10 +483,9 @@ async fn relay_proxy_ws(
         }
     };
     if let Some(protocol) = headers.get(axum::http::header::SEC_WEBSOCKET_PROTOCOL) {
-        upstream_request.headers_mut().insert(
-            axum::http::header::SEC_WEBSOCKET_PROTOCOL,
-            protocol.clone(),
-        );
+        upstream_request
+            .headers_mut()
+            .insert(axum::http::header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
     }
 
     let upstream_socket = match connect_async(upstream_request).await {
@@ -503,7 +502,9 @@ async fn relay_proxy_ws(
 
 async fn bridge_relay_websocket(
     downstream: WebSocket,
-    upstream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) {
     let (mut downstream_tx, mut downstream_rx) = downstream.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
@@ -545,17 +546,19 @@ async fn bridge_relay_websocket(
 async fn forward_downstream_ws(
     message: Message,
     upstream_tx: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         TungsteniteMessage,
     >,
 ) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error> {
     match message {
-        Message::Text(text) => upstream_tx
-            .send(TungsteniteMessage::Text(text.to_string().into()))
-            .await,
-        Message::Binary(binary) => upstream_tx
-            .send(TungsteniteMessage::Binary(binary))
-            .await,
+        Message::Text(text) => {
+            upstream_tx
+                .send(TungsteniteMessage::Text(text.to_string().into()))
+                .await
+        }
+        Message::Binary(binary) => upstream_tx.send(TungsteniteMessage::Binary(binary)).await,
         Message::Ping(payload) => upstream_tx.send(TungsteniteMessage::Ping(payload)).await,
         Message::Pong(payload) => upstream_tx.send(TungsteniteMessage::Pong(payload)).await,
         Message::Close(frame) => {
@@ -573,9 +576,11 @@ async fn forward_upstream_ws(
     downstream_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> std::result::Result<(), axum::Error> {
     match message {
-        TungsteniteMessage::Text(text) => downstream_tx
-            .send(Message::Text(text.to_string().into()))
-            .await,
+        TungsteniteMessage::Text(text) => {
+            downstream_tx
+                .send(Message::Text(text.to_string().into()))
+                .await
+        }
         TungsteniteMessage::Binary(binary) => downstream_tx.send(Message::Binary(binary)).await,
         TungsteniteMessage::Ping(payload) => downstream_tx.send(Message::Ping(payload)).await,
         TungsteniteMessage::Pong(payload) => downstream_tx.send(Message::Pong(payload)).await,
@@ -597,7 +602,10 @@ fn relay_proxy_error(status: StatusCode, message: &'static str) -> Response<Body
 }
 
 fn is_hop_by_hop_header(name: &ReqwestHeaderName) -> bool {
-    matches!(name, &CONNECTION | &CONTENT_LENGTH | &HOST | &TRANSFER_ENCODING | &UPGRADE)
+    matches!(
+        name,
+        &CONNECTION | &CONTENT_LENGTH | &HOST | &TRANSFER_ENCODING | &UPGRADE
+    )
 }
 
 fn axum_close_code_to_tungstenite(code: u16) -> CloseCode {

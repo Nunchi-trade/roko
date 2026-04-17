@@ -65,10 +65,7 @@ async fn forward_message(
         .map_err(await_message_error)
 }
 
-async fn agent_ws(
-    State(state): State<Arc<RelayState>>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn agent_ws(State(state): State<Arc<RelayState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_agent_socket(state, socket))
 }
 
@@ -98,10 +95,9 @@ fn await_message_error(error: AwaitMessageError) -> (StatusCode, Json<Value>) {
             StatusCode::GATEWAY_TIMEOUT,
             Json(json!({ "error": "agent response timed out" })),
         ),
-        AwaitMessageError::Agent(error) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": error })),
-        ),
+        AwaitMessageError::Agent(error) => {
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": error })))
+        }
     }
 }
 
@@ -294,9 +290,7 @@ async fn send_raw_json(
         .map_err(|_| ())
 }
 
-async fn next_text_frame(
-    stream: &mut futures::stream::SplitStream<WebSocket>,
-) -> Option<String> {
+async fn next_text_frame(stream: &mut futures::stream::SplitStream<WebSocket>) -> Option<String> {
     loop {
         match stream.next().await {
             Some(Ok(Message::Text(text))) => return Some(text.to_string()),

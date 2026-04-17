@@ -65,6 +65,7 @@ notify = { version = "6", default-features = false, features = ["macos_fsevent"]
 notify-debouncer-full = "0.3"
 
 [dev-dependencies]
+agent-relay = { path = "../../apps/agent-relay" }
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

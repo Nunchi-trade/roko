@@ -580,7 +580,11 @@ impl PredictionStore {
     /// Restores a store from a snapshot.
     #[must_use]
     pub fn from_snapshot(snap: PredictionStoreSnapshot) -> Self {
-        let sessions = snap.sessions.into_iter().map(|s| (s.id.clone(), s)).collect();
+        let sessions = snap
+            .sessions
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
         let claims = snap.claims.into_iter().map(|c| (c.id.clone(), c)).collect();
         Self {
             sessions,

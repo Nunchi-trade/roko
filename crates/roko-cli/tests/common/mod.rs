@@ -245,6 +245,7 @@ pub struct AgentServeConfig<'a> {
     pub identity_registry: Option<&'a str>,
     pub passport_id: Option<&'a str>,
     pub wallet_key: Option<&'a str>,
+    pub roko_config: Option<&'a Path>,
 }
 
 impl<'a> AgentServeConfig<'a> {
@@ -256,6 +257,7 @@ impl<'a> AgentServeConfig<'a> {
             identity_registry: None,
             passport_id: None,
             wallet_key: None,
+            roko_config: None,
         }
     }
 }
@@ -322,6 +324,9 @@ pub fn spawn_roko_agent_serve_on_random_port(
     }
     if let Some(wallet_key) = config.wallet_key {
         command.arg("--wallet-key").arg(wallet_key);
+    }
+    if let Some(roko_config) = config.roko_config {
+        command.env("ROKO_CONFIG", roko_config);
     }
 
     let child = command

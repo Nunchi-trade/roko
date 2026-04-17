@@ -142,8 +142,7 @@ const ERC8004_REPUTATION_REGISTRY: Address = address!("0x8004A818BFB912233c49187
 const ERC8004_VALIDATION_REGISTRY: Address = address!("0x8004A818BFB912233c491871b3d84c89A494BDA0");
 const ERC8004_BOOTSTRAP_ADMIN: Address = address!("0x8004000000000000000000000000000000000001");
 const ERC8004_BOOTSTRAP_DEPLOYER: Address = address!("0x8004000000000000000000000000000000000002");
-const ERC8004_IDENTITY_INIT_HEX: &str =
-    include_str!("../static/erc8004/IdentityRegistry.init.hex");
+const ERC8004_IDENTITY_INIT_HEX: &str = include_str!("../static/erc8004/IdentityRegistry.init.hex");
 const ERC8004_REPUTATION_INIT_HEX: &str =
     include_str!("../static/erc8004/ReputationRegistry.init.hex");
 const ERC8004_VALIDATION_INIT_HEX: &str =
@@ -296,17 +295,13 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         if toggles.any_enabled() {
             let chain_ctx = {
                 // Restore from snapshot if available, otherwise create fresh.
-                let ctx = if let Some(chain_snap) = loaded_snapshot
-                    .as_ref()
-                    .and_then(|s| s.chain.clone())
+                let ctx = if let Some(chain_snap) =
+                    loaded_snapshot.as_ref().and_then(|s| s.chain.clone())
                 {
                     tracing::info!("restoring chain context from snapshot");
                     persist::chain_context_from_snapshot(chain_snap, cli.chain_hnsw_threshold)
                 } else {
-                    mirage_rs::chain_rpc::ChainContext::with_hnsw(
-                        toggles,
-                        cli.chain_hnsw_threshold,
-                    )
+                    mirage_rs::chain_rpc::ChainContext::with_hnsw(toggles, cli.chain_hnsw_threshold)
                 };
                 // Install subscription buses so WebSocket streaming (/api/ws) and
                 // JSON-RPC chain_subscribe* methods are available.
@@ -635,11 +630,12 @@ fn ensure_erc8004_contract(
         .accounts
         .get(&deployed_address)
         .cloned()
-        .with_context(|| format!("bootstrap account missing for deployed contract {deployed_address}"))?;
-    let runtime_code = deployed_account
-        .code
-        .clone()
-        .with_context(|| format!("bootstrap runtime code missing for deployed contract {deployed_address}"))?;
+        .with_context(|| {
+            format!("bootstrap account missing for deployed contract {deployed_address}")
+        })?;
+    let runtime_code = deployed_account.code.clone().with_context(|| {
+        format!("bootstrap runtime code missing for deployed contract {deployed_address}")
+    })?;
 
     fork.db.set_code(canonical_address, runtime_code);
     if let Some(balance) = deployed_account.balance {

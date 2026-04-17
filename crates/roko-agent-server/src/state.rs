@@ -565,7 +565,9 @@ impl AgentState {
     /// backend fails to complete the turn.
     pub async fn dispatch_prompt(&self, prompt: &str) -> Result<ChatResponse, DispatchError> {
         self.metrics.record_message();
-        let dispatcher = self.message_dispatcher().ok_or(DispatchError::NotConfigured)?;
+        let dispatcher = self
+            .message_dispatcher()
+            .ok_or(DispatchError::NotConfigured)?;
         let response = dispatcher.dispatch(chat_request(prompt, false)).await;
         let status = if response.is_ok() { "ok" } else { "error" };
         self.append_log_line(format!("message prompt={prompt:?} status={status}"))

@@ -282,7 +282,9 @@ impl PendingMessage {
                 response,
             }),
             Ok(Ok(Err(error))) => Err(AwaitMessageError::Agent(error)),
-            Ok(Err(_)) => Err(AwaitMessageError::Agent("response channel closed".to_string())),
+            Ok(Err(_)) => Err(AwaitMessageError::Agent(
+                "response channel closed".to_string(),
+            )),
             Err(_) => Err(AwaitMessageError::Timeout),
         }
     }

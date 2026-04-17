@@ -1,8 +1,21 @@
 //! `roko agent serve` command wiring.
 
-use anyhow::Result;
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{Context as _, Result};
+use async_trait::async_trait;
 use clap::{Args, Subcommand};
-use roko_agent_server::{AgentRegistration, AgentServer};
+use roko_agent::{
+    Agent,
+    chat_types::{ChatRequest, ChatResponse},
+};
+use roko_agent_server::{
+    AgentRegistration, AgentServer, DispatchError, DispatchLike, RelayClientConfig,
+};
+use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
+use roko_core::config::schema::RokoConfig;
+use roko_core::{Body, Context, Engram, Kind, MessageContent};
 use tracing::{info, warn};
 
 /// Agent-focused CLI subtree.
@@ -91,10 +104,11 @@ impl AgentServeRuntimeConfig {
             .research()
             .tasks();
 
-        if let Some(chain) = &self.chain {
-            let mut registration = AgentRegistration::default();
-            registration.identity_registry_address = chain.identity_registry.clone();
-            registration.passport_id = chain.passport_id.clone();
+        if let Some(dispatcher) = self.try_build_dispatcher()? {
+            builder = builder.with_message_dispatcher(dispatcher);
+        }
+
+        if let Some(registration) = self.registration() {
             builder = builder.registration(registration);
         }
 
@@ -138,6 +152,61 @@ impl AgentServeRuntimeConfig {
             .build()
     }
 
+    fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {
+        let workdir = std::env::current_dir().context("read current working directory")?;
+        let config = load_roko_config(&workdir)?;
+        if config.agent.command.is_none() {
+            return Ok(None);
+        }
+
+        let model = config.agent.default_model.trim();
+        if model.is_empty() {
+            return Ok(None);
+        }
+
+        let agent = spawn_agent_scoped(
+            &config,
+            SpawnAgentSpec {
+                model: model.to_string(),
+                command: config.agent.command.clone(),
+                timeout_ms: config.agent.timeout_ms,
+                system_prompt: None,
+                cached_content: None,
+                tools: None,
+                mcp_config: None,
+                working_dir: Some(workdir),
+                env: config.agent.env.clone().unwrap_or_default(),
+                extra_args: config.agent.args.clone().unwrap_or_default(),
+                effort: Some(config.agent.default_effort.clone()),
+                bare_mode: config.agent.bare_mode,
+                dangerously_skip_permissions: false,
+                name: self.agent_id.clone(),
+                role: None,
+            },
+            format!("create serving agent for {}", self.agent_id),
+        )?;
+
+        Ok(Some(Arc::new(ServingAgentDispatcher {
+            agent: Arc::from(agent),
+        })))
+    }
+
+    fn registration(&self) -> Option<AgentRegistration> {
+        if self.relay.is_none() && self.chain.is_none() {
+            return None;
+        }
+
+        let mut registration = AgentRegistration::default();
+        if let Some(relay) = &self.relay {
+            registration.relay = Some(RelayClientConfig::new(relay.url.clone()));
+        }
+        if let Some(chain) = &self.chain {
+            registration.identity_registry_address = chain.identity_registry.clone();
+            registration.passport_id = chain.passport_id.clone();
+        }
+        Some(registration)
+    }
+
     fn startup_snapshot(&self) -> StartupSnapshot {
         StartupSnapshot {
             agent_id: self.agent_id.clone(),
@@ -169,6 +238,78 @@ impl ChainConfig {
             wallet_key: args.wallet_key.clone(),
         })
     }
+}
+
+struct ServingAgentDispatcher {
+    agent: Arc<dyn Agent>,
+}
+
+#[async_trait]
+impl DispatchLike for ServingAgentDispatcher {
+    async fn dispatch(&self, request: ChatRequest) -> Result<ChatResponse, DispatchError> {
+        let prompt = extract_prompt(&request).ok_or(DispatchError::NotConfigured)?;
+        let input = Engram::builder(Kind::Prompt)
+            .body(Body::text(prompt.clone()))
+            .build();
+        let result = self
+            .agent
+            .run(&input, &Context::now().with_goal(prompt))
+            .await;
+
+        Ok(ChatResponse {
+            content: result.output.body.as_text().unwrap_or_default().to_string(),
+            usage: result.usage,
+            finish_reason: if result.success {
+                roko_agent::chat_types::FinishReason::Stop
+            } else {
+                roko_agent::chat_types::FinishReason::Error(
+                    result
+                        .output
+                        .body
+                        .as_text()
+                        .unwrap_or("agent failed")
+                        .to_string(),
+                )
+            },
+            ..ChatResponse::default()
+        })
+    }
+}
+
+fn extract_prompt(request: &ChatRequest) -> Option<String> {
+    request.messages.iter().find_map(|message| match message {
+        roko_core::ChatMessage::User { content } => match content {
+            MessageContent::Text(text) => Some(text.clone()),
+            MessageContent::Blocks(blocks) => {
+                let parts: Vec<&str> = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        roko_core::ContentBlock::Text { text } => Some(text.as_str()),
+                        roko_core::ContentBlock::ImageUrl { .. } => None,
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("\n"))
+                }
+            }
+        },
+        _ => None,
+    })
+}
+
+fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
+    let path = std::env::var_os("ROKO_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| workdir.join("roko.toml"));
+    if !path.exists() {
+        return Ok(RokoConfig::default());
+    }
+
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
 }
 
 /// Run `roko agent ...`.

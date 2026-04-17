@@ -95,7 +95,12 @@ async fn send_json(socket: &mut AgentSocket, value: Value) {
 
 async fn recv_json(socket: &mut AgentSocket) -> Value {
     loop {
-        match socket.next().await.expect("websocket message").expect("ws frame") {
+        match socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("ws frame")
+        {
             Message::Text(text) => {
                 return serde_json::from_str(text.as_str()).expect("parse websocket json");
             }

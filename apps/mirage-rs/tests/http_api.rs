@@ -20,8 +20,8 @@ use axum::{
 };
 use parking_lot::RwLock;
 use serde_json::Value;
-use tower::ServiceExt;
 use tokio::{net::TcpListener, task::JoinHandle};
+use tower::ServiceExt;
 
 use mirage_rs::{
     chain::{KnowledgeKind, PheromoneKind, projection::project_tokens},
@@ -192,9 +192,7 @@ impl MockRelayServer {
             .route("/relay/health", any(mock_relay_health))
             .route("/relay/{*tail}", any(mock_relay_echo));
         let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve mock relay");
+            axum::serve(listener, app).await.expect("serve mock relay");
         });
 
         let server = Self { base_url, task };
@@ -1168,7 +1166,10 @@ async fn test_deposit_pheromone_empty_content() {
 async fn relay_proxy_get_preserves_path_and_query() {
     let relay = MockRelayServer::spawn().await;
     let router = Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+        )
         .merge(build_relay_proxy_router_for_tests(relay.base_url.clone()));
     let req = Request::builder()
         .method("GET")
@@ -1195,7 +1196,10 @@ async fn relay_proxy_get_preserves_path_and_query() {
 async fn relay_proxy_leaves_non_relay_routes_local() {
     let relay = MockRelayServer::spawn().await;
     let router = Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+        )
         .merge(build_relay_proxy_router_for_tests(relay.base_url.clone()));
     let (status, body) = get_json(&router, "/health").await;
 
@@ -1207,7 +1211,10 @@ async fn relay_proxy_leaves_non_relay_routes_local() {
 async fn relay_proxy_post_preserves_json_and_status() {
     let relay = MockRelayServer::spawn().await;
     let router = Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+        )
         .merge(build_relay_proxy_router_for_tests(relay.base_url.clone()));
     let request_body = serde_json::json!({
         "agent_id": "agent-relay",

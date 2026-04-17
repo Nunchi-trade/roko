@@ -112,11 +112,24 @@ pub enum RelayOutboundFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RelayEvent {
-    AgentConnected { agent: ConnectedAgent },
-    AgentDisconnected { agent_id: String },
-    CardUpdated { agent_id: String, card_uri: String },
-    MessageDelivered { agent_id: String, message_id: String },
-    MessageResponded { agent_id: String, message_id: String },
+    AgentConnected {
+        agent: ConnectedAgent,
+    },
+    AgentDisconnected {
+        agent_id: String,
+    },
+    CardUpdated {
+        agent_id: String,
+        card_uri: String,
+    },
+    MessageDelivered {
+        agent_id: String,
+        message_id: String,
+    },
+    MessageResponded {
+        agent_id: String,
+        message_id: String,
+    },
     AgentError {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
