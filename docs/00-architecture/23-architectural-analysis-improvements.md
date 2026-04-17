@@ -2,13 +2,14 @@
 
 > **Abstract:** A comprehensive analysis of Roko's current architecture as a v1 snapshot and
 > its v2 rewrite path: the six-operator snapshot, five-layer taxonomy, three cognitive speeds,
-> Engram/Pulse split, two fabrics (Substrate and Bus), and cognitive cross-cuts — evaluated
-> against modern research in cognitive architectures (SOAR, ACT-R, LIDA), trait-based systems
-> (Scala typeclasses, Haskell type classes), category theory (functors, monoids, natural
-> transformations), and active inference (Free Energy Principle, VERSES Genius). This document
-> identifies architectural strengths, coherence gaps, layer violations, rewrite boundaries, and
-> proposes improvements grounded in academic literature. See also
-> `tmp/refinements/21-from-scratch-redesigns.md` and
+> Engram/Pulse split, two mediums (durable Engram and ephemeral Pulse), two fabrics (Substrate
+> and Bus), and cognitive cross-cuts — evaluated against modern research in cognitive
+> architectures (SOAR, ACT-R, LIDA), trait-based systems (Scala typeclasses, Haskell type
+> classes), category theory (functors, monoids, natural transformations), and active inference
+> (Free Energy Principle, VERSES Genius). This document identifies architectural strengths,
+> coherence gaps, layer violations, rewrite boundaries, and proposes improvements grounded in
+> academic literature. See also `tmp/refinements/01-critique-one-noun.md`,
+> `tmp/refinements/21-from-scratch-redesigns.md`, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
 > **Implementation**: Analysis (informing future architectural decisions, including from-scratch sequencing)
@@ -30,6 +31,10 @@ L2/Cross-cut) and **six unclassified crates**. The three cognitive speeds map cl
 three primary domains (coding, chain, research). The current Engram model is genuinely
 universal, with edge cases that are handled by existing extension mechanisms (`Kind::Custom`,
 `Body::Json`, `tags`).
+
+REF01 is the diagnostic bridge for that shift: it shows that the old "one noun, six verbs"
+mnemonic still captures the durable half of the system, but it no longer explains live traffic,
+the bus, or the boundary cases that this analysis documents below.
 
 Key findings:
 1. **The current operator set is coherent, but v2 planning changes the question.** The
@@ -71,6 +76,10 @@ Three operations sit at the boundary of the trait model:
 | **Engram transformation** (e.g., summarize, translate) | `Composer::compose(&[single], &Budget::UNLIMITED, ...)` | Adequate. Budget parameter is unused but harmless. |
 | **Telemetry emission** (metrics, traces) | `Policy::decide(&[], ctx)` returning metric Engrams | Adequate. Empty stream input is awkward but functional. |
 | **Batch verification** (verify N Engrams at once) | Loop calling `Gate::verify` N times | Adequate. External loop is standard; batch Gate would be premature optimization. |
+
+That telemetry row is the first concrete sign that the old framing is too narrow: `Policy::decide(&[], ctx)`
+works, but only by pretending live telemetry is an empty Engram stream. REF01 treats that awkward
+boundary as evidence for the two-medium, two-fabric reframing rather than as a harmless quirk.
 
 ### 2.3 When a rewrite beats incremental refactor
 
@@ -158,6 +167,10 @@ pub trait HealthMetrics: Send + Sync {
 
 Then `roko-conductor` depends on `&dyn HealthMetrics` (L0 trait), and `roko-learn` implements
 it. The dependency flows downward.
+
+REF01 uses this violation as the second load-bearing data point for the reframing: the conductor
+problem is not just a misplaced import, it is evidence that the architecture already contains
+distinct durable and live-message paths that the old single-medium story does not describe cleanly.
 
 ### 3.3 Unclassified Crates
 
@@ -762,3 +775,7 @@ The most impactful improvement would be **gradient gate feedback** (Section 8.2)
 connects Roko's existing Gate pipeline to active inference's prediction-error minimization
 framework, enabling continuous learning from every verification attempt rather than binary
 pass/fail outputs.
+
+Read together, the §2.2 telemetry boundary and the §3.2 conductor violation are the strongest
+signals in this analysis that the kernel wants the two-medium / two-fabric vocabulary from
+`tmp/refinements/01-critique-one-noun.md`, not just a renamed durable record.
