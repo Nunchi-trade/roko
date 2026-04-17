@@ -3,7 +3,7 @@
 > **Crate:** `roko-learn` · **Modules:** `playbook.rs`, `playbook_rules.rs`
 > **Persistence:** `.roko/learn/playbooks/` (JSON per playbook), `.roko/learn/playbook-rules.toml`
 > **Wiring:** `LearningRuntime::record_completed_run()` → `PlaybookStore`, `PlaybookRules`
-> **Cross-references:** [00-episode-logger](00-episode-logger.md), [02-skill-library-voyager](02-skill-library-voyager.md), [05-pattern-discovery-trigram](05-pattern-discovery-trigram.md), [04-decay-variants](../00-architecture/04-decay-variants.md), [25-attention-as-currency](../00-architecture/25-attention-as-currency.md), [Naming and Glossary](../00-architecture/01-naming-and-glossary.md), [REF12 demurrage proposal](../../tmp/refinements/12-knowledge-demurrage.md)
+> **Cross-references:** [00-episode-logger](00-episode-logger.md), [02-skill-library-voyager](02-skill-library-voyager.md), [05-pattern-discovery-trigram](05-pattern-discovery-trigram.md), [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md), [04-decay-variants](../00-architecture/04-decay-variants.md), [25-attention-as-currency](../00-architecture/25-attention-as-currency.md), [Naming and Glossary](../00-architecture/01-naming-and-glossary.md), [REF12 demurrage proposal](../../tmp/refinements/12-knowledge-demurrage.md), [REF14 worldview validation proposal](../../tmp/refinements/14-worldview-validation.md)
 
 
 > **Implementation**: Shipping
@@ -12,7 +12,7 @@
 
 ## Purpose
 
-The playbook system is the validated knowledge tier of Roko's three-tier memory architecture. Where episodes are raw observations and patterns are extracted hypotheses, playbook rules are validated instructions that have proven their predictive accuracy across multiple subsequent executions. When a rule correctly predicts outcomes across 5+ builds, it earns enough reinforcement to stay warm and gets injected directly into agent prompts, preventing the agent from repeating known mistakes. Freshness is not governed by confidence alone: demurrage, successful reuse, and contradiction-driven penalties decide whether a rule remains active or cools into cold storage.
+The playbook system is the concrete procedural projection of Roko's learning stack, not the whole stack by itself. REF14 adds a first-class `Heuristic` layer above episodes and patterns: heuristics capture reusable claims, predictions, falsifiers, and calibration records, while playbooks remain the highly specific ordered steps and prompt-ready rules compiled from those validated beliefs. When a rule correctly predicts outcomes across multiple subsequent executions, it earns enough reinforcement to stay warm and gets injected directly into agent prompts, preventing the agent from repeating known mistakes. Freshness is not governed by confidence alone: demurrage, successful reuse, and contradiction-driven penalties decide whether a rule remains active or cools into cold storage. See also [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md) and `../../tmp/refinements/14-worldview-validation.md`.
 
 The system has two components:
 
@@ -21,18 +21,23 @@ The system has two components:
 
 ---
 
-## Three-Tier Memory Architecture
+## Playbooks Inside The Learning Stack
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    Tier 3: Playbook Rules                        │
-│   Validated instructions injected into agent prompts.            │
-│   Confidence: 0.0 – 0.95 (bounded). Reinforcement + balance     │
-│   keep rules warm; demurrage cools stale rules. Validated ≥5x.   │
-│   Trigger: file globs, tags, categories, error signatures, roles │
-│   Action: inject body text into Implementer prompt               │
-│   Lifecycle: validate (+0.05) / contradict (−0.10) / reinforce   │
-│   / demurrage / prune                                             │
+│              Tier 4: Playbook Rules And Playbooks                │
+│   Concrete instructions compiled from validated heuristics and   │
+│   repeated strategy fragments. Confidence: 0.0 – 0.95 bounded.  │
+│   Reinforcement + balance keep rules warm; demurrage cools      │
+│   stale rules. Trigger: file globs, tags, categories, error     │
+│   signatures, roles. Action: inject prompt-ready body text.     │
+│   Lifecycle: validate / contradict / reinforce / demurrage /    │
+│   prune.                                                         │
+├──────────────────────────────────────────────────────────────────┤
+│             Tier 3: Heuristics And Worldview Priors              │
+│   Reusable rules of thumb with preconditions, predictions,       │
+│   falsifier surfaces, calibration records, and episode receipts. │
+│   See: 19-heuristics-worldviews-and-falsifiers.md                │
 ├──────────────────────────────────────────────────────────────────┤
 │                    Tier 2: Patterns                               │
 │   Extracted hypotheses from episode clustering.                   │

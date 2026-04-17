@@ -1,6 +1,7 @@
 # Neuro — Cognitive Knowledge Layer
 
 > Neuro (`roko-neuro`) is the agent's persistent, tiered, HDC-indexed knowledge system. It classifies knowledge by type (Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge), validates it through four tiers (Transient → Working → Consolidated → Persistent), and treats every Engram as carrying a 10,240-bit HDC fingerprint for native similarity, consensus, and analogy. Neuro now treats demurrage and balance as the primary freshness mechanism, with Ebbinghaus curves shaping the drain rate rather than defining the whole retention model.
+> REF14 extends that story by making heuristic calibration, falsifier handling, and worldview clustering explicit; see `../../tmp/refinements/14-worldview-validation.md`, [12-4-tier-distillation-pipeline](./12-4-tier-distillation-pipeline.md), and [Naming Map and Glossary](../00-architecture/01-naming-and-glossary.md).
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -35,7 +36,7 @@ Neuro spans all five architectural layers (L0 Runtime through L4 Orchestration) 
 | 09 | [False Positive Math](./09-false-positive-math.md) | Threshold selection (0.526), Bonferroni correction, Johnson-Lindenstrauss validation |
 | 10 | [Knowledge Query API](./10-knowledge-query-api.md) | NeuroStore trait, fingerprint queries, KnowledgeStore JSONL backend, ContextAssembler |
 | 11 | [AntiKnowledge Challenge](./11-antiknowledge-challenge.md) | Challenge mechanism, refutation warnings, epistemic parasite detection, Price equation |
-| 12 | [4-Tier Distillation Pipeline](./12-4-tier-distillation-pipeline.md) | Episodes→Insights→Heuristics→PLAYBOOK.md with balance-earning freshness and HDC novelty |
+| 12 | [4-Tier Distillation Pipeline](./12-4-tier-distillation-pipeline.md) | Episodes→Insights→Heuristics→PLAYBOOK.md with calibration, falsifiers, worldview clustering, and HDC novelty |
 | 13 | [Somatic Integration](./13-somatic-integration.md) | SomaticLandscape k-d tree, PAD vector, mood-congruent retrieval, 15% contrarian |
 | 14 | [Library of Babel](./14-library-of-babel.md) | Cross-collective knowledge, 5 inflow channels, confidence discounting, publishing policies |
 | 15 | [Knowledge Backup/Restore](./15-knowledge-backup-restore.md) | 4-step BACKUP→DELETE→CREATE→RESTORE, replacing succession, mesh sharing |
@@ -70,6 +71,7 @@ This topic connects to:
 - [18-decay-tier-matrix](../00-architecture/18-decay-tier-matrix.md) — tier progression and cold-storage calibration
 - [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) — full HDC fingerprint proposal reflected in this chapter
 - [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) — demurrage refinement reflected in this chapter
+- [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) — heuristic calibration, falsifiers, and worldview clustering reflected in this chapter
 
 ---
 

@@ -4,10 +4,13 @@
 > Use `Engram` for the durable record, `Pulse` for the ephemeral wire medium, `Substrate` for
 > storage, `Bus` for transport, `Topic` for routing, `TopicFilter` for subscription matching,
 > `Datum` for Engram-or-Pulse operator inputs, and `PulseSource` for transport-time producer
-> attribution. When another document disagrees, this glossary wins. See also
+> attribution. For the heuristic, falsifier, and worldview vocabulary used in learning
+> refinements, see also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md). When another document
+> disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
 > [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md),
 > [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md),
+> [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md),
 > [tmp/refinements/13-collective-intelligence-c-factor.md](../../tmp/refinements/13-collective-intelligence-c-factor.md),
 > [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
@@ -106,6 +109,9 @@ crates directly.
 | `PulseSource` | Transport-time producer attribution | Lightweight source identifier carried on a Pulse before graduation. |
 | `BusReceiver` | Subscriber handle | Delivers matching Pulses in publish order with bounded replay state. |
 | `u64` sequence id | Bus ordering primitive | The default sequence identifier for Pulse ordering. |
+| `Heuristic` | Learned rule of thumb | Structured precondition-plus-prediction knowledge with calibration from lived episodes. |
+| `Falsifier` | Counterexample or test signal | A deliberate challenge that can violate a heuristic and force recalibration. |
+| `Worldview` | Heuristic cluster | A co-citation cluster of heuristics that holds up in a shared domain. |
 
 ### 5.2 Prominent Retired and Avoided Names
 
@@ -199,6 +205,9 @@ The following names are load-bearing additions in the current architecture:
 | `Demurrage` | The durable-memory holding cost that continuously taxes idle Engram balance while reinforcement refunds useful retrieval, citation, gate survival, and surprise. |
 | `Balance` | The attention-credit carried by an Engram under demurrage; Scorer and Composer read effective weight from balance rather than a standalone freshness field. |
 | `Cold tier` | A colder Substrate tier that keeps content-addressability and lineage intact after an Engram's balance reaches the configured floor. |
+| `Heuristic` | A first-class learned claim with explicit preconditions, a prediction, and calibration updates from actual outcomes. |
+| `Falsifier` | An observed challenge or counterexample that can refute, refine, or narrow a heuristic. |
+| `Worldview` | A domain-shaped cluster of heuristics that co-occur and reinforce one another under lived experience. |
 | `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
@@ -264,5 +273,6 @@ prefixes without coordination.
 - [07-substrate-trait.md](./07-substrate-trait.md) for the storage fabric
 - [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) for the transport fabric
 - [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md) for `Datum`-aware operator signatures
+- [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the heuristic, falsifier, and worldview refinement
 - [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md) for the canonical naming proposal
 - [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the fingerprint-first HDC proposal

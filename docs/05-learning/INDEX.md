@@ -12,7 +12,9 @@ The learning subsystem turns every agent execution into training data. Each agen
 
 REF12 extends that learning story with demurrage-governed freshness for playbooks and distilled knowledge: useful rules keep earning `balance`, stale ones cool and eventually leave the hot path, and retention is driven by use rather than a fixed-age window. See also [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [04-decay-variants](../00-architecture/04-decay-variants.md), and [25-attention-as-currency](../00-architecture/25-attention-as-currency.md).
 
-The subsystem is organized around three tiers of memory (episodes → patterns → playbook rules), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
+REF14 adds a first-class belief layer on top of those loops: `Heuristic` Engrams with explicit preconditions, predictions, falsifier surfaces, and calibration records. Matching heuristics are injected as advisory priors, outcome Pulses update their track record, worldview clusters keep multiple coherent prior sets alive, and playbooks become the concrete downstream projection rather than the only durable learning surface. See [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md), `../../tmp/refinements/14-worldview-validation.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
+
+The subsystem is organized around four durable learning surfaces (episodes → patterns → heuristics/worldviews → playbook projections), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
 
 ---
 
@@ -66,6 +68,7 @@ The subsystem is organized around three tiers of memory (episodes → patterns �
 | [16](16-predictive-foraging.md) | **Predictive Foraging** | Falsifiable predictions (duration, complexity, gate outcome, conflict). CalibrationTracker, arithmetic corrector (~50ns). Brier score calibration metric, reliability diagrams. |
 | [17](17-adas-and-autocatalytic.md) | **ADAS and Autocatalytic Thesis** | ADAS meta-architecture search (Hu et al. ICLR 2025, +14% ARC). EvoSkills (Chen et al. 2023). Autocatalytic sets (Kauffman 1993). Compound math: 0.9⁴ = 0.656. Ten flywheel mechanisms. Empirical testability via C-Factor trend. |
 | [18](18-self-learning-cybernetic-loops.md) | **Self-Learning & Cybernetic Feedback Loops** | Predict-publish-correct loop, per-operator calibration, `CalibrationPolicy`, `prediction.error.*`, and Bus-backed learners (`CascadeRouter`, `EpisodeLogger`, `ExperimentStore`). |
+| [19](19-heuristics-worldviews-and-falsifiers.md) | **Heuristics, Worldviews, and Falsifiers** | First-class `Heuristic` Engrams, explicit falsifier surfaces, `Calibrator` verdicts, worldview clustering, dissonance detection, and inspectable belief export/import. |
 
 ---
 

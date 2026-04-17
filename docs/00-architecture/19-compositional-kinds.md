@@ -15,6 +15,9 @@ The current `Kind` enum is flat: a Signal is a `GateVerdict` or a `PromptSection
 
 This document specifies `Kind::Compound(Vec<Kind>)` -- a compositional extension to the Kind system that lets a Signal carry multiple kinds simultaneously. It defines the semantics, dispatch rules, migration path, and backwards-compatibility constraints.
 
+The same composition model also gives learning-layer artifacts a clean type-level home when a record needs to carry both heuristic identity and worldview membership. That stays in the kind system rather than being represented as tags or ad hoc fields. See also
+[tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) and [Naming and Glossary](./01-naming-and-glossary.md).
+
 ---
 
 ## 1. The problem with flat kinds
@@ -285,5 +288,7 @@ impl Kind {
 - [02-engram-data-type.md](02-engram-data-type.md) -- Signal struct with Kind field
 - [08-scorer-gate-router-composer-policy.md](08-scorer-gate-router-composer-policy.md) -- Trait dispatch by Kind
 - [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md) -- Loop stages that filter by Kind
+- [01-naming-and-glossary.md](./01-naming-and-glossary.md) -- Canonical kind vocabulary, including heuristic and worldview terms
+- [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) -- Heuristic and worldview learning refinement
 - `crates/roko-core/src/kind.rs` -- Current Kind enum
 - `crates/roko-core/src/signal.rs` -- Signal struct

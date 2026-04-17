@@ -26,6 +26,11 @@ knowledge warm, and cold-tier freeze/thaw replaces blunt prune-only decay for lo
 `tmp/refinements/13-collective-intelligence-c-factor.md` adds c-factor as a continuously
 measured cohort diagnostic derived from Bus and Substrate statistics, with conditional Policy
 interventions when degraded group process correlates with worse outcomes.
+`tmp/refinements/14-worldview-validation.md` adds a first-class heuristic library with
+falsifier-driven calibration, worldview clustering, and inspectable belief export/import;
+start with [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
+[`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 
 ## Start Here
 
@@ -53,6 +58,11 @@ interventions when degraded group process correlates with worse outcomes.
 > measurement of collective process quality computed from Bus and Substrate traces; start with
 > [`00-architecture/14-c-factor-collective-intelligence.md`](00-architecture/14-c-factor-collective-intelligence.md)
 > and [`13-coordination/11-collective-intelligence-metrics.md`](13-coordination/11-collective-intelligence-metrics.md).
+> REF14 adds explicit heuristics, falsifiers, and worldview clustering as the inspectable belief
+> layer over that feedback system; start with
+> [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
+> [`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
+> and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 
 ## Topics
 
@@ -61,8 +71,8 @@ interventions when degraded group process correlates with worse outcomes.
 - [`02-agents/`](02-agents/INDEX.md) — 02 — Agents
 - [`03-composition/`](03-composition/INDEX.md) — 03 — Composition: Scaffold Layer (L2) — Prompt Assembly & Context Engineering
 - [`04-verification/`](04-verification/INDEX.md) — 04 — Verification (L3 Harness)
-- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, calibration policies, and prediction-error feedback
-- [`06-neuro/`](06-neuro/INDEX.md) — Neuro — Cognitive Knowledge Layer
+- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, heuristics, worldview calibration, and prediction-error feedback
+- [`06-neuro/`](06-neuro/INDEX.md) — Neuro — Cognitive Knowledge Layer and durable heuristic library
 - [`07-conductor/`](07-conductor/INDEX.md) — 07 — Conductor Subsystem
 - [`08-chain/`](08-chain/INDEX.md) — Topic 08: Chain Layer (Korai)
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine

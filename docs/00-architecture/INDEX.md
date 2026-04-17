@@ -54,6 +54,10 @@ This topic is the entry point for understanding Roko. It covers the theoretical 
 (Engram, Score, Decay, Provenance, ContentHash), the operator composition model, the cognitive
 loop, and the frontier innovations that emerge from the architecture.
 
+See also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the learning-side heuristic,
+falsifier, and worldview framing, and [Naming and Glossary](./01-naming-and-glossary.md) for
+the canonical vocabulary.
+
 ---
 
 ## Contents
@@ -125,8 +129,8 @@ This topic connects to:
 - [Topic 02: Agents](../02-agents/INDEX.md) — Agent types built on the Synapse Architecture
 - [Topic 03: Composition](../03-composition/INDEX.md) — Context engineering and the Composer trait in depth
 - [Topic 04: Verification](../04-verification/INDEX.md) — Gate pipeline and verification strategies
-- [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, skills, bandits, calibration policies, predict/publish/correct loops
-- [Topic 06: Neuro](../06-neuro/INDEX.md) — Knowledge management cross-cut in depth
+- [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, heuristics, falsifier-driven calibration, worldview clustering, bandits, predict/publish/correct loops
+- [Topic 06: Neuro](../06-neuro/INDEX.md) — Knowledge management cross-cut in depth, including the heuristic library and distillation pipeline
 - [Topic 09: Daimon](../09-daimon/INDEX.md) — Motivation and affect cross-cut in depth
 - [Topic 10: Dreams](../10-dreams/INDEX.md) — Offline learning cross-cut in depth
 - [Topic 08: Chain](../08-chain/INDEX.md) — Korai chain and on-chain capabilities
