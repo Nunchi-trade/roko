@@ -7,7 +7,9 @@
 > highest leverage improvement. The earlier engine/event-bus proposal is now the promoted
 > kernel `Bus` trait at L0: the transport fabric beside `Substrate`, with `Topic`,
 > `TopicFilter`, and bounded replay on the Bus ring as the coordination vocabulary.
-> See also `tmp/refinements/03-bus-as-first-class.md` and [01-naming-and-glossary.md](./01-naming-and-glossary.md).
+> See also `tmp/refinements/03-bus-as-first-class.md`,
+> `tmp/refinements/09-phase-2-implications.md`, and
+> [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
 > **Implementation**: Reference
 
@@ -46,6 +48,24 @@ map covers all pairwise relationships between these 22 sections.
 | 19 | Deployment | (build/ops) | Packaging, Docker, WASM, daemon | Infrastructure |
 | 20 | Technical Analysis | `roko-oracle` (planned) | Prediction, calibration, domain oracles | L2/L3 |
 | 21 | References | (docs only) | Master citation index | Documentation |
+
+---
+
+### 1.1 REF09 Overlay: Phase-2 Systems on the Same Kernel
+
+REF09 removes the need to treat Chain, Dreams, Coordination, Heartbeat, and the HTTP control
+plane as special architecture branches. In the two-fabric model they are standard Bus and
+Substrate consumers or backends:
+
+| Subsystem | Durable side | Live side | Net effect |
+|---|---|---|---|
+| Chain | `ChainSubstrate` stores and queries on-chain Engrams | `ChainBus` maps chain logs into `chain.*` Pulses | Chain consumers stop polling chain state just to notice fresh work |
+| Dreams | Substrate scan remains the complete consolidation source | Bus subscription to `substrate.engram.stored` wakes Delta work reactively | Delta-speed can be threshold-triggered instead of fixed polling |
+| Coordination | Pheromones persist as Engrams in shared Substrates | `mesh.pheromone.deposited` and related Pulses alert nearby agents | Stigmergy becomes literal storage plus transport rather than custom plumbing |
+| Heartbeat | Tick history may still persist as Engrams when needed | `HeartbeatPolicy` publishes `heartbeat.{gamma,theta,delta}.tick` Pulses | Clock consumers subscribe by topic instead of importing a scheduler |
+| Interfaces | REST reads and durable writes project Substrate state | WebSocket and SSE streams project Bus subscriptions | `roko-serve` becomes a thin projection layer rather than a custom fanout path |
+
+This overlay is the architecture-level summary of `tmp/refinements/09-phase-2-implications.md`.
 
 ---
 
@@ -183,30 +203,29 @@ graph TB
     style DREAMS fill:#49a,stroke:#333
 ```
 
-### 3.3 Engram Flow Taxonomy
+### 3.3 Datum Flow Taxonomy
 
-Every inter-section data flow carries Engrams of specific Kinds. The complete Kind flow map:
+Cross-section exchange now uses both mediums: durable Engrams in Substrate and ephemeral
+Pulses on the Bus. The map below highlights the Phase-2 flows that REF09 clarifies.
 
-| Source Section | Engram Kind | Target Section(s) | Status |
-|---|---|---|---|
-| 01-Orchestration | `Kind::Plan`, `Kind::Task` | 02-Agents, 04-Verification | Wired |
-| 02-Agents | `Kind::AgentOutput` | 04-Verification, 05-Learning | Wired |
-| 02-Agents | `Kind::ToolCall`, `Kind::ToolResult` | 18-Tools, 11-Safety | Wired |
-| 03-Composition | `Kind::Prompt` | 02-Agents | Wired |
-| 04-Verification | `Kind::GateVerdict` | 01-Orchestration, 05-Learning | Wired |
-| 05-Learning | `Kind::Episode` | 06-Neuro, 10-Dreams | Partial |
-| 05-Learning | `Kind::Playbook` | 03-Composition | Partial |
-| 05-Learning | `Kind::Skill` | 03-Composition | Missing |
-| 06-Neuro | `Kind::Insight`, `Kind::Heuristic` | 03-Composition, 01-Orchestration | Partial |
-| 06-Neuro | `Kind::Warning` | 11-Safety, 03-Composition | Missing |
-| 06-Neuro | `Kind::AntiKnowledge` | 03-Composition, 01-Orchestration | Missing |
-| 07-Conductor | `Kind::Intervention` | 01-Orchestration | Wired |
-| 08-Chain | `Kind::Transaction` | 04-Verification, 14-Economy | Wired (chain path) |
-| 09-Daimon | `Kind::AffectState` | 03-Composition, 16-Heartbeat | Missing |
-| 10-Dreams | `Kind::DreamInsight` | 06-Neuro | Missing |
-| 13-Coordination | `Kind::Pheromone` | 06-Neuro, 01-Orchestration | Missing |
-| 15-Code Intelligence | `Kind::Symbol` | 03-Composition, 02-Agents | Missing |
-| 20-Tech Analysis | `Kind::Prediction` | 05-Learning, 16-Heartbeat | Partial |
+| Source Section | Datum | Fabric | Target Section(s) | Status |
+|---|---|---|---|---|
+| 01-Orchestration | `Kind::Plan`, `Kind::Task` | Substrate | 02-Agents, 04-Verification | Wired |
+| 02-Agents | `Kind::AgentOutput` | Substrate | 04-Verification, 05-Learning | Wired |
+| 02-Agents | `tool.call.started`, `tool.call.finished` Pulses | Bus | 11-Safety, 12-Interfaces | Partial |
+| 04-Verification | `Kind::GateVerdict` | Substrate | 01-Orchestration, 05-Learning | Wired |
+| 04-Verification | `gate.verdict.emitted` Pulse | Bus | 05-Learning, 09-Daimon, 12-Interfaces | Partial |
+| 05-Learning | `Kind::Episode` | Substrate | 06-Neuro, 10-Dreams | Partial |
+| 06-Neuro | `Kind::Insight`, `Kind::Heuristic` | Substrate | 03-Composition, 01-Orchestration | Partial |
+| 08-Chain | durable chain records via `ChainSubstrate` | Substrate | 04-Verification, 14-Economy, 13-Coordination | Proposed |
+| 08-Chain | `chain.*` Pulses via `ChainBus` | Bus | 05-Learning, 07-Conductor, 12-Interfaces | Proposed |
+| 10-Dreams | consolidated `Kind::Insight` / `Kind::Heuristic` | Substrate | 06-Neuro, 03-Composition | Proposed |
+| 10-Dreams | `engram.promoted`, `neuro.insight.promoted` Pulses | Bus | 03-Composition, 06-Neuro, 12-Interfaces | Proposed |
+| 13-Coordination | `Kind::Pheromone` | Substrate | 06-Neuro, 01-Orchestration, 08-Chain | Proposed |
+| 13-Coordination | `mesh.pheromone.deposited` Pulse | Bus | 02-Agents, 03-Composition, 12-Interfaces | Proposed |
+| 16-Heartbeat | optional tick or telemetry Engrams | Substrate | 05-Learning, 12-Interfaces | Planned |
+| 16-Heartbeat | `heartbeat.gamma.tick`, `heartbeat.theta.tick`, `heartbeat.delta.tick` Pulses | Bus | 07-Conductor, 09-Daimon, 10-Dreams | Proposed |
+| 20-Tech Analysis | `Kind::Prediction` | Substrate | 05-Learning, 16-Heartbeat | Partial |
 
 ---
 
@@ -223,8 +242,11 @@ transport alike.
 | **Substrate** | 00-Architecture | `MemorySubstrate` | Wired |
 | **Substrate** | 06-Neuro | `NeuroStore` (as `FileSubstrate`) | Wired |
 | **Substrate** | 08-Chain | `ChainSubstrate` | Scaffold |
+| **Substrate** | 13-Coordination | `MeshSubstrate` | Proposed in REF09 as the shared durable mesh backend |
 | **Substrate** | 15-Code Intel | `SymbolSubstrate` | Missing |
 | **Bus** | 00-Architecture | `BroadcastBus` / `MemoryBus` | Wired |
+| **Bus** | 08-Chain | `ChainBus` | Proposed in REF09 as the chain-log to topic adapter |
+| **Bus** | 13-Coordination | `MeshBus` | Proposed in REF09 as the mesh transport backend |
 | **Scorer** | 00-Architecture | `RecencyScorer` | Wired |
 | **Scorer** | 03-Composition | `RelevanceScorer` | Wired |
 | **Scorer** | 06-Neuro | `KnowledgeScorer` (multi-factor) | Missing |
@@ -244,6 +266,7 @@ transport alike.
 | **Policy** | 05-Learning | `PredictionPolicy` | Wired |
 | **Policy** | 13-Coordination | `CFactorPolicy` | Wired into prompt-time collective calibration guidance |
 | **Policy** | 10-Dreams | `DreamSchedulePolicy` | Missing |
+| **Policy** | 16-Heartbeat | `HeartbeatPolicy` | Proposed in REF09 as the publisher of heartbeat tick Pulses |
 | **Policy** | 13-Coordination | `PheromonePolicy` | Missing |
 
 ### 4.2 Trait Consumption by Section
@@ -335,6 +358,10 @@ roko.toml (Section 00: Architecture)
 Missing integrations ranked by impact × feasibility. Impact measures how much the missing
 connection limits the system's self-improvement capability. Feasibility measures how much
 existing code can be reused.
+
+REF09 changes the shape of several entries: Chain, Dreams, Coordination, Heartbeat, and
+Interfaces no longer need bespoke side channels or new trait families. They reduce to Bus
+topics, Bus projections, and backend swaps on the existing two-fabric kernel.
 
 | # | Missing Integration | From → To | Impact | Feasibility | LOC Est. | Tier |
 |---|---|---|---|---|---|---|
@@ -642,50 +669,66 @@ pub enum ProvenanceDimension {
 an optional `dimension: Option<ProvenanceDimension>` field. Existing code continues to work
 (field defaults to `None`); new cross-section flows tag their dimension.
 
-### 7.3 Dreams as Off-Loop Projection Builder
+### 7.3 Dreams as a Two-Fabric Consolidation Consumer
 
-**Research basis:** arXiv:2507.03724 (MemOS lifecycle model), event sourcing literature.
+**Research basis:** arXiv:2507.03724 (MemOS lifecycle model), consolidation literature, and
+`tmp/refinements/09-phase-2-implications.md`.
 
-**Problem:** The Dreams subsystem is designed as a separate process that runs during idle time.
-But it needs access to the same episode log that the learning subsystem writes to. Currently,
-there is no protocol for Dreams to "catch up" on episodes it hasn't processed.
+**Problem:** Dreams is currently described like a polling-only background loop. That misses the
+Bus side of the two-fabric kernel and makes Delta-speed look fixed-cadence when it should be
+threshold-triggered by fresh durable work.
 
-**Proposal:** Treat Dreams as an event log projection — a background consumer that maintains
-a cursor into `episodes.jsonl` and processes episodes in order, emitting consolidated
-knowledge back to NeuroStore.
+**Proposal:** Treat Dreams as a two-input subsystem:
+
+- a **Substrate scan** remains the source of completeness for replay and consolidation
+- a **Bus subscription** to `substrate.engram.stored` provides the wake-up and bounded catch-up
 
 ```rust
 pub struct DreamProjection {
-    /// Last processed episode offset (persisted to .roko/learn/dream-cursor.json)
-    cursor: u64,
-    /// Accumulated episodes since last consolidation
-    pending_episodes: Vec<Episode>,
-    /// Consolidation trigger threshold
-    min_episodes_for_nrem: usize,  // default: 20
+    /// Last durable point fully scanned in the Substrate.
+    last_scan_cursor: Option<ContentHash>,
+    /// Recent storage Pulses that suggest new consolidation work is available.
+    wake_buffer: Vec<Pulse>,
+    /// Threshold of fresh durable items before Delta work starts.
+    min_new_engrams: usize,
 }
 
 impl DreamProjection {
-    /// Process new episodes from the log
-    pub fn catch_up(&mut self, episode_log: &EpisodeLog) -> Vec<ConsolidatedKnowledge> {
-        let new_episodes = episode_log.read_from(self.cursor);
-        self.pending_episodes.extend(new_episodes);
-        self.cursor = episode_log.latest_offset();
-
-        if self.pending_episodes.len() >= self.min_episodes_for_nrem {
-            let consolidated = self.run_nrem_cycle();
-            self.pending_episodes.clear();
-            consolidated
-        } else {
-            vec![]
+    pub async fn on_pulse(&mut self, pulse: Pulse) {
+        if pulse.topic == "substrate.engram.stored" {
+            self.wake_buffer.push(pulse);
         }
+    }
+
+    pub async fn maybe_run_delta(
+        &mut self,
+        substrate: &dyn Substrate,
+        bus: &dyn Bus,
+    ) -> Result<()> {
+        if self.wake_buffer.len() < self.min_new_engrams {
+            return Ok(());
+        }
+
+        let candidates = substrate.query(self.scan_query()).await?;
+        let consolidated = self.run_consolidation(candidates).await?;
+
+        for engram in consolidated {
+            substrate.put(engram.clone()).await?;
+            bus.publish(Pulse::new("engram.promoted")).await?;
+        }
+
+        self.wake_buffer.clear();
+        Ok(())
     }
 }
 ```
 
 **Integration points:**
-- `orchestrate.rs` calls `dream_projection.catch_up()` when an agent idle period begins.
-- Consolidated knowledge feeds into NeuroStore (closing the Dreams → Neuro gap, M7).
-- The cursor file enables crash recovery — Dreams picks up where it left off.
+- Dreams subscribes to `substrate.engram.stored` for reactivity but still scans Substrate for completeness.
+- Consolidated `Kind::Insight` and `Kind::Heuristic` Engrams persist through Substrate.
+- Promotion Pulses such as `engram.promoted` and `neuro.insight.promoted` let Neuro,
+  Composition, and Interfaces react without re-querying.
+- Delta-speed remains slower than Gamma and Theta, but it no longer implies fixed polling.
 
 ### 7.4 Compiled Dependency Graph
 

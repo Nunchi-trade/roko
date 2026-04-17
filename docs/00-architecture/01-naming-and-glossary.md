@@ -6,7 +6,11 @@
 > When any other document disagrees with a definition here, this glossary is authoritative.
 > This serves as a quick-reference companion to the full architecture documentation. See also
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion that makes the transport
-> fabric a first-class kernel surface beside Substrate.
+> fabric a first-class kernel surface beside Substrate,
+> `tmp/refinements/04-operators-generalized.md` for the `Datum` and `PolicyOutputs` operator
+> generalization, and
+> `tmp/refinements/09-phase-2-implications.md` for how Chain, Dreams, Coordination, and
+> Heartbeat land on the same two-fabric kernel.
 
 
 > **Implementation**: Shipping
@@ -41,7 +45,8 @@ parenthetical notes when quoting legacy sources).
 > ephemeral medium is **Pulse**; the two fabrics are **Substrate** and **Bus**. See
 > [06-synapse-traits.md](./06-synapse-traits.md),
 > [07-substrate-trait.md](./07-substrate-trait.md), and
-> `tmp/refinements/03-bus-as-first-class.md`.
+> `tmp/refinements/03-bus-as-first-class.md`. REF09 extends that same vocabulary to
+> `ChainBus`, `MeshBus`, and `HeartbeatPolicy`; see `tmp/refinements/09-phase-2-implications.md`.
 
 ---
 
@@ -167,6 +172,7 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **Topic** | Dot-separated routing handle for Pulses on a Bus, such as `gate.verdict.emitted` or `agent.msg.chunk`. |
 | **TopicFilter** | Declarative Bus subscription filter with `Exact`, `Glob`, `AnyOf`, `All`, `And`, `Or`, and `Not` forms. |
 | **BusReceiver** | Subscriber handle returned by `Bus::subscribe()`. Delivers Pulses in publish order and carries sequence state for bounded replay. |
+| **Datum** | Polymorphic operator input: `enum Datum<'a> { Engram(&'a Engram), Pulse(&'a Pulse) }`. Used when operators need to accept either medium without inventing a new trait family. |
 | **Synapse Architecture** | Roko's architectural story: two mediums (Engram and Pulse), two fabrics (Substrate and Bus), and six operators. Replaces the older single-medium mnemonic. |
 | **Five Layers** | Runtime (L0) / Framework (L1) / Scaffold (L2) / Harness (L3) / Orchestration (L4). |
 | **Cognitive Cross-Cuts** | Neuro / Daimon / Dreams — subsystems injected across multiple layers. |
@@ -214,9 +220,11 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | **C-Factor** | Collective intelligence ratio: `C-Factor = Collective Performance / Sum(Individual Performances)`. Values > 1.0 indicate superlinear intelligence. (Woolley et al. 2010) |
 | **C-Score** | Composite optimization metric: `gate_pass×0.3 + cost_efficiency×0.2 + speed×0.15 + first_try_rate×0.25 + knowledge_growth×0.1`. |
 | **CascadeRouter** | Multi-stage model routing: confidence threshold → contextual bandit (LinUCB) → cost-aware selection. Persisted to `.roko/learn/cascade-router.json`. |
+| **ChainBus** | Bus backend that turns Korai or Daeji log streams into topic-addressed Pulses such as `chain.deposit.emitted`. It is the transport sibling to `ChainSubstrate`, not a replacement for durable on-chain storage. |
+| **ChainSubstrate** | Substrate backend for durable on-chain Engrams such as attestations, transactions, insights, bounties, and pheromones. Queries durable chain state; live chain notifications belong on `ChainBus`. |
 | **Cognitive Loop** | The 9-step universal loop: PERCEIVE → EVALUATE → ATTEND → INTEGRATE → ACT → VERIFY → PERSIST → ADAPT → META-COGNIZE. |
 | **Collective** | A group of cooperating agents. Replaces "Clade." |
-| **Composer** | Synapse trait. Combines multiple Engrams into one new Engram under Budget constraints. Synchronous. Takes `&dyn Scorer`. |
+| **Composer** | Synapse trait. Combines `Datum` inputs into one durable Engram under Budget constraints. Synchronous. Takes `&dyn Scorer`. |
 | **ContentHash** | 32-byte BLAKE3 digest identifying an Engram. Computed from kind + body + author + tags. Score and decay are excluded. |
 | **Context** | The shared runtime environment passed to every trait method. Carries time (`now_ms`), goal, session, and extension attributes. |
 
@@ -224,6 +232,7 @@ These terms are introduced in the new architecture and do not appear in legacy d
 
 | Term | Definition |
 |---|---|
+| **Datum** | Polymorphic operator input: `enum Datum<'a> { Engram(&'a Engram), Pulse(&'a Pulse) }`. Used by Scorer and Composer where the same operator should accept either medium. |
 | **Daimon** | Motivation and focus subsystem (`roko-daimon`). Maintains PAD (Pleasure-Arousal-Dominance) vectors, six behavioral states, and somatic markers. The agent's self-model. |
 | **Decay** | Time-based weight reduction for Engrams. Variants: None (permanent), HalfLife (exponential), Ttl (hard cutoff), Ebbinghaus (psychological forgetting curve). |
 | **Delta** | Consolidation cognitive speed. Hours timescale. Dreams: replay, synthesis, pruning. Knowledge tier promotion. |
@@ -246,13 +255,14 @@ These terms are introduced in the new architecture and do not appear in legacy d
 |---|---|
 | **Forensic AI** | Content-addressed causal replay — the ability to trace any decision back to its inputs via lineage chains. Regulatory pre-compliance moat. |
 | **Gamma** | Reactive cognitive speed. ~5-15 second timescale. One complete loop tick: tool calls, LLM inference, verification. |
-| **Gate** | Synapse trait. Verifies an Engram against ground truth, producing a Verdict. Asynchronous. The bridge to external reality. |
+| **Gate** | Synapse trait. Verifies an Engram against ground truth and can optionally verify a Pulse window through a `verify_stream` path. Asynchronous. The bridge to external reality. |
 
 ### H-K
 
 | Term | Definition |
 |---|---|
 | **HDC** | Hyperdimensional Computing. 10,240-bit vectors using XOR bind, majority bundle, Hamming similarity. Used for semantic similarity in knowledge retrieval. (Kanerva 2009, Cognitive Computation 1(2); Plate 2003; Frady et al. 2018) |
+| **HeartbeatPolicy** | Policy-owned clock publisher that emits `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses on the Bus. REF09 frames heartbeat as a Bus producer rather than a special orchestration mechanism. |
 | **Hypnagogia** | The creative hypothesis generator in `roko-dreams`. Four components: Thalamic Gate (stimulus filter), Executive Loosener (constraint relaxation), Dali Interrupt (capture mechanism), Homuncular Observer (coherence filter). |
 | **Kind** | The semantic type of an Engram. `#[non_exhaustive]` enum with variants for agent runtime, verification, tasks, context, routing, memory, observability, chain participation, and `Custom(String)` for extensions. |
 | **KORAI** | Mainnet token on the Korai chain. 1% annual demurrage. Replaces "GNOS." |
@@ -263,6 +273,8 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | Term | Definition |
 |---|---|
 | **Lineage** | A vector of ContentHashes tracking the parent Engrams from which a new Engram was derived. Forms an audit DAG. |
+| **MeshBus** | Bus backend for inter-agent transport over NATS or libp2p-style meshes. Carries Pulses such as `mesh.pheromone.deposited` without becoming the durable coordination store. |
+| **MeshSubstrate** | Shared Substrate backend for durable multi-agent Engrams replicated across the mesh. Holds the pheromone and shared-knowledge records that `MeshBus` announces. |
 | **Neuro** | Knowledge management subsystem (`roko-neuro`). Six knowledge types (Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge). Four tiers (Transient, Working, Consolidated, Persistent). HDC encoding for similarity. |
 | **NeuroStore** | The storage backend for the Neuro subsystem. |
 
@@ -271,8 +283,9 @@ These terms are introduced in the new architecture and do not appear in legacy d
 | Term | Definition |
 |---|---|
 | **Outcome** | Feedback about a prior Router selection. Carries success/failure, reward, cost, and latency. Used by Routers to learn via bandit algorithms. |
-| **Pheromone** | A stigmergic signal with time-based decay. Three types: THREAT (2h half-life), OPPORTUNITY (4h), WISDOM (24h). Agents communicate indirectly by reading and writing pheromones to shared Substrates. |
-| **Policy** | Synapse trait. Watches Engram streams and emits new Engrams in response (interventions, reactions). Synchronous. Batch input. |
+| **Pheromone** | A stigmergic Engram with time-based decay. Three types: THREAT (2h half-life), OPPORTUNITY (4h), WISDOM (24h). Agents deposit pheromones into shared Substrates and announce fresh deposits on Bus topics such as `mesh.pheromone.deposited`. |
+| **Policy** | Synapse trait. Watches Pulse streams and emits `PolicyOutputs` in response. Policies publish live reactions as Pulses and persist summaries, verdict records, or graduated artifacts as Engrams. |
+| **PolicyOutputs** | Policy return type with two channels: `pulses: Vec<Pulse>` for Bus publication and `engrams: Vec<Engram>` for Substrate persistence. |
 | **Pulse** | Ephemeral medium carried by the Bus. Pulses are topic-addressed, sequence-numbered, ring-buffered for short replay, and not persisted by default. |
 | **Provenance** | Who produced an Engram and how trustworthy they are. Fields: author (String), trust ([0,1]), tainted (bool), session (Option). |
 
@@ -282,15 +295,15 @@ These terms are introduced in the new architecture and do not appear in legacy d
 |---|---|
 | **Query** | Filter specification for Substrate lookups. Fields: kinds, author, session, since_ms, until_ms, min_weight, tags, limit. |
 | **ROSEDUST** | Dark-only design system. Rose on void-black. The visual identity for all Roko interfaces. |
-| **Router** | Synapse trait. Selects one Engram from candidates. Has `feedback()` method for learning from outcomes. Synchronous. |
+| **Router** | Synapse trait. Selects among Engram candidates for durable retrieval or Pulse candidates for live routing. Has `feedback()` for learning from outcomes and may expose separate `select_engram` and `select_pulse` entry points. |
 
 ### S
 
 | Term | Definition |
 |---|---|
 | **Score** | Multi-dimensional quality assessment of an Engram. 4 stable axes: confidence [0,1], novelty [0,1], utility [0,∞), reputation [0,∞). 3 extended axes (planned): precision [0,1], salience [0,1], coherence [0,1]. Effective score formula: `confidence × (1 + novelty) × (1 + utility) × reputation`. |
-| **Scorer** | Synapse trait. Rates an Engram along multiple axes, producing a Score. Synchronous. Pure function of (Engram, Context). |
-| **Selection** | Output of a Router: the chosen Engram's ContentHash, confidence, router name, and optional reasoning. |
+| **Scorer** | Synapse trait. Rates either medium, usually through monomorphic `score_engram` and `score_pulse` methods plus a thin `score(Datum, Context)` dispatcher. Synchronous. |
+| **Selection** | Output of a Router: the chosen Engram or Pulse candidate, plus confidence, router name, and optional reasoning. |
 | **Spectre** | Procedurally generated dot-cloud creature per agent. Body encodes cognitive state; eyes encode emotion; clarity encodes prediction accuracy. |
 | **Substrate** | Storage fabric and kernel trait for durable Engrams. Multiple backends include MemorySubstrate, FileSubstrate, HdcSubstrate, and ChainSubstrate. |
 | **Synapse Architecture** | The compositional model underlying Roko: two mediums moving through two fabrics, coordinated by six operators across five layers. |
@@ -301,8 +314,8 @@ These terms are introduced in the new architecture and do not appear in legacy d
 |---|---|
 | **T0 / T1 / T2** | Inference tiers. T0: no LLM call (direct tool call, ~80% of ticks). T1: fast model, shallow reasoning (~15%). T2: full model, deep reasoning (~5%). Routing emerges from active inference (EFE). |
 | **Theta** | Reflective cognitive speed. ~75 second timescale. Summarize recent work, update Daimon state, check predictions. |
-| **TickOutcome** | The result of one `loop_tick` invocation. Contains: candidates_examined, composed Engram, Verdict, emitted Engrams, written ContentHashes. |
-| **Topic** | Dot-separated routing handle for Pulses. Topics name transport intent rather than storage identity. |
+| **TickOutcome** | The result of one `loop_tick` invocation. In the generalized operator model it spans both durable persistence and live publication: candidates examined, composed Engram, Verdict, emitted Pulses, emitted Engrams, and written ContentHashes. |
+| **Topic** | Dot-separated routing handle for Pulses. Topics name transport intent rather than storage identity, for example `mesh.pheromone.deposited` or `heartbeat.gamma.tick`. |
 | **TopicFilter** | Declarative matcher for Bus subscriptions and replay queries. Supports exact, glob, set, and boolean composition. |
 | **Verdict** | Output of a Gate. Contains: passed (bool), reason (String), gate name, score [0,1], optional detail, optional TestCount, optional error_digest, duration_ms. |
 

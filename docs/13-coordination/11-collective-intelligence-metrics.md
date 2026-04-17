@@ -9,6 +9,9 @@
 > **Prerequisites**: `00-stigmergy-theory.md` (coordination fundamentals),
 > `10-exponential-flywheel.md` (what the metrics should detect)
 
+> **See also**: `../../tmp/refinements/09-phase-2-implications.md`,
+> `../00-architecture/01-naming-and-glossary.md`
+
 
 > **Implementation**: Specified
 
@@ -17,15 +20,17 @@
 ## Overview
 
 Stigmergic coordination is only valuable if it produces measurable collective intelligence —
-outputs that exceed what individual agents could achieve alone. This sub-doc specifies the
-metrics framework for measuring, diagnosing, and optimizing collective intelligence in Roko
-Collectives.
+outputs that exceed what individual agents could achieve alone. In the two-fabric model,
+collectives are pub/sub topologies on the Bus, so the metrics framework measures Bus
+statistics, task outcomes, and lineage together. This sub-doc specifies the metrics framework
+for measuring, diagnosing, and optimizing collective intelligence in Roko Collectives.
 
 The central metric is the **C-Factor** (Collective Intelligence Factor), derived from Woolley
 et al.'s seminal research on human groups [Woolley, A.W. et al. "Evidence for a Collective
 Intelligence Factor in the Performance of Human Groups." *Science*, 330(6004):686-688, 2010].
 The C-Factor quantifies the degree to which a collective's performance exceeds the sum of
-its members' individual performances.
+its members' individual performances, using Bus statistics to explain how coordination
+actually flowed.
 
 ---
 
@@ -54,9 +59,9 @@ C-Factor = Collective_Output / Σ(Individual_Outputs)
 Where:
 - `Collective_Output` = the quality-weighted task completions achieved by the Collective
   working together (with pheromone coordination, morphogenetic specialization, shared
-  knowledge)
+  knowledge, and Bus-mediated triggers)
 - `Σ(Individual_Outputs)` = the sum of quality-weighted task completions each agent would
-  achieve working independently (no coordination, no shared pheromones)
+  achieve working independently (no coordination, no shared pheromones, no shared Bus)
 
 | C-Factor | Interpretation |
 |----------|---------------|
@@ -68,13 +73,14 @@ Where:
 
 ### Measurement Method
 
-C-Factor measurement requires a controlled comparison:
+C-Factor measurement requires a controlled comparison built from Bus statistics:
 
 1. **Collective trial**: Run the Collective on a task set with full coordination (pheromone
-   field, morphogenetic specialization, knowledge sharing enabled)
+   Bus publication, morphogenetic specialization, knowledge sharing enabled)
 2. **Individual baseline**: Run each agent independently on the same task set (coordination
    disabled)
-3. **Compute ratio**: C-Factor = Collective score / Sum of individual scores
+3. **Compute ratio**: C-Factor = Collective score / Sum of individual scores, where the score
+   is reconstructed from task outcomes and Bus topic traces
 
 For ongoing measurement (without disrupting production), Roko uses an estimation approach:
 
@@ -118,15 +124,15 @@ In Woolley et al.'s human group studies, the most predictive feature of collecti
 was **equality of conversational turn-taking** — groups where one person dominated performed
 worse than groups where contributions were more equally distributed.
 
-For Roko Collectives, turn-taking equality measures how evenly pheromone deposits are
-distributed across agents:
+For Roko Collectives, turn-taking equality measures how evenly pheromone-related Bus
+publishes are distributed across agents:
 
 ```rust
-/// Measure turn-taking equality in pheromone deposits.
+/// Measure turn-taking equality in pheromone-related Bus activity.
 ///
 /// Returns a value in [0, 1]:
-/// - 1.0 = perfectly equal (all agents deposit equally)
-/// - 0.0 = maximally unequal (one agent deposits everything)
+/// - 1.0 = perfectly equal (all agents publish equally)
+/// - 0.0 = maximally unequal (one agent publishes everything)
 ///
 /// Uses normalized Shannon entropy of deposit counts.
 pub fn turn_taking_equality(
@@ -152,17 +158,17 @@ pub fn turn_taking_equality(
 ```
 
 **Target**: > 0.7. Below this threshold, the Collective has a "loudest agent" problem — one
-agent's pheromones dominate the field, reducing the diversity benefit.
+agent's Bus traffic dominates the field, reducing the diversity benefit.
 
 ### Signal 2: Knowledge Flow Rate
 
 How quickly does knowledge propagate through the Collective? Measured as the average time
-between a pheromone deposit and its first confirmation by a different agent:
+between a pheromone-related Bus publish and its first confirmation by a different agent:
 
 ```rust
-/// Measure knowledge flow rate in the Collective.
+/// Measure knowledge flow rate in the Collective from Bus statistics.
 ///
-/// Returns the average time (in ticks) between pheromone deposit
+/// Returns the average time (in ticks) between Bus publication
 /// and first confirmation by a different agent. Lower is better.
 pub fn knowledge_flow_rate(
     deposits: &[PheromoneDeposit],
@@ -185,15 +191,16 @@ pub fn knowledge_flow_rate(
 ```
 
 **Target**: < 100 ticks (~25 minutes at 4 ticks/minute). Slower flow rates indicate
-communication bottlenecks or insufficient agent overlap.
+communication bottlenecks, insufficient agent overlap, or Bus backpressure.
 
 ### Signal 3: Cross-Domain Transfer
 
 How often does a pheromone deposited by one agent type influence an agent of a different type?
-This measures the cross-pollination of ideas across specialization boundaries.
+This measures the cross-pollination of ideas across specialization boundaries, expressed as
+Bus-topic reach across domains.
 
 ```rust
-/// Measure cross-domain transfer rate.
+/// Measure cross-domain transfer rate from Bus topic statistics.
 ///
 /// Returns the fraction of pheromone sensing events where the
 /// sensing agent has a different primary domain than the depositing
@@ -212,18 +219,18 @@ pub fn cross_domain_transfer(
 ```
 
 **Target**: > 0.2. Below this threshold, agents are operating in silos — each domain's
-pheromones only influence agents in the same domain, missing the cross-domain resonance
+Bus traffic only influences agents in the same domain, missing the cross-domain resonance
 mechanism (see `10-exponential-flywheel.md`, Mechanism 7).
 
 ### Signal 4: Emergent Coordination
 
 How often do agents spontaneously coordinate without explicit task assignment? Measured by
-the frequency of "coordination chains" — sequences where Agent A's pheromone deposit triggers
-Agent B's action, which triggers Agent C's action, without any central orchestrator directing
-the chain.
+the frequency of "coordination chains" — sequences where Agent A's Bus publish triggers Agent
+B's action, which triggers Agent C's action, without any central orchestrator directing the
+chain.
 
 ```rust
-/// Measure emergent coordination rate.
+/// Measure emergent coordination rate from Bus-triggered actions.
 ///
 /// Returns the fraction of task completions that were triggered by
 /// pheromone sensing (stigmergic coordination) rather than direct
@@ -247,7 +254,7 @@ emerges from pheromone sensing rather than top-down assignment.
 
 ### Composite C-Score
 
-The four signals combine into a composite score:
+The four signals combine into a composite score built from Bus statistics and task outcomes:
 
 ```
 C-Score = w₁ × turn_taking + w₂ × (1 / knowledge_flow) + w₃ × cross_domain + w₄ × emergent
@@ -762,9 +769,9 @@ Diagnostics:
   Cross-domain transfer:  0.28  [▓▓▓░░░░░░░] ✓
   Emergent coordination:  0.35  [▓▓▓░░░░░░░] ✓
 
-Pheromone Field:
-  Active pheromones: 142
-  Field entropy: 0.63 [▓▓▓▓▓▓░░░░]
+Bus Statistics:
+  Active Pulses: 142
+  Topic entropy: 0.63 [▓▓▓▓▓▓░░░░]
   Confirmation rate: 0.41
 
 Morphogenetic:
@@ -782,11 +789,11 @@ The metrics feed back into the coordination system to optimize collective intell
 
 | Metric | Below Target | Adjustment |
 |--------|-------------|-----------|
-| C-Factor < 1.0 | Coordination overhead too high | Reduce pheromone deposit frequency; simplify pheromone kinds |
-| Turn-taking < 0.7 | Dominant agent | Increase morphogenetic inhibition; reduce dominant agent's deposit rate |
-| Knowledge flow > 100 ticks | Slow propagation | Increase immediate push threshold; check transport health |
+| C-Factor < 1.0 | Coordination overhead too high | Reduce Bus publish frequency; simplify pheromone kinds |
+| Turn-taking < 0.7 | Dominant agent | Increase morphogenetic inhibition; reduce dominant agent's publish rate |
+| Knowledge flow > 100 ticks | Slow propagation | Increase immediate push threshold; check Bus health |
 | Cross-domain < 0.2 | Siloed agents | Lower domain filter thresholds; add cross-domain scoring bonus |
-| Emergent coordination < 0.3 | Over-orchestrated | Reduce explicit task assignment; increase pheromone visibility |
+| Emergent coordination < 0.3 | Over-orchestrated | Reduce explicit task assignment; increase Bus visibility |
 
 These adjustments are implemented by the `Policy` trait at L4 Orchestration, which observes
 the metrics stream and emits configuration-adjustment Engrams.
@@ -811,3 +818,5 @@ the metrics stream and emits configuration-adjustment Engrams.
 - `09-stigmergy-scaling.md` — Scaling properties of coordination
 - `10-exponential-flywheel.md` — The mechanisms that produce superlinear C-Factor
 - `12-current-status-and-gaps.md` — Implementation status of metrics
+- `../../tmp/refinements/09-phase-2-implications.md` — Phase 2+ Bus/Substrate framing for collectives and metrics
+- `../00-architecture/01-naming-and-glossary.md` — Glossary for Bus, Pulse, MeshBus, and MeshSubstrate

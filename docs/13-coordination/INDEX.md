@@ -12,11 +12,11 @@
 ## Summary
 
 This topic covers how Roko agents coordinate without direct communication, using **stigmergy**
-— indirect coordination through environmental modification. The environment in Roko is a
-multi-layered pheromone field composed of typed, decaying, scoped Engrams that agents deposit
-and sense. These digital pheromones carry coordination signals (threats, opportunities,
-patterns, wisdom) that propagate through three scopes (Local, Mesh, Global) via the Agent Mesh
-transport layer (WebSocket relay, Iroh P2P, ERC-8004 discovery).
+— indirect coordination through environmental modification. In the two-fabric model, the
+environment is a multi-layered pheromone field composed of typed Engrams in shared Substrates
+and matching Pulses on the Bus. These digital pheromones carry coordination signals (threats,
+opportunities, patterns, wisdom) that propagate through three scopes (Local, Mesh, Global)
+via the Agent Mesh, now framed as MeshBus + MeshSubstrate rather than a separate trait family.
 
 On top of the pheromone field, **morphogenetic specialization** uses Turing reaction-diffusion
 dynamics to produce emergent role differentiation in Collectives of initially identical agents.
@@ -50,15 +50,15 @@ The **C-Factor** and composite **C-Score** metrics quantify coordination effecti
 | 00 | [00-stigmergy-theory.md](00-stigmergy-theory.md) | Stigmergy Theory | ~470 | Grassé 1959, formal definition, two forms (sematectonic/marker-based), why stigmergy over direct communication, scalability/robustness/asynchrony analysis, Grossman-Stiglitz paradox resolution, **information-theoretic analysis** (stigmergic channel capacity, entropy rate, transfer entropy, design implications) |
 | 01 | [01-stigmergy-beyond-termites.md](01-stigmergy-beyond-termites.md) | Stigmergy Beyond Termites | ~280 | Biological examples (ants, bees, bacteria, spiders), human stigmergy (Wikipedia, science, cities, OSS), computational stigmergy (ACO, PSO, swarm robotics), software engineering (code smells, niche construction, information foraging), Constructal Law, self-organized criticality |
 | 02 | [02-git-as-stigmergy.md](02-git-as-stigmergy.md) | Git as Stigmergy | ~250 | Repository as stigmergic environment, sematectonic (code structure) and marker-based (commits, branches, CI) signals, multi-agent worktree model, base+overlay pattern, declared contracts, pheromone traces in codebases |
-| 03 | [03-digital-pheromones.md](03-digital-pheromones.md) | Digital Pheromones | ~490 | Pheromone struct, exponential decay formula, decay profiles per kind, confirmation mechanics, anti-spoofing via reputation, pheromone field operations, pheromone-enriched context assembly, complete lifecycle, **pheromone interference model** (SINR framework, cross-kind interference matrix, anti-saturation mechanisms, mitigation strategies) |
+| 03 | [03-digital-pheromones.md](03-digital-pheromones.md) | Digital Pheromones | ~490 | Two-fabric pheromone framing, typed Engrams plus Bus Pulses, decay formula, confirmation mechanics, anti-spoofing via reputation, pheromone field operations, pheromone-enriched context assembly, complete lifecycle, **pheromone interference model** (SINR framework, cross-kind interference matrix, anti-saturation mechanisms, mitigation strategies) |
 | 04 | [04-pheromone-kinds.md](04-pheromone-kinds.md) | Pheromone Kinds | ~450 | PheromoneKind enum (Threat/Opportunity/Wisdom/Alpha/Pattern/Anomaly/Consensus/Custom), three-tier taxonomy, kind interactions, Alpha paradox, Pattern→Wisdom promotion, Consensus stability, **pheromone-driven task allocation** (response threshold model, Hill function, emergent division of labor) |
 | 05 | [05-pheromone-scope.md](05-pheromone-scope.md) | Pheromone Scope | ~260 | PheromoneScope enum (Local/Mesh/Global), three-level hierarchy, Constructal Law connection, trust discounting, scope promotion, cross-scope composition, permissioned subnets preview |
-| 06 | [06-agent-mesh-sync.md](06-agent-mesh-sync.md) | Agent Mesh Sync | ~470 | Dual-transport architecture (WebSocket + Iroh), EventFabric integration, connection registry, store-and-forward, iroh-gossip pheromone propagation, iroh-blobs knowledge exchange, ERC-8004 discovery, failure modes, security model, **partition tolerance** (AP design, partition-aware morphogenetics, post-partition reconciliation, Byzantine agent detection) |
+| 06 | [06-agent-mesh-sync.md](06-agent-mesh-sync.md) | Agent Mesh Sync | ~470 | Dual-transport architecture (WebSocket + Iroh), Bus projection integration, MeshBus + MeshSubstrate split, connection registry, store-and-forward, iroh-gossip pheromone propagation, iroh-blobs knowledge exchange, ERC-8004 discovery, failure modes, security model, **partition tolerance** (AP design, partition-aware morphogenetics, post-partition reconciliation, Byzantine agent detection) |
 | 07 | [07-morphogenetic-specialization.md](07-morphogenetic-specialization.md) | Morphogenetic Specialization | ~660 | Turing 1952 reaction-diffusion, strategy concentration vector (8 dimensions), Gierer-Meinhardt kinetics, update rule with activation/inhibition/decay/noise, niche competition, role coordination messages, resource pressure modulation, convergence analysis, **Turing pattern stability analysis** (linear stability, pitchfork bifurcation, Hopf oscillatory instability, Lyapunov stability monitoring, pattern selection), DeLanda assemblage theory |
 | 08 | [08-permissioned-subnets.md](08-permissioned-subnets.md) | Permissioned Subnets | ~240 | Private Mesh scopes, access control models (invite/role/reputation), internal reputation, opt-in publishing, scope boundary enforcement, organizational patterns, club goods theory |
 | 09 | [09-stigmergy-scaling.md](09-stigmergy-scaling.md) | Stigmergy Scaling | ~250 | O(N×M) vs O(N²) analysis, pheromone field scaling, transport scaling (relay vs gossip), morphogenetic scaling, knowledge sync scaling, practical limits, comparison with consensus and pub-sub |
 | 10 | [10-exponential-flywheel.md](10-exponential-flywheel.md) | Exponential Flywheel | ~280 | 10 mechanisms for superlinear growth: autocatalytic networks (Kauffman), superlinear scaling (West/Bettencourt β≈1.15), Reed's Law (2^N), distillation cascades (Hinton), evolutionary dynamics, collective calibration (31.6×), cross-domain resonance (HDC 0.526), niche construction, information-theoretic compounding, transactive memory |
-| 11 | [11-collective-intelligence-metrics.md](11-collective-intelligence-metrics.md) | Collective Intelligence Metrics | ~640 | C-Factor (Woolley et al. 2010), composite C-Score (4 diagnostic signals), turn-taking equality, knowledge flow rate, cross-domain transfer, emergent coordination, information-theoretic metrics, **collective pathology detection** (information cascades/herding, groupthink/premature consensus, echo chambers, cascading hallucinations, pheromone deadlock, composite pathology dashboard), A/B testing with clustered standard errors, dashboard integration |
+| 11 | [11-collective-intelligence-metrics.md](11-collective-intelligence-metrics.md) | Collective Intelligence Metrics | ~640 | C-Factor (Woolley et al. 2010) from Bus statistics, composite C-Score (4 diagnostic signals), turn-taking equality, knowledge flow rate, cross-domain transfer, emergent coordination, information-theoretic metrics, **collective pathology detection** (information cascades/herding, groupthink/premature consensus, echo chambers, cascading hallucinations, pheromone deadlock, composite pathology dashboard), A/B testing with clustered standard errors, dashboard integration |
 | 12 | [12-current-status-and-gaps.md](12-current-status-and-gaps.md) | Current Status and Gaps | ~250 | Per-feature implementation status (Wired/Scaffold/Design/Gap), 5-tier implementation priority, existing code assets, key gaps (no pheromone types, no transport, no morphogenetic code, no metrics), open questions and decisions |
 
 ---
@@ -72,6 +72,9 @@ The **C-Factor** and composite **C-Score** metrics quantify coordination effecti
 - `08-chain/` — Korai chain as the Global pheromone scope
 - `09-safety/` — Safety constraints on pheromone propagation
 - `10-learning/` — Efficiency events and adaptive tuning that feed coordination metrics
+- `00-architecture/01-naming-and-glossary.md` — Shared vocabulary for Bus, Pulse, MeshBus, and MeshSubstrate
+- `00-architecture/24-cross-section-integration-map.md` — Bus-based integration map for the two-fabric model
+- `../../tmp/refinements/09-phase-2-implications.md` — Phase 2+ implications for chain, dreams, mesh, coordination, and heartbeat
 
 ---
 
@@ -132,38 +135,35 @@ The **C-Factor** and composite **C-Score** metrics quantify coordination effecti
   - `refactoring-prd/02-five-layers.md` (stigmergy section, layer taxonomy)
   - `refactoring-prd/09-innovations.md` (14 frontier innovations)
   - `refactoring-prd/05-agent-types.md` (niche construction, coding agent pheromone traces)
-  - `bardo-backup/tmp/agent-chain/03-stigmergy.md` (full stigmergy spec)
-  - `bardo-backup/tmp/agent-chain/09-exponential-flywheels.md` (10 flywheel mechanisms)
-  - `bardo-backup/tmp/agent-chain-new/02-coordination-theory.md` (7 scientific traditions)
-  - `bardo-backup/tmp/agent-chain/proving-collective-intelligence.md` (C-Factor, evidence levels)
-  - `bardo-backup/prd/02-mortality/10-clade-ecology.md` (pheromone field, decay function)
-  - `bardo-backup/prd/02-mortality/10b-morphogenetic-specialization.md` (Turing R-D, full Rust structs)
-  - `bardo-backup/prd/09-economy/04-coordination.md` (ERC coordination, pheromone signals)
-  - `bardo-backup/prd/13-runtime/06-collective-intelligence.md` (pheromone field operations)
-  - `bardo-backup/prd/20-styx/00-architecture.md` (16-service Agent Mesh architecture)
-  - `bardo-backup/prd/20-styx/03-clade-sync.md` (sync protocol, morphogenetic messages)
-  - `bardo-backup/prd/20-styx/07-p2p-transport.md` (Iroh integration, dual-transport model)
-  - `bardo-backup/tmp/mori-refactor/18-agent-ecology.md` (niche construction, affordances)
-  - `bardo-backup/tmp/death/tools/c05-multi-agent.md` (worktree model, base+overlay)
+  - legacy source: `bardo-backup/tmp/agent-chain/03-stigmergy.md` (full stigmergy spec)
+  - legacy source: `bardo-backup/tmp/agent-chain/09-exponential-flywheels.md` (10 flywheel mechanisms)
+  - legacy source: `bardo-backup/tmp/agent-chain-new/02-coordination-theory.md` (7 scientific traditions)
+  - legacy source: `bardo-backup/tmp/agent-chain/proving-collective-intelligence.md` (C-Factor, evidence levels)
+  - legacy source: `bardo-backup/prd/02-mortality/10-clade-ecology.md` (pheromone field, decay function)
+  - legacy source: `bardo-backup/prd/02-mortality/10b-morphogenetic-specialization.md` (Turing R-D, full Rust structs)
+  - legacy source: `bardo-backup/prd/09-economy/04-coordination.md` (ERC coordination, pheromone signals)
+  - legacy source: `bardo-backup/prd/13-runtime/06-collective-intelligence.md` (pheromone field operations)
+  - legacy source: `bardo-backup/prd/20-styx/00-architecture.md` (16-service Agent Mesh architecture)
+  - legacy source: `bardo-backup/prd/20-styx/03-clade-sync.md` (sync protocol, morphogenetic messages)
+  - legacy source: `bardo-backup/prd/20-styx/07-p2p-transport.md` (Iroh integration, dual-transport model)
+  - legacy source: `bardo-backup/tmp/mori-refactor/18-agent-ecology.md` (niche construction, affordances)
+  - legacy source: `bardo-backup/tmp/death/tools/c05-multi-agent.md` (worktree model, base+overlay)
   - `tmp/implementation-plans/12b-chain-layer.md` (gossip mesh, ISFR)
-- **Naming map applied**: Bardo→Roko, Golem→Agent, Grimoire→Neuro/NeuroStore, Styx→Agent Mesh,
-  GNOS→KORAI/DAEJI, Clade→Collective (not fleet), Signal→Engram
-- **Reframe rules applied**: No mortality/death language, no vitality phases (Thriving→Terminal),
-  succession→backup/restore, death→resource exhaustion, mortality_activation_scalar→
-  resource_pressure_scalar
+- **Legacy naming map applied**: legacy terms were remapped to current names such as Roko, Agent, Neuro/NeuroStore, Agent Mesh, KORAI/DAEJI, Collective, and Engram.
+- **Legacy reframe rules applied**: end-of-life framing and vitality phases were removed in favor of backup/restore, resource exhaustion, and `resource_pressure_scalar`.
 - **Judgment calls**:
   - Chose domain-agnostic strategy dimensions for morphogenetic specialization (depth/breadth/
     execution/verification/time_horizon/exploration/exploitation/coordination) instead of
     legacy DeFi-specific dimensions
-  - Generalized "bloodstain network" (death-framed) to "knowledge backup/restore" per reframe
+  - Generalized the legacy death-framed "bloodstain network" to "knowledge backup/restore" per reframe
     rules
   - Decided WebSocket before Iroh for implementation priority (simpler, faster to implement)
   - Used `Custom(String)` extensibility rather than registration for pheromone kinds (simpler)
-  - Classified NicheVacancy messaging as agent "departure" rather than "death"
+  - Classified NicheVacancy messaging as agent "departure" rather than the legacy "death" framing
 - **Unresolved tensions**:
   - The Pheromone struct exists only in PRD; implementing it requires deciding whether to
-    extend the existing `Signal` type or create a separate type
+    extend the existing legacy code type `Signal` or create a separate type
   - The legacy Styx architecture has 16 services; Roko's Agent Mesh scope is unclear on how
     many of these survive the migration (this migration documents the coordination subset)
-  - Cross-domain insight detection (HDC threshold 0.526) depends on `bardo-primitives` which
+  - Cross-domain insight detection (HDC threshold 0.526) depends on the legacy code path `bardo-primitives`, which
     is built but not wired; the integration path is not fully specified

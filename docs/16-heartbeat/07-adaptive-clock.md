@@ -7,19 +7,21 @@
 
 **Topic**: [16-heartbeat](./INDEX.md)
 **Prerequisites**: [03-three-cognitive-speeds.md](./03-three-cognitive-speeds.md)
-**Key sources**: `refactoring-prd/02-five-layers.md` §Adaptive Clock, legacy `bardo-backup/prd/01-golem/18-cortical-state.md` §Adaptive Clock, `implementation-plans/12a-cognitive-layer.md` §I4
+**Key sources**: `refactoring-prd/02-five-layers.md` §Adaptive Clock, legacy source `bardo-backup/prd/01-golem/18-cortical-state.md` §Adaptive Clock, `implementation-plans/12a-cognitive-layer.md` §I4
 
 ---
 
 ## Abstract
 
-The adaptive clock is the runtime component in `roko-runtime` (L0 Runtime layer) that manages the three cognitive frequencies — gamma, theta, and delta — as concurrent `tokio` tasks. It is not a simple timer. It dynamically adjusts each frequency based on environmental regime (calm vs. volatile), resource constraints (approaching budget ceiling), and agent behavioral state (focused vs. resting).
+The adaptive clock is the runtime policy in `roko-runtime` (L0 Runtime layer) that publishes the three heartbeat tick Pulses on the Bus. It does not orchestrate cognition directly. Instead, a `HeartbeatPolicy` emits `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` at cadence, and the speed-specific consumers subscribe by topic. That makes the clock a Bus producer, not a special control-flow mechanism.
 
-The fixed ~60-second heartbeat from simpler agent architectures serves all purposes at one rate. This is wrong. A code compilation check resolves in seconds. A deployment pipeline takes minutes. A research synthesis takes hours. Biology solves this with oscillatory hierarchies (Buzsáki 2006, "Rhythms of the Brain", Oxford University Press): fast gamma oscillations (30-100 Hz) ride on top of slower theta oscillations (4-8 Hz), which ride on top of delta oscillations (0.5-4 Hz). The adaptive clock implements this hierarchy for agent cognition.
+It still dynamically adjusts each frequency based on environmental regime (calm vs. volatile), resource constraints (approaching budget ceiling), and agent behavioral state (focused vs. resting). The fixed ~60-second heartbeat from simpler agent architectures serves all purposes at one rate. This is wrong. A code compilation check resolves in seconds. A deployment pipeline takes minutes. A research synthesis takes hours. Biology solves this with oscillatory hierarchies (Buzsáki 2006, "Rhythms of the Brain", Oxford University Press): fast gamma oscillations (30-100 Hz) ride on top of slower theta oscillations (4-8 Hz), which ride on top of delta oscillations (0.5-4 Hz). The adaptive clock implements this hierarchy for agent cognition.
 
 The adaptive clock draws from Friston's (2010) free energy principle: the agent should sample its environment more frequently when prediction error is high (the environment is surprising) and less frequently when prediction error is low (the environment is predictable). Clark (2013, "Whatever Next?", Behavioral and Brain Sciences 36(3)) extends this into the "predictive brain" framework: biological cognition is nested prediction loops at multiple timescales, with each timescale adapting independently.
 
-This document specifies the adaptive clock: its configuration, the regime detection system, the three-frequency scheduler, budget-aware throttling, and the `CognitiveSignal` system for inter-loop communication.
+This document specifies the adaptive clock: its configuration, the regime detection system, the three-frequency scheduler, budget-aware throttling, and the Bus topic delivery model for inter-loop communication.
+
+See also `tmp/refinements/09-phase-2-implications.md` and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the two-fabric framing and the Bus / Pulse / Topic vocabulary.
 
 ---
 
@@ -51,13 +53,13 @@ throttle_at_percent = 80  # start throttling at 80% budget
 hard_stop_at_percent = 95  # stop T2 calls at 95% budget
 ```
 
-All intervals have minimum and maximum bounds. The adaptive logic operates within these bounds — it can never make gamma faster than 5 seconds or slower than 15 seconds, regardless of regime.
+All intervals have minimum and maximum bounds. The adaptive logic operates within these bounds — it can never make gamma faster than 5 seconds or slower than 15 seconds, regardless of regime. Those bounds define the cadence of `HeartbeatPolicy`; they do not change the Bus topic shape.
 
 ---
 
 ## Regime Detection
 
-The adaptive clock adjusts frequencies based on the detected environmental regime. Regime detection is performed by the gamma loop's T0 probes (see [09-16-t0-probes.md](./09-16-t0-probes.md)) and is domain-specific:
+The adaptive clock adjusts emission cadence based on the detected environmental regime. Regime detection is performed by the gamma loop's T0 probes (see [09-16-t0-probes.md](./09-16-t0-probes.md)) and is domain-specific:
 
 | Regime | Chain Domain | Coding Domain | Research Domain | Universal |
 |---|---|---|---|---|
@@ -66,7 +68,7 @@ The adaptive clock adjusts frequencies based on the detected environmental regim
 | **Volatile** | High price swings, gas spikes, liquidation risk | Build failures, test regressions, security alerts | Major new findings, contradictory sources | Prediction error 0.3-0.6 |
 | **Crisis** | Flash crash, protocol exploit, mass liquidation | Critical production outage, data breach | Fundamental paradigm challenge | Prediction error > 0.6 |
 
-Regime is stored in the CorticalState (`regime: AtomicU8`) and is read by all three loops to adjust their frequencies.
+Regime is stored in the CorticalState (`regime: AtomicU8`) and is read by the `HeartbeatPolicy` to adjust tick emission for all three speeds.
 
 ---
 
@@ -149,13 +151,13 @@ Delta does not have an adaptive interval in the same sense. It fires based on tr
 
 ## The Three-Frequency Scheduler
 
-The adaptive clock runs as the top-level coordinator for three concurrent `tokio` tasks. It owns the `CancellationToken` hierarchy and manages priority:
+The adaptive clock runs as the top-level tick producer for three concurrent topic streams. It owns the `CancellationToken` hierarchy for its own lifecycle, but it does not own cognition. Its job is to emit the tick Pulses and let the consumers run:
 
 ```rust
-/// The adaptive clock: manages gamma, theta, and delta as concurrent tasks.
+/// The adaptive clock: emits gamma, theta, and delta tick Pulses.
 ///
-/// Lives at L0 Runtime. Dependencies flow strictly downward — the clock
-/// has no knowledge of domain-specific logic.
+/// Lives at L0 Runtime. Dependencies flow strictly downward — the policy
+/// has no knowledge of domain-specific cognition.
 pub struct AdaptiveClock {
     config: ClockConfig,
     gamma_interval: AtomicU64,   // stored as milliseconds
@@ -166,37 +168,20 @@ pub struct AdaptiveClock {
 }
 
 impl AdaptiveClock {
-    /// Start the three-frequency cognitive loop.
+    /// Start the three-frequency tick producer.
     ///
-    /// All three loops run as separate tokio tasks. Gamma has priority:
-    /// if gamma and theta collide, gamma runs first. Delta can be
-    /// preempted by incoming gamma work.
+    /// All three topics are emitted independently. Gamma has priority
+    /// in cadence selection, but the policy never calls into a consumer
+    /// directly.
     pub async fn run(
         &self,
         state: Arc<RwLock<AgentState>>,
     ) -> Result<()> {
-        let gamma_handle = tokio::spawn({
-            let state = state.clone();
-            let clock = self.clone();
-            async move { clock.gamma_loop(state).await }
-        });
-
-        let theta_handle = tokio::spawn({
-            let state = state.clone();
-            let clock = self.clone();
-            async move { clock.theta_loop(state).await }
-        });
-
-        let delta_handle = tokio::spawn({
-            let state = state.clone();
-            let clock = self.clone();
-            async move { clock.delta_loop(state).await }
-        });
-
+        let _ = state;
         tokio::select! {
-            r = gamma_handle => r?,
-            r = theta_handle => r?,
-            r = delta_handle => r?,
+            _ = self.emit_gamma_ticks() => {},
+            _ = self.emit_theta_ticks() => {},
+            _ = self.emit_delta_ticks() => {},
             _ = self.cancel.cancelled() => Ok(()),
         }
     }
@@ -205,27 +190,20 @@ impl AdaptiveClock {
 
 ### Priority and Collision Handling
 
-When gamma and theta attempt to run simultaneously:
-1. Gamma has priority — it executes first.
-2. Theta waits for the current gamma tick to complete.
-3. If gamma is in the middle of a T2 deliberation (which can take 5+ seconds), theta waits. This is acceptable because theta is not time-critical at the sub-second level.
+When gamma and theta are both due, the policy emits the gamma tick first and lets the theta consumer catch up on its own queue. The producer never invokes the consumer directly.
 
-When gamma work arrives during delta:
-1. Delta receives `CognitiveSignal::Pause`.
-2. Delta serializes its current dream state to disk.
-3. Gamma takes over immediately.
-4. When gamma/theta go idle again, delta resumes from the serialized state.
+When gamma work arrives during delta, the policy keeps publishing the gamma topic and the delta consumer yields to the higher-priority queue. The delta consumer resumes when its topic stream has capacity again.
 
 ---
 
 ## Budget-Aware Throttling
 
-The adaptive clock tracks daily spending and adjusts frequencies when approaching budget limits:
+The adaptive clock tracks daily spending and adjusts tick emission when approaching budget limits:
 
 ```rust
 /// Budget-aware frequency throttling.
 ///
-/// When daily spending approaches the configured budget, the clock
+/// When daily spending approaches the configured budget, the policy
 /// progressively reduces expensive operations:
 /// - At 80% budget: extend theta intervals by 2×
 /// - At 90% budget: extend theta intervals by 4×, limit T2 to crisis only
@@ -255,7 +233,7 @@ fn apply_budget_throttle(
 }
 ```
 
-The key insight: **gamma T0 probes always run** regardless of budget. They cost $0.00 (pure computation). Even at 100% budget utilization, the agent maintains perception — it can see what's happening, it just can't deliberate about it. This means the agent never goes blind, even when it runs out of budget.
+The key insight: **gamma T0 probes always run** regardless of budget. They cost $0.00 (pure computation). Even at 100% budget utilization, the policy can still emit `heartbeat.gamma.tick` Pulses, so the agent maintains perception — it can see what's happening, it just can't deliberate about it. This means the agent never goes blind, even when it runs out of budget.
 
 When T2 is restricted, the agent falls back to T1 (cheaper model) for situations that would normally trigger T2. If T1 is also restricted (extreme budget pressure), the agent operates on T0 only — playbook rules and deterministic heuristics handle everything.
 
@@ -263,57 +241,27 @@ When T2 is restricted, the agent falls back to T1 (cheaper model) for situations
 
 ## Cognitive Signals
 
-The three loops communicate via `CognitiveSignal`, a typed interrupt system analogous to Unix process signals but for cognitive state:
+The three speeds communicate by Bus topic subscription rather than by direct loop-to-loop control. The `HeartbeatPolicy` emits tick Pulses, and each consumer watches the topic it cares about:
 
 ```rust
-/// Typed cognitive interrupts for inter-loop communication.
-///
-/// Unlike process signals (SIGTERM, SIGKILL), cognitive signals alter
-/// agent behavior without killing the process. An operator can inject
-/// new context, reprioritize tasks, or force model escalation mid-execution.
-pub enum CognitiveSignal {
-    /// Suspend reasoning, serialize state. Used to preempt delta for gamma.
-    Pause,
-    /// Resume from serialized state. Used when delta can restart.
-    Resume,
-    /// Change current task priority. Used by theta interventions.
-    Reprioritize(TaskId),
-    /// Add context mid-reasoning. Used by external operators.
-    InjectContext(Engram),
-    /// Switch to stronger model immediately. Used by theta escalation.
-    Escalate,
-    /// Reduce arousal, slow down. Used by homeostasis regulator.
-    Cooldown,
-    /// Switch to exploratory mode. Used by Daimon state transitions.
-    Explore,
-    /// Graceful termination.
-    Shutdown,
-}
+let gamma_topic = "heartbeat.gamma.tick";
+let theta_topic = "heartbeat.theta.tick";
+let delta_topic = "heartbeat.delta.tick";
 ```
 
-Signal flow between loops:
-
-| Signal | Sender | Receiver | Effect |
-|---|---|---|---|
-| `Pause` | Gamma | Delta | Suspend dream, serialize state |
-| `Resume` | Gamma (idle) | Delta | Resume dream from serialized state |
-| `Escalate` | Theta | Gamma | Next gamma tick uses T2 regardless of prediction error |
-| `Cooldown` | Theta | Gamma | Raise T2 threshold, reduce gamma frequency |
-| `Explore` | Daimon | Gamma | Lower T1 threshold, increase exploration |
-| `Reprioritize` | Theta | Gamma | Change which task gamma works on next |
-| `Shutdown` | External | All | Graceful termination of all three loops |
+The policy can still emit a higher-priority gamma tick early when needed, but that is a topic emission decision, not an inline control path.
 
 ---
 
 ## Event-Driven Wakeup
 
-In addition to periodic ticking, the gamma loop can be interrupted by urgent events:
+In addition to periodic cadence, the policy can emit an early gamma tick when urgency changes:
 
 ```rust
-/// Event-driven wakeup conditions.
+/// Early gamma tick conditions.
 ///
 /// These override the normal gamma interval, triggering an
-/// immediate gamma tick regardless of the timer.
+/// immediate gamma tick emission regardless of the timer.
 pub enum WakeupCondition {
     /// External intervention from user (steer/followUp)
     UserIntervention,
@@ -328,24 +276,24 @@ pub enum WakeupCondition {
 }
 ```
 
-When a wakeup condition fires, the gamma loop skips the remaining sleep time and immediately starts a new tick. This ensures that urgent events (user steers, safety alerts, peer threat signals) are processed within milliseconds rather than waiting up to 15 seconds for the next scheduled tick.
+When a wakeup condition fires, the policy skips the remaining sleep time and immediately emits a new `heartbeat.gamma.tick` Pulse. This ensures that urgent conditions are processed within milliseconds rather than waiting up to 15 seconds for the next scheduled tick.
 
 ---
 
 ## Mapping to Existing Code
 
-The adaptive clock lives at L0 Runtime in `roko-runtime` (currently `bardo-runtime`).
+The adaptive clock lives at L0 Runtime in `roko-runtime`.
 
 | Component | Current Status | Target |
 |---|---|---|
-| Process lifecycle | `bardo-runtime/src/process.rs` — `ProcessSupervisor` | Extend with three-loop management |
-| Event bus | `bardo-runtime/src/event_bus.rs` | Wire CognitiveSignal dispatch |
-| Cancellation | `bardo-runtime/src/cancel.rs` | Use for loop shutdown |
-| Metrics | `bardo-runtime/src/metrics.rs` | Track per-loop timing and cost |
+| Process lifecycle | Runtime process supervisor module | Extend with three-loop management |
+| Bus transport | Runtime Bus transport module | Wire topic subscriptions and tick delivery |
+| Cancellation | Runtime cancellation module | Use for loop shutdown |
+| Metrics | Runtime metrics module | Track per-loop timing and cost |
 | CorticalState | Not yet implemented | New struct in `roko-core` or `roko-runtime` |
 | Regime detection | Implicit in probe logic | Formalize in adaptive clock |
 
-The existing `bardo-runtime` provides the infrastructure (`ProcessSupervisor`, event bus, cancellation tokens) but does not implement the three-loop architecture. The adaptive clock would be a new component that uses these existing primitives.
+The existing runtime support crate provides the infrastructure (process supervision, Bus transport, cancellation tokens) but does not implement the three-topic architecture. The adaptive clock would be a new component that uses these existing primitives.
 
 ---
 
@@ -362,18 +310,18 @@ The existing `bardo-runtime` provides the infrastructure (`ProcessSupervisor`, e
 ## Current Status and Gaps
 
 **What exists:**
-- `bardo-runtime` provides process supervision, event bus, cancellation tokens, and metrics.
+- The runtime support crate provides process supervision, Bus transport, cancellation tokens, and metrics.
 - The orchestration loop in `roko-cli/src/orchestrate.rs` provides a single-frequency gamma-like loop.
-- `InferenceTier` and `TierRouter` in `bardo-primitives/src/tier.rs`.
+- The current tier enum and tier router in the primitives layer support T0/T1/T2 selection.
 
 **What is missing (Implementation Plan 12a §I4):**
-- **I4**: Frequency scheduler deciding which loop to run based on context.
-- `AdaptiveClock` struct managing three concurrent tokio tasks.
-- `CognitiveSignal` enum and dispatch mechanism.
+- **I4**: Frequency scheduler deciding which topic to emit based on context.
+- `HeartbeatPolicy` struct managing three concurrent tick streams.
+- Bus topic emission and subscription wiring.
 - Regime-based interval adjustment.
 - Budget-aware throttling.
-- Event-driven wakeup system.
-- Delta preemption and dream state serialization.
+- Early gamma emission for urgent conditions.
+- Delta yielding and dream state serialization.
 - CorticalState shared perception surface.
 
 ---
@@ -385,3 +333,5 @@ The existing `bardo-runtime` provides the infrastructure (`ProcessSupervisor`, e
 - See [05-theta-reflective-loop.md](./05-theta-reflective-loop.md) for the theta loop
 - See [06-delta-consolidation-loop.md](./06-delta-consolidation-loop.md) for the delta loop
 - See [09-16-t0-probes.md](./09-16-t0-probes.md) for regime detection via probes
+- See `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ Bus / Substrate framing
+- See [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the canonical Bus, Pulse, and Topic vocabulary

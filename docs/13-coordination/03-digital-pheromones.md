@@ -1,14 +1,17 @@
 # Digital Pheromones: Typed Engrams with Decay Profiles
 
-> **Layer**: L0 Runtime (persistence and decay timers), L1 Framework (type system and
-> transport), L2 Scaffold (context assembly enrichment)
+> **Layer**: L0 Runtime (Substrate persistence and decay timers), L1 Framework (Bus
+> publication and type system), L2 Scaffold (context assembly enrichment)
 >
-> **Synapse traits**: `Substrate` (store pheromone Engrams), `Scorer` (rate pheromone
-> intensity and relevance), `Router` (select highest-priority signal), `Policy` (react to
-> pheromone streams)
+> **Synapse traits**: `Substrate` (store pheromone Engrams), `Bus` (announce Pulses),
+> `Scorer` (rate pheromone intensity and relevance), `Router` (select highest-priority
+> Pulse), `Policy` (react to pheromone streams)
 >
 > **Prerequisites**: `00-stigmergy-theory.md` (stigmergy theory),
 > `01-stigmergy-beyond-termites.md` (generalized stigmergy)
+
+> **See also**: `../../tmp/refinements/09-phase-2-implications.md`,
+> `../00-architecture/01-naming-and-glossary.md`
 
 
 > **Implementation**: Specified
@@ -18,8 +21,9 @@
 ## What Are Digital Pheromones?
 
 Digital pheromones are software analogs of the chemical pheromones used by social insects for
-indirect coordination. In Roko, a digital pheromone is a typed Engram — a content-addressed,
-scored, decaying unit of cognition — that carries coordination information through the system.
+indirect coordination. In Roko, a digital pheromone is a typed Engram that lives in a shared
+Substrate and is announced as a Pulse on the Bus. The same coordination fact therefore has two
+faces in the two-fabric model: durable storage and ephemeral announcement.
 
 The concept was formalized by Parunak, Brueckner & Sauter (2005), who identified the key
 properties that make biological pheromones effective as coordination mechanisms and showed how
@@ -32,7 +36,8 @@ Roko extends Parunak's framework with three additions:
 1. **Typed pheromones**: Each pheromone has a `PheromoneKind` that determines its semantic
    meaning and default decay profile (see `04-pheromone-kinds.md`).
 2. **Scoped propagation**: Pheromones propagate through one of three scopes — Local, Mesh,
-   or Global — controlling their audience and persistence (see `05-pheromone-scope.md`).
+   or Global — controlling their audience and persistence. Mesh scope is expressed as Bus
+   topics such as `mesh.pheromone.deposited` (see `05-pheromone-scope.md`).
 3. **Confirmation reinforcement**: Multiple independent deposits of the same pheromone type
    extend its effective half-life, implementing a quorum-sensing mechanism analogous to
    bacterial autoinducer accumulation [Nealson, Platt & Hastings, *J. Bacteriology*, 1970].
@@ -47,13 +52,16 @@ The core data structure for a digital pheromone in Roko:
 /// A digital pheromone — a typed Engram carrying coordination information.
 ///
 /// Pheromones are the primary mechanism for indirect coordination between
-/// agents. They are deposited into a Substrate, propagate through a scope,
-/// decay over time, and influence the behavior of agents that sense them.
+/// agents. They are persisted as Engrams in a shared Substrate, announced
+/// as Pulses on the Bus, decay over time, and influence the behavior of
+/// agents that sense them.
 ///
 /// # Stigmergic Properties
 ///
 /// - **Deposition**: Created by an agent via `Substrate::store()`
-/// - **Diffusion**: Propagates through the Agent Mesh based on `scope`
+/// - **Announcement**: Published as a Pulse on the Bus, often on
+///   `mesh.pheromone.deposited`
+/// - **Diffusion**: Propagates through MeshBus based on `scope`
 /// - **Evaporation**: Decays exponentially according to `decay_rate`
 /// - **Sensing**: Queried by other agents via `Substrate::query()`
 /// - **Reinforcement**: Confirmations extend effective half-life
@@ -91,7 +99,7 @@ pub struct Pheromone {
 
     /// The propagation scope of this pheromone.
     /// - `Local(SubstrateId)`: Visible only within the agent's own store
-    /// - `Mesh(CollectiveId)`: Visible to all agents in the collective
+    /// - `Mesh(CollectiveId)`: Visible to all agents via MeshBus topics
     /// - `Global`: Visible to all agents on the Korai chain
     pub scope: PheromoneScope,
 }
@@ -120,6 +128,7 @@ The Engram's `tags` field carries metadata that the `Substrate::query()` method 
 |---------|--------------|---------|
 | `pheromone_kind` | `"Threat"` | Filter by signal type |
 | `pheromone_scope` | `"Mesh(collective-42)"` | Filter by propagation scope |
+| `bus_topic` | `"mesh.pheromone.deposited"` | Topic used when announcing the deposit on the Bus |
 | `pheromone_intensity` | `"0.87"` | Current intensity (updated on read) |
 | `pheromone_confirmations` | `"3"` | Number of independent confirmations |
 | `pheromone_domain` | `"code-quality"` | Domain-specific context |
@@ -305,7 +314,7 @@ multi-dimensional signal landscape that agents navigate. The field has the follo
 
 ### Field Operations
 
-Four fundamental operations on the pheromone field, adapted from the clade ecology
+Four fundamental operations on the pheromone field, adapted from the legacy collective-ecology
 specification [Hölldobler, B. & Wilson, E.O. *The Superorganism*. W.W. Norton, 2008]:
 
 | Operation | Description | Synapse Trait |
@@ -354,7 +363,7 @@ Consensus ██████████████░  1 active (0.88 max)
 
 Digital pheromones are integrated into Roko's context assembly pipeline at L2 Scaffold. When
 the `Composer` assembles a prompt for an agent, it includes a summary of the ambient pheromone
-field:
+field and any fresh Pulses on the Bus that have not yet been folded into the Substrate:
 
 ### Context Enrichment Flow
 
@@ -362,6 +371,8 @@ field:
 Agent receives task assignment
     ↓
 Composer queries Substrate for ambient pheromones
+    ↓
+Composer subscribes to `mesh.pheromone.deposited` Pulses for freshness
     ↓
 Scorer rates each pheromone by intensity × relevance
     ↓
@@ -381,15 +392,16 @@ Agent processes task with awareness of ambient signals
 
 This enrichment happens automatically for every agent dispatch. The agent does not need to
 explicitly request pheromone information — it is part of the environment, just as chemical
-pheromones are part of the air that biological agents breathe.
+pheromones are part of the air that biological agents breathe. In two-fabric terms, the
+Substrate holds the durable record and the Bus keeps the prompt current.
 
 ### Dynamic Context Assembly as Stigmergic Behavior
 
 The context assembly process itself is stigmergic: the agent's context (which information it
-receives) is determined by the pheromone field, which was shaped by previous agents' actions.
-An agent that deposits a high-intensity `Threat` pheromone changes the context that all
-subsequent agents in the same scope will receive, steering collective attention toward the
-threat without any direct communication.
+receives) is determined by the pheromone field, which was shaped by previous agents' actions
+and announced on the Bus. An agent that deposits a high-intensity `Threat` pheromone changes
+the context that all subsequent agents in the same scope will receive, steering collective
+attention toward the threat without any direct communication.
 
 This is the digital equivalent of an ant depositing alarm pheromone: the ant doesn't send a
 message to specific other ants; it modifies the chemical environment, and all ants that pass
@@ -420,16 +432,15 @@ substrate.store(pheromone.into_engram())?;
 
 ### 2. Propagation
 
-Based on the `scope`, the pheromone propagates:
+Based on the `scope`, the pheromone is announced on the Bus:
 
 - `Local`: Stays in the agent's own NeuroStore. No propagation.
-- `Mesh`: Propagated to all agents in the Collective via Agent Mesh (WebSocket relay or Iroh
-  P2P, see `06-agent-mesh-sync.md`).
-- `Global`: Published to the Korai chain for all agents worldwide.
+- `Mesh`: Published as `mesh.pheromone.deposited` and routed by MeshBus to the Collective.
+- `Global`: Replicated to the Korai chain for all agents worldwide.
 
 ### 3. Sensing
 
-Other agents query the Substrate and encounter the pheromone:
+Other agents query the Substrate and/or subscribe to the Bus and encounter the pheromone:
 
 ```rust
 let threats = substrate.query(PheromoneFilter {
@@ -475,7 +486,7 @@ After acting, the agent may deposit its own pheromone:
 Over time, the pheromone's intensity decays toward zero. When it drops below the sensing
 threshold (default 0.01), it becomes invisible to other agents. When it drops below the GC
 threshold (default 0.001), it is eligible for garbage collection by the `Substrate`
-implementation.
+implementation. The Bus announcement remains ephemeral; only the Engram persists.
 
 ---
 
@@ -722,3 +733,5 @@ systems.
 - `05-pheromone-scope.md` — Local, Mesh, and Global scoping
 - `06-agent-mesh-sync.md` — Transport layer for pheromone propagation
 - `10-exponential-flywheel.md` — How pheromones enable compounding intelligence
+- `../../tmp/refinements/09-phase-2-implications.md` — Phase 2+ Bus/Substrate framing for coordination
+- `../00-architecture/01-naming-and-glossary.md` — Glossary for Bus, Pulse, MeshBus, and MeshSubstrate

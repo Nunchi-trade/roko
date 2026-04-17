@@ -8,7 +8,7 @@
 
 | # | Document | Summary |
 |---|---|---|
-| 00 | [00-vision-and-framing.md](./00-vision-and-framing.md) | Blockchain as domain plugin framing. Three-level knowledge architecture (Local → Mesh → Chain). What goes on-chain vs. off-chain. Tier 6 deferred status. **NEW: Chain selection rationale (EVM vs. Move/CosmWasm/SVM), Stylus precompile path, cross-chain interoperability (Hyperlane ISM, IBC, intent-based bridges).** |
+| 00 | [00-vision-and-framing.md](./00-vision-and-framing.md) | Blockchain as domain plugin framing. Three-level knowledge architecture (Local → Mesh → Chain). ChainSubstrate vs. ChainBus split. What goes on-chain vs. off-chain. Tier 6 deferred status. **NEW: Chain selection rationale (EVM vs. Move/CosmWasm/SVM), Stylus precompile path, cross-chain interoperability (Hyperlane ISM, IBC, intent-based bridges).** |
 | 01 | [01-korai-chain-spec.md](./01-korai-chain-spec.md) | Chain parameters (400ms blocks, 2s finality). Block structure, state model. Custom `korai_*` RPC methods. Chain intelligence pipeline. Deployment modes. **NEW: L2/L3 deployment architecture (Arbitrum Orbit), consensus evolution roadmap, EigenLayer AVS integration.** |
 | 02 | [02-korai-token-economics.md](./02-korai-token-economics.md) | KORAI/DAEJI tokens. Demurrage (1% annual decay). 5 earning mechanisms, 5 spending mechanisms. Fee distribution. Relationship to NeuroStore decay. |
 | 03 | [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) | HDC precompile at 0xA01. 10,240-bit BSC vectors. ~400 gas for top-K=20. Three-tier search (Bloom → approximate → exact). Cross-domain resonance. **NEW: Detailed gas cost model (calibrated benchmarks), Stylus WASM implementation, verifiable HDC via ZK proofs/optimistic fraud proofs/TEE, Binius binary-field STARKs.** |
@@ -40,6 +40,7 @@
 
 - **Korai**: Dedicated EVM chain for agent coordination (not Ethereum mainnet)
 - **KORAI**: Native token with 1% annual demurrage. DAEJI is the testnet equivalent
+- **ChainSubstrate / ChainBus**: Split storage and transport roles for on-chain Engrams versus chain-log Pulses. See `tmp/refinements/09-phase-2-implications.md` and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md)
 - **Korai Passport**: Soulbound ERC-721 NFT — the agent's on-chain identity
 - **ERC-8004**: Three registries (Identity, Reputation, Validation)
 - **HDC Precompile**: 10,240-bit BSC vectors at ~400 gas for top-K similarity search
@@ -54,7 +55,7 @@
 
 ## Critical Framing
 
-**Blockchain is ONE domain plugin, not the default frame.** The Korai chain uses the same Synapse traits (`Substrate`, `Scorer`, `Gate`, `Router`, `Composer`, `Policy`) as every other domain. A chain agent is configured differently from a coding agent, but the cognitive architecture is identical. Nothing about the chain layer requires special treatment in the Roko kernel.
+**Blockchain is ONE domain plugin, not the default frame.** The Korai chain uses the same Synapse traits (`Substrate`, `Scorer`, `Gate`, `Router`, `Composer`, `Policy`) as every other domain. A chain agent is configured differently from a coding agent, but the cognitive architecture is identical. In the two-fabric model, `ChainSubstrate` stores and queries durable on-chain Engrams while `ChainBus` maps chain logs into ordinary Bus Pulses; chain consumers stay standard Bus subscribers instead of a special transport path. See `tmp/refinements/09-phase-2-implications.md` and the glossary at [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 **Tier 6 is DEFERRED.** All 76 implementation items in the chain layer are blocked by Tier 5 (self-hosting loop). The specifications in this topic are complete but the implementation has not started.
 
@@ -125,6 +126,7 @@ Deep research and enhancement of 7 documents across all major subsystems:
 | [09-oracle](../20-technical-analysis/INDEX.md) | Chain predictions calibrated against actual outcomes |
 | [12-learn](../05-learning/INDEX.md) | Learning system uses reputation feedback |
 | [14-identity-economy](../14-identity-economy/INDEX.md) | Broader identity context for Korai Passport |
+| `tmp/refinements/09-phase-2-implications.md` | Phase 2 implications for chain, dreams, mesh, coordination, heartbeat, and control-plane projection |
 
 ---
 
@@ -133,6 +135,6 @@ Deep research and enhancement of 7 documents across all major subsystems:
 - **Generated**: 2026-04-11
 - **Generator**: Claude (prd-migration prompt 08-chain)
 - **Source material**: 7 context pack files, 5 refactoring-prd sources, 1 implementation plan (12b-chain-layer.md, 76 items), 9 legacy PRD files (14-chain/), 14 agent-chain-new research files, active code from roko-chain (9 files) and mirage-rs (38 files)
-- **Naming applied**: GNOS→KORAI/DAEJI, Golem→Agent, Grimoire→Neuro, Styx→Agent Mesh, Clade→Collective/Mesh, Bardo→Roko, Signal→Engram
+- **Legacy naming applied**: legacy terms were mapped to KORAI/DAEJI, Agent, Neuro, Agent Mesh, Collective/Mesh, Roko, and Engram.
 - **Sub-documents**: 25 (00-24)
 - **Total output**: ~75,000 words across 26 files

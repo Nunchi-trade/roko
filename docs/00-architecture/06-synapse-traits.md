@@ -2,10 +2,10 @@
 
 > **Abstract:** This document keeps the Synapse trait model as a load-bearing part of Roko's
 > architecture, but no longer treats the historical "one noun, six verbs" mnemonic as the
-> complete story. Roko's kernel is better read as two mediums — durable Engram and ephemeral
-> Pulse — moving through two fabrics — Substrate and Bus — with six operators providing the
+> complete story. Roko's kernel is better read as two mediums, durable Engram and ephemeral
+> Pulse, moving through two fabrics, Substrate and Bus, with six operators providing the
 > durable-storage, assessment, verification, routing, composition, and reaction logic around
-> them. The operators remain the right decomposition; the surrounding kernel story has grown.
+> them. The complete kernel grammar is six operations plus two fabric traits.
 
 > **See also:** `tmp/refinements/01-critique-one-noun.md` for the diagnosis,
 > `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
@@ -61,19 +61,23 @@ architecture" to "this is the operator model inside the broader kernel."
 
 ## 2. Operator Overview
 
-The six synapse traits are still the stable operator vocabulary for Roko's kernel:
+At the trait level, the kernel is easiest to read as five non-fabric operators plus the two
+fabric traits they work through:
 
-| Operator | Core job | Primary layer | Relationship to the two-medium / two-fabric model |
+| Kernel trait | Core job | Primary layer | Relationship to the two-medium / two-fabric model |
 |---|---|---|---|
-| **Substrate** | Persist and query durable state | L0 Runtime | Durable fabric for Engrams |
-| **Scorer** | Assess salience, value, novelty, quality | L1-L2 | Operates over retrieved or observed data; generalized further in REF04 |
-| **Gate** | Verify against external reality | L3 Harness | Verifies claims, actions, and composed artifacts |
-| **Router** | Choose among candidates or next actions | L1 Framework | Makes selections informed by scores, costs, and context |
-| **Composer** | Assemble bounded artifacts | L2 Scaffold | Builds prompt Engrams and other composed outputs |
-| **Policy** | React to streams and outcomes | L3-L4 | Most obviously pulled toward Pulse-heavy runtime behavior |
+| **Substrate** | Persist and query durable state | L0 Runtime | Storage fabric for Engrams |
+| **Bus** | Publish and subscribe live traffic | L0 Runtime | Transport fabric for Pulses |
+| **Scorer** | Assess salience, value, novelty, quality | L1-L2 | Scores either medium through `Datum` |
+| **Gate** | Verify against external reality | L3 Harness | Verifies Engrams directly and Pulse windows through stream-gates |
+| **Router** | Choose among candidates or next actions | L1 Framework | Selects from Engrams or Pulses depending on the decision surface |
+| **Composer** | Assemble bounded artifacts | L2 Scaffold | Consumes `Datum` inputs and emits durable Engrams under a budget |
+| **Policy** | React to streams and outcomes | L3-L4 | Consumes Pulse streams and emits `PolicyOutputs` with Pulses plus Engrams |
 
-The Bus is not a seventh operator in this document's framing. It is the second fabric the six
-operators now work alongside. REF03 gives it the full first-class treatment.
+The Bus is not a replacement for the six operators. It is the second fabric those operators now
+work alongside. In other words: six operations plus two fabric traits is the complete kernel
+grammar. REF03 gives Bus the full first-class treatment; REF04 generalizes the operators so the
+trait story matches the two-medium runtime.
 
 ---
 
@@ -105,8 +109,10 @@ durable and live inputs:
 - candidate actions before execution
 - live runtime signals that may later graduate into durable records
 
-REF04 carries the signature-generalization work. REF01's point is simpler: the architecture
-should stop pretending that every assessable thing is already a stored Engram.
+REF04 carries the signature-generalization work. In the revised trait table that means a Scorer
+can expose monomorphic `score_engram` and `score_pulse` methods plus a thin `score(Datum)` entry
+point. REF01's point is simpler: the architecture should stop pretending that every assessable
+thing is already a stored Engram.
 
 ---
 
@@ -124,8 +130,9 @@ runtime:
 - the Gate pipeline should therefore be described as sitting beside both Substrate and Bus, not
   as a purely post-storage concern
 
-REF05 retells the loop around this distinction. REF01 only establishes the diagnosis that the
-Engram-only explanation was hiding real runtime behavior.
+REF04 makes that runtime behavior explicit by adding stream-gates such as
+`verify_stream(&[Pulse], ctx)` that can watch a live window without first pretending the system
+already has a durable record. REF05 retells the loop around this distinction.
 
 ---
 
@@ -139,8 +146,9 @@ choice among stored Engrams. Some routing decisions are about live control flow 
 traffic, and only later become Engrams for audit and learning.
 
 That distinction matters because it explains why routing feels natural in the system while some
-of the older trait signatures felt stretched. The choice is first-class; the durable record of
-the choice is often second.
+of the older trait signatures felt stretched. REF04 resolves the mismatch with separate
+`select_engram` and `select_pulse` paths. The choice is first-class; the durable record of the
+choice is often second.
 
 ---
 
@@ -156,9 +164,9 @@ Prompt construction is the clearest example:
 3. assemble a prompt Engram under a budget
 
 That story still holds. What changes is the boundary around composition. When the runtime reacts
-to live traffic, the input set may include observations that are not yet durable. REF04 handles
-the generalized operator surface; REF01 simply makes room for that fact in the architecture
-description.
+to live traffic, the input set may include observations that are not yet durable. REF04 names
+that mixed input set as `Datum` and keeps the output durable: `Composer::compose(&[Datum], ...)`
+still emits an Engram even when some ingredients are Pulses.
 
 ---
 
@@ -177,7 +185,9 @@ other follow-on work. In practice that means:
 
 REF01 calls this out explicitly because "stream of Engrams" was doing too much conceptual work.
 The durable output of a Policy can absolutely be an Engram. But the thing the Policy is watching
-is often better described as Pulse traffic on a Bus.
+is often better described as Pulse traffic on a Bus. REF04 makes that explicit with
+`Policy::decide(&[Pulse], ctx) -> PolicyOutputs`, where `PolicyOutputs` can publish new Pulses
+and persist graduated Engrams in the same reaction step.
 
 This is also why REF04 matters: operator signatures should generalize where the architecture has
 already generalized in reality.
@@ -240,9 +250,10 @@ The most important awkward cases are not random edge conditions. They are eviden
 
 | Boundary case | Why it feels awkward in the old framing | What REF01 says about it |
 |---|---|---|
-| Telemetry emission from `Policy::decide(&[], ctx)` | The operator wants to react without pretending an Engram stream already exists | The runtime has live traffic that should be described directly |
-| Circuit breakers and watcher loops | Policies want to watch runtime changes as they happen | Policy is partly a Pulse-stream consumer, not only an Engram consumer |
+| Telemetry emission from `Policy::decide(&[], ctx)` | The operator wants to react without pretending an Engram stream already exists | `Policy::decide(&[Pulse], ctx) -> PolicyOutputs` describes the live stream directly |
+| Circuit breakers and watcher loops | Policies want to watch runtime changes as they happen | Policy is a Pulse-stream consumer whose reactions may publish Pulses or persist Engrams |
 | Direct cross-layer runtime dependencies | Subsystems bypass the architecture story to communicate | Bus needs first-class architectural recognition |
+| Mixed live-plus-durable context assembly | Composer wants recent traffic plus stored state in one budget | `Datum` makes the mixed input set explicit without inventing new operator types |
 
 ### 11.2 Why Not Add More Operators Here?
 
@@ -261,7 +272,7 @@ REF02, REF03, and REF04 carry the concrete follow-on work:
 3. generalize operator signatures where the runtime already handles both mediums
 
 This document therefore marks the end of the old full-story claim, not the end of the operator
-model itself.
+model itself. The full story is now explicit: two mediums, two fabrics, six operators.
 
 ---
 
@@ -283,8 +294,8 @@ model itself.
   `roko-core`.
 - **Implemented in practice**: runtime transport already exists and multiple subsystems behave as
   live stream consumers.
-- **Gap in documentation now closed by REF01**: this doc no longer presents the old mnemonic as
-  the complete architecture story.
+- **Gap in documentation now closed by REF04**: this doc no longer presents the old mnemonic as
+  the complete kernel story.
 - **Gap still open for follow-on refinements**: Pulse, Bus, and generalized operator signatures
   need their dedicated specification updates in REF02-REF04.
 

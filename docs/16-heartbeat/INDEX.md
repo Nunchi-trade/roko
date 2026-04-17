@@ -1,6 +1,6 @@
 # Heartbeat: The Cognitive Clock
 
-> The heartbeat is the agent's autonomous decision cycle — a continuous loop of observe-decide-act-learn running at three concurrent timescales (Gamma, Theta, Delta), with dual-process tier gating that makes ~80% of ticks free and active inference determining compute investment.
+> The heartbeat is the agent's autonomous decision cycle — in the two-fabric model it is driven by Bus-published tick Pulses at three concurrent timescales (Gamma, Theta, Delta), with dual-process tier gating that makes ~80% of ticks free and active inference determining compute investment.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -11,19 +11,19 @@
 
 ## Abstract
 
-The heartbeat topic covers the core cognitive loop that every Roko agent executes autonomously. Unlike conversation-based agent frameworks where cognition is triggered by user messages, Roko agents run a continuous, timed decision cycle — the "heartbeat" — that operates whether or not a human is present. Approximately 80% of heartbeat ticks have no human input.
+The heartbeat topic covers the core cognitive loop that every Roko agent executes autonomously. Unlike conversation-based agent frameworks where cognition is triggered by user messages, Roko agents run a continuous, timed decision cycle — the "heartbeat" — that operates whether or not a human is present. In the two-fabric framing, the adaptive clock publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses on the Bus, and speed-specific consumers subscribe by topic. Approximately 80% of heartbeat ticks have no human input.
 
 The heartbeat is organized around three key ideas:
 
-1. **The 9-step CoALA-derived pipeline** (Sumers et al. 2023, arXiv:2309.02427): PERCEIVE → EVALUATE → ATTEND → INTEGRATE → ACT → VERIFY → PERSIST → ADAPT → META-COGNIZE. Every tick executes this loop, mapped to the six Synapse traits (Substrate, Scorer, Gate, Router, Composer, Policy) plus the Daimon cognitive cross-cut.
+1. **The 9-step CoALA-derived pipeline** (Sumers et al. 2023, arXiv:2309.02427): PERCEIVE → EVALUATE → ATTEND → INTEGRATE → ACT → VERIFY → PERSIST → ADAPT → META-COGNIZE. Every tick executes this loop when the corresponding tick Pulse arrives on the Bus, mapped to the six Synapse traits (Substrate, Scorer, Gate, Router, Composer, Policy) plus the Daimon cognitive cross-cut.
 
-2. **Three cognitive speeds** (Buzsáki 2006): Gamma (~5-15s, reactive perception), Theta (~75s, reflective planning), and Delta (~hours, offline consolidation). All three run concurrently on separate async tasks managed by the adaptive clock in `roko-runtime`.
+2. **Three cognitive speeds** (Buzsáki 2006): Gamma (~5-15s, reactive perception), Theta (~75s, reflective planning), and Delta (~hours, offline consolidation). All three run concurrently as topic subscribers driven by the `HeartbeatPolicy` in `roko-runtime`.
 
 3. **Dual-process cognition** (Kahneman 2011): T0 (no LLM, deterministic probes, ~80% of ticks), T1 (fast model, ~15%), T2 (full model, ~5%). The 16 T0 probes drive tier suppression using FrugalGPT-inspired cascade routing (Chen et al. 2023).
 
 The theoretical foundation draws from Friston's free energy principle (2010), Clark's predictive processing framework (2013), active inference for compute allocation (Friston et al. 2015), and VCG mechanism design (Vickrey 1961) for context budget allocation.
 
-This topic spans L0 Runtime (adaptive clock, CorticalState), L1 Framework (tier routing, model selection), L2 Scaffold (context assembly, VCG auction), L3 Harness (gate verification), and L4 Orchestration (plan execution), plus the Daimon, Neuro, and Dreams cognitive cross-cuts.
+This topic spans L0 Runtime (HeartbeatPolicy, adaptive clock, CorticalState, Bus tick delivery), L1 Framework (tier routing, model selection), L2 Scaffold (context assembly, VCG auction), L3 Harness (gate verification), and L4 Orchestration (plan execution), plus the Daimon, Neuro, and Dreams cognitive cross-cuts.
 
 ---
 
@@ -34,12 +34,12 @@ This topic spans L0 Runtime (adaptive clock, CorticalState), L1 Framework (tier 
 | 00 | [CoALA 9-Step Pipeline](./00-coala-9-step-pipeline.md) | The Cognitive Architectures for Language Agents framework. Academic predecessors (Soar, ACT-R, CLARION). Why decision cycles, not conversation turns. The 9-step pipeline specification. OODA loop mapping. |
 | 01 | [Universal Loop Mapping](./01-universal-loop-mapping.md) | Side-by-side CoALA → Synapse translation. Which Synapse trait implements each step. Layer traversal. Domain parameterization (coding, chain, research). |
 | 02 | [Chain Heartbeat Variant](./02-chain-heartbeat-variant.md) | Chain agents add SIMULATE (mirage-rs) and VALIDATE (PolicyCage) between ATTEND and ACT. The 11-step chain heartbeat. Three custody modes. Sleepwalker 3-step variant (OBSERVE → REFLECT → PUBLISH). |
-| 03 | [Three Cognitive Speeds](./03-three-cognitive-speeds.md) | Gamma (5-15s reactive), Theta (75s reflective), Delta (hours consolidation). Nested hierarchy. Concurrency model with tokio tasks. Cost model per speed. |
+| 03 | [Three Cognitive Speeds](./03-three-cognitive-speeds.md) | Gamma (5-15s reactive), Theta (75s reflective), Delta (hours consolidation). Nested hierarchy. Bus topics and topic subscribers. Cost model per speed. |
 | 04 | [Gamma Reactive Loop](./04-gamma-reactive-loop.md) | Main orchestration loop. Full 9-step execution per tick. Adaptive interval computation. DecisionCycleRecord. Ten cognitive mechanisms. OODA correspondence. |
 | 05 | [Theta Reflective Loop](./05-theta-reflective-loop.md) | Five-phase reflection: summarize gamma, update Daimon affect (ALMA layers), check prediction calibration, re-evaluate plan, trigger interventions. Adaptive interval by regime. |
 | 06 | [Delta Consolidation Loop](./06-delta-consolidation-loop.md) | Three-phase dream cycle: NREM replay (Mattar-Daw), REM imagination (Boden + Pearl), integration staging. Knowledge tier promotion. Playbook compilation. Non-blocking architecture. |
-| 07 | [Adaptive Clock](./07-adaptive-clock.md) | The roko-runtime component managing three frequencies. Regime detection. Frequency adjustment rules. Budget-aware throttling. CognitiveSignal system. Event-driven wakeup. |
-| 08 | [Dual-Process T0/T1/T2](./08-dual-process-t0-t1-t2.md) | LLM-Last architecture. InferenceTier enum. Adaptive gating threshold. Cost model. FrugalGPT validation. Interaction with Synapse traits. Active inference connection. |
+| 07 | [Adaptive Clock](./07-adaptive-clock.md) | The `HeartbeatPolicy` publishes `heartbeat.gamma.tick` / `heartbeat.theta.tick` / `heartbeat.delta.tick` Pulses on the Bus. Regime detection. Frequency adjustment rules. Budget-aware throttling. Topic subscriptions. |
+| 08 | [Dual-Process T0/T1/T2](./08-dual-process-t0-t1-t2.md) | LLM-Last architecture. Tier enum. Adaptive gating threshold. Cost model. FrugalGPT validation. Interaction with Synapse traits. Active inference connection. |
 | 09 | [16 T0 Probes](./09-16-t0-probes.md) | All 16 zero-LLM probes specified: 8 chain (price, TVL, position health, gas, credit, RSI, MACD, circuit breaker), 6 coding (build, tests, complexity, deps, coverage, error rate), 2 universal (world model drift, causal consistency). Probe trait. Registry extensibility. |
 | 10 | [Active Inference: Compute Allocation](./10-active-inference-compute-allocation.md) | Expected Free Energy formula. Zero-hyperparameter exploration/exploitation. EFE for context selection. PredictiveScorer. Connection to CascadeRouter. Rational inattention (Sims 2003). |
 | 11 | [Active Inference: State Space](./11-active-inference-state-space.md) | Factorized discrete POMDP: TaskPhase × ContextQuality × Uncertainty = 90 states. A/B/C/D matrices from pymdp. EFE computation in microseconds. Bayesian matrix learning. |
@@ -55,6 +55,7 @@ Before reading this topic, we recommend:
 - [Topic 09: Daimon](../09-daimon/INDEX.md) — for the PAD affect model, ALMA layers, and behavioral states
 - [Topic 06: Neuro](../06-neuro/INDEX.md) — for knowledge tiers, HDC vectors, and tier progression
 - [Topic 05: Learning](../05-learning/INDEX.md) — for episodes, CascadeRouter, playbooks, and calibration
+- [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) — canonical terms for Bus, Pulse, Topic, and the heartbeat vocabulary
 
 ---
 
@@ -103,10 +104,10 @@ This topic connects to:
 
 **What exists:**
 - The orchestration loop in `roko-cli/src/orchestrate.rs` is effectively a gamma loop.
-- `InferenceTier` enum (T0/T1/T2) and `TierRouter` in `bardo-primitives/src/tier.rs`.
+- The current tier enum (T0/T1/T2) and tier router in the primitives layer.
 - `CascadeRouter` three-stage model routing in `roko-learn/src/cascade_router.rs`.
 - Episode logging, efficiency events, adaptive gate thresholds — all wired.
-- `bardo-runtime` provides process supervision, event bus, cancellation.
+- The runtime support crate provides process supervision, Bus transport, cancellation.
 - `roko-dreams` crate exists as a scaffold.
 
 **What is missing (implementation-plans/12a-cognitive-layer.md §I):**
@@ -121,7 +122,7 @@ This topic connects to:
 - Active inference POMDP for tier selection (target: Stage 3).
 - ALMA three-layer affect model in roko-daimon.
 - Behavioral state machine (Engaged/Struggling/Coasting/Exploring/Focused/Resting).
-- CognitiveSignal dispatch between loops.
+- Bus tick subscriptions between loops.
 
 ---
 
@@ -138,17 +139,17 @@ This topic connects to:
   - `refactoring-prd/05-agent-types.md` (chain heartbeat, sleepwalker)
   - `refactoring-prd/08-translation-guide.md` (old→new mapping)
   - `refactoring-prd/09-innovations.md` (T0 probes, VCG, active inference, somatic landscape)
-  - `bardo-backup/prd/01-golem/02-heartbeat.md` (full tick pipeline, DecisionCycleRecord, cost model)
-  - `bardo-backup/prd/01-golem/18-cortical-state.md` (CorticalState, adaptive clock, Daimon PAD)
-  - `bardo-backup/prd/01-golem/03-mind.md` (10 cognitive mechanisms)
-  - `bardo-backup/prd/01-golem/01-cognition.md` (inference engine, cognitive workspace)
-  - `bardo-backup/prd/01-golem/15-sleepwalker.md` (observer phenotype, 3-step variant)
-  - `bardo-primitives/src/tier.rs` (InferenceTier, TierRouter)
+  - legacy source: `bardo-backup/prd/01-golem/02-heartbeat.md` (full tick pipeline, DecisionCycleRecord, cost model)
+  - legacy source: `bardo-backup/prd/01-golem/18-cortical-state.md` (CorticalState, adaptive clock, Daimon PAD)
+  - legacy source: `bardo-backup/prd/01-golem/03-mind.md` (10 cognitive mechanisms)
+  - legacy source: `bardo-backup/prd/01-golem/01-cognition.md` (inference engine, cognitive workspace)
+  - legacy source: `bardo-backup/prd/01-golem/15-sleepwalker.md` (observer phenotype, 3-step variant)
+  - legacy code path: `bardo-primitives/src/tier.rs` (tier enum, tier router)
   - `roko-learn/src/cascade_router.rs` (CascadeRouter, LinUCB)
-  - `bardo-runtime/src/lib.rs` (event_bus, process, cancel)
+  - legacy code path: `bardo-runtime/src/lib.rs` (event_bus, process, cancel)
   - `implementation-plans/12a-cognitive-layer.md` §I (I1-I5)
 - **Decisions requiring judgment**:
-  - CorticalState resource signals renamed from "mortality" framing (economic_vitality → resource_health, behavioral_phase → behavioral_state) per reframe rules. Underlying mechanisms preserved.
+  - Legacy mortality framing in CorticalState resource signals was renamed (`economic_vitality` → `resource_health`, `behavioral_phase` → `behavioral_state`) per reframe rules. Underlying mechanisms were preserved.
   - Sleepwalker 3-step variant included in chain heartbeat variant (02) rather than a separate sub-doc, as it's a specialization of the chain heartbeat.
   - Active inference split into two sub-docs (10: theory, 11: state space) rather than one, to keep each focused and under the recommended length.
   - VCG auction, CorticalState, meta-cognition, and frequency scheduler combined in sub-doc 12 as they are closely related aspects of the heartbeat's governance mechanism.

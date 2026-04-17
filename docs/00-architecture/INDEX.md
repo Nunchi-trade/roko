@@ -9,6 +9,9 @@
 > foundations, and the frontier innovations that distinguish Roko from every other agent
 > framework. See also `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
 > `tmp/refinements/03-bus-as-first-class.md` for the Bus promotion and two-fabric kernel,
+> `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
+> `tmp/refinements/09-phase-2-implications.md` for how Chain, Dreams, Coordination, and
+> Heartbeat collapse onto that same kernel,
 > `tmp/refinements/06-refactoring-plan.md` for the phased refactoring plan and rollout
 > ordering, and `tmp/refinements/21-from-scratch-redesigns.md` for the rewrite-track
 > alternative and from-scratch sequencing.
@@ -56,7 +59,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 06 | [Synapse Traits](./06-synapse-traits.md) | Six operators across two mediums and two fabrics, the trait composition model, all six trait signatures, trait × layer map, composability example via loop_tick |
 | 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | The durable storage fabric: Substrate's trait surface, backends, concurrency, pruning, and its relationship to the Bus sibling fabric |
 | 07b | [Bus Transport Fabric](./07b-bus-transport-fabric.md) | The transport fabric: Bus trait, Topic and TopicFilter routing, replay/ring semantics, backend families, and topic-driven decoupling |
-| 08 | [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md) | Detailed specs for the five non-Substrate operators: Scorer composition, 11-gate pipeline, CascadeRouter feedback, Composer budget, Policy batch model |
+| 08 | [Scorer, Gate, Router, Composer, Policy](./08-scorer-gate-router-composer-policy.md) | Detailed specs for the five non-Substrate operators after REF04: `Datum`-aware scoring/composition, stream Gates, Pulse routing, and `PolicyOutputs` |
 | 09 | [Universal Cognitive Loop](./09-universal-cognitive-loop.md) | 9-step loop specification with trait mappings, shipping loop_tick code, TickOutcome struct, loop at three speeds, universality |
 | 10 | [Three Cognitive Speeds](./10-three-cognitive-speeds.md) | Gamma (~5-15s), Theta (~75s), Delta (hours): frequency selection, adaptive clock, turn limits, neuroscience inspiration |
 | 11 | [Dual-Process and Active Inference](./11-dual-process-and-active-inference.md) | T0/T1/T2 tiers, EFE formula, 16 T0 probes, Kahneman mapping, classical architectures (ACT-R, SOAR, CLARION, GWT, modern agent-systems comparison), LLM-era architectures |
@@ -72,7 +75,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 21 | [Performance and Numerical Stability](./21-performance-numerical-stability.md) | f32/f64 decision matrix, hot-path complexity targets, memory budgets, NaN/Inf handling |
 | 22 | [Error Handling and Recovery](./22-error-handling-recovery.md) | Four error classes, exponential backoff, circuit breaker, 7-level graceful degradation |
 | 23 | [Architectural Analysis and Improvements](./23-architectural-analysis-improvements.md) | Coherence analysis of the current architecture plus the v2 rewrite path: layer violations, refactor boundaries, category theory, and from-scratch decision points |
-| 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), transport-fabric proposal, data flow diagrams, integration roadmap (~2,070 LOC) |
+| 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), REF09 two-fabric implications for ChainBus/Dreams/Coordination/Heartbeat, data flow diagrams, integration roadmap (~2,070 LOC) |
 | 25 | [Attention as Universal Cognitive Currency](./25-attention-as-currency.md) | Attention tokens as universal unit of account, VCG auction for Engram selection, budget-aware CascadeRouter, Daimon affect modulation, cross-speed token economics |
 | 26 | [Cognitive Immune System](./26-cognitive-immune-system.md) | 5-layer defense against knowledge corruption: taint propagation, anomaly detection, quarantine, red-team probes, immune memory with HDC signatures |
 | 27 | [Temporal Knowledge Topology](./27-temporal-knowledge-topology.md) | Allen's 13 interval relations, temporal calculus (fluents, causation, interval relations), three-tier temporal KG (episodes/entities/communities), temporal queries |

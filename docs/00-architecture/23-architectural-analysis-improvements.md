@@ -10,6 +10,7 @@
 > coherence gaps, layer violations, rewrite boundaries, and proposes improvements grounded in
 > academic literature. See also `tmp/refinements/01-critique-one-noun.md`,
 > `tmp/refinements/03-bus-as-first-class.md`,
+> `tmp/refinements/04-operators-generalized.md`,
 > `tmp/refinements/21-from-scratch-redesigns.md`, and
 > [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
@@ -73,17 +74,21 @@ UI/API boundary code (`roko-cli/src/tui/`, `roko-serve/src/routes/`), none in co
 
 ### 2.2 Boundary Operations
 
-Three operations sit at the boundary of the trait model:
+Three operations sit at the boundary of the trait model, and REF04 shows that they are better
+understood as `Datum`-aware operators rather than special cases:
 
 | Operation | Current Implementation | Fit Quality |
 |---|---|---|
-| **Engram transformation** (e.g., summarize, translate) | `Composer::compose(&[single], &Budget::UNLIMITED, ...)` | Adequate. Budget parameter is unused but harmless. |
-| **Telemetry emission** (metrics, traces) | `Policy::decide(&[], ctx)` returning metric Engrams | Adequate. Empty stream input is awkward but functional. |
-| **Batch verification** (verify N Engrams at once) | Loop calling `Gate::verify` N times | Adequate. External loop is standard; batch Gate would be premature optimization. |
+| **Engram transformation** (e.g., summarize, translate) | `Composer::compose(&[Datum], &Budget, &dyn Scorer, ctx)` | Adequate. Composer can ingest either medium, so the same path can absorb mixed Engram/Pulse context without inventing a separate boundary abstraction. |
+| **Telemetry emission** (metrics, traces) | `Policy::decide(&[Pulse], ctx)` returning `PolicyOutputs` | Better fit. Policy is intentionally Pulse-native, so live telemetry and reactive follow-ups can emit both Pulses and Engrams directly instead of masquerading as an empty Engram slice. |
+| **Batch verification** (verify N Engrams at once) | Loop calling `Gate::verify` N times, or `Gate::verify_stream(&[Pulse], ctx)` for stream windows | Adequate. Gate keeps the durable Engram path while also supporting stream verification over Pulses when the boundary is temporal rather than stored. |
 
-That telemetry row is the first concrete sign that the old framing is too narrow: `Policy::decide(&[], ctx)`
-works, but only by pretending live telemetry is an empty Engram stream. REF01 treats that awkward
-boundary as evidence for the two-medium, two-fabric reframing rather than as a harmless quirk.
+The trait boundary now lines up with the medium split: `Datum` covers polymorphic Scorer and
+Composer inputs; Router gains a native Pulse-selection path beside its durable Engram path;
+`Gate::verify_stream` covers verification over Pulse windows; `Policy::decide(&[Pulse], ctx)`
+and `PolicyOutputs` make stream reaction explicit; and the Bus handles Pulse transport while
+Substrate remains the storage path for Engrams. REF01 treats that boundary as evidence for the
+two mediums and two fabrics reframing rather than as a harmless quirk.
 
 ### 2.3 When a rewrite beats incremental refactor
 
@@ -156,24 +161,27 @@ Full Cargo.toml analysis across all 28 crates:
 ### 3.2 The roko-conductor Violation
 
 **Root cause**: `roko-conductor` imports learning types for circuit-breaker state tracking.
-The Conductor needs to react to failure-rate signals, but the current implementation reaches
-across into `roko-learn` instead of consuming a shared transport primitive.
+The Conductor needs to react to failure-rate Pulses, but the current implementation reaches
+across into `roko-learn` instead of consuming the shared transport primitive and topic boundary.
 
 **Bus-first fix**: publish the circuit-breaker facts on the kernel `Bus` as topics and let both
 subsystems subscribe to the same live stream:
 
 - `gate.verdict.emitted` carries the gate result from the verification path.
-- `gate.failure.rate` carries the learned failure-rate summary that `roko-conductor` needs.
+- `gate.failure.rate` carries the learned failure-rate Pulse that `roko-conductor` needs.
 
 That dissolves the layer violation without introducing a separate `HealthMetrics` trait in
 `roko-core`. `roko-conductor` depends on the `Bus` trait and a `TopicFilter`; `roko-learn`
-publishes the learned rate as a Pulse. The compile-time dependency between `roko-conductor`
-and `roko-learn` disappears because the shared contract is now the Bus fabric, not a direct
-trait object.
+publishes the learned rate as a Pulse; `Gate` can verify Pulse windows directly; `Router` can
+select among live Pulse candidates; and `Composer` can fold mixed `Datum` inputs when the
+conductor needs a synthesized control packet rather than a stored episode. The compile-time
+dependency between `roko-conductor` and `roko-learn` disappears because the shared contract is
+now the Bus fabric and its topics, not a direct crate dependency or a bespoke trait object.
 
-REF03 is the load-bearing reframing for this section: the architecture already contains two
-fabrics, Substrate for durable Engrams and Bus for ephemeral Pulses, so the conductor problem
-belongs in topic routing rather than in a bespoke health interface.
+REF03 and REF04 together are the load-bearing reframing for this section: the architecture
+already contains two mediums and two fabrics, so the conductor problem belongs in topic routing,
+Datum-aware operator boundaries, and Pulse stream handling rather than in a bespoke health
+interface.
 
 ### 3.3 Unclassified Crates
 
