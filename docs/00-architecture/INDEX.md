@@ -60,7 +60,11 @@ loop, and the frontier innovations that emerge from the architecture.
 
 See also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the learning-side heuristic,
 falsifier, and worldview framing, and [Naming and Glossary](./01-naming-and-glossary.md) for
-the canonical vocabulary.
+the canonical vocabulary. The developer-facing Rust SDK framing that maps these kernel concepts
+onto one-liner, builder, trait impl, and runtime impl entry points lives in
+[Topic 12: Rust SDK Developer UX](../12-interfaces/19-rust-sdk-developer-ux.md) and
+[Topic 02: Extensibility](../02-agents/12-extensibility.md); see also
+[tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md).
 
 ---
 
@@ -131,6 +135,7 @@ This topic connects to:
 
 - [Topic 01: Orchestration](../01-orchestration/INDEX.md) — L4 orchestration layer details (plan DAG, parallel executor, merge queue)
 - [Topic 02: Agents](../02-agents/INDEX.md) — Agent types built on the Synapse Architecture
+- [Topic 12: Interfaces](../12-interfaces/INDEX.md) — Interface surfaces, including the four-layer Rust SDK and `cargo roko` developer workflow
 - [Topic 03: Composition](../03-composition/INDEX.md) — Context engineering and the Composer trait in depth
 - [Topic 04: Verification](../04-verification/INDEX.md) — Gate pipeline and verification strategies
 - [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, heuristics, falsifier-driven calibration, worldview clustering, bandits, predict/publish/correct loops

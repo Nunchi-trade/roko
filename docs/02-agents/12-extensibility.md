@@ -4,8 +4,11 @@
 >
 > This document describes how to add new agent backends, new provider
 > adapters, new tool translators, and new LlmBackend implementations.
-> It covers the 8-step domain plugin process and the extensibility
-> architecture.
+> It covers the 8-step domain plugin process, the four-layer Rust SDK
+> surface, and the extensibility architecture.
+>
+> See also: `../../tmp/refinements/22-developer-ux-rust.md` and
+> `../00-architecture/01-naming-and-glossary.md`.
 
 
 > **Implementation**: Shipping
@@ -24,6 +27,36 @@ or registration mechanism:
 | New tool translator | `Translator` | `roko-agent/src/translate/` | Medium |
 | New LLM backend | `LlmBackend` | `roko-agent/src/tool_loop/` | Low |
 | New tool handler | `ToolHandler` | `roko-core/src/tool/` | Low |
+
+## Four-Layer Rust SDK
+
+The SDK is intentionally layered so Rust developers can stop at the
+highest level that fits their task.
+
+| Layer | Primary user | Typical entry point | What they own | Where failure should surface |
+|---|---|---|---|---|
+| One-liner | Application author | `roko::run(...)` | Defaults, model selection, memory path, immediate success path | At the call site, with typed errors |
+| Builder | Agent author | `Agent::builder()` | Roles, tools, gates, prompts, memory, configuration | At `.build()`, not first `.send()` |
+| Trait impl | Trait implementor | `ProviderAdapter`, `Translator`, `LlmBackend`, `ToolHandler` | Narrow, stable contracts with no runtime leakage | Compile-time contract errors and typed runtime errors |
+| Runtime impl | Runtime implementor | Runtime / supervisor / transport wiring | Host process, cancellation, transport, scheduling, platform-specific execution | In runtime bootstrap and lifecycle code |
+
+Practical guidance:
+
+- Application authors should be able to paste a one-liner and get a
+  working agent in under a minute.
+- Agent authors should stay on the builder surface unless they are
+  replacing a kernel contract.
+- Trait implementors should keep dependencies narrow and implement the
+  smallest stable interface that solves the problem.
+- Runtime implementors should wire execution hosts directly, not add
+  application-facing configuration detours.
+- Every layer should have a matching example and README entry so the
+  first working path is obvious and the advanced paths stay discoverable.
+
+The four layers are the frame for the rest of this chapter: the
+extensibility points below are the trait-implementor and runtime-implementor
+layers in practice, while the builder surface is how most agent authors
+compose the system.
 
 ---
 

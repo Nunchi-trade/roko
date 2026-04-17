@@ -6,7 +6,9 @@
 > chat types, agent roles, agent pools, MCP integration, tool loop, harness
 > engineering, format translation, temperament profiling, dual-process tier
 > routing, extensibility, creation site consolidation, provider integrations,
-> and current status.
+> the four-layer Rust SDK for custom-agent authoring, and current status.
+>
+> See also: `../../tmp/refinements/22-developer-ux-rust.md`.
 
 ---
 
@@ -26,7 +28,7 @@
 | 09 | [Format Translation](09-format-translation.md) | `09-format-translation.md` | `Translator` trait, 4 translators (OpenAI/Claude/Ollama/ReAct), wire format types, model capabilities, reasoning extraction |
 | 10 | [Temperament Profiling](10-temperament-profiling.md) | `10-temperament-profiling.md` | Conservative/Balanced/Aggressive/Exploratory dial, controls for model params, tool selection, gates, review, routing |
 | 11 | [Dual-Process Routing](11-dual-process-routing.md) | `11-dual-process-routing.md` | System 1/System 2 model, `CascadeRouter`, `LinUCB` bandit, Pareto frontier, Thompson sampling, anomaly detection, **Dual-Process Theory 2.0** (competing intuitions, triple-process), **MoE connection**, **routing feedback loops**, **meta-routing**, **latest routing research** (Router-R1, xRouter, IRT-Router, BEST-Route) |
-| 12 | [Extensibility](12-extensibility.md) | `12-extensibility.md` | Adding providers, adapters, translators, LlmBackends, 8-step domain plugin process, **self-evolving architecture** (Darwin Gödel Machine, Voyager skill library, agent memory sharing, intrinsic metacognition) |
+| 12 | [Extensibility](12-extensibility.md) | `12-extensibility.md` | Adding providers, adapters, translators, LlmBackends, the four-layer Rust SDK (one-liner, builder, trait impl, runtime impl), 8-step domain plugin process, **self-evolving architecture** (Darwin Gödel Machine, Voyager skill library, agent memory sharing, intrinsic metacognition) |
 | 13 | [Creation Sites](13-creation-sites.md) | `13-creation-sites.md` | 8 agent creation sites, consolidation into `create_agent_for_model`, migration strategy and status |
 | 14 | [Provider Integrations](14-provider-integrations.md) | `14-provider-integrations.md` | Perplexity (Sonar), Gemini, ZhipuAI (GLM), Moonshot (Kimi), OpenRouter — API surfaces, config, extensions, status |
 | 15 | [Status and Gaps](15-status-gaps.md) | `15-status-gaps.md` | What works, what's built but not wired, 7 prioritized gaps, integration path, metrics |

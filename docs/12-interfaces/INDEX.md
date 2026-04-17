@@ -13,7 +13,7 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 - **ROSEDUST everywhere**: One design language across TUI, Web, and CLI
 - **Real-time**: WebSocket and SSE feeds for live agent monitoring
 - **Spectre as readout**: Every agent has a procedurally generated creature that encodes cognitive state
-- **No mortality references**: Spectres never die, music reflects engagement not lifecycle
+- **No ending framing**: Spectres stay continuous; music reflects engagement, not lifecycle
 
 ---
 
@@ -37,9 +37,10 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 | 13 | [13-web-portal.md](./13-web-portal.md) | Web Portal — React 19 + Next.js 15.5+, ROSEDUST Tailwind config, glass morphism CSS, 9 pages, WebGL Spectre, WebSocket integration |
 | 14 | [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md) | Onboarding journey — domain selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, first-task validation |
 | 15 | [15-generative-interfaces-a2ui.md](./15-generative-interfaces-a2ui.md) | A2UI protocol — agents emit JSONL UI descriptions, 12 component types, ROSEDUST inheritance, sandboxed rendering across TUI/Web/CLI |
-| 16 | [16-sonification-reframed.md](./16-sonification-reframed.md) | Ambient sonification — Eno mandate, 5 musical layers, 8 behavioral state presets, emotional harmonic vocabulary. No mortality audio. |
+| 16 | [16-sonification-reframed.md](./16-sonification-reframed.md) | Ambient sonification — Eno mandate, 5 musical layers, 8 behavioral state presets, emotional harmonic vocabulary. No lifecycle audio. |
 | 17 | [17-accessibility-and-current-status.md](./17-accessibility-and-current-status.md) | WCAG 2.1 AA targets, keyboard nav, screen reader support, reduced motion, port allocation, comprehensive implementation status |
 | 18 | [18-ux-innovation-proposals.md](./18-ux-innovation-proposals.md) | 7 UX innovations — Conversational Development, Time-Travel Debugging, Dream Journal, Agent Garden, Pair Programming with Affect, Collaborative Planning, Knowledge Map |
+| 19 | [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) | Four-layer Rust SDK — one-liner, builder, trait impl, runtime impl, typed errors, docs/examples discipline, `cargo roko`, macros, testing ergonomics, tracing, release compatibility |
 
 ---
 
@@ -102,7 +103,8 @@ This topic was generated from:
 - `bardo-backup/prd/shared/` (branding, port allocation)
 - Active code: `roko-cli/src/tui/`, `roko-serve/src/routes/`, `roko-cli/src/main.rs`
 
-All naming follows the authoritative naming map: bardo→Roko, golem→agent, grimoire→Neuro, Signal→Engram, clade→collective/mesh, mori→Roko Orchestrator. Mortality and death references have been removed per the reframe rules. Sonification presets have been remapped from lifecycle phases to behavioral states.
+All naming follows the authoritative naming map. Legacy/renamed terms include bardo→Roko, golem→agent, grimoire→Neuro, Signal→Engram, clade→collective/mesh, and mori→Roko Orchestrator. Legacy lifecycle and death framing has been removed per the reframe rules. Sonification presets have been remapped from lifecycle phases to behavioral states.
 REF17 adds the interface-side plugin surface; start with [00-cli-overview.md](./00-cli-overview.md),
 [01-cli-command-reference.md](./01-cli-command-reference.md), and
 [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
+REF22 adds the Rust SDK developer-UX chapter; start with [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) and [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md).

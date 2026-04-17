@@ -10,6 +10,9 @@
 > [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md). For the plugin and SPI extension
 > vocabulary used in the five-tier extension architecture, see also
 > [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
+> For the Rust SDK vocabulary used by application authors, agent authors, trait implementors,
+> and runtime implementors, see also [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md)
+> and [../12-interfaces/19-rust-sdk-developer-ux.md](../12-interfaces/19-rust-sdk-developer-ux.md).
 > When another document
 > disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
@@ -232,6 +235,12 @@ The following names are load-bearing additions in the current architecture:
 | `roko-tools` | Proposed crate for builtin tools split out of `roko-std`. |
 | `roko-compose-core` | Proposed crate for compose engine mechanics split out of `roko-compose`. |
 | `roko-templates` | Proposed crate for role and domain template packs split out of `roko-compose`. |
+| `SDK` | Four-layer Rust developer surface spanning one-liner, builder, trait impl, and runtime impl entry points over the same kernel. |
+| `one-liner` | Fastest Rust entry point, typically `roko::run(...)`, for demos, scripts, and first-run success. |
+| `builder` | Daily-driver authoring surface that validates at `.build()` and hides kernel details by default. |
+| `trait impl` | Custom component surface for `Substrate`, `Bus`, operators, translators, and provider adapters. |
+| `runtime impl` | Host integration surface for browser, edge, embedded, or distributed runtimes. |
+| `cargo roko` | Cargo-native developer workflow for scaffold, replay, explain, benchmark, and heuristic inspection. |
 | `Paper` | Durable research source Engram that seeds claims, heuristics, and replication tracking. |
 | `Claim` | Testable hypothesis distilled from a Paper, with context, falsifier, and calibration. |
 | `Replication Ledger` | Per-claim record of paper effect, observed effect, trial count, divergence, and replication status. |
@@ -244,7 +253,7 @@ The following names are load-bearing additions in the current architecture:
 | `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
-| `Extension tier` | Extension loading class | One of the five extension tiers: prompts, profiles, declarative tools/MCP, native Rust, or WASM sandboxing. |
+| `Extension tier` | One of the five extension loading classes: prompts, profiles, declarative tools/MCP, native Rust, or WASM sandboxing. |
 | `c-factor` | Continuously measured cohort-process metric learned from turn-taking entropy, peer prediction accuracy, citation reciprocity, delivery rate, and HDC diversity. |
 | `Compounding loop` | A feedback loop where each successful cycle improves the next cycle's cost, latency, or quality rather than merely repeating it. |
 | `Superlinear return` | A scaling regime where accumulated usage, connected deployments, or added plugins produce more than proportional capability or efficiency gains. |
@@ -296,6 +305,7 @@ prefixes without coordination.
 | `HDC fingerprint` | Per-Engram 10,240-bit hyperdimensional vector used for `query_similar`, clustering, consensus, and analogy. |
 | `Mesh` | Agent-network layer for multi-agent communication. |
 | `Neuro` | Durable knowledge cross-cut that influences storage reads and composition. |
+| `SDK` | The four-layer Rust developer surface that lets Rust users start with a one-liner and descend only as far as builder, trait impl, or runtime impl work requires. |
 | `Pulse` | Ephemeral transport record published on a Bus and retained only as long as the stream requires. |
 | `PulseSource` | Lightweight producer identity carried on a Pulse. |
 | `Prediction Error` | The residual between predicted and observed outcomes, published as `prediction.error.*` when it becomes a first-class runtime signal. |
@@ -313,7 +323,9 @@ prefixes without coordination.
 - [07-substrate-trait.md](./07-substrate-trait.md) for the storage fabric
 - [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) for the transport fabric
 - [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md) for `Datum`-aware operator signatures
+- [../12-interfaces/19-rust-sdk-developer-ux.md](../12-interfaces/19-rust-sdk-developer-ux.md) for the four-layer Rust SDK vocabulary and developer-facing entry points
 - [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the heuristic, falsifier, and worldview refinement
 - [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md) for the paper, claim, and replication ledger pipeline
 - [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md) for the canonical naming proposal
 - [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the fingerprint-first HDC proposal
+- [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md) for the Rust SDK framing and developer-UX proposal
