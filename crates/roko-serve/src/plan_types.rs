@@ -34,6 +34,11 @@ impl Plan {
     }
 
     /// Validate the plan for common issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns a list of validation errors when the plan ID or title is blank,
+    /// or when any task has a blank ID.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         if self.id.trim().is_empty() {

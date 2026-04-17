@@ -92,6 +92,11 @@ fn map_load_config_error(err: LoadConfigError) -> ApiError {
 }
 
 /// Reload `roko.toml` from disk into the live state and return validation warnings.
+///
+/// # Errors
+///
+/// Returns [`LoadConfigError::Read`] when `roko.toml` cannot be read and
+/// [`LoadConfigError::Parse`] when the file contents are not valid config.
 pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConfigError> {
     let new_config = load_config(&state.workdir)?;
     let warnings = validate_references(&new_config);

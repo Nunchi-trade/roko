@@ -249,6 +249,10 @@ impl PlaybookStore {
     ///
     /// This is a thin alias for [`PlaybookStore::load`] used by the
     /// orchestrator's pre-dispatch learning hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error raised by [`PlaybookStore::load`].
     pub async fn lookup(&self, task_type: &str) -> io::Result<Option<Playbook>> {
         self.load(task_type).await
     }
@@ -263,6 +267,11 @@ impl PlaybookStore {
     /// If the query yields no textual matches, the store falls back to the
     /// most recently used playbooks so callers still get a best-effort prompt
     /// injection candidate list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any persisted playbook file cannot be read or
+    /// deserialized.
     pub async fn relevant(
         &self,
         query: impl AsRef<str>,
@@ -387,6 +396,10 @@ impl PlaybookStore {
     /// This is a convenience wrapper around [`PlaybookStore::record_outcome`]
     /// for call sites that already have the originating task definition and
     /// only need to persist the success/failure result.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error raised while loading or updating the playbook.
     pub async fn record(&self, id: &str, success: bool) -> io::Result<bool> {
         self.record_outcome(id, success).await
     }

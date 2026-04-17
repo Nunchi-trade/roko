@@ -6,6 +6,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(clippy, allow(missing_docs))]
+// TODO(UX42-followup): remove `missing_panics_doc` once the remaining
+// public Mirage APIs have accurate panic documentation.
 #![allow(
     clippy::double_must_use,
     clippy::expect_used,

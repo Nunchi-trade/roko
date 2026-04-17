@@ -413,6 +413,11 @@ impl ExperimentStore {
     }
 
     /// Save to a JSON file (atomic write).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be serialized or if the output
+    /// file cannot be created, written, or renamed.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -492,11 +497,20 @@ impl ExperimentStore {
     }
 
     /// Write concluded winners to the static-overrides file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the static-overrides file cannot be written.
     pub fn apply_winners(&self, winners: &[ExperimentWinner]) -> io::Result<()> {
         self.apply_winners_to(winners, Path::new(DEFAULT_STATIC_OVERRIDES_PATH))
     }
 
     /// Write concluded winners to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the existing overrides cannot be parsed, or if the
+    /// new overrides cannot be serialized, written, or renamed.
     pub fn apply_winners_to(&self, winners: &[ExperimentWinner], path: &Path) -> io::Result<()> {
         if winners.is_empty() {
             return Ok(());

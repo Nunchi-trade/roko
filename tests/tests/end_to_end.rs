@@ -17,8 +17,8 @@
 use roko_agent::{Agent, ExecAgent, MockAgent};
 use roko_compose::{CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority};
 use roko_core::{
-    Body, Budget, Composer, ContentHash, Context, Decay, Gate, Kind, Policy, Provenance, Query,
-    Signal, Substrate, Verdict,
+    Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind, Policy,
+    Provenance, Query, Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, CompileGate, GatePayload};
@@ -32,12 +32,12 @@ use tokio::fs;
 struct EpisodePolicy;
 
 impl Policy for EpisodePolicy {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         stream
             .iter()
             .filter(|s| s.kind == Kind::GateVerdict)
             .map(|v| {
-                Signal::builder(Kind::Episode)
+                Engram::builder(Kind::Episode)
                     .body(
                         Body::from_json(&serde_json::json!({
                             "verdict_id": v.id.to_hex(),
@@ -157,7 +157,7 @@ async fn coding_agent_full_loop() {
 
     // 5. Gate verifies the project actually compiles.
     let compile_gate = CompileGate::new(BuildSystem::Cargo).with_timeout_ms(120_000);
-    let gate_input_sig = Signal::builder(Kind::Task)
+    let gate_input_sig = Engram::builder(Kind::Task)
         .body(Body::from_json(&GatePayload::in_dir(&project).with_label("e2e-test")).unwrap())
         .lineage([agent_result.output.id]) // chain back to the agent run
         .build();
@@ -209,7 +209,7 @@ async fn coding_agent_full_loop() {
     }
 
     // 8. Trace the lineage chain: Episode → GateVerdict → Task → AgentOutput → Prompt → PromptSection(x3)
-    let chain = trace_lineage(&*substrate, episode.id).await;
+    let chain: Vec<Engram> = trace_lineage(&*substrate, episode.id).await;
     assert!(chain.len() >= 6, "lineage chain too short: {chain:?}");
     // The chain should contain at least one of each traced kind.
     let kinds_in_chain: Vec<_> = chain.iter().map(|s| &s.kind).collect();
@@ -231,7 +231,7 @@ async fn coding_agent_full_loop() {
 
 /// Walk the lineage DAG breadth-first from a starting signal, collecting
 /// every ancestor.
-async fn trace_lineage(substrate: &dyn Substrate, start: ContentHash) -> Vec<Signal> {
+async fn trace_lineage(substrate: &dyn Substrate, start: ContentHash) -> Vec<Engram> {
     let mut visited = std::collections::HashSet::new();
     let mut queue = vec![start];
     let mut out = Vec::new();
@@ -281,7 +281,7 @@ path = "src/lib.rs"
 
     let substrate = FileSubstrate::open(tmp.path().join(".roko")).await.unwrap();
     let gate = CompileGate::new(BuildSystem::Cargo).with_timeout_ms(60_000);
-    let input = Signal::builder(Kind::Task)
+    let input = Engram::builder(Kind::Task)
         .body(Body::from_json(&GatePayload::in_dir(&project)).unwrap())
         .build();
     substrate.put(input.clone()).await.unwrap();
@@ -363,7 +363,7 @@ mod parking_lot_fork {
 }
 
 impl roko_core::Router for FeedbackCounter {
-    fn select(&self, candidates: &[Signal], _ctx: &Context) -> Option<roko_core::Selection> {
+    fn select(&self, candidates: &[Engram], _ctx: &Context) -> Option<roko_core::Selection> {
         candidates
             .first()
             .map(|s| roko_core::Selection::new(s.id, "feedback_counter"))
@@ -384,8 +384,8 @@ async fn router_receives_feedback() {
         count: parking_lot_fork::Mutex::new(0),
     };
     let candidates = [
-        Signal::builder(Kind::Task).body(Body::text("a")).build(),
-        Signal::builder(Kind::Task).body(Body::text("b")).build(),
+        Engram::builder(Kind::Task).body(Body::text("a")).build(),
+        Engram::builder(Kind::Task).body(Body::text("b")).build(),
     ];
     let sel = roko_core::Router::select(&router, &candidates, &Context::at(0)).unwrap();
 
@@ -402,7 +402,7 @@ async fn router_receives_feedback() {
 #[tokio::test]
 async fn episode_policy_emits_signals_for_verdicts() {
     let policy = EpisodePolicy;
-    let verdict_sig = Signal::builder(Kind::GateVerdict)
+    let verdict_sig = Engram::builder(Kind::GateVerdict)
         .body(Body::from_json(&Verdict::pass("x")).unwrap())
         .tag("passed", "true")
         .tag("gate", "x")
@@ -414,6 +414,6 @@ async fn episode_policy_emits_signals_for_verdicts() {
     assert_eq!(out[0].lineage, vec![verdict_sig.id]);
 
     // Non-verdict signals are ignored.
-    let task = Signal::builder(Kind::Task).body(Body::text("x")).build();
+    let task = Engram::builder(Kind::Task).body(Body::text("x")).build();
     assert!(policy.decide(&[task], &Context::at(0)).is_empty());
 }

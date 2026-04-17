@@ -13,6 +13,11 @@ use super::{ApiError, ApiState};
 const DEFAULT_ISFR_SERVICE_URL: &str = "http://localhost:8546";
 
 /// `GET /api/isfr/current` — proxy latest ISFR data from the upstream service.
+///
+/// # Errors
+///
+/// Returns `502` if the upstream ISFR service is unavailable, returns a
+/// non-success status, or returns malformed JSON.
 pub async fn isfr_current(
     State(_state): State<ApiState>,
     Query(query): Query<HashMap<String, String>>,
@@ -21,6 +26,11 @@ pub async fn isfr_current(
 }
 
 /// `GET /api/isfr/history` — proxy ISFR history from the upstream service.
+///
+/// # Errors
+///
+/// Returns `502` if the upstream ISFR service is unavailable, returns a
+/// non-success status, or returns malformed JSON.
 pub async fn isfr_history(
     State(_state): State<ApiState>,
     Query(query): Query<HashMap<String, String>>,

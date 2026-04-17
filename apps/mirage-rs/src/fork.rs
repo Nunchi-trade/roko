@@ -290,6 +290,10 @@ impl DirtyStore {
     }
 
     /// Restores a previously taken snapshot and invalidates later snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::SnapshotNotFound`] if `id` is no longer live.
     pub fn revert(&mut self, id: u64) -> Result<(u64, u64)> {
         let snapshot = self
             .snapshots
@@ -425,6 +429,11 @@ impl DiffClassifier {
     }
 
     /// Applies classifier output to the watch list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::WatchListFull`] if the diff promotes more
+    /// protocol contracts than the configured watch-list capacity allows.
     pub fn apply(&self, store: &mut DirtyStore, diff: &StateDiff, block_number: u64) -> Result<()> {
         for (address, classification) in self.classify(diff) {
             if store.unwatch_list.contains(&address) {
@@ -546,6 +555,12 @@ impl HybridDB {
     }
 
     /// Returns the ERC-20 balance slot used for `owner`.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream storage or account-read errors while probing candidate
+    /// slots, or [`MirageError::SlotDetectionFailed`] if no slot can be
+    /// inferred.
     pub fn erc20_balance_slot(&mut self, token: Address, owner: Address) -> Result<U256> {
         if let Some(slot) = self
             .dirty
@@ -579,6 +594,13 @@ impl HybridDB {
     }
 
     /// Reads a token balance using the detected ERC-20 balance slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream storage, account-read, or call errors while resolving
+    /// the slot or fetching the balance. Returns
+    /// [`MirageError::SlotDetectionFailed`] if the token cannot be identified
+    /// as ERC-20-like from local or upstream state.
     pub fn erc20_balance_of(&mut self, token: Address, owner: Address) -> Result<U256> {
         if let Some(balance) = self
             .dirty
@@ -620,6 +642,11 @@ impl HybridDB {
     }
 
     /// Writes a token balance using the detected or default ERC-20 balance slot.
+    ///
+    /// # Errors
+    ///
+    /// This helper does not currently return an error; it falls back to slot
+    /// `0` when the balance slot or total supply cannot be resolved.
     pub fn set_erc20_balance(
         &mut self,
         token: Address,
@@ -676,6 +703,11 @@ impl HybridDB {
 
 impl HybridDB {
     /// Reads basic account info.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream account-fetching or parsing errors when the account is
+    /// not already satisfied by the dirty layer or read cache.
     pub fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>> {
         if let Some(dirty) = self.dirty.accounts.get(&address) {
             let needs_upstream =
@@ -706,6 +738,11 @@ impl HybridDB {
     }
 
     /// Reads bytecode by hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream bytecode-fetching or parsing errors, or
+    /// [`MirageError::Upstream`] if the hash cannot be resolved.
     pub fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode> {
         let cached = self.bytecode_cache.lock().get(&code_hash);
         if let Some(bytecode) = cached {
@@ -729,6 +766,11 @@ impl HybridDB {
     }
 
     /// Reads storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream storage-fetching or parsing errors when the slot is
+    /// not already satisfied by the dirty layer or read cache.
     pub fn storage(&mut self, address: Address, index: U256) -> Result<U256> {
         if let Some(dirty) = self.dirty.accounts.get(&address) {
             if let Some(value) = dirty.storage.get(&index) {
@@ -746,6 +788,11 @@ impl HybridDB {
     }
 
     /// Reads a block hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream block-hash fetching or parsing errors when the hash is
+    /// not already cached locally.
     pub fn block_hash(&mut self, number: u64) -> Result<B256> {
         if let Some(hash) = self.read_cache.block_hashes.get(&number).copied() {
             return Ok(hash);
@@ -1011,6 +1058,11 @@ impl ForkState {
     }
 
     /// Restores a previously captured snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::SnapshotNotFound`] if the snapshot ID no longer
+    /// exists.
     pub fn revert(&mut self, id: u64) -> Result<bool> {
         let (block_number, _) = self.db.dirty.revert(id)?;
         self.local_block_number = block_number;
@@ -1467,6 +1519,12 @@ pub struct EvmExecutor;
 impl EvmExecutor {
     /// Executes a read-only `eth_call`-style invocation.
     ///
+    /// # Errors
+    ///
+    /// Returns validation, upstream lookup, or EVM execution errors while
+    /// resolving the call, including missing ERC-20 balance slots and malformed
+    /// transaction environment construction.
+    ///
     /// Uses [`HybridDB::clone_for_readonly`], so the live fork's [`DirtyStore`] is never updated
     /// (no committed state changes from this path). Shared bytecode LRU state may still be
     /// populated for cache hits across calls.
@@ -1524,6 +1582,12 @@ impl EvmExecutor {
     }
 
     /// Executes a local state-changing transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, upstream lookup, or execution errors from the
+    /// selected transaction path, including invalid sender data, malformed
+    /// calldata, and replay/execution failures.
     pub fn transact(
         state: &mut ForkState,
         from: Address,

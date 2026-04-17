@@ -536,6 +536,10 @@ impl DreamRunner {
 
     /// Replay the supplied episodes into durable insights without mutating the
     /// workspace.
+    ///
+    /// # Errors
+    ///
+    /// This method is currently infallible and always returns `Ok`.
     #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn replay_insights(&self, episodes: &[Episode]) -> Result<Vec<Insight>> {
@@ -552,11 +556,21 @@ impl DreamRunner {
     }
 
     /// Load the latest persisted dream report from `.roko/dreams/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the report directory cannot be scanned, if the
+    /// newest report cannot be read, or if the report contents are invalid
+    /// JSON.
     pub fn latest_report(&self) -> Result<Option<DreamReport>> {
         load_latest_dream_report(&self.report_dir())
     }
 
     /// Summarize the current heartbeat and delta-loop status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the episode log cannot be read.
     pub fn heartbeat_report(&self) -> Result<DreamHeartbeatReport> {
         let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
         let episodes = block_on(EpisodeLogger::read_all_lossy(&episodes_path))
@@ -566,6 +580,12 @@ impl DreamRunner {
     }
 
     /// Run a full dream consolidation cycle against the workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying dream cycle fails while reading the
+    /// episode log, synthesizing insights, writing knowledge, or producing the
+    /// consolidated report.
     pub fn consolidate_now(&mut self) -> Result<DreamReport> {
         block_on(self.consolidate_async())
     }
@@ -656,8 +676,16 @@ impl Default for DreamRunner {
 /// Trait for dream engines that can replay, consolidate, and schedule.
 pub trait DreamEngine {
     /// Replay a batch of episodes into insights.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`DreamRunner::replay_insights`].
     fn replay(&mut self, episodes: &[Episode]) -> Result<Vec<Insight>>;
     /// Consolidate the workspace into a persisted dream report.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`DreamRunner::consolidate_now`].
     fn consolidate(&mut self) -> Result<DreamReport>;
     /// Schedule the next dream fire time.
     fn schedule(&self) -> Option<Duration>;
@@ -793,6 +821,11 @@ fn default_idle_grace_mins() -> u64 {
 /// Load the latest persisted dream report from a report directory.
 ///
 /// Returns `Ok(None)` when the directory has no report yet.
+///
+/// # Errors
+///
+/// Returns an error if the report directory cannot be scanned, if the newest
+/// report cannot be read, or if the report contents are invalid JSON.
 pub fn load_latest_dream_report(report_dir: &Path) -> Result<Option<DreamReport>> {
     let Some(path) = latest_dream_report_path(report_dir)? else {
         return Ok(None);
@@ -850,6 +883,11 @@ where
 }
 
 /// Build the dream review dispatcher from the configured agent backend.
+///
+/// # Errors
+///
+/// Returns an error if the routing config cannot be loaded, if a routed model
+/// cannot be determined, or if the agent backend cannot be constructed.
 pub fn build_dream_review_dispatcher(
     workdir: &Path,
     config: &DreamAgentConfig,

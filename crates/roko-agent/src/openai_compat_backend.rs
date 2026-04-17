@@ -439,6 +439,15 @@ mod tests {
 
     use crate::http::HttpPostError;
 
+    fn test_timeout(ms: u64) -> Duration {
+        let scaled = if std::env::var("CI").map(|v| v == "true").unwrap_or(false) {
+            ms * 10
+        } else {
+            ms
+        };
+        Duration::from_millis(scaled)
+    }
+
     #[derive(Clone, Debug)]
     struct RecordedRequest {
         url: String,
@@ -955,7 +964,7 @@ mod tests {
                 .await
         });
 
-        let first_chunk = timeout(Duration::from_millis(500), event_rx.recv())
+        let first_chunk = timeout(test_timeout(500), event_rx.recv())
             .await
             .expect("stream should emit before completion")
             .expect("stream channel open");

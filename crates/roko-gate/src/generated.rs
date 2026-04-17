@@ -21,6 +21,11 @@ pub type GateError = roko_core::RokoError;
 /// Produces verifier artifacts from acceptance criteria and task context.
 pub trait GateGenerator: Send + Sync {
     /// Generate verification artifacts from acceptance criteria.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GateError`] if the acceptance criteria cannot be translated
+    /// into verifier artifacts for this generator.
     fn generate(
         &self,
         acceptance_criteria: &str,

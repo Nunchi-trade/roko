@@ -217,6 +217,10 @@ impl CronEventSource {
     }
 
     /// Return a snapshot of the configured schedules and their next fire times.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error if any cron expression cannot be parsed.
     #[must_use]
     pub fn schedules(&self) -> Result<Vec<CronScheduleStatus>> {
         Ok(self

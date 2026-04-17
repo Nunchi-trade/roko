@@ -62,6 +62,12 @@ impl AdaptiveThresholds {
     ///
     /// Returns `NotFound` if the file does not exist and `InvalidData` if the
     /// file exists but does not contain valid adaptive-threshold JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns any filesystem error from opening `path`, or
+    /// [`io::ErrorKind::InvalidData`] if the file contents are not valid
+    /// adaptive-threshold JSON.
     pub fn load(path: &Path) -> Result<Self, io::Error> {
         let file = std::fs::File::open(path)?;
         serde_json::from_reader(file).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
@@ -73,6 +79,12 @@ impl AdaptiveThresholds {
     }
 
     /// Save to a JSON file (atomic write).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be serialized, the parent
+    /// directory cannot be created, or the temporary/output files cannot be
+    /// written and renamed atomically.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

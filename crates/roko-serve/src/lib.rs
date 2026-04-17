@@ -161,6 +161,12 @@ impl ServerBuilder {
     }
 
     /// Bind and run the HTTP server until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `PORT` environment variable is not a valid
+    /// `u16`, the listener cannot bind, or the Axum server exits with an
+    /// error.
     pub async fn run(mut self) -> Result<()> {
         // -- PORT env var override (Railway / cloud platforms) -------------
         let addr = if let Ok(env_port) = std::env::var("PORT") {
@@ -214,6 +220,11 @@ impl ServerBuilder {
 }
 
 /// Start the HTTP server.
+///
+/// # Errors
+///
+/// Returns an error if `roko.toml` cannot be read or parsed, if the resolved
+/// listener cannot bind, or if serving the Axum router fails.
 pub async fn run_server(
     workdir: PathBuf,
     runtime: Arc<dyn CliRuntime>,
@@ -245,6 +256,11 @@ pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
 }
 
 /// Run the HTTP server against an already constructed [`AppState`].
+///
+/// # Errors
+///
+/// Returns an error if the listener cannot bind to `bind:port` or if the
+/// Axum server exits with an error.
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
     let roko_config = state.load_roko_config().as_ref().clone();
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));

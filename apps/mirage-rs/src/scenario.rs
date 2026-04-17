@@ -544,6 +544,10 @@ fn execute_scenario_set(fork_in: ForkState, set: &ScenarioSet) -> (Vec<ScenarioR
 
 impl Scenario {
     /// Parses a built-in TOML scenario fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::Toml`] if `input` is not valid fixture TOML.
     pub fn from_toml(id: impl Into<String>, input: &str) -> Result<Self, MirageError> {
         let fixture: ScenarioFixture = toml::from_str(input)?;
         let mut track_addresses = fixture.scenario.track_addresses;
@@ -584,6 +588,12 @@ impl Scenario {
     }
 
     /// Evaluates the fixture assertions against the current fork state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::Unsupported`] if a watch-list or token-balance
+    /// assertion fails, or propagates any underlying [`MirageError`] from the
+    /// balance lookup.
     pub fn evaluate_assertions(
         &self,
         state: &mut crate::fork::ForkState,

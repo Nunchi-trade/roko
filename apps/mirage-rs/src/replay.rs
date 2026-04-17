@@ -184,6 +184,11 @@ impl TargetedFollower {
     }
 
     /// Runs the follower until shutdown or upstream stream exhaustion.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream block-fetch, WebSocket, or replay-validation errors
+    /// encountered while consuming heads or falling back to polling.
     #[allow(clippy::cognitive_complexity)]
     pub async fn run(mut self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
         if self.is_proxy_mode() {
@@ -624,6 +629,11 @@ pub struct TxReplay {
 
 impl TxReplay {
     /// Attempts to replay a specific transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream transaction lookup, JSON decode, missing-sender, or
+    /// execution errors while rebuilding the transaction.
     pub fn execute(
         &self,
         upstream: &UpstreamRpc,
@@ -682,6 +692,11 @@ pub struct SpeculativeExecutor {
 
 impl SpeculativeExecutor {
     /// Executes a transaction request without mutating the base state.
+    ///
+    /// # Errors
+    ///
+    /// Returns missing-sender, decode, or execution errors while preparing and
+    /// simulating the speculative transaction.
     ///
     /// Forks the current dirty storage into a [`CowState`] branch so the
     /// shared baseline is never deep-cloned for repeated speculative runs

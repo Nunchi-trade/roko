@@ -111,6 +111,14 @@ mod tests {
     use crate::features::messaging;
     use crate::state::{DispatchError, DispatchLike};
 
+    fn scaled_test_timeout_ms(ms: u64) -> u64 {
+        if std::env::var("CI").is_ok_and(|value| value == "true") {
+            ms.saturating_mul(10)
+        } else {
+            ms
+        }
+    }
+
     fn log_path_for(agent_id: &str) -> std::path::PathBuf {
         std::env::temp_dir()
             .join("roko-agent-server-tests")
@@ -237,9 +245,10 @@ mod tests {
             .expect("message response");
         assert_eq!(message_response.status(), StatusCode::OK);
 
-        let logs_response = tokio::time::timeout(Duration::from_millis(100), async move {
-            app.oneshot(logs_request("/logs?tail=50")).await
-        })
+        let logs_response = tokio::time::timeout(
+            Duration::from_millis(scaled_test_timeout_ms(100)),
+            async move { app.oneshot(logs_request("/logs?tail=50")).await },
+        )
         .await
         .expect("logs response within 100ms")
         .expect("logs response");

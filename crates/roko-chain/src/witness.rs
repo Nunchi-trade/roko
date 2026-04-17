@@ -37,6 +37,11 @@ impl ChainWitnessEngine {
 
     /// Submit a witness transaction for `attestation` and attach chain
     /// metadata if the receipt is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ChainError::Rpc`] if the wallet or client RPC calls fail,
+    /// or if the backend returns an invalid transaction hash.
     pub async fn witness_on_chain(
         self,
         attestation: &mut Attestation,
@@ -67,6 +72,11 @@ impl ChainWitnessEngine {
 
     /// Check that `attestation` was witnessed on-chain and the mined receipt
     /// contains the expected witness payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ChainError::Rpc`] if the client RPC call fails or if the
+    /// stored transaction hash is malformed.
     pub async fn verify_on_chain(
         self,
         attestation: &Attestation,
@@ -91,6 +101,11 @@ impl ChainWitnessEngine {
 }
 
 /// Anchor an attestation on-chain using the default witness engine.
+///
+/// # Errors
+///
+/// Returns a [`ChainError::Rpc`] if the wallet or client RPC calls fail,
+/// or if the backend returns an invalid transaction hash.
 pub async fn witness_on_chain(
     attestation: &mut Attestation,
     wallet: &dyn ChainWallet,
@@ -102,6 +117,11 @@ pub async fn witness_on_chain(
 }
 
 /// Verify an on-chain witness using the default witness engine.
+///
+/// # Errors
+///
+/// Returns a [`ChainError::Rpc`] if the client RPC call fails or if the
+/// stored transaction hash is malformed.
 pub async fn verify_on_chain(
     attestation: &Attestation,
     client: &dyn ChainClient,

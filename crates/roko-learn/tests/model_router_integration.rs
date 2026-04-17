@@ -31,6 +31,14 @@ const FAST_SLUG: &str = "claude-haiku-3-5";
 const PREMIUM_SLUG: &str = "claude-opus-4";
 const TRAINING_ROUNDS: usize = 20;
 
+fn scaled_test_timeout_ms(ms: u64) -> u64 {
+    if std::env::var("CI").is_ok_and(|value| value == "true") {
+        ms.saturating_mul(10)
+    } else {
+        ms
+    }
+}
+
 #[derive(Clone, Copy)]
 struct MockBackendProfile {
     slug: &'static str,
@@ -218,7 +226,7 @@ async fn model_router_routes_by_tier_and_persists_atomically() {
         .unwrap_or_else(|err| panic!("seed metadata: {err}"))
         .modified()
         .unwrap_or_else(|err| panic!("seed modified time: {err}"));
-    sleep(Duration::from_millis(20)).await;
+    sleep(Duration::from_millis(scaled_test_timeout_ms(20))).await;
 
     let harness = DispatchHarness::new([
         MockBackendProfile {

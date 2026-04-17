@@ -17,7 +17,6 @@
     clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
-    clippy::missing_panics_doc,
     clippy::option_if_let_else,
     clippy::ref_option,
     clippy::suboptimal_flops,
@@ -1547,6 +1546,12 @@ impl DaimonState {
     ///
     /// When the definition changes, previously stored markers are discarded so
     /// incompatible domains do not silently share the same coordinate system.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `strategy_space` fails validation. Call
+    /// [`StrategySpaceDefinition::validate`] first when the input may be
+    /// malformed.
     pub fn configure_strategy_space(&mut self, strategy_space: StrategySpaceDefinition) {
         let strategy_space = strategy_space
             .validate()
@@ -1648,6 +1653,11 @@ pub trait AffectEngine {
     /// Modulate dispatch parameters in place.
     fn modulate(&self, params: &mut DispatchParams);
     /// Persist the current engine state to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns any persistence error encountered while serializing or writing
+    /// the engine state to disk.
     fn persist(&self, path: &Path) -> Result<()>;
 }
 

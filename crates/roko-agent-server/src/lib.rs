@@ -110,6 +110,13 @@ impl AgentServer {
     }
 
     /// Bind the configured address and serve until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bind address cannot be resolved or the TCP
+    /// listener cannot be created, if the bound address cannot be read back,
+    /// if optional registration or start hooks fail, or if serving the Axum
+    /// router fails.
     pub async fn serve(self) -> Result<()> {
         let bind = resolve_addr(&self.bind)?;
         let listener = TcpListener::bind(bind)
@@ -299,6 +306,10 @@ impl AgentServerBuilder {
     }
 
     /// Finish building the server definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `agent_id` was not configured.
     pub fn build(self) -> Result<AgentServer> {
         let agent_id = self
             .agent_id

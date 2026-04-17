@@ -323,6 +323,13 @@ impl TaskStore {
     }
 
     /// Create a follow-up improvement task for a completed parent task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskError::NotFound`] if the parent task is missing,
+    /// [`TaskError::InvalidState`] if the parent task is not completed, or
+    /// [`TaskError::ImprovementTargetUnassigned`] if the completed parent has
+    /// no assignee to reuse.
     pub fn create_improvement(
         &mut self,
         parent_id: TaskId,
@@ -378,6 +385,12 @@ impl TaskStore {
     }
 
     /// Assign a task to an agent. Task must be in `Open` state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskError::NotFound`] if the task is missing,
+    /// [`TaskError::InvalidState`] if the task is not open, or
+    /// [`TaskError::AlreadyAssigned`] if the task already has an assignee.
     pub fn assign(&mut self, id: TaskId, assignee: String, now: u64) -> Result<(), TaskError> {
         let entry = self.tasks.get_mut(&id).ok_or(TaskError::NotFound(id))?;
         if entry.state != TaskState::Open {
@@ -397,6 +410,11 @@ impl TaskStore {
     }
 
     /// Mark a task as in-progress. Task must be in `Assigned` state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskError::NotFound`] if the task is missing or
+    /// [`TaskError::InvalidState`] if the task is not assigned.
     pub fn start(&mut self, id: TaskId, now: u64) -> Result<(), TaskError> {
         let entry = self.tasks.get_mut(&id).ok_or(TaskError::NotFound(id))?;
         if entry.state != TaskState::Assigned {
@@ -415,6 +433,11 @@ impl TaskStore {
     /// Complete a task, optionally linking a result insight. Returns the reward (wei).
     ///
     /// Task must be in `InProgress` state. The reward is set to equal the stake.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskError::NotFound`] if the task is missing or
+    /// [`TaskError::InvalidState`] if the task is not in progress.
     pub fn complete(
         &mut self,
         id: TaskId,
@@ -446,6 +469,11 @@ impl TaskStore {
     ///
     /// If the task has not exceeded `max_attempts`, it is returned to `Open` state
     /// so it can be reassigned. Otherwise it stays in `Failed`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskError::NotFound`] if the task is missing or
+    /// [`TaskError::InvalidState`] if the task is not in progress.
     pub fn fail(&mut self, id: TaskId, _reason: String, now: u64) -> Result<(), TaskError> {
         let entry = self.tasks.get_mut(&id).ok_or(TaskError::NotFound(id))?;
         if entry.state != TaskState::InProgress {
@@ -469,6 +497,11 @@ impl TaskStore {
     }
 
     /// Cancel a task. Task must be in `Open`, `Assigned`, or `InProgress` state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskError::NotFound`] if the task is missing or
+    /// [`TaskError::InvalidState`] if the task is already in a terminal state.
     pub fn cancel(&mut self, id: TaskId, _reason: String) -> Result<(), TaskError> {
         let entry = self.tasks.get_mut(&id).ok_or(TaskError::NotFound(id))?;
         match entry.state {

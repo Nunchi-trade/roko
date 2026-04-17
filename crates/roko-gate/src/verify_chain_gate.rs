@@ -518,6 +518,14 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
+    fn scaled_test_timeout_ms(ms: u64) -> u64 {
+        if std::env::var("CI").is_ok_and(|value| value == "true") {
+            ms.saturating_mul(10)
+        } else {
+            ms
+        }
+    }
+
     fn signal_with_script(dir: &std::path::Path, script: &str) -> Engram {
         let payload = GatePayload::in_dir(dir);
         let body = Body::from_json(&payload).expect("serialize payload");
@@ -758,7 +766,7 @@ mod tests {
         let sig = signal_with_script(tmp.path(), "verify.sh");
         let gate = VerifyChainGate::strict()
             .with_retry(false)
-            .with_timeout_ms(150);
+            .with_timeout_ms(scaled_test_timeout_ms(150));
         let v = gate.verify(&sig, &Context::at(0)).await;
         assert!(!v.passed);
         assert!(v.reason.contains("timed out"), "reason: {}", v.reason);

@@ -307,6 +307,12 @@ impl ContextPackCache {
     /// tempfile + rename so a crash mid-write cannot corrupt a previous
     /// snapshot. Intended for best-effort warm-up snapshots — callers
     /// should not rely on this for strict durability guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RokoError::Json` if the snapshot cannot be serialized and
+    /// `RokoError::Io` if creating the parent directory, writing the
+    /// tempfile, or renaming the snapshot fails.
     pub async fn persist(&self) -> Result<()> {
         let snapshot = {
             let inner = self.inner.lock();
@@ -356,6 +362,11 @@ impl ContextPackCache {
     /// A missing file yields an empty cache — this is the "cold start" case
     /// and is not an error. Malformed JSON is surfaced as
     /// [`RokoError::Json`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `RokoError::Io` if the snapshot file cannot be read, and
+    /// `RokoError::Json` if the stored snapshot is not valid JSON.
     pub async fn load(path: impl Into<PathBuf>, fallback_capacity: usize) -> Result<Self> {
         let path = path.into();
         let bytes = match tokio::fs::read(&path).await {

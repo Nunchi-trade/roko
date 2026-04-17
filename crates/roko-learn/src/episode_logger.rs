@@ -318,6 +318,11 @@ impl Episode {
     }
 
     /// Attach a deterministic fingerprint of the completed episode text.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the computed fingerprint cannot be serialized into JSON for
+    /// storage in the episode metadata map.
     pub fn attach_text_fingerprint(&mut self) {
         let text = self.completion_fingerprint_text();
         let fingerprint = text_fingerprint(&text);
@@ -335,6 +340,11 @@ impl Episode {
     /// what model, which gates fired, did it succeed) rather than the
     /// textual content. It enables similarity search across episodes with
     /// structurally similar execution profiles.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the computed metadata fingerprint cannot be serialized into
+    /// JSON for storage in the episode metadata map.
     pub fn attach_metadata_fingerprint(&mut self) {
         let text = self.metadata_fingerprint_text();
         let fingerprint = text_fingerprint(&text);

@@ -520,6 +520,14 @@ mod tests {
     use roko_core::{Body, Kind};
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    fn scaled_test_timeout_ms(ms: u64) -> u64 {
+        if std::env::var("CI").is_ok_and(|value| value == "true") {
+            ms.saturating_mul(10)
+        } else {
+            ms
+        }
+    }
+
     fn empty_signal() -> Engram {
         Engram::builder(Kind::Task).body(Body::empty()).build()
     }
@@ -686,7 +694,7 @@ test foo::c ... ok";
             Verdict::pass("never")
         })
         .with_warmup_ms(0)
-        .with_timeout_ms(80);
+        .with_timeout_ms(scaled_test_timeout_ms(80));
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         assert!(!v.passed);
         assert!(v.reason.contains("timed out"), "reason was: {}", v.reason);

@@ -34,6 +34,14 @@ const CHEAP_SLUG: &str = "claude-haiku-3-5";
 const EXPENSIVE_SLUG: &str = "claude-opus-4";
 const TURN_COUNT: usize = 60;
 
+fn scaled_test_timeout_ms(ms: u64) -> u64 {
+    if std::env::var("CI").is_ok_and(|value| value == "true") {
+        ms.saturating_mul(10)
+    } else {
+        ms
+    }
+}
+
 #[derive(Clone, Copy)]
 struct MockBackendProfile {
     slug: &'static str,
@@ -246,7 +254,7 @@ async fn cascade_prefers_the_cheap_backend_after_confidence_learning() {
         .unwrap_or_else(|err| panic!("seed file metadata: {err}"))
         .modified()
         .unwrap_or_else(|err| panic!("seed file modified time: {err}"));
-    sleep(Duration::from_millis(20)).await;
+    sleep(Duration::from_millis(scaled_test_timeout_ms(20))).await;
 
     let harness = DispatchHarness::new([
         MockBackendProfile {

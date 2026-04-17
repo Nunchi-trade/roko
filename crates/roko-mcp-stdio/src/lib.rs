@@ -102,6 +102,11 @@ struct JsonRpcResponse {
 /// Requests and responses are serialized as single newline-delimited JSON
 /// objects. Notifications are handled by calling the handler and discarding
 /// any returned value.
+///
+/// # Errors
+///
+/// Returns an error if reading a request line from `reader`, serializing a
+/// JSON-RPC response, writing to `writer`, or flushing `writer` fails.
 pub fn serve_stdio<R, W, F>(reader: R, mut writer: W, mut handler: F) -> anyhow::Result<()>
 where
     R: BufRead,

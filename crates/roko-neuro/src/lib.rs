@@ -378,18 +378,42 @@ impl KnowledgeEntry {
 /// Single entry point for durable knowledge storage backends.
 pub trait NeuroStore: Sized {
     /// Initialize a store at the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot initialize or load its durable
+    /// state from `path`.
     fn init(path: &Path) -> Result<Self>;
 
     /// Query a topic for relevant knowledge entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot read or decode the stored
+    /// knowledge entries needed to answer the query.
     fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>>;
 
     /// Ingest a batch of knowledge entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot persist the provided entries.
     fn ingest(&mut self, entries: Vec<KnowledgeEntry>) -> Result<()>;
 
     /// Apply decay and return the number of entries processed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the decayed
+    /// entries.
     fn decay(&mut self) -> Result<usize>;
 
     /// Garbage-collect low-confidence entries and return the number removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the filtered
+    /// entries.
     fn gc(&mut self, min_confidence: f64) -> Result<usize>;
 }
 

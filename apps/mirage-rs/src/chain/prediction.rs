@@ -191,6 +191,16 @@ impl PredictionStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Submits a prediction claim for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PredictionError::Validation`] if the numeric inputs are not
+    /// finite or the confidence/interval constraints are violated,
+    /// [`PredictionError::SessionNotFound`] if the session is missing,
+    /// [`PredictionError::InvalidSessionState`] if the session is already
+    /// resolved, or [`PredictionError::DuplicateClaim`] if the same agent
+    /// has already claimed the session.
     pub fn submit_claim(
         &mut self,
         session_id: &str,
@@ -288,6 +298,15 @@ impl PredictionStore {
         Ok(claim_id)
     }
 
+    /// Resolves a prediction session against the supplied actual value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PredictionError::Validation`] if `actual_value` is not
+    /// finite, [`PredictionError::SessionNotFound`] if the session is missing,
+    /// [`PredictionError::InvalidSessionState`] if the session is already
+    /// resolved, or [`PredictionError::ClaimNotFound`] if the session contains
+    /// an inconsistent claim reference.
     pub fn resolve_session(
         &mut self,
         session_id: &str,

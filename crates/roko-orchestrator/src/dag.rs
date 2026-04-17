@@ -609,6 +609,14 @@ impl UnifiedTaskDag {
     ///
     /// The mutation is validated against the current graph and rejected if
     /// it would introduce a cycle or touch a completed task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DagMutationError::UnknownTask`] if the target task does
+    /// not exist, [`DagMutationError::CompletedTask`] if the mutation
+    /// touches a completed task, [`DagMutationError::InvalidMutation`] if
+    /// the payload is structurally invalid, or [`DagMutationError::Cycle`]
+    /// if the mutation introduces a cycle.
     #[allow(clippy::too_many_lines)]
     pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
         let mut next = self.clone();
@@ -991,6 +999,12 @@ impl IncrementalDag {
     }
 
     /// Apply a mutation and mark the touched subtree dirty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`DagMutationError`] variants as
+    /// [`UnifiedTaskDag::apply_mutation`] when the mutation cannot be
+    /// applied.
     pub fn apply_mutation(&mut self, mutation: DagMutation) -> Result<(), DagMutationError> {
         let touched = mutation_touched_ids(&mutation);
         self.dag.apply_mutation(mutation)?;

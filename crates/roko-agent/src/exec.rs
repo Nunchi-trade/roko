@@ -506,10 +506,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn timeout_fails_result() {
         let agent = ExecAgent::new("sleep", vec!["10".into()]).with_timeout_ms(100);
-        let result = agent.run(&prompt("x"), &Context::now()).await;
+        let input = prompt("x");
+        let ctx = Context::now();
+        let run = tokio::spawn(async move { agent.run(&input, &ctx).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let result = run.await.expect("exec task should join");
         assert!(!result.success);
         assert!(result.output.body.as_text().unwrap().contains("timed out"));
     }

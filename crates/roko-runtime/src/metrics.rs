@@ -54,6 +54,11 @@ pub struct MetricRecorder {
 
 impl MetricRecorder {
     /// Open (or create) a JSONL metric file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricError::Io`] if the parent directory cannot be created
+    /// or the JSONL file cannot be opened for append.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetricError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -68,6 +73,12 @@ impl MetricRecorder {
     }
 
     /// Record a single metric. Serialises as JSON, appends newline, flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricError::Serialize`] if `metric` cannot be encoded as
+    /// JSON, or [`MetricError::Io`] if appending or flushing the JSONL file
+    /// fails.
     pub fn record<M: Serialize>(&self, metric: &M) -> Result<(), MetricError> {
         let line = MetricLine {
             ts: Utc::now().to_rfc3339(),

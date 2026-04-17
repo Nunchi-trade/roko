@@ -27,6 +27,11 @@ pub struct ChainCtx {
 
 impl ChainCtx {
     /// Build an alloy provider that signs as the named wallet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC URL is invalid, the wallet is unknown, or
+    /// the wallet private key cannot be parsed.
     pub fn wallet_provider(&self, wallet_name: &str) -> anyhow::Result<Arc<DynProvider>> {
         let entry = self
             .wallets
@@ -46,6 +51,10 @@ impl ChainCtx {
     }
 
     /// Build a read-only provider (no signer).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC URL is invalid.
     pub fn read_provider(&self) -> anyhow::Result<Arc<DynProvider>> {
         let url = reqwest::Url::parse(&self.rpc_url)?;
         let provider = ProviderBuilder::new().connect_http(url).erased();
@@ -53,6 +62,11 @@ impl ChainCtx {
     }
 
     /// Look up a contract's deployed address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the contract is unknown or the stored address is
+    /// not valid hex.
     pub fn address_of(&self, contract: &str) -> anyhow::Result<Address> {
         let hex = self
             .addresses
@@ -63,6 +77,11 @@ impl ChainCtx {
     }
 
     /// Derive the address of the named wallet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the wallet is unknown or the private key cannot be
+    /// parsed into a signer.
     pub fn wallet_address(&self, name: &str) -> anyhow::Result<Address> {
         let entry = self
             .wallets

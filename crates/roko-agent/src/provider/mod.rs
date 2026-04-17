@@ -1042,7 +1042,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn provider_semaphore_blocks_fourth_request_when_limit_is_three() {
         let mut configs = HashMap::new();
         configs.insert(
@@ -1061,23 +1061,28 @@ mod tests {
             },
         );
 
-        let semaphores = ProviderSemaphores::new(&configs);
+        let semaphores = Arc::new(ProviderSemaphores::new(&configs));
         let permit_one = semaphores.acquire("zai").await;
         let permit_two = semaphores.acquire("zai").await;
         let permit_three = semaphores.acquire("zai").await;
 
+        let blocked_semaphores = Arc::clone(&semaphores);
+        let blocked = tokio::spawn(async move {
+            timeout(
+                Duration::from_millis(50),
+                blocked_semaphores.acquire("zai"),
+            )
+            .await
+        });
+        tokio::time::advance(Duration::from_millis(50)).await;
         assert!(
-            timeout(Duration::from_millis(50), semaphores.acquire("zai"))
-                .await
-                .is_err(),
+            blocked.await.expect("blocked acquisition task should join").is_err(),
             "fourth request should block while all permits are held"
         );
 
         drop(permit_one);
 
-        let permit_four = timeout(Duration::from_millis(50), semaphores.acquire("zai"))
-            .await
-            .expect("fourth request should acquire after a permit is released");
+        let permit_four = semaphores.acquire("zai").await;
 
         drop(permit_two);
         drop(permit_three);

@@ -22,7 +22,7 @@ pub struct ApiError {
     pub message: String,
     /// Optional structured debugging context for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
+    pub details: Option<Box<Value>>,
 }
 
 impl IntoResponse for ApiError {
@@ -101,7 +101,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_json".into(),
             message: "request body must be valid JSON".into(),
-            details: Some(json!({ "reason": err.to_string() })),
+            details: Some(Box::new(json!({ "reason": err.to_string() }))),
         }
     }
 
@@ -111,12 +111,17 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "validation_error".into(),
             message: "request body validation failed".into(),
-            details: Some(validation_errors_to_value(&err)),
+            details: Some(Box::new(validation_errors_to_value(&err))),
         }
     }
 }
 
 /// Reject path segments that could escape their parent directory.
+///
+/// # Errors
+///
+/// Returns [`ApiError::bad_request`] when the segment contains `..`, `/`, or
+/// `\\`, because those values could escape the expected parent directory.
 pub fn validate_path_segment(segment: &str, label: &str) -> Result<(), ApiError> {
     if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
         return Err(ApiError::bad_request(format!(

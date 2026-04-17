@@ -131,6 +131,11 @@ impl ResourceModel {
     }
 
     /// Checks whether the process should be allowed to start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirageError::Unsupported`] if the available memory is known
+    /// and does not satisfy the configured memory budget plus headroom.
     pub fn ensure_spawn_budget(&self) -> Result<()> {
         let mut system = System::new();
         system.refresh_memory();

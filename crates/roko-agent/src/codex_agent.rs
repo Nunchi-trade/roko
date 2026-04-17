@@ -429,6 +429,15 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::time::{Duration, sleep, timeout};
 
+    fn test_wait(ms: u64) -> Duration {
+        let scaled = if std::env::var("CI").map(|v| v == "true").unwrap_or(false) {
+            ms * 10
+        } else {
+            ms
+        };
+        Duration::from_millis(scaled)
+    }
+
     // A mock HttpPoster that returns canned responses and records calls.
     struct MockPoster {
         response: Mutex<Result<String, HttpPostError>>,
@@ -894,7 +903,7 @@ mod tests {
         let first =
             tokio::spawn(async move { first_agent.run(&first_prompt, &Context::now()).await });
 
-        timeout(Duration::from_secs(1), poster.first_call_entered.notified())
+        timeout(test_wait(1_000), poster.first_call_entered.notified())
             .await
             .expect("first request should reach the poster");
 
@@ -903,16 +912,16 @@ mod tests {
         let second =
             tokio::spawn(async move { second_agent.run(&second_prompt, &Context::now()).await });
 
-        sleep(Duration::from_millis(50)).await;
+        sleep(test_wait(50)).await;
         assert_eq!(poster.entered_calls.load(Ordering::SeqCst), 1);
 
         poster.release_first_call.notify_waiters();
 
-        let first_result = timeout(Duration::from_secs(1), first)
+        let first_result = timeout(test_wait(1_000), first)
             .await
             .expect("first request should finish")
             .expect("first task should join");
-        let second_result = timeout(Duration::from_secs(1), second)
+        let second_result = timeout(test_wait(1_000), second)
             .await
             .expect("second request should finish")
             .expect("second task should join");

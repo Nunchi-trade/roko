@@ -26,7 +26,6 @@
     clippy::expect_used,
     clippy::manual_let_else,
     clippy::missing_const_for_fn,
-    clippy::missing_panics_doc,
     clippy::redundant_closure_for_method_calls,
     clippy::single_match,
     clippy::uninlined_format_args,

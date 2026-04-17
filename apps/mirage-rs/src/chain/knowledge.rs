@@ -190,6 +190,13 @@ impl KnowledgeStore {
     }
 
     /// Records a confirmation from `confirmer` on entry `id`. Updates indices.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KnowledgeError::NotFound`] if the entry does not exist,
+    /// [`KnowledgeError::Immutable`] if the entry is terminal, or
+    /// [`KnowledgeError::DuplicateConfirmation`] if the confirmer has already
+    /// been recorded.
     pub fn confirm(&mut self, id: InsightId, confirmer: Vec<u8>) -> Result<(), KnowledgeError> {
         let entry = self
             .entries
@@ -210,6 +217,13 @@ impl KnowledgeStore {
     }
 
     /// Records a challenge against entry `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KnowledgeError::NotFound`] if the entry does not exist,
+    /// [`KnowledgeError::Immutable`] if the entry is terminal, or
+    /// [`KnowledgeError::DuplicateChallenge`] if the challenger has already
+    /// been recorded.
     pub fn challenge(&mut self, id: InsightId, challenger: Vec<u8>) -> Result<(), KnowledgeError> {
         let entry = self
             .entries

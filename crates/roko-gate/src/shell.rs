@@ -122,6 +122,14 @@ mod tests {
     use super::*;
     use roko_core::{Body, Kind};
 
+    fn scaled_test_timeout_ms(ms: u64) -> u64 {
+        if std::env::var("CI").is_ok_and(|value| value == "true") {
+            ms.saturating_mul(10)
+        } else {
+            ms
+        }
+    }
+
     fn empty_signal() -> Engram {
         Engram::builder(Kind::Task).body(Body::empty()).build()
     }
@@ -161,7 +169,8 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_causes_failure() {
-        let gate = ShellGate::new("sleep", vec!["10".into()]).with_timeout_ms(100);
+        let gate =
+            ShellGate::new("sleep", vec!["10".into()]).with_timeout_ms(scaled_test_timeout_ms(100));
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         assert!(!v.passed);
         assert!(v.reason.contains("timed out"));

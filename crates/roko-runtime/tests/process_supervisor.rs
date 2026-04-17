@@ -11,6 +11,18 @@ use tokio::{
     time::{Instant, sleep, timeout},
 };
 
+fn scaled_test_timeout_ms(ms: u64) -> u64 {
+    if std::env::var("CI").is_ok_and(|value| value == "true") {
+        ms.saturating_mul(10)
+    } else {
+        ms
+    }
+}
+
+fn scaled_test_duration(ms: u64) -> Duration {
+    Duration::from_millis(scaled_test_timeout_ms(ms))
+}
+
 fn spawn_config(label: &str, grace_period: Duration) -> SpawnConfig {
     let (program, args) = long_running_command();
 
@@ -47,12 +59,12 @@ fn long_running_command() -> (String, Vec<String>) {
 }
 
 async fn wait_until_process_stops(pid: u32) {
-    timeout(Duration::from_secs(5), async {
+    timeout(scaled_test_duration(5_000), async {
         loop {
             if !process_is_running(pid).await {
                 return;
             }
-            sleep(Duration::from_millis(50)).await;
+            sleep(scaled_test_duration(50)).await;
         }
     })
     .await
@@ -102,7 +114,7 @@ async fn sigterm_then_sigkill_escalates_when_the_child_ignores_term() {
     let id = supervisor
         .spawn(spawn_config(
             "sigterm-then-sigkill",
-            Duration::from_millis(50),
+            scaled_test_duration(50),
         ))
         .await
         .expect("spawn should succeed");
@@ -115,7 +127,7 @@ async fn sigterm_then_sigkill_escalates_when_the_child_ignores_term() {
         .map(|(pid, _)| pid)
         .expect("child pid should be tracked");
 
-    sleep(Duration::from_millis(100)).await;
+    sleep(scaled_test_duration(100)).await;
     let started = Instant::now();
 
     let outcome = supervisor
@@ -128,7 +140,7 @@ async fn sigterm_then_sigkill_escalates_when_the_child_ignores_term() {
         "ignored SIGTERM should force escalation"
     );
     assert!(
-        started.elapsed() >= Duration::from_millis(50),
+        started.elapsed() >= scaled_test_duration(50),
         "shutdown should honor the grace period before escalating"
     );
     wait_until_process_stops(pid).await;
@@ -142,7 +154,7 @@ async fn dropping_the_supervisor_kills_live_children() {
     supervisor
         .spawn(spawn_config(
             "drop-kills-live-children",
-            Duration::from_millis(50),
+            scaled_test_duration(50),
         ))
         .await
         .expect("spawn should succeed");
@@ -165,7 +177,7 @@ async fn cancellation_token_triggers_shutdown() {
     let root = CancelToken::new();
     let cancellation = CancelToken::new();
     let supervisor = ProcessSupervisor::new(root);
-    let mut config = spawn_config("per-process-cancellation", Duration::from_millis(50));
+    let mut config = spawn_config("per-process-cancellation", scaled_test_duration(50));
     config.cancellation = Some(cancellation.clone());
 
     supervisor
@@ -183,12 +195,12 @@ async fn cancellation_token_triggers_shutdown() {
 
     cancellation.cancel();
 
-    timeout(Duration::from_secs(5), async {
+    timeout(scaled_test_duration(5_000), async {
         loop {
             if supervisor.count().await == 0 {
                 break;
             }
-            sleep(Duration::from_millis(25)).await;
+            sleep(scaled_test_duration(25)).await;
         }
     })
     .await

@@ -41,6 +41,11 @@ struct SemanticSearchArguments {
 }
 
 /// Run the MCP server over stdio.
+///
+/// # Errors
+///
+/// Returns an error if the workspace index cannot be loaded or if the stdio
+/// JSON-RPC loop fails to read, handle, or write requests.
 pub fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("roko_mcp_code=info")

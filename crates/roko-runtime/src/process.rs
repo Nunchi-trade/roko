@@ -286,11 +286,21 @@ impl ProcessHandle {
     }
 
     /// Check if the process has exited without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error reported by the underlying child-process handle
+    /// while querying its exit status.
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
 
     /// Wait for the process to exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error reported by the underlying child-process handle
+    /// while waiting for the process to exit.
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }
@@ -394,6 +404,10 @@ impl ProcessSupervisor {
 
     /// Spawn a new managed process.
     #[allow(clippy::unused_async)] // Preserve the existing async API for callers across crates.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error from configuring or spawning the child process.
     pub async fn spawn(&self, config: SpawnConfig) -> std::io::Result<ProcessId> {
         let id = ProcessId::next();
         let child_cancel = self.cancel.child();

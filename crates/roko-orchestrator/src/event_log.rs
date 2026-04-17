@@ -236,6 +236,11 @@ impl EventLog {
     /// Verify the hash chain is intact. Returns `Ok(())` if every entry's
     /// content hash matches a recomputation from scratch, or an
     /// [`IntegrityError`] at the first broken link.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntegrityError`] when an entry hash or the stored tail
+    /// hash does not match a recomputation from scratch.
     #[allow(clippy::significant_drop_tightening)]
     pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
         let guard = self.inner.lock();

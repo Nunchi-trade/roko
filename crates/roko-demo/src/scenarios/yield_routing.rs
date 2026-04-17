@@ -197,6 +197,12 @@ impl Scenario for YieldRouting {
     }
 }
 
+/// Prepare the yield-routing scenario state.
+///
+/// # Errors
+///
+/// Returns an error if any contract address lookup, participant setup,
+/// reputation restore, or baseline seeding step fails.
 pub async fn prepare(
     ctx: Arc<ChainCtx>,
     runtime_dir: PathBuf,
@@ -227,6 +233,12 @@ pub async fn prepare(
     Ok(prepared)
 }
 
+/// Run one yield-routing round end to end.
+///
+/// # Errors
+///
+/// Returns an error if posting the job, collecting bids, or finalizing the
+/// round fails.
 pub async fn run_round(
     prepared: &PreparedYieldRouting,
     round: u32,
@@ -238,6 +250,12 @@ pub async fn run_round(
     finalize_round(prepared, posted, bids, llm, events).await
 }
 
+/// Post the round's job to the bounty market and snapshot current insights.
+///
+/// # Errors
+///
+/// Returns an error if the insight query, wallet lookup, job posting, or job
+/// id lookup fails.
 pub async fn post_round_job(
     prepared: &PreparedYieldRouting,
     round: u32,
@@ -284,6 +302,12 @@ pub async fn post_round_job(
     })
 }
 
+/// Ask one agent to produce a route proposal for the current round.
+///
+/// # Errors
+///
+/// Returns an error if the LLM backend call fails or if route normalization
+/// cannot complete after the response is received.
 pub async fn generate_agent_bid(
     prepared: &PreparedYieldRouting,
     llm: Arc<dyn LlmProvider>,
@@ -343,6 +367,12 @@ pub async fn generate_agent_bid(
     })
 }
 
+/// Finalize a round by assigning the job, collecting validation, and paying out.
+///
+/// # Errors
+///
+/// Returns an error if assigning, submitting, validating, distributing fees,
+/// or posting the winner insight fails.
 pub async fn finalize_round(
     prepared: &PreparedYieldRouting,
     posted: PostedJob,
@@ -474,6 +504,12 @@ pub async fn finalize_round(
     Ok(outcome)
 }
 
+/// Post the winning agent's insight and gather confirmations.
+///
+/// # Errors
+///
+/// Returns an error if the LLM call, insight post, confirmation loop, or
+/// wallet lookup fails.
 pub async fn post_winner_insight(
     prepared: &PreparedYieldRouting,
     llm: Arc<dyn LlmProvider>,
@@ -546,6 +582,12 @@ pub async fn post_winner_insight(
     Ok(insight_id)
 }
 
+/// Query the on-chain insight board and return sorted insight records.
+///
+/// # Errors
+///
+/// Returns an error if the read provider cannot be built or any chain query
+/// fails while reading the board.
 pub async fn query_insights(prepared: &PreparedYieldRouting) -> anyhow::Result<Vec<InsightRecord>> {
     let board = InsightBoard::new(prepared.board_addr, prepared.ctx.read_provider()?);
     let total = board.nextInsightId().call().await?;
@@ -573,6 +615,12 @@ pub async fn query_insights(prepared: &PreparedYieldRouting) -> anyhow::Result<V
     Ok(out)
 }
 
+/// Run the adversarial slashing phase for the yield-routing demo.
+///
+/// # Errors
+///
+/// Returns an error if any of the slashing, committee, voting, or wallet
+/// lookup steps fail.
 pub async fn run_adversarial_phase(
     prepared: &PreparedYieldRouting,
     events: Arc<dyn EventEmitter>,
@@ -733,6 +781,12 @@ pub async fn run_adversarial_phase(
     Ok(slash)
 }
 
+/// Persist the current reputation snapshot to disk.
+///
+/// # Errors
+///
+/// Returns an error if the chain queries fail, the output directory cannot be
+/// created, or the reputation file cannot be written.
 pub async fn save_reputation(prepared: &PreparedYieldRouting) -> anyhow::Result<PathBuf> {
     let registry = WorkerRegistry::new(prepared.registry_addr, prepared.ctx.read_provider()?);
     let mut workers = Vec::new();

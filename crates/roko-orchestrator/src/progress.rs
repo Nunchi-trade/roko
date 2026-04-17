@@ -83,6 +83,13 @@ impl ProgressTracker {
     /// - the transition violates the [`valid_transitions`] table.
     ///
     /// [`valid_transitions`]: roko_core::valid_transitions
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProgressError`] if the plan is untracked and the first
+    /// transition is not from [`PhaseKind::Queued`], if the caller's
+    /// `from` phase does not match the current phase, or if the requested
+    /// transition is not monotonic.
     pub fn try_transition(
         &mut self,
         plan_id: &str,
@@ -192,6 +199,11 @@ fn required_keys(schema: &str) -> Option<&'static [&'static str]> {
 /// intentionally permissive so that new schemas can be introduced
 /// without blocking the pipeline. Callers should log a warning for
 /// unknown schemas.
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] when `data` is not a JSON object or when
+/// it is missing one or more keys required by a known schema.
 pub fn validate_enrichment(data: &serde_json::Value, schema: &str) -> Result<(), ValidationError> {
     let Some(keys) = required_keys(schema) else {
         return Ok(()); // unknown schema: pass through

@@ -88,6 +88,13 @@ pub struct TemplateExperiment {
 
 impl AgentTemplate {
     /// Validate the template for common startup-time issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns a list of validation errors when required fields are blank,
+    /// names do not match the source filename, model or role values are
+    /// invalid, experiment configuration is incomplete, or required MCP
+    /// servers are not configured.
     pub fn validate(
         &self,
         source_name: Option<&str>,
@@ -343,6 +350,12 @@ impl TemplateRegistry {
     }
 
     /// Insert (or overwrite) a template and persist it to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `.roko/templates` directory cannot be created,
+    /// the template cannot be serialized to TOML, or the rendered TOML cannot
+    /// be written to disk.
     pub fn insert(&mut self, template: AgentTemplate) -> Result<()> {
         let dir = self.workdir.join(".roko").join("templates");
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -354,6 +367,11 @@ impl TemplateRegistry {
     }
 
     /// Remove a template by name. Returns `true` if it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the template existed on disk but its TOML file
+    /// could not be removed.
     pub fn remove(&mut self, name: &str) -> Result<bool> {
         if self.templates.remove(name).is_some() {
             let path = self

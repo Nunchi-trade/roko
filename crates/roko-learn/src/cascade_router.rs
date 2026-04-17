@@ -1223,6 +1223,10 @@ impl CascadeRouter {
     ///
     /// Preference order is premium > standard > fast. Within the same tier,
     /// the first slug wins so the choice stays stable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the router was constructed without any configured model slugs.
     #[must_use]
     pub fn strongest_model(&self) -> ModelSpec {
         let mut best_slug = self
@@ -1247,6 +1251,10 @@ impl CascadeRouter {
     ///
     /// Preference order is fast < standard < premium. Within the same tier,
     /// the first slug wins so the choice stays stable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the router was constructed without any configured model slugs.
     #[must_use]
     pub fn cheapest_model(&self) -> ModelSpec {
         let mut best_slug = self
@@ -1557,6 +1565,11 @@ impl CascadeRouter {
     /// Load static routing overrides from a JSON map of role labels to model slugs.
     ///
     /// Returns the number of overrides applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the override file cannot be read or if its
+    /// contents are not valid JSON.
     pub fn load_static_overrides(&self, path: &Path) -> std::io::Result<usize> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
@@ -2254,6 +2267,11 @@ impl CascadeRouter {
     /// Confidence stats represent the accumulated pass-rate history needed for
     /// stage-2 routing, and the total observation count determines which cascade
     /// stage is active after reload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be serialized or if any
+    /// filesystem operation needed to write the snapshot fails.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let stage_transitions = self.stage_tracking.lock().transitions.clone();
         let snapshot = CascadeSnapshot {

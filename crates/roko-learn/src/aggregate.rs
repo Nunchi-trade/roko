@@ -38,6 +38,11 @@ impl JsonlCursor {
     /// Read and return lines appended since the last successful tick.
     ///
     /// Missing files and truncation reset the cursor to the beginning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path metadata, open, seek, or read operation
+    /// fails for reasons other than the file being missing.
     pub fn read_new_lines(&mut self) -> io::Result<Vec<String>> {
         self.read_new_lines_with_status().map(|read| read.lines)
     }
@@ -188,6 +193,11 @@ impl Default for CFactorBucket {
 ///
 /// Missing files return an empty-count series of `n_buckets` buckets. Malformed
 /// lines are skipped.
+///
+/// # Errors
+///
+/// Returns an error if `bucket` is not positive or if the file cannot be
+/// read.
 pub fn efficiency_trend(
     path: &Path,
     bucket: Duration,
@@ -200,6 +210,11 @@ pub fn efficiency_trend(
 ///
 /// Missing files return an empty-count series of `n_buckets` buckets.
 /// Malformed lines are skipped.
+///
+/// # Errors
+///
+/// Returns an error if `bucket` is not positive or if the file cannot be
+/// read.
 pub fn cfactor_trend(
     path: &Path,
     bucket: Duration,
@@ -213,6 +228,11 @@ pub fn cfactor_trend(
 /// The caller supplies the prior `existing` bucket series so the function can
 /// preserve in-window data without rescanning the full file. If the file was
 /// truncated or recreated, the function falls back to a full rescan.
+///
+/// # Errors
+///
+/// Returns an error if the cursor cannot read the tracked file or if `bucket`
+/// is not positive.
 pub fn efficiency_trend_with_cursor(
     cursor: &mut JsonlCursor,
     existing: &[EfficiencyBucket],

@@ -353,6 +353,11 @@ pub struct PostInsightResult {
 }
 
 /// Handler for `chain_postInsight`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the knowledge layer is disabled,
+/// the kind is unknown, or any `enabled_by` id is malformed.
 pub fn handle_post_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: PostInsightParams,
@@ -442,6 +447,11 @@ const fn default_k() -> usize {
 }
 
 /// Handler for `chain_searchInsights`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the HDC layer is disabled, the
+/// query payload is malformed, or `queryVector` is not 1280 bytes long.
 pub fn handle_search_insights(
     chain: &Arc<RwLock<ChainContext>>,
     params: SearchInsightsParams,
@@ -505,6 +515,12 @@ pub struct ConfirmInsightParams {
 }
 
 /// Handler for `chain_confirmInsight`.
+///
+/// # Errors
+///
+/// Returns `INVALID`, `NOT_FOUND`, `DUPLICATE`, or `IMMUTABLE` JSON-RPC
+/// errors when the knowledge layer is disabled, the id is malformed, or the
+/// store rejects the confirmation.
 pub fn handle_confirm_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: ConfirmInsightParams,
@@ -557,6 +573,12 @@ pub struct ChallengeInsightParams {
 }
 
 /// Handler for `chain_challengeInsight`.
+///
+/// # Errors
+///
+/// Returns `INVALID`, `NOT_FOUND`, `DUPLICATE`, or `IMMUTABLE` JSON-RPC
+/// errors when the knowledge layer is disabled, the id is malformed, or the
+/// store rejects the challenge.
 pub fn handle_challenge_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: ChallengeInsightParams,
@@ -600,6 +622,10 @@ pub fn handle_challenge_insight(
 }
 
 /// Handler for `chain_getInsight`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if `id` is missing or malformed.
 pub fn handle_get_insight(
     chain: &Arc<RwLock<ChainContext>>,
     params: JsonValue,
@@ -632,6 +658,11 @@ pub fn handle_get_insight(
 }
 
 /// Handler for `chain_applyDecay`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the knowledge layer is disabled or
+/// the request payload cannot be interpreted.
 pub fn handle_apply_decay(
     chain: &Arc<RwLock<ChainContext>>,
     params: JsonValue,
@@ -708,6 +739,11 @@ const fn default_intensity() -> f32 {
 }
 
 /// Handler for `chain_depositPheromone`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the stigmergy layer is disabled or
+/// the pheromone kind is unknown.
 pub fn handle_deposit_pheromone(
     chain: &Arc<RwLock<ChainContext>>,
     params: DepositPheromoneParams,
@@ -742,6 +778,11 @@ pub fn handle_deposit_pheromone(
 }
 
 /// Handler for `chain_queryPheromones`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if the stigmergy layer is disabled or
+/// the query payload is malformed.
 pub fn handle_query_pheromones(
     chain: &Arc<RwLock<ChainContext>>,
     params: JsonValue,
@@ -1108,6 +1149,11 @@ pub fn handle_list_kinds() -> JsonValue {
 /// Takes `{"method": "chain_postInsight"}` and returns a small JSON-Schema-ish
 /// document describing the request params and response shape. Returns
 /// [`err_code::NOT_FOUND`] if `method` is not a known `chain_*` method.
+///
+/// # Errors
+///
+/// Returns `INVALID` if `method` is missing from `params`, or `NOT_FOUND` if
+/// the method name is unknown.
 pub fn handle_method_schema(params: JsonValue) -> Result<JsonValue, ErrorObjectOwned> {
     let method = params
         .get("method")
@@ -1429,6 +1475,10 @@ static METHOD_SCHEMAS: LazyLock<HashMap<&'static str, JsonValue>> = LazyLock::ne
 // ─── Agent registry handlers ────────────────────────────────────────────────
 
 /// Handle `chain_registerAgent(id, address_hex, role)`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if `address_hex` is not valid hex.
 pub fn handle_register_agent(
     chain: &Arc<RwLock<ChainContext>>,
     id: String,
@@ -1473,6 +1523,11 @@ pub fn handle_agent_heartbeat(
 }
 
 /// Handle `chain_agentTrace(id, phase, reads, reasoning, action)`.
+///
+/// # Errors
+///
+/// Returns an `INVALID` JSON-RPC error if `phase` is not one of `retrieve`,
+/// `reason`, `act`, or `verify`.
 pub fn handle_agent_trace(
     chain: &Arc<RwLock<ChainContext>>,
     id: String,

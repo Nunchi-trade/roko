@@ -1,5 +1,7 @@
 //! JSON-RPC server surface for `mirage-rs`.
 
+// TODO(UX42-followup): remove `missing_panics_doc` once the remaining
+// RPC handlers have accurate panic documentation.
 #![allow(
     clippy::default_trait_access,
     clippy::missing_panics_doc,
@@ -88,6 +90,12 @@ struct StagedErc20Mint {
 
 /// Starts a JSON-RPC server on the provided address.
 ///
+/// # Errors
+///
+/// Returns address-resolution errors, [`MirageError::Unsupported`] if the RPC
+/// module cannot be built, or [`MirageError::BindFailed`] if the listener
+/// cannot bind the chosen port.
+///
 /// When the `chain` feature is enabled, use [`start_rpc_server_with_chain`] to
 /// attach an [`crate::chain_rpc::ChainContext`] that exposes `chain_*` methods.
 pub async fn start_rpc_server(
@@ -116,6 +124,12 @@ pub async fn start_rpc_server(
 }
 
 /// Starts a JSON-RPC server with an attached chain substrate.
+///
+/// # Errors
+///
+/// Returns address-resolution errors, [`MirageError::Unsupported`] if the RPC
+/// module cannot be built, or [`MirageError::BindFailed`] if the listener
+/// cannot bind the chosen port.
 ///
 /// Registers all `chain_*` methods described in [`crate::chain_rpc`] on top
 /// of the standard `eth_*` / `mirage_*` surface.
@@ -281,6 +295,10 @@ async fn finish_start_rpc_server(
 }
 
 /// Starts an ephemeral server for tests.
+///
+/// # Errors
+///
+/// Returns the same errors as [`start_rpc_server`].
 pub async fn spawn_rpc_server_for_tests() -> Result<(String, ServerHandle)> {
     let upstream = Arc::new(UpstreamRpc::mock(1));
     let db = HybridDB::new(upstream, 64, Duration::from_secs(12), NonZeroUsize::MIN, 1);
@@ -2117,6 +2135,10 @@ pub fn from_sqrt_price_x96(sqrt_price_x96: U256) -> f64 {
 }
 
 /// Spawns a Mirage test child process for integration tests.
+///
+/// # Errors
+///
+/// Returns any error from [`crate::spawn_mirage_test_instance`].
 ///
 /// Reads the listening port from the `MIRAGE_TEST_PORT` environment variable when set to a valid
 /// `u16`. If unset or unparsable, binds **18552**.

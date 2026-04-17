@@ -43,7 +43,6 @@
     clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
-    clippy::missing_panics_doc,
     clippy::needless_borrow,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
