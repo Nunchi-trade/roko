@@ -111,7 +111,7 @@ pub struct TaskEntry {
 }
 
 /// A deliverable produced by a completed task.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskArtifact {
     /// Artifact category, e.g. `code`, `report`, or `data`.
     #[serde(default)]

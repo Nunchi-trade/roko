@@ -1080,7 +1080,7 @@ fn episode_is_replan(episode: &Episode) -> bool {
             .extra
             .get("strategy")
             .or_else(|| episode.extra.get("replan_strategy")),
-        Some(Value::String(_)) | Some(Value::Number(_))
+        Some(Value::String(_) | Value::Number(_))
     ) || episode.extra.contains_key("attempt_number")
 }
 

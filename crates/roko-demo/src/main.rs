@@ -147,6 +147,7 @@ enum BenchmarkCmd {
     },
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -420,7 +421,7 @@ async fn register_agent_cmd(
         .await?;
     let passport = keccak256(format!("{name}:{model}:{wallet}").as_bytes());
     AgentRegistry::new(agent_registry_addr, ctx.wallet_provider(wallet)?)
-        .register(format!("yield-routing,{model}").into(), passport.into())
+        .register(format!("yield-routing,{model}"), passport)
         .send()
         .await?
         .watch()
@@ -462,7 +463,7 @@ fn load_chain_ctx(
     Ok(Arc::new(ChainCtx {
         rpc_url: deploy_ctx.rpc_url.clone(),
         chain_id: deploy_ctx.chain_id,
-        wallets: deploy_ctx.wallets.clone(),
+        wallets: deploy_ctx.wallets,
         addresses: deployments.contracts,
         deployed_at_block: deployments.deployed_at_block,
     }))
@@ -489,7 +490,7 @@ fn deployments_path(runtime_dir: &PathBuf, scenario: &str) -> PathBuf {
     runtime_dir.join(scenario).join("deployments.json")
 }
 
-fn tier_label(value: u8) -> &'static str {
+const fn tier_label(value: u8) -> &'static str {
     match value {
         1 => "Probation",
         2 => "Standard",

@@ -5,6 +5,26 @@
 //! stores situation-specific somatic markers, and modulates dispatch
 //! parameters for future task runs.
 
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::clone_on_copy,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::manual_clamp,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::suboptimal_flops,
+    clippy::too_many_arguments,
+    clippy::useless_conversion
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

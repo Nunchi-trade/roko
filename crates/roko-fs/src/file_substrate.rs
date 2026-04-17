@@ -259,10 +259,6 @@ impl Substrate for FileSubstrate {
     }
 }
 
-/// HDC fingerprint tag key. The value is a base64-encoded 1280-byte
-/// HDC vector computed from the signal's kind + body.
-const HDC_TAG: &str = "hdc_fingerprint";
-
 /// Attach a deterministic HDC fingerprint to a signal's tags.
 ///
 /// The fingerprint is derived from `kind|body` so that signals with
@@ -273,6 +269,7 @@ const HDC_TAG: &str = "hdc_fingerprint";
 fn attach_hdc_fingerprint(mut signal: Engram) -> Engram {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    const HDC_TAG: &str = "hdc_fingerprint";
 
     if signal.tags.contains_key(HDC_TAG) {
         return signal;
@@ -287,7 +284,7 @@ fn attach_hdc_fingerprint(mut signal: Engram) -> Engram {
 }
 
 #[cfg(not(feature = "hdc"))]
-fn attach_hdc_fingerprint(signal: Engram) -> Engram {
+const fn attach_hdc_fingerprint(signal: Engram) -> Engram {
     signal
 }
 

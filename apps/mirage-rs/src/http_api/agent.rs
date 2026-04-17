@@ -250,7 +250,7 @@ pub async fn agent_heartbeat(
     let ok = chain.agent_registry.heartbeat(&id, current_block, now);
     if !ok {
         return Err(ApiError {
-            error: format!("agent '{}' not found", id),
+            error: format!("agent '{id}' not found"),
             code: 404,
         });
     }
@@ -295,7 +295,7 @@ pub async fn post_agent_trace(
     let ok = chain.agent_registry.add_trace(&id, trace);
     if !ok {
         return Err(ApiError {
-            error: format!("agent '{}' not found", id),
+            error: format!("agent '{id}' not found"),
             code: 404,
         });
     }

@@ -1,5 +1,17 @@
 //! Plugin SDK for Roko event sources and feedback collectors.
 
+#![allow(
+    clippy::derive_partial_eq_without_eq,
+    clippy::double_must_use,
+    clippy::explicit_into_iter_loop,
+    clippy::ignored_unit_patterns,
+    clippy::missing_const_for_fn,
+    clippy::option_if_let_else,
+    clippy::return_self_not_must_use,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_literal_bound
+)]
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -599,9 +611,13 @@ pub trait FeedbackCollector: Send + Sync + 'static {
 
 /// Top-level plugin metadata plus the event sources and feedback collectors it exposes.
 pub struct PluginManifest {
+    /// Human-readable plugin name.
     pub name: String,
+    /// Semantic version string for the plugin.
     pub version: String,
+    /// Event sources exposed by the plugin.
     pub event_sources: Vec<Box<dyn EventSource>>,
+    /// Feedback collectors exposed by the plugin.
     pub feedback_collectors: Vec<Box<dyn FeedbackCollector>>,
 }
 

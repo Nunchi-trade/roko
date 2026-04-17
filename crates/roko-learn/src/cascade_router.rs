@@ -2051,7 +2051,7 @@ impl CascadeRouter {
                     .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
                     .map(|(slug, _)| slug.clone())
                     .unwrap_or_else(|| candidates[0].clone());
-                let mut scored = scores
+                let mut scored_candidates = scores
                     .into_iter()
                     .map(|(slug, score)| CascadeCandidateScore {
                         selected: slugs_match(&slug, &selected),
@@ -2062,7 +2062,7 @@ impl CascadeRouter {
                         exploration: None,
                     })
                     .collect::<Vec<_>>();
-                scored.sort_by(|a, b| {
+                scored_candidates.sort_by(|a, b| {
                     b.score
                         .total_cmp(&a.score)
                         .then_with(|| a.slug.cmp(&b.slug))
@@ -2073,18 +2073,18 @@ impl CascadeRouter {
                     observations,
                     alpha: None,
                     selected_slug: selected,
-                    candidates: scored,
+                    candidates: scored_candidates,
                     pareto_frontier,
                 }
             }
             CascadeStage::Ucb => {
                 self.refresh_pareto_frontier_if_needed();
                 let frontier = {
-                    let state = self.pareto_frontier.lock();
-                    if state.bucket == 0 || state.frontier.is_empty() {
+                    let frontier_state = self.pareto_frontier.lock();
+                    if frontier_state.bucket == 0 || frontier_state.frontier.is_empty() {
                         pareto_frontier.clone()
                     } else {
-                        state.frontier.clone()
+                        frontier_state.frontier.clone()
                     }
                 };
                 let base_alpha = self.linucb.current_alpha();

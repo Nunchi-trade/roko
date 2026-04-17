@@ -43,7 +43,7 @@ impl ChainWitnessEngine {
         wallet: &dyn ChainWallet,
         client: &dyn ChainClient,
     ) -> ChainResult<TxHash> {
-        let tx = witness_tx_request(attestation)?;
+        let tx = witness_tx_request(attestation);
         let tx_hash = wallet.sign_and_submit(tx).await?;
 
         match wallet
@@ -58,7 +58,7 @@ impl ChainWitnessEngine {
                     block_number: receipt.block_number,
                 });
             }
-            Err(ChainError::Unsupported(_)) | Err(ChainError::Timeout(_)) => {}
+            Err(ChainError::Unsupported(_) | ChainError::Timeout(_)) => {}
             Err(err) => return Err(err),
         }
 
@@ -76,7 +76,7 @@ impl ChainWitnessEngine {
             return Ok(false);
         };
 
-        let tx_hash = tx_hash_from_bytes(&chain_attestation.tx_hash)?;
+        let tx_hash = tx_hash_from_bytes(&chain_attestation.tx_hash);
         let Some(receipt) = client.get_receipt(&tx_hash).await? else {
             return Ok(false);
         };
@@ -111,11 +111,11 @@ pub async fn verify_on_chain(
         .await
 }
 
-fn witness_tx_request(attestation: &Attestation) -> ChainResult<TxRequest> {
+fn witness_tx_request(attestation: &Attestation) -> TxRequest {
     let mut data = Vec::with_capacity(WITNESS_MARKER.len() + 32);
     data.extend_from_slice(WITNESS_MARKER);
     data.extend_from_slice(&attestation.witness_hash().0);
-    Ok(TxRequest {
+    TxRequest {
         to: Some(WITNESS_TO.to_string()),
         from: None,
         value: 0,
@@ -124,15 +124,15 @@ fn witness_tx_request(attestation: &Attestation) -> ChainResult<TxRequest> {
         max_fee_per_gas: None,
         max_priority_fee_per_gas: None,
         nonce: None,
-    })
+    }
 }
 
 fn tx_hash_to_bytes(tx_hash: &TxHash) -> ChainResult<[u8; 32]> {
     tx_hash_from_hex(tx_hash.as_str())
 }
 
-fn tx_hash_from_bytes(bytes: &[u8; 32]) -> ChainResult<TxHash> {
-    Ok(TxHash::new(format!("0x{}", hex(bytes))))
+fn tx_hash_from_bytes(bytes: &[u8; 32]) -> TxHash {
+    TxHash::new(format!("0x{}", hex(bytes)))
 }
 
 fn tx_hash_from_hex(value: &str) -> ChainResult<[u8; 32]> {
@@ -182,10 +182,7 @@ mod tests {
             .chain_attestation
             .as_ref()
             .expect("chain attestation");
-        assert_eq!(
-            tx_hash_from_bytes(&chain_attestation.tx_hash).unwrap(),
-            tx_hash
-        );
+        assert_eq!(tx_hash_from_bytes(&chain_attestation.tx_hash), tx_hash);
         assert!(verify_on_chain(&attestation, &client).await.unwrap());
     }
 

@@ -119,7 +119,7 @@ where
             Err(err) => {
                 write_response(
                     &mut writer,
-                    JsonRpcResponse {
+                    &JsonRpcResponse {
                         jsonrpc: "2.0",
                         result: None,
                         error: Some(JsonRpcError::parse_error(err.to_string())),
@@ -137,7 +137,7 @@ where
             Err(err) => {
                 write_response(
                     &mut writer,
-                    JsonRpcResponse {
+                    &JsonRpcResponse {
                         jsonrpc: "2.0",
                         result: None,
                         error: Some(JsonRpcError::invalid_request(err.to_string())),
@@ -151,7 +151,7 @@ where
         if request.jsonrpc != "2.0" {
             write_response(
                 &mut writer,
-                JsonRpcResponse {
+                &JsonRpcResponse {
                     jsonrpc: "2.0",
                     result: None,
                     error: Some(JsonRpcError::invalid_request(
@@ -183,7 +183,7 @@ where
             },
         };
 
-        write_response(&mut writer, response)?;
+        write_response(&mut writer, &response)?;
     }
 
     writer.flush().context("flush JSON-RPC output")?;

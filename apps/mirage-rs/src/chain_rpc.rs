@@ -1,10 +1,11 @@
 //! JSON-RPC surface for chain extensions (gated by the `chain` feature).
 //!
-//! This module exposes the chain knowledge + pheromone substrates over the same
-//! jsonrpsee server that hosts the `eth_*` and `mirage_*` methods. Wiring is
-//! opt-in: callers must construct a [`ChainContext`] and pass it through
-//! [`crate::rpc::start_rpc_server_with_chain`], otherwise mirage behaves as a
-//! pure EVM fork simulator.
+//! This module exposes the chain knowledge + pheromone substrates.
+//!
+//! It rides on the same jsonrpsee server that hosts the `eth_*` and `mirage_*`
+//! methods. Wiring is opt-in: callers must construct a [`ChainContext`] and
+//! pass it through [`crate::rpc::start_rpc_server_with_chain`], otherwise
+//! mirage behaves as a pure EVM fork simulator.
 //!
 //! # Methods
 //!
@@ -203,7 +204,7 @@ impl std::fmt::Debug for ChainContext {
             dbg.field("pheromone_bus", &self.pheromone_bus.is_some())
                 .field("insight_bus", &self.insight_bus.is_some());
         }
-        dbg.finish()
+        dbg.finish_non_exhaustive()
     }
 }
 
@@ -531,7 +532,9 @@ pub fn handle_confirm_insight(
             crate::chain::KnowledgeError::Immutable(_, _) => {
                 rpc_err(err_code::IMMUTABLE, e.to_string())
             }
-            other => rpc_err(err_code::INVALID, other.to_string()),
+            other @ crate::chain::KnowledgeError::DuplicateChallenge(_) => {
+                rpc_err(err_code::INVALID, other.to_string())
+            }
         })?;
     #[cfg(feature = "roko")]
     if let Some(bus) = &chain_lock.insight_bus {
@@ -581,7 +584,9 @@ pub fn handle_challenge_insight(
             crate::chain::KnowledgeError::Immutable(_, _) => {
                 rpc_err(err_code::IMMUTABLE, e.to_string())
             }
-            other => rpc_err(err_code::INVALID, other.to_string()),
+            other @ crate::chain::KnowledgeError::DuplicateConfirmation(_) => {
+                rpc_err(err_code::INVALID, other.to_string())
+            }
         })?;
     #[cfg(feature = "roko")]
     if let Some(bus) = &chain_lock.insight_bus {
@@ -843,10 +848,11 @@ pub const INSIGHT_SUB_PREFIX: &str = "insi:";
 ///
 /// The manager doesn't own the buses; it holds `Arc` handles so the RPC
 /// `register_subscription` closures can register new mpsc sinks without
-/// touching the `ChainContext` write lock. Every registered bus subscription
-/// is tagged with a prefix (see [`PHEROMONE_SUB_PREFIX`] /
-/// [`INSIGHT_SUB_PREFIX`]) so a single `chain_unsubscribe(subscriptionId)`
-/// call can route to the correct bus.
+/// touching the `ChainContext` write lock.
+///
+/// Every registered bus subscription is tagged with a prefix (see
+/// [`PHEROMONE_SUB_PREFIX`] / [`INSIGHT_SUB_PREFIX`]) so a single
+/// `chain_unsubscribe(subscriptionId)` call can route to the correct bus.
 #[cfg(feature = "roko")]
 #[derive(Clone)]
 #[must_use]
@@ -1008,10 +1014,10 @@ pub fn insight_event_to_json(event: &crate::roko_bridge::InsightEvent) -> JsonVa
 
 /// Canonical list of every `chain_*` JSON-RPC method exposed by this surface.
 ///
-/// Used by [`handle_version`] (to populate `supportedMethods`) and by
-/// [`handle_method_schema`] (to look up per-method schemas). If you add a new
-/// `chain_*` method in [`crate::rpc`], add it here too — the unit tests assert
-/// every entry has a schema.
+/// Used by [`handle_version`] and [`handle_method_schema`].
+///
+/// If you add a new `chain_*` method in [`crate::rpc`], add it here too. The
+/// unit tests assert that every entry has a schema.
 pub const CHAIN_METHOD_NAMES: &[&str] = &[
     "chain_postInsight",
     "chain_searchInsights",

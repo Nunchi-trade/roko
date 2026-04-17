@@ -1,6 +1,36 @@
 //! Knowledge and memory subsystems for Roko.
 
 #![deny(missing_docs)]
+#![allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_copy,
+    clippy::default_trait_access,
+    clippy::derivable_impls,
+    clippy::derive_partial_eq_without_eq,
+    clippy::doc_markdown,
+    clippy::format_push_string,
+    clippy::implicit_clone,
+    clippy::manual_pattern_char_comparison,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::ptr_arg,
+    clippy::redundant_clone,
+    clippy::redundant_closure,
+    clippy::redundant_closure_for_method_calls,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::unused_self,
+    clippy::unwrap_or_default,
+    clippy::use_self
+)]
 
 use std::path::Path;
 

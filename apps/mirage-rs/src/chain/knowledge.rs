@@ -122,6 +122,7 @@ impl KnowledgeStore {
 
     /// Posts a new entry. Returns an outcome describing whether it was accepted,
     /// duplicated, or already exists.
+    #[allow(clippy::too_many_arguments)]
     pub fn post(
         &mut self,
         author: Vec<u8>,
@@ -165,7 +166,7 @@ impl KnowledgeStore {
     fn find_hdc_duplicate(&self, entry: &InsightEntry) -> Option<(InsightId, f32)> {
         let top = self.hdc.top_k(&entry.vector, 5);
         top.into_iter()
-            .filter_map(|hit| {
+            .find_map(|hit| {
                 let existing = self.entries.get(&hit.id)?;
                 if existing.kind != entry.kind {
                     return None;
@@ -176,7 +177,6 @@ impl KnowledgeStore {
                     None
                 }
             })
-            .next()
     }
 
     /// Retrieves a single entry by id.

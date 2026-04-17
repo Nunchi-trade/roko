@@ -75,6 +75,12 @@ members = [
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
     "crates/roko-index",
 ]
+default-members = [
+    # Ordinary root builds target the main CLI plus the MCP servers we ship.
+    "crates/roko-cli",
+    "crates/roko-mcp-code",
+    "crates/roko-mcp-github",
+]
 
 [workspace.package]
 edition = "2024"

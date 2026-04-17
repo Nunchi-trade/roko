@@ -149,7 +149,7 @@ fn handle_tools_call(
         .map_err(|err| JsonRpcError::invalid_params(format!("invalid tools/call params: {err}")))?;
     match params.name.as_str() {
         "run_script" => handle_run_script(params.arguments, config, runtime),
-        "list_scripts" => handle_list_scripts(config),
+        "list_scripts" => Ok(handle_list_scripts(config)),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {}",
             params.name
@@ -166,23 +166,23 @@ fn handle_run_script(
         .map_err(|err| JsonRpcError::invalid_params(format!("invalid run_script args: {err}")))?;
 
     let execution = runtime.block_on(execute_script(config, &args.name, &args.args));
-    Ok(make_tool_result(execution))
+    Ok(make_tool_result(&execution))
 }
 
-fn handle_list_scripts(config: &AppConfig) -> Result<Value, JsonRpcError> {
+fn handle_list_scripts(config: &AppConfig) -> Value {
     let scripts = config
         .scripts
         .iter()
         .map(|script| script.entry.clone())
         .collect::<Vec<_>>();
 
-    Ok(json!({
+    json!({
         "content": [{
             "type": "text",
             "text": json!({ "scripts": scripts }).to_string(),
         }],
         "isError": false
-    }))
+    })
 }
 
 async fn execute_script(config: &AppConfig, name: &str, args: &[String]) -> ScriptExecution {
@@ -304,7 +304,7 @@ fn parse_env_allowlist(value: impl AsRef<str>) -> BTreeSet<String> {
     allowlist
 }
 
-fn make_tool_result(execution: ScriptExecution) -> Value {
+fn make_tool_result(execution: &ScriptExecution) -> Value {
     let is_error = execution.exit_code != 0;
     let payload = json!({
         "command": execution.command,
@@ -331,19 +331,14 @@ fn resolve_script_path(script_roots: &[PathBuf], name: &str) -> Result<ResolvedS
         .components()
         .any(|component| matches!(component, Component::ParentDir))
     {
-        return Err(format!(
-            "script '{}' contains parent-directory traversal",
-            name
-        ));
+        return Err(format!("script '{name}' contains parent-directory traversal"));
     }
 
     let mut candidates = Vec::new();
 
     for root in script_roots {
-        if requested.components().count() > 1 || requested.extension().is_some() {
-            candidates.push((root.clone(), root.join(requested)));
-        } else {
-            candidates.push((root.clone(), root.join(requested)));
+        candidates.push((root.clone(), root.join(requested)));
+        if requested.components().count() == 1 && requested.extension().is_none() {
             for extension in ["sh", "py", "js"] {
                 candidates.push((root.clone(), root.join(requested.with_extension(extension))));
             }
@@ -355,15 +350,12 @@ fn resolve_script_path(script_roots: &[PathBuf], name: &str) -> Result<ResolvedS
             continue;
         }
 
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root.clone());
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         let canonical_candidate = std::fs::canonicalize(&candidate)
             .map_err(|err| format!("failed to resolve script '{}': {err}", candidate.display()))?;
 
         if !canonical_candidate.starts_with(&canonical_root) {
-            return Err(format!(
-                "script '{}' resolves outside configured directory",
-                name
-            ));
+            return Err(format!("script '{name}' resolves outside configured directory"));
         }
 
         return Ok(ResolvedScript {
@@ -393,7 +385,7 @@ fn discover_scripts(roots: &[PathBuf]) -> Vec<IndexedScript> {
     let mut seen = std::collections::HashSet::new();
 
     for root in roots {
-        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
         if !canonical_root.is_dir() {
             warn!(
                 "script root '{}' is missing or not a directory; skipping",
@@ -439,18 +431,16 @@ fn collect_scripts(
             continue;
         }
 
-        let canonical = match std::fs::canonicalize(&path) {
-            Ok(path) => path,
-            Err(_) => continue,
+        let Ok(canonical) = std::fs::canonicalize(&path) else {
+            continue;
         };
 
         if !canonical.starts_with(root) {
             continue;
         }
 
-        let rel = match canonical.strip_prefix(root) {
-            Ok(rel) => rel,
-            Err(_) => continue,
+        let Ok(rel) = canonical.strip_prefix(root) else {
+            continue;
         };
 
         let name = rel.to_string_lossy().replace('\\', "/");
@@ -519,7 +509,7 @@ fn command_for_script(script_path: &Path, args: &[String]) -> (String, Vec<Strin
 }
 
 fn empty_json_object() -> Value {
-    Value::Object(Default::default())
+    Value::Object(serde_json::Map::default())
 }
 
 impl AppConfig {
@@ -528,15 +518,13 @@ impl AppConfig {
         let mut timeout = env::var("ROKO_MCP_SCRIPTS_TIMEOUT_SECS")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .map(|value| parse_timeout_secs(value))
+            .map(parse_timeout_secs)
             .transpose()?
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(60));
+            .map_or_else(|| Duration::from_secs(60), Duration::from_secs);
         let mut env_allowlist = env::var("ROKO_MCP_SCRIPTS_ENV_ALLOWLIST")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .map(|value| parse_env_allowlist(&value))
-            .unwrap_or_else(default_env_allowlist);
+            .map_or_else(default_env_allowlist, |value| parse_env_allowlist(&value));
         let mut args = env::args_os().skip(1);
 
         while let Some(arg) = args.next() {
@@ -616,11 +604,10 @@ fn script_roots_from_env() -> Vec<PathBuf> {
         }
     }
 
-    vec![
-        env::current_dir()
-            .map(|dir| dir.join(".roko/scripts"))
-            .unwrap_or_else(|_| PathBuf::from(".roko/scripts")),
-    ]
+    vec![env::current_dir().map_or_else(
+        |_| PathBuf::from(".roko/scripts"),
+        |dir| dir.join(".roko/scripts"),
+    )]
 }
 
 #[cfg(test)]

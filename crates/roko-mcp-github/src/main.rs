@@ -4,6 +4,8 @@
 //! servers: read line-delimited JSON from stdin and write line-delimited
 //! JSON responses to stdout.
 
+#![allow(clippy::missing_const_for_fn)]
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::DateTime;
@@ -274,6 +276,7 @@ struct GithubBranchRef {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct GithubPullRequestDetails {
     url: String,
     html_url: Option<String>,
@@ -403,6 +406,7 @@ fn handle_initialize() -> Value {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_tools_list() -> Value {
     serde_json::json!({
         "tools": [
@@ -766,7 +770,7 @@ fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcErro
 }
 
 fn empty_json_object() -> Value {
-    Value::Object(Default::default())
+    Value::Object(serde_json::Map::default())
 }
 
 fn unsupported_tool(name: &str) -> Result<Value, JsonRpcError> {
@@ -933,22 +937,22 @@ fn handle_create_issue(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_comment_issue(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.comment_issue")
 }
 
 fn handle_close_issue(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.close_issue")
 }
 
 fn handle_add_labels(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.add_labels")
 }
 
 fn handle_create_label(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.create_label")
 }
 
@@ -988,36 +992,39 @@ fn handle_search_code(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_list_commits(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.list_commits")
 }
 
 fn handle_create_branch(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.create_branch")
 }
 
 fn handle_get_branch(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.get_branch")
 }
 
 fn handle_compare_branches(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.compare_branches")
 }
 
 fn handle_get_actions_status(arguments: Value) -> Result<Value, JsonRpcError> {
-    let _ = arguments;
+    drop(arguments);
     unsupported_tool("github.get_actions_status")
 }
 
 fn github_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    serde_json::json!({
-        "name": name,
-        "description": description,
-        "inputSchema": input_schema
-    })
+    let mut tool = serde_json::Map::new();
+    tool.insert("name".to_string(), Value::String(name.to_string()));
+    tool.insert(
+        "description".to_string(),
+        Value::String(description.to_string()),
+    );
+    tool.insert("inputSchema".to_string(), input_schema);
+    Value::Object(tool)
 }
 
 fn github_client() -> Result<Client, JsonRpcError> {

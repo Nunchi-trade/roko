@@ -32,6 +32,7 @@ const TELEMETRY_BUS_CAPACITY: usize = 10_000;
 /// Command-line configuration for `mirage-rs`.
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Bind host (default `127.0.0.1`).
     #[arg(long, default_value = "127.0.0.1")]
@@ -222,6 +223,7 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         };
         if toggles.any_enabled() {
             let chain_ctx = {
+                #[allow(unused_mut)]
                 let mut ctx = mirage_rs::chain_rpc::ChainContext::with_hnsw(
                     toggles,
                     cli.chain_hnsw_threshold,

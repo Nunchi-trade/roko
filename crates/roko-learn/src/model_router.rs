@@ -542,25 +542,28 @@ fn sample_gamma<R: Rng + ?Sized>(shape: f64, rng: &mut R) -> f64 {
         return -sample_open_unit(rng).ln();
     }
 
-    let d = shape - (1.0 / 3.0);
-    let c = (1.0 / (9.0 * d)).sqrt();
+    let adjusted_shape = shape - (1.0 / 3.0);
+    let scale = (1.0 / (9.0 * adjusted_shape)).sqrt();
 
     loop {
-        let x = sample_standard_normal(rng);
-        let v = 1.0 + c * x;
-        if v <= 0.0 {
+        let normal_sample = sample_standard_normal(rng);
+        let candidate = 1.0 + scale * normal_sample;
+        if candidate <= 0.0 {
             continue;
         }
 
-        let v_cubed = v * v * v;
-        let u = sample_open_unit(rng);
+        let candidate_cubed = candidate * candidate * candidate;
+        let uniform_sample = sample_open_unit(rng);
 
-        if u < 1.0 - 0.0331 * x.powi(4) {
-            return d * v_cubed;
+        if uniform_sample < 1.0 - 0.0331 * normal_sample.powi(4) {
+            return adjusted_shape * candidate_cubed;
         }
 
-        if u.ln() < 0.5 * x * x + d * (1.0 - v_cubed + v_cubed.ln()) {
-            return d * v_cubed;
+        if uniform_sample.ln()
+            < 0.5 * normal_sample * normal_sample
+                + adjusted_shape * (1.0 - candidate_cubed + candidate_cubed.ln())
+        {
+            return adjusted_shape * candidate_cubed;
         }
     }
 }
