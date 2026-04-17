@@ -28,6 +28,10 @@ pub struct Deployments {
 
 impl Deployments {
     /// Load from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the deployments file cannot be read or parsed.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read deployments {}: {e}", path.display()))?;
@@ -44,6 +48,12 @@ pub struct VerifyReport {
 }
 
 /// Run all checks. Never panics — returns a report.
+///
+/// # Errors
+///
+/// Returns an error if the read provider cannot be built, a deployed address
+/// cannot be parsed, a contract artifact cannot be loaded, or a required chain
+/// query fails.
 pub async fn verify(
     ctx: &ChainCtx,
     scenario: &Scenario,

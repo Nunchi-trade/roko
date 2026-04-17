@@ -363,6 +363,10 @@ impl LlmBackend for AnthropicMessagesBackend {
             BackendResponse::StreamJson(_) | BackendResponse::Text(_) => SessionState::default(),
         }
     }
+
+    fn backend_id(&self) -> &'static str {
+        "claude_api"
+    }
 }
 
 fn content_as_text(content: &Value) -> String {

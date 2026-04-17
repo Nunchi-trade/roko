@@ -23,6 +23,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::obs::histograms::{Histogram, HistogramSnapshot, escape_help, format_f64};
+use crate::obs::schema;
 
 // ─── Primitives: Counter + Gauge ─────────────────────────────────────
 
@@ -575,52 +576,16 @@ pub enum MetricValue {
 
 /// The seven standard metrics every Roko binary registers (§40.2).
 ///
-/// Format: `(name, help, kind)`. Label keys are documented in comments
-/// below; they are not encoded here because label values are only known
-/// at emit time (e.g. `status=succeeded`, `role=coder`).
-pub const STANDARD_METRICS: &[(&str, &str, MetricKind)] = &[
-    // labels: status
-    (
-        "roko_plans_total",
-        "Total number of plans observed, by status",
-        MetricKind::Counter,
-    ),
-    // labels: status, role
-    (
-        "roko_tasks_total",
-        "Total number of tasks observed, by status and role",
-        MetricKind::Counter,
-    ),
-    // labels: tool, outcome
-    (
-        "roko_tool_calls_total",
-        "Total tool calls, by tool and outcome",
-        MetricKind::Counter,
-    ),
-    // labels: gate, verdict
-    (
-        "roko_gate_verdicts_total",
-        "Gate verdicts, by gate and verdict",
-        MetricKind::Counter,
-    ),
-    // labels: backend, role
-    (
-        "roko_agent_duration_seconds",
-        "Agent turn duration in seconds, by backend and role",
-        MetricKind::Histogram,
-    ),
-    // labels: provider, model, direction (input|output|cached)
-    (
-        "roko_llm_tokens_total",
-        "LLM tokens consumed/produced, by provider, model, direction",
-        MetricKind::Counter,
-    ),
-    // labels: provider, model
-    (
-        "roko_llm_cost_usd_total",
-        "Cumulative LLM spend in USD, by provider and model",
-        MetricKind::Counter,
-    ),
+/// This list is sourced from the canonical schema so core registration and
+/// sidecar emission cannot drift on names, help text, or kinds.
+pub const STANDARD_METRICS: &[schema::MetricDescriptor] = &[
+    schema::ROKO_PLANS_TOTAL_DESCRIPTOR,
+    schema::ROKO_TASKS_TOTAL_DESCRIPTOR,
+    schema::ROKO_TOOL_CALLS_TOTAL_DESCRIPTOR,
+    schema::ROKO_GATE_VERDICTS_TOTAL_DESCRIPTOR,
+    schema::ROKO_AGENT_DURATION_SECONDS_DESCRIPTOR,
+    schema::ROKO_LLM_TOKENS_TOTAL_DESCRIPTOR,
+    schema::ROKO_LLM_COST_USD_TOTAL_DESCRIPTOR,
 ];
 
 /// Pre-register every metric in [`STANDARD_METRICS`] with zero labels.
@@ -633,18 +598,19 @@ pub const STANDARD_METRICS: &[(&str, &str, MetricKind)] = &[
 /// pure look-up.
 pub fn register_standard_metrics(registry: &MetricRegistry) {
     use crate::obs::histograms::LLM_LATENCY_BUCKETS;
-    for (name, help, kind) in STANDARD_METRICS {
-        match kind {
+    for descriptor in STANDARD_METRICS {
+        match descriptor.kind {
             MetricKind::Counter => {
-                let _ = registry.register_counter(name, help, LabelSet::new());
+                let _ =
+                    registry.register_counter(descriptor.name, descriptor.help, LabelSet::new());
             }
             MetricKind::Gauge => {
-                let _ = registry.register_gauge(name, help, LabelSet::new());
+                let _ = registry.register_gauge(descriptor.name, descriptor.help, LabelSet::new());
             }
             MetricKind::Histogram => {
                 let _ = registry.register_histogram(
-                    name,
-                    help,
+                    descriptor.name,
+                    descriptor.help,
                     LabelSet::new(),
                     LLM_LATENCY_BUCKETS.to_vec(),
                 );
@@ -825,10 +791,11 @@ mod tests {
 
     #[test]
     fn standard_metrics_all_prefixed_roko() {
-        for (name, _, _) in STANDARD_METRICS {
+        for descriptor in STANDARD_METRICS {
             assert!(
-                name.starts_with("roko_"),
-                "expected roko_ prefix, got {name}"
+                descriptor.name.starts_with("roko_"),
+                "expected roko_ prefix, got {}",
+                descriptor.name
             );
         }
         assert_eq!(STANDARD_METRICS.len(), 7);
@@ -841,11 +808,11 @@ mod tests {
         assert_eq!(reg.family_count(), STANDARD_METRICS.len());
         // spot-check lookups
         assert!(
-            reg.get_counter("roko_plans_total", &LabelSet::new())
+            reg.get_counter(schema::ROKO_PLANS_TOTAL, &LabelSet::new())
                 .is_some()
         );
         assert!(
-            reg.get_histogram("roko_agent_duration_seconds", &LabelSet::new())
+            reg.get_histogram(schema::ROKO_AGENT_DURATION_SECONDS, &LabelSet::new())
                 .is_some()
         );
     }

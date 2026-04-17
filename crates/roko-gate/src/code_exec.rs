@@ -54,12 +54,10 @@ impl CodeExecutionBackend for GeminiNativeAgent {
             .build();
         let result = self.run(&input, ctx).await;
         if !result.success {
-            let reason = result
-                .output
-                .body
-                .as_text()
-                .map(str::to_string)
-                .unwrap_or_else(|_| "gemini validation request failed".to_string());
+            let reason = result.output.body.as_text().map_or_else(
+                |_| "gemini validation request failed".to_string(),
+                str::to_string,
+            );
             return Err(reason);
         }
 

@@ -452,6 +452,12 @@ pub struct PostInsightRequest {
 }
 
 /// `POST /api/knowledge/entries` — post a new insight entry.
+///
+/// # Errors
+///
+/// Returns `400` if the knowledge kind is unknown, the content is empty, or
+/// any enabled-by id is malformed, and `503` if the knowledge subsystem is
+/// disabled.
 pub async fn post_insight(
     State(state): State<ApiState>,
     Json(req): Json<PostInsightRequest>,
@@ -561,6 +567,12 @@ pub struct ConfirmRequest {
 }
 
 /// `POST /api/knowledge/entries/:id/confirm` — confirm an insight entry.
+///
+/// # Errors
+///
+/// Returns `400` if the id is malformed, `404` if the entry is missing, `409`
+/// if the entry is immutable or the confirmer is already recorded, and `503`
+/// if the knowledge subsystem is disabled.
 pub async fn confirm_entry(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -617,6 +629,12 @@ pub struct ChallengeRequest {
 }
 
 /// `POST /api/knowledge/entries/:id/challenge` — challenge an insight entry.
+///
+/// # Errors
+///
+/// Returns `400` if the id is malformed, `404` if the entry is missing, `409`
+/// if the entry is immutable or the challenger is already recorded, and `503`
+/// if the knowledge subsystem is disabled.
 pub async fn challenge_entry(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -673,6 +691,10 @@ pub struct DecayRequest {
 }
 
 /// `POST /api/knowledge/decay` — trigger a decay sweep on the knowledge store.
+///
+/// # Errors
+///
+/// Returns `503` if the knowledge subsystem is disabled.
 pub async fn trigger_decay(
     State(state): State<ApiState>,
     Json(req): Json<DecayRequest>,

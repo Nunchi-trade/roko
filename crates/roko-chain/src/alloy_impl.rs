@@ -67,6 +67,10 @@ pub struct AlloyChainClient {
 
 impl AlloyChainClient {
     /// Construct an HTTP-backed client pointing at `rpc_url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError::Rpc`] if `rpc_url` is not a valid HTTP RPC URL.
     pub fn http(rpc_url: &str) -> ChainResult<Self> {
         let url = reqwest::Url::parse(rpc_url)
             .map_err(|e| ChainError::Rpc(format!("invalid rpc url {rpc_url}: {e}")))?;
@@ -210,6 +214,11 @@ pub struct AlloyChainWallet {
 
 impl AlloyChainWallet {
     /// Build a wallet from a hex-encoded private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError::Rpc`] if `rpc_url` is invalid or `key_hex` is not
+    /// a valid private key for an Ethereum signer.
     pub fn from_hex_key(rpc_url: &str, key_hex: &str, chain_id: u64) -> ChainResult<Self> {
         let url = reqwest::Url::parse(rpc_url)
             .map_err(|e| ChainError::Rpc(format!("invalid rpc url {rpc_url}: {e}")))?;

@@ -1,9 +1,9 @@
-//! Agent identity, trace, and stats tracking.
+//! Legacy runtime-local agent trace and stats tracking.
 //!
-//! Provides first-class agent entities with cognitive trace recording,
-//! heartbeat-based liveness detection, and accumulated stats. The
-//! [`AgentRegistry`] is wired into [`super::super::chain_rpc::ChainContext`]
-//! and exposed via HTTP (`/api/agents/*`) and JSON-RPC (`chain_*Agent*`).
+//! This module backs mirage's in-process `chain_*` / `/api/agents/*` runtime
+//! surface. It is not the durable ERC-8004 identity source and must stay out
+//! of the new discovery path, which now lives on-chain via the bootstrapped
+//! identity contracts.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,7 +47,7 @@ pub struct AgentStats {
 }
 
 /// Per-skill configuration persisted for an agent.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillConfig {
     /// Whether the skill is currently enabled.
     #[serde(default)]
@@ -76,7 +76,7 @@ pub struct AgentTrace {
     pub timestamp: u64,
 }
 
-/// A registered agent entity.
+/// A runtime-local agent entity for legacy `chain_*` / `/api/agents/*` flows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEntry {
     /// Unique agent identifier.
@@ -137,7 +137,10 @@ pub enum AgentEvent {
     },
 }
 
-/// Registry tracking all known agents, their traces, and stats.
+/// Legacy in-memory registry tracking runtime-local agents, traces, and stats.
+///
+/// This registry is intentionally separate from the durable ERC-8004 identity
+/// surface exposed through the EVM contracts bootstrapped by mirage.
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
     agents: HashMap<String, AgentEntry>,

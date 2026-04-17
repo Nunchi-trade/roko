@@ -101,6 +101,11 @@ pub struct WorkspaceIndex {
 
 impl WorkspaceIndex {
     /// Build an index from a workspace root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace root cannot be canonicalized or its
+    /// source files cannot be collected and parsed.
     pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = std::fs::canonicalize(root.as_ref())
             .with_context(|| format!("resolve workspace root {}", root.as_ref().display()))?;
@@ -119,6 +124,11 @@ impl WorkspaceIndex {
     }
 
     /// Return the imports for a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `file` cannot be resolved to a file tracked by this
+    /// workspace index.
     pub fn imports_for_file(&self, file: &str) -> Result<Vec<Import>> {
         let key = self.resolve_file_key(file)?;
         Ok(self.imports_by_file.get(&key).cloned().unwrap_or_default())
@@ -159,6 +169,12 @@ impl WorkspaceIndex {
     }
 
     /// Perform HDC-powered semantic search.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index is internally inconsistent and a symbol is missing
+    /// its cached file or symbol fingerprint. That indicates a broken
+    /// `WorkspaceIndex::from_source_files_with_root` construction path.
     pub fn semantic_search(&self, query: &str, limit: u32) -> Vec<SearchResult> {
         let limit = limit as usize;
         if limit == 0 || self.symbols_by_id.is_empty() {

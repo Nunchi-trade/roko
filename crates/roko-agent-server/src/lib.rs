@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ pub mod registration;
 pub mod state;
 
 pub use auth::bearer::BearerAuth;
+pub use features::relay_client::RelayClientConfig;
 pub use registration::{
     AgentCard, AgentCardEndpoints, AgentCardPublisher, AgentRegistration, RegistrationOutcome,
 };
@@ -90,7 +92,9 @@ impl AgentServer {
     }
 
     fn protected_router(&self) -> Router<Arc<AgentState>> {
-        let mut router = Router::new().route("/stats", axum::routing::get(features::health::stats));
+        let mut router = Router::new()
+            .route("/stats", axum::routing::get(features::health::stats))
+            .merge(features::logs::router());
         if self.features.messaging {
             router = router.merge(features::messaging::router());
         }
@@ -107,6 +111,13 @@ impl AgentServer {
     }
 
     /// Bind the configured address and serve until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bind address cannot be resolved or the TCP
+    /// listener cannot be created, if the bound address cannot be read back,
+    /// if optional registration or start hooks fail, or if serving the Axum
+    /// router fails.
     pub async fn serve(self) -> Result<()> {
         let bind = resolve_addr(&self.bind)?;
         let listener = TcpListener::bind(bind)
@@ -123,7 +134,7 @@ impl AgentServer {
 
         if let Some(registration) = &self.registration {
             registration
-                .register(&self.state, local_addr)
+                .register(Arc::clone(&self.state), local_addr)
                 .await
                 .context("register agent card")?;
         }
@@ -144,6 +155,7 @@ impl AgentServer {
 pub struct AgentServerBuilder {
     bind: Option<String>,
     agent_id: Option<String>,
+    log_path: Option<PathBuf>,
     owner: Option<String>,
     version: Option<String>,
     capabilities: Vec<String>,
@@ -170,6 +182,13 @@ impl AgentServerBuilder {
     #[must_use]
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.bind = Some(bind.into());
+        self
+    }
+
+    /// Override the sidecar log path exposed by `GET /logs`.
+    #[must_use]
+    pub fn log_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.log_path = Some(path.into());
         self
     }
 
@@ -288,6 +307,10 @@ impl AgentServerBuilder {
     }
 
     /// Finish building the server definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `agent_id` was not configured.
     pub fn build(self) -> Result<AgentServer> {
         let agent_id = self
             .agent_id
@@ -302,6 +325,9 @@ impl AgentServerBuilder {
             self.llm_backend,
             self.knowledge_store,
         );
+        if let Some(log_path) = self.log_path {
+            state = state.with_log_path(log_path);
+        }
         if let Some(dispatcher) = self.dispatcher {
             state = state.with_dispatcher(dispatcher);
         }

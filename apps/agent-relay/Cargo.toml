@@ -1,0 +1,40 @@
+[package]
+name = "agent-relay"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Narrow in-memory relay for agent websocket presence, cards, and message forwarding."
+
+[lib]
+name = "agent_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-relay"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }

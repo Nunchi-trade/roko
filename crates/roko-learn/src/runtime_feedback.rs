@@ -689,6 +689,11 @@ impl LearningRuntime {
     /// Read all persisted efficiency events from the JSONL log.
     ///
     /// Returns an empty vec if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log cannot be opened or read, or if a line
+    /// read from the log fails unexpectedly.
     pub async fn read_efficiency_events(
         &self,
     ) -> Result<Vec<AgentEfficiencyEvent>, LearningRuntimeError> {
@@ -696,6 +701,10 @@ impl LearningRuntime {
     }
 
     /// Read the latest persisted C-Factor snapshot, if one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot file cannot be read.
     pub async fn latest_cfactor(&self) -> Result<Option<CFactor>, LearningRuntimeError> {
         let contents = match tokio::fs::read_to_string(&self.paths.cfactor_jsonl).await {
             Ok(contents) => contents,
@@ -714,6 +723,10 @@ impl LearningRuntime {
     }
 
     /// Save cascade router observations to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cascade router snapshot cannot be written.
     pub fn save_cascade_router(&self) -> Result<(), LearningRuntimeError> {
         self.cascade_router.save(&self.paths.cascade_router_json)?;
         Ok(())
@@ -746,6 +759,11 @@ impl LearningRuntime {
     }
 
     /// Append one raw episode record without triggering any learning updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the episode cannot be appended to the persisted
+    /// log.
     pub async fn append_episode(&self, episode: &Episode) -> Result<(), LearningRuntimeError> {
         let mut episode = episode.clone();
         self.apply_affect_signature(&mut episode);
@@ -1380,6 +1398,11 @@ fn compute_regression_report(
 }
 
 /// Read efficiency events from a JSONL file. Returns empty vec if file missing.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or if any read operation
+/// fails unexpectedly.
 pub async fn read_efficiency_events(
     path: &Path,
 ) -> Result<Vec<AgentEfficiencyEvent>, LearningRuntimeError> {
@@ -1406,6 +1429,11 @@ pub async fn read_efficiency_events(
 /// history log.
 ///
 /// Returns the snapshot that was persisted.
+///
+/// # Errors
+///
+/// Returns an error if the snapshot cannot be computed or if the history log
+/// cannot be updated.
 pub async fn refresh_cfactor_snapshot(
     learn_root: impl AsRef<Path>,
 ) -> Result<CFactor, LearningRuntimeError> {
@@ -1813,7 +1841,9 @@ mod tests {
         freq.skill_mining_every_n = 1;
         runtime.set_update_frequency(freq);
 
-        let input = CompletedRunInput::from_episode(sample_episode(true));
+        let mut episode = sample_episode(true);
+        episode.backend = "claude_cli".to_string();
+        let input = CompletedRunInput::from_episode(episode);
         let update = runtime.record_completed_run(input).await.unwrap();
 
         assert_eq!(update.episode_logged, ApplyStatus::Applied);
@@ -1825,6 +1855,7 @@ mod tests {
         let episodes_jsonl = std::fs::read_to_string(&runtime.paths().episodes_jsonl).unwrap();
         let persisted: Episode = serde_json::from_str(episodes_jsonl.lines().next().unwrap())
             .expect("persisted episode");
+        assert_eq!(persisted.backend, "claude_cli");
         let pad = persisted
             .extra
             .get("pad")

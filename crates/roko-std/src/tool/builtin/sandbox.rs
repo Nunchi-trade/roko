@@ -25,6 +25,11 @@ use roko_core::tool::ToolError;
 
 /// Resolve `rel` against `worktree` and ensure the result stays inside
 /// the worktree. Returns the absolute, normalized path on success.
+///
+/// # Errors
+///
+/// Returns [`ToolError::PathOutsideWorktree`] if the resolved path escapes the
+/// supplied worktree.
 pub fn require_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf, ToolError> {
     let candidate = Path::new(rel);
     let joined = if candidate.is_absolute() {
@@ -41,6 +46,11 @@ pub fn require_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf, To
 }
 
 /// Extract a required string field from a JSON arguments object.
+///
+/// # Errors
+///
+/// Returns [`ToolError::SchemaInvalid`] if `key` is missing or is not a JSON
+/// string.
 pub fn require_string(args: &serde_json::Value, key: &str) -> Result<String, ToolError> {
     args.get(key)
         .and_then(serde_json::Value::as_str)

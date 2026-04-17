@@ -175,6 +175,11 @@ impl TuiState {
 }
 
 /// Run a TUI while a demo future emits events into the supplied emitter.
+///
+/// # Errors
+///
+/// Returns an error if terminal setup fails, the scenario future fails, or
+/// event loop teardown fails.
 pub async fn run_tui<F, Fut>(title: &str, scenario_future: F) -> anyhow::Result<()>
 where
     F: FnOnce(Arc<dyn EventEmitter>) -> Fut,

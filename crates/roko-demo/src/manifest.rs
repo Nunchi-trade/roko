@@ -234,6 +234,11 @@ pub struct LoadedManifest {
 
 impl LoadedManifest {
     /// Load the manifest from `demo/manifest.toml`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manifest file cannot be read, parsed, or if the
+    /// schema version is unsupported.
     pub fn load(demo_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
         let demo_dir = demo_dir.as_ref().to_path_buf();
         let path = demo_dir.join("manifest.toml");
@@ -251,6 +256,11 @@ impl LoadedManifest {
     }
 
     /// Resolve a scenario by name and load its full definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scenario name is unknown, the scenario file
+    /// cannot be read or parsed, or the file's name does not match the entry.
     pub fn load_scenario(&self, name: &str) -> anyhow::Result<Scenario> {
         let entry = self
             .manifest
@@ -273,6 +283,10 @@ impl LoadedManifest {
     }
 
     /// Load wallets.toml (path defaults to `<demo>/wallets.toml`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the wallet file cannot be read or parsed.
     pub fn load_wallets(&self) -> anyhow::Result<Wallets> {
         let rel = self
             .manifest
@@ -323,6 +337,11 @@ pub struct ExpandedAgent {
 }
 
 /// Write the post-deploy address registry.
+///
+/// # Errors
+///
+/// Returns an error if the output directory cannot be created or the JSON
+/// registry cannot be written.
 pub fn write_deployments(
     runtime_dir: impl AsRef<Path>,
     scenario: &str,

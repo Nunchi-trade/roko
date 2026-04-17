@@ -221,6 +221,12 @@ impl ModelExperimentStore {
     }
 
     /// Save the store to disk using an atomic rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be serialized, if the target
+    /// directory or snapshot file cannot be written, or if syncing the
+    /// cascade-router mirror fails.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

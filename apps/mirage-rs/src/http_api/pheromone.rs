@@ -237,6 +237,11 @@ pub struct PheromoneQueryResponse {
     pub timestamp: u64,
 }
 
+/// `POST /api/pheromones/query` — score a natural-language pheromone query.
+///
+/// # Errors
+///
+/// Returns `400` if the query field is missing.
 pub async fn query_pheromones(
     State(state): State<ApiState>,
     Json(req): Json<PheromoneQueryRequest>,
@@ -392,6 +397,11 @@ pub struct DepositRequest {
 }
 
 /// `POST /api/pheromones` — deposit a new pheromone.
+///
+/// # Errors
+///
+/// Returns `400` if the kind is unknown or the content is empty, or `503` if
+/// the stigmergy subsystem is disabled.
 pub async fn deposit_pheromone(
     State(state): State<ApiState>,
     Json(req): Json<DepositRequest>,
@@ -464,6 +474,10 @@ pub struct ProjectionQuery {
 }
 
 /// `GET /api/pheromones/:id/projection` — project decay over time for a pheromone.
+///
+/// # Errors
+///
+/// Returns `404` if the pheromone does not exist.
 pub async fn pheromone_projection(
     State(state): State<ApiState>,
     Path(id): Path<u64>,

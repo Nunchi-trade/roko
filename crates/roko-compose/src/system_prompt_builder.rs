@@ -30,10 +30,11 @@
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
 use crate::prompt::estimate_tokens;
-use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
+use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
 
@@ -46,7 +47,7 @@ use roko_learn::skill_library::Skill;
 ///     .with_domain("DeFi protocol context: ...")
 ///     .with_task("Implement the rate limiter in crates/golem-core")
 ///     .with_tools("MCP tools available: Read, Write, Bash")
-///     .with_anti_patterns(vec!["Never use unwrap() in library crates"])
+///     .with_anti_patterns(vec!["Never call unwrap in library crates"])
 ///     .build();
 /// ```
 pub struct SystemPromptBuilder {
@@ -66,6 +67,8 @@ pub struct SystemPromptBuilder {
     tools: Option<String>,
     /// Layer 6: Relevant skills — learned techniques to prefer for this task.
     relevant_skills: Vec<Skill>,
+    /// Layer 6: Relevant playbooks — reusable prior task sequences.
+    relevant_playbooks: Vec<Playbook>,
     /// Layer 7: Anti-patterns — things the agent must NOT do.
     anti_patterns: Vec<String>,
     /// Layer 8: Affect guidance — current emotional tone and focus.
@@ -124,6 +127,7 @@ impl SystemPromptBuilder {
             task: None,
             tools: None,
             relevant_skills: Vec::new(),
+            relevant_playbooks: Vec::new(),
             anti_patterns: Vec::new(),
             affect_state: None,
             cache_markers: false,
@@ -178,6 +182,13 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_skills(mut self, skills: &[Skill]) -> Self {
         self.relevant_skills = skills.to_vec();
+        self
+    }
+
+    /// Set layer 6: relevant playbooks for this task.
+    #[must_use]
+    pub fn with_playbooks(mut self, playbooks: &[Playbook]) -> Self {
+        self.relevant_playbooks = playbooks.to_vec();
         self
     }
 
@@ -469,7 +480,7 @@ impl SystemPromptBuilder {
         if self.tools.as_ref().is_some_and(|s| !s.is_empty()) {
             count += 1;
         }
-        if !self.relevant_skills.is_empty() {
+        if !self.relevant_skills.is_empty() || !self.relevant_playbooks.is_empty() {
             count += 1;
         }
         if !self.anti_patterns.is_empty() {
@@ -549,13 +560,26 @@ impl SystemPromptBuilder {
     }
 
     fn relevant_techniques_section(&self) -> Option<PromptSection> {
-        if self.relevant_skills.is_empty() {
+        if self.relevant_skills.is_empty() && self.relevant_playbooks.is_empty() {
             return None;
         }
 
         let mut rendered = String::from("## Relevant Techniques");
-        let mut kept = 0usize;
+        let mut kept_playbooks = 0usize;
+        let mut kept_skills = 0usize;
         let mut total_tokens = estimate_tokens(&rendered);
+
+        for playbook in self.relevant_playbooks.iter().take(3) {
+            let block = render_playbook(playbook);
+            let candidate = format!("{rendered}\n\n{block}");
+            let candidate_tokens = estimate_tokens(&candidate);
+            if candidate_tokens > RELEVANT_TECHNIQUES_TOKEN_BUDGET {
+                break;
+            }
+            rendered = candidate;
+            kept_playbooks += 1;
+            total_tokens = candidate_tokens;
+        }
 
         for skill in &self.relevant_skills {
             let block = render_skill(skill);
@@ -565,24 +589,29 @@ impl SystemPromptBuilder {
                 break;
             }
             rendered = candidate;
-            kept += 1;
+            kept_skills += 1;
             total_tokens = candidate_tokens;
         }
 
-        if kept < self.relevant_skills.len() {
+        if kept_playbooks < self.relevant_playbooks.len().min(3)
+            || kept_skills < self.relevant_skills.len()
+        {
             tracing::info!(
-                kept,
-                dropped = self.relevant_skills.len() - kept,
+                kept_playbooks,
+                dropped_playbooks = self.relevant_playbooks.len().min(3) - kept_playbooks,
+                kept_skills,
+                dropped_skills = self.relevant_skills.len() - kept_skills,
                 token_budget = RELEVANT_TECHNIQUES_TOKEN_BUDGET,
                 used_tokens = total_tokens,
-                "trimmed relevant skills to fit the prompt budget"
+                "trimmed relevant techniques to fit the prompt budget"
             );
         } else {
             tracing::info!(
-                kept,
+                kept_playbooks,
+                kept_skills,
                 token_budget = RELEVANT_TECHNIQUES_TOKEN_BUDGET,
                 used_tokens = total_tokens,
-                "included relevant skills in the prompt"
+                "included relevant techniques in the prompt"
             );
         }
 
@@ -591,6 +620,7 @@ impl SystemPromptBuilder {
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End)
+                .with_bidder(AttentionBidder::PlaybookRules)
                 .with_hard_cap(RELEVANT_TECHNIQUES_TOKEN_BUDGET),
         )
     }
@@ -728,6 +758,31 @@ fn render_skill(skill: &Skill) -> String {
         "### {title}\n\nWhen to use: {when_to_use}\nHow to apply: {how_to_apply}\nSuccess rate: {:.0}%\n",
         (skill.success_rate.clamp(0.0, 1.0) * 100.0)
     )
+}
+
+fn render_playbook(playbook: &Playbook) -> String {
+    let title = if playbook.name.is_empty() {
+        playbook.id.as_str()
+    } else {
+        playbook.name.as_str()
+    };
+
+    let mut rendered = format!(
+        "### Playbook: {title} ({})\n\nGoal: {}\nSuccess rate: {:.0}%\n",
+        playbook.id,
+        playbook.goal,
+        playbook.success_rate().unwrap_or(0.0).clamp(0.0, 1.0) * 100.0
+    );
+
+    if !playbook.steps.is_empty() {
+        rendered.push_str("Steps:");
+        for step in &playbook.steps {
+            rendered.push_str(&format!("\n- [{}] {}", step.action_kind, step.description));
+        }
+        rendered.push('\n');
+    }
+
+    rendered
 }
 
 #[derive(Clone)]
@@ -897,11 +952,7 @@ impl SystemPromptBuilder {
             return None;
         }
 
-        let mut pheromones = self
-            .pheromones
-            .iter()
-            .cloned()
-            .collect::<Vec<ContextChunk>>();
+        let mut pheromones = self.pheromones.to_vec();
         pheromones.sort_by(|left, right| {
             right
                 .relevance
@@ -978,6 +1029,7 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
 mod tests {
     use super::*;
     use roko_core::tool::{ToolCategory, ToolPermission};
+    use roko_learn::playbook::{Playbook, PlaybookStep};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
     use roko_learn::skill_library::Skill;
 
@@ -999,7 +1051,7 @@ mod tests {
             .with_task("Implement rate limiter in crates/golem-core")
             .with_tools("MCP tools: Read, Write, Bash")
             .with_anti_patterns(vec![
-                "Never use unwrap() in library crates".to_string(),
+                "Never call unwrap in library crates".to_string(),
                 "No hardcoded paths".to_string(),
             ])
             .build();
@@ -1010,7 +1062,7 @@ mod tests {
         assert!(prompt.contains("Knowledge about execution flow."));
         assert!(prompt.contains("rate limiter"));
         assert!(prompt.contains("MCP tools"));
-        assert!(prompt.contains("Never use unwrap()"));
+        assert!(prompt.contains("Never call unwrap"));
         assert!(prompt.contains("No hardcoded paths"));
     }
 
@@ -1074,14 +1126,30 @@ mod tests {
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build();
 
-        let pos_role = prompt.find("LAYER1_ROLE").unwrap();
-        let pos_conv = prompt.find("LAYER2_CONV").unwrap();
-        let pos_tools = prompt.find("LAYER5_TOOLS").unwrap();
-        let pos_domain = prompt.find("LAYER3_DOMAIN").unwrap();
-        let pos_context = prompt.find("LAYER3B_CONTEXT").unwrap();
-        let pos_anti = prompt.find("LAYER6_ANTI").unwrap();
-        let pos_task = prompt.find("LAYER4_TASK").unwrap();
-        let pos_affect = prompt.find("time pressure").unwrap();
+        let pos_role = prompt
+            .find("LAYER1_ROLE")
+            .expect("invariant: prompt should contain the role layer marker");
+        let pos_conv = prompt
+            .find("LAYER2_CONV")
+            .expect("invariant: prompt should contain the conventions marker");
+        let pos_tools = prompt
+            .find("LAYER5_TOOLS")
+            .expect("invariant: prompt should contain the tools marker");
+        let pos_domain = prompt
+            .find("LAYER3_DOMAIN")
+            .expect("invariant: prompt should contain the domain marker");
+        let pos_context = prompt
+            .find("LAYER3B_CONTEXT")
+            .expect("invariant: prompt should contain the context marker");
+        let pos_anti = prompt
+            .find("LAYER6_ANTI")
+            .expect("invariant: prompt should contain the anti-pattern marker");
+        let pos_task = prompt
+            .find("LAYER4_TASK")
+            .expect("invariant: prompt should contain the task marker");
+        let pos_affect = prompt
+            .find("time pressure")
+            .expect("invariant: prompt should contain affect guidance text");
 
         // Cache order: role -> workspace -> plan -> volatile.
         assert!(pos_role < pos_conv, "role before conventions");
@@ -1108,13 +1176,21 @@ mod tests {
         assert!(prompt.contains("<!-- cache:session -->"));
 
         // System marker comes after conventions, before domain.
-        let sys_marker = prompt.find("<!-- cache:system -->").unwrap();
-        let domain_pos = prompt.find("Domain").unwrap();
+        let sys_marker = prompt
+            .find("<!-- cache:system -->")
+            .expect("invariant: prompt should contain the system cache marker");
+        let domain_pos = prompt
+            .find("Domain")
+            .expect("invariant: prompt should contain the domain section");
         assert!(sys_marker < domain_pos);
 
         // Session marker comes after the session-tier context, before task.
-        let sess_marker = prompt.find("<!-- cache:session -->").unwrap();
-        let task_pos = prompt.find("Task").unwrap();
+        let sess_marker = prompt
+            .find("<!-- cache:session -->")
+            .expect("invariant: prompt should contain the session cache marker");
+        let task_pos = prompt
+            .find("Task")
+            .expect("invariant: prompt should contain the task section");
         assert!(sess_marker < task_pos);
     }
 
@@ -1154,7 +1230,7 @@ mod tests {
             .with_context("Assembly context")
             .with_task("Implement feature X")
             .with_tools("Use MCP tools")
-            .add_anti_pattern("No unwrap()")
+            .add_anti_pattern("No unwrap calls")
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build_sections();
 
@@ -1419,9 +1495,22 @@ mod tests {
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build();
 
-        assert!(prompt.find("Role").unwrap() < prompt.find("Task").unwrap());
-        assert!(prompt.find("Domain").unwrap() < prompt.find("Task").unwrap());
-        assert!(prompt.find("Task").unwrap() < prompt.find("time pressure").unwrap());
+        let role_pos = prompt
+            .find("Role")
+            .expect("invariant: prompt should contain the role text");
+        let domain_pos = prompt
+            .find("Domain")
+            .expect("invariant: prompt should contain the domain text");
+        let task_pos = prompt
+            .find("Task")
+            .expect("invariant: prompt should contain the task text");
+        let pressure_pos = prompt
+            .find("time pressure")
+            .expect("invariant: prompt should contain affect guidance text");
+
+        assert!(role_pos < task_pos);
+        assert!(domain_pos < task_pos);
+        assert!(task_pos < pressure_pos);
     }
 
     #[test]
@@ -1471,7 +1560,7 @@ mod tests {
         }
 
         let sections = SystemPromptBuilder::new("Role")
-            .add_anti_pattern("No unwrap()")
+            .add_anti_pattern("No unwrap calls")
             .with_section_effectiveness("Implementer", &registry)
             .build_sections();
 
@@ -1526,6 +1615,38 @@ mod tests {
         assert!(prompt.contains("## Relevant Techniques"));
         assert!(prompt.contains("When to use: focused refactor"));
         assert!(prompt.contains("How to apply: Use `git commit --fixup`"));
+    }
+
+    #[test]
+    fn relevant_playbooks_are_injected_and_capped() {
+        let mut api = Playbook::new("pb1", "Implement REST API");
+        api.name = "implement-api".to_string();
+        api.steps.push(PlaybookStep::new(
+            0,
+            "Wire the route handler",
+            "edit_file",
+            vec!["compile_ok".to_string()],
+        ));
+
+        let mut docs = Playbook::new("pb2", "Review docs");
+        docs.name = "review-docs".to_string();
+
+        let mut auth = Playbook::new("pb3", "Implement auth");
+        auth.name = "implement-auth".to_string();
+
+        let mut cache = Playbook::new("pb4", "Implement cache");
+        cache.name = "implement-cache".to_string();
+
+        let prompt = SystemPromptBuilder::new("Role")
+            .with_task("Implement REST API")
+            .with_playbooks(&[api, docs, auth, cache])
+            .build();
+
+        assert!(prompt.contains("## Relevant Techniques"));
+        assert!(prompt.contains("Playbook: implement-api (pb1)"));
+        assert!(prompt.contains("Playbook: review-docs (pb2)"));
+        assert!(prompt.contains("Playbook: implement-auth (pb3)"));
+        assert!(!prompt.contains("Playbook: implement-cache (pb4)"));
     }
 
     #[test]

@@ -210,6 +210,11 @@ impl LatencyRegistry {
     }
 
     /// Persist the registry to `path` as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registry snapshot cannot be serialized or if
+    /// the snapshot cannot be written to disk.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let mut entries: Vec<_> = self
             .stats
@@ -320,6 +325,10 @@ impl LatencyTracker {
     }
 
     /// Persist the tracker to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying registry snapshot cannot be saved.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         self.registry.save(path)
     }

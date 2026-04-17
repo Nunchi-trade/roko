@@ -81,6 +81,10 @@ fn default_metric() -> String {
 }
 
 /// `POST /api/predictions/sessions` — create a prediction session.
+///
+/// # Errors
+///
+/// Returns `400` if the question or creator is empty.
 pub async fn create_session(
     State(state): State<ApiState>,
     Json(req): Json<CreateSessionRequest>,
@@ -145,6 +149,10 @@ pub async fn list_sessions(
 }
 
 /// `GET /api/predictions/sessions/{id}` — fetch a session and its claims.
+///
+/// # Errors
+///
+/// Returns `404` if the session does not exist.
 pub async fn get_session(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -167,6 +175,11 @@ pub async fn get_session(
 }
 
 /// `POST /api/predictions/sessions/{id}/resolve` — resolve a prediction session.
+///
+/// # Errors
+///
+/// Returns `400` if the actual value is not finite, `404` if the session does
+/// not exist, or `409` if the session is already resolved.
 pub async fn resolve_session(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -195,6 +208,12 @@ pub async fn resolve_session(
 }
 
 /// `POST /api/predictions/claims` — submit a prediction claim.
+///
+/// # Errors
+///
+/// Returns `400` if `session_id` or `agent_id` is empty, `404` if the session
+/// does not exist, `409` if the claim is duplicated or the session state is
+/// incompatible, or `400` if the numeric fields are invalid.
 pub async fn submit_claim(
     State(state): State<ApiState>,
     Json(req): Json<SubmitClaimRequest>,

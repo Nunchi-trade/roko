@@ -314,7 +314,7 @@ impl HnswBinaryIndex {
 
     /// Beam-search on a given layer from `entry`, returning up to `ef` nearest candidates.
     fn search_layer(&self, node: usize, entry: usize, ef: usize, layer: usize) -> Vec<Candidate> {
-        let q = self.nodes[node].vector.clone();
+        let q = self.nodes[node].vector;
         self.search_layer_vec(&q, entry, ef, layer)
     }
 
@@ -392,7 +392,7 @@ impl HnswBinaryIndex {
             return;
         }
         // Rank by distance to this node, keep the m_max closest.
-        let base = self.nodes[node].vector.clone();
+        let base = self.nodes[node].vector;
         let mut ranked: Vec<(usize, f32)> = self.nodes[node].neighbours[layer]
             .iter()
             .copied()

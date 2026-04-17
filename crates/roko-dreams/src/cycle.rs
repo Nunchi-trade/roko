@@ -395,6 +395,13 @@ impl DreamCycle {
     /// The budget is consumed using the actual episode data that gets replayed
     /// during the cycle. When the budget is exhausted, the cycle stops after
     /// the already-processed clusters and records a note in the report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the episode log cannot be read, if the replay
+    /// analysis or regression summaries fail, if the knowledge or playbook
+    /// stores reject an update, if the review dispatcher fails, or if the
+    /// final report cannot be written.
     pub async fn run_budgeted(
         &mut self,
         budget: &mut Option<DreamBudget>,

@@ -1,0 +1,4 @@
+{"id":"chatcmpl-codex-stream","session_id":"sess-codex-stream","thread_id":"thread-codex-stream","choices":[{"index":0,"delta":{"content":"Codex "}}]}
+{"choices":[{"index":0,"delta":{"content":"streams "}}]}
+{"choices":[{"index":0,"delta":{"content":"cleanly."}}]}
+{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":1}}}

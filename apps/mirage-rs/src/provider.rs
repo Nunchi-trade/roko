@@ -257,6 +257,11 @@ impl UpstreamRpc {
     }
 
     /// Returns the upstream block number.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream RPC, transport, or response-parsing errors when the
+    /// block number is not satisfied by the mock adapter.
     pub fn get_block_number(&self) -> Result<u64> {
         if self.http_url.is_none() {
             self.maybe_delay_mock();
@@ -267,6 +272,11 @@ impl UpstreamRpc {
     }
 
     /// Returns upstream account info.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream balance, nonce, code, transport, or parsing errors
+    /// when the account is not satisfied by the mock adapter.
     pub fn get_account_info(
         &self,
         address: Address,
@@ -312,6 +322,11 @@ impl UpstreamRpc {
     }
 
     /// Returns upstream storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream storage, transport, or parsing errors when the slot is
+    /// not satisfied by the mock adapter.
     pub fn get_storage_at(&self, address: Address, slot: U256, block: BlockTag) -> Result<U256> {
         if self.http_url.is_none() {
             self.maybe_delay_mock();
@@ -331,6 +346,11 @@ impl UpstreamRpc {
     }
 
     /// Executes an upstream `eth_call`.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream call, transport, or parsing errors when the call is
+    /// not satisfied by the mock adapter.
     pub fn eth_call(
         &self,
         from: Address,
@@ -354,6 +374,11 @@ impl UpstreamRpc {
     }
 
     /// Returns a block payload with optional full transaction bodies.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream block-fetch, transport, or parsing errors when the
+    /// block is not satisfied by the mock adapter.
     pub fn get_block_by_number(
         &self,
         block: BlockTag,
@@ -404,6 +429,11 @@ impl UpstreamRpc {
     }
 
     /// Returns a transaction payload by hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream transaction-fetch, transport, or parsing errors when
+    /// the transaction is not satisfied by the mock adapter.
     pub fn get_transaction_by_hash(&self, tx_hash: B256) -> Result<Option<Value>> {
         if self.http_url.is_none() {
             self.maybe_delay_mock();
@@ -422,6 +452,11 @@ impl UpstreamRpc {
     }
 
     /// Returns upstream bytecode by code hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream code-fetch, transport, or parsing errors. Returns
+    /// [`MirageError::Upstream`] when the bytecode hash cannot be resolved.
     pub fn get_code_by_hash(&self, code_hash: B256, block: BlockTag) -> Result<Bytecode> {
         if let Some(code) = self.code_by_hash.read().get(&code_hash).cloned() {
             return Ok(code);
@@ -461,6 +496,11 @@ impl UpstreamRpc {
     }
 
     /// Returns a deterministic or upstream-provided block hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream block-fetch, transport, missing-field, or parsing
+    /// errors when the hash is not satisfied by the mock adapter.
     pub fn get_block_hash(&self, number: u64) -> Result<B256> {
         if self.http_url.is_none() {
             self.maybe_delay_mock();
@@ -484,11 +524,20 @@ impl UpstreamRpc {
     }
 
     /// Performs a basic connectivity check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::get_block_number`].
     pub fn health_check(&self) -> Result<u64> {
         self.get_block_number()
     }
 
     /// Subscribes to `newHeads` notifications from the WebSocket upstream.
+    ///
+    /// # Errors
+    ///
+    /// Returns WebSocket connect, subscribe, read, text-frame, JSON decode, or
+    /// subscription-id errors while establishing the stream.
     pub async fn subscribe_new_heads(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<u64>> + Send>>> {

@@ -6,6 +6,11 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 /// Start a background WebSocket server and return its broadcast sender.
+///
+/// # Errors
+///
+/// Returns an error if the TCP listener cannot bind or the local address
+/// cannot be queried.
 pub async fn start_ws_server(port: u16) -> anyhow::Result<broadcast::Sender<String>> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let local_addr = listener.local_addr()?;

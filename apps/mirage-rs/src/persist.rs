@@ -18,9 +18,7 @@ use std::time::Duration;
 use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
-use crate::fork::{
-    DirtyStore, ForkState, LocalBlock, LocalReceipt, LocalTransaction, MirageFork,
-};
+use crate::fork::{DirtyStore, ForkState, LocalBlock, LocalReceipt, LocalTransaction, MirageFork};
 
 /// Current schema version. Bump when the snapshot format changes.
 pub const SNAPSHOT_VERSION: u32 = 1;
@@ -191,30 +189,46 @@ pub fn chain_context_from_snapshot(
     snap: ChainSnapshot,
     hnsw_threshold: usize,
 ) -> crate::chain_rpc::ChainContext {
-    use crate::chain::{
-        AgentRegistry, KnowledgeStore, PheromoneField, PredictionStore, TaskStore,
-    };
+    use crate::chain::{KnowledgeStore, PheromoneField, PredictionStore, TaskStore};
+
+    let ChainSnapshot {
+        toggles,
+        knowledge: knowledge_snapshot,
+        pheromones: pheromone_snapshot,
+        agents: legacy_agent_snapshot,
+        tasks: task_snapshot,
+        predictions: prediction_snapshot,
+    } = snap;
 
     // `from_snapshot` rebuilds the brute-force HDC index. HNSW is not persisted
     // — it auto-activates when entry count exceeds `hnsw_threshold` on the next
     // `post()`. This is acceptable: HNSW is a query-time optimisation, not state.
     let _ = hnsw_threshold; // reserved for future HNSW rebuild
-    let knowledge = KnowledgeStore::from_snapshot(snap.knowledge);
-    let pheromones = PheromoneField::from_snapshot(snap.pheromones, 0.01);
+    let knowledge = KnowledgeStore::from_snapshot(knowledge_snapshot);
+    let pheromones = PheromoneField::from_snapshot(pheromone_snapshot, 0.01);
+    let legacy_agent_count = legacy_agent_snapshot.agents.len();
+    let legacy_trace_count = legacy_agent_snapshot.traces.len();
+    if legacy_agent_count > 0 || legacy_trace_count > 0 {
+        tracing::info!(
+            legacy_agent_count,
+            legacy_trace_count,
+            "ignoring persisted legacy AgentRegistry snapshot; ERC-8004 contracts remain the durable identity source"
+        );
+    }
 
     crate::chain_rpc::ChainContext {
         knowledge,
         pheromones,
-        toggles: snap.toggles,
+        toggles,
         #[cfg(feature = "roko")]
         pheromone_bus: None,
         #[cfg(feature = "roko")]
         insight_bus: None,
-        agent_registry: AgentRegistry::from_snapshot(snap.agents),
+        agent_registry: crate::chain::AgentRegistry::new(),
         agent_bus: tokio::sync::broadcast::channel(1_024).0,
-        task_store: TaskStore::from_snapshot(snap.tasks),
+        task_store: TaskStore::from_snapshot(task_snapshot),
         task_bus: tokio::sync::broadcast::channel(1_024).0,
-        prediction_store: PredictionStore::from_snapshot(snap.predictions),
+        prediction_store: PredictionStore::from_snapshot(prediction_snapshot),
         prediction_bus: tokio::sync::broadcast::channel(1_024).0,
     }
 }
@@ -353,7 +367,13 @@ mod tests {
 
         let upstream = Arc::new(UpstreamRpc::new_with_limits(None, None, 1, 1, 1));
         let mut fork = ForkState::new(
-            HybridDB::new(upstream, 100, Duration::from_secs(12), 1.try_into().unwrap(), 1),
+            HybridDB::new(
+                upstream,
+                100,
+                Duration::from_secs(12),
+                1.try_into().unwrap(),
+                1,
+            ),
             42,
             1,
         );
@@ -402,7 +422,10 @@ mod tests {
         write_snapshot(&snap, dir.path()).expect("write");
 
         let tmp_path = dir.path().join(format!("{SNAPSHOT_FILE}.tmp"));
-        assert!(!tmp_path.exists(), ".tmp file should be cleaned up by rename");
+        assert!(
+            !tmp_path.exists(),
+            ".tmp file should be cleaned up by rename"
+        );
 
         let final_path = dir.path().join(SNAPSHOT_FILE);
         assert!(final_path.exists());
@@ -427,5 +450,31 @@ mod tests {
         std::fs::write(&path, r#"{"version":999,"created_at":0,"fork":{}}"#).unwrap();
         let result = load_snapshot(dir.path());
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "chain")]
+    #[test]
+    fn chain_context_restore_discards_legacy_agent_registry_snapshot() {
+        let mut agent_registry = crate::chain::AgentRegistry::new();
+        assert!(agent_registry.register(
+            "agent-1".to_owned(),
+            vec![0xAA],
+            "worker".to_owned(),
+            "owner-1".to_owned(),
+            123
+        ));
+
+        let snap = ChainSnapshot {
+            toggles: crate::chain_rpc::ChainToggles::all(),
+            knowledge: crate::chain::KnowledgeStore::new().snapshot(),
+            pheromones: crate::chain::PheromoneField::default().snapshot(),
+            agents: agent_registry.snapshot(),
+            tasks: crate::chain::TaskStore::new().snapshot(),
+            predictions: crate::chain::PredictionStore::new().snapshot(),
+        };
+
+        let restored = chain_context_from_snapshot(snap, 1_000);
+
+        assert!(restored.agent_registry.list_agents().is_empty());
     }
 }

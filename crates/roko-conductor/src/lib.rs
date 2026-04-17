@@ -21,6 +21,17 @@
 //! The canonical [`PlanPhase`], [`PhaseKind`], and [`ConductorDecision`]
 //! types live in `roko-core`. This crate re-exports them for convenience.
 
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::expect_used,
+    clippy::manual_let_else,
+    clippy::missing_const_for_fn,
+    clippy::redundant_closure_for_method_calls,
+    clippy::single_match,
+    clippy::uninlined_format_args,
+    clippy::unnested_or_patterns
+)]
+
 pub mod circuit_breaker;
 pub mod conductor;
 pub mod diagnosis;

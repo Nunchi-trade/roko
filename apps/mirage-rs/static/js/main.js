@@ -2,8 +2,28 @@
    MAIN — init, connect(), frame(), event wiring, interval setup
    ================================================================ */
 
-import { state } from './state.js';
-import { rpc, api, apiPost, logReq, logAgent, toast, onRenderLog, onRenderAgent } from './api.js';
+import {
+  getSelectedMergedAgent,
+  listTransportOptionsForAgent,
+  resetRegistryState,
+  setRegistryMessageResult,
+  setRegistryTransportPreference,
+  setSelectedMergedAgent,
+  state,
+} from './state.js';
+import {
+  api,
+  apiPost,
+  loadInitialRemoteBase,
+  logReq,
+  logAgent,
+  onRenderAgent,
+  onRenderLog,
+  rpc,
+  sendAgentMessage,
+  setRemoteBase,
+  toast,
+} from './api.js';
 import { pollBlock, pollChain, pollEntries, pollEdges, pollKinds, pollPheroSummary, pollHeatmap, pollTopology, pollAgentRegistry, pollLeaderboard, pollTasks } from './polling.js';
 import { sparkDraw, drawGrowth, drawHeatmap, metricTick, renderBlocks, renderAgent, renderLog } from './charts.js';
 import { drawPheromones, depositPheromoneParticle, resetPheroSize, handlePheroMouseMove, handlePheroClick, handlePheroMouseLeave, handlePheroFilterClick } from './pheromones.js';
@@ -15,6 +35,62 @@ import { resetGrowthSize, resetHeatmapSize } from './charts.js';
 /* ---------- Wire render callbacks (avoids circular deps) ---------- */
 onRenderLog(renderLog);
 onRenderAgent(renderAgent);
+
+/* ---------- Remote base + registry composer ---------- */
+function updateNetChip() {
+  var chip = document.getElementById('net-chip');
+  var label = document.getElementById('net-label');
+  if (!chip || !label) return;
+  label.textContent = state.remoteBase + ' · /api + /relay';
+  chip.title = 'mirage base ' + state.remoteBase + ' · relay is derived as ' + state.relayBase;
+}
+
+function ensureRemoteBaseInput() {
+  document.getElementById('rpc-url').value = state.remoteBase;
+  updateNetChip();
+}
+
+function renderMessageComposer() {
+  var select = document.getElementById('msg-agent');
+  var path = document.getElementById('msg-path');
+  var result = document.getElementById('msg-result');
+  var note = document.getElementById('msg-note');
+  if (!select || !path || !result || !note) return;
+
+  var agent = getSelectedMergedAgent();
+  var options = listTransportOptionsForAgent(agent);
+  path.innerHTML = '';
+  for (var i = 0; i < options.length; i++) {
+    var option = document.createElement('option');
+    option.value = options[i].value;
+    option.textContent = options[i].label.toUpperCase();
+    path.appendChild(option);
+  }
+  path.value = state.registry.transportPreference;
+  if (path.value !== state.registry.transportPreference) {
+    path.value = 'auto';
+  }
+  if (select.value !== state.registry.selectedAgentKey) {
+    select.value = state.registry.selectedAgentKey || '';
+  }
+
+  if (!agent) {
+    note.textContent = 'select a discovered agent to test direct or relay transport';
+    result.textContent = 'waiting for discovery…';
+    return;
+  }
+
+  var direct = agent.directEndpoint || 'no direct endpoint';
+  var relay = agent.relayAvailable ? ('relay agent ' + (agent.relayAgentId || agent.agentId)) : 'relay unavailable';
+  note.textContent = 'selected ' + (agent.displayName || agent.agentId) + ' · direct ' + direct + ' · ' + relay;
+
+  if (!state.registry.messageResult) {
+    result.textContent = 'ready · choose a path and send a prompt';
+    return;
+  }
+
+  result.textContent = JSON.stringify(state.registry.messageResult, null, 2);
+}
 
 /* ---------- Animation loop ---------- */
 var lastT = performance.now();
@@ -39,6 +115,7 @@ async function connect() {
       var s = statusRes.result;
       if (s) {
         var fb = s.forkBlock || s.fork_block || 0;
+        state.forkBlock = fb || state.forkBlock;
         document.getElementById('fork-chip').innerHTML = '<span class="dot"></span>FORK: ' + (fb ? fb.toLocaleString() : '?');
         document.getElementById('fork-chip').className = fb ? 'chip ok' : 'chip';
         var fu = s.forkUrl || s.fork_url;
@@ -46,7 +123,7 @@ async function connect() {
       }
     } catch(e2) {}
     // Initial data fetch
-    await Promise.allSettled([pollBlock(), pollChain(), pollEntries(), pollEdges(), pollKinds(), pollPheroSummary(), pollHeatmap(), pollTopology()]);
+    await Promise.allSettled([pollBlock(), pollChain(), pollEntries(), pollEdges(), pollKinds(), pollPheroSummary(), pollHeatmap(), pollTopology(), pollAgentRegistry()]);
     // Clear existing intervals
     if (state.pollers.blocks) clearInterval(state.pollers.blocks);
     if (state.pollers.chain) clearInterval(state.pollers.chain);
@@ -56,6 +133,9 @@ async function connect() {
     if (state.pollers.edges) clearInterval(state.pollers.edges);
     if (state.pollers.entries) clearInterval(state.pollers.entries);
     if (state.pollers.summary) clearInterval(state.pollers.summary);
+    if (state.pollers.agentReg) clearInterval(state.pollers.agentReg);
+    if (state.pollers.leaderboard) clearInterval(state.pollers.leaderboard);
+    if (state.pollers.tasks) clearInterval(state.pollers.tasks);
     // Start polling
     state.pollers.blocks = setInterval(pollBlock, 1000);
     state.pollers.chain = setInterval(pollChain, 2000);
@@ -68,7 +148,6 @@ async function connect() {
     state.pollers.agentReg = setInterval(pollAgentRegistry, 5000);
     state.pollers.leaderboard = setInterval(pollLeaderboard, 8000);
     state.pollers.tasks = setInterval(pollTasks, 3000);
-    pollAgentRegistry();
     pollLeaderboard();
     pollTasks();
     // Auto-connect WebSocket for real-time updates
@@ -155,7 +234,19 @@ pheroCanvas.addEventListener('mouseleave', handlePheroMouseLeave);
 document.getElementById('phero-filters').addEventListener('click', handlePheroFilterClick);
 
 /* ---------- UI wiring ---------- */
-document.getElementById('btn-reconnect').onclick = function() { state.rpcUrl = document.getElementById('rpc-url').value.trim(); connect(); };
+setRemoteBase(loadInitialRemoteBase());
+ensureRemoteBaseInput();
+window.addEventListener('registry-updated', renderMessageComposer);
+document.getElementById('btn-reconnect').onclick = function() {
+  setRemoteBase(document.getElementById('rpc-url').value.trim());
+  updateNetChip();
+  if (state.ws) {
+    try { state.ws.close(); } catch (e) { /* ignore */ }
+    state.ws = null;
+    state.wsLive = false;
+  }
+  connect();
+};
 document.getElementById('btn-ws').onclick = toggleWs;
 document.getElementById('btn-clear').onclick = function() {
   state.blocks = []; state.insights.clear(); state.pheromones.length = 0;
@@ -163,11 +254,48 @@ document.getElementById('btn-clear').onclick = function() {
   state.selectedNode = null; state.confirmsCount = 0; state.challengesCount = 0;
   state.agentLog = []; state.growthSeries = []; state.seenAuthors.clear();
   state.topoNodes = []; state.topoEdges = []; state.heatmapBuckets = [];
+  resetRegistryState();
   renderBlocks(); renderAgent(); renderDetail(null);
+  renderMessageComposer();
+  pollAgentRegistry();
   toast('info', 'cleared');
 };
 document.getElementById('btn-clear-log').onclick = function() { state.requestLog = []; renderLog(); };
 document.getElementById('ph-intensity').oninput = function(e) { document.getElementById('ph-int-label').textContent = (e.target.value/100).toFixed(2); };
+document.getElementById('msg-agent').addEventListener('change', function(e) {
+  setSelectedMergedAgent(e.target.value);
+  setRegistryMessageResult(null);
+  renderMessageComposer();
+});
+document.getElementById('msg-path').addEventListener('change', function(e) {
+  setRegistryTransportPreference(e.target.value);
+  renderMessageComposer();
+});
+document.getElementById('agent-reg-tbody').addEventListener('click', function(e) {
+  var button = e.target.closest('button[data-agent-key]');
+  if (!button) return;
+  setSelectedMergedAgent(button.dataset.agentKey);
+  setRegistryMessageResult(null);
+  renderMessageComposer();
+  document.getElementById('msg-prompt').focus();
+});
+document.getElementById('btn-send-agent').onclick = async function() {
+  var agent = getSelectedMergedAgent();
+  var prompt = document.getElementById('msg-prompt').value.trim();
+  if (!agent) { toast('warn', 'select an agent'); return; }
+  if (!prompt) { toast('warn', 'enter a prompt'); return; }
+  try {
+    var response = await sendAgentMessage(agent, prompt, state.registry.transportPreference);
+    setRegistryMessageResult(response);
+    renderMessageComposer();
+    toast('ok', (response.transport || 'message') + ' response received');
+    logAgent('act', agent.agentId, 'message via ' + response.transport + ' completed');
+  } catch (e) {
+    setRegistryMessageResult({ error: e.message });
+    renderMessageComposer();
+    toast('err', e.message);
+  }
+};
 
 document.getElementById('btn-post').onclick = async function() {
   var kind = document.getElementById('ins-kind').value;
@@ -259,25 +387,9 @@ document.getElementById('btn-search').onclick = async function() {
   } catch(e) { toast('err', e.message); }
 };
 
-/* ---------- Register Agent ---------- */
-document.getElementById('btn-register').onclick = async function() {
-  var id = document.getElementById('reg-id').value.trim();
-  var role = document.getElementById('reg-role').value.trim();
-  if (!id) { toast('warn', 'enter an agent ID'); return; }
-  try {
-    var res = await apiPost('/agents', { id: id, pubkey: [], role: role });
-    if (res.data && res.data.ok) {
-      toast('ok', 'registered agent: ' + id);
-      logAgent('act', id, 'registered as ' + role);
-      pollAgentRegistry();
-    } else {
-      toast('warn', (res.data && res.data.error) || 'registration failed');
-    }
-  } catch(e) { toast('err', e.message); }
-};
-
 /* ---------- Boot ---------- */
-logReq('info', 'dashboard init · connecting to real mirage fork · REST API + JSON-RPC');
+renderMessageComposer();
+logReq('info', 'dashboard init · remote mirage base + ERC-8004 identity + relay reachability');
 connect();
 setInterval(metricTick, 1000);
 window.addEventListener('resize', function() {

@@ -21,6 +21,11 @@ pub type GateError = roko_core::RokoError;
 /// Produces verifier artifacts from acceptance criteria and task context.
 pub trait GateGenerator: Send + Sync {
     /// Generate verification artifacts from acceptance criteria.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GateError`] if the acceptance criteria cannot be translated
+    /// into verifier artifacts for this generator.
     fn generate(
         &self,
         acceptance_criteria: &str,
@@ -288,7 +293,7 @@ fn workspace_module_path(workspace: &Path, file: &Path) -> Option<String> {
         .collect::<Option<Vec<_>>>()?;
 
     match components.as_slice() {
-        ["crates", crate_dir, "src", ..] | ["apps", crate_dir, "src", ..] => {
+        ["crates" | "apps", crate_dir, "src", ..] => {
             let crate_name = crate_dir.replace('-', "_");
             let root = workspace.join(components[0]).join(crate_dir).join("src");
             let suffix = rust_module_path(file, &root)?;

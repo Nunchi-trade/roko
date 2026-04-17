@@ -9,9 +9,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use validator::Validate;
 
 use crate::error::ApiError;
 use crate::events::ServerEvent;
+use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::state::{AppState, OperationStatus, RunHandle};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -20,17 +22,27 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/run/{id}/status", get(run_status))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct RunRequest {
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     prompt: String,
     #[serde(default)]
     workdir: Option<String>,
 }
 
+impl RequestPayload for RunRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
+}
+
 /// `POST /api/run` — spawn a background `run_once()` invocation.
 async fn start_run(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<RunRequest>,
+    ValidJson(body): ValidJson<RunRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = spawn_background_run(
         &state,

@@ -92,6 +92,10 @@ pub async fn task_stats(State(state): State<ApiState>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/tasks/{id}` — get a single task by ID.
+///
+/// # Errors
+///
+/// Returns `404` if the task does not exist.
 pub async fn get_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -138,6 +142,10 @@ fn default_priority() -> TaskPriority {
 }
 
 /// `POST /api/tasks` — create a new task.
+///
+/// # Errors
+///
+/// Returns `400` if `title`, `kind`, or `creator` is empty.
 pub async fn create_task(
     State(state): State<ApiState>,
     Json(req): Json<CreateTaskRequest>,
@@ -202,6 +210,11 @@ pub struct AssignTaskRequest {
 }
 
 /// `POST /api/tasks/{id}/assign` — assign a task to an agent.
+///
+/// # Errors
+///
+/// Returns `400` if `assignee` is empty, `404` if the task does not exist,
+/// or `409` if the task is not assignable.
 pub async fn assign_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -239,6 +252,10 @@ pub async fn assign_task(
 // ---------------------------------------------------------------------------
 
 /// `POST /api/tasks/{id}/start` — mark a task as in-progress.
+///
+/// # Errors
+///
+/// Returns `404` if the task does not exist or `409` if it is not assigned.
 pub async fn start_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -288,6 +305,11 @@ pub struct CompleteTaskRequest {
 }
 
 /// `POST /api/tasks/{id}/complete` — complete a task with optional result insight.
+///
+/// # Errors
+///
+/// Returns `404` if the task does not exist or `409` if it is not in
+/// progress.
 pub async fn complete_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -339,6 +361,10 @@ pub async fn complete_task(
 }
 
 /// `GET /api/tasks/{id}/artifacts` — list completion artifacts for a task.
+///
+/// # Errors
+///
+/// Returns `404` if the task does not exist.
 pub async fn get_task_artifacts(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -372,6 +398,11 @@ pub struct ImproveTaskRequest {
 }
 
 /// `POST /api/tasks/{id}/improve` — create a child improvement task.
+///
+/// # Errors
+///
+/// Returns `400` if `feedback` or `creator` is empty, `404` if the parent task
+/// does not exist, or `409` if the parent task cannot be improved.
 pub async fn improve_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -424,6 +455,11 @@ pub struct FailTaskRequest {
 }
 
 /// `POST /api/tasks/{id}/fail` — fail a task with a reason.
+///
+/// # Errors
+///
+/// Returns `400` if `reason` is empty, `404` if the task does not exist, or
+/// `409` if it is not in progress.
 pub async fn fail_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,
@@ -495,6 +531,11 @@ pub struct CancelTaskRequest {
 }
 
 /// `POST /api/tasks/{id}/cancel` — cancel a task with a reason.
+///
+/// # Errors
+///
+/// Returns `400` if `reason` is empty, `404` if the task does not exist, or
+/// `409` if it is already terminal.
 pub async fn cancel_task(
     State(state): State<ApiState>,
     Path(id): Path<u64>,

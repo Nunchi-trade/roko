@@ -47,8 +47,8 @@ pub use pheromone::{
 };
 pub use prediction::{
     CalibrationCategorySummary, CalibrationSummary, ClaimId, ClaimState, PredictionClaim,
-    PredictionError, PredictionEvent, PredictionSession, PredictionStore,
-    PredictionStoreSnapshot, ResolveResult, SessionId, SessionState,
+    PredictionError, PredictionEvent, PredictionSession, PredictionStore, PredictionStoreSnapshot,
+    ResolveResult, SessionId, SessionState,
 };
 pub use projection::{
     DEFAULT_EMBEDDING_DIM, HDC_BITS, ProjectionMatrix, project_bytes, project_tokens,

@@ -31,6 +31,7 @@ members = [
     # Opt-in `chain` feature adds HDC / InsightEntry / pheromone subsystems.
     # Opt-in `roko` feature bridges to roko-core traits (Gate, Substrate).
     "apps/mirage-rs",
+    "apps/agent-relay",
     # roko-chain-watcher: long-running agent that observes a mirage chain and
     # posts insights back via HTTP JSON-RPC.
     "apps/roko-chain-watcher",
@@ -74,6 +75,12 @@ members = [
 
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
     "crates/roko-index",
+]
+default-members = [
+    # Ordinary root builds target the main CLI plus the MCP servers we ship.
+    "crates/roko-cli",
+    "crates/roko-mcp-code",
+    "crates/roko-mcp-github",
 ]
 
 [workspace.package]

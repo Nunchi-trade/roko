@@ -60,6 +60,10 @@ impl Agent for PerplexityEmbedAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "perplexity"
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }

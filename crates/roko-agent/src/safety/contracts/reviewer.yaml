@@ -1,0 +1,13 @@
+{
+  "role": "reviewer",
+  "invariants": [
+    "NoNetworkAccess"
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 4 },
+    { "ForbiddenTools": ["edit_file", "apply_patch", "write_file", "multi_edit"] }
+  ],
+  "recovery": [
+    { "trigger": "attempted_edit", "action": "Abort" }
+  ]
+}

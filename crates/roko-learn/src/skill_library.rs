@@ -1017,6 +1017,11 @@ impl SkillLibrary {
     /// Open (or create) a skill library at `path`. If the file exists it is
     /// deserialized; if it does not, an empty library is returned and will
     /// be created on the next mutating call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillLibraryError::Io`] if the file cannot be read and
+    /// [`SkillLibraryError::Serde`] if an existing snapshot is not valid JSON.
     pub async fn new(path: impl AsRef<Path>) -> Result<Self, SkillLibraryError> {
         let path = path.as_ref().to_path_buf();
         let skills = match tokio::fs::read(&path).await {
@@ -1042,6 +1047,11 @@ impl SkillLibrary {
 
     /// Register a new skill. Returns [`SkillLibraryError::Duplicate`] if a
     /// skill with the same name is already present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillLibraryError::Duplicate`] if the skill already exists,
+    /// or any error from persisting the updated library.
     pub async fn register(&self, skill: &Skill) -> Result<(), SkillLibraryError> {
         let mut skill = skill.clone();
         skill.normalize();
@@ -1079,6 +1089,11 @@ impl SkillLibrary {
     /// outcome into a rolling mean `success_rate`.
     ///
     /// Returns [`SkillLibraryError::NotFound`] if `name` is not registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillLibraryError::NotFound`] if the skill is missing, or
+    /// any error from persisting the updated library.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn record_use(&self, name: &str, success: bool) -> Result<(), SkillLibraryError> {
         {
@@ -1584,6 +1599,11 @@ impl SkillLibrary {
     /// Record that a skill was injected into a prompt and whether the
     /// subsequent gate check passed. Increments `match_count` (always) and
     /// `validated_count` (if `gate_passed`), and updates `last_matched`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillLibraryError::NotFound`] if the skill is missing, or
+    /// any error from persisting the updated library.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn record_validation(
         &self,
@@ -1603,6 +1623,11 @@ impl SkillLibrary {
     /// Record that a skill was injected into a prompt and whether the
     /// subsequent gate check passed. Increments `match_count` (always) and
     /// `validated_count` (if `gate_passed`), and updates `last_matched`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillLibraryError::NotFound`] if the skill is missing, or
+    /// any error from persisting the updated library.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn record_outcome(
         &self,

@@ -133,7 +133,7 @@ impl ActiveInferenceScorer {
         } else {
             text.push_str(signal.kind.as_str());
             text.push('\n');
-            if let Some(text_body) = signal.body.as_text().ok() {
+            if let Ok(text_body) = signal.body.as_text() {
                 text.push_str(text_body);
             }
         }

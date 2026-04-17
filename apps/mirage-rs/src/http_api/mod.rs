@@ -1,8 +1,10 @@
 //! HTTP REST API for dashboard consumption (Issue #1).
 //!
-//! Provides JSON endpoints that expose pheromone field, knowledge graph, and
-//! agent topology data for the kauri dashboard. These complement the existing
-//! JSON-RPC surface with REST semantics optimized for UI consumption:
+//! Provides JSON endpoints that expose dashboard-friendly chain data.
+//!
+//! These endpoints cover the pheromone field, knowledge graph, and agent
+//! topology surfaces for kauri. They complement the existing JSON-RPC surface
+//! with REST semantics optimized for UI consumption:
 //!
 //! - Pagination, filtering, and sorting on all list endpoints
 //! - Decay projections and time-bucketed heatmap data for animated visualizations
@@ -30,6 +32,8 @@
 //! | GET    | `/api/agents/topology`  | Agent interaction graph (nodes + edges)    |
 //! | GET    | `/api/stats`            | Combined dashboard statistics              |
 //! | WS     | `/api/ws`               | Live event stream (roko feature)           |
+
+#![allow(missing_docs)]
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -64,7 +68,7 @@ pub const MAX_HEATMAP_BUCKETS: usize = 500;
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-pub struct PaginatedResponse<T: Serialize> {
+pub struct PaginatedResponse<T> {
     pub items: Vec<T>,
     pub total: usize,
     pub offset: usize,
@@ -92,13 +96,9 @@ pub fn with_cache_control<T: Serialize>(
     body: T,
     max_age: u32,
 ) -> ([(HeaderName, HeaderValue); 1], Json<T>) {
-    (
-        [(
-            header::CACHE_CONTROL,
-            HeaderValue::from_str(&format!("public, max-age={max_age}")).unwrap(),
-        )],
-        Json(body),
-    )
+    let cache_control = HeaderValue::from_str(&format!("public, max-age={max_age}"))
+        .unwrap_or_else(|_| HeaderValue::from_static("public, max-age=0"));
+    ([(header::CACHE_CONTROL, cache_control)], Json(body))
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +109,8 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 async fn request_id_middleware(mut request: axum::extract::Request, next: Next) -> Response {
     let id = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let value = HeaderValue::from_str(&format!("req-{id}")).unwrap();
+    let value = HeaderValue::from_str(&format!("req-{id}"))
+        .unwrap_or_else(|_| HeaderValue::from_static("req-invalid"));
     request
         .headers_mut()
         .insert(HeaderName::from_static("x-request-id"), value.clone());
@@ -135,16 +136,20 @@ pub struct ProjectionCache {
 
 impl ProjectionCache {
     pub fn new(capacity: usize) -> Self {
+        let capacity = NonZeroUsize::new(capacity).unwrap_or_else(|| {
+            NonZeroUsize::new(1024).expect("default cache capacity is non-zero")
+        });
         Self {
-            inner: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1024).unwrap()),
-            ))),
+            inner: Arc::new(std::sync::Mutex::new(lru::LruCache::new(capacity))),
         }
     }
 
     /// Returns a cached projection or computes and inserts it.
     pub fn get_or_insert(&self, text: &str) -> roko_primitives::HdcVector {
-        let mut cache = self.inner.lock().unwrap();
+        let mut cache = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(v) = cache.get(text) {
             return *v; // HdcVector is Copy
         }

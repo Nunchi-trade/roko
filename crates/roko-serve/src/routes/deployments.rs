@@ -12,10 +12,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
+use validator::Validate;
 
 use crate::deploy::{DeploySpec, DeploymentStatus};
 use crate::error::ApiError;
 use crate::events::ServerEvent;
+use crate::extract::{ApiJson, RequestPayload, ValidJson, validate_with_validator};
 use crate::state::AppState;
 use crate::templates::TemplateRegistry;
 
@@ -36,9 +38,13 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 // ---- Request/Response types ------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct CreateDeploymentRequest {
     /// Template name to deploy.
+    #[validate(
+        length(min = 1),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
     template: String,
     /// Parameters to interpolate into the template.
     #[serde(default)]
@@ -47,6 +53,12 @@ struct CreateDeploymentRequest {
     /// If omitted, uses the default from config.
     #[serde(default)]
     backend: Option<String>,
+}
+
+impl RequestPayload for CreateDeploymentRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)
+    }
 }
 
 #[derive(Deserialize)]
@@ -65,7 +77,7 @@ const fn default_tail() -> usize {
 #[allow(clippy::too_many_lines)]
 async fn create_deployment(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateDeploymentRequest>,
+    ValidJson(req): ValidJson<CreateDeploymentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Look up template
     let templates = state.templates.read().await;
@@ -327,7 +339,7 @@ async fn get_logs(
 async fn proxy_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Get the deployment URL
     let worker_url = {
@@ -389,7 +401,7 @@ async fn template_name_for_deployment(deployment_id: &str, state: &AppState) -> 
 async fn receive_callback(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<Value>,
+    ApiJson(body): ApiJson<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let success = body
         .get("success")
@@ -708,7 +720,7 @@ mod tests {
 
         let payload = json_body(response).await?;
         assert_eq!(
-            payload["error"]["code"], "not_found",
+            payload["code"], "not_found",
             "missing deployment logs should return the structured not_found error code"
         );
         Ok(())

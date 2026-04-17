@@ -19,8 +19,11 @@
     )
 )]
 
+mod agent_serve;
 mod commands;
+mod plan_validate;
 
+use agent_serve::AgentCmd;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use commands::experiment::{ExperimentCmd, dispatch_experiment};
@@ -229,6 +232,11 @@ enum Command {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Manage standalone agent runtimes.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
     /// Inject a signal into a running session.
     Inject {
         /// Target session ID.
@@ -420,10 +428,17 @@ enum PlanCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Validate a plan directory for modern `tasks.toml` fields.
+    /// Lint every `tasks.toml` under a plans directory without executing it.
     Validate {
-        /// Path to the plan directory containing `tasks.toml`.
-        plan_dir: PathBuf,
+        /// Plans root directory.
+        #[arg(default_value = "plans/")]
+        dir: PathBuf,
+        /// Fail on warnings, not only errors.
+        #[arg(long)]
+        strict: bool,
+        /// Output machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Run a plan directory through the orchestration loop.
     Run {
@@ -954,6 +969,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             dispatch_config(cmd).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Agent { cmd } => cmd_agent(cli, cmd).await,
         Command::Inject {
             session,
             kind,
@@ -1058,6 +1074,13 @@ async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
     }
+}
+
+async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
+    let workdir = resolve_workdir(cli);
+    prepare_runtime_hooks(&workdir, cli.quiet);
+    agent_serve::run(cmd).await?;
+    Ok(EXIT_SUCCESS)
 }
 
 // -----------------------------------------------------------------------
@@ -3160,25 +3183,8 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             }
             Ok(EXIT_SUCCESS)
         }
-        PlanCmd::Validate { plan_dir } => {
-            let tasks_path = plan_dir.join("tasks.toml");
-            if !tasks_path.is_file() {
-                anyhow::bail!("No tasks.toml found in {}", plan_dir.display());
-            }
-
-            let issues = roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path)?;
-            if issues.is_empty() {
-                if !cli.quiet {
-                    println!("modern task fields present in {}", tasks_path.display());
-                }
-                return Ok(EXIT_SUCCESS);
-            }
-
-            eprintln!("❌ {} is missing modern fields:", tasks_path.display());
-            for issue in &issues {
-                eprintln!("  - {issue}");
-            }
-            Ok(EXIT_AGENT_FAILURE)
+        PlanCmd::Validate { dir, strict, json } => {
+            cmd_plan_validate(&dir, strict, json || cli.json)
         }
         PlanCmd::Run {
             plans_dir,
@@ -3204,6 +3210,16 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 let state_dir = wd.join(".roko").join("state");
                 let exec_json = std::fs::read_to_string(&snap_path)
                     .map_err(|e| anyhow!("read snapshot {}: {e}", snap_path.display()))?;
+                let snapshot = roko_cli::snapshot_migrate::load_executor_snapshot(&exec_json)
+                    .map_err(|e| anyhow!("bad snapshot {}: {e}", snap_path.display()))?;
+                let discovered_plans = roko_orchestrator::discover_plans(&plans_dir)
+                    .map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+                roko_cli::snapshot_reconcile::reconcile_snapshot_vs_plans(
+                    &snapshot,
+                    &discovered_plans,
+                    &snap_path,
+                    &plans_dir,
+                )?;
                 // Try to load the event log from alongside the executor snapshot.
                 let events_path = state_dir.join("events.json");
                 if events_path.exists() {
@@ -3542,6 +3558,30 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
     }
+}
+
+fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
+    let current_dir =
+        std::env::current_dir().context("resolve current directory for plan validation")?;
+    let config_path = current_dir.join("roko.toml");
+    let models = if config_path.is_file() {
+        let config_text = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("read {}", config_path.display()))?;
+        let config: RokoConfig = toml::from_str(&config_text)
+            .map_err(|error| anyhow!(error))
+            .with_context(|| format!("parse {}", config_path.display()))?;
+        Some(configured_models(&config))
+    } else {
+        None
+    };
+
+    let report = plan_validate::validate_plans_dir(dir, models.as_ref())?;
+    if json_output {
+        println!("{}", plan_validate::render_json(&report)?);
+    } else {
+        println!("{}", plan_validate::render_text(&report));
+    }
+    Ok(report.exit_code(strict))
 }
 
 // -----------------------------------------------------------------------
@@ -6379,6 +6419,44 @@ mod tests {
     fn cli_parses_status_subcommand() {
         let cli = Cli::try_parse_from(["roko", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn cli_parses_agent_serve_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "agent",
+            "serve",
+            "--agent-id",
+            "demo-1",
+            "--bind",
+            "127.0.0.1:7777",
+            "--relay-url",
+            "https://relay.example",
+            "--chain-rpc-url",
+            "https://rpc.example",
+            "--identity-registry",
+            "0x1234",
+            "--passport-id",
+            "7",
+            "--wallet-key",
+            "0xdeadbeef",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent {
+                cmd: AgentCmd::Serve(agent_serve::AgentServeArgs {
+                    agent_id,
+                    bind,
+                    relay_url: Some(_),
+                    chain_rpc_url: Some(_),
+                    identity_registry: Some(_),
+                    passport_id: Some(_),
+                    wallet_key: Some(_),
+                }),
+            }) if agent_id == "demo-1" && bind == "127.0.0.1:7777"
+        ));
     }
 
     #[test]

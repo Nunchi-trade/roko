@@ -1,0 +1,15 @@
+{
+  "role": "implementer",
+  "invariants": [
+    { "MaxTokensPerTurn": 12000 },
+    "RequireGateBeforeCommit"
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 8 },
+    { "ForbiddenTools": ["network", "fetch"] },
+    { "RequireToolBeforeEdit": "read_file" }
+  ],
+  "recovery": [
+    { "trigger": "contract_violation", "action": "Abort" }
+  ]
+}

@@ -2,7 +2,7 @@
 //!
 //! These profiles define the canonical tool-name allow/deny sets used by
 //! higher-level orchestration code when constructing per-role tool menus.
-//! The names are the internal snake_case tool identifiers from
+//! The names are the internal `snake_case` tool identifiers from
 //! `roko-std`'s built-in registry.
 
 use crate::tool::builtin::{

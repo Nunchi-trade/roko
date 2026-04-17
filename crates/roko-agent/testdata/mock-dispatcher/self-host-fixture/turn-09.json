@@ -1,0 +1,12 @@
+{
+  "reply": "Applied a no-op follow-up pass so the mock run can finish its verification cycle.",
+  "name": "self-host-fixture-turn-09",
+  "usage": {
+    "input_tokens": 11,
+    "output_tokens": 13,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

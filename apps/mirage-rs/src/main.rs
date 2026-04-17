@@ -8,12 +8,13 @@
 
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::Context;
+use alloy_primitives::{Address, Bytes, U256, address, hex};
+use anyhow::{Context, bail};
 use clap::Parser;
 use mirage_rs::{
     ClassificationConfig, DiffClassifier, MirageError,
     events::MirageTelemetryEvent,
-    fork::{ForkState, HybridDB, MirageFork},
+    fork::{EvmExecutor, ForkState, HybridDB, MirageFork},
     persist,
     provider::UpstreamRpc,
     replay::{FollowerConfig, TargetedFollower},
@@ -33,6 +34,7 @@ const TELEMETRY_BUS_CAPACITY: usize = 10_000;
 /// Command-line configuration for `mirage-rs`.
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Bind host (default `127.0.0.1`).
     #[arg(long, default_value = "127.0.0.1")]
@@ -126,6 +128,25 @@ enum ModeArg {
     Historical,
     Proxy,
 }
+
+#[derive(Debug, Clone)]
+struct Erc8004Contracts {
+    identity_registry: Address,
+    reputation_registry: Address,
+    validation_registry: Address,
+    source: &'static str,
+}
+
+const ERC8004_IDENTITY_REGISTRY: Address = address!("0x8004A818BFB912233c491871b3d84c89A494BD9e");
+const ERC8004_REPUTATION_REGISTRY: Address = address!("0x8004A818BFB912233c491871b3d84c89A494BD9f");
+const ERC8004_VALIDATION_REGISTRY: Address = address!("0x8004A818BFB912233c491871b3d84c89A494BDA0");
+const ERC8004_BOOTSTRAP_ADMIN: Address = address!("0x8004000000000000000000000000000000000001");
+const ERC8004_BOOTSTRAP_DEPLOYER: Address = address!("0x8004000000000000000000000000000000000002");
+const ERC8004_IDENTITY_INIT_HEX: &str = include_str!("../static/erc8004/IdentityRegistry.init.hex");
+const ERC8004_REPUTATION_INIT_HEX: &str =
+    include_str!("../static/erc8004/ReputationRegistry.init.hex");
+const ERC8004_VALIDATION_INIT_HEX: &str =
+    include_str!("../static/erc8004/ValidationRegistry.init.hex");
 
 impl From<ModeArg> for MirageMode {
     fn from(value: ModeArg) -> Self {
@@ -255,6 +276,9 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         persist::apply_fork_snapshot(&mut fork, snap.fork.clone());
     }
 
+    let erc8004_contracts =
+        bootstrap_erc8004_contracts(&mut fork).context("bootstrap ERC-8004 contracts")?;
+
     let mode = MirageMode::from(cli.mode);
     let telemetry_bus = EventBus::<MirageTelemetryEvent>::new(TELEMETRY_BUS_CAPACITY);
     let mirage = MirageFork::with_telemetry(fork, resource_model, mode, telemetry_bus.sender());
@@ -271,17 +295,13 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         if toggles.any_enabled() {
             let chain_ctx = {
                 // Restore from snapshot if available, otherwise create fresh.
-                let mut ctx = if let Some(chain_snap) = loaded_snapshot
-                    .as_ref()
-                    .and_then(|s| s.chain.clone())
+                let mut ctx = if let Some(chain_snap) =
+                    loaded_snapshot.as_ref().and_then(|s| s.chain.clone())
                 {
                     tracing::info!("restoring chain context from snapshot");
                     persist::chain_context_from_snapshot(chain_snap, cli.chain_hnsw_threshold)
                 } else {
-                    mirage_rs::chain_rpc::ChainContext::with_hnsw(
-                        toggles,
-                        cli.chain_hnsw_threshold,
-                    )
+                    mirage_rs::chain_rpc::ChainContext::with_hnsw(toggles, cli.chain_hnsw_threshold)
                 };
                 // Install subscription buses so WebSocket streaming (/api/ws) and
                 // JSON-RPC chain_subscribe* methods are available.
@@ -355,8 +375,16 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         });
     }
 
-    write_artifacts(addr.port(), cli.chain_id).context("failed to write startup artifacts")?;
+    write_artifacts(addr.port(), cli.chain_id, &erc8004_contracts)
+        .context("failed to write startup artifacts")?;
     tracing::info!("mirage ready port={} chain={}", addr.port(), cli.chain_id);
+    tracing::info!(
+        source = erc8004_contracts.source,
+        identity_registry = %erc8004_contracts.identity_registry,
+        reputation_registry = %erc8004_contracts.reputation_registry,
+        validation_registry = %erc8004_contracts.validation_registry,
+        "ERC-8004 identity surface ready; Rust AgentRegistry remains runtime-only metadata"
+    );
 
     // --- Spawn periodic persistence loop ---
     if !cli.no_persist {
@@ -504,7 +532,7 @@ fn startup_exit_code(error: &anyhow::Error) -> Option<i32> {
     })
 }
 
-fn write_artifacts(port: u16, chain_id: u64) -> anyhow::Result<()> {
+fn write_artifacts(port: u16, chain_id: u64, erc8004: &Erc8004Contracts) -> anyhow::Result<()> {
     let pid_path = PathBuf::from(format!("/tmp/mirage-{port}.pid"));
     let status_path = PathBuf::from(format!("/tmp/mirage-{port}-status.json"));
     fs::write(pid_path, std::process::id().to_string())?;
@@ -515,6 +543,12 @@ fn write_artifacts(port: u16, chain_id: u64) -> anyhow::Result<()> {
             "ready": true,
             "port": port,
             "chainId": chain_id,
+            "erc8004": {
+                "source": erc8004.source,
+                "identityRegistry": format!("{}", erc8004.identity_registry),
+                "reputationRegistry": format!("{}", erc8004.reputation_registry),
+                "validationRegistry": format!("{}", erc8004.validation_registry),
+            },
         })
         .to_string(),
     )?;
@@ -526,6 +560,126 @@ fn cleanup_artifacts(port: u16) {
     let status_path = PathBuf::from(format!("/tmp/mirage-{port}-status.json"));
     let _ = fs::remove_file(pid_path);
     let _ = fs::remove_file(status_path);
+}
+
+fn bootstrap_erc8004_contracts(fork: &mut ForkState) -> anyhow::Result<Erc8004Contracts> {
+    let bootstrapped_identity = ensure_erc8004_contract(
+        fork,
+        ERC8004_IDENTITY_REGISTRY,
+        ERC8004_IDENTITY_INIT_HEX,
+        &[ERC8004_BOOTSTRAP_ADMIN, Address::ZERO],
+    )
+    .context("bootstrap identity registry")?;
+    let bootstrapped_reputation = ensure_erc8004_contract(
+        fork,
+        ERC8004_REPUTATION_REGISTRY,
+        ERC8004_REPUTATION_INIT_HEX,
+        &[ERC8004_IDENTITY_REGISTRY, ERC8004_BOOTSTRAP_ADMIN],
+    )
+    .context("bootstrap reputation registry")?;
+    let bootstrapped_validation = ensure_erc8004_contract(
+        fork,
+        ERC8004_VALIDATION_REGISTRY,
+        ERC8004_VALIDATION_INIT_HEX,
+        &[ERC8004_IDENTITY_REGISTRY, ERC8004_BOOTSTRAP_ADMIN],
+    )
+    .context("bootstrap validation registry")?;
+    let source = if bootstrapped_identity || bootstrapped_reputation || bootstrapped_validation {
+        "bootstrapped"
+    } else {
+        "upstream"
+    };
+
+    Ok(Erc8004Contracts {
+        identity_registry: ERC8004_IDENTITY_REGISTRY,
+        reputation_registry: ERC8004_REPUTATION_REGISTRY,
+        validation_registry: ERC8004_VALIDATION_REGISTRY,
+        source,
+    })
+}
+
+fn ensure_erc8004_contract(
+    fork: &mut ForkState,
+    canonical_address: Address,
+    init_code_hex: &str,
+    constructor_args: &[Address],
+) -> anyhow::Result<bool> {
+    if contract_has_code(fork, canonical_address)? {
+        return Ok(false);
+    }
+
+    let init_code = build_init_code(init_code_hex, constructor_args)?;
+    let mut bootstrap_state = fork.clone();
+    let (result, diff) = EvmExecutor::transact(
+        &mut bootstrap_state,
+        ERC8004_BOOTSTRAP_DEPLOYER,
+        None,
+        init_code,
+        U256::ZERO,
+        30_000_000,
+    )
+    .with_context(|| format!("deploy bootstrap contract for {canonical_address}"))?;
+    if !result.success {
+        bail!("bootstrap deployment reverted for {canonical_address}");
+    }
+
+    let deployed_address = decode_created_address(diff.output.as_ref())?;
+    let deployed_account = bootstrap_state
+        .db
+        .dirty
+        .accounts
+        .get(&deployed_address)
+        .cloned()
+        .with_context(|| {
+            format!("bootstrap account missing for deployed contract {deployed_address}")
+        })?;
+    let runtime_code = deployed_account.code.clone().with_context(|| {
+        format!("bootstrap runtime code missing for deployed contract {deployed_address}")
+    })?;
+
+    fork.db.set_code(canonical_address, runtime_code);
+    if let Some(balance) = deployed_account.balance {
+        fork.db.set_balance(canonical_address, balance);
+    }
+    if let Some(nonce) = deployed_account.nonce {
+        fork.db.set_nonce(canonical_address, nonce);
+    }
+    for (slot, value) in deployed_account.storage {
+        fork.db.set_storage(canonical_address, slot, value);
+    }
+
+    Ok(true)
+}
+
+fn contract_has_code(fork: &mut ForkState, address: Address) -> anyhow::Result<bool> {
+    let info = fork.db.basic(address)?.unwrap_or_default();
+    let code = fork.db.code_by_hash(info.code_hash)?;
+    Ok(!code.bytecode().is_empty())
+}
+
+fn build_init_code(init_code_hex: &str, constructor_args: &[Address]) -> anyhow::Result<Bytes> {
+    let hex_text = init_code_hex.trim();
+    let decoded = hex::decode(hex_text.trim_start_matches("0x"))
+        .with_context(|| "decode ERC-8004 init bytecode")?;
+    let mut init_code = decoded;
+    for address in constructor_args {
+        init_code.extend_from_slice(&encode_address_word(*address));
+    }
+    Ok(Bytes::from(init_code))
+}
+
+fn encode_address_word(address: Address) -> [u8; 32] {
+    let mut encoded = [0_u8; 32];
+    encoded[12..].copy_from_slice(address.as_slice());
+    encoded
+}
+
+fn decode_created_address(bytes: &[u8]) -> anyhow::Result<Address> {
+    match bytes.len() {
+        20 => Ok(Address::from_slice(bytes)),
+        len if len > 20 => Ok(Address::from_slice(&bytes[len - 20..])),
+        len => bail!("unexpected create output length: {len}"),
+    }
 }
 
 fn resolve_initial_head(upstream: &UpstreamRpc, require_probe: bool) -> anyhow::Result<u64> {
@@ -541,8 +695,8 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{
-        Cli, ModeArg, UpstreamRpc, cleanup_artifacts, resolve_initial_head, startup_exit_code,
-        write_artifacts,
+        Cli, Erc8004Contracts, ModeArg, UpstreamRpc, cleanup_artifacts, decode_created_address,
+        encode_address_word, resolve_initial_head, startup_exit_code, write_artifacts,
     };
     use crate::MirageError;
 
@@ -605,7 +759,13 @@ mod tests {
         let _ = fs::remove_file(&status_path);
 
         let chain_id = 42_u64;
-        write_artifacts(port, chain_id).expect("artifacts should be written");
+        let erc8004 = Erc8004Contracts {
+            identity_registry: super::ERC8004_IDENTITY_REGISTRY,
+            reputation_registry: super::ERC8004_REPUTATION_REGISTRY,
+            validation_registry: super::ERC8004_VALIDATION_REGISTRY,
+            source: "bootstrapped",
+        };
+        write_artifacts(port, chain_id, &erc8004).expect("artifacts should be written");
 
         let pid_text = fs::read_to_string(&pid_path).expect("pid artifact should exist");
         assert_eq!(pid_text, std::process::id().to_string());
@@ -622,10 +782,30 @@ mod tests {
         assert_eq!(status["ready"], true);
         assert_eq!(status["port"], serde_json::json!(port));
         assert_eq!(status["chainId"], serde_json::json!(chain_id));
+        assert_eq!(status["erc8004"]["source"], "bootstrapped");
+        assert_eq!(
+            status["erc8004"]["identityRegistry"],
+            serde_json::json!(format!("{}", super::ERC8004_IDENTITY_REGISTRY))
+        );
 
         cleanup_artifacts(port);
 
         assert!(!pid_path.exists());
         assert!(!status_path.exists());
+    }
+
+    #[test]
+    fn address_word_encoding_is_left_padded() {
+        let encoded = encode_address_word(super::ERC8004_IDENTITY_REGISTRY);
+        assert!(encoded[..12].iter().all(|byte| *byte == 0));
+        assert_eq!(&encoded[12..], super::ERC8004_IDENTITY_REGISTRY.as_slice());
+    }
+
+    #[test]
+    fn create_output_decodes_last_twenty_bytes() {
+        let mut output = vec![0_u8; 32];
+        output[12..].copy_from_slice(super::ERC8004_REPUTATION_REGISTRY.as_slice());
+        let decoded = decode_created_address(&output).expect("decode address");
+        assert_eq!(decoded, super::ERC8004_REPUTATION_REGISTRY);
     }
 }

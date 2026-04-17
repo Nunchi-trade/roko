@@ -1,14 +1,17 @@
 //! Typed API error response for the HTTP server.
 //!
 //! Every handler returns `Result<T, ApiError>` so that error responses are
-//! consistent JSON envelopes: `{ "error": { "code": "…", "message": "…" } }`.
+//! consistent JSON objects: `{ "code": "…", "message": "…", "details": … }`.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use serde_json::{Value, json};
+use utoipa::ToSchema;
+use validator::{ValidationErrors, ValidationErrorsKind};
 
 /// A structured error returned from any API endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiError {
     /// HTTP status code (not serialized — used only for the response status).
     #[serde(skip)]
@@ -17,17 +20,21 @@ pub struct ApiError {
     pub code: String,
     /// Human-readable description.
     pub message: String,
+    /// Optional structured debugging context for the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<Value>>,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = serde_json::json!({
-            "error": {
-                "code": self.code,
-                "message": self.message,
-            }
+        let status = self.status;
+        let body = serde_json::to_value(&self).unwrap_or_else(|error| {
+            json!({
+                "code": "internal_error",
+                "message": format!("failed to serialize API error: {error}"),
+            })
         });
-        (self.status, axum::Json(body)).into_response()
+        (status, axum::Json(body)).into_response()
     }
 }
 
@@ -44,6 +51,7 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             code: "not_found".into(),
             message: msg.into(),
+            details: None,
         }
     }
 
@@ -53,6 +61,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "bad_request".into(),
             message: msg.into(),
+            details: None,
         }
     }
 
@@ -62,6 +71,7 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error".into(),
             message: msg.into(),
+            details: None,
         }
     }
 
@@ -71,6 +81,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "conflict".into(),
             message: msg.into(),
+            details: None,
         }
     }
 
@@ -80,11 +91,37 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             code: "unauthorized".into(),
             message: msg.into(),
+            details: None,
+        }
+    }
+
+    /// JSON parse failure.
+    pub fn parse(err: serde_json::Error) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_json".into(),
+            message: "request body must be valid JSON".into(),
+            details: Some(Box::new(json!({ "reason": err.to_string() }))),
+        }
+    }
+
+    /// Validation failure for a decoded request body.
+    pub fn validation(err: ValidationErrors) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "validation_error".into(),
+            message: "request body validation failed".into(),
+            details: Some(Box::new(validation_errors_to_value(&err))),
         }
     }
 }
 
 /// Reject path segments that could escape their parent directory.
+///
+/// # Errors
+///
+/// Returns [`ApiError::bad_request`] when the segment contains `..`, `/`, or
+/// `\\`, because those values could escape the expected parent directory.
 pub fn validate_path_segment(segment: &str, label: &str) -> Result<(), ApiError> {
     if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
         return Err(ApiError::bad_request(format!(
@@ -92,4 +129,59 @@ pub fn validate_path_segment(segment: &str, label: &str) -> Result<(), ApiError>
         )));
     }
     Ok(())
+}
+
+fn validation_errors_to_value(errors: &ValidationErrors) -> Value {
+    Value::Object(
+        errors
+            .errors()
+            .iter()
+            .map(|(field, kind)| ((*field).to_string(), validation_kind_to_value(kind)))
+            .collect(),
+    )
+}
+
+fn validation_kind_to_value(kind: &ValidationErrorsKind) -> Value {
+    match kind {
+        ValidationErrorsKind::Field(errors) => Value::Array(
+            errors
+                .iter()
+                .map(|error| {
+                    let mut body = serde_json::Map::new();
+                    body.insert("code".into(), Value::String(error.code.to_string()));
+                    if let Some(message) = &error.message {
+                        body.insert("message".into(), Value::String(message.to_string()));
+                    }
+                    Value::Object(body)
+                })
+                .collect(),
+        ),
+        ValidationErrorsKind::Struct(errors) => validation_errors_to_value(errors),
+        ValidationErrorsKind::List(errors) => Value::Object(
+            errors
+                .iter()
+                .map(|(index, nested)| (index.to_string(), validation_errors_to_value(nested)))
+                .collect(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn api_error_serializes_top_level_shape() {
+        let response = ApiError::bad_request("nope").into_response();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("parse body");
+
+        assert_eq!(json["code"], "bad_request");
+        assert_eq!(json["message"], "nope");
+        assert!(json.get("details").is_none());
+    }
 }

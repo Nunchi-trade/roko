@@ -14,6 +14,7 @@ use base64::Engine;
 use futures::future::join_all;
 use futures::{SinkExt, StreamExt};
 use roko_agent_server::registration::AgentCard;
+use roko_core::{AgentTopology, AgentTopologyNode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -132,32 +133,6 @@ struct MuxEnvelope {
 struct AgentStreamHandle {
     sender: mpsc::UnboundedSender<String>,
     task: JoinHandle<()>,
-}
-
-#[derive(Serialize)]
-struct AgentNode {
-    id: String,
-    address: String,
-    insights_posted: usize,
-    confirmations_given: usize,
-    challenges_given: usize,
-    total_weight: f64,
-}
-
-#[derive(Serialize)]
-struct AgentEdge {
-    from: String,
-    to: String,
-    weight: usize,
-    #[serde(rename = "type")]
-    edge_type: String,
-}
-
-#[derive(Serialize)]
-struct TopologyResponse {
-    nodes: Vec<AgentNode>,
-    edges: Vec<AgentEdge>,
-    timestamp: u64,
 }
 
 fn default_limit() -> usize {
@@ -347,11 +322,11 @@ async fn agent_trace(
 
 async fn agent_topology(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<TopologyResponse>, ApiError> {
+) -> Result<Json<AgentTopology>, ApiError> {
     let agents = known_agents(&state).await?;
     let nodes = agents
         .iter()
-        .map(|agent| AgentNode {
+        .map(|agent| AgentTopologyNode {
             id: agent.agent_id.clone(),
             address: agent
                 .endpoints
@@ -365,7 +340,7 @@ async fn agent_topology(
         })
         .collect();
 
-    Ok(Json(TopologyResponse {
+    Ok(Json(AgentTopology {
         nodes,
         edges: Vec::new(),
         timestamp: now_secs(),

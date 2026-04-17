@@ -43,10 +43,8 @@ async fn message(
     State(state): State<Arc<AgentState>>,
     Json(request): Json<MessageRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    state.metrics().record_message();
-    let dispatcher = state.message_dispatcher().ok_or_else(missing_dispatcher)?;
-    let response = dispatcher
-        .dispatch(message_request(&request.prompt, false))
+    let response = state
+        .dispatch_prompt(&request.prompt)
         .await
         .map_err(|error| dispatch_failed(&error))?;
 

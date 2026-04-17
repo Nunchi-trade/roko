@@ -1,0 +1,12 @@
+{
+  "reply": "# Research\n\nNo external citations required for this smoke test. The existing PRD is sufficient.\n",
+  "name": "self-host-fixture-turn-02",
+  "usage": {
+    "input_tokens": 17,
+    "output_tokens": 31,
+    "cache_read_tokens": 0,
+    "cache_create_tokens": 0,
+    "cost_usd": 0.0,
+    "wall_ms": 0
+  }
+}

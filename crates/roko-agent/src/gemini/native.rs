@@ -449,6 +449,10 @@ impl Agent for GeminiNativeAgent {
         &self.name
     }
 
+    fn backend_id(&self) -> &'static str {
+        "gemini"
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }

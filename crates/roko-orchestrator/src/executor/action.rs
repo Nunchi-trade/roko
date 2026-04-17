@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// feeds results back as events on the next tick.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)]
 pub enum ExecutorAction {
     /// Begin executing a plan that was queued.
     DispatchPlan {

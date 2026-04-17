@@ -191,6 +191,11 @@ impl ChannelEmitter {
 }
 
 /// Factory for requested event mode.
+///
+/// # Errors
+///
+/// Returns an error if the requested mode is unknown or the WebSocket server
+/// cannot be started.
 pub async fn create_emitter(mode: &str, ws_port: u16) -> anyhow::Result<Arc<dyn EventEmitter>> {
     match mode {
         "none" => Ok(Arc::new(NullEmitter)),

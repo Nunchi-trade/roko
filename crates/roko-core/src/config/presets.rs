@@ -101,6 +101,9 @@ fn minimal() -> RokoConfig {
             learning_min_occurrences: 5,
             file_intel_max_entries: 5,
             warning_max_entries: 2,
+            replan_on_gate_failure: false,
+            replan_max_per_plan: 1,
+            replan_gate_attempts: 3,
         },
         ..RokoConfig::default()
     }
@@ -159,6 +162,9 @@ fn thorough() -> RokoConfig {
             learning_min_occurrences: 1,
             file_intel_max_entries: 30,
             warning_max_entries: 10,
+            replan_on_gate_failure: true,
+            replan_max_per_plan: 2,
+            replan_gate_attempts: 3,
         },
         ..RokoConfig::default()
     }

@@ -556,7 +556,8 @@ pub struct TaskDef {\n\
 }\n\n\
 pub fn helper() {}\n";
 
-        let sym = find_definition(content, "TaskDef", "src/lib.rs").unwrap();
+        let sym = find_definition(content, "TaskDef", "src/lib.rs")
+            .expect("invariant: struct definition should be resolved in test fixture");
         assert_eq!(sym.symbol, "TaskDef");
         assert_eq!(sym.kind, SymbolKind::Struct);
         assert!(sym.signature.contains("pub id: String"));
@@ -568,7 +569,8 @@ pub fn helper() {}\n";
     fallback.to_string()\n\
 }\n";
 
-        let sym = find_definition(content, "effective_model", "src/lib.rs").unwrap();
+        let sym = find_definition(content, "effective_model", "src/lib.rs")
+            .expect("invariant: function definition should be resolved in test fixture");
         assert_eq!(sym.kind, SymbolKind::Function);
         assert!(sym.signature.contains("effective_model"));
         assert!(sym.signature.contains("{ ... }"));
@@ -589,7 +591,8 @@ impl Foo {\n\
     }\n\
 }\n";
 
-        let sym = find_method_in_impl(content, "Foo", "baz", "src/lib.rs", "Foo::baz").unwrap();
+        let sym = find_method_in_impl(content, "Foo", "baz", "src/lib.rs", "Foo::baz")
+            .expect("invariant: impl method should be resolved in test fixture");
         assert_eq!(sym.symbol, "Foo::baz");
         assert_eq!(sym.kind, SymbolKind::Function);
         assert!(sym.signature.contains("baz"));

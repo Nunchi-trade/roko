@@ -3,8 +3,24 @@
              kinds, pheroSummary, heatmap, topology)
    ================================================================ */
 
-import { state } from './state.js';
-import { rpc, api, logAgent, parseHexU64, parseHexBig, weiToGwei, fmtTs } from './api.js';
+import {
+  applyAgentDiscovery,
+  getSelectedMergedAgent,
+  listTransportOptionsForAgent,
+  setSelectedMergedAgent,
+  state,
+} from './state.js';
+import {
+  api,
+  discoverAgentRegistry,
+  logAgent,
+  parseHexBig,
+  parseHexU64,
+  rpc,
+  weiToGwei,
+  fmtTs,
+} from './api.js';
+import { describeAgentSources, describeTransportSummary, isBrowserReachableDirect } from './agent_registry.js';
 import { pushSeries, renderBlocks, updateHero } from './charts.js';
 import { depositPheromoneParticle, P_HALFLIFE } from './pheromones.js';
 import { addInsightNode, graphNodes, graphEdges } from './graph.js';
@@ -370,179 +386,152 @@ export async function pollKinds() {
   } catch (e) { /* ignore */ }
 }
 
-/* ---------- Trace expand/collapse for agent registry ---------- */
-function toggleTraceRow(evt) {
-  var btn = evt.currentTarget;
-  var agentId = btn.dataset.agentId;
+/* ---------- Agent registry via ERC-8004 + relay ---------- */
+var agentRegHash = '';
+
+function esc(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function shortUri(uri) {
+  if (!uri) return '—';
+  return uri.length > 48 ? uri.slice(0, 32) + '…' + uri.slice(-12) : uri;
+}
+
+function renderRegistryRows(agents) {
   var tbody = document.getElementById('agent-reg-tbody');
-  var parentRow = btn.closest('tr');
-  var nextRow = parentRow.nextElementSibling;
-  if (nextRow && nextRow.classList.contains('trace-detail-row') && nextRow.dataset.traceFor === agentId) {
-    // Toggle visibility
-    if (nextRow.style.display === 'none') {
-      nextRow.style.display = '';
-      btn.textContent = 'HIDE';
-      fetchAndRenderTraces(agentId, nextRow);
-    } else {
-      nextRow.style.display = 'none';
-      btn.textContent = 'VIEW';
-    }
+  if (!tbody) return;
+  if (!agents.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-faint)">no agents discovered from identity registry or relay</td></tr>';
     return;
   }
-  // Create a new trace detail row
-  var tr = document.createElement('tr');
-  tr.className = 'trace-detail-row';
-  tr.dataset.traceFor = agentId;
-  var td = document.createElement('td');
-  td.colSpan = 9;
-  td.style.cssText = 'padding:8px 12px;background:rgba(255,255,255,0.02);border-left:2px solid var(--accent)';
-  td.innerHTML = '<span style="color:var(--text-faint)">loading traces…</span>';
-  tr.appendChild(td);
-  parentRow.after(tr);
-  btn.textContent = 'HIDE';
-  fetchAndRenderTraces(agentId, tr);
+
+  var html = '';
+  for (var i = 0; i < agents.length; i++) {
+    var agent = agents[i];
+    var pathSummary = describeTransportSummary(agent, state.remoteBase);
+    var sourceSummary = describeAgentSources(agent);
+    var directSummary = agent.directEndpoint
+      ? (isBrowserReachableDirect(agent.directEndpoint, state.remoteBase) ? 'ready' : 'manual')
+      : '—';
+    html += '<tr data-agent-key="' + esc(agent.key) + '">' +
+      '<td style="font-weight:600;color:var(--accent-bright)">' + esc(agent.displayName || agent.agentId) + '</td>' +
+      '<td>' + (agent.passportId != null ? ('#' + esc(agent.passportId)) : 'wallet-free') + '</td>' +
+      '<td>' + esc(sourceSummary) + '</td>' +
+      '<td>' + esc(pathSummary) + '</td>' +
+      '<td>' + esc((agent.capabilities || []).join(', ') || '—') + '</td>' +
+      '<td title="' + esc(agent.cardUri || '') + '">' + esc(shortUri(agent.cardUri)) + '</td>' +
+      '<td>' + esc(directSummary) + '</td>' +
+      '<td><button class="btn ghost sm" data-agent-key="' + esc(agent.key) + '">MESSAGE</button></td>' +
+      '</tr>';
+  }
+  tbody.innerHTML = html;
 }
 
-async function fetchAndRenderTraces(agentId, trRow) {
-  try {
-    var res = await api('/agents/' + encodeURIComponent(agentId) + '/trace?limit=10&offset=0');
-    var data = res.data;
-    var traces = (data && data.items) || [];
-    var td = trRow.children[0];
-    if (traces.length === 0) {
-      td.innerHTML = '<span style="color:var(--text-faint)">no traces recorded</span>';
-      return;
-    }
-    var phaseColors = { retrieve: 'var(--cyan)', reason: 'var(--yellow)', act: 'var(--green)', verify: 'var(--accent-bright)' };
-    var html = '<div style="font-size:12px;font-family:monospace;max-height:200px;overflow-y:auto">';
-    html += '<table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--text-dim);font-size:11px"><th style="text-align:left;padding:2px 6px">Cycle</th><th style="text-align:left;padding:2px 6px">Phase</th><th style="text-align:left;padding:2px 6px">Reads</th><th style="text-align:left;padding:2px 6px">Action</th><th style="text-align:left;padding:2px 6px">Reasoning</th></tr></thead><tbody>';
-    for (var i = traces.length - 1; i >= 0; i--) {
-      var t = traces[i];
-      var phase = t.phase || '?';
-      var color = phaseColors[phase] || 'var(--text)';
-      html += '<tr style="border-top:1px solid rgba(255,255,255,0.05)">';
-      html += '<td style="padding:3px 6px;color:var(--text-dim)">' + (t.cycle || 0) + '</td>';
-      html += '<td style="padding:3px 6px;color:' + color + ';font-weight:600;text-transform:uppercase">' + phase + '</td>';
-      html += '<td style="padding:3px 6px;color:var(--text-dim);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + ((t.reads || []).join(', ') || '—') + '</td>';
-      html += '<td style="padding:3px 6px;color:var(--text)">' + (t.action || '—') + '</td>';
-      html += '<td style="padding:3px 6px;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.reasoning || '—') + '</td>';
-      html += '</tr>';
-    }
-    html += '</tbody></table></div>';
-    td.innerHTML = html;
-  } catch (e) {
-    trRow.children[0].innerHTML = '<span style="color:var(--red)">failed to load traces</span>';
+function renderComposerTargets() {
+  var select = document.getElementById('msg-agent');
+  if (!select) return;
+  var agents = state.registry.mergedAgents;
+  select.innerHTML = '';
+  if (!agents.length) {
+    var empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = 'no discovered agents';
+    select.appendChild(empty);
+    return;
+  }
+  for (var i = 0; i < agents.length; i++) {
+    var option = document.createElement('option');
+    option.value = agents[i].key;
+    option.textContent = agents[i].displayName || agents[i].agentId;
+    select.appendChild(option);
+  }
+  var selected = getSelectedMergedAgent() || agents[0];
+  if (selected) {
+    setSelectedMergedAgent(selected.key);
+    select.value = selected.key;
   }
 }
 
-/* ---------- Poll agent registry via REST (diff-update) ---------- */
-var agentRegHash = '';
+function renderTransportOptions() {
+  var select = document.getElementById('msg-path');
+  if (!select) return;
+  var agent = getSelectedMergedAgent();
+  var options = listTransportOptionsForAgent(agent);
+  select.innerHTML = '';
+  for (var i = 0; i < options.length; i++) {
+    var option = document.createElement('option');
+    option.value = options[i].value;
+    option.textContent = options[i].label.toUpperCase();
+    select.appendChild(option);
+  }
+  select.value = state.registry.transportPreference;
+  if (select.value !== state.registry.transportPreference) {
+    select.value = 'auto';
+  }
+}
+
+function updateRegistryMeta(agents, discovery) {
+  document.getElementById('h-agents').textContent = agents.length;
+  var meta = agents.length + ' merged · '
+    + discovery.identityAgents.length + ' on-chain · '
+    + discovery.relayAgents.length + ' relay-live';
+  if (state.registry.identityRegistryAddress) {
+    meta += ' · registry ' + state.registry.identityRegistryAddress.slice(0, 10) + '…';
+  }
+  document.getElementById('agent-reg-meta').textContent = meta;
+  var chip = document.getElementById('agents-chip');
+  if (chip) {
+    chip.className = agents.length > 0 ? 'chip ok' : 'chip';
+    chip.innerHTML = '<span class="dot"></span>' + agents.length + ' agents';
+  }
+  pushSeries('agents', agents.length);
+}
+
 export async function pollAgentRegistry() {
   try {
-    var res = await api('/agents');
-    var data = res.data;
-    var agents = data && data.items ? data.items : (Array.isArray(data) ? data : []);
-    state.registeredAgents = agents;
-
-    // Update hero + header chip
-    document.getElementById('h-agents').textContent = agents.length;
-    document.getElementById('agent-reg-meta').textContent = agents.length + ' agents';
-    var chip = document.getElementById('agents-chip');
-    if (chip) {
-      chip.className = agents.length > 0 ? 'chip ok' : 'chip';
-      chip.innerHTML = '<span class="dot"></span>' + agents.length + ' agents';
+    var previousKeys = {};
+    for (var i = 0; i < state.registry.mergedAgents.length; i++) {
+      previousKeys[state.registry.mergedAgents[i].key] = true;
     }
-    pushSeries('agents', agents.length);
 
-    // Quick hash to skip DOM work if nothing changed
-    var hash = agents.map(function(a) {
-      var s = a.stats || {};
-      return (a.id || '') + (s.total_tokens || 0) + (a.last_heartbeat_ts || 0);
+    var discovery = await discoverAgentRegistry();
+    var agents = applyAgentDiscovery(discovery);
+    for (var j = 0; j < agents.length; j++) {
+      state.seenAuthors.add(agents[j].agentId);
+      if (!previousKeys[agents[j].key]) {
+        logAgent('observe', 'registry', 'discovered ' + (agents[j].displayName || agents[j].agentId));
+      }
+    }
+
+    updateRegistryMeta(agents, discovery);
+
+    var hash = agents.map(function(agent) {
+      return [
+        agent.key,
+        agent.passportId,
+        agent.cardUri,
+        agent.relayAvailable,
+        agent.directEndpoint,
+      ].join(':');
     }).join('|');
     if (hash === agentRegHash) return;
     agentRegHash = hash;
 
-    var tbody = document.getElementById('agent-reg-tbody');
-    if (!tbody) return;
-
-    // Clear placeholder row (has colspan, not 9 separate tds)
-    if (tbody.children.length > 0 && tbody.children[0].children.length !== 9) {
-      tbody.innerHTML = '';
+    renderRegistryRows(agents);
+    renderComposerTargets();
+    renderTransportOptions();
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('registry-updated'));
     }
-
-    // Build a set of existing agent rows (excluding trace-detail rows)
-    var existingRows = {};
-    for (var ei = 0; ei < tbody.children.length; ei++) {
-      var erow = tbody.children[ei];
-      if (erow.dataset && erow.dataset.agentId) existingRows[erow.dataset.agentId] = erow;
-    }
-    // Remove rows for agents no longer present, and trace rows
-    for (var ri = tbody.children.length - 1; ri >= 0; ri--) {
-      var rr = tbody.children[ri];
-      if (rr.classList.contains('trace-detail-row')) {
-        // keep if its agent still exists
-        var parentId = rr.dataset.traceFor;
-        if (!agents.find(function(x) { return (x.id || x.agent_id) === parentId; })) {
-          tbody.removeChild(rr);
-        }
-        continue;
-      }
-      var rowAgentId = rr.dataset && rr.dataset.agentId;
-      if (rowAgentId && !agents.find(function(x) { return (x.id || x.agent_id) === rowAgentId; })) {
-        // also remove its trace row if any
-        if (rr.nextSibling && rr.nextSibling.classList && rr.nextSibling.classList.contains('trace-detail-row')) {
-          tbody.removeChild(rr.nextSibling);
-        }
-        tbody.removeChild(rr);
-      }
-    }
-
-    if (agents.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" style="color:var(--text-faint)">no agents registered</td></tr>';
-      return;
-    }
-    for (var i = 0; i < agents.length; i++) {
-      var a = agents[i];
-      var s = a.stats || {};
-      var agentId = a.id || a.agent_id || '?';
-      var row = existingRows[agentId];
-      if (!row) {
-        row = document.createElement('tr');
-        row.dataset.agentId = agentId;
-        for (var c = 0; c < 9; c++) row.appendChild(document.createElement('td'));
-        tbody.appendChild(row);
-      }
-      var cells = row.children;
-      var alive = a.is_alive !== false;
-      var hbTs = a.last_heartbeat_ts || a.last_heartbeat || 0;
-      var lastSeen = hbTs ? new Date(hbTs * 1000).toLocaleTimeString('en-US', {hour12: false}) : '—';
-      var tokens = s.total_tokens || a.total_tokens || 0;
-      var cost = s.total_cost_usd || a.total_cost_usd || 0;
-      cells[0].textContent = agentId;
-      cells[0].style.cssText = 'font-weight:600;color:var(--accent-bright);cursor:pointer';
-      cells[1].textContent = a.role || '—';
-      cells[2].textContent = alive ? 'ALIVE' : 'OFFLINE';
-      cells[2].style.color = alive ? 'var(--green)' : 'var(--red)';
-      cells[3].textContent = s.tasks_completed || 0;
-      cells[3].style.color = (s.tasks_completed || 0) > 0 ? 'var(--green)' : '';
-      cells[4].textContent = s.tasks_failed || 0;
-      cells[4].style.color = (s.tasks_failed || 0) > 0 ? 'var(--red)' : '';
-      cells[5].textContent = tokens.toLocaleString();
-      cells[6].textContent = '$' + cost.toFixed(4);
-      cells[7].textContent = lastSeen;
-      // Traces column — show button to expand
-      if (!cells[8].querySelector('button')) {
-        var btn = document.createElement('button');
-        btn.className = 'btn ghost sm';
-        btn.textContent = 'VIEW';
-        btn.style.cssText = 'padding:2px 8px;font-size:11px';
-        btn.dataset.agentId = agentId;
-        btn.onclick = toggleTraceRow;
-        cells[8].innerHTML = '';
-        cells[8].appendChild(btn);
-      }
-    }
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    document.getElementById('agent-reg-meta').textContent = 'discovery failed: ' + e.message;
+  }
 }
 
 /* ---------- Poll leaderboard from topology (diff-update) ---------- */

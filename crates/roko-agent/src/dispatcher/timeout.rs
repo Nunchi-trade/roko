@@ -47,13 +47,16 @@ mod tests {
     use super::*;
     use roko_core::tool::ToolResult;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn with_timeout_expires_when_future_slow() {
         let slow = async {
             tokio::time::sleep(Duration::from_millis(200)).await;
             ToolResult::text("done")
         };
-        let out = with_timeout(Duration::from_millis(50), slow).await;
+        let out = tokio::spawn(with_timeout(Duration::from_millis(50), slow));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let out = out.await.expect("timeout task should join");
         match out {
             ToolResult::Err(ToolError::Timeout { after_ms }) => {
                 // Elapsed should be close to 50 ms (the cap).

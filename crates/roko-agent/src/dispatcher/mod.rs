@@ -249,6 +249,20 @@ impl ToolDispatcher {
                 Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
                 return ToolResult::err(e);
             }
+            if let Err(e) = safety.check_contract(&call, ctx) {
+                Self::emit_audit(
+                    ctx,
+                    &call,
+                    "contract",
+                    "blocked",
+                    &json!({
+                        "error": e.to_string(),
+                        "error_kind": tool_error_kind(&e),
+                    }),
+                );
+                Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
+                return ToolResult::err(e);
+            }
         }
         // 4. Resolve handler.
         let Some(handler) = self.resolver.resolve(&call.name) else {
@@ -291,6 +305,14 @@ impl ToolDispatcher {
         // 7. Scrub secrets from output.
         let result = if let Some(ref safety) = self.safety {
             safety.scrub_output(result)
+        } else {
+            result
+        };
+        let result = if let Some(ref safety) = self.safety {
+            match safety.check_recovery(&result) {
+                Ok(()) => result,
+                Err(err) => ToolResult::err(err),
+            }
         } else {
             result
         };

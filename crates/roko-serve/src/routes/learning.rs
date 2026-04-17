@@ -3,16 +3,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
+use chrono::Duration;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
+use roko_learn::aggregate::{CFactorBucket, cfactor_trend as aggregate_cfactor_trend};
 use roko_learn::cascade_router::CascadeStage;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::model_router::COLD_START_THRESHOLD;
@@ -21,6 +23,7 @@ use roko_learn::runtime_feedback::read_efficiency_events;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/c-factor/trend", get(cfactor_trend))
         .route("/learning/efficiency", get(efficiency))
         .route("/learn/efficiency", get(efficiency))
         .route("/learning/cascade-router", get(cascade_router))
@@ -46,6 +49,22 @@ async fn efficiency(
         .await
         .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
     Ok(Json(build_efficiency_response(&events)))
+}
+
+/// `GET /api/c-factor/trend` — read `.roko/learn/c-factor.jsonl` and return a trend series.
+async fn cfactor_trend(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CFactorTrendQuery>,
+) -> Result<Json<Vec<CFactorBucket>>, ApiError> {
+    let path = state.workdir.join(".roko/learn/c-factor.jsonl");
+    if !path.exists() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let (bucket, n_buckets) = parse_cfactor_trend_window(query.window.as_deref());
+    let buckets = aggregate_cfactor_trend(&path, bucket, n_buckets)
+        .map_err(|err| ApiError::internal(format!("read {}: {err}", path.display())))?;
+    Ok(Json(buckets))
 }
 
 /// `GET /api/learning/cascade-router` — read `.roko/learn/cascade-router.json`.
@@ -126,6 +145,13 @@ async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore
 
     serde_json::from_str(&content)
         .map_err(|e| ApiError::internal(format!("parse {}: {e}", path.display())))
+}
+
+fn parse_cfactor_trend_window(raw: Option<&str>) -> (Duration, usize) {
+    match raw {
+        Some("7d") => (Duration::hours(1), 7 * 24),
+        _ => (Duration::hours(1), 24),
+    }
 }
 
 /// Build the structured experiments response from the persisted store.
@@ -834,6 +860,12 @@ struct CostTrendPoint {
     cumulative_cost_usd: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct CFactorTrendQuery {
+    #[serde(default)]
+    window: Option<String>,
+}
+
 /// Task-level efficiency summary derived from the JSONL event stream.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1219,7 +1251,13 @@ mod tests {
         assert_eq!(payload["source"], signals.display().to_string());
         assert_eq!(payload["total"], 2);
         assert_eq!(payload["limit"], 1);
-        assert_eq!(payload["history"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            payload["history"]
+                .as_array()
+                .expect("invariant: gate history payload should contain a history array")
+                .len(),
+            1
+        );
         assert_eq!(payload["history"][0]["gate"], "test");
         assert_eq!(payload["history"][0]["passed"], false);
         Ok(())
@@ -1296,7 +1334,13 @@ mod tests {
             .map_err(|err| anyhow!("failed to read cascade-router alias response body: {err}"))?;
         let cascade_payload: Value = serde_json::from_slice(&cascade_body)
             .map_err(|err| anyhow!("failed to parse cascade-router alias response body: {err}"))?;
-        assert_eq!(cascade_payload["model_slugs"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            cascade_payload["model_slugs"]
+                .as_array()
+                .expect("invariant: cascade response should contain a model_slugs array")
+                .len(),
+            2
+        );
 
         let cost_tiers_response = app
             .clone()
@@ -1397,6 +1441,104 @@ mod tests {
         assert_eq!(response.cost_trend.len(), 2);
         assert!((response.cost_trend[0].cumulative_cost_usd - 3.0).abs() < 1e-9);
         assert!((response.cost_trend[1].cumulative_cost_usd - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cfactor_trend_window_defaults_to_24h_and_supports_7d() {
+        assert_eq!(parse_cfactor_trend_window(None), (Duration::hours(1), 24));
+        assert_eq!(
+            parse_cfactor_trend_window(Some("24h")),
+            (Duration::hours(1), 24)
+        );
+        assert_eq!(
+            parse_cfactor_trend_window(Some("7d")),
+            (Duration::hours(1), 168)
+        );
+        assert_eq!(
+            parse_cfactor_trend_window(Some("unexpected")),
+            (Duration::hours(1), 24)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cfactor_trend_returns_empty_array_when_missing() -> Result<(), Box<dyn Error>> {
+        let (_dir, state) = test_state()?;
+
+        let response = build_router(Arc::clone(&state), &[], ServeAuthConfig::default())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/c-factor/trend")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build c-factor trend request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("c-factor trend request failed: {err}"))?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
+        let payload: Value = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
+        assert_eq!(
+            payload
+                .as_array()
+                .expect("invariant: c-factor trend response should be an array")
+                .len(),
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cfactor_trend_returns_hourly_buckets_for_default_window() -> Result<(), Box<dyn Error>>
+    {
+        let (dir, state) = test_state()?;
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .map_err(|err| anyhow!("failed to create learn dir for c-factor trend test: {err}"))?;
+        tokio::fs::write(
+            learn_dir.join("c-factor.jsonl"),
+            [
+                serde_json::json!({
+                    "computed_at": "2026-04-16T08:10:00Z",
+                    "overall": 0.35
+                })
+                .to_string(),
+                serde_json::json!({
+                    "computed_at": "2026-04-16T08:40:00Z",
+                    "overall": 0.65
+                })
+                .to_string(),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .await
+        .map_err(|err| anyhow!("failed to write c-factor trend fixture: {err}"))?;
+
+        let response = build_router(Arc::clone(&state), &[], ServeAuthConfig::default())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/c-factor/trend")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build c-factor trend request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("c-factor trend request failed: {err}"))?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
+        let payload: Vec<CFactorBucket> = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
+        assert_eq!(payload.len(), 24);
+        assert!(payload.iter().any(|bucket| bucket.samples == 2));
+        Ok(())
     }
 
     #[test]

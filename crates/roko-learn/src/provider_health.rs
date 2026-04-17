@@ -293,6 +293,11 @@ impl ProviderHealthRegistry {
     }
 
     /// Persist the registry to `path` as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registry snapshot cannot be serialized or if
+    /// any filesystem step needed to write it fails.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let snapshot = ProviderHealthRegistrySnapshot {
             providers: self.providers.lock().clone(),

@@ -7,12 +7,12 @@
 //! and `verify` sections) and produces [`TaskDef`]s that the executor uses
 //! to select models, assemble context, and verify results.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use roko_core::OperatingFrequency;
-use roko_orchestrator::ReplanStrategy;
+use roko_orchestrator::{ReplanStrategy, detect_cycle_nodes};
 use roko_std::denied_tools_for_role;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -601,13 +601,18 @@ impl TasksFile {
     pub fn parse(path: &Path) -> Result<Self> {
         let content =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        toml::from_str(&content).with_context(|| format!("parse tasks.toml at {}", path.display()))
+        Self::parse_str(&content).with_context(|| format!("parse tasks.toml at {}", path.display()))
+    }
+
+    /// Parse a `tasks.toml` payload from a string slice.
+    pub fn parse_str(content: &str) -> Result<Self> {
+        toml::from_str(content).context("parse tasks.toml")
     }
 
     /// Parse a `tasks.toml` payload returned inline by an agent.
     pub fn parse_agent_output(content: &str) -> Result<Self> {
         let payload = extract_toml_payload(content);
-        toml::from_str(&payload).context("parse tasks.toml from agent output")
+        Self::parse_str(&payload).context("parse tasks.toml from agent output")
     }
 
     /// Get all tasks that are ready to execute (deps satisfied).
@@ -795,13 +800,14 @@ impl TasksFile {
             issues.push(TaskValidationIssue::NoStartNode);
         }
 
-        let mut valid_deps: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut valid_deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for task in &self.tasks {
             valid_deps.insert(
-                task.id.as_str(),
+                task.id.clone(),
                 task.depends_on
                     .iter()
-                    .filter_map(|dep| task_ids.contains(dep.as_str()).then_some(dep.as_str()))
+                    .filter(|dep| task_ids.contains(dep.as_str()))
+                    .cloned()
                     .collect(),
             );
         }
@@ -886,65 +892,6 @@ fn validate_modern_fields_content(content: &str) -> Result<Vec<ModernFieldIssue>
     }
 
     Ok(issues)
-}
-
-fn detect_cycle_nodes(deps: &HashMap<&str, Vec<&str>>) -> Vec<String> {
-    fn dfs<'a>(
-        node: &'a str,
-        deps: &HashMap<&'a str, Vec<&'a str>>,
-        state: &mut HashMap<&'a str, u8>,
-        stack: &mut Vec<&'a str>,
-        positions: &mut HashMap<&'a str, usize>,
-        cycle_nodes: &mut HashSet<String>,
-    ) {
-        state.insert(node, 1);
-        positions.insert(node, stack.len());
-        stack.push(node);
-
-        if let Some(children) = deps.get(node) {
-            for child in children {
-                match state.get(child).copied().unwrap_or(0) {
-                    0 => dfs(child, deps, state, stack, positions, cycle_nodes),
-                    1 => {
-                        if let Some(start) = positions.get(child).copied() {
-                            for entry in &stack[start..] {
-                                cycle_nodes.insert((*entry).to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        stack.pop();
-        positions.remove(node);
-        state.insert(node, 2);
-    }
-
-    let mut state: HashMap<&str, u8> = HashMap::new();
-    let mut stack: Vec<&str> = Vec::new();
-    let mut positions: HashMap<&str, usize> = HashMap::new();
-    let mut cycle_nodes: HashSet<String> = HashSet::new();
-    let mut nodes: Vec<&str> = deps.keys().copied().collect();
-    nodes.sort_unstable();
-
-    for node in nodes {
-        if state.get(node).copied().unwrap_or(0) == 0 {
-            dfs(
-                node,
-                deps,
-                &mut state,
-                &mut stack,
-                &mut positions,
-                &mut cycle_nodes,
-            );
-        }
-    }
-
-    let mut cycles: Vec<String> = cycle_nodes.into_iter().collect();
-    cycles.sort();
-    cycles
 }
 
 /// Extract lines from content given a range like "40-80" or "10-".

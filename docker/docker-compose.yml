@@ -1,7 +1,7 @@
 # docker-compose.yml for the roko stack (§42.4).
 #
 # Services:
-#   mirage     — in-process EVM fork simulator (JSON-RPC :8545, metrics :9091)
+#   mirage     — mirage-rs fronting a co-deployed loopback agent-relay on one public origin (:8545)
 #   roko       — roko CLI, depends on mirage
 #   gateway    — roko-gateway (placeholder, see gateway.Dockerfile TODO)
 #   prometheus — scrapes mirage + roko + gateway + itself
@@ -20,6 +20,7 @@ volumes:
   prometheus-data:
   grafana-data:
   demo-runtime:
+  mirage-state:
 
 services:
   mirage:
@@ -32,21 +33,24 @@ services:
       - roko-net
     ports:
       - "8545:8545"
-      - "9091:9091"
     environment:
       RUST_LOG: "info,mirage_rs=debug"
-    # eth_blockNumber RPC healthcheck — gates other services' readiness.
+      PORT: "8545"
+      ROKO_AGENT_RELAY_BIND: "127.0.0.1:9011"
+      ROKO_AGENT_RELAY_URL: "http://127.0.0.1:9011"
+      MIRAGE_STATE_DIR: "/workspace/.roko/state"
+      MIRAGE_SNAPSHOT_INTERVAL_SECS: "15"
+    volumes:
+      - mirage-state:/workspace/.roko
+    # Gate dependents on both the mirage RPC surface and the relayed one-origin path.
     healthcheck:
       test:
-        - "CMD"
-        - "/usr/local/bin/mirage-rs"
-        - "healthcheck"
-        - "--url"
-        - "http://127.0.0.1:8545"
+        - "CMD-SHELL"
+        - "/usr/local/bin/mirage-rs healthcheck --url http://127.0.0.1:8545 && bash -lc \"exec 3<>/dev/tcp/127.0.0.1/8545 && printf 'GET /relay/health HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'ok' <&3\""
       interval: 10s
       timeout: 5s
       retries: 6
-      start_period: 20s
+      start_period: 30s
     restart: unless-stopped
 
   roko:

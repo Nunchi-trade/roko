@@ -1,8 +1,8 @@
-//! F1 Dashboard view -- master-detail layout with 7 sub-tabs.
+//! F1 Dashboard view -- master-detail layout with 8 sub-tabs.
 //!
 //! Left panel (38%): plan tree + phase compact + task progress.
 //! Right panel (62%): sub-tabbed detail view (Agents, Output, Diff,
-//! Errors, Git, Context/MCP, Processes).
+//! Gate, Git, Context/MCP, Learning, Processes).
 //! Bottom ribbon: wave progress + token sparkline + sys metrics.
 //!
 //! Delegates to compiled widgets for all panels.
@@ -11,16 +11,19 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
-use std::collections::{BTreeMap, HashMap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Wrap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use roko_core::dashboard_snapshot::{ErrorEntry, GateVerdict, SnapshotStats};
+use roko_core::dashboard_snapshot::{
+    DiagnosisSeverity, DiagnosisSummary, ExperimentWinnerSummary, FailureEntry,
+};
 
 use super::ViewState;
 use crate::config::Config;
 use crate::tui::ansi::parse_ansi_line;
-use crate::tui::dashboard::{DashboardData, Theme};
+use crate::tui::dashboard::{DashboardData, GateFailureRow, GateSummaryRow, Theme};
 use crate::tui::input::FocusZone;
 use crate::tui::state::{RouteMetrics, TuiState};
 use crate::tui::widgets::{self, braille};
@@ -33,9 +36,10 @@ const SUB_TAB_LABELS: &[(&str, &str)] = &[
     ("a", "Agents"),
     ("o", "Output"),
     ("d", "Diff"),
-    ("e", "Errors"),
+    ("e", "Gate"),
     ("g", "Git"),
     ("m", "MCP"),
+    ("L", "Learning"),
     ("P", "Procs"),
 ];
 
@@ -133,31 +137,48 @@ fn render_right_panel(
     render_sub_tab_bar(frame, sections[0], sub, theme);
 
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
+    let diagnosis_height = diagnosis_panel_height(tui_state.diagnoses.len(), sections[1].height);
 
+    if diagnosis_height > 0 {
+        let split = Layout::vertical([Constraint::Min(0), Constraint::Length(diagnosis_height)])
+            .split(sections[1]);
+        render_right_panel_content(
+            frame, split[0], sub, data, tui_state, view_state, focused, theme,
+        );
+        render_diagnosis_panel(frame, split[1], &tui_state.diagnoses, focused, theme);
+    } else {
+        render_right_panel_content(
+            frame,
+            sections[1],
+            sub,
+            data,
+            tui_state,
+            view_state,
+            focused,
+            theme,
+        );
+    }
+}
+
+fn render_right_panel_content(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    sub: usize,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    focused: bool,
+    theme: &Theme,
+) {
     match sub {
-        0 => render_sub_agents(
-            frame,
-            sections[1],
-            data,
-            tui_state,
-            view_state,
-            focused,
-            theme,
-        ),
-        1 => render_output_panel(
-            frame,
-            sections[1],
-            data,
-            tui_state,
-            view_state,
-            focused,
-            theme,
-        ),
-        2 => render_sub_diff(frame, sections[1], data, tui_state, theme),
-        3 => render_sub_errors(frame, sections[1], data, theme),
-        4 => render_sub_git(frame, sections[1], tui_state, theme),
-        5 => render_sub_mcp(frame, sections[1], data, tui_state, theme),
-        6 => render_sub_processes(frame, sections[1], data, tui_state, focused, theme),
+        0 => render_sub_agents(frame, area, data, tui_state, view_state, focused, theme),
+        1 => render_output_panel(frame, area, data, tui_state, view_state, focused, theme),
+        2 => render_sub_diff(frame, area, data, tui_state, theme),
+        3 => render_sub_gate(frame, area, data, tui_state, focused, theme),
+        4 => render_sub_git(frame, area, tui_state, theme),
+        5 => render_sub_mcp(frame, area, data, tui_state, theme),
+        6 => render_sub_learning(frame, area, data, tui_state, focused, theme),
+        7 => render_sub_processes(frame, area, data, tui_state, focused, theme),
         _ => {}
     }
 }
@@ -451,40 +472,87 @@ fn render_sub_diff(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-tab: Errors -- delegates to widgets::error_digest
+// Sub-tab: Gate -- verdict summary + recent failures
 // ---------------------------------------------------------------------------
 
-fn render_sub_errors(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, theme: &Theme) {
-    let verdicts: Vec<GateVerdict> = data
-        .gate_results
-        .iter()
-        .map(|g| GateVerdict {
-            plan_id: g.plan_id.clone(),
-            task_id: String::new(),
-            gate: g.gate_name.clone(),
-            passed: g.passed,
-            ts_millis: 0,
-        })
-        .collect();
-
-    let errors: Vec<ErrorEntry> = data
-        .gate_results_page
-        .failure_rows
-        .iter()
-        .map(|row| ErrorEntry {
-            message: format!("{}: {} - {}", row.gate_name, row.task_id, row.error_excerpt),
-            ts_millis: row.created_at_ms.max(0) as u64,
-        })
-        .collect();
-
-    let stats = SnapshotStats {
-        gates_passed: data.gate_results.iter().filter(|g| g.passed).count(),
-        gates_failed: data.gate_results.iter().filter(|g| !g.passed).count(),
-        errors_total: errors.len(),
-        ..Default::default()
+fn render_sub_gate(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
     };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Verdicts ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    widgets::error_digest::render_error_digest(frame, area, &verdicts, &errors, &stats, theme);
+    if inner.width < 24 || inner.height < 8 {
+        frame.render_widget(
+            Paragraph::new(" verdicts panel needs more space").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let rows = gate_verdict_rows(data);
+    let trend_rows = gate_trend_rows(tui_state);
+    let failures = &data.gate_results_page.failure_rows;
+
+    if rows.is_empty()
+        && trend_rows.is_empty()
+        && tui_state.gate_recent_failures.is_empty()
+        && failures.is_empty()
+    {
+        frame.render_widget(
+            Paragraph::new(" no gate verdict data yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(gate_failure_section_height(inner.height)),
+    ])
+    .split(inner);
+
+    if trend_rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" historical summary shown until live verdict buckets populate")
+                .style(theme.muted()),
+            sections[0],
+        );
+        render_gate_verdict_summary(frame, sections[1], &rows, focused, theme);
+    } else {
+        frame.render_widget(
+            Paragraph::new(" per-gate pass ratio over the last 24 hours").style(theme.muted()),
+            sections[0],
+        );
+        render_gate_trend_grid(frame, sections[1], &trend_rows, focused, theme);
+    }
+    render_recent_gate_failures(
+        frame,
+        sections[2],
+        &tui_state.gate_recent_failures,
+        failures,
+        focused,
+        theme,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +603,10 @@ pub(crate) fn collect_git_summary(
     git_data: &crate::tui::views::git_view::GitViewData,
     age: &str,
 ) -> Vec<String> {
+    if git_data.is_not_a_git_repository() {
+        return vec![" not a git repository".to_string()];
+    }
+
     let mut lines = Vec::new();
 
     let commit = git_data
@@ -942,6 +1014,838 @@ fn render_sub_processes(
     );
 }
 
+fn render_diagnosis_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    diagnoses: &[DiagnosisSummary],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Diagnosis ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = diagnosis_rows(diagnoses, inner.width, theme);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no conductor diagnoses yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let rows = rows
+        .into_iter()
+        .take(visible_rows.max(1))
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Min(20),
+                Constraint::Min(0),
+            ],
+        )
+        .header(
+            Row::new(["Severity", "Signal", "Message"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+fn render_sub_learning(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Learning ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 12 || inner.height < 12 {
+        frame.render_widget(
+            Paragraph::new(" learning trend data needs more space").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let trends = build_learning_trends(data);
+    let sections =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(inner);
+
+    let trend_sections = Layout::vertical([
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+    ])
+    .split(sections[0]);
+
+    let c_factor_title = cfactor_trend_title(&trends, data);
+    let c_factor_style = trends
+        .cfactor_latest
+        .map(|score| rate_style(score, theme))
+        .unwrap_or_else(|| theme.muted());
+    render_learning_sparkline(
+        frame,
+        trend_sections[0],
+        &c_factor_title,
+        &trends.cfactor_overall,
+        c_factor_style,
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        trend_sections[1],
+        " Tokens / hr (tok) ",
+        &trends.tokens_per_hour,
+        theme.info(),
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        trend_sections[2],
+        " Latency / hr (ms) ",
+        &trends.latency_per_hour_ms,
+        theme.warning(),
+        theme,
+        focused,
+    );
+    render_learning_sparkline(
+        frame,
+        trend_sections[3],
+        " Cost / hr (c) ",
+        &trends.cost_per_hour_cents,
+        theme.danger(),
+        theme,
+        focused,
+    );
+
+    render_concluded_experiments_panel(frame, sections[1], data, tui_state, focused, theme);
+}
+
+fn render_learning_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    series: &[u64],
+    color: Style,
+    theme: &Theme,
+    focused: bool,
+) {
+    if area.width < 8 || area.height < 2 {
+        return;
+    }
+
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = color.add_modifier(Modifier::BOLD);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(title.to_string(), title_style))
+        .border_style(border)
+        .style(Theme::block_style());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if series.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" waiting for trend data").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let max = series.iter().copied().max().unwrap_or(0).max(1);
+    let sparkline = Sparkline::default().data(series).max(max).style(color);
+    frame.render_widget(sparkline, inner);
+}
+
+fn render_concluded_experiments_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    tui_state: &TuiState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Concluded Experiments ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 30 || inner.height < 3 {
+        return;
+    }
+
+    let rows = concluded_experiment_rows(data, tui_state);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" no concluded experiments yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let rows = rows
+        .into_iter()
+        .take(visible_rows.max(1))
+        .collect::<Vec<_>>();
+    let bar_width = concluded_experiment_bar_width(inner.width);
+    let id_width = concluded_experiment_id_width(inner.width);
+    let winner_width = concluded_experiment_winner_width(inner.width);
+
+    frame.render_widget(
+        Table::new(
+            rows.into_iter()
+                .map(|row| {
+                    Row::new(vec![
+                        Cell::from(Span::styled(
+                            truncate(&row.experiment_id, id_width),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            truncate(&row.winner_label, winner_width),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            format!("{:>3.0}%", row.win_rate * 100.0),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            render_rate_bar(row.win_rate, bar_width),
+                            rate_style(row.win_rate, theme),
+                        )),
+                        Cell::from(Span::styled(
+                            format!("n={}", row.sample_size),
+                            theme.muted(),
+                        )),
+                        Cell::from(Span::styled(
+                            format_ci_range(row.ci_lower, row.ci_upper),
+                            rate_style(row.win_rate, theme),
+                        )),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            [
+                Constraint::Length(id_width as u16),
+                Constraint::Length(winner_width as u16),
+                Constraint::Length(7),
+                Constraint::Length(bar_width as u16),
+                Constraint::Length(8),
+                Constraint::Min(13),
+            ],
+        )
+        .header(
+            Row::new(["Experiment", "Winner", "Rate", "Win bar", "n", "95% CI"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+#[derive(Debug, Clone)]
+struct ConcludedExperimentRow {
+    experiment_id: String,
+    winner_label: String,
+    win_rate: f64,
+    sample_size: u64,
+    ci_lower: f64,
+    ci_upper: f64,
+}
+
+fn concluded_experiment_rows(
+    data: &DashboardData,
+    tui_state: &TuiState,
+) -> Vec<ConcludedExperimentRow> {
+    let winners = if tui_state.experiment_winners.is_empty() {
+        &data.experiment_winners
+    } else {
+        &tui_state.experiment_winners
+    };
+
+    winners.into_iter().map(concluded_experiment_row).collect()
+}
+
+fn concluded_experiment_row(summary: &ExperimentWinnerSummary) -> ConcludedExperimentRow {
+    ConcludedExperimentRow {
+        experiment_id: summary.experiment_id.clone(),
+        winner_label: summary.winner.clone(),
+        win_rate: summary.win_rate,
+        sample_size: summary.sample_size,
+        ci_lower: summary.ci_lower,
+        ci_upper: summary.ci_upper,
+    }
+}
+
+fn concluded_experiment_id_width(width: u16) -> usize {
+    if width >= 110 {
+        20
+    } else if width >= 90 {
+        16
+    } else {
+        12
+    }
+}
+
+fn concluded_experiment_winner_width(width: u16) -> usize {
+    if width >= 110 {
+        22
+    } else if width >= 90 {
+        18
+    } else {
+        14
+    }
+}
+
+fn concluded_experiment_bar_width(width: u16) -> usize {
+    width
+        .saturating_sub(
+            concluded_experiment_id_width(width) as u16
+                + concluded_experiment_winner_width(width) as u16
+                + 7
+                + 8
+                + 8
+                + 13
+                + 5,
+        )
+        .max(12) as usize
+}
+
+fn render_rate_bar(rate: f64, width: usize) -> String {
+    let width = width.max(4);
+    let filled = (rate.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let empty = width.saturating_sub(filled);
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
+fn format_ci_range(lower: f64, upper: f64) -> String {
+    format!("{:.0}%..{:.0}%", lower * 100.0, upper * 100.0)
+}
+
+fn rate_style(rate: f64, theme: &Theme) -> Style {
+    if rate >= 0.75 {
+        theme.success()
+    } else if rate >= 0.5 {
+        theme.warning()
+    } else {
+        theme.danger()
+    }
+}
+
+fn gate_verdict_rows(data: &DashboardData) -> Vec<GateSummaryRow> {
+    data.gate_results_page.gate_rows.clone()
+}
+
+fn render_gate_verdict_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateSummaryRow],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Gate Summary ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" no gate verdict rows yet").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let gate_width = gate_summary_gate_width(inner.width);
+    let runs_width = 6usize;
+    let pass_width = 7usize;
+    let avg_width = 10usize;
+    let last_width = gate_summary_last_width(inner.width);
+    let trend_width = inner
+        .width
+        .saturating_sub(
+            gate_width as u16
+                + runs_width as u16
+                + pass_width as u16
+                + avg_width as u16
+                + last_width as u16
+                + 6,
+        )
+        .max(12) as usize;
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+
+    let table_rows: Vec<Row<'_>> = rows
+        .iter()
+        .take(visible_rows.max(1))
+        .map(|row| {
+            let pass_style = rate_style(row.pass_rate, theme);
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    truncate(&row.gate_name, gate_width),
+                    pass_style,
+                )),
+                Cell::from(Span::styled(fmt_count(row.total_runs), theme.text())),
+                Cell::from(Span::styled(
+                    format!("{:.0}%", row.pass_rate * 100.0),
+                    pass_style,
+                )),
+                Cell::from(Span::styled(
+                    format_duration_ms(row.avg_duration_ms),
+                    theme.muted(),
+                )),
+                Cell::from(Span::styled(
+                    render_rate_bar(row.pass_rate, trend_width),
+                    pass_style,
+                )),
+                Cell::from(Span::styled(
+                    truncate(&row.last_run, last_width),
+                    theme.muted(),
+                )),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(
+        Table::new(
+            table_rows,
+            [
+                Constraint::Length(gate_width as u16),
+                Constraint::Length(runs_width as u16),
+                Constraint::Length(pass_width as u16),
+                Constraint::Length(avg_width as u16),
+                Constraint::Min(12),
+                Constraint::Length(last_width as u16),
+            ],
+        )
+        .header(
+            Row::new(["gate", "runs", "pass", "avg", "trend", "last"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+#[derive(Debug, Clone)]
+struct GateTrendRow {
+    gate: String,
+    pass_rate: f64,
+    buckets: Vec<f32>,
+    failures: usize,
+}
+
+fn gate_trend_rows(tui_state: &TuiState) -> Vec<GateTrendRow> {
+    let mut rows = tui_state
+        .gate_trends
+        .iter()
+        .map(|(gate, trend)| {
+            let total_pass = trend
+                .slots
+                .iter()
+                .map(|bucket| bucket.pass as u64)
+                .sum::<u64>();
+            let total_fail = trend
+                .slots
+                .iter()
+                .map(|bucket| bucket.fail as u64)
+                .sum::<u64>();
+            let pass_rate = if total_pass + total_fail == 0 {
+                0.0
+            } else {
+                total_pass as f64 / (total_pass + total_fail) as f64
+            };
+            let buckets = trend
+                .slots
+                .iter()
+                .map(|bucket| {
+                    let total = bucket.pass + bucket.fail;
+                    if total == 0 {
+                        0.0
+                    } else {
+                        bucket.pass as f32 / total as f32
+                    }
+                })
+                .collect::<Vec<_>>();
+            let failures = tui_state
+                .gate_recent_failures
+                .iter()
+                .filter(|failure| failure.gate == *gate)
+                .count();
+
+            GateTrendRow {
+                gate: gate.clone(),
+                pass_rate,
+                buckets,
+                failures,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|lhs, rhs| {
+        rhs.failures
+            .cmp(&lhs.failures)
+            .then_with(|| lhs.gate.cmp(&rhs.gate))
+    });
+    rows
+}
+
+fn render_gate_trend_grid(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rows: &[GateTrendRow],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Gate Timeline ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new(" no data yet").style(theme.muted()), inner);
+        return;
+    }
+
+    let gate_width = gate_summary_gate_width(inner.width);
+    let pass_width = 7usize;
+    let fail_width = 5usize;
+    let spark_width = inner
+        .width
+        .saturating_sub(gate_width as u16 + pass_width as u16 + fail_width as u16 + 5)
+        .max(8) as usize;
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+
+    let table_rows = rows
+        .iter()
+        .take(visible_rows.max(1))
+        .map(|row| {
+            let style = rate_style(row.pass_rate, theme);
+            let mut spark = vec![Span::styled("24h ", theme.muted())];
+            spark.extend(braille::braille_spans_f32(
+                &row.buckets,
+                1.0,
+                spark_width.saturating_sub(4).max(4),
+                style.fg.unwrap_or(theme.info),
+            ));
+
+            Row::new(vec![
+                Cell::from(Span::styled(truncate(&row.gate, gate_width), style)),
+                Cell::from(Span::styled(
+                    format!("{:.0}%", row.pass_rate * 100.0),
+                    style,
+                )),
+                Cell::from(Line::from(spark)),
+                Cell::from(Span::styled(row.failures.to_string(), theme.warning())),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Table::new(
+            table_rows,
+            [
+                Constraint::Length(gate_width as u16),
+                Constraint::Length(pass_width as u16),
+                Constraint::Min(8),
+                Constraint::Length(fail_width as u16),
+            ],
+        )
+        .header(
+            Row::new(["gate", "pass", "timeline", "fail"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1),
+        inner,
+    );
+}
+
+fn render_recent_gate_failures(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    live_failures: &[FailureEntry],
+    fallback_failures: &[GateFailureRow],
+    focused: bool,
+    theme: &Theme,
+) {
+    let border = if focused {
+        Theme::focused_border_style()
+    } else {
+        theme.muted()
+    };
+    let title_style = if focused {
+        Theme::focused_title_style()
+    } else {
+        theme.muted()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Recent Failures ", title_style))
+        .border_style(border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if live_failures.is_empty() && fallback_failures.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" no recent gate failures").style(theme.muted()),
+            inner,
+        );
+        return;
+    }
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let lines: Vec<Line<'_>> = if !live_failures.is_empty() {
+        live_failures
+            .iter()
+            .rev()
+            .take(visible_rows.max(1))
+            .map(|failure| {
+                let detail = if failure.summary.trim().is_empty() {
+                    failure
+                        .artifacts
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                } else {
+                    failure.summary.clone()
+                };
+                Line::from(vec![
+                    Span::styled(relative_age_datetime(failure.ts), theme.muted()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.gate, 12), theme.warning()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.task_id, 16), theme.text()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(
+                        truncate(&detail, inner.width.saturating_sub(40) as usize),
+                        theme.text(),
+                    ),
+                ])
+            })
+            .collect()
+    } else {
+        fallback_failures
+            .iter()
+            .take(visible_rows.max(1))
+            .map(|failure| {
+                Line::from(vec![
+                    Span::styled(relative_age_label(failure.created_at_ms), theme.muted()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.gate_name, 12), theme.warning()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(truncate(&failure.task_id, 16), theme.text()),
+                    Span::styled(" | ", theme.muted()),
+                    Span::styled(
+                        truncate(
+                            &failure.error_excerpt,
+                            inner.width.saturating_sub(40) as usize,
+                        ),
+                        theme.text(),
+                    ),
+                ])
+            })
+            .collect()
+    };
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn gate_summary_gate_width(width: u16) -> usize {
+    if width >= 120 {
+        22
+    } else if width >= 100 {
+        18
+    } else {
+        14
+    }
+}
+
+fn gate_summary_last_width(width: u16) -> usize {
+    if width >= 120 {
+        16
+    } else if width >= 100 {
+        14
+    } else {
+        10
+    }
+}
+
+fn gate_failure_section_height(height: u16) -> u16 {
+    height.saturating_div(3).clamp(3, 8)
+}
+
+fn format_duration_ms(duration_ms: f64) -> String {
+    if duration_ms >= 1_000.0 {
+        format!("{:.1}s", duration_ms / 1_000.0)
+    } else {
+        format!("{:.0}ms", duration_ms.max(0.0).round())
+    }
+}
+
+fn relative_age_label(created_at_ms: i64) -> String {
+    let created_at_ms = u64::try_from(created_at_ms).unwrap_or_default();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    let age_ms = now_ms.saturating_sub(created_at_ms);
+    if age_ms >= 86_400_000 {
+        format!("{:.1}d ago", age_ms as f64 / 86_400_000.0)
+    } else if age_ms >= 3_600_000 {
+        format!("{:.1}h ago", age_ms as f64 / 3_600_000.0)
+    } else if age_ms >= 60_000 {
+        format!("{:.1}m ago", age_ms as f64 / 60_000.0)
+    } else {
+        format!("{age_ms}ms ago")
+    }
+}
+
+fn relative_age_datetime(created_at: chrono::DateTime<chrono::Utc>) -> String {
+    relative_age_label(created_at.timestamp_millis())
+}
+
+#[derive(Debug, Clone, Default)]
+struct LearningTrends {
+    cfactor_overall: Vec<u64>,
+    tokens_per_hour: Vec<u64>,
+    latency_per_hour_ms: Vec<u64>,
+    cost_per_hour_cents: Vec<u64>,
+    cfactor_latest: Option<f64>,
+}
+
+fn build_learning_trends(data: &DashboardData) -> LearningTrends {
+    let cfactor_latest = data
+        .cfactor_trend
+        .iter()
+        .rev()
+        .find(|bucket| bucket.samples > 0)
+        .map(|bucket| bucket.avg)
+        .or_else(|| data.cfactor.as_ref().map(|cfactor| cfactor.overall));
+
+    let cfactor_overall = data
+        .cfactor_trend
+        .iter()
+        .map(|bucket| (bucket.avg.clamp(0.0, 1.0) * 100.0).round() as u64)
+        .collect();
+
+    let tokens_per_hour = data
+        .efficiency_trend
+        .iter()
+        .map(|bucket| bucket.tokens_in.saturating_add(bucket.tokens_out))
+        .collect();
+    let latency_per_hour_ms = data
+        .efficiency_trend
+        .iter()
+        .map(|bucket| bucket.latency_ms_avg.round() as u64)
+        .collect();
+    let cost_per_hour_cents = data
+        .efficiency_trend
+        .iter()
+        .map(|bucket| bucket.cost_usd_cents)
+        .collect();
+
+    LearningTrends {
+        cfactor_overall,
+        tokens_per_hour,
+        latency_per_hour_ms,
+        cost_per_hour_cents,
+        cfactor_latest,
+    }
+}
+
+fn cfactor_trend_title(trends: &LearningTrends, data: &DashboardData) -> String {
+    let latest = trends
+        .cfactor_latest
+        .or_else(|| data.cfactor.as_ref().map(|cfactor| cfactor.overall));
+
+    match latest {
+        Some(score) => format!(" C-Factor / hr (%) {:>3.0} ", score * 100.0),
+        None => String::from(" C-Factor / hr (%) "),
+    }
+}
+
 fn format_mem_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -1156,5 +2060,258 @@ fn route_tier_style(tier: &str, theme: &Theme) -> Style {
         "balanced" => theme.accent(),
         "deep" => theme.warning(),
         _ => theme.muted(),
+    }
+}
+
+fn diagnosis_panel_height(diagnosis_count: usize, available_height: u16) -> u16 {
+    if available_height < 8 {
+        return 0;
+    }
+
+    let desired = (diagnosis_count as u16).saturating_add(3).clamp(6, 9);
+    desired.min(available_height.saturating_sub(1))
+}
+
+fn diagnosis_rows(diagnoses: &[DiagnosisSummary], width: u16, theme: &Theme) -> Vec<Row<'static>> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+
+    for diagnosis in diagnoses.iter().rev() {
+        if !seen.insert(diagnosis.id.clone()) {
+            continue;
+        }
+
+        let style = diagnosis_severity_style(diagnosis.severity, theme);
+        let message = if let Some(intervention) = diagnosis.intervention_taken.as_deref() {
+            format!("{} [{}]", diagnosis.detail, intervention)
+        } else {
+            diagnosis.detail.clone()
+        };
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                truncate(&diagnosis_severity_label(diagnosis.severity), 9),
+                style,
+            )),
+            Cell::from(Span::styled(
+                truncate(&diagnosis.subject, diagnosis_kind_width(width)),
+                style,
+            )),
+            Cell::from(Span::styled(
+                truncate(&message, diagnosis_message_width(width)),
+                style,
+            )),
+        ]));
+    }
+
+    rows
+}
+
+fn diagnosis_severity_label(severity: DiagnosisSeverity) -> &'static str {
+    match severity {
+        DiagnosisSeverity::Info => "info",
+        DiagnosisSeverity::Warn => "warn",
+        DiagnosisSeverity::Alert => "alert",
+    }
+}
+
+fn diagnosis_severity_style(severity: DiagnosisSeverity, theme: &Theme) -> Style {
+    match severity {
+        DiagnosisSeverity::Alert => Theme::error_style(),
+        DiagnosisSeverity::Warn => theme.warning(),
+        DiagnosisSeverity::Info => theme.info(),
+    }
+}
+
+fn diagnosis_kind_width(width: u16) -> usize {
+    if width >= 110 {
+        30
+    } else if width >= 90 {
+        26
+    } else {
+        20
+    }
+}
+
+fn diagnosis_message_width(width: u16) -> usize {
+    width.saturating_sub(diagnosis_kind_width(width) as u16 + 16) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tempfile::tempdir;
+
+    use crate::tui::dashboard::{GateFailureRow, GateSummaryRow};
+    use crate::tui::pages::PageId;
+    use crate::tui::state::TuiState;
+    use crate::tui::views::ViewState;
+
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_learning_dashboard(data: &DashboardData) -> String {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let tui_state = TuiState::default();
+        let view_state = ViewState {
+            sub_tab: 6,
+            ..ViewState::default()
+        };
+        let theme = Theme::dark();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                assert_eq!(PageId::Learning.group(), "efficiency");
+                render(frame, area, data, &tui_state, &view_state, &theme);
+            })
+            .unwrap();
+        rendered_text(&terminal)
+    }
+
+    fn render_gate_dashboard(data: &DashboardData) -> String {
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let tui_state = TuiState::default();
+        let view_state = ViewState {
+            sub_tab: 3,
+            ..ViewState::default()
+        };
+        let theme = Theme::dark();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render(frame, area, data, &tui_state, &view_state, &theme);
+            })
+            .unwrap();
+        rendered_text(&terminal)
+    }
+
+    fn concluded_experiment_store() -> DashboardData {
+        let dir = tempdir().unwrap();
+        let learn_dir = dir.path().join(".roko").join("learn");
+        std::fs::create_dir_all(&learn_dir).unwrap();
+        std::fs::write(
+            learn_dir.join("experiments.json"),
+            r#"{
+  "experiments": {
+    "exp-02": {
+      "experiment_id": "exp-02",
+      "section_name": "prompt-style",
+      "role": "implementer",
+      "variants": [
+        {
+          "id": "claude-opus",
+          "name": "Claude Opus",
+          "section_name": "prompt-style",
+          "content": "use concise directives",
+          "slug": "claude-opus-4-6",
+          "active": true
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "section_name": "prompt-style",
+          "content": "use broad directives",
+          "slug": "gpt-5.4",
+          "active": true
+        }
+      ],
+        "stats": {
+        "claude-opus": {
+          "trials": 142,
+          "successes": 136,
+          "total_cost_usd": 0.0,
+          "total_tokens": 0,
+          "total_duration_ms": 0,
+          "pass_rate": 0.0,
+          "avg_cost_usd": 0.0,
+          "cost_per_success": 0.0,
+          "avg_duration_ms": 0.0
+        },
+        "gpt-5.4": {
+          "trials": 88,
+          "successes": 8,
+          "total_cost_usd": 0.0,
+          "total_tokens": 0,
+          "total_duration_ms": 0,
+          "pass_rate": 0.0,
+          "avg_cost_usd": 0.0,
+          "cost_per_success": 0.0,
+          "avg_duration_ms": 0.0
+        }
+      },
+      "status": "Concluded",
+      "winner_id": "claude-opus",
+      "min_trials_per_variant": 5,
+      "min_effect_size": 0.1,
+      "created_at": "2026-04-16T00:00:00Z"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        DashboardData::load_best_effort(dir.path())
+    }
+
+    #[test]
+    fn learning_tab_renders_concluded_experiments_panel() {
+        let data = concluded_experiment_store();
+        let rendered = render_learning_dashboard(&data);
+
+        assert!(rendered.contains("Concluded Experiments"));
+        assert!(rendered.contains("exp-02"));
+        assert!(rendered.contains("claude-opus"));
+        assert!(rendered.contains("n=142"));
+        assert!(rendered.contains("95% CI"));
+        assert!(rendered.contains("████"));
+    }
+
+    #[test]
+    fn gate_tab_renders_verdicts_and_recent_failures() {
+        let data = concluded_experiment_store();
+        let mut data = data;
+        data.gate_results_page.gate_rows = vec![
+            GateSummaryRow {
+                gate_name: "compile".to_string(),
+                total_runs: 12,
+                pass_rate: 0.83,
+                avg_duration_ms: 1825.0,
+                last_run: "2m ago".to_string(),
+            },
+            GateSummaryRow {
+                gate_name: "test".to_string(),
+                total_runs: 8,
+                pass_rate: 0.50,
+                avg_duration_ms: 2450.0,
+                last_run: "5m ago".to_string(),
+            },
+        ];
+        data.gate_results_page.failure_rows = vec![GateFailureRow {
+            created_at_ms: 1_700_000_000_000,
+            task_id: "task-17".to_string(),
+            gate_name: "test".to_string(),
+            error_excerpt: "assertion failed".to_string(),
+        }];
+
+        let rendered = render_gate_dashboard(&data);
+
+        assert!(rendered.contains("Verdicts"));
+        assert!(rendered.contains("Gate Summary"));
+        assert!(rendered.contains("Recent Failures"));
+        assert!(rendered.contains("compile"));
+        assert!(rendered.contains("assertion failed"));
     }
 }

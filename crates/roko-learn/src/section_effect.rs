@@ -136,6 +136,11 @@ impl SectionEffectivenessRegistry {
     }
 
     /// Save the registry to `path` using an atomic rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registry cannot be serialized or if the
+    /// snapshot cannot be written to disk.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let snapshot = self.snapshot();
         let json = serde_json::to_string_pretty(&snapshot)

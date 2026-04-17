@@ -42,10 +42,11 @@
 //! ```
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -63,6 +64,69 @@ pub struct Envelope<E> {
     pub ts_millis: u64,
     /// The wrapped event payload.
     pub payload: E,
+}
+
+/// A compact summary of a gate verdict included in plan-revision events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateVerdictSummary {
+    /// The gate name that produced the verdict.
+    pub gate: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Optional free-form details from the gate or logger.
+    pub details: Option<String>,
+}
+
+/// Why a plan revision event was emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanRevisionReason {
+    /// The task exhausted its gate-failure retry budget.
+    GateFailureLimit {
+        /// The number of gate attempts that were allowed before revision.
+        attempts: u32,
+    },
+}
+
+/// Why a PRD publish event was emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishOrigin {
+    /// The publish happened through the CLI.
+    Cli,
+    /// The publish happened through HTTP.
+    Http,
+    /// The publish happened while importing content.
+    Import,
+}
+
+/// Events shared across the runtime event bus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RokoEvent {
+    /// Emitted when repeated gate failures should trigger a plan revision.
+    PlanRevision {
+        /// The plan being revised.
+        plan_id: String,
+        /// The task that exhausted its retries.
+        task_id: String,
+        /// The reason the plan revision was requested.
+        reason: PlanRevisionReason,
+        /// Summaries of the failing gate verdicts.
+        failing_verdicts: Vec<GateVerdictSummary>,
+        /// Tail of the task log captured at the point of failure.
+        log_tail: String,
+        /// UTC timestamp for when the revision event was emitted.
+        issued_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Emitted when a PRD is promoted into the published state.
+    PrdPublished {
+        /// The published PRD slug.
+        slug: String,
+        /// The published PRD path.
+        path: std::path::PathBuf,
+        /// UTC timestamp for when the PRD was published.
+        published_at: chrono::DateTime<chrono::Utc>,
+        /// Where the publish originated.
+        origin: PublishOrigin,
+    },
 }
 
 /// Shared interior state backing both [`EventBus`] and [`BusSender`].
@@ -188,6 +252,13 @@ impl<E: Clone + Send + Sync + 'static> BusSender<E> {
     }
 }
 
+static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
+
+/// Returns the process-local shared runtime event bus for `RokoEvent`.
+pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+    ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn current_ts_millis() -> u64 {
     SystemTime::now()
@@ -248,7 +319,10 @@ mod tests {
 
         bus.emit(TestEvent::Ping(42));
 
-        let env = rx.recv().await.unwrap();
+        let env = rx
+            .recv()
+            .await
+            .expect("invariant: subscriber should receive the emitted live event");
         assert_eq!(env.payload, TestEvent::Ping(42));
         assert_eq!(env.seq, 0);
         assert!(env.ts_millis > 0);
@@ -263,5 +337,92 @@ mod tests {
         let all = bus.replay_from(0);
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].payload, TestEvent::Pong("from sender".into()));
+    }
+
+    #[test]
+    fn plan_revision_event_round_trips_through_json() {
+        let event = RokoEvent::PlanRevision {
+            plan_id: "plan-123".into(),
+            task_id: "task-abc".into(),
+            reason: PlanRevisionReason::GateFailureLimit { attempts: 3 },
+            failing_verdicts: vec![
+                GateVerdictSummary {
+                    gate: "compile".into(),
+                    passed: false,
+                    details: Some("E0277".into()),
+                },
+                GateVerdictSummary {
+                    gate: "clippy".into(),
+                    passed: false,
+                    details: None,
+                },
+            ],
+            log_tail: "line 1\nline 2".into(),
+            issued_at: chrono::Utc::now(),
+        };
+
+        let json = serde_json::to_string(&event)
+            .expect("invariant: plan revision event should serialize to JSON");
+        let decoded: RokoEvent = serde_json::from_str(&json)
+            .expect("invariant: serialized plan revision event should deserialize");
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn plan_revision_event_flows_through_bus() {
+        let bus = EventBus::new(8);
+        let event = RokoEvent::PlanRevision {
+            plan_id: "plan-123".into(),
+            task_id: "task-abc".into(),
+            reason: PlanRevisionReason::GateFailureLimit { attempts: 3 },
+            failing_verdicts: vec![GateVerdictSummary {
+                gate: "test".into(),
+                passed: false,
+                details: Some("tests failed".into()),
+            }],
+            log_tail: "tail".into(),
+            issued_at: chrono::Utc::now(),
+        };
+
+        bus.emit(event.clone());
+
+        let replayed = bus.replay_from(0);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, event);
+    }
+
+    #[test]
+    fn prd_published_event_round_trips_through_json() {
+        let event = RokoEvent::PrdPublished {
+            slug: "demo".into(),
+            path: std::path::PathBuf::from(".roko/prd/published/demo.md"),
+            published_at: chrono::Utc::now(),
+            origin: PublishOrigin::Cli,
+        };
+
+        let json = serde_json::to_string(&event)
+            .expect("invariant: PRD published event should serialize to JSON");
+        let decoded: RokoEvent = serde_json::from_str(&json)
+            .expect("invariant: serialized PRD published event should deserialize");
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn prd_published_event_flows_through_bus() {
+        let bus = EventBus::new(8);
+        let event = RokoEvent::PrdPublished {
+            slug: "demo".into(),
+            path: std::path::PathBuf::from(".roko/prd/published/demo.md"),
+            published_at: chrono::Utc::now(),
+            origin: PublishOrigin::Http,
+        };
+
+        bus.emit(event.clone());
+
+        let replayed = bus.replay_from(0);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, event);
     }
 }

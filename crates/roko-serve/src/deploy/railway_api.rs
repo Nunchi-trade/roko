@@ -518,6 +518,13 @@ impl RailwayApiBackend {
     }
 
     /// Deploy the Roko app, wait for healthcheck success, and return the live deployment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Railway project or service resolution fails, the
+    /// service instance cannot be configured, variables or volumes cannot be
+    /// updated, deployment triggering fails, or the deployment never reaches a
+    /// healthy ready state.
     pub async fn deploy_roko_app(&self, spec: &RailwayDeploySpec) -> Result<Deployment> {
         let project = self
             .ensure_project_context(

@@ -20,6 +20,7 @@ roko-std = { path = "../roko-std" }
 roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }
 roko-agent = { path = "../roko-agent" }
+roko-agent-server = { path = "../roko-agent-server" }
 roko-gate = { path = "../roko-gate" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-learn = { path = "../roko-learn" }
@@ -60,8 +61,11 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy = "0.15"
 dirs = "6"
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-full = "0.3"
 
 [dev-dependencies]
+agent-relay = { path = "../../apps/agent-relay" }
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

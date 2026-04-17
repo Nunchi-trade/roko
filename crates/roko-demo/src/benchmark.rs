@@ -33,6 +33,11 @@ pub struct CFactorReport {
 }
 
 /// Prepare the chain for a C-factor benchmark.
+///
+/// # Errors
+///
+/// Returns an error if scenario preparation fails, including missing deployed
+/// contract addresses, prompt loading, or participant setup.
 pub async fn prepare_benchmark(
     ctx: Arc<ChainCtx>,
     runtime_dir: PathBuf,
@@ -43,6 +48,11 @@ pub async fn prepare_benchmark(
 }
 
 /// Run the benchmark and optionally reuse a prepared scenario state.
+///
+/// # Errors
+///
+/// Returns an error if either benchmark round fails or if the underlying
+/// scenario helpers report an error.
 pub async fn run_benchmark(
     prepared: &PreparedYieldRouting,
     llm: Arc<dyn LlmProvider>,

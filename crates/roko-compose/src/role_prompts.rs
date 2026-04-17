@@ -22,6 +22,7 @@ use crate::templates::strategist::StrategistTemplate;
 use crate::templates::task_impl::TaskImplTemplate;
 use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context, Scorer};
+use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
 use tracing::warn;
@@ -166,6 +167,8 @@ pub struct RoleSystemPromptSpec {
     pub extra_anti_patterns: Vec<String>,
     /// Optional relevant skills injected into the system prompt.
     pub relevant_skills: Vec<Skill>,
+    /// Optional relevant playbooks injected into the system prompt.
+    pub relevant_playbooks: Vec<Playbook>,
     /// Optional pheromone / active-signal chunks injected into the prompt.
     pub pheromones: Vec<ContextChunk>,
     /// Optional affect state used to tune tone and focus.
@@ -186,6 +189,7 @@ impl RoleSystemPromptSpec {
             extra_conventions: None,
             extra_anti_patterns: Vec::new(),
             relevant_skills: Vec::new(),
+            relevant_playbooks: Vec::new(),
             pheromones: Vec::new(),
             affect_state: None,
             cache_markers: false,
@@ -217,6 +221,13 @@ impl RoleSystemPromptSpec {
     #[must_use]
     pub fn with_relevant_skills(mut self, skills: &[Skill]) -> Self {
         self.relevant_skills = skills.to_vec();
+        self
+    }
+
+    /// Attach relevant playbooks to the prompt.
+    #[must_use]
+    pub fn with_relevant_playbooks(mut self, playbooks: &[Playbook]) -> Self {
+        self.relevant_playbooks = playbooks.to_vec();
         self
     }
 
@@ -281,6 +292,9 @@ impl RoleSystemPromptSpec {
         }
         if !self.relevant_skills.is_empty() {
             builder = builder.with_skills(&self.relevant_skills);
+        }
+        if !self.relevant_playbooks.is_empty() {
+            builder = builder.with_playbooks(&self.relevant_playbooks);
         }
         if !self.pheromones.is_empty() {
             builder = builder.with_pheromones(&self.pheromones);
@@ -347,7 +361,6 @@ impl RoleSystemPromptSpec {
     }
 
     /// Compose the section form under a token budget using an explicit scorer/context pair.
-    #[must_use]
     pub fn compose_with_budget_and_scorer(
         &self,
         token_budget: usize,
@@ -521,6 +534,7 @@ pub fn role_identity_for(role: AgentRole) -> String {
 mod tests {
     use super::*;
     use crate::prompt::SectionPriority;
+    use roko_learn::playbook::Playbook;
     use roko_learn::skill_library::Skill;
     use std::collections::HashSet;
 
@@ -604,6 +618,20 @@ mod tests {
 
         assert!(prompt.contains("## Relevant Techniques"));
         assert!(prompt.contains("Use fixup commits"));
+    }
+
+    #[test]
+    fn relevant_playbooks_are_forwarded_into_the_prompt_builder() {
+        let ctx = TaskContext::new("Implement REST API");
+        let mut playbook = Playbook::new("pb-implement-api", "Implement REST API");
+        playbook.name = "implement-api".to_string();
+
+        let prompt = RoleSystemPromptSpec::new(AgentRole::Implementer, ctx, "Read,Edit")
+            .with_relevant_playbooks(&[playbook])
+            .build();
+
+        assert!(prompt.contains("## Relevant Techniques"));
+        assert!(prompt.contains("Playbook: implement-api (pb-implement-api)"));
     }
 
     #[test]

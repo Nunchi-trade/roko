@@ -1,5 +1,7 @@
 //! JSON-RPC server surface for `mirage-rs`.
 
+// TODO(UX42-followup): remove `missing_panics_doc` once the remaining
+// RPC handlers have accurate panic documentation.
 #![allow(
     clippy::default_trait_access,
     clippy::missing_panics_doc,
@@ -13,7 +15,7 @@ use std::{
     convert::Infallible,
     net::{SocketAddr, ToSocketAddrs},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -25,10 +27,11 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{Request, Response, StatusCode},
+    http::{HeaderMap, Request, Response, StatusCode, Uri},
     response::IntoResponse,
-    routing::{delete, get},
+    routing::{any, delete, get},
 };
+use futures_util::{SinkExt, StreamExt};
 use jsonrpsee::{
     RpcModule,
     core::{RegisterMethodError, SubscriptionError},
@@ -37,7 +40,18 @@ use jsonrpsee::{
 };
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use parking_lot::RwLock;
+use reqwest::header::{
+    CONNECTION, CONTENT_LENGTH, HOST, HeaderName as ReqwestHeaderName, TRANSFER_ENCODING, UPGRADE,
+};
 use tokio::sync::broadcast;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Message as TungsteniteMessage,
+        client::IntoClientRequest,
+        protocol::{CloseFrame as TungsteniteCloseFrame, frame::coding::CloseCode},
+    },
+};
 use tower::Service;
 use tower_http::cors::CorsLayer;
 
@@ -86,7 +100,189 @@ struct StagedErc20Mint {
     storage_writes: Vec<(U256, U256)>,
 }
 
+#[derive(Clone, Debug)]
+struct RelayProxyState {
+    upstream_http: String,
+    client: reqwest::Client,
+}
+
+impl RelayProxyState {
+    fn from_env() -> Self {
+        let upstream_http = std::env::var("ROKO_AGENT_RELAY_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:9011".to_owned());
+        Self {
+            upstream_http,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn upstream_http_url(&self, uri: &Uri) -> String {
+        format!("{}{}", self.upstream_http.trim_end_matches('/'), uri)
+    }
+
+    fn upstream_ws_url(&self, uri: &Uri) -> String {
+        let base = if let Some(rest) = self.upstream_http.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.upstream_http.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            format!("ws://{}", self.upstream_http.trim_start_matches('/'))
+        };
+        format!("{}{}", base.trim_end_matches('/'), uri)
+    }
+}
+
+const RELAY_PROXY_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// Canonical ERC-8004 Identity Registry address used by the Ethereum-fork demo path.
+pub const ERC8004_IDENTITY_REGISTRY: Address =
+    alloy_primitives::address!("0x8004A818BFB912233c491871b3d84c89A494BD9e");
+/// Canonical ERC-8004 Reputation Registry address used by the Ethereum-fork demo path.
+pub const ERC8004_REPUTATION_REGISTRY: Address =
+    alloy_primitives::address!("0x8004A818BFB912233c491871b3d84c89A494Bd9F");
+/// Canonical ERC-8004 Validation Registry address used by the Ethereum-fork demo path.
+pub const ERC8004_VALIDATION_REGISTRY: Address =
+    alloy_primitives::address!("0x8004a818bfb912233c491871B3D84C89A494Bda0");
+/// Mirage-local alias for the identity registry documented in the Korai chain emulation docs.
+pub const MIRAGE_IDENTITY_REGISTRY_ALIAS: Address =
+    alloy_primitives::address!("0x000000000000000000000000000000000000A100");
+/// Mirage-local alias for the reputation registry documented in the Korai chain emulation docs.
+pub const MIRAGE_REPUTATION_REGISTRY_ALIAS: Address =
+    alloy_primitives::address!("0x000000000000000000000000000000000000A200");
+/// Mirage-local alias for the validation registry documented in the Korai chain emulation docs.
+pub const MIRAGE_VALIDATION_REGISTRY_ALIAS: Address =
+    alloy_primitives::address!("0x000000000000000000000000000000000000A300");
+
+static ERC8004_IDENTITY_RUNTIME: LazyLock<Bytecode> = LazyLock::new(|| {
+    decode_boot_bytecode(
+        "erc8004_identity",
+        "608060405234801561000f575f5ffd5b50600436106101cd575f3560e01c8063656afdee11610102578063b88d4fde116100a0578063d19c7f5f1161006f578063d19c7f5f14610579578063e0af096214610595578063e8853111146105c5578063fb3551ff146105e1576101cd565b8063b88d4fde146104da578063c5e32694146104f6578063c87b56dd14610514578063cb22f5fd14610544576101cd565b80639f5679f4116100dc5780639f5679f41461043d5780639f8a13d714610472578063a10d7de6146104a2578063a22cb465146104be576101cd565b8063656afdee146103c157806370a08231146103dd578063891df6711461040d576101cd565b8063292763341161016f5780633defb962116101495780633defb9621461033b57806342842e0e146103455780634f062c5a146103615780636352211e14610391576101cd565b806329276334146102e757806332232ada1461030357806332a9744e1461031f576101cd565b80631a04943d116101ab5780631a04943d1461024d578063210ff9bb1461027d57806323b872dd1461029b57806324638f59146102b7576101cd565b8063047b6e4a146101d1578063095ea7b314610201578063142a7de41461021d575b5f5ffd5b6101eb60048036038101906101e69190611903565b610611565b6040516101f8919061195b565b60405180910390f35b61021b600480360381019061021691906119ce565b610659565b005b61023760048036038101906102329190611a3f565b61068b565b6040516102449190611ac5565b60405180910390f35b61026760048036038101906102629190611b14565b61073a565b604051610274919061195b565b60405180910390f35b610285610780565b6040516102929190611ac5565b60405180910390f35b6102b560048036038101906102b09190611b52565b61078c565b005b6102d160048036038101906102cc9190611c03565b6107be565b6040516102de9190611ac5565b60405180910390f35b61030160048036038101906102fc9190611c99565b6108a4565b005b61031d60048036038101906103189190611c99565b61098e565b005b61033960048036038101906103349190611903565b610a78565b005b610343610b4a565b005b61035f600480360381019061035a9190611b52565b610c4d565b005b61037b60048036038101906103769190611cd7565b610c7f565b6040516103889190611d11565b60405180910390f35b6103ab60048036038101906103a69190611cd7565b610ca8565b6040516103b89190611d39565b60405180910390f35b6103db60048036038101906103d69190611d52565b610ce1565b005b6103f760048036038101906103f29190611daf565b610dc1565b6040516104049190611ac5565b60405180910390f35b61042760048036038101906104229190611cd7565b610e19565b6040516104349190611d39565b60405180910390f35b61045760048036038101906104529190611cd7565b610e5d565b60405161046996959493929190611e68565b60405180910390f35b61048c60048036038101906104879190611daf565b610f53565b604051610499919061195b565b60405180910390f35b6104bc60048036038101906104b79190611ece565b610ff7565b005b6104d860048036038101906104d39190611f43565b6110e6565b005b6104f460048036038101906104ef9190611fd6565b611118565b005b6104fe61114a565b60405161050b919061205a565b60405180910390f35b61052e60048036038101906105299190611cd7565b61114f565b60405161053b9190612073565b60405180910390f35b61055e60048036038101906105599190611cd7565b6111f3565b60405161057096959493929190611e68565b60405180910390f35b610593600480360381019061058e9190612093565b6112d0565b005b6105af60048036038101906105aa9190611daf565b6112df565b6040516105bc9190611ac5565b60405180910390f35b6105df60048036038101906105da9190611c99565b6112f4565b005b6105fb60048036038101906105f69190611daf565b611302565b60405161060891906121cb565b60405180910390f35b5f8167ffffffffffffffff168260025f8681526020019081526020015f205f015f9054906101000a900467ffffffffffffffff161667ffffffffffffffff1614905092915050565b6040517fa4420a9500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f5f60035f8873ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f205414610702576040517f3a81d6fc00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b61072f86866003878760405180602001604052805f81525060405180602001604052805f8152508b61146f565b905095945050505050565b5f5f8260ff166001901b60025f8681526020019081526020015f205f015f9054906101000a900467ffffffffffffffff161667ffffffffffffffff161415905092915050565b5f600180549050905090565b6040517fa4420a9500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f5f60035f8973ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f205414610835576040517f3a81d6fc00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b610898878787875f5f1b88888080601f0160208091040260200160405190810160405280939291908181526020018383808284375f81840152601f19601f8201169050808301925050505050505060405180602001604052805f8152508b61146f565b90509695505050505050565b3373ffffffffffffffffffffffffffffffffffffffff1660045f8481526020019081526020015f205f9054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1614610939576040517ff147d5a800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b8060025f8481526020019081526020015f2060020181905550817fc447b20909591b186acb2180f62bcdd7bad2a6954d7f2e31a7ce76f26728e5288260405161098291906121eb565b60405180910390a25050565b3373ffffffffffffffffffffffffffffffffffffffff1660045f8481526020019081526020015f205f9054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1614610a23576040517ff147d5a800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b8060025f8481526020019081526020015f2060010181905550817f3de9408b25e68ef7822dd91f8f63676f98a2b1779bf3314fa3987c23b0ff3de582604051610a6c91906121eb565b60405180910390a25050565b3373ffffffffffffffffffffffffffffffffffffffff1660045f8481526020019081526020015f205f9054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1614610b0d576040517ff147d5a800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b8060025f8481526020019081526020015f205f015f6101000a81548167ffffffffffffffff021916908367ffffffffffffffff1602179055505050565b5f5f5f3373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f2090508060020160109054906101000a900460ff16610bd1576040517faba4733900000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b438160020160086101000a81548167ffffffffffffffff021916908367ffffffffffffffff1602179055503373ffffffffffffffffffffffffffffffffffffffff167f290c71822ca7388f807d9ce3f9f023fe93b8000082daa4de512bf7ff84244dd243604051610c42919061205a565b60405180910390a250565b6040517fa4420a9500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f60025f8381526020019081526020015f205f0160089054906101000a900460ff169050919050565b5f60045f8381526020019081526020015f205f9054906101000a900473ffffffffffffffffffffffffffffffffffffffff169050919050565b5f60035f3373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f205414610d57576040517f3a81d6fc00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b610dbb335f6003845f5f1b60405180602001604052805f81525089898080601f0160208091040260200160405190810160405280939291908181526020018383808284375f81840152601f19601f820116905080830192505050505050508861146f565b50505050565b5f5f60035f8473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f205414610e0d576001610e0f565b5f5b60ff169050919050565b5f60018281548110610e2e57610e2d612204565b5b905f5260205f20015f9054906101000a900473ffffffffffffffffffffffffffffffffffffffff169050919050565b5f5f5f5f5f60605f60025f8981526020019081526020015f209050805f015f9054906101000a900467ffffffffffffffff16815f0160089054906101000a900460ff1682600101548360020154846003015485600401808054610ebf9061225e565b80601f0160208091040260200160405190810160405280929190818152602001828054610eeb9061225e565b8015610f365780601f10610f0d57610100808354040283529160200191610f36565b820191905f5260205f20905b815481529060010190602001808311610f1957829003601f168201915b505050505090509650965096509650965096505091939550919395565b5f5f5f5f8473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f2090508060020160109054906101000a900460ff16610fb2575f915050610ff2565b60c867ffffffffffffffff168160020160089054906101000a900467ffffffffffffffff1667ffffffffffffffff1643610fec91906122bb565b11159150505b919050565b5f5f5f3373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f2090508060020160109054906101000a900460ff1661107e576040517faba4733900000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b8282825f0191826110909291906124c5565b503373ffffffffffffffffffffffffffffffffffffffff167fcd962bc3c4bc4adc020e5dd8dd8e26ed49da802778485194f204bf85efd64c3d84846040516110d99291906125cc565b60405180910390a2505050565b6040517fa4420a9500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b6040517fa4420a9500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b60c881565b606060025f8381526020019081526020015f2060040180546111709061225e565b80601f016020809104026020016040519081016040528092919081815260200182805461119c9061225e565b80156111e75780601f106111be576101008083540402835291602001916111e7565b820191905f5260205f20905b8154815290600101906020018083116111ca57829003601f168201915b50505050509050919050565b6002602052805f5260405f205f91509050805f015f9054906101000a900467ffffffffffffffff1690805f0160089054906101000a900460ff169080600101549080600201549080600301549080600401805461124f9061225e565b80601f016020809104026020016040519081016040528092919081815260200182805461127b9061225e565b80156112c65780601f1061129d576101008083540402835291602001916112c6565b820191905f5260205f20905b8154815290600101906020018083116112a957829003601f168201915b5050505050905086565b6112da83836108a4565b505050565b6003602052805f5260405f205f915090505481565b6112fe828261098e565b5050565b61130a61184a565b5f5f8373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f206040518060a00160405290815f820180546113609061225e565b80601f016020809104026020016040519081016040528092919081815260200182805461138c9061225e565b80156113d75780601f106113ae576101008083540402835291602001916113d7565b820191905f5260205f20905b8154815290600101906020018083116113ba57829003601f168201915b5050505050815260200160018201548152602001600282015f9054906101000a900467ffffffffffffffff1667ffffffffffffffff1667ffffffffffffffff1681526020016002820160089054906101000a900467ffffffffffffffff1667ffffffffffffffff1667ffffffffffffffff1681526020016002820160109054906101000a900460ff1615151515815250509050919050565b5f60038760ff1611156114ae576040517fe142361700000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b60055f8154809291906114c0906125ee565b9190505590506040518060c001604052808967ffffffffffffffff1681526020018860ff1681526020018781526020018681526020014381526020018581525060025f8381526020019081526020015f205f820151815f015f6101000a81548167ffffffffffffffff021916908367ffffffffffffffff1602179055506020820151815f0160086101000a81548160ff021916908360ff16021790555060408201518160010155606082015181600201556080820151816003015560a08201518160040190816115909190612635565b509050508060035f8b73ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f20819055508860045f8381526020019081526020015f205f6101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055506040518060a001604052808481526020018381526020014367ffffffffffffffff1681526020014367ffffffffffffffff168152602001600115158152505f5f8b73ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020015f205f820151815f0190816116b29190612635565b50602082015181600101556040820151816002015f6101000a81548167ffffffffffffffff021916908367ffffffffffffffff16021790555060608201518160020160086101000a81548167ffffffffffffffff021916908367ffffffffffffffff16021790555060808201518160020160106101000a81548160ff021916908315150217905550905050600189908060018154018082558091505060019003905f5260205f20015f9091909190916101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055508873ffffffffffffffffffffffffffffffffffffffff167f44beda3d7d201bb876725c6a34391cbd97bb0b57b82c15cd856080b7e152b81b83856040516117e5929190612704565b60405180910390a2808973ffffffffffffffffffffffffffffffffffffffff167f4db3a5617370d36215eeb4e9d647271113f60967114f0ba75dfc914e83a6a50e898b604051611836929190612732565b60405180910390a398975050505050505050565b6040518060a00160405280606081526020015f81526020015f67ffffffffffffffff1681526020015f67ffffffffffffffff1681526020015f151581525090565b5f5ffd5b5f5ffd5b5f819050919050565b6118a581611893565b81146118af575f5ffd5b50565b5f813590506118c08161189c565b92915050565b5f67ffffffffffffffff82169050919050565b6118e2816118c6565b81146118ec575f5ffd5b50565b5f813590506118fd816118d9565b92915050565b5f5f604083850312156119195761191861188b565b5b5f611926858286016118b2565b9250506020611937858286016118ef565b9150509250929050565b5f8115159050919050565b61195581611941565b82525050565b5f60208201905061196e5f83018461194c565b92915050565b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f61199d82611974565b9050919050565b6119ad81611993565b81146119b7575f5ffd5b50565b5f813590506119c8816119a4565b92915050565b5f5f604083850312156119e4576119e361188b565b5b5f6119f1858286016119ba565b9250506020611a02858286016118b2565b9150509250929050565b5f819050919050565b611a1e81611a0c565b8114611a28575f5ffd5b50565b5f81359050611a3981611a15565b92915050565b5f5f5f5f5f60a08688031215611a5857611a5761188b565b5b5f611a65888289016119ba565b9550506020611a76888289016118ef565b9450506040611a8788828901611a2b565b9350506060611a9888828901611a2b565b9250506080611aa9888289016118ef565b9150509295509295909350565b611abf81611893565b82525050565b5f602082019050611ad85f830184611ab6565b92915050565b5f60ff82169050919050565b611af381611ade565b8114611afd575f5ffd5b50565b5f81359050611b0e81611aea565b92915050565b5f5f60408385031215611b2a57611b2961188b565b5b5f611b37858286016118b2565b9250506020611b4885828601611b00565b9150509250929050565b5f5f5f60608486031215611b6957611b6861188b565b5b5f611b76868287016119ba565b9350506020611b87868287016119ba565b9250506040611b98868287016118b2565b9150509250925092565b5f5ffd5b5f5ffd5b5f5ffd5b5f5f83601f840112611bc357611bc2611ba2565b5b8235905067ffffffffffffffff811115611be057611bdf611ba6565b5b602083019150836001820283011115611bfc57611bfb611baa565b5b9250929050565b5f5f5f5f5f5f60a08789031215611c1d57611c1c61188b565b5b5f611c2a89828a016119ba565b9650506020611c3b89828a016118ef565b9550506040611c4c89828a01611b00565b9450506060611c5d89828a01611a2b565b935050608087013567ffffffffffffffff811115611c7e57611c7d61188f565b5b611c8a89828a01611bae565b92509250509295509295509295565b5f5f60408385031215611caf57611cae61188b565b5b5f611cbc858286016118b2565b9250506020611ccd85828601611a2b565b9150509250929050565b5f60208284031215611cec57611ceb61188b565b5b5f611cf9848285016118b2565b91505092915050565b611d0b81611ade565b82525050565b5f602082019050611d245f830184611d02565b92915050565b611d3381611993565b82525050565b5f602082019050611d4c5f830184611d2a565b92915050565b5f5f5f60408486031215611d6957611d6861188b565b5b5f84013567ffffffffffffffff811115611d8657611d8561188f565b5b611d9286828701611bae565b93509350506020611da586828701611a2b565b9150509250925092565b5f60208284031215611dc457611dc361188b565b5b5f611dd1848285016119ba565b91505092915050565b611de3816118c6565b82525050565b611df281611a0c565b82525050565b5f81519050919050565b5f82825260208201905092915050565b8281835e5f83830152505050565b5f601f19601f8301169050919050565b5f611e3a82611df8565b611e448185611e02565b9350611e54818560208601611e12565b611e5d81611e20565b840191505092915050565b5f60c082019050611e7b5f830189611dda565b611e886020830188611d02565b611e956040830187611de9565b611ea26060830186611de9565b611eaf6080830185611ab6565b81810360a0830152611ec18184611e30565b9050979650505050505050565b5f5f60208385031215611ee457611ee361188b565b5b5f83013567ffffffffffffffff811115611f0157611f0061188f565b5b611f0d85828601611bae565b92509250509250929050565b611f2281611941565b8114611f2c575f5ffd5b50565b5f81359050611f3d81611f19565b92915050565b5f5f60408385031215611f5957611f5861188b565b5b5f611f66858286016119ba565b9250506020611f7785828601611f2f565b9150509250929050565b5f5f83601f840112611f9657611f95611ba2565b5b8235905067ffffffffffffffff811115611fb357611fb2611ba6565b5b602083019150836001820283011115611fcf57611fce611baa565b5b9250929050565b5f5f5f5f5f60808688031215611fef57611fee61188b565b5b5f611ffc888289016119ba565b955050602061200d888289016119ba565b945050604061201e888289016118b2565b935050606086013567ffffffffffffffff81111561203f5761203e61188f565b5b61204b88828901611f81565b92509250509295509295909350565b5f60208201905061206d5f830184611dda565b92915050565b5f6020820190508181035f83015261208b8184611e30565b905092915050565b5f5f5f606084860312156120aa576120a961188b565b5b5f6120b7868287016118b2565b93505060206120c886828701611a2b565b92505060406120d9868287016118ef565b9150509250925092565b5f82825260208201905092915050565b5f6120fd82611df8565b61210781856120e3565b9350612117818560208601611e12565b61212081611e20565b840191505092915050565b61213481611a0c565b82525050565b612143816118c6565b82525050565b61215281611941565b82525050565b5f60a083015f8301518482035f86015261217282826120f3565b9150506020830151612187602086018261212b565b50604083015161219a604086018261213a565b5060608301516121ad606086018261213a565b5060808301516121c06080860182612149565b508091505092915050565b5f6020820190508181035f8301526121e38184612158565b905092915050565b5f6020820190506121fe5f830184611de9565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52603260045260245ffd5b7f4e487b71000000000000000000000000000000000000000000000000000000005f52602260045260245ffd5b5f600282049050600182168061227557607f821691505b60208210810361228857612287612231565b5b50919050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f6122c582611893565b91506122d083611893565b92508282039050818111156122e8576122e761228e565b5b92915050565b5f82905092915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52604160045260245ffd5b5f819050815f5260205f209050919050565b5f6020601f8301049050919050565b5f82821b905092915050565b5f600883026123817fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff82612346565b61238b8683612346565b95508019841693508086168417925050509392505050565b5f819050919050565b5f6123c66123c16123bc84611893565b6123a3565b611893565b9050919050565b5f819050919050565b6123df836123ac565b6123f36123eb826123cd565b848454612352565b825550505050565b5f5f905090565b61240a6123fb565b6124158184846123d6565b505050565b5b818110156124385761242d5f82612402565b60018101905061241b565b5050565b601f82111561247d5761244e81612325565b61245784612337565b81016020851015612466578190505b61247a61247285612337565b83018261241a565b50505b505050565b5f82821c905092915050565b5f61249d5f1984600802612482565b1980831691505092915050565b5f6124b5838361248e565b9150826002028217905092915050565b6124cf83836122ee565b67ffffffffffffffff8111156124e8576124e76122f8565b5b6124f2825461225e565b6124fd82828561243c565b5f601f83116001811461252a575f8415612518578287013590505b61252285826124aa565b865550612589565b601f19841661253886612325565b5f5b8281101561255f5784890135825560018201915060208501945060208101905061253a565b8683101561257c5784890135612578601f89168261248e565b8355505b6001600288020188555050505b50505050505050565b828183375f83830152505050565b5f6125ab8385611e02565b93506125b8838584612592565b6125c183611e20565b840190509392505050565b5f6020820190508181035f8301526125e58184866125a0565b90509392505050565b5f6125f882611893565b91507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff820361262a5761262961228e565b5b600182019050919050565b61263e82611df8565b67ffffffffffffffff811115612657576126566122f8565b5b612661825461225e565b61266c82828561243c565b5f60209050601f83116001811461269d575f841561268b578287015190505b61269585826124aa565b8655506126fc565b601f1984166126ab86612325565b5f5b828110156126d2578489015182556001820191506020850194506020810190506126ad565b868310156126ef57848901516126eb601f89168261248e565b8355505b6001600288020188555050505b505050505050565b5f6040820190506127175f830185611de9565b81810360208301526127298184611e30565b90509392505050565b5f6040820190506127455f830185611d02565b6127526020830184611dda565b939250505056fea2646970667358221220a176a4391e901a1bf400f218918f6ddc3e47d1b5fe44f782f00149b4bd3a623d64736f6c634300081e0033",
+    )
+});
+static ERC8004_UNSUPPORTED_RUNTIME: LazyLock<Bytecode> = LazyLock::new(|| {
+    decode_boot_bytecode(
+        "erc8004_unsupported",
+        "608060405236610044576040517f08c379a000000000000000000000000000000000000000000000000000000000815260040161003b906100ff565b60405180910390fd5b6040517f08c379a0000000000000000000000000000000000000000000000000000000008152600401610076906100ff565b60405180910390fd5b5f82825260208201905092915050565b7f455243383030342072656769737472792073757266616365206e6f7420696d705f8201527f6c656d656e74656420696e206d69726167650000000000000000000000000000602082015250565b5f6100e960328361007f565b91506100f48261008f565b604082019050919050565b5f6020820190508181035f830152610116816100dd565b905091905056fea26469706673582212201e20d0afe57c74ffb9bbabb2d6d987d479801da8c0bf1eb0e79d66a3ffe197c164736f6c634300081e0033",
+    )
+});
+static ERC8004_IDENTITY_ALIAS_RUNTIME: LazyLock<Bytecode> = LazyLock::new(|| {
+    decode_boot_bytecode(
+        "erc8004_identity_alias",
+        "608060405236603b575f738004a818bfb912233c491871b3d84c89a494bd9e90505f5f5f5f34855af13d5f5f3e805f81146037573d5ff35b3d5ffd5b5f738004a818bfb912233c491871b3d84c89a494bd9e9050365f5f375f5f365f34855af13d5f5f3e805f8114606e573d5ff35b3d5ffdfea264697066735822122024c32fbaf18837eadc409ee0f2ae757f22c1230a73ebf9d9f21a2f60b8b88ec264736f6c634300081e0033",
+    )
+});
+static ERC8004_REPUTATION_ALIAS_RUNTIME: LazyLock<Bytecode> = LazyLock::new(|| {
+    decode_boot_bytecode(
+        "erc8004_reputation_alias",
+        "608060405236603b575f738004a818bfb912233c491871b3d84c89a494bd9f90505f5f5f5f34855af13d5f5f3e805f81146037573d5ff35b3d5ffd5b5f738004a818bfb912233c491871b3d84c89a494bd9f9050365f5f375f5f365f34855af13d5f5f3e805f8114606e573d5ff35b3d5ffdfea26469706673582212207e468f4bbcfcc4e8a9960f74b9998c0475976b5d12184ce3e8a871c1094160b564736f6c634300081e0033",
+    )
+});
+static ERC8004_VALIDATION_ALIAS_RUNTIME: LazyLock<Bytecode> = LazyLock::new(|| {
+    decode_boot_bytecode(
+        "erc8004_validation_alias",
+        "608060405236603b575f738004a818bfb912233c491871b3d84c89a494bda090505f5f5f5f34855af13d5f5f3e805f81146037573d5ff35b3d5ffd5b5f738004a818bfb912233c491871b3d84c89a494bda09050365f5f375f5f365f34855af13d5f5f3e805f8114606e573d5ff35b3d5ffdfea2646970667358221220f39e6f28720437fe3780b7568e658aa14d4382a48ff7e452ab29b3bf546ae20564736f6c634300081e0033",
+    )
+});
+
+fn decode_boot_bytecode(label: &'static str, hex_bytes: &'static str) -> Bytecode {
+    Bytecode::new_raw(Bytes::from(
+        hex::decode(hex_bytes).unwrap_or_else(|error| panic!("invalid {label} bytecode: {error}")),
+    ))
+}
+
+fn boot_contract_specs() -> [(&'static str, Address, &'static LazyLock<Bytecode>); 6] {
+    [
+        (
+            "erc8004_identity_registry",
+            ERC8004_IDENTITY_REGISTRY,
+            &ERC8004_IDENTITY_RUNTIME,
+        ),
+        (
+            "erc8004_reputation_registry",
+            ERC8004_REPUTATION_REGISTRY,
+            &ERC8004_UNSUPPORTED_RUNTIME,
+        ),
+        (
+            "erc8004_validation_registry",
+            ERC8004_VALIDATION_REGISTRY,
+            &ERC8004_UNSUPPORTED_RUNTIME,
+        ),
+        (
+            "mirage_identity_registry_alias",
+            MIRAGE_IDENTITY_REGISTRY_ALIAS,
+            &ERC8004_IDENTITY_ALIAS_RUNTIME,
+        ),
+        (
+            "mirage_reputation_registry_alias",
+            MIRAGE_REPUTATION_REGISTRY_ALIAS,
+            &ERC8004_REPUTATION_ALIAS_RUNTIME,
+        ),
+        (
+            "mirage_validation_registry_alias",
+            MIRAGE_VALIDATION_REGISTRY_ALIAS,
+            &ERC8004_VALIDATION_ALIAS_RUNTIME,
+        ),
+    ]
+}
+
+fn account_has_code(fork: &mut ForkState, address: Address) -> Result<bool> {
+    let Some(info) = fork.db.basic(address)? else {
+        return Ok(false);
+    };
+    if let Some(code) = info.code {
+        return Ok(!code.bytecode().is_empty());
+    }
+    Ok(info.code_hash != Bytecode::default().hash_slow())
+}
+
+/// Returns the boot-time ERC-8004 address book exposed by mirage.
+#[must_use]
+pub fn erc8004_boot_address_book() -> serde_json::Value {
+    serde_json::json!({
+        "identity": {
+            "canonical": format!("{ERC8004_IDENTITY_REGISTRY:#x}"),
+            "localAlias": format!("{MIRAGE_IDENTITY_REGISTRY_ALIAS:#x}"),
+        },
+        "reputation": {
+            "canonical": format!("{ERC8004_REPUTATION_REGISTRY:#x}"),
+            "localAlias": format!("{MIRAGE_REPUTATION_REGISTRY_ALIAS:#x}"),
+        },
+        "validation": {
+            "canonical": format!("{ERC8004_VALIDATION_REGISTRY:#x}"),
+            "localAlias": format!("{MIRAGE_VALIDATION_REGISTRY_ALIAS:#x}"),
+        }
+    })
+}
+
+/// Ensures the ERC-8004 registry surface exists in local fork state when absent upstream.
+///
+/// Installs the canonical mainnet/demo addresses plus mirage-local aliases documented by the
+/// Korai chain emulation surface. The Rust `chain::AgentRegistry` remains runtime-only metadata;
+/// the durable identity source is this on-chain contract surface.
+///
+/// # Errors
+///
+/// Returns account-read errors if the existing fork state cannot be inspected.
+pub fn ensure_erc8004_boot_contracts(fork: &mut ForkState) -> Result<Vec<&'static str>> {
+    let mut installed = Vec::new();
+    for (label, address, bytecode) in boot_contract_specs() {
+        if account_has_code(fork, address)? {
+            continue;
+        }
+        fork.db.set_code(address, (*bytecode).clone());
+        fork.db.set_nonce(address, 1);
+        installed.push(label);
+    }
+    Ok(installed)
+}
+
 /// Starts a JSON-RPC server on the provided address.
+///
+/// # Errors
+///
+/// Returns address-resolution errors, [`MirageError::Unsupported`] if the RPC
+/// module cannot be built, or [`MirageError::BindFailed`] if the listener
+/// cannot bind the chosen port.
 ///
 /// When the `chain` feature is enabled, use [`start_rpc_server_with_chain`] to
 /// attach an [`crate::chain_rpc::ChainContext`] that exposes `chain_*` methods.
@@ -116,6 +312,12 @@ pub async fn start_rpc_server(
 }
 
 /// Starts a JSON-RPC server with an attached chain substrate.
+///
+/// # Errors
+///
+/// Returns address-resolution errors, [`MirageError::Unsupported`] if the RPC
+/// module cannot be built, or [`MirageError::BindFailed`] if the listener
+/// cannot bind the chosen port.
 ///
 /// Registers all `chain_*` methods described in [`crate::chain_rpc`] on top
 /// of the standard `eth_*` / `mirage_*` surface.
@@ -189,6 +391,264 @@ async fn dashboard_cache_control(
     response
 }
 
+fn build_relay_proxy_router() -> Router<()> {
+    build_relay_proxy_router_with_state(RelayProxyState::from_env())
+}
+
+/// Builds the same-origin `/relay/*` proxy router against an explicit relay upstream.
+///
+/// This exists so integration tests can exercise the real mirage relay-forwarding
+/// handlers without relying on process-global environment mutation.
+#[doc(hidden)]
+#[must_use]
+pub fn build_relay_proxy_router_for_tests(upstream_http: String) -> Router<()> {
+    build_relay_proxy_router_with_state(RelayProxyState {
+        upstream_http,
+        client: reqwest::Client::new(),
+    })
+}
+
+fn build_relay_proxy_router_with_state(state: RelayProxyState) -> Router<()> {
+    Router::new()
+        .route("/relay/agents/ws", get(relay_proxy_ws))
+        .route("/relay/events/ws", get(relay_proxy_ws))
+        .route("/relay", any(relay_proxy_http))
+        .route("/relay/{*path}", any(relay_proxy_http))
+        .with_state(state)
+}
+
+async fn relay_proxy_http(
+    State(state): State<RelayProxyState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let upstream_url = state.upstream_http_url(&parts.uri);
+    let body = match axum::body::to_bytes(body, RELAY_PROXY_BODY_LIMIT).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read relay proxy request body");
+            return relay_proxy_error(StatusCode::BAD_REQUEST, "invalid relay request body");
+        }
+    };
+
+    let mut upstream = state.client.request(parts.method.clone(), upstream_url);
+    for (name, value) in &parts.headers {
+        if is_hop_by_hop_header(name) {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+
+    let upstream_response = match upstream.body(body).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "relay proxy upstream request failed");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay upstream unavailable");
+        }
+    };
+
+    let status = upstream_response.status();
+    let headers = upstream_response.headers().clone();
+    let body = match upstream_response.bytes().await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read relay proxy upstream response body");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay upstream response invalid");
+        }
+    };
+
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    for (name, value) in &headers {
+        if is_hop_by_hop_header(name) {
+            continue;
+        }
+        response.headers_mut().append(name, value.clone());
+    }
+    response
+}
+
+async fn relay_proxy_ws(
+    State(state): State<RelayProxyState>,
+    ws: WebSocketUpgrade,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let upstream_url = state.upstream_ws_url(&uri);
+    let mut upstream_request = match upstream_url.clone().into_client_request() {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%error, "failed to construct relay websocket request");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket request invalid");
+        }
+    };
+    if let Some(protocol) = headers.get(axum::http::header::SEC_WEBSOCKET_PROTOCOL) {
+        upstream_request
+            .headers_mut()
+            .insert(axum::http::header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+    }
+
+    let upstream_socket = match connect_async(upstream_request).await {
+        Ok((socket, _response)) => socket,
+        Err(error) => {
+            tracing::warn!(%error, %upstream_url, "failed to connect relay websocket upstream");
+            return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket unavailable");
+        }
+    };
+
+    ws.on_upgrade(move |socket| bridge_relay_websocket(socket, upstream_socket))
+        .into_response()
+}
+
+async fn bridge_relay_websocket(
+    downstream: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    let (mut downstream_tx, mut downstream_rx) = downstream.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+
+    loop {
+        tokio::select! {
+            message = downstream_rx.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        if forward_downstream_ws(message, &mut upstream_tx).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "relay proxy downstream websocket receive failed");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            message = upstream_rx.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        if forward_upstream_ws(message, &mut downstream_tx).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "relay proxy upstream websocket receive failed");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+async fn forward_downstream_ws(
+    message: Message,
+    upstream_tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TungsteniteMessage,
+    >,
+) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error> {
+    match message {
+        Message::Text(text) => {
+            upstream_tx
+                .send(TungsteniteMessage::Text(text.to_string().into()))
+                .await
+        }
+        Message::Binary(binary) => upstream_tx.send(TungsteniteMessage::Binary(binary)).await,
+        Message::Ping(payload) => upstream_tx.send(TungsteniteMessage::Ping(payload)).await,
+        Message::Pong(payload) => upstream_tx.send(TungsteniteMessage::Pong(payload)).await,
+        Message::Close(frame) => {
+            let frame = frame.map(|frame| TungsteniteCloseFrame {
+                code: axum_close_code_to_tungstenite(frame.code),
+                reason: frame.reason.to_string().into(),
+            });
+            upstream_tx.send(TungsteniteMessage::Close(frame)).await
+        }
+    }
+}
+
+async fn forward_upstream_ws(
+    message: TungsteniteMessage,
+    downstream_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> std::result::Result<(), axum::Error> {
+    match message {
+        TungsteniteMessage::Text(text) => {
+            downstream_tx
+                .send(Message::Text(text.to_string().into()))
+                .await
+        }
+        TungsteniteMessage::Binary(binary) => downstream_tx.send(Message::Binary(binary)).await,
+        TungsteniteMessage::Ping(payload) => downstream_tx.send(Message::Ping(payload)).await,
+        TungsteniteMessage::Pong(payload) => downstream_tx.send(Message::Pong(payload)).await,
+        TungsteniteMessage::Close(frame) => {
+            let frame = frame.map(|frame| axum::extract::ws::CloseFrame {
+                code: tungstenite_close_code_to_axum(frame.code),
+                reason: frame.reason.to_string().into(),
+            });
+            downstream_tx.send(Message::Close(frame)).await
+        }
+        TungsteniteMessage::Frame(_) => Ok(()),
+    }
+}
+
+fn relay_proxy_error(status: StatusCode, message: &'static str) -> Response<Body> {
+    let mut response = Response::new(Body::from(message));
+    *response.status_mut() = status;
+    response
+}
+
+fn is_hop_by_hop_header(name: &ReqwestHeaderName) -> bool {
+    matches!(
+        name,
+        &CONNECTION | &CONTENT_LENGTH | &HOST | &TRANSFER_ENCODING | &UPGRADE
+    )
+}
+
+fn axum_close_code_to_tungstenite(code: u16) -> CloseCode {
+    match code {
+        1000 => CloseCode::Normal,
+        1001 => CloseCode::Away,
+        1002 => CloseCode::Protocol,
+        1003 => CloseCode::Unsupported,
+        1005 => CloseCode::Status,
+        1006 => CloseCode::Abnormal,
+        1007 => CloseCode::Invalid,
+        1008 => CloseCode::Policy,
+        1009 => CloseCode::Size,
+        1010 => CloseCode::Extension,
+        1011 => CloseCode::Error,
+        1012 => CloseCode::Restart,
+        1013 => CloseCode::Again,
+        1015 => CloseCode::Tls,
+        value => CloseCode::Library(value),
+    }
+}
+
+fn tungstenite_close_code_to_axum(code: CloseCode) -> u16 {
+    match code {
+        CloseCode::Normal => 1000,
+        CloseCode::Away => 1001,
+        CloseCode::Protocol => 1002,
+        CloseCode::Unsupported => 1003,
+        CloseCode::Status => 1005,
+        CloseCode::Abnormal => 1006,
+        CloseCode::Invalid => 1007,
+        CloseCode::Policy => 1008,
+        CloseCode::Size => 1009,
+        CloseCode::Extension => 1010,
+        CloseCode::Error => 1011,
+        CloseCode::Restart => 1012,
+        CloseCode::Again => 1013,
+        CloseCode::Tls => 1015,
+        CloseCode::Reserved(value) | CloseCode::Iana(value) | CloseCode::Library(value) => value,
+        CloseCode::Bad(value) => value,
+    }
+}
+
 async fn finish_start_rpc_server(
     address: SocketAddr,
     module: RpcModule<ServerContext>,
@@ -225,6 +685,7 @@ async fn finish_start_rpc_server(
         .route("/events/{stream_id}", get(event_ws_handler))
         .route("/events/{stream_id}", delete(unsubscribe_event_handler))
         .with_state(local_state);
+    app = app.merge(build_relay_proxy_router());
     if let Some(api) = api_router {
         app = app.nest("/api", api);
     }
@@ -281,6 +742,10 @@ async fn finish_start_rpc_server(
 }
 
 /// Starts an ephemeral server for tests.
+///
+/// # Errors
+///
+/// Returns the same errors as [`start_rpc_server`].
 pub async fn spawn_rpc_server_for_tests() -> Result<(String, ServerHandle)> {
     let upstream = Arc::new(UpstreamRpc::mock(1));
     let db = HybridDB::new(upstream, 64, Duration::from_secs(12), NonZeroUsize::MIN, 1);
@@ -1003,7 +1468,7 @@ fn register_chain_subscription_methods(
 
 /// Full fork reset for `hardhat_reset` / `anvil_reset`: dirty store + read cache + watch lists,
 /// local tx indexes, and impersonation set (mirrors Hardhat/Anvil semantics).
-fn apply_hardhat_anvil_reset(state: &mut MirageState) {
+fn apply_hardhat_anvil_reset(state: &mut MirageState) -> Result<()> {
     state.fork.db.reset();
     state.fork.db.pinned_block = None;
     state.fork.db.dirty.demote_protocols_to_slot_only = false;
@@ -1013,6 +1478,7 @@ fn apply_hardhat_anvil_reset(state: &mut MirageState) {
     state.fork.blocks_by_hash.clear();
     state.fork.blocks_by_number.clear();
     state.last_committed_state_diff = None;
+    Ok(())
 }
 
 /// Parses `hardhat_mine` / `anvil_mine` first parameter: hex quantity string or JSON integer.
@@ -1101,7 +1567,21 @@ fn register_state_mutation_methods(
     }
     for method in ["hardhat_setNonce", "anvil_setNonce"] {
         module.register_async_method(method, |params, ctx, _| async move {
-            let (address, nonce): (Address, u64) = params.parse().map_err(invalid_params)?;
+            let (address, raw): (Address, serde_json::Value) =
+                params.parse().map_err(invalid_params)?;
+            let nonce = match &raw {
+                serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| {
+                    invalid_params(MirageError::InvalidParams("nonce out of u64 range".into()))
+                })?,
+                serde_json::Value::String(s) => {
+                    parse_hex_quantity(s).map_err(invalid_params)?
+                }
+                _ => {
+                    return Err(invalid_params(MirageError::InvalidParams(
+                        "nonce must be a number or hex string".into(),
+                    )));
+                }
+            };
             with_state_write(&ctx.state, |state| {
                 state.fork.db.set_nonce(address, nonce);
             })
@@ -1157,7 +1637,10 @@ fn register_state_mutation_methods(
     }
     for method in ["hardhat_reset", "anvil_reset"] {
         module.register_async_method(method, |_params, ctx, _| async move {
-            with_state_write(&ctx.state, apply_hardhat_anvil_reset).await;
+            with_state_write(&ctx.state, |state| {
+                apply_hardhat_anvil_reset(state).map_err(rpc_error)
+            })
+            .await?;
             Ok::<_, ErrorObjectOwned>(true)
         })?;
     }
@@ -1279,6 +1762,16 @@ fn register_snapshot_methods(
             state.fork.timestamp = timestamp;
         })
         .await;
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+    // Anvil/Hardhat mining-mode stubs. mirage-rs automines every block so
+    // these are accepted for compatibility but are effectively no-ops.
+    module.register_async_method("evm_setAutomine", |params, _ctx, _| async move {
+        let (_enabled,): (bool,) = params.parse().map_err(invalid_params)?;
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+    module.register_async_method("evm_setIntervalMining", |params, _ctx, _| async move {
+        let (_interval_ms,): (u64,) = params.parse().map_err(invalid_params)?;
         Ok::<_, ErrorObjectOwned>(true)
     })?;
     Ok(())
@@ -2118,6 +2611,10 @@ pub fn from_sqrt_price_x96(sqrt_price_x96: U256) -> f64 {
 
 /// Spawns a Mirage test child process for integration tests.
 ///
+/// # Errors
+///
+/// Returns any error from [`crate::spawn_mirage_test_instance`].
+///
 /// Reads the listening port from the `MIRAGE_TEST_PORT` environment variable when set to a valid
 /// `u16`. If unset or unparsable, binds **18552**.
 pub async fn mirage_instance_or_env() -> crate::Result<crate::MirageTestInstance> {
@@ -2716,16 +3213,17 @@ mod tests {
     use tokio::{sync::broadcast, time::sleep};
 
     use super::{
-        RlpValue, ServerContext, apply_pressure_action, build_rpc_module,
-        commit_transaction_request, decode_signed_raw_transaction, from_sqrt_price_x96,
+        ERC8004_IDENTITY_REGISTRY, MIRAGE_IDENTITY_REGISTRY_ALIAS, RlpValue, ServerContext,
+        apply_pressure_action, build_rpc_module, commit_transaction_request,
+        decode_signed_raw_transaction, ensure_erc8004_boot_contracts, from_sqrt_price_x96,
         parse_hex_quantity, rlp_encode, rlp_from_u64, rpc_error, run_fork_snapshot,
         stage_erc20_mint, to_sqrt_price_x96,
     };
     use crate::{
         MirageError, TransactionRequest,
         fork::{
-            ClassificationConfig, DiffClassifier, ForkState, HybridDB, MirageFork, WatchEntry,
-            WatchSource, with_state_write,
+            ClassificationConfig, DiffClassifier, EvmExecutor, ForkState, HybridDB, MirageFork,
+            WatchEntry, WatchSource, with_state_write,
         },
         integration::MIRAGE_WATCH_CONTRACT_METHOD,
         provider::UpstreamRpc,
@@ -2754,6 +3252,48 @@ mod tests {
         let module = build_rpc_module(context.clone())
             .unwrap_or_else(|error| panic!("build rpc module: {error}"));
         (module, context)
+    }
+
+    fn abi_word_from_u64(value: u64) -> [u8; 32] {
+        let mut word = [0_u8; 32];
+        word[24..].copy_from_slice(&value.to_be_bytes());
+        word
+    }
+
+    fn abi_word_from_address(address: Address) -> [u8; 32] {
+        let mut word = [0_u8; 32];
+        word[12..].copy_from_slice(address.as_slice());
+        word
+    }
+
+    fn selector(signature: &str) -> [u8; 4] {
+        let hash = keccak256(signature.as_bytes());
+        let mut selector = [0_u8; 4];
+        selector.copy_from_slice(&hash[..4]);
+        selector
+    }
+
+    fn encode_register_passport(owner: Address, capability_bitmask: u64) -> Bytes {
+        let mut data = Vec::with_capacity(4 + (32 * 5));
+        data.extend_from_slice(&selector(
+            "registerPassport(address,uint64,bytes32,bytes32,uint64)",
+        ));
+        data.extend_from_slice(&abi_word_from_address(owner));
+        data.extend_from_slice(&abi_word_from_u64(capability_bitmask));
+        data.extend_from_slice(B256::ZERO.as_slice());
+        data.extend_from_slice(B256::ZERO.as_slice());
+        data.extend_from_slice(&abi_word_from_u64(0));
+        Bytes::from(data)
+    }
+
+    fn encode_registered_count() -> Bytes {
+        Bytes::from(selector("registeredCount()").to_vec())
+    }
+
+    fn decode_u256(output: &Bytes) -> U256 {
+        let mut word = [0_u8; 32];
+        word.copy_from_slice(&output[..32]);
+        U256::from_be_bytes(word)
     }
 
     #[test]
@@ -2941,6 +3481,81 @@ mod tests {
                 "{method} should be registered"
             );
         }
+    }
+
+    #[test]
+    fn ensure_erc8004_boot_contracts_seeds_all_boot_addresses() {
+        let upstream = Arc::new(UpstreamRpc::mock(1));
+        let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
+        let mut fork = ForkState::new(db, 0, 1);
+
+        let installed = ensure_erc8004_boot_contracts(&mut fork).expect("seed erc8004");
+        assert_eq!(installed.len(), 6);
+
+        for address in [
+            super::ERC8004_IDENTITY_REGISTRY,
+            super::ERC8004_REPUTATION_REGISTRY,
+            super::ERC8004_VALIDATION_REGISTRY,
+            super::MIRAGE_IDENTITY_REGISTRY_ALIAS,
+            super::MIRAGE_REPUTATION_REGISTRY_ALIAS,
+            super::MIRAGE_VALIDATION_REGISTRY_ALIAS,
+        ] {
+            assert!(
+                super::account_has_code(&mut fork, address).expect("contract code check"),
+                "{address} should carry boot code"
+            );
+            let nonce = fork
+                .db
+                .basic(address)
+                .expect("account read")
+                .expect("boot account")
+                .nonce;
+            assert_eq!(nonce, 1, "{address} should look deployed");
+        }
+    }
+
+    #[test]
+    fn local_identity_alias_writes_into_canonical_registry() {
+        let upstream = Arc::new(UpstreamRpc::mock(1));
+        let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
+        let mut fork = ForkState::new(db, 0, 1);
+        ensure_erc8004_boot_contracts(&mut fork).expect("seed erc8004");
+
+        let caller = address!("0x6100000000000000000000000000000000000007");
+        fork.db.set_balance(caller, U256::from(10_u128.pow(18)));
+
+        let (register_result, _diff) = EvmExecutor::transact(
+            &mut fork,
+            caller,
+            Some(MIRAGE_IDENTITY_REGISTRY_ALIAS),
+            encode_register_passport(caller, 0b101),
+            U256::ZERO,
+            500_000,
+        )
+        .expect("register via local alias");
+        assert!(register_result.success, "alias registration should succeed");
+
+        let canonical_count = EvmExecutor::call(
+            &fork,
+            caller,
+            ERC8004_IDENTITY_REGISTRY,
+            encode_registered_count(),
+            U256::ZERO,
+            100_000,
+        )
+        .expect("canonical registeredCount");
+        assert_eq!(decode_u256(&canonical_count.output), U256::from(1_u64));
+
+        let alias_count = EvmExecutor::call(
+            &fork,
+            caller,
+            MIRAGE_IDENTITY_REGISTRY_ALIAS,
+            encode_registered_count(),
+            U256::ZERO,
+            100_000,
+        )
+        .expect("alias registeredCount");
+        assert_eq!(decode_u256(&alias_count.output), U256::from(1_u64));
     }
 
     #[test]
@@ -3283,6 +3898,11 @@ mod tests {
                 state.fork.impersonated_accounts.is_empty(),
                 "reset clears impersonation set"
             );
+            assert!(
+                super::account_has_code(&mut state.fork.clone(), super::ERC8004_IDENTITY_REGISTRY)
+                    .expect("identity code after hardhat reset"),
+                "hardhat reset should preserve ERC-8004 boot contracts"
+            );
         }
         assert_eq!(
             module
@@ -3332,6 +3952,11 @@ mod tests {
                 .unwrap_or_else(|error| panic!("balance after anvil reset: {error}")),
             receiver_baseline_balance
         );
+        let identity_code_after_anvil_reset: String = module
+            .call("eth_getCode", (super::ERC8004_IDENTITY_REGISTRY, "latest"))
+            .await
+            .unwrap_or_else(|error| panic!("identity code after anvil reset: {error}"));
+        assert_ne!(identity_code_after_anvil_reset, "0x");
     }
 
     #[test]

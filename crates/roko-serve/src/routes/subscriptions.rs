@@ -13,6 +13,7 @@ use roko_core::config::schema::SubscriptionConfig;
 
 use crate::dispatch::Subscription;
 use crate::error::ApiError;
+use crate::extract::{RequestPayload, ValidJson};
 use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -74,9 +75,9 @@ async fn list_subscriptions(
 /// `POST /api/subscriptions` — create a new subscription file and register it.
 async fn create_subscription(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<SubscriptionConfig>,
+    ValidJson(body): ValidJson<SubscriptionConfig>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let config = validate_subscription(body)?;
+    let config = body;
     let id = next_subscription_id(&state, &config);
     let path = subscription_path(&state, &id);
 
@@ -96,9 +97,9 @@ async fn create_subscription(
 async fn update_subscription(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<SubscriptionUpdateRequest>,
+    ValidJson(body): ValidJson<SubscriptionUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let config = validate_subscription(body.0)?;
+    let config = body.0;
     let path = subscription_path(&state, &id);
 
     if state.subscriptions.get_by_id(&id).is_none() {
@@ -186,7 +187,7 @@ async fn set_subscription_enabled(
     ))
 }
 
-fn validate_subscription(config: SubscriptionConfig) -> Result<SubscriptionConfig, ApiError> {
+fn validate_subscription(config: &SubscriptionConfig) -> Result<(), ApiError> {
     if config.template.trim().is_empty() {
         return Err(ApiError::bad_request(
             "subscription template must not be empty",
@@ -197,7 +198,19 @@ fn validate_subscription(config: SubscriptionConfig) -> Result<SubscriptionConfi
             "subscription trigger must not be empty",
         ));
     }
-    Ok(config)
+    Ok(())
+}
+
+impl RequestPayload for SubscriptionConfig {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_subscription(self)
+    }
+}
+
+impl RequestPayload for SubscriptionUpdateRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_subscription(&self.0)
+    }
 }
 
 fn subscription_status(enabled: bool) -> &'static str {

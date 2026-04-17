@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-codex-session-1",
+  "session_id": "sess-codex-session",
+  "thread_id": "thread-codex-session",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Codex session turn one."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 7,
+    "completion_tokens": 3,
+    "total_tokens": 10,
+    "prompt_tokens_details": {
+      "cached_tokens": 1
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-cursor-happy",
+  "session_id": "sess-cursor-happy",
+  "thread_id": "thread-cursor-happy",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Cursor happy path."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 6,
+    "completion_tokens": 4,
+    "total_tokens": 10,
+    "prompt_tokens_details": {
+      "cached_tokens": 1
+    }
+  }
+}

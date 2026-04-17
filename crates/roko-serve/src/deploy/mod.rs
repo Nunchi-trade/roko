@@ -143,6 +143,11 @@ pub trait DeployBackend: Send + Sync {
 }
 
 /// Factory function: create a deploy backend from config.
+///
+/// # Errors
+///
+/// Returns an error if `backend_name` is unknown, or if the `railway-api`
+/// backend is selected without the required API token.
 pub fn create_backend(
     backend_name: &str,
     api_token: Option<&str>,

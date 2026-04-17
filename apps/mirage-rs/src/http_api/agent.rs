@@ -174,6 +174,11 @@ pub struct RegisterAgentRequest {
 }
 
 /// `POST /api/agents` — register a new agent.
+///
+/// # Errors
+///
+/// Returns `400` if the id or role is empty, or `409` if the agent already
+/// exists.
 pub async fn register_agent(
     State(state): State<ApiState>,
     Json(req): Json<RegisterAgentRequest>,
@@ -238,6 +243,10 @@ pub struct HeartbeatRequest {
 }
 
 /// `POST /api/agents/:id/heartbeat` — send a heartbeat for an agent.
+///
+/// # Errors
+///
+/// Returns `404` if the agent does not exist.
 pub async fn agent_heartbeat(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -250,7 +259,7 @@ pub async fn agent_heartbeat(
     let ok = chain.agent_registry.heartbeat(&id, current_block, now);
     if !ok {
         return Err(ApiError {
-            error: format!("agent '{}' not found", id),
+            error: format!("agent '{id}' not found"),
             code: 404,
         });
     }
@@ -283,6 +292,10 @@ pub async fn agent_heartbeat(
 // ---------------------------------------------------------------------------
 
 /// `POST /api/agents/:id/trace` — record a cognitive trace for an agent.
+///
+/// # Errors
+///
+/// Returns `404` if the agent does not exist.
 pub async fn post_agent_trace(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -295,7 +308,7 @@ pub async fn post_agent_trace(
     let ok = chain.agent_registry.add_trace(&id, trace);
     if !ok {
         return Err(ApiError {
-            error: format!("agent '{}' not found", id),
+            error: format!("agent '{id}' not found"),
             code: 404,
         });
     }

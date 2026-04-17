@@ -162,6 +162,15 @@ impl WorktreeManager {
     /// does not already exist. Rejects duplicate ids, invalid id
     /// strings (empty, containing `/`, `\`, NUL, or leading `.`), and
     /// requests that would exceed [`WorktreeConfig::max_live`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorktreeError::InvalidId`] if `id` fails validation,
+    /// [`WorktreeError::AlreadyExists`] if the id is already tracked,
+    /// [`WorktreeError::BudgetExhausted`] if the live-worktree limit would
+    /// be exceeded, [`WorktreeError::GitFailed`] if `git worktree add`
+    /// exits unsuccessfully, or [`WorktreeError::IoError`] if preparing the
+    /// worktree directory fails.
     pub async fn create(&self, id: &str, branch: &str) -> Result<WorktreeHandle, WorktreeError> {
         validate_id(id)?;
         let _ = self.clear_stale_locks();
@@ -242,6 +251,11 @@ impl WorktreeManager {
 
     /// Convenience: create a worktree using the canonical branch naming
     /// convention (`roko/plan/<plan_id>`). §15.3
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`WorktreeError`] variants as
+    /// [`WorktreeManager::create`].
     pub async fn create_for_plan(&self, plan_id: &str) -> Result<WorktreeHandle, WorktreeError> {
         let branch = format_branch_name(plan_id);
         self.create(plan_id, &branch).await
@@ -257,6 +271,13 @@ impl WorktreeManager {
     ///
     /// If the worktree is already tracked, this touches and returns it.
     /// Otherwise a new canonical plan worktree is created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorktreeError::NotFound`] if the tracked handle is
+    /// removed between the initial lookup and the final fetch, or any
+    /// [`WorktreeError`] that can be produced by
+    /// [`WorktreeManager::create_for_plan`].
     pub async fn ensure_for_plan(&self, plan_id: &str) -> Result<WorktreeHandle, WorktreeError> {
         if let Some(existing) = self.get(plan_id) {
             self.touch(plan_id);
@@ -277,6 +298,13 @@ impl WorktreeManager {
     /// tracked. The underlying git directory is removed via
     /// `git worktree remove --force` so uncommitted files are cleaned up
     /// along with the metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorktreeError::NotFound`] if the id is not tracked,
+    /// [`WorktreeError::GitFailed`] if `git worktree remove` exits
+    /// unsuccessfully, or [`WorktreeError::IoError`] if invoking `git`
+    /// fails.
     pub async fn remove(&self, id: &str) -> Result<(), WorktreeError> {
         let _ = self.clear_stale_locks();
         let handle = {
@@ -298,6 +326,12 @@ impl WorktreeManager {
     /// Snapshot of every worktree currently tracked by the manager.
     /// Does **not** consult `git worktree list` — it reports the
     /// in-memory registry only.
+    ///
+    /// # Errors
+    ///
+    /// This function is currently infallible and always returns
+    /// `Ok(...)`; the `Result` wrapper is kept for API symmetry with the
+    /// rest of the manager surface.
     pub fn list(&self) -> Result<Vec<WorktreeHandle>, WorktreeError> {
         let mut out: Vec<WorktreeHandle> = {
             let guard = self.active.lock();
@@ -329,6 +363,13 @@ impl WorktreeManager {
     /// Returns [`WorktreeHealth::Ok`] when the directory exists and the
     /// expected branch is checked out; other variants describe the
     /// specific failure mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorktreeError::NotFound`] if `id` is not tracked,
+    /// [`WorktreeError::GitFailed`] if the `git rev-parse` probe exits
+    /// unsuccessfully, or [`WorktreeError::IoError`] if the git process
+    /// cannot be spawned.
     pub async fn check_health(&self, id: &str) -> Result<WorktreeHealth, WorktreeError> {
         let handle = {
             let guard = self.active.lock();
@@ -370,6 +411,12 @@ impl WorktreeManager {
     /// Evict worktrees whose `last_active_ms` is older than
     /// [`WorktreeConfig::idle_ttl`], oldest first. Returns the ids
     /// that were successfully reclaimed (§15.6).
+    ///
+    /// # Errors
+    ///
+    /// This function is currently infallible and returns `Ok(...)` after
+    /// best-effort reclamation; individual removal failures are skipped so
+    /// one bad worktree does not block the rest.
     pub async fn reclaim_idle(&self) -> Result<Vec<String>, WorktreeError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let ttl_ms = i64::try_from(self.config.idle_ttl.as_millis()).unwrap_or(i64::MAX);
@@ -400,6 +447,11 @@ impl WorktreeManager {
     /// Remove all currently tracked worktrees.
     ///
     /// Returns the ids that were successfully removed.
+    ///
+    /// # Errors
+    ///
+    /// This function is currently infallible and returns `Ok(...)` after
+    /// best-effort removal; per-worktree failures are ignored.
     pub async fn remove_all(&self) -> Result<Vec<String>, WorktreeError> {
         let ids: Vec<String> = self.active.lock().keys().cloned().collect();
         let mut removed = Vec::new();
@@ -414,6 +466,12 @@ impl WorktreeManager {
 
     /// Remove stale `.git/index.lock` files (older than 60 seconds)
     /// across the main repo and all git-tracked worktrees (§15.7).
+    ///
+    /// # Errors
+    ///
+    /// This function is currently infallible and returns `Ok(...)` after
+    /// best-effort cleanup; unreadable or non-stale lock files are simply
+    /// skipped.
     pub fn clear_stale_locks(&self) -> Result<Vec<PathBuf>, WorktreeError> {
         let mut cleared = Vec::new();
 
@@ -445,6 +503,12 @@ impl WorktreeManager {
 
     /// Run `git worktree prune` to clean up stale git worktree metadata
     /// that no longer corresponds to on-disk directories (§15.9).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorktreeError::GitFailed`] if `git worktree prune`
+    /// exits unsuccessfully or [`WorktreeError::IoError`] if the `git`
+    /// process cannot be spawned.
     pub async fn prune(&self) -> Result<String, WorktreeError> {
         let _ = self.clear_stale_locks();
         let output = Command::new("git")
