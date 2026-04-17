@@ -31,6 +31,13 @@ falsifier-driven calibration, worldview clustering, and inspectable belief expor
 start with [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
 [`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
 and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/16-research-to-runtime.md` adds the paper-to-calibration pipeline:
+papers become Engrams, claims become falsifiable hypotheses, heuristics carry provenance,
+and replication ledgers track whether the system's own trials replicate the source. Start with
+[`21-references/25-research-to-runtime.md`](21-references/25-research-to-runtime.md),
+[`05-learning/20-research-to-runtime.md`](05-learning/20-research-to-runtime.md),
+[`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
 
 ## Start Here
 

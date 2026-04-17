@@ -20,8 +20,10 @@
 > `tmp/refinements/06-refactoring-plan.md` plus `tmp/refinements/21-from-scratch-redesigns.md`
 > for the rollout and rewrite-track sequencing. This topic covers the complete architectural
 > specification from the core data types through the layer taxonomy, cognitive cross-cuts,
-> collective intelligence metrics, crate map, cybernetic foundations, and the frontier
-> innovations that distinguish Roko from every other agent framework.
+> collective intelligence metrics, research-to-runtime provenance, crate map, cybernetic
+> foundations, and the frontier innovations that distinguish Roko from every other agent
+> framework. See also `tmp/refinements/16-research-to-runtime.md` for the paper → claim →
+> heuristic → trial → calibration pipeline and replication ledger.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -131,6 +133,7 @@ This topic connects to:
 - [Topic 04: Verification](../04-verification/INDEX.md) — Gate pipeline and verification strategies
 - [Topic 05: Learning](../05-learning/INDEX.md) — Episodes, playbooks, heuristics, falsifier-driven calibration, worldview clustering, bandits, predict/publish/correct loops
 - [Topic 06: Neuro](../06-neuro/INDEX.md) — Knowledge management cross-cut in depth, including the heuristic library and distillation pipeline
+- [Topic 21: References](../21-references/INDEX.md) — Research-to-runtime pipeline, paper/claim vocabulary, and the replication ledger
 - [Topic 09: Daimon](../09-daimon/INDEX.md) — Motivation and affect cross-cut in depth
 - [Topic 10: Dreams](../10-dreams/INDEX.md) — Offline learning cross-cut in depth
 - [Topic 08: Chain](../08-chain/INDEX.md) — Korai chain and on-chain capabilities

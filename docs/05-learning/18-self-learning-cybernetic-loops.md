@@ -2,7 +2,7 @@
 
 > **REF10 source:** `../../tmp/refinements/10-self-learning-cybernetic-loops.md`
 > **Glossary:** [Naming and Glossary](../00-architecture/01-naming-and-glossary.md)
-> **Cross-references:** [16-predictive-foraging](16-predictive-foraging.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md), [15-collective-calibration-31x](15-collective-calibration-31x.md), [17-adas-and-autocatalytic](17-adas-and-autocatalytic.md)
+> **Cross-references:** [16-predictive-foraging](16-predictive-foraging.md), [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md), [15-collective-calibration-31x](15-collective-calibration-31x.md), [17-adas-and-autocatalytic](17-adas-and-autocatalytic.md), [20-research-to-runtime](20-research-to-runtime.md), `../../tmp/refinements/16-research-to-runtime.md`
 
 ---
 
@@ -44,6 +44,8 @@ The Bus makes per-operator calibration cheap enough to do everywhere, not just i
 
 This is the missing middle between fixed heuristics and heavyweight model retraining. The calibration target is not just “did the task pass?” but “which operator was systematically overconfident, underconfident, or stale?”
 
+The same calibration machinery also applies to research-derived defaults. If a runtime threshold or routing constant comes from a paper-backed claim, it should not live as an untracked literal; it should resolve through a claim ID or `claim!`-style lookup, so the system can see when the supporting claim's replication ledger weakens and fall back to a safer default.
+
 ## CalibrationPolicy
 
 `CalibrationPolicy` is the chapter-level name for the Bus consumer that closes the loop. It subscribes to the `prediction.*` and `outcome.*` families, matches records by lineage, and maintains per-operator state:
@@ -61,6 +63,8 @@ The concrete implementation details can vary, but the structure should not:
 - outcome Pulses are ground truth from the downstream step
 - calibration updates are separate Pulses, not hidden side effects
 - the policy itself is just another Bus subscriber
+
+That same policy can ingest replication-ledger outcomes for paper-derived claims. If a claim-backed heuristic or parameter repeatedly diverges from local reality, the ledger should push the associated calibration downward instead of letting the claim keep authority by citation alone.
 
 That separation matters because it keeps learning composable. Operators do not need to know who is measuring them. They only need to publish predictions and react to calibration updates.
 
@@ -112,4 +116,5 @@ The result is a self-modeling system. Prediction error is no longer an incidenta
 - [13-8-missing-feedback-loops](13-8-missing-feedback-loops.md) catalogs the current wiring gaps that REF10 turns into Bus-backed learner loops.
 - [15-collective-calibration-31x](15-collective-calibration-31x.md) applies calibration at the collective level.
 - [17-adas-and-autocatalytic](17-adas-and-autocatalytic.md) frames the compound effect of the loops as autocatalytic growth.
+- [20-research-to-runtime](20-research-to-runtime.md) defines the paper → claim → heuristic → trial → calibration pipeline and the replication ledger that feeds back into calibration.
 - See also `tmp/refinements/10-self-learning-cybernetic-loops.md` for the full proposal.

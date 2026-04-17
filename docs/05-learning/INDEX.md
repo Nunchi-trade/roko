@@ -8,11 +8,13 @@
 
 ## Overview
 
-The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. REF10 adds a Bus-backed predict-publish-correct loop: operators publish prediction Pulses, outcomes close the loop, and `prediction.error.*` becomes a first-class calibration signal. See `../../tmp/refinements/10-self-learning-cybernetic-loops.md` for the full proposal, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the Bus/Pulse vocabulary. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
+The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. REF10 adds a Bus-backed predict-publish-correct loop: operators publish prediction Pulses, outcomes close the loop, and `prediction.error.*` becomes a first-class calibration signal. REF16 extends that loop into research ingestion: papers become Engrams, claims become testable hypotheses with falsifiers, and replication ledgers feed back into calibration instead of leaving research as folklore. See `../../tmp/refinements/10-self-learning-cybernetic-loops.md`, `../../tmp/refinements/16-research-to-runtime.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the Bus/Pulse and research vocabulary. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
 
 REF12 extends that learning story with demurrage-governed freshness for playbooks and distilled knowledge: useful rules keep earning `balance`, stale ones cool and eventually leave the hot path, and retention is driven by use rather than a fixed-age window. See also [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [04-decay-variants](../00-architecture/04-decay-variants.md), and [25-attention-as-currency](../00-architecture/25-attention-as-currency.md).
 
 REF14 adds a first-class belief layer on top of those loops: `Heuristic` Engrams with explicit preconditions, predictions, falsifier surfaces, and calibration records. Matching heuristics are injected as advisory priors, outcome Pulses update their track record, worldview clusters keep multiple coherent prior sets alive, and playbooks become the concrete downstream projection rather than the only durable learning surface. See [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md), `../../tmp/refinements/14-worldview-validation.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
+
+REF16 adds the research-to-runtime pipeline underneath those beliefs: paper Engrams carry provenance, claims carry falsifiers, trial results become replication-ledger entries, and claim-resolved runtime parameters stay auditable through a `claim!`-style lookup instead of hardcoded literals. See [20-research-to-runtime](20-research-to-runtime.md), `../../tmp/refinements/16-research-to-runtime.md`, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
 
 The subsystem is organized around four durable learning surfaces (episodes → patterns → heuristics/worldviews → playbook projections), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
 
@@ -58,6 +60,12 @@ The subsystem is organized around four durable learning surfaces (episodes → p
 | [11](11-thompson-sampling-drift.md) | **Thompson Sampling with Drift** | Bayesian bandit with discount factor γ for non-stationary environments. Beta distribution per arm, discounted updates, drift detection and arm reset. |
 | [12](12-self-improvement-frameworks.md) | **Self-Improvement Frameworks** | Survey: Reflexion (Shinn et al. 2023), ExpeL (Zhao et al. 2023), DSPy (Khattab et al. 2023), RouteLLM (ICLR 2025), FrugalGPT (arXiv:2305.05176), AutoMix (NeurIPS 2024), Karpathy autoresearch. External verifier requirement. |
 
+### Research and Evidence
+
+| # | Document | What it covers |
+|---|----------|---------------|
+| [20](20-research-to-runtime.md) | **Research-to-Runtime Pipeline** | Paper → Claim → Heuristic → Trial → Calibration, paper Engrams, falsifiers, replication ledger, and claim-resolved runtime parameters. |
+
 ### Cybernetic Architecture
 
 | # | Document | What it covers |
@@ -69,7 +77,6 @@ The subsystem is organized around four durable learning surfaces (episodes → p
 | [17](17-adas-and-autocatalytic.md) | **ADAS and Autocatalytic Thesis** | ADAS meta-architecture search (Hu et al. ICLR 2025, +14% ARC). EvoSkills (Chen et al. 2023). Autocatalytic sets (Kauffman 1993). Compound math: 0.9⁴ = 0.656. Ten flywheel mechanisms. Empirical testability via C-Factor trend. |
 | [18](18-self-learning-cybernetic-loops.md) | **Self-Learning & Cybernetic Feedback Loops** | Predict-publish-correct loop, per-operator calibration, `CalibrationPolicy`, `prediction.error.*`, and Bus-backed learners (`CascadeRouter`, `EpisodeLogger`, `ExperimentStore`). |
 | [19](19-heuristics-worldviews-and-falsifiers.md) | **Heuristics, Worldviews, and Falsifiers** | First-class `Heuristic` Engrams, explicit falsifier surfaces, `Calibrator` verdicts, worldview clustering, dissonance detection, and inspectable belief export/import. |
-
 ---
 
 ## LearningRuntime: The Integration Hub

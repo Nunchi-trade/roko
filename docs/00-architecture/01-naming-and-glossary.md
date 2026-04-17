@@ -5,7 +5,10 @@
 > storage, `Bus` for transport, `Topic` for routing, `TopicFilter` for subscription matching,
 > `Datum` for Engram-or-Pulse operator inputs, and `PulseSource` for transport-time producer
 > attribution. For the heuristic, falsifier, and worldview vocabulary used in learning
-> refinements, see also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md). When another document
+> refinements, see also [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md). For the paper,
+> claim, and replication-ledger vocabulary used in research-to-runtime work, see also
+> [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md).
+> When another document
 > disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
 > [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md),
@@ -202,6 +205,9 @@ The following names are load-bearing additions in the current architecture:
 | `BusReceiver` | Subscriber handle that yields matching Pulses in order. |
 | `ChainBus` | Bus backend that maps chain logs into `chain.*` Pulses while `ChainSubstrate` handles durable on-chain Engrams. |
 | `HDC fingerprint` | Deterministic 10,240-bit `HdcVector` carried on each Engram for native similarity, clustering, consensus, and analogy. |
+| `Paper` | Durable research source Engram that seeds claims, heuristics, and replication tracking. |
+| `Claim` | Testable hypothesis distilled from a Paper, with context, falsifier, and calibration. |
+| `Replication Ledger` | Per-claim record of paper effect, observed effect, trial count, divergence, and replication status. |
 | `Demurrage` | The durable-memory holding cost that continuously taxes idle Engram balance while reinforcement refunds useful retrieval, citation, gate survival, and surprise. |
 | `Balance` | The attention-credit carried by an Engram under demurrage; Scorer and Composer read effective weight from balance rather than a standalone freshness field. |
 | `Cold tier` | A colder Substrate tier that keeps content-addressability and lineage intact after an Engram's balance reaches the configured floor. |
@@ -255,6 +261,9 @@ prefixes without coordination.
 | `Engram` | Durable cognitive record stored in a Substrate and identified by content hash. |
 | `Balance` | Per-Engram attention credit under demurrage; when it falls to the floor, the Engram becomes a cold-tier candidate. |
 | `c-factor` | Learned scalar summarizing collective process quality for a cohort; computed from Bus plus Substrate statistics and used as a diagnostic covariate rather than a standalone objective. |
+| `Paper` | Research Engram that carries the cited source and its durable metadata. |
+| `Claim` | Structured, testable restatement of a Paper's result with a falsifier and calibration state. |
+| `Replication Ledger` | Living record that compares a paper's reported effect against observed results in this deployment. |
 | `Fleet` | Roster of agents under shared coordination or ownership. |
 | `HDC fingerprint` | Per-Engram 10,240-bit hyperdimensional vector used for `query_similar`, clustering, consensus, and analogy. |
 | `Mesh` | Agent-network layer for multi-agent communication. |
@@ -277,5 +286,6 @@ prefixes without coordination.
 - [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) for the transport fabric
 - [08-scorer-gate-router-composer-policy.md](./08-scorer-gate-router-composer-policy.md) for `Datum`-aware operator signatures
 - [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the heuristic, falsifier, and worldview refinement
+- [tmp/refinements/16-research-to-runtime.md](../../tmp/refinements/16-research-to-runtime.md) for the paper, claim, and replication ledger pipeline
 - [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md) for the canonical naming proposal
 - [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the fingerprint-first HDC proposal
