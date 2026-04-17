@@ -147,6 +147,7 @@ impl OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
+        session: &SessionState,
         stream: bool,
     ) -> Result<Vec<u8>, LlmError> {
         let RenderedTools::JsonArray(tools) = tools else {
@@ -162,6 +163,18 @@ impl OpenAiCompatLlmBackend {
         if let Some(body_obj) = body.as_object_mut() {
             if let Some(max_tokens) = self.max_tokens {
                 body_obj.insert("max_tokens".to_string(), Value::from(max_tokens));
+            }
+            if let Some(session_id) = &session.session_id {
+                body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+            }
+            if let Some(thread_id) = &session.thread_id {
+                body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+            }
+            if let Some(conversation_id) = &session.conversation_id {
+                body_obj.insert(
+                    "conversation_id".to_string(),
+                    Value::String(conversation_id.clone()),
+                );
             }
             if stream {
                 body_obj.insert("stream".to_string(), Value::Bool(true));
@@ -270,9 +283,9 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
-        _session: &SessionState,
+        session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
-        let body_bytes = self.build_body(messages, tools, false)?;
+        let body_bytes = self.build_body(messages, tools, session, false)?;
         self.rate_limiter.acquire(&self.provider_id).await;
 
         let raw = self
@@ -296,10 +309,10 @@ impl LlmBackend for OpenAiCompatLlmBackend {
         &self,
         messages: &[serde_json::Value],
         tools: &RenderedTools,
-        _session: &SessionState,
+        session: &SessionState,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
-        let body_bytes = self.build_body(messages, tools, true)?;
+        let body_bytes = self.build_body(messages, tools, session, true)?;
         self.rate_limiter.acquire(&self.provider_id).await;
 
         let mut req = reqwest::Client::new()

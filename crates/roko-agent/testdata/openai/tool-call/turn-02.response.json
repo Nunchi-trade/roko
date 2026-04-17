@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-openai-tool-2",
+  "session_id": "sess-openai-tool",
+  "thread_id": "thread-openai-tool",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "OpenAI handled the tool."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 6,
+    "total_tokens": 18,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  }
+}

@@ -146,8 +146,8 @@ impl Fixture {
         });
         let mut grouped = BTreeMap::<usize, Vec<FixtureFrame>>::new();
         for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-            let frame: FixtureFrame =
-                serde_json::from_str(line).unwrap_or_else(|err| panic!("parse fixture line: {err}"));
+            let frame: FixtureFrame = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("parse fixture line: {err}"));
             grouped.entry(frame.turn()).or_default().push(frame);
         }
 
@@ -403,10 +403,7 @@ impl MockHttp {
         if let Some(handle) = self.handle.take() {
             handle.join().expect("join mock http thread");
         }
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .clone()
+        self.requests.lock().expect("requests lock").clone()
     }
 }
 
@@ -444,7 +441,11 @@ async fn codex_ten_turn_basic_replays_cleanly() {
             .iter()
             .filter(|chunk| matches!(chunk, StreamChunk::ToolCallDelta { .. }))
             .count();
-        assert_eq!(chunk_reasoning, turn.reasoning, "turn {} reasoning", turn.turn);
+        assert_eq!(
+            chunk_reasoning, turn.reasoning,
+            "turn {} reasoning",
+            turn.turn
+        );
         assert_eq!(chunk_content, turn.content, "turn {} content", turn.turn);
         assert_eq!(
             chunk_tool_delta_count, turn.tool_call_frame_count,
@@ -528,8 +529,14 @@ async fn codex_ten_turn_basic_replays_cleanly() {
 
     assert_eq!(final_text, fixture.expected_content);
     assert_eq!(observed_reasoning, fixture.expected_reasoning);
-    assert_eq!(observed_usage.input_tokens, fixture.expected_usage.input_tokens);
-    assert_eq!(observed_usage.output_tokens, fixture.expected_usage.output_tokens);
+    assert_eq!(
+        observed_usage.input_tokens,
+        fixture.expected_usage.input_tokens
+    );
+    assert_eq!(
+        observed_usage.output_tokens,
+        fixture.expected_usage.output_tokens
+    );
     assert_eq!(
         observed_usage.cache_read_tokens,
         fixture.expected_usage.cache_read_tokens
@@ -572,9 +579,7 @@ fn echo_tool() -> ToolDef {
     )
 }
 
-async fn collect_chunks(
-    event_rx: &mut mpsc::UnboundedReceiver<StreamChunk>,
-) -> Vec<StreamChunk> {
+async fn collect_chunks(event_rx: &mut mpsc::UnboundedReceiver<StreamChunk>) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
     while let Some(chunk) = event_rx.recv().await {
         chunks.push(chunk);
@@ -604,7 +609,9 @@ fn collect_content(chunks: &[StreamChunk]) -> String {
 
 fn finish_reason(response: &BackendResponse) -> Option<&str> {
     match response {
-        BackendResponse::Json(json) => json.pointer("/choices/0/finish_reason").and_then(Value::as_str),
+        BackendResponse::Json(json) => json
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str),
         BackendResponse::StreamJson(_) | BackendResponse::Text(_) => None,
     }
 }
@@ -659,7 +666,9 @@ fn merge_session_state(current: &mut SessionState, next: SessionState) {
 fn add_usage(total: &mut Usage, usage: Usage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
-    total.cache_read_tokens = total.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(usage.cache_read_tokens);
     total.cache_create_tokens = total
         .cache_create_tokens
         .saturating_add(usage.cache_create_tokens);
@@ -739,21 +748,22 @@ fn assert_request_replay(requests: &[RecordedRequest], fixture: &Fixture) {
         for expected_tool_call in &previous_turn.tool_calls {
             assert!(messages.iter().any(|message| {
                 message["role"] == "assistant"
-                    && message["tool_calls"]
-                        .as_array()
-                        .is_some_and(|calls| {
-                            calls.iter().any(|call| {
-                                let actual_arguments = call["function"]["arguments"]
+                    && message["tool_calls"].as_array().is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            let actual_arguments =
+                                call["function"]["arguments"]
                                     .as_str()
-                                    .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok());
-                                let expected_arguments =
-                                    serde_json::from_str::<Value>(&expected_tool_call.arguments_json)
-                                        .ok();
-                                call["id"] == expected_tool_call.id
-                                    && call["function"]["name"] == expected_tool_call.name
-                                    && actual_arguments == expected_arguments
-                            })
+                                    .and_then(|arguments| {
+                                        serde_json::from_str::<Value>(arguments).ok()
+                                    });
+                            let expected_arguments =
+                                serde_json::from_str::<Value>(&expected_tool_call.arguments_json)
+                                    .ok();
+                            call["id"] == expected_tool_call.id
+                                && call["function"]["name"] == expected_tool_call.name
+                                && actual_arguments == expected_arguments
                         })
+                    })
             }));
         }
 

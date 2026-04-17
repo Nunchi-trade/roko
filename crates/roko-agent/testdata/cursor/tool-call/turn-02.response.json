@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-cursor-tool-2",
+  "session_id": "sess-cursor-tool",
+  "thread_id": "thread-cursor-tool",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Cursor handled the tool."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 11,
+    "completion_tokens": 6,
+    "total_tokens": 17,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  }
+}

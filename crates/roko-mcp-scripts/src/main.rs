@@ -331,7 +331,9 @@ fn resolve_script_path(script_roots: &[PathBuf], name: &str) -> Result<ResolvedS
         .components()
         .any(|component| matches!(component, Component::ParentDir))
     {
-        return Err(format!("script '{name}' contains parent-directory traversal"));
+        return Err(format!(
+            "script '{name}' contains parent-directory traversal"
+        ));
     }
 
     let mut candidates = Vec::new();
@@ -355,7 +357,9 @@ fn resolve_script_path(script_roots: &[PathBuf], name: &str) -> Result<ResolvedS
             .map_err(|err| format!("failed to resolve script '{}': {err}", candidate.display()))?;
 
         if !canonical_candidate.starts_with(&canonical_root) {
-            return Err(format!("script '{name}' resolves outside configured directory"));
+            return Err(format!(
+                "script '{name}' resolves outside configured directory"
+            ));
         }
 
         return Ok(ResolvedScript {

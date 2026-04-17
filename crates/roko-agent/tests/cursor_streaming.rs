@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use roko_agent::Usage;
 use roko_agent::cursor_agent::CursorAgent;
 use roko_agent::streaming::StreamChunk;
 use roko_agent::tool_loop::LlmBackend;
-use roko_agent::Usage;
 use roko_agent::translate::{OpenAiTranslator, SessionState, Translator};
 use roko_core::tool::ToolCall;
 use serde::Deserialize;
@@ -125,8 +125,8 @@ impl Fixture {
 
         let mut grouped = BTreeMap::<usize, Vec<FixtureFrame>>::new();
         for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-            let frame: FixtureFrame =
-                serde_json::from_str(line).unwrap_or_else(|err| panic!("parse fixture line: {err}"));
+            let frame: FixtureFrame = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("parse fixture line: {err}"));
             grouped.entry(frame.turn()).or_default().push(frame);
         }
 
@@ -185,10 +185,8 @@ impl Fixture {
                             function.insert("name".to_string(), Value::String(name));
                         }
                         if !arguments_delta.is_empty() {
-                            function.insert(
-                                "arguments".to_string(),
-                                Value::String(arguments_delta),
-                            );
+                            function
+                                .insert("arguments".to_string(), Value::String(arguments_delta));
                         }
                         if !function.is_empty() {
                             tool_call.insert("function".to_string(), Value::Object(function));
@@ -230,7 +228,10 @@ impl Fixture {
                 }
             }
 
-            assert_eq!(turn, 1, "cursor_streaming fixture should stay one-turn small");
+            assert_eq!(
+                turn, 1,
+                "cursor_streaming fixture should stay one-turn small"
+            );
         }
 
         response_lines.push("data: [DONE]\n\n".to_string());
@@ -285,7 +286,10 @@ impl MockHttp {
                 .expect("set read timeout");
 
             let request = read_http_request(&mut stream);
-            captured_requests.lock().expect("requests lock").push(request);
+            captured_requests
+                .lock()
+                .expect("requests lock")
+                .push(request);
 
             write!(
                 stream,
@@ -305,7 +309,9 @@ impl MockHttp {
                         .write_all(line[split_at..].as_bytes())
                         .expect("write trailing response line");
                 } else {
-                    stream.write_all(line.as_bytes()).expect("write response line");
+                    stream
+                        .write_all(line.as_bytes())
+                        .expect("write response line");
                 }
                 stream.flush().expect("flush response line");
                 if line.contains("\"reasoning_content\"") {
@@ -455,27 +461,47 @@ async fn cursor_streaming_basic_replays_cleanly() {
 
     assert_eq!(collect_reasoning(&chunks), fixture.reasoning);
     assert_eq!(collect_content(&chunks), fixture.content);
-    assert!(chunks
-        .iter()
-        .any(|chunk| matches!(chunk, StreamChunk::ToolCallDelta { .. })));
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| matches!(chunk, StreamChunk::ToolCallDelta { .. }))
+    );
     assert!(chunks.iter().any(|chunk| matches!(
         chunk,
         StreamChunk::Done(roko_agent::translate::FinishReason::ToolCalls)
     )));
 
     assert_eq!(response.extract_text(), fixture.content);
-    assert_eq!(response.extract_reasoning().as_deref(), Some(fixture.reasoning.as_str()));
-    assert_eq!(response.extract_usage().input_tokens, fixture.usage.input_tokens);
-    assert_eq!(response.extract_usage().output_tokens, fixture.usage.output_tokens);
+    assert_eq!(
+        response.extract_reasoning().as_deref(),
+        Some(fixture.reasoning.as_str())
+    );
+    assert_eq!(
+        response.extract_usage().input_tokens,
+        fixture.usage.input_tokens
+    );
+    assert_eq!(
+        response.extract_usage().output_tokens,
+        fixture.usage.output_tokens
+    );
     assert_eq!(
         response.extract_usage().cache_read_tokens,
         fixture.usage.cache_read_tokens
     );
 
     let turn_session = backend.extract_session(&response);
-    assert_eq!(turn_session.conversation_id.as_deref(), Some(fixture.response_id.as_str()));
-    assert_eq!(turn_session.session_id.as_deref(), Some(fixture.session_id.as_str()));
-    assert_eq!(turn_session.thread_id.as_deref(), Some(fixture.thread_id.as_str()));
+    assert_eq!(
+        turn_session.conversation_id.as_deref(),
+        Some(fixture.response_id.as_str())
+    );
+    assert_eq!(
+        turn_session.session_id.as_deref(),
+        Some(fixture.session_id.as_str())
+    );
+    assert_eq!(
+        turn_session.thread_id.as_deref(),
+        Some(fixture.thread_id.as_str())
+    );
 
     let mut tool_calls = translator
         .parse_calls(&response)
@@ -491,7 +517,10 @@ async fn cursor_streaming_basic_replays_cleanly() {
         requests[0].body["messages"][1]["content"],
         "stream the basic answer"
     );
-    assert_eq!(requests[0].body["tools"][0]["function"]["name"], "read_file");
+    assert_eq!(
+        requests[0].body["tools"][0]["function"]["name"],
+        "read_file"
+    );
 }
 
 fn expected_tool_calls(expected: &[ExpectedToolCall]) -> Vec<ToolCall> {

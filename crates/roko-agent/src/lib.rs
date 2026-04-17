@@ -73,6 +73,7 @@ pub mod retry;
 pub mod safety;
 pub mod streaming;
 pub mod task_runner;
+pub mod testutil;
 pub mod tool_loop;
 pub mod translate;
 pub mod usage;

@@ -165,18 +165,17 @@ impl KnowledgeStore {
 
     fn find_hdc_duplicate(&self, entry: &InsightEntry) -> Option<(InsightId, f32)> {
         let top = self.hdc.top_k(&entry.vector, 5);
-        top.into_iter()
-            .find_map(|hit| {
-                let existing = self.entries.get(&hit.id)?;
-                if existing.kind != entry.kind {
-                    return None;
-                }
-                if hit.similarity >= DUPLICATE_SIMILARITY_THRESHOLD {
-                    Some((hit.id, hit.similarity))
-                } else {
-                    None
-                }
-            })
+        top.into_iter().find_map(|hit| {
+            let existing = self.entries.get(&hit.id)?;
+            if existing.kind != entry.kind {
+                return None;
+            }
+            if hit.similarity >= DUPLICATE_SIMILARITY_THRESHOLD {
+                Some((hit.id, hit.similarity))
+            } else {
+                None
+            }
+        })
     }
 
     /// Retrieves a single entry by id.

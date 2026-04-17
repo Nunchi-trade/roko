@@ -268,6 +268,7 @@ impl CursorAgent {
         &self,
         messages: &[Value],
         tools: &RenderedTools,
+        session: &SessionState,
         stream: bool,
     ) -> Result<Vec<u8>, LlmError> {
         let RenderedTools::JsonArray(tools) = tools else {
@@ -279,8 +280,22 @@ impl CursorAgent {
             "messages": messages,
             "tools": tools,
         });
-        if stream && let Some(body_obj) = body.as_object_mut() {
-            body_obj.insert("stream".to_string(), Value::Bool(true));
+        if let Some(body_obj) = body.as_object_mut() {
+            if let Some(session_id) = &session.session_id {
+                body_obj.insert("session_id".to_string(), Value::String(session_id.clone()));
+            }
+            if let Some(thread_id) = &session.thread_id {
+                body_obj.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+            }
+            if let Some(conversation_id) = &session.conversation_id {
+                body_obj.insert(
+                    "conversation_id".to_string(),
+                    Value::String(conversation_id.clone()),
+                );
+            }
+            if stream {
+                body_obj.insert("stream".to_string(), Value::Bool(true));
+            }
         }
 
         serde_json::to_vec(&body).map_err(|err| LlmError::Backend(format!("serialize: {err}")))
@@ -538,9 +553,9 @@ impl LlmBackend for CursorAgent {
         &self,
         messages: &[Value],
         tools: &RenderedTools,
-        _session: &SessionState,
+        session: &SessionState,
     ) -> Result<BackendResponse, LlmError> {
-        let body = self.build_chat_completion_body(messages, tools, false)?;
+        let body = self.build_chat_completion_body(messages, tools, session, false)?;
         let raw = self
             .poster
             .post_json(
@@ -561,10 +576,10 @@ impl LlmBackend for CursorAgent {
         &self,
         messages: &[Value],
         tools: &RenderedTools,
-        _session: &SessionState,
+        session: &SessionState,
         event_tx: mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<BackendResponse, LlmError> {
-        let body = self.build_chat_completion_body(messages, tools, true)?;
+        let body = self.build_chat_completion_body(messages, tools, session, true)?;
 
         let mut req = reqwest::Client::new()
             .post(self.chat_completion_endpoint())

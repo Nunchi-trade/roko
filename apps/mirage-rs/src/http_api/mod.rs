@@ -96,10 +96,7 @@ pub fn with_cache_control<T: Serialize>(
 ) -> ([(HeaderName, HeaderValue); 1], Json<T>) {
     let cache_control = HeaderValue::from_str(&format!("public, max-age={max_age}"))
         .unwrap_or_else(|_| HeaderValue::from_static("public, max-age=0"));
-    (
-        [(header::CACHE_CONTROL, cache_control)],
-        Json(body),
-    )
+    ([(header::CACHE_CONTROL, cache_control)], Json(body))
 }
 
 // ---------------------------------------------------------------------------

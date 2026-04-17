@@ -1,0 +1,23 @@
+{
+  "id": "chatcmpl-codex-happy",
+  "session_id": "sess-codex-happy",
+  "thread_id": "thread-codex-happy",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Codex happy path."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 8,
+    "completion_tokens": 4,
+    "total_tokens": 12,
+    "prompt_tokens_details": {
+      "cached_tokens": 1
+    }
+  }
+}
