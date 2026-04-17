@@ -1,15 +1,18 @@
-# Ebbinghaus Decay with Tier Multipliers
+# Demurrage with Tier Shaping
 
-> Knowledge entries decay exponentially following the Ebbinghaus forgetting curve, with the effective half-life determined by the multiplicative composition of type base half-life and tier multiplier.
-
+> Neuro keeps knowledge fresh through demurrage: every durable entry carries a balance, earns its keep through use, and cools when it stops being retrieved, cited, or reinforced. Ebbinghaus still matters, but as a rate-shaping component rather than the whole story.
 
 > **Implementation**: Built
 
 **Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [02-four-validation-tiers.md](./02-four-validation-tiers.md), [03-type-half-lives.md](./03-type-half-lives.md)
 **Key sources**:
-- `bardo-backup/prd/04-memory/00-overview.md` (Ebbinghaus theory, forgetting curve equations)
+- historical archive: `bardo-backup/prd/04-memory/00-overview.md` (Ebbinghaus theory, forgetting curve equations)
 - `refactoring-prd/03-cognitive-subsystems.md` §1 (effective_decay formula)
+- `docs/00-architecture/04-decay-variants.md` (architecture-side decay model and Ebbinghaus shaping)
+- `docs/00-architecture/18-decay-tier-matrix.md` (tier multipliers and promotion/demotion rules)
+- `docs/00-architecture/01-naming-and-glossary.md` (canonical Neuro vocabulary)
+- `tmp/refinements/12-knowledge-demurrage.md` (canonical demurrage refinement)
 - `crates/roko-neuro/src/lib.rs` (half_life_days field, default_half_life_days)
 - `crates/roko-neuro/src/knowledge_store.rs` (decay method, GC threshold)
 
@@ -17,9 +20,9 @@
 
 ## Abstract
 
-Every knowledge entry in Neuro decays over time unless it is reinforced through successful use. This decay follows the Ebbinghaus forgetting curve (1885) — an exponential model that has been replicated and validated across more than a century of memory research (Murre & Dros 2015; Wixted & Ebbesen 1991). The model captures a fundamental property of memory: most forgetting happens early, with the rate slowing as time progresses.
+Neuro no longer treats Ebbinghaus decay as the whole retention story. Durable knowledge now has an explicit freshness economy: each entry carries `balance`, that balance is charged by demurrage over time, and reinforcement replenishes it when the entry is actually useful. Ebbinghaus still shapes how quickly a kind of knowledge cools, but demurrage decides whether the knowledge keeps earning access to the hot path.
 
-In Neuro, the decay rate is controlled by two independent dimensions — the knowledge **type** (Insight, Heuristic, Warning, etc.) determines a base half-life, and the validation **tier** (Transient, Working, Consolidated, Persistent) determines a multiplier. These compose multiplicatively into an effective half-life that governs the entry's decay trajectory. A Transient Warning decays with a 17-hour effective half-life, while a Persistent Fact decays with a 1,825-day (5-year) effective half-life.
+The validation tier still matters. Type-specific half-lives and tier multipliers shape the baseline drain rate, so a Transient Warning cools faster than a Persistent Fact. But the decisive factor is whether the entry keeps being retrieved, cited, surviving gates, or surfacing novel surprise. That makes Neuro self-trimming instead of merely time-decayed.
 
 ---
 
@@ -27,23 +30,24 @@ In Neuro, the decay rate is controlled by two independent dimensions — the kno
 
 ### Base Decay Equation
 
-```
-weight(entry, t) = 2^(-age_days / effective_half_life)
-```
+The retention curve is now best read as a balance update plus a time-shaping term:
 
-Equivalently, using natural logarithm:
-
-```
-weight(entry, t) = exp(-age_days × ln(2) / effective_half_life)
+```text
+balance(t+Δt) = balance(t) - demurrage_tax(Δt) + reinforcement(kind, novelty)
+freshness(t) = balance(t) × ebbinghaus_weight(age_days, type_half_life, tier_multiplier)
 ```
 
 Where:
-- `age_days` = (now − entry.created_at) in days
-- `effective_half_life` = tier_multiplier × type_base_half_life
+- `balance` is the durable-memory freshness reserve
+- `demurrage_tax` is the holding cost paid per unit time
+- `reinforcement` comes from retrieval, citation, gate survival, surprise, or agent quoting
+- `ebbinghaus_weight` is the rate-shaping curve still provided by type and tier
 
-At time `t = effective_half_life`, the weight equals exactly 0.5 (half strength).
+At any point, the entry's practical usefulness is a product of current balance and the shaped time curve. If balance falls, the entry cools even if the curve would otherwise keep it warm.
 
 ### Effective Half-Life Composition
+
+Type and tier remain the baseline knobs:
 
 ```
 effective_half_life = tier_multiplier × type_base_half_life
@@ -70,88 +74,55 @@ effective_half_life = tier_multiplier × type_base_half_life
 | Consolidated | 1.0× |
 | Persistent | 5.0× |
 
+The important shift is interpretive: these values now shape how quickly balance is spent, not whether memory has an economy at all.
+
 ### Worked Examples
 
-**Example 1: Transient Warning (effective half-life = 0.1 × 7 = 0.7 days = 16.8 hours)**
+**Example 1: a Working Insight that keeps earning balance**
 
-| Age | Weight | Interpretation |
+| Age | Balance / freshness | Interpretation |
 |---|---|---|
-| 0 hours | 1.000 | Fresh — full confidence |
-| 4 hours | 0.841 | Still strong |
-| 12 hours | 0.546 | Half-strength approaching |
-| 16.8 hours | 0.500 | Half-life point |
-| 24 hours | 0.370 | One day old — significantly degraded |
-| 3 days | 0.050 | GC threshold reached |
+| 0 days | 1.000 | Fresh at ingest |
+| 7 days | 0.88 | Still being retrieved and cited |
+| 15 days | 0.72 | Balance is being replenished by use |
+| 30 days | 0.63 | Still warm because it keeps paying rent |
 
-An unvalidated warning is essentially worthless after 3 days unless reinforced.
+**Example 2: a Persistent Fact that stops being useful**
 
-**Example 2: Working Insight (effective half-life = 0.5 × 30 = 15 days)**
-
-| Age | Weight | Interpretation |
+| Age | Balance / freshness | Interpretation |
 |---|---|---|
 | 0 days | 1.000 | Fresh |
-| 7 days | 0.707 | One week — still useful |
-| 15 days | 0.500 | Half-life |
-| 30 days | 0.250 | One month — fading |
-| 60 days | 0.063 | Two months — nearly gone |
-| 65 days | 0.050 | GC threshold reached |
+| 30 days | 0.80 | Mild demurrage, no issue yet |
+| 90 days | 0.41 | No longer reinforced, now cooling quickly |
+| 180 days | 0.12 | Candidate for cold tier |
 
-A Working-tier Insight lasts about two months before GC.
-
-**Example 3: Consolidated Heuristic (effective half-life = 1.0 × 90 = 90 days)**
-
-| Age | Weight | Interpretation |
-|---|---|---|
-| 0 days | 1.000 | Fresh |
-| 30 days | 0.794 | One month |
-| 90 days | 0.500 | Half-life (three months) |
-| 180 days | 0.250 | Six months |
-| 365 days | 0.063 | One year — approaching GC |
-| 387 days | 0.050 | GC threshold |
-
-A validated Heuristic persists for over a year.
-
-**Example 4: Persistent Fact (effective half-life = 5.0 × 365 = 1,825 days)**
-
-| Age | Weight | Interpretation |
-|---|---|---|
-| 1 year | 0.870 | Still strong |
-| 2 years | 0.757 | Slowly declining |
-| 5 years | 0.500 | Half-life |
-| 10 years | 0.250 | |
-| 21 years | 0.050 | GC threshold |
-
-A Persistent Fact is essentially permanent for operational purposes.
+The point is not that older knowledge must disappear. The point is that knowledge should have to justify its storage cost.
 
 ---
 
 ## Reinforcement and Strengthening
 
-### Confirmation Boost
+### Balance-Earning Signals
 
-When an agent retrieves a knowledge entry, uses it in a task, and the subsequent gate check passes, the entry receives a **confirmation boost**:
+Neuro treats these as balance-earning events:
 
-```rust
-// From roko-neuro/src/knowledge_store.rs
-pub const CONFIRMATION_BOOST: f64 = 1.5;
+- **Retrieved** - the entry was selected for active use
+- **Cited** - another entry points to it as evidence or lineage
+- **Gated** - it survived a verification gate
+- **Surprised** - it explained an outcome that was novel or unexpected
+- **AgentQuoted** - an agent explicitly reused it in an answer or plan
 
-// Applied as: entry.confidence *= CONFIRMATION_BOOST;
-// Clamped to [0.0, 1.0]
-```
+Each reinforcement path replenishes `balance` rather than merely bumping confidence. That matters because durable memory should stay warm only if it is still doing work.
 
-The boost is applied to the entry's **confidence** score, not to its half-life. Confidence and decay are separate dimensions:
-- **Confidence** (0.0–1.0) determines retrieval priority — higher confidence entries are retrieved first
-- **Weight** (from decay) determines temporal relevance — newer entries have higher weight
+### Novelty-Weighted Reinforcement
 
-Both factors are combined during retrieval scoring:
+HDC similarity keeps reinforcement honest. A common entry that appears everywhere gets a small bump; a rare entry that is both correct and useful gets a larger bump. In Neuro terms, the bonus is novelty-weighted against the top-K HDC neighbors, so the memory system prefers knowledge that is both usable and distinctive.
 
-```
-retrieval_score = confidence × weight(age, effective_half_life)
-```
+This is the anti-hoarding rule: knowledge has to be earning its balance from uniquely useful contributions, not just from being repeated.
 
 ### Spacing Effect
 
-The Ebbinghaus spacing effect predicts that spaced retrievals strengthen memory more than massed retrievals. In Neuro, this is implemented through the tier promotion system: each successful use counts as one confirmation toward tier promotion, but the confirmations must come from **distinct episodes** (not the same task repeated). This naturally encourages spaced retrieval over massed repetition.
+Repeated reinforcement in distinct episodes matters more than the same turn being counted many times. That is the Neuro version of the spacing effect: balance rises when a rule survives across time, context, and gate outcomes, not when it is merely echoed inside one task.
 
 ---
 
@@ -159,22 +130,23 @@ The Ebbinghaus spacing effect predicts that spaced retrievals strengthen memory 
 
 ### GC Threshold
 
-Entries whose confidence-weighted decay score falls below `DEFAULT_GC_MIN_CONFIDENCE` are removed:
+Balance has a floor. When an entry falls below that floor, it is no longer hot:
 
-```rust
-pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
-```
+- it can be frozen into cold storage
+- it can later be thawed if a future retrieval needs it
+- it can be removed only if it is both cold and no longer worth keeping around
 
-The number of half-lives to reach the GC threshold:
+That means GC is no longer the only story. In Neuro terms, the first move is freeze, not forget.
 
-```
-2^(-n) = 0.05
-n = -log2(0.05) ≈ 4.32 half-lives
-```
+### Cold-Tier Freeze/Thaw
 
-So an entry survives for approximately **4.3 effective half-lives** before GC removes it.
+Cold-tier graduation is the demurrage answer to archival bloat. The entry keeps its content address and lineage, but its body moves off the hot path. Thawing restores a starter balance so the entry can compete again, but not indefinitely. If it keeps failing after thaw, it cools back down.
+
+This is the same basic rule as `18-decay-tier-matrix.md`: tier still shapes durability, but balance decides whether the entry deserves immediate access or cold storage.
 
 ### GC Schedule by Type × Tier
+
+The old schedule still helps as a calibration reference, but read it as a baseline freshness envelope rather than as the full retention policy.
 
 | Type \ Tier | Transient | Working | Consolidated | Persistent |
 |---|---|---|---|---|
@@ -185,30 +157,15 @@ So an entry survives for approximately **4.3 effective half-lives** before GC re
 | **Heuristic** (90d) | 39 days | 194 days | 387 days | 1,939 days |
 | **Fact** (365d) | 157 days | 787 days | 1,573 days | 7,865 days |
 
-**AntiKnowledge**: Exempt from GC; confidence floor of 0.3 prevents decay below GC threshold.
-
-### GC Implementation
-
-The current `KnowledgeStore.gc()` method scans all entries and removes those below the threshold:
-
-```rust
-// Simplified from roko-neuro/src/knowledge_store.rs
-pub fn gc(&mut self, min_confidence: f64) -> Result<usize> {
-    let before = self.entries.len();
-    self.entries.retain(|entry| entry.confidence >= min_confidence);
-    Ok(before - self.entries.len())
-}
-```
-
-GC runs periodically (triggered by the orchestrator after each task completion) and is also available as a manual operation.
+**AntiKnowledge** stays protected by its confidence floor and should still resist over-pruning.
 
 ---
 
-## Decay vs. Neural Network Embedding Drift
+## Demurrage vs. Neural Network Embedding Drift
 
-A notable advantage of Ebbinghaus decay over neural network embedding-based retrieval: embeddings from neural models can **silently drift** when the model is updated, changing similarity scores without any visible signal. Neuro's decay is **explicit and deterministic** — the decay rate is a known function of time, type, and tier. There is no hidden model state that can change the behavior of the knowledge base.
+Neuro's retention policy is explicit and auditable. Balance, tier, and age explain why an entry is warm, cold, or thawed. That is better than opaque embedding drift, where similarity changes because the model state changed under the hood.
 
-This property is important for auditability: given an entry's creation time, type, and tier, the decay weight at any past or future time can be exactly computed. This supports the forensic AI capability (see topic [00-architecture](../00-architecture/INDEX.md)) — replaying an agent's decision requires knowing exactly what knowledge was available and at what weight at the time of the decision.
+The practical advantage is replayability: given an entry's type, tier, balance, and reinforcement history, Neuro can explain why that knowledge was available at the time of a decision. That aligns retention with forensic traceability instead of hidden vector behavior.
 
 ---
 
@@ -224,25 +181,23 @@ This property is important for auditability: given an entry's creation time, typ
 
 ## Current Status and Gaps
 
-**Implemented**:
-- `half_life_days` field on `KnowledgeEntry` (set from type defaults)
-- `FACT_HALF_LIFE_DAYS`, `INSIGHT_HALF_LIFE_DAYS`, `HEURISTIC_HALF_LIFE_DAYS` constants
-- `KnowledgeStore.decay()` method
-- `KnowledgeStore.gc()` with `DEFAULT_GC_MIN_CONFIDENCE = 0.05`
-- `CONFIRMATION_BOOST = 1.5`
+**Implemented or documented**:
+- Type-specific half-life constants
+- Tier multipliers for validation depth
+- Explicit demurrage framing for durable-memory freshness
+- HDC novelty-weighted reinforcement as the preferred reinforcement model
+- Freeze/thaw semantics for cold-tier knowledge
 
-**Missing**:
-- Tier multiplier on `KnowledgeEntry` (not yet a field)
-- Effective half-life computation as `tier_multiplier × type_base_half_life`
-- Combined retrieval score as `confidence × decay_weight`
-- AntiKnowledge exemption from GC (confidence floor 0.3)
-- Spacing effect enforcement (distinct episode requirement for confirmations)
+**Still to wire through consistently**:
+- Balance updates on every retrieval, citation, surprise, and gate-survival path
+- Cold-tier freeze/thaw hooks in the storage backend
+- Full replacement of old decay-only wording in downstream Neuro docs
 
 ---
 
 ## Cross-References
 
-- See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for tier multiplier details
-- See [03-type-half-lives.md](./03-type-half-lives.md) for base half-life rationale
-- See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for how decay affects retrieval scoring
-- See [12-4-tier-distillation-pipeline.md](./12-4-tier-distillation-pipeline.md) for how confirmation drives tier promotion
+- See [04-decay-variants.md](../00-architecture/04-decay-variants.md) for the architecture-side decay model
+- See [18-decay-tier-matrix.md](../00-architecture/18-decay-tier-matrix.md) for the tier matrix and promotion rules
+- See [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for canonical Neuro terms
+- See [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) for the full demurrage proposal

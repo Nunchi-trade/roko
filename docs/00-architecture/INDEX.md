@@ -1,7 +1,7 @@
 # Architecture
 
 > The Synapse Architecture is Roko's compositional foundation: two mediums (Engram, durable
-> content-addressed and decayed; Pulse, ephemeral topic-addressed and sequenced), two fabrics (Substrate
+> content-addressed and balance-bearing under demurrage; Pulse, ephemeral topic-addressed and sequenced), two fabrics (Substrate
 > for storage; Bus for transport), six operators, five layers, three speeds, and three
 > cross-cuts. The canonical wire vocabulary is `Engram`, `Pulse`, `Bus`, `Topic`,
 > `TopicFilter`, `Datum`, and `PulseSource`; see also `tmp/refinements/07-naming.md` for the
@@ -11,6 +11,7 @@
 > `tmp/refinements/04-operators-generalized.md` for `Datum` and `PolicyOutputs`,
 > `tmp/refinements/05-loop-retold.md` for the seven-step loop, co-equal PERSIST/BROADCAST, and
 > `tmp/refinements/10-self-learning-cybernetic-loops.md` for Bus-backed prediction, outcome,
+> `tmp/refinements/12-knowledge-demurrage.md` for the attention-economy view of durable memory,
 > calibration, and `prediction.error.*` loops across operators,
 > cross-cut injection model, `tmp/refinements/09-phase-2-implications.md` for how Chain,
 > Dreams, Coordination, and Heartbeat collapse onto that same kernel, and
@@ -31,14 +32,14 @@
 
 Roko is a Rust toolkit for building cognitive agents that build themselves. Its architecture
 — the Synapse Architecture — is built around two mediums: `Engram`, the durable
-content-addressed record, and `Pulse`, the ephemeral topic-addressed message. Those mediums
+content-addressed record whose effective weight is shaped by demurrage `balance`, and `Pulse`, the ephemeral topic-addressed transport medium. Those mediums
 move through two fabrics, `Substrate` for storage and `Bus` for transport, with six operators
 coordinating the system across five layers, three speeds, and three cross-cuts. `Topic` and
 `TopicFilter` govern routing on the Bus, `Datum` abstracts over Engram-or-Pulse inputs where
 operators need to handle both, and `PulseSource` names the producer side of the ephemeral
 stream. Engrams carry lineage through a DAG; Pulses carry ordering through Bus sequence
 numbers; Pulses graduate to Engrams when lineage matters. See also
-`tmp/refinements/07-naming.md`.
+`tmp/refinements/07-naming.md` and `tmp/refinements/12-knowledge-demurrage.md`.
 
 The architecture is organized into five layers (Runtime, Framework, Scaffold, Harness,
 Orchestration) with strictly downward dependencies. Three cognitive cross-cuts (Neuro for
@@ -62,7 +63,7 @@ loop, and the frontier innovations that emerge from the architecture.
 | 02 | [Engram Data Type](./02-engram-data-type.md) | The durable content-addressed record medium: struct fields, ContentHash (BLAKE3), HDC fingerprint, Kind enum, Body enum, lineage DAG, and builder pattern |
 | 02b | [Pulse Ephemeral Event Medium](./02b-pulse-ephemeral-event.md) | The durable-versus-ephemeral medium split: Pulse, graduation rules, and the storage/stream boundary between Substrate and Bus |
 | 03 | [Score: 7-Axis Appraisal](./03-score-7-axis-appraisal.md) | 4 stable axes (confidence, novelty, utility, reputation) + 3 extended (precision, salience, coherence), effective formula, arithmetic, constants |
-| 04 | [Decay Variants](./04-decay-variants.md) | Four decay variants (None, HalfLife, Ttl, Ebbinghaus), formulas, pheromone constants, knowledge tier interaction, selection guidelines |
+| 04 | [Decay Variants](./04-decay-variants.md) | Demurrage superseding decay-first durable-memory framing: `balance`, reinforcement, novelty weighting, cold-tier freeze/thaw, and legacy rate-shaping mechanisms |
 | 05 | [Provenance and Attestation](./05-provenance-and-attestation.md) | Provenance struct (author, trust, tainted, session), four constructors, taint analysis, planned Attestation (Ed25519 + chain), extended fields |
 | 06 | [Synapse Traits](./06-synapse-traits.md) | Six operators across two mediums and two fabrics, the trait composition model, all six trait signatures, trait × layer map, composability example via loop_tick |
 | 07 | [Substrate Trait (Deep Dive)](./07-substrate-trait.md) | The durable storage fabric: Substrate's trait surface, fingerprint population, `query_similar`, backends, concurrency, pruning, and its relationship to the Bus sibling fabric |
@@ -77,14 +78,14 @@ loop, and the frontier innovations that emerge from the architecture.
 | 15 | [Crate Map](./15-crate-map.md) | 18+ crates by layer with status, test counts, dependency graph, legacy umbrella-crate dissolution, legacy naming |
 | 16 | [Autocatalytic Improvement and Cybernetics](./16-autocatalytic-and-cybernetics.md) | Kauffman autocatalytic sets, compound improvement (0.9^4), Ashby's Law, Good Regulator Theorem, Beer VSM, Bus-centered feedback nervous system, Free Energy Principle, stigmergy |
 | 17 | [Design Principles and Frontier Summary](./17-design-principles-and-frontier-summary.md) | 7 design principles (P1-P7), 14 Blue Ocean innovations with details, interconnection map, empirical validation status |
-| 18 | [Decay-Tier Matrix](./18-decay-tier-matrix.md) | 4×4 matrix: four decay variants × four knowledge tiers, Ebbinghaus parameters, promotion/demotion rules |
+| 18 | [Decay-Tier Matrix](./18-decay-tier-matrix.md) | Tier-specific demurrage behavior: hot-to-cold graduation, reinforcement stickiness, tier floors, and promotion/demotion under use, contradiction, and surprise |
 | 19 | [Compositional Kinds](./19-compositional-kinds.md) | Kind::Compound variant for cross-domain records, filter matching, scoring, migration path |
-| 20 | [Configuration Schema](./20-configuration-schema.md) | RokoConfig struct, 60+ parameters, 3-level override hierarchy, validation rules |
+| 20 | [Configuration Schema](./20-configuration-schema.md) | RokoConfig plus the specified demurrage tuning surface: taxes, reinforcement bonuses, cold-floor thresholds, and validation notes |
 | 21 | [Performance and Numerical Stability](./21-performance-numerical-stability.md) | f32/f64 decision matrix, hot-path complexity targets, memory budgets, NaN/Inf handling |
 | 22 | [Error Handling and Recovery](./22-error-handling-recovery.md) | Four error classes, exponential backoff, circuit breaker, 7-level graceful degradation |
 | 23 | [Architectural Analysis and Improvements](./23-architectural-analysis-improvements.md) | Coherence analysis of the current architecture plus the v2 rewrite path: layer violations, refactor boundaries, category theory, and from-scratch decision points |
 | 24 | [Cross-Section Integration Map](./24-cross-section-integration-map.md) | Full 22×22 dependency matrix, 20 missing integrations (prioritized), REF09 two-fabric implications for ChainBus/Dreams/Coordination/Heartbeat, data flow diagrams, integration roadmap (~2,070 LOC) |
-| 25 | [Attention as Universal Cognitive Currency](./25-attention-as-currency.md) | Attention tokens as universal unit of account, VCG auction for Engram selection, budget-aware CascadeRouter, Daimon affect modulation, cross-speed token economics |
+| 25 | [Attention as Universal Cognitive Currency](./25-attention-as-currency.md) | Attention tokens for online spend plus demurrage for idle durable memory: VCG selection, budget-aware routing, and attention-economy observability across speeds |
 | 26 | [Cognitive Immune System](./26-cognitive-immune-system.md) | 5-layer defense against knowledge corruption: taint propagation, anomaly detection, quarantine, red-team probes, immune memory with HDC signatures |
 | 27 | [Temporal Knowledge Topology](./27-temporal-knowledge-topology.md) | Allen's 13 interval relations, temporal calculus, HDC-clustered episode/entity/community tiers, and temporal queries |
 | 28 | [Emergent Goal Structures](./28-emergent-goal-structures.md) | Goals emerge from affect×knowledge×experience interaction, 5 built-in detectors, intrinsic motivation scoring, EFE ranking, somatic markers, goal lifecycle |

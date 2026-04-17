@@ -20,6 +20,9 @@ in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-pl
 outcome, calibration, and `prediction.error.*` topics first-class across learning and heartbeat.
 `tmp/refinements/11-hyperdimensional-substrate.md` extends it further by making the HDC
 fingerprint a first-class Engram field and a native Substrate query primitive.
+`tmp/refinements/12-knowledge-demurrage.md` then recasts durable memory as an attention
+economy: Engrams carry `balance`, demurrage taxes idle knowledge, reinforcement keeps useful
+knowledge warm, and cold-tier freeze/thaw replaces blunt prune-only decay for long-lived stores.
 
 ## Start Here
 
@@ -39,7 +42,11 @@ fingerprint a first-class Engram field and a native Substrate query primitive.
 > [`00-architecture/07b-bus-transport-fabric.md`](00-architecture/07b-bus-transport-fabric.md).
 > REF11 adds that every durable Engram carries an HDC fingerprint for native similarity,
 > clustering, and consensus; see [`00-architecture/02-engram-data-type.md`](00-architecture/02-engram-data-type.md)
-> and [`06-neuro/INDEX.md`](06-neuro/INDEX.md).
+> and [`06-neuro/INDEX.md`](06-neuro/INDEX.md). REF12 adds that durable Engrams also carry
+> demurrage `balance`, so freshness is earned through use rather than preserved by age-only
+> decay; start with [`00-architecture/04-decay-variants.md`](00-architecture/04-decay-variants.md),
+> [`00-architecture/25-attention-as-currency.md`](00-architecture/25-attention-as-currency.md),
+> and [`05-learning/INDEX.md`](05-learning/INDEX.md).
 
 ## Topics
 

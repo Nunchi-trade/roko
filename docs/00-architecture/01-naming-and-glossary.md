@@ -7,6 +7,7 @@
 > attribution. When another document disagrees, this glossary wins. See also
 > [tmp/refinements/07-naming.md](../../tmp/refinements/07-naming.md),
 > [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md),
+> [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md),
 > [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md),
 > [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md),
 > [07-substrate-trait.md](./07-substrate-trait.md),
@@ -194,6 +195,9 @@ The following names are load-bearing additions in the current architecture:
 | `BusReceiver` | Subscriber handle that yields matching Pulses in order. |
 | `ChainBus` | Bus backend that maps chain logs into `chain.*` Pulses while `ChainSubstrate` handles durable on-chain Engrams. |
 | `HDC fingerprint` | Deterministic 10,240-bit `HdcVector` carried on each Engram for native similarity, clustering, consensus, and analogy. |
+| `Demurrage` | The durable-memory holding cost that continuously taxes idle Engram balance while reinforcement refunds useful retrieval, citation, gate survival, and surprise. |
+| `Balance` | The attention-credit carried by an Engram under demurrage; Scorer and Composer read effective weight from balance rather than a standalone freshness field. |
+| `Cold tier` | A colder Substrate tier that keeps content-addressability and lineage intact after an Engram's balance reaches the configured floor. |
 | `MeshBus` | Bus backend for collective pub/sub topics such as `mesh.pheromone.deposited`. |
 | `MeshSubstrate` | Shared durable Engram backend for mesh replication, collective knowledge, and pheromone deposits. |
 | `HeartbeatPolicy` | Runtime policy that publishes `heartbeat.gamma.tick`, `heartbeat.theta.tick`, and `heartbeat.delta.tick` Pulses. |
@@ -232,8 +236,10 @@ prefixes without coordination.
 | `BusReceiver` | Subscription handle returned by the Bus for ordered Pulse delivery. |
 | `Datum` | Either-medium enum used when operators accept either `Engram` or `Pulse`. |
 | `Daimon` | Affect cross-cut that biases assessment and gates action. |
+| `Demurrage` | Economic memory rule that charges idle Engrams a holding cost and rewards useful durable knowledge with reinforcement bonuses. |
 | `Dreams` | Delta-speed consolidation cross-cut that writes durable results back to storage. |
 | `Engram` | Durable cognitive record stored in a Substrate and identified by content hash. |
+| `Balance` | Per-Engram attention credit under demurrage; when it falls to the floor, the Engram becomes a cold-tier candidate. |
 | `Fleet` | Roster of agents under shared coordination or ownership. |
 | `HDC fingerprint` | Per-Engram 10,240-bit hyperdimensional vector used for `query_similar`, clustering, consensus, and analogy. |
 | `Mesh` | Agent-network layer for multi-agent communication. |

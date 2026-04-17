@@ -3,7 +3,7 @@
 > Layer 0 Kernel -- Configuration Management
 > Status: **Implemented** -- `RokoConfig` in `crates/roko-core/src/config/schema.rs` (~2,600 lines)
 > Canonical source: `crates/roko-core/src/config/schema.rs`, `roko.toml`
-> Cross-references: [15-crate-map.md](15-crate-map.md)
+> Cross-references: [15-crate-map.md](15-crate-map.md), [04-decay-variants.md](04-decay-variants.md), [25-attention-as-currency.md](25-attention-as-currency.md), [01-naming-and-glossary.md](01-naming-and-glossary.md)
 
 > **Implementation**: Shipping
 
@@ -12,6 +12,8 @@
 ## Purpose
 
 Roko has 60+ configurable parameters spread across 20+ config structs. This document catalogs every parameter, its default, valid range, and interdependencies. It serves as the single reference for `roko.toml` authors and for validation logic.
+
+REF12 extends that canonical surface with a dedicated demurrage section for durable-memory economics. Even where the shipping schema still trails the architecture, the keys below are the intended contract for tuning `balance`, reinforcement, and cold-tier thresholds. See also [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md).
 
 ---
 
@@ -46,6 +48,8 @@ pub struct RokoConfig {
     pub gemini: GeminiConfig,       // Gemini-specific
 }
 ```
+
+The next schema revision adds a top-level `[demurrage]` section. Treat that section as canonical for the architecture docs even if the shipping `RokoConfig` has not yet absorbed it.
 
 ---
 
@@ -172,6 +176,39 @@ Constraint: `warn_threshold < block_threshold`.
 | `adaptive_thresholds` | bool | `true` | -- | Enable EMA-based gate threshold adaptation |
 | `cascade_router_persistence` | bool | `true` | -- | Persist cascade router state |
 
+`episode_retention_days` remains a coarse cap for raw logs, but REF12 shifts durable-knowledge freshness away from fixed retention windows and toward demurrage-governed `balance` on Engrams, playbooks, and distilled heuristics.
+
+### 2.10a Demurrage (`[demurrage]`, specified by REF12)
+
+This section tunes the durable-memory attention economy. The values below come from [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) and are read alongside the glossary in [01-naming-and-glossary.md](01-naming-and-glossary.md).
+
+| Parameter | Type | Default | Range | Description |
+|---|---|---|---|---|
+| `flat_tax_per_day` | f64 | `0.01` | `>= 0.0` | Flat carrying cost `r` charged against an Engram's `balance` each day. |
+| `exp_decay_per_day` | f64 | `0.005` | `>= 0.0` | Exponential term `β` that compounds demurrage as balance persists idle. |
+| `min_balance` | f64 | `0.0` | `>= 0.0` | Floor below which an Engram becomes a candidate for cold-tier freeze. |
+| `cited_bonus` | f64 | `0.05` | `>= 0.0` | Reinforcement added when other Engrams cite this Engram in lineage. |
+| `retrieved_bonus` | f64 | `0.02` | `>= 0.0` | Reinforcement added when retrieval actually surfaces the Engram. |
+| `gated_bonus` | f64 | `0.03` | `>= 0.0` | Reinforcement added when a gate compares against the Engram and it holds up. |
+| `surprised_bonus` | f64 | `0.15` | `>= 0.0` | Novelty-heavy reinforcement for prediction error or informative surprise. |
+| `agent_quoted_bonus` | f64 | `0.08` | `>= 0.0` | Reinforcement added when an agent explicitly quotes or references the Engram in output. |
+| `policy_confidence_tax` | f64 | `0.002` | `>= 0.0` | Demurrage applied to learned Policy confidences so stale thresholds become challengeable again. |
+
+Illustrative shape:
+
+```toml
+[demurrage]
+flat_tax_per_day      = 0.01
+exp_decay_per_day     = 0.005
+min_balance           = 0.0
+cited_bonus           = 0.05
+retrieved_bonus       = 0.02
+gated_bonus           = 0.03
+surprised_bonus       = 0.15
+agent_quoted_bonus    = 0.08
+policy_confidence_tax = 0.002
+```
+
 ### 2.11 TUI (`[tui]`)
 
 | Parameter | Type | Default | Range | Description |
@@ -200,6 +237,10 @@ Some parameters constrain each other. The config loader validates these on start
 | Max agents vs budget | `max_agents`, `max_session_usd` | `max_agents * max_task_usd <= max_session_usd` (warning, not error) |
 | Gate iterations vs pipeline | `gates.max_iterations`, `pipeline.*.max_iterations` | Pipeline value overrides gate default |
 | Model availability | `agent.default_model`, provider entries | Default model's provider must exist in `providers` |
+| Demurrage floor | `demurrage.min_balance` | Must be non-negative so freeze candidates are well-defined |
+| Demurrage bonuses | `demurrage.*_bonus` | Bonuses should be non-negative; negative reinforcement belongs in scorer/gate outcomes, not config |
+
+REF12 also changes interpretation, not just schema shape: `learning.episode_retention_days` manages raw log retention, while durable retrieval quality is expected to come from demurrage-driven `effective_weight` rather than a standalone decay multiplier.
 
 ---
 

@@ -10,6 +10,8 @@
 
 The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. REF10 adds a Bus-backed predict-publish-correct loop: operators publish prediction Pulses, outcomes close the loop, and `prediction.error.*` becomes a first-class calibration signal. See `../../tmp/refinements/10-self-learning-cybernetic-loops.md` for the full proposal, and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for the Bus/Pulse vocabulary. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
 
+REF12 extends that learning story with demurrage-governed freshness for playbooks and distilled knowledge: useful rules keep earning `balance`, stale ones cool and eventually leave the hot path, and retention is driven by use rather than a fixed-age window. See also [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [04-decay-variants](../00-architecture/04-decay-variants.md), and [25-attention-as-currency](../00-architecture/25-attention-as-currency.md).
+
 The subsystem is organized around three tiers of memory (episodes → patterns → playbook rules), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
 
 ---
@@ -21,7 +23,7 @@ The subsystem is organized around three tiers of memory (episodes → patterns �
 | # | Document | What it covers |
 |---|----------|---------------|
 | [00](00-episode-logger.md) | **Episode Logger** | Append-only JSONL episode log, HDC fingerprinting, crash-safe writes, tolerant reader. The foundational data substrate for all learning. |
-| [01](01-playbook-system.md) | **Playbook System** | Playbook rules with globset trigger matching, bounded confidence dynamics (validate +0.05, contradict −0.10, ceiling 0.95), TOML persistence. Three-tier memory: episodes → patterns → rules. |
+| [01](01-playbook-system.md) | **Playbook System** | Playbook rules with globset trigger matching, demurrage-driven freshness, bounded confidence dynamics (validate +0.05, contradict −0.10, ceiling 0.95), and TOML persistence. Three-tier memory: episodes → patterns → rules, with attention-economy self-trimming. |
 | [02](02-skill-library-voyager.md) | **Skill Library (Voyager)** | Voyager-style skill accumulation (Wang et al. 2023). Monotonically growing library of reusable capabilities with prompt templates, tool dependencies, usage telemetry, and deduplication. |
 
 ### Bandit Algorithms

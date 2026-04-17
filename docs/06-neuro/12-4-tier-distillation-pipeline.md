@@ -1,6 +1,6 @@
 # Four-Tier Distillation Pipeline
 
-> Episodes are distilled into Insights, Insights are promoted to Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files — a three-stage pipeline implementing Complementary Learning Systems theory.
+> Episodes are distilled into Insights, Insights are promoted to Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files. In the demurrage model, durable knowledge has to keep earning balance through retrieval, citation, surprise, or gate survival.
 
 
 > **Implementation**: Built
@@ -12,7 +12,11 @@
 - `crates/roko-neuro/src/distiller.rs` (DistillationBackend, Distiller)
 - `crates/roko-neuro/src/episode_completion.rs` (spawn_episode_distillation)
 - `refactoring-prd/03-cognitive-subsystems.md` §3 (Dreams produce knowledge promotions)
-- `../../tmp/refinements/11-hyperdimensional-substrate.md` (canonical refinement source)
+- `docs/00-architecture/04-decay-variants.md` (retention model and Ebbinghaus shaping)
+- `docs/00-architecture/18-decay-tier-matrix.md` (tier matrix and graduation rules)
+- `docs/00-architecture/01-naming-and-glossary.md` (canonical Neuro vocabulary)
+- `../../tmp/refinements/11-hyperdimensional-substrate.md` (HDC fingerprint proposal)
+- `../../tmp/refinements/12-knowledge-demurrage.md` (canonical demurrage refinement)
 
 ---
 
@@ -26,7 +30,9 @@ The distillation pipeline transforms raw agent experiences (episodes) into progr
 
 This pipeline directly implements Complementary Learning Systems (CLS) theory (McClelland et al. 1995): fast episodic memory (episodes) consolidates into slow semantic memory (Insights, Heuristics, Playbooks) through repeated extraction and validation. HDC fingerprints make the D2 clustering step structural rather than textual, so the system promotes coherent neighborhoods of knowledge instead of tag-adjacent piles.
 
-See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md), and [Temporal Knowledge Topology](../00-architecture/27-temporal-knowledge-topology.md).
+Demurrage changes the retention rule: compiled knowledge is not durable because it is compiled once, but because it keeps earning balance in downstream use. That means the pipeline has to watch for retrieval, citation, surprise, and gate survival after compilation, not just during promotion.
+
+See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md), [Temporal Knowledge Topology](../00-architecture/27-temporal-knowledge-topology.md), [04-decay-variants.md](../00-architecture/04-decay-variants.md), [18-decay-tier-matrix.md](../00-architecture/18-decay-tier-matrix.md), and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
@@ -84,7 +90,7 @@ pub struct InsightRecord {
 
 ### D1 Output
 
-Distilled knowledge entries enter the NeuroStore at **Transient tier** with initial confidence based on the extraction confidence (typically 0.3–0.6). They also receive their HDC fingerprint at ingestion time and must be validated through use before promotion.
+Distilled knowledge entries enter the NeuroStore at **Transient tier** with initial confidence based on the extraction confidence (typically 0.3–0.6). They also receive their HDC fingerprint at ingestion time, start with a starter balance, and must keep earning additional balance through retrieval, citation, surprise, and gate survival before they feel durable.
 
 ---
 
@@ -98,6 +104,8 @@ The D2 stage uses the `PatternMiner` from `roko-learn` to identify clusters of r
 2. **Cluster** by HDC fingerprint similarity using the per-Engram fingerprint field
 3. **Filter** clusters with ≥ 5 members and mean confidence ≥ 0.7
 4. **Extract** the common pattern from each qualifying cluster
+
+The HDC fingerprint matters twice here: first, it keeps D2 structural instead of lexical; second, it supplies the novelty score that makes reinforcement balance-aware. A cluster that is coherent but redundant earns less balance than a cluster that is coherent and meaningfully novel.
 
 ### HeuristicRule
 
@@ -153,6 +161,18 @@ pub struct PlaybookCompilation {
     pub markdown: String,       // Rendered PLAYBOOK.md content
 }
 ```
+
+Compiled playbooks are not exempt from demurrage. They remain part of the semantic memory economy, and each rule has to keep earning balance through retrieval, citation, surprise, or gate survival. When a rule stops paying rent, it should cool into a lower tier or cold storage instead of occupying the attention budget forever.
+
+### Freshness and Balance
+
+Neuro treats playbook compilation as the beginning of a freshness contract, not the end of one:
+
+- Rules that are retrieved often keep their balance higher.
+- Rules that are cited by other knowledge entries gain reinforcement faster.
+- Rules that survive gates during real work keep the strongest balance.
+- Rules that explain novel surprises earn the largest novelty-weighted boost.
+- Rules that are never used eventually cool and stop dominating the playbook.
 
 ### TierProgression Orchestrator
 
@@ -235,9 +255,11 @@ Episodes (raw agent turns)
 │  Validation through Use                  │
 │  - Agent retrieves entry, uses it       │
 │  - Gate checks outcome                  │
-│  - Positive → tier promotion + boost    │
+│  - Positive → promotion + balance      │
 │  - Negative → tier demotion             │
-│  - Entries accumulate confirmations     │
+│  - Entries accumulate balance          │
+│    through retrieval, citation,        │
+│    surprise, and gate survival         │
 └─────────────────────────────────────────┘
     │
     ▼
@@ -269,19 +291,23 @@ The distillation pipeline runs both online (after episode completion) and offlin
 
 1. **NREM Replay**: Re-process recent episodes (prioritized by Mattar-Daw utility formula)
 2. **Consolidation**: Run D1 and D2 on replayed episodes, with D2 grouping by fingerprint similarity
-3. **Pruning**: Run decay + GC to remove stale knowledge
+3. **Pruning**: Charge demurrage, freeze cold knowledge, and thaw only what is still earning balance
 4. **Playbook update**: Run D3 to recompile PLAYBOOK.md with new Heuristics
 
-This mirrors the neuroscience of sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995).
+This mirrors the neuroscience of sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995). In Neuro terms, Dreams also re-check which entries are still earning balance and which should move to cold storage.
 
 ---
 
 ## Cross-References
 
 - See [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the HDC fingerprint proposal that drives D2 clustering
+- See [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) for the demurrage model reflected in this doc
 - See [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for the HDC algebra behind fingerprint similarity
 - See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for the default encoder and per-Engram fingerprinting pipeline
 - See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for the native similarity query surface
+- See [04-decay-variants.md](../00-architecture/04-decay-variants.md) for the architecture-side retention model
+- See [18-decay-tier-matrix.md](../00-architecture/18-decay-tier-matrix.md) for tier progression and cold-tier calibration
+- See [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for canonical Neuro terminology
 
 ---
 
@@ -492,7 +518,7 @@ impl DreamsDistillationTrigger {
     ///   1. Select episodes for replay (Mattar-Daw priority)
     ///   2. Run D1 on each (extract Insights + Warnings)
     ///   3. Run D2 (cluster Insights, promote Heuristics)
-    ///   4. Run decay + GC
+    ///   4. Charge demurrage, freeze cold knowledge, thaw on demand
     ///   5. Run D3 (recompile PLAYBOOK.md)
     pub async fn run(
         &self,
@@ -604,7 +630,7 @@ pub struct DistillationQualityReport {
 pub struct D1Metrics {
     /// Extraction yield: insights extracted per episode. Target: 1.5-3.0.
     pub extraction_yield: f64,
-    /// Survival rate: fraction of D1 outputs that survive to Working tier.
+    /// Survival rate: fraction of D1 outputs that survive to Working tier and keep earning balance.
     /// Target: 0.3-0.5. Below 0.2 = too many false patterns. Above 0.7 = too conservative.
     pub survival_rate: f64,
     /// Novelty rate: fraction of D1 outputs that are genuinely new
@@ -624,17 +650,17 @@ pub struct D2Metrics {
     /// Cross-validation score: fraction of promoted heuristics from 2+ contexts.
     /// Must be 1.0 (all promoted heuristics pass cross-validation by design).
     pub cross_validation_score: f64,
-    /// Heuristic longevity: mean age (days) of heuristics before demotion.
+    /// Heuristic longevity: mean age (days) of heuristics before demotion or cold storage.
     /// Target: > 30 days. Short-lived heuristics indicate false promotions.
     pub heuristic_mean_age_days: f64,
 }
 
 pub struct D3Metrics {
-    /// Playbook coverage: fraction of active heuristics included in PLAYBOOK.md.
+    /// Playbook coverage: fraction of active heuristics that still earn balance and are included in PLAYBOOK.md.
     /// Target: > 0.8.
     pub playbook_coverage: f64,
     /// Playbook actionability: fraction of playbook rules that have been
-    /// successfully applied in tasks since last compilation. Target: > 0.5.
+    /// successfully applied in tasks since last compilation and kept their balance above the floor. Target: > 0.5.
     pub playbook_actionability: f64,
     /// Staleness: days since last PLAYBOOK.md update. Target: < 7 days.
     pub days_since_update: f64,
@@ -783,12 +809,15 @@ This ordering improves D1 extraction quality because the distillation LLM builds
 - `TierProgression` struct with `analyze()`, `extract_insights()`, `promote_heuristics()`, `compile_playbook()`, `replay_heuristics()`
 - `InsightRecord`, `HeuristicRule`, `PlaybookCompilation` types
 - `PatternMiner` integration from `roko-learn`
+- The demurrage framing for playbook freshness and balance-bearing reinforcement
 
 **Missing**:
 - Automatic Warning extraction in D1 (designed above; `extract_warnings()`)
 - HDC-based clustering in D2 (designed above; `HdcClusterer`)
 - Cross-validation enforcement in D2 (designed above; `cross_validation_check()`)
 - AntiKnowledge contradiction check before promotion (designed above; `anti_knowledge_check()`)
+- Balance updates on every retrieval, citation, surprise, and gate-survival path
+- Cold-tier freeze/thaw hooks in the storage backend
 - Dreams integration (designed above; `DreamsDistillationTrigger`)
 - End-to-end integration test (scenario above; not yet automated)
 
