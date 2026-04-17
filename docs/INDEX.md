@@ -10,11 +10,11 @@ has its own folder with multiple sub-docs. For naming conventions, reframe rules
 and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 `/Users/will/dev/nunchi/roko/refactoring-prd/`.
 
-See also `tmp/refinements/01-critique-one-noun.md`; REF02-REF05 and REF07 continue the
-reframing from the retired "one noun, six verbs" mnemonic into the current two-medium,
-two-fabric architecture story, and `tmp/refinements/06-refactoring-plan.md` records the
-phased landing sequence now summarized in
-[`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-plan-phases.md).
+See also `tmp/refinements/01-critique-one-noun.md` and `tmp/refinements/02-engram-vs-pulse.md`;
+REF02-REF05 and REF07 continue the reframing from the retired "one noun, six verbs"
+mnemonic into the current two-medium, two-fabric architecture story, and
+`tmp/refinements/06-refactoring-plan.md` records the phased landing sequence now summarized
+in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-plan-phases.md).
 
 ## Start Here
 
@@ -28,7 +28,8 @@ phased landing sequence now summarized in
 > **Kernel framing:** Roko's architecture is best read as two mediums (durable Engram and
 > ephemeral Pulse) moving through two fabrics (Substrate and Bus), acted on by six operators.
 > See [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md)
-> for the canonical terminology map and retired-code guidance.
+> for the canonical terminology map and [`00-architecture/02b-pulse-ephemeral-event.md`](00-architecture/02b-pulse-ephemeral-event.md)
+> for the medium split.
 
 ## Topics
 

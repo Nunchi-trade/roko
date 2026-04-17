@@ -7,9 +7,10 @@
 > covers the complete architectural specification from the core data type through the
 > layer taxonomy, cognitive cross-cuts, collective intelligence metrics, crate map, cybernetic
 > foundations, and the frontier innovations that distinguish Roko from every other agent
-> framework. For the phased refactoring plan and rollout ordering, see
-> `tmp/refinements/06-refactoring-plan.md`. For the rewrite-track alternative and from-scratch
-> sequencing, see `tmp/refinements/21-from-scratch-redesigns.md`.
+> framework. See also `tmp/refinements/02-engram-vs-pulse.md` for the Engram/Pulse split,
+> `tmp/refinements/06-refactoring-plan.md` for the phased refactoring plan and rollout
+> ordering, and `tmp/refinements/21-from-scratch-redesigns.md` for the rewrite-track
+> alternative and from-scratch sequencing.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -46,7 +47,8 @@ loop, and the frontier innovations that emerge from the architecture.
 |---|---|---|
 | 00 | [Vision and Core Thesis](./00-vision-and-thesis.md) | "The scaffold IS the product" thesis, empirical evidence, modern agent-systems mapping, active inference foundations, design principles overview |
 | 01 | [Naming and Glossary](./01-naming-and-glossary.md) | Complete retired→current naming map, crate dissolution, glossary of all terms |
-| 02 | [Engram Data Type](./02-engram-data-type.md) | The universal content-addressed data unit: struct fields, ContentHash (BLAKE3), Kind enum (28 variants), Body enum, lineage DAG, builder pattern |
+| 02 | [Engram Data Type](./02-engram-data-type.md) | The durable content-addressed record medium: struct fields, ContentHash (BLAKE3), Kind enum, Body enum, lineage DAG, and builder pattern |
+| 02b | [Pulse Ephemeral Event Medium](./02b-pulse-ephemeral-event.md) | The durable-versus-ephemeral medium split: Pulse, graduation rules, and the storage/stream boundary between Substrate and Bus |
 | 03 | [Score: 7-Axis Appraisal](./03-score-7-axis-appraisal.md) | 4 stable axes (confidence, novelty, utility, reputation) + 3 extended (precision, salience, coherence), effective formula, arithmetic, constants |
 | 04 | [Decay Variants](./04-decay-variants.md) | Four decay variants (None, HalfLife, Ttl, Ebbinghaus), formulas, pheromone constants, knowledge tier interaction, selection guidelines |
 | 05 | [Provenance and Attestation](./05-provenance-and-attestation.md) | Provenance struct (author, trust, tainted, session), four constructors, taint analysis, planned Attestation (Ed25519 + chain), extended fields |
@@ -90,7 +92,7 @@ mediums, the six operators, the two fabrics, and the five-layer taxonomy.
 **Recommended reading order within this topic**:
 1. Start with [00-vision-and-thesis](./00-vision-and-thesis.md) for the high-level thesis
 2. Read [01-naming-and-glossary](./01-naming-and-glossary.md) for terminology
-3. Read [02-engram-data-type](./02-engram-data-type.md) through [05-provenance-and-attestation](./05-provenance-and-attestation.md) for the core data types
+3. Read [02-engram-data-type](./02-engram-data-type.md) and [02b-pulse-ephemeral-event](./02b-pulse-ephemeral-event.md) through [05-provenance-and-attestation](./05-provenance-and-attestation.md) for the core data types and medium split
 4. Read [06-synapse-traits](./06-synapse-traits.md) through [08-scorer-gate-router-composer-policy](./08-scorer-gate-router-composer-policy.md) for the trait system
 5. Read [09-universal-cognitive-loop](./09-universal-cognitive-loop.md) through [11-dual-process-and-active-inference](./11-dual-process-and-active-inference.md) for the cognitive loop
 6. Read [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) through [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) for the architectural layers
