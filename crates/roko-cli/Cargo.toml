@@ -20,6 +20,7 @@ roko-std = { path = "../roko-std" }
 roko-fs = { path = "../roko-fs" }
 roko-compose = { path = "../roko-compose" }
 roko-agent = { path = "../roko-agent" }
+roko-agent-server = { path = "../roko-agent-server" }
 roko-gate = { path = "../roko-gate" }
 roko-orchestrator = { path = "../roko-orchestrator" }
 roko-learn = { path = "../roko-learn" }
@@ -67,4 +68,3 @@ notify-debouncer-full = "0.3"
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
-roko-agent-server = { path = "../roko-agent-server" }

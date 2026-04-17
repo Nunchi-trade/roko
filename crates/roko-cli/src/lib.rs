@@ -9,6 +9,7 @@
 //! schema.
 
 #![allow(clippy::module_name_repetitions)]
+#![allow(missing_docs)]
 #![cfg_attr(
     clippy,
     allow(

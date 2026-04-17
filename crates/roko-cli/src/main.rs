@@ -19,9 +19,11 @@
     )
 )]
 
+mod agent_serve;
 mod commands;
 mod plan_validate;
 
+use agent_serve::AgentCmd;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use commands::experiment::{ExperimentCmd, dispatch_experiment};
@@ -229,6 +231,11 @@ enum Command {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+    /// Manage standalone agent runtimes.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
     },
     /// Inject a signal into a running session.
     Inject {
@@ -962,6 +969,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             dispatch_config(cmd).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Agent { cmd } => cmd_agent(cli, cmd).await,
         Command::Inject {
             session,
             kind,
@@ -1066,6 +1074,13 @@ async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
     }
+}
+
+async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
+    let workdir = resolve_workdir(cli);
+    prepare_runtime_hooks(&workdir, cli.quiet);
+    agent_serve::run(cmd).await?;
+    Ok(EXIT_SUCCESS)
 }
 
 // -----------------------------------------------------------------------
@@ -6404,6 +6419,44 @@ mod tests {
     fn cli_parses_status_subcommand() {
         let cli = Cli::try_parse_from(["roko", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn cli_parses_agent_serve_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "agent",
+            "serve",
+            "--agent-id",
+            "demo-1",
+            "--bind",
+            "127.0.0.1:7777",
+            "--relay-url",
+            "https://relay.example",
+            "--chain-rpc-url",
+            "https://rpc.example",
+            "--identity-registry",
+            "0x1234",
+            "--passport-id",
+            "7",
+            "--wallet-key",
+            "0xdeadbeef",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent {
+                cmd: AgentCmd::Serve(agent_serve::AgentServeArgs {
+                    agent_id,
+                    bind,
+                    relay_url: Some(_),
+                    chain_rpc_url: Some(_),
+                    identity_registry: Some(_),
+                    passport_id: Some(_),
+                    wallet_key: Some(_),
+                }),
+            }) if agent_id == "demo-1" && bind == "127.0.0.1:7777"
+        ));
     }
 
     #[test]

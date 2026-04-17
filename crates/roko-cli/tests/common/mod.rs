@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use assert_cmd::Command;
 use assert_cmd::assert::Assert;
 use assert_cmd::cargo::cargo_bin;
@@ -236,6 +238,28 @@ pub struct ServeHandle {
     child: Child,
 }
 
+pub struct AgentServeConfig<'a> {
+    pub agent_id: &'a str,
+    pub relay_url: Option<&'a str>,
+    pub chain_rpc_url: Option<&'a str>,
+    pub identity_registry: Option<&'a str>,
+    pub passport_id: Option<&'a str>,
+    pub wallet_key: Option<&'a str>,
+}
+
+impl<'a> AgentServeConfig<'a> {
+    pub fn new(agent_id: &'a str) -> Self {
+        Self {
+            agent_id,
+            relay_url: None,
+            chain_rpc_url: None,
+            identity_registry: None,
+            passport_id: None,
+            wallet_key: None,
+        }
+    }
+}
+
 impl Drop for ServeHandle {
     fn drop(&mut self) {
         if let Ok(None) = self.child.try_wait() {
@@ -262,6 +286,49 @@ pub fn spawn_roko_serve_on_random_port(workdir: &Path) -> ServeHandle {
         .stderr(Stdio::null())
         .spawn()
         .unwrap_or_else(|err| panic!("spawn roko serve: {err}"));
+
+    ServeHandle { base_url, child }
+}
+
+pub fn spawn_roko_agent_serve_on_random_port(
+    workdir: &Path,
+    config: AgentServeConfig<'_>,
+) -> ServeHandle {
+    let port = pick_unused_port();
+    let bind = format!("127.0.0.1:{port}");
+    let base_url = format!("http://{bind}");
+    let bin = cargo_bin("roko");
+    let mut command = ProcessCommand::new(bin);
+    command
+        .current_dir(workdir)
+        .arg("agent")
+        .arg("serve")
+        .arg("--agent-id")
+        .arg(config.agent_id)
+        .arg("--bind")
+        .arg(&bind);
+
+    if let Some(relay_url) = config.relay_url {
+        command.arg("--relay-url").arg(relay_url);
+    }
+    if let Some(chain_rpc_url) = config.chain_rpc_url {
+        command.arg("--chain-rpc-url").arg(chain_rpc_url);
+    }
+    if let Some(identity_registry) = config.identity_registry {
+        command.arg("--identity-registry").arg(identity_registry);
+    }
+    if let Some(passport_id) = config.passport_id {
+        command.arg("--passport-id").arg(passport_id);
+    }
+    if let Some(wallet_key) = config.wallet_key {
+        command.arg("--wallet-key").arg(wallet_key);
+    }
+
+    let child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn roko agent serve: {err}"));
 
     ServeHandle { base_url, child }
 }
