@@ -17,7 +17,7 @@ Technical analysis (TA) originated as a financial discipline — chart patterns,
 
 The core insight: code, markets, research, and operations all share the same structural properties that make TA useful. They are structured systems with measurable state variables, feedback loops, non-stationary dynamics, and adversarial participants. A build time trend is structurally analogous to a price trend. A test failure probability is structurally analogous to a risk assessment. A dependency vulnerability score is structurally analogous to portfolio risk. The mathematics is the same; the domain vocabulary changes. That same measurement discipline is what lets TA distinguish a real moat from a feature list.
 
-This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. Under the two-mediums/two-fabrics framing in the [glossary](../00-architecture/01-naming-and-glossary.md), TA is one of the places where Roko's compounding and superlinear product claim becomes measurable: each prediction, correction, and replay cycle should make the next cycle cheaper, faster, and better. It is also the measurement and feedback layer for the structural moat described in [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md): TA shows whether architectural coherence, heuristic commons, plugin ecosystem, replication ledger, and Rust-level correctness are compounding together or merely existing as separate features. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md).
+This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. Under the two-mediums/two-fabrics framing in the [glossary](../00-architecture/01-naming-and-glossary.md), TA is one of the places where Roko's compounding and superlinear product claim becomes measurable: each prediction, correction, and replay cycle should make the next cycle cheaper, faster, and better. It is also the measurement and feedback layer for the structural moat described in [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md): TA shows whether architectural coherence, heuristic commons, plugin ecosystem, replication ledger, and Rust-level correctness are compounding together or merely existing as separate features. REF19 adds the honesty test on top of that: which oracle-side primitives are genuinely net-new, which are carefully integrated from prior art, and which claims have enough evidence to support publication. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) and [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
 
 ## Moat telemetry
 
@@ -248,6 +248,61 @@ Without those guardrails, TA can still report local prediction quality, but it c
 
 ---
 
+## Net-New Innovation Lens For TA
+
+REF19 reframes novelty claims as a flat catalog with three levels: primitive, pattern, and API. The technical-analysis chapter is where several of those claims become measurable rather than rhetorical, because this topic owns prediction, correction, calibration, and replay loops. See [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md) for the canonical catalog.
+
+### Primitive vs integration claims
+
+Not every TA-facing capability is net-new in isolation. HDC fingerprinting, demurrage, prediction markets, and active inference all have prior art. The honest claim is that Roko turns them into one coherent oracle stack by running them through the same two mediums, two fabrics, and seven-step loop.
+
+| TA-facing claim | Category | Why it matters here | Closest prior art |
+|---|---|---|---|
+| **HDC fingerprint** on every Engram used for oracle-side similarity and analogy | Integrated primitive | Lets coding, chain, and research oracles share one structural retrieval surface | Vector databases and HDC/VSA systems |
+| **Demurrage** on durable prediction knowledge | Integrated primitive | Keeps stale calibration, weak hypotheses, and idle playbooks from dominating retrieval | TTL/LRU caches and recommender decay |
+| **Heuristic with explicit falsifier** | Genuinely new primitive | Turns prediction guidance into something the oracle loop can actually disconfirm and recalibrate | Rule engines and retrieved tips without mandatory falsifiers |
+| **Replication ledger** for design claims and oracle assumptions | Genuinely new primitive | Makes the runtime's own research basis auditable across deployments | Replication registries in science, not agent runtimes |
+| **c-factor** as a runtime routing and dashboard signal | Genuinely new primitive | Measures whether cohort prediction quality is producing better group outcomes | Team dashboards and organizational-health metrics |
+| **Predict-publish-correct loop** over Bus + Substrate | Integrated pattern | Makes every prediction a first-class learning cycle across agents and sessions | Forecasting pipelines and stream-processing systems |
+| **Bus subscription API** for predictions and outcomes | Integrated API | Lets dashboards, audits, and external tools subscribe to the same live calibration traffic | Message-bus subscribers and monitoring feeds |
+
+The moat claim stays the same across those rows: a competitor can copy a local feature, but copying the whole TA stack means reproducing the alignment among Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics with falsifiers, c-factor, and the replication ledger.
+
+### TA's contribution to the net-new catalog
+
+TA is the chapter where several REF19 entries either become visible to users or become empirically defensible:
+
+| REF19 entry | TA chapter contribution | Home doc |
+|---|---|---|
+| Predict-publish-correct loops | Prediction registration, outcome resolution, residual correction, and calibration flow | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) |
+| HDC query API | Cross-domain similarity search over oracle artifacts and structural analogies | [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) |
+| c-factor runtime signal | Shared oracle accuracy becomes a cohort health input instead of a vanity dashboard number | [../00-architecture/14-c-factor-collective-intelligence.md](../00-architecture/14-c-factor-collective-intelligence.md) |
+| Replication ledger API | Research-oracle outputs can be joined to claims and rerun histories | [../05-learning/20-research-to-runtime.md](../05-learning/20-research-to-runtime.md) |
+| Demurrage-taxed learned parameters | Calibration priors decay when unchallenged, enabling graceful relearning | [../00-architecture/04-decay-variants.md](../00-architecture/04-decay-variants.md) |
+
+### Publishable claims ladder
+
+REF19 identifies four claims that could plausibly clear a publication bar after enough deployment history. The TA topic is where the evidence plan for those claims lives because it owns the measurement discipline.
+
+| Candidate paper | TA evidence needed | Likely adjacent doc |
+|---|---|---|
+| **c-factor measurement in agent systems** | Longitudinal cohort metrics showing that higher c-factor predicts better verified outcomes, not just more chatter | [../00-architecture/14-c-factor-collective-intelligence.md](../00-architecture/14-c-factor-collective-intelligence.md) |
+| **Demurrage-based memory management for LLM agents** | Retrieval-quality gains with bounded warm-tier size and lower stale-memory interference | [../00-architecture/04-decay-variants.md](../00-architecture/04-decay-variants.md) |
+| **Replication ledger as evidence-based engineering** | Per-claim history of reported effect vs observed deployment effect, with confidence intervals and reversals logged | [../05-learning/20-research-to-runtime.md](../05-learning/20-research-to-runtime.md) |
+| **HDC compositional memory for code agents** | Cross-codebase similarity, analogy transfer, and latency measurements over real coding workloads | [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) |
+
+Those are intentionally stronger than "interesting feature" claims. A publishable claim here needs live deployment evidence, preserved historical state, and explicit falsifiers for the claim being tested.
+
+### Honest novelty rule
+
+The chapter should keep making one distinction explicit:
+
+- A **net-new primitive** is rare and should be claimed carefully.
+- An **innovation by integration** is still valuable, but its novelty comes from fit, not from pretending the ingredients never existed.
+- TA is the instrumentation layer that tells us when either claim has become true in practice.
+
+---
+
 ## Why domain-specific instances matter
 
 Universal primitives provide the architecture. Domain-specific instances provide the value. Each domain has unique:
@@ -309,3 +364,4 @@ See `tmp/implementation-plans/modelrouting/12-advanced-patterns.md` for the Thom
 - See topic [06-neuro](../06-neuro/INDEX.md) for HDC cross-domain transfer
 - See [../../tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md) for the structural moat synthesis this chapter measures
 - See [../../tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) for the canonical REF15 proposal
+- See [../../tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md) for the net-new innovation catalog this chapter helps validate

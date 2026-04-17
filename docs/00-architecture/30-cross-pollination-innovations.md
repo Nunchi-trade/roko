@@ -8,13 +8,35 @@
 > existing traits together, not a new subsystem to build from scratch.
 >
 > That same composition is part of the moat. The advantage does not come from any isolated
-> primitive, but from the reinforcing weave across Substrate, Bus, HDC fingerprinting,
-> demurrage, heuristic calibration, c-factor measurement, plugin SPI, and the replication
-> ledger. A competitor can copy one piece; copying the aligned kernel decisions that make
-> these pieces reinforce each other is a much harder, slower rewrite. See also
-> [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md).
+> primitive. Pulse, HDC fingerprinting, demurrage, the heuristic-with-falsifier pattern,
+> replication ledger, c-factor, worldview clusters, two-fabric operator generalization, and
+> plugin tiers each have prior art or close analogues. The net-new artifact is the composition:
+> the reinforcing weave across Substrate, Bus, shared traits, and shared evidence loops that
+> makes those primitives compound into a single system. A competitor can copy one primitive;
+> copying the aligned kernel decisions that make the whole architecture reinforce itself is a
+> much harder, slower rewrite. See also
+> [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md)
+> and [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
 
 > **Implementation**: Specified
+
+---
+
+## REF19 Alignment: Net-New vs Carefully Integrated
+
+The right way to read this chapter is not "which primitive is unique by itself?" but "which
+composition is net-new?" Most primitives are valuable because they are carefully integrated
+with the rest of the runtime, not because they are novel in isolation.
+
+| Primitive cluster | Composition role | Net-new claim |
+|---|---|---|
+| `Pulse` + two-fabric operator generalization | One operator algebra spans ephemeral and durable artifacts | Medium polymorphism becomes a first-class runtime property, not a framework convention |
+| HDC fingerprint + c-factor + worldview clusters | Similarity, collective signal, and emergent domains reinforce routing | The system can compare, organize, and steer knowledge with structural evidence instead of ad hoc metadata |
+| Demurrage + heuristic with falsifier + replication ledger | Ideas decay unless justified; claims stay auditable | Beliefs, heuristics, and research assumptions are continuously corrected by lived evidence |
+| Plugin tiers | Risk-aware extension boundaries | Extensibility is native to the kernel instead of bolted on as a single security model |
+
+This is the core REF19 claim: the primitives are the building blocks, but the **net-new**
+innovation is the composition.
 
 ---
 
@@ -1037,7 +1059,9 @@ Agents specialize based on whether they succeed at tasks, not based on *what the
 The insight: **knowledge concentration should drive specialization**. An agent that has deep
 Consolidated knowledge about testing should specialize in testing. An agent with rich
 CausalLink knowledge about performance should specialize in optimization. The knowledge
-landscape *is* the morphogenetic field.
+landscape *is* the morphogenetic field. In REF19 terms, the net-new object is the resulting
+**worldview cluster**: a stable bundle of co-citing heuristics, claims, and behavioral priors
+that can be routed and compared as a unit, rather than just a bag of isolated facts.
 
 ### Research Basis
 
@@ -2794,10 +2818,12 @@ These eight innovations are not isolated. They form a **reinforcing network**:
 
 That network is also the chapter's moat claim: each innovation becomes materially more
 defensible because it depends on aligned decisions across the kernel stack. Substrate,
-Bus, HDC fingerprints, demurrage, heuristic calibration, c-factor measurement, plugin SPI,
-and the replication ledger reinforce one another. Competitors can approximate the isolated
-primitive, but they do not get the same architecture-wide compound effect without rebuilding
-the weave. See also [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md).
+Bus, Pulse, HDC fingerprints, demurrage, the heuristic with falsifier, c-factor measurement,
+worldview clusters, two-fabric operator generalization, plugin tiers, and the replication
+ledger reinforce one another. Competitors can approximate the isolated primitive, but they do
+not get the same architecture-wide compound effect without rebuilding the weave. See also
+[tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md) and
+[tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
 
 ```
    ┌─────────────────────────────────────────────────────────┐
@@ -2846,7 +2872,7 @@ the weave. See also [tmp/refinements/18-competitive-moat.md](../../tmp/refinemen
    their niche, reinforcing the specialization gradient.
 
 The full interaction set is what makes the moat durable: the primitives are valuable alone,
-but the cross-pollinated architecture compounds because each subsystem improves the others'
+but the cross-pollinated architecture is net-new because each subsystem improves the others'
 signals, routing, persistence, and calibration. That architectural coherence is expensive to
 copy because it depends on aligned kernel choices, not just feature parity.
 

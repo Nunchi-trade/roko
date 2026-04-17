@@ -46,6 +46,12 @@ discovered, audited, and sandboxed without forking core. Start with
 [`12-interfaces/00-cli-overview.md`](12-interfaces/00-cli-overview.md),
 [`12-interfaces/01-cli-command-reference.md`](12-interfaces/01-cli-command-reference.md),
 and [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md).
+`tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
+which primitives are genuinely new, which are integrations of prior art, and which claims
+deserve publication-grade evidence. Start with
+[`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
+[`00-architecture/30-cross-pollination-innovations.md`](00-architecture/30-cross-pollination-innovations.md),
+and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/00-vision-ta-generalized.md).
 
 ## Start Here
 
@@ -78,6 +84,11 @@ and [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md).
 > [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
 > [`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
 > and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+> REF19 adds the net-new innovation catalog and the rule that novelty claims should distinguish
+> genuinely new primitives from carefully integrated prior art; start with
+> [`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
+> [`00-architecture/30-cross-pollination-innovations.md`](00-architecture/30-cross-pollination-innovations.md),
+> and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/00-vision-ta-generalized.md).
 
 ## Topics
 
@@ -101,7 +112,7 @@ and [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md).
 - [`17-lifecycle/`](17-lifecycle/INDEX.md) — Agent Lifecycle
 - [`18-tools/`](18-tools/INDEX.md) — Topic 18 — Tools, Plugins & Integrations
 - [`19-deployment/`](19-deployment/INDEX.md) — 19 — Deployment
-- [`20-technical-analysis/`](20-technical-analysis/INDEX.md) — Topic 20: Technical Analysis — Universal Oracle Primitives
+- [`20-technical-analysis/`](20-technical-analysis/INDEX.md) — Topic 20: Technical Analysis — Universal Oracle Primitives, compounding telemetry, and REF19 publishable-claims evidence
 - [`21-references/`](21-references/INDEX.md) — References — Master Citation Index
 
 ## How this was built
