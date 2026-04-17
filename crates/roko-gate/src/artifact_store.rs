@@ -84,7 +84,9 @@ mod tests {
         let mut store = ArtifactStore::new();
         let content = b"hello world";
         let hash = store.store(content);
-        let retrieved = store.retrieve(&hash).unwrap();
+        let retrieved = store
+            .retrieve(&hash)
+            .expect("invariant: stored artifact should be retrievable by its hash");
         assert_eq!(retrieved, content);
     }
 
@@ -115,8 +117,18 @@ mod tests {
         let h2 = store.store(b"beta");
         assert_ne!(h1, h2);
         assert_eq!(store.len(), 2);
-        assert_eq!(store.retrieve(&h1).unwrap(), b"alpha");
-        assert_eq!(store.retrieve(&h2).unwrap(), b"beta");
+        assert_eq!(
+            store
+                .retrieve(&h1)
+                .expect("invariant: first stored artifact should exist"),
+            b"alpha"
+        );
+        assert_eq!(
+            store
+                .retrieve(&h2)
+                .expect("invariant: second stored artifact should exist"),
+            b"beta"
+        );
     }
 
     #[test]
@@ -124,7 +136,12 @@ mod tests {
         let mut store = ArtifactStore::new();
         let hash = store.store(b"");
         assert!(store.exists(&hash));
-        assert_eq!(store.retrieve(&hash).unwrap(), b"");
+        assert_eq!(
+            store
+                .retrieve(&hash)
+                .expect("invariant: empty artifact should be retrievable"),
+            b""
+        );
         assert_eq!(store.len(), 1);
     }
 
@@ -133,7 +150,9 @@ mod tests {
         let mut store = ArtifactStore::new();
         let big = vec![0xAB_u8; 1_000_000];
         let hash = store.store(&big);
-        let retrieved = store.retrieve(&hash).unwrap();
+        let retrieved = store
+            .retrieve(&hash)
+            .expect("invariant: large stored artifact should be retrievable");
         assert_eq!(retrieved.len(), 1_000_000);
         assert!(retrieved.iter().all(|&b| b == 0xAB));
     }
@@ -165,7 +184,12 @@ mod tests {
         assert_eq!(store.len(), 50);
         for (i, hash) in hashes.iter().enumerate() {
             let expected = format!("artifact-{i}");
-            assert_eq!(store.retrieve(hash).unwrap(), expected.as_bytes());
+            assert_eq!(
+                store
+                    .retrieve(hash)
+                    .expect("invariant: stored artifact should exist during lookup sweep"),
+                expected.as_bytes()
+            );
         }
     }
 }

@@ -145,11 +145,20 @@ mod tests {
         let scrubber = Arc::new(LogScrubber::new());
         let leaked = "your key is sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890 ok";
         let app = test_app(scrubber, leaked);
-        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let req = Request::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("invariant: building request body for test");
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("invariant: middleware test router responds");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("invariant: test response body buffers");
+        let text =
+            String::from_utf8(body.to_vec()).expect("invariant: middleware test body is utf-8");
         assert!(!text.contains("sk-ant-api03"));
         assert!(text.contains("[REDACTED"));
     }
@@ -159,10 +168,21 @@ mod tests {
         let scrubber = Arc::new(LogScrubber::new());
         let clean = "all good, no secrets here";
         let app = test_app(scrubber, clean);
-        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert_eq!(std::str::from_utf8(&body).unwrap(), clean);
+        let req = Request::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("invariant: building request body for test");
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("invariant: middleware test router responds");
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("invariant: test response body buffers");
+        assert_eq!(
+            std::str::from_utf8(&body).expect("invariant: clean response remains utf-8"),
+            clean
+        );
     }
 
     #[tokio::test]
@@ -173,7 +193,7 @@ mod tests {
             Response::builder()
                 .header(CONTENT_TYPE, "image/png")
                 .body(Body::from(leaked))
-                .unwrap()
+                .expect("invariant: image response body builds")
         };
         let app =
             Router::new()
@@ -182,11 +202,22 @@ mod tests {
                     scrubber,
                     scrub_secrets,
                 ));
-        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let req = Request::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("invariant: building request body for test");
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("invariant: middleware test router responds");
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("invariant: test response body buffers");
         // Binary/image content should NOT be scrubbed.
-        assert_eq!(std::str::from_utf8(&body).unwrap(), leaked);
+        assert_eq!(
+            std::str::from_utf8(&body).expect("invariant: binary test payload is utf-8"),
+            leaked
+        );
     }
 
     #[tokio::test]
@@ -194,10 +225,19 @@ mod tests {
         let scrubber = Arc::new(LogScrubber::new());
         let leaked = "token: ghp_ABCDEFGHIJKLMNOPqrstuvwxyz1234567890";
         let app = test_app_json(scrubber, leaked);
-        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
+        let req = Request::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("invariant: building request body for test");
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("invariant: middleware test router responds");
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("invariant: test response body buffers");
+        let text =
+            String::from_utf8(body.to_vec()).expect("invariant: middleware test body is utf-8");
         assert!(!text.contains("ghp_"));
         assert!(text.contains("[REDACTED"));
     }
@@ -207,7 +247,7 @@ mod tests {
         let resp = Response::builder()
             .header(CONTENT_TYPE, "application/json")
             .body(Body::empty())
-            .unwrap();
+            .expect("invariant: response builder constructs json response");
         assert!(is_scrubbable_content_type(&resp));
     }
 
@@ -216,7 +256,7 @@ mod tests {
         let resp = Response::builder()
             .header(CONTENT_TYPE, "text/plain")
             .body(Body::empty())
-            .unwrap();
+            .expect("invariant: response builder constructs text response");
         assert!(is_scrubbable_content_type(&resp));
     }
 
@@ -225,7 +265,7 @@ mod tests {
         let resp = Response::builder()
             .header(CONTENT_TYPE, "image/png")
             .body(Body::empty())
-            .unwrap();
+            .expect("invariant: response builder constructs image response");
         assert!(!is_scrubbable_content_type(&resp));
     }
 
@@ -234,13 +274,15 @@ mod tests {
         let resp = Response::builder()
             .header(CONTENT_TYPE, "application/octet-stream")
             .body(Body::empty())
-            .unwrap();
+            .expect("invariant: response builder constructs octet-stream response");
         assert!(!is_scrubbable_content_type(&resp));
     }
 
     #[test]
     fn is_scrubbable_assumes_json_when_no_content_type() {
-        let resp = Response::builder().body(Body::empty()).unwrap();
+        let resp = Response::builder()
+            .body(Body::empty())
+            .expect("invariant: response builder constructs empty response");
         assert!(is_scrubbable_content_type(&resp));
     }
 }

@@ -1693,12 +1693,16 @@ mod tests {
         verdict.duration_ms = duration_ms;
 
         let signal = Engram::builder(Kind::GateVerdict)
-            .body(Body::from_json(&verdict).unwrap())
+            .body(
+                Body::from_json(&verdict)
+                    .expect("invariant: verdict helper should serialize test payloads"),
+            )
             .provenance(Provenance::trusted("test"))
             .tag("gate", gate)
             .tag("passed", passed.to_string())
             .build();
-        let mut signal = serde_json::to_value(signal).unwrap();
+        let mut signal = serde_json::to_value(signal)
+            .expect("invariant: verdict helper should serialize signal envelopes");
         signal
             .as_object_mut()
             .expect("gate signal should be an object")
@@ -1856,7 +1860,13 @@ mod tests {
         assert_eq!(payload["source"], signals.display().to_string());
         assert_eq!(payload["total"], 3);
         assert_eq!(payload["limit"], 2);
-        assert_eq!(payload["history"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            payload["history"]
+                .as_array()
+                .expect("invariant: gate history payload should contain a history array")
+                .len(),
+            2
+        );
         assert_eq!(payload["history"][0]["gate"], "test");
         assert_eq!(payload["history"][1]["gate"], "compile");
     }
@@ -1914,7 +1924,13 @@ mod tests {
         let payload: Value = serde_json::from_slice(&body).expect("parse gate summary response");
         assert_eq!(payload["compile"]["total_runs"], 2);
         assert_eq!(payload["compile"]["pass_rate"], 0.5);
-        assert_eq!(payload["rungs"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            payload["rungs"]
+                .as_array()
+                .expect("invariant: gate summary payload should contain a rung array")
+                .len(),
+            2
+        );
         assert_eq!(payload["rungs"][0]["rung"], 1);
         assert_eq!(payload["rungs"][0]["passed_runs"], 1);
         assert_eq!(payload["rungs"][0]["failed_runs"], 1);

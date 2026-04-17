@@ -245,17 +245,25 @@ mod tests {
 
     #[test]
     fn round_trip_persistence() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()
+            .expect("invariant: adaptive-threshold test should create a temp directory");
         let path = dir.path().join("gate-thresholds.json");
 
         let mut at = AdaptiveThresholds::new();
         for _ in 0..10 {
             at.update(1, true);
         }
-        at.save(&path).unwrap();
+        at.save(&path)
+            .expect("invariant: adaptive thresholds should save to the temp file");
 
         let loaded = AdaptiveThresholds::load_or_new(&path);
-        assert_eq!(loaded.rung_stats(1).unwrap().total_observations, 10);
+        assert_eq!(
+            loaded
+                .rung_stats(1)
+                .expect("invariant: persisted rung stats should exist after reload")
+                .total_observations,
+            10
+        );
     }
 
     #[test]

@@ -1252,7 +1252,13 @@ mod tests {
         assert_eq!(payload["source"], signals.display().to_string());
         assert_eq!(payload["total"], 2);
         assert_eq!(payload["limit"], 1);
-        assert_eq!(payload["history"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            payload["history"]
+                .as_array()
+                .expect("invariant: gate history payload should contain a history array")
+                .len(),
+            1
+        );
         assert_eq!(payload["history"][0]["gate"], "test");
         assert_eq!(payload["history"][0]["passed"], false);
         Ok(())
@@ -1329,7 +1335,13 @@ mod tests {
             .map_err(|err| anyhow!("failed to read cascade-router alias response body: {err}"))?;
         let cascade_payload: Value = serde_json::from_slice(&cascade_body)
             .map_err(|err| anyhow!("failed to parse cascade-router alias response body: {err}"))?;
-        assert_eq!(cascade_payload["model_slugs"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            cascade_payload["model_slugs"]
+                .as_array()
+                .expect("invariant: cascade response should contain a model_slugs array")
+                .len(),
+            2
+        );
 
         let cost_tiers_response = app
             .clone()
@@ -1470,7 +1482,13 @@ mod tests {
             .map_err(|err| anyhow!("failed to read c-factor trend response body: {err}"))?;
         let payload: Value = serde_json::from_slice(&body)
             .map_err(|err| anyhow!("failed to parse c-factor trend response body: {err}"))?;
-        assert_eq!(payload.as_array().unwrap().len(), 0);
+        assert_eq!(
+            payload
+                .as_array()
+                .expect("invariant: c-factor trend response should be an array")
+                .len(),
+            0
+        );
         Ok(())
     }
 

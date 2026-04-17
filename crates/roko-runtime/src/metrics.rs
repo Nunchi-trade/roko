@@ -121,10 +121,12 @@ mod tests {
     fn record_and_read_back() {
         let dir = std::env::temp_dir().join(format!("roko-runtime-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir)
+            .expect("invariant: metric test should be able to create its temp directory");
 
         let path = dir.join("metrics.jsonl");
-        let recorder = MetricRecorder::open(&path).unwrap();
+        let recorder = MetricRecorder::open(&path)
+            .expect("invariant: metric recorder should open within the temp directory");
 
         recorder
             .record(&TestMetric {
@@ -132,23 +134,25 @@ mod tests {
                 cost_usd: 1.23,
                 gate_passed: true,
             })
-            .unwrap();
+            .expect("invariant: first metric should serialize and append");
         recorder
             .record(&TestMetric {
                 plan_id: "plan-02".into(),
                 cost_usd: 0.45,
                 gate_passed: false,
             })
-            .unwrap();
+            .expect("invariant: second metric should serialize and append");
 
         // Read back.
-        let contents = std::fs::read_to_string(&path).unwrap();
+        let contents = std::fs::read_to_string(&path)
+            .expect("invariant: metric test should be able to read back its JSONL file");
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2);
 
         // Parse each line.
         for line in &lines {
-            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let v: serde_json::Value = serde_json::from_str(line)
+                .expect("invariant: recorded metric lines should contain valid JSON");
             assert!(v.get("ts").is_some());
             assert!(v.get("plan_id").is_some());
         }

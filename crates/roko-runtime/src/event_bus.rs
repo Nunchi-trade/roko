@@ -319,7 +319,10 @@ mod tests {
 
         bus.emit(TestEvent::Ping(42));
 
-        let env = rx.recv().await.unwrap();
+        let env = rx
+            .recv()
+            .await
+            .expect("invariant: subscriber should receive the emitted live event");
         assert_eq!(env.payload, TestEvent::Ping(42));
         assert_eq!(env.seq, 0);
         assert!(env.ts_millis > 0);
@@ -358,8 +361,10 @@ mod tests {
             issued_at: chrono::Utc::now(),
         };
 
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: RokoEvent = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&event)
+            .expect("invariant: plan revision event should serialize to JSON");
+        let decoded: RokoEvent = serde_json::from_str(&json)
+            .expect("invariant: serialized plan revision event should deserialize");
 
         assert_eq!(decoded, event);
     }
@@ -396,8 +401,10 @@ mod tests {
             origin: PublishOrigin::Cli,
         };
 
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: RokoEvent = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&event)
+            .expect("invariant: PRD published event should serialize to JSON");
+        let decoded: RokoEvent = serde_json::from_str(&json)
+            .expect("invariant: serialized PRD published event should deserialize");
 
         assert_eq!(decoded, event);
     }

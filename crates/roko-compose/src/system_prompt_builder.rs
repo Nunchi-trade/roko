@@ -46,7 +46,7 @@ use roko_learn::skill_library::Skill;
 ///     .with_domain("DeFi protocol context: ...")
 ///     .with_task("Implement the rate limiter in crates/golem-core")
 ///     .with_tools("MCP tools available: Read, Write, Bash")
-///     .with_anti_patterns(vec!["Never use unwrap() in library crates"])
+///     .with_anti_patterns(vec!["Never call unwrap in library crates"])
 ///     .build();
 /// ```
 pub struct SystemPromptBuilder {
@@ -995,7 +995,7 @@ mod tests {
             .with_task("Implement rate limiter in crates/golem-core")
             .with_tools("MCP tools: Read, Write, Bash")
             .with_anti_patterns(vec![
-                "Never use unwrap() in library crates".to_string(),
+                "Never call unwrap in library crates".to_string(),
                 "No hardcoded paths".to_string(),
             ])
             .build();
@@ -1006,7 +1006,7 @@ mod tests {
         assert!(prompt.contains("Knowledge about execution flow."));
         assert!(prompt.contains("rate limiter"));
         assert!(prompt.contains("MCP tools"));
-        assert!(prompt.contains("Never use unwrap()"));
+        assert!(prompt.contains("Never call unwrap"));
         assert!(prompt.contains("No hardcoded paths"));
     }
 
@@ -1070,14 +1070,30 @@ mod tests {
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build();
 
-        let pos_role = prompt.find("LAYER1_ROLE").unwrap();
-        let pos_conv = prompt.find("LAYER2_CONV").unwrap();
-        let pos_tools = prompt.find("LAYER5_TOOLS").unwrap();
-        let pos_domain = prompt.find("LAYER3_DOMAIN").unwrap();
-        let pos_context = prompt.find("LAYER3B_CONTEXT").unwrap();
-        let pos_anti = prompt.find("LAYER6_ANTI").unwrap();
-        let pos_task = prompt.find("LAYER4_TASK").unwrap();
-        let pos_affect = prompt.find("time pressure").unwrap();
+        let pos_role = prompt
+            .find("LAYER1_ROLE")
+            .expect("invariant: prompt should contain the role layer marker");
+        let pos_conv = prompt
+            .find("LAYER2_CONV")
+            .expect("invariant: prompt should contain the conventions marker");
+        let pos_tools = prompt
+            .find("LAYER5_TOOLS")
+            .expect("invariant: prompt should contain the tools marker");
+        let pos_domain = prompt
+            .find("LAYER3_DOMAIN")
+            .expect("invariant: prompt should contain the domain marker");
+        let pos_context = prompt
+            .find("LAYER3B_CONTEXT")
+            .expect("invariant: prompt should contain the context marker");
+        let pos_anti = prompt
+            .find("LAYER6_ANTI")
+            .expect("invariant: prompt should contain the anti-pattern marker");
+        let pos_task = prompt
+            .find("LAYER4_TASK")
+            .expect("invariant: prompt should contain the task marker");
+        let pos_affect = prompt
+            .find("time pressure")
+            .expect("invariant: prompt should contain affect guidance text");
 
         // Cache order: role -> workspace -> plan -> volatile.
         assert!(pos_role < pos_conv, "role before conventions");
@@ -1104,13 +1120,21 @@ mod tests {
         assert!(prompt.contains("<!-- cache:session -->"));
 
         // System marker comes after conventions, before domain.
-        let sys_marker = prompt.find("<!-- cache:system -->").unwrap();
-        let domain_pos = prompt.find("Domain").unwrap();
+        let sys_marker = prompt
+            .find("<!-- cache:system -->")
+            .expect("invariant: prompt should contain the system cache marker");
+        let domain_pos = prompt
+            .find("Domain")
+            .expect("invariant: prompt should contain the domain section");
         assert!(sys_marker < domain_pos);
 
         // Session marker comes after the session-tier context, before task.
-        let sess_marker = prompt.find("<!-- cache:session -->").unwrap();
-        let task_pos = prompt.find("Task").unwrap();
+        let sess_marker = prompt
+            .find("<!-- cache:session -->")
+            .expect("invariant: prompt should contain the session cache marker");
+        let task_pos = prompt
+            .find("Task")
+            .expect("invariant: prompt should contain the task section");
         assert!(sess_marker < task_pos);
     }
 
@@ -1150,7 +1174,7 @@ mod tests {
             .with_context("Assembly context")
             .with_task("Implement feature X")
             .with_tools("Use MCP tools")
-            .add_anti_pattern("No unwrap()")
+            .add_anti_pattern("No unwrap calls")
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build_sections();
 
@@ -1415,9 +1439,22 @@ mod tests {
             .with_affect_state(Some(PadState::new(0.0, 0.8, 0.0)))
             .build();
 
-        assert!(prompt.find("Role").unwrap() < prompt.find("Task").unwrap());
-        assert!(prompt.find("Domain").unwrap() < prompt.find("Task").unwrap());
-        assert!(prompt.find("Task").unwrap() < prompt.find("time pressure").unwrap());
+        let role_pos = prompt
+            .find("Role")
+            .expect("invariant: prompt should contain the role text");
+        let domain_pos = prompt
+            .find("Domain")
+            .expect("invariant: prompt should contain the domain text");
+        let task_pos = prompt
+            .find("Task")
+            .expect("invariant: prompt should contain the task text");
+        let pressure_pos = prompt
+            .find("time pressure")
+            .expect("invariant: prompt should contain affect guidance text");
+
+        assert!(role_pos < task_pos);
+        assert!(domain_pos < task_pos);
+        assert!(task_pos < pressure_pos);
     }
 
     #[test]
@@ -1467,7 +1504,7 @@ mod tests {
         }
 
         let sections = SystemPromptBuilder::new("Role")
-            .add_anti_pattern("No unwrap()")
+            .add_anti_pattern("No unwrap calls")
             .with_section_effectiveness("Implementer", &registry)
             .build_sections();
 
