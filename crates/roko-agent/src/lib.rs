@@ -15,8 +15,9 @@
 //!
 //! - [`MockAgent`] — deterministic, for tests
 //! - [`ExecAgent`] — spawns an external CLI, pipes prompt to stdin, captures stdout
-//!
-//! Future: `ClaudeAgent`, `CodexAgent`, `CursorAgent`, `OllamaAgent`.
+//! - [`ClaudeCliAgent`] — Claude CLI adapter with tool allowlists and resume support
+//! - [`OllamaAgent`] — direct Ollama `/api/chat` adapter
+//! - [`OllamaLlmBackend`] — Ollama tool-loop backend
 
 #![allow(
     dead_code,
@@ -59,8 +60,6 @@ pub mod mock;
 pub mod multi_pool;
 pub mod nl_to_format;
 pub mod ollama;
-pub mod ollama_agent;
-pub mod ollama_backend;
 pub mod openai_agent;
 pub mod openai_compat_backend;
 pub mod perplexity;
@@ -78,6 +77,20 @@ pub mod tool_loop;
 pub mod translate;
 pub mod usage;
 
+/// Deprecated compatibility shim for the former flat `ollama_agent` module.
+#[deprecated(note = "use crate::ollama::agent::OllamaAgent or crate::OllamaAgent instead")]
+pub mod ollama_agent {
+    pub use crate::ollama::agent::OllamaAgent;
+}
+
+/// Deprecated compatibility shim for the former flat `ollama_backend` module.
+#[deprecated(
+    note = "use crate::ollama::agent::OllamaLlmBackend or crate::OllamaLlmBackend instead"
+)]
+pub mod ollama_backend {
+    pub use crate::ollama::agent::OllamaLlmBackend;
+}
+
 pub use agent::{Agent, AgentResult};
 pub use chat_types::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
 pub use claude_cli_agent::ClaudeCliAgent;
@@ -91,7 +104,7 @@ pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn}
 pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};
 pub use mock::MockAgent;
 pub use multi_pool::MultiAgentPool;
-pub use ollama_backend::OllamaLlmBackend;
+pub use ollama::agent::{OllamaAgent, OllamaLlmBackend};
 pub use openai_compat_backend::OpenAiCompatLlmBackend;
 pub use perplexity::{
     Annotation, PerplexityChatAgent, PerplexityDeepResearchAgent, PerplexityEmbedAgent,

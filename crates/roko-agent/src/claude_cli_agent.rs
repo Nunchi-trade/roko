@@ -1,9 +1,11 @@
-//! `ClaudeCliAgent` — spawns the Claude CLI with Roko's system prompt,
-//! tool allowlist, and safety settings.
+//! `ClaudeCliAgent` — choose this for the Claude CLI path with Roko's system
+//! prompt, tool allowlist, safety settings, and session-aware behavior.
 //!
 //! This is the runtime-facing adapter for the `claude` executable. It keeps
 //! the wire-specific flag construction in one place instead of scattering
-//! command-building logic across the CLI entrypoints.
+//! command-building logic across the CLI entrypoints. Prefer
+//! [`ExecAgent`](crate::ExecAgent) only for generic stdin/stdout CLIs where
+//! Claude-specific resume and tool-loop wiring are not needed.
 
 use crate::agent::{Agent, AgentResult};
 use crate::mcp::find_mcp_config;

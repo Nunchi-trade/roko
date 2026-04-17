@@ -1,7 +1,10 @@
-//! `ExecAgent` — runs any CLI that accepts a prompt on stdin and returns output on stdout.
+//! `ExecAgent` — choose this for generic prompt-in/stdout CLIs that are not
+//! Claude-specific and do not need a provider-aware protocol.
 //!
 //! Works with tools like `ollama run`, `mods`, `llm`, or just `cat` / `echo`
-//! for testing. This is the lowest-common-denominator LLM integration.
+//! for testing. Prefer [`ClaudeCliAgent`](crate::ClaudeCliAgent) when the
+//! backend is actually Claude Code and you need its richer tool, session, and
+//! safety wiring. This is the lowest-common-denominator LLM integration.
 
 use crate::agent::{Agent, AgentResult, derived_output};
 use crate::process::{
