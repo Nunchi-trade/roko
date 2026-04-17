@@ -6,14 +6,21 @@
 > and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md)
 > and [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
-> **Implementation**: Specified
+> **Implementation**: Target-state design
+>
+> **Implementation status**: The current runtime does not load plugins from
+> manifests. Tool registration is compile-time Rust via
+> `roko_std::StaticToolRegistry`, with MCP/config-driven layering on top. The
+> discovery-first manifest flow in this chapter is a planned loader model, not
+> current behavior. The proposed `roko plugin` CLI, native ABI loading, WASM
+> loading, and registry-backed discovery are aspirational.
 
 ---
 
 ## Overview
 
-Roko loads plugins by discovering manifests, validating their declared tier and permissions,
-and then selecting the matching loader and sandbox. That is the canonical flow.
+This chapter describes the target-state loading flow: discover manifests, validate declared
+tiers and permissions, and then select the matching loader and sandbox.
 
 The loader does not depend on a single config file listing every plugin. Instead:
 
@@ -22,8 +29,8 @@ The loader does not depend on a single config file listing every plugin. Instead
 - Tier 4 manifests declare native trait implementations and their ABI bridge.
 - Tier 5 manifests declare WASM modules and host capability grants.
 
-The `roko plugin` CLI sits on top of this flow and gives operators a discovery and lifecycle
-surface without exposing internal loader details.
+In the target state, the `roko plugin` CLI would sit on top of this flow and give operators a
+discovery and lifecycle surface without exposing internal loader details.
 
 ---
 
@@ -39,8 +46,8 @@ Discovery is driven by file layout and install metadata.
 | 4 | `plugins/native/**/manifest.toml` or workspace-local extension crates | Resolve ABI bridge, load native trait implementation |
 | 5 | `plugins/wasm/**/manifest.toml` | Instantiate module inside capability sandbox |
 
-This keeps discovery local, inspectable, and auditable. A plugin can be installed, listed, and
-enabled without editing a global registry by hand.
+These proposed roots keep discovery local, inspectable, and auditable. The goal is that a
+plugin can be installed, listed, and enabled without editing a global registry by hand.
 
 For Tier 2 profile bundles, the loader also validates composition. Multiple installed profiles
 can be active together, but the runtime should resolve conflicts explicitly rather than
@@ -50,7 +57,9 @@ silently overwriting settings.
 
 ## CLI Surface
 
-The canonical user workflow is the `roko plugin` command group:
+This section is target-state. Today there is no shipped `roko plugin` command group.
+
+The canonical future user workflow is the `roko plugin` command group:
 
 ```bash
 roko plugin list
@@ -72,8 +81,8 @@ The commands map directly to discovery and policy:
 - `profile check`-style validation reports bundle conflicts, missing context keys, and custody
   mismatches before activation.
 
-`roko.toml` may still set defaults such as plugin roots or registry mirrors, but it is not the
-canonical place to enumerate every extension.
+`roko.toml` may still set defaults such as plugin roots or registry mirrors, but in the
+target state it is not the canonical place to enumerate every extension.
 
 ---
 

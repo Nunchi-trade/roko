@@ -11,7 +11,18 @@
 > for the refinement note that drove this rewrite.
 
 
-> **Implementation**: Shipping
+> **Implementation**: Mixed
+
+> **Reality check**: This document mixes shipping architecture with target-state
+> frontier claims. Shipping today: Engram/Substrate, the six kernel traits, the
+> runtime event bus in its current concrete form, HDC primitives, multi-backend
+> orchestration, the gate pipeline, episode logging, and the TUI. Research
+> hypotheses or planned primitives: `Pulse`, demurrage, heuristics with explicit
+> falsifiers as a shared commons, replication ledger, worldview clusters, and
+> the full plugin SPI.
+>
+> **Actual edge today**: the competitive edge is the working Rust product
+> surface, not the full future frontier catalog.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [00-vision-and-thesis](./00-vision-and-thesis.md), [06-synapse-traits](./06-synapse-traits.md), [12-five-layer-taxonomy](./12-five-layer-taxonomy.md)
@@ -38,6 +49,14 @@ plus prior art, produce the surfaces that matter operationally.
 
 This document serves as both a design guide (what principles govern decisions) and a
 capability catalog (what is genuinely net-new, what is primitive, and what is composed).
+
+### Status framing
+
+| Category | What belongs here today |
+|---|---|
+| **Shipping** | Engram/Substrate, the six kernel traits, the current concrete event bus, HDC primitives, gate pipeline, multi-backend orchestration, episode logging, TUI |
+| **Research hypotheses / target-state** | Pulse, demurrage, falsifier commons, replication ledger, worldview clusters, full plugin SPI |
+| **Prior art integrations** | Many higher-level compositions such as T0 probes, VCG attention, predictive foraging, and cross-domain resonance |
 
 ---
 
@@ -176,8 +195,8 @@ and taint propagation provide full observability without requiring additional in
 
 ## 2. The Fourteen Frontier Innovations
 
-REF19 replaces the older frontier list with a tighter distinction: some items are primitive
-innovations, meaning genuinely new architectural primitives or invariants; others are
+REF19 replaces the older frontier list with a tighter distinction: some items are target-state
+primitive innovations, meaning proposed architectural primitives or invariants; others are
 integrated innovations, meaning composed capabilities built from those primitives plus prior
 art. That split matters because it keeps the novelty claim honest. See
 [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md)
@@ -464,20 +483,18 @@ leaves an audit gap that is visible to any DAG traversal.
 
 - **Design principles (P1-P7)**: Documented and enforced in architectural review. Not
   formally encoded as automated checks; a linter for principle violations would be useful.
-- **Engram / Pulse / Bus / Substrate split**: Core vocabulary and boundary model are now
-  reflected in the architecture docs, but some runtime surfaces still need full alignment.
-- **HDC fingerprint**: Present in the primitive data model and naming glossary. Validation is
-  still mostly theoretical outside similarity-oriented paths.
-- **Demurrage**: Specified in the docs and partly wired into memory handling. The retention
-  curve still needs stronger empirical tuning.
-- **Heuristics / falsifiers commons**: Specified in the learning and cybernetics chapters.
-  Cross-deployment reuse and falsifier closure still need broader runtime support.
-- **c-factor**: Defined and documented. It still needs broader policy integration to become a
-  routine diagnostic rather than a chapter-level metric.
-- **Replication ledger**: Architecture supports it, but full ledgered replay and provenance
-  inheritance remain incomplete.
-- **Plugin SPI**: The extension surface is specified and now shapes the moat story, but the
-  ecosystem still needs more shipped plugins and stability testing.
+- **Engram / Pulse / Bus / Substrate split**: `Engram` and `Substrate` ship. The current event
+  bus exists in runtime code, but `Pulse` and a generic kernel `Bus` trait are target-state.
+- **HDC fingerprint**: HDC primitives ship, but there is not yet an HDC fingerprint field on
+  every `Engram`.
+- **Demurrage**: Target-state only. Standard decay exists; the demurrage model does not.
+- **Heuristics / falsifiers commons**: Target-state only. Shared falsifier-aware calibration is
+  not yet a live runtime surface.
+- **c-factor**: Partial. It exists as a routing/coordination signal, but not yet at the full
+  scope described here.
+- **Replication ledger**: Not yet built as a first-class runtime subsystem.
+- **Plugin SPI**: Target-state. The current `roko-plugin` crate is a narrow event-source and
+  feedback SDK, not the full multi-tier extension platform described above.
 - **16 T0 Probes**: Specified but not implemented. The probe registry (`Vec<Box<dyn Probe>>`)
   is straightforward; individual probes need domain-specific implementations.
 - **VCG Attention Auction**: Specified with bid computation formulas. Not yet wired into the

@@ -17,10 +17,17 @@
 > **Implementation**: Analysis (informing future architectural decisions, including from-scratch sequencing)
 > See also `tmp/refinements/20-modularity-composability.md` for the dep graph rewrite boundary.
 
+> **Reality check**: The cleanup direction in this chapter is useful, but
+> `roko-bus`, `roko-hdc`, and `roko-spi` are proposed target crates, not current
+> workspace members. Today the event bus lives in runtime code, HDC lives in
+> `roko-primitives`, and the extension story is still centered on built-in tools,
+> MCP integrations, and the narrow `roko-plugin` SDK.
+
 **Date**: 2026-04-12
 **Methodology**: Read all 24 architecture docs, all 22 section INDEX files, STATUS/QUICKSTART/COMPARISON,
-analyzed actual Cargo.toml dependency graphs across all 28 crates, read trait definitions in code
-(`roko-core/src/traits.rs`), and surveyed recent literature.
+analyzed actual Cargo.toml dependency graphs across the workspace, read trait definitions in code
+(`roko-core/src/traits.rs`), and surveyed recent literature across the current
+36-workspace-member repo.
 
 ---
 
@@ -144,7 +151,9 @@ a Rust trait system: fine enough for meaningful composition, coarse enough for h
 
 ### 3.1 Dependency Audit
 
-Full Cargo.toml analysis across all 28 crates shows a mostly clean layer story, but the dep graph still has a few pressure points that should be treated as architectural signals rather than isolated mistakes.
+Full Cargo.toml analysis across the workspace shows a mostly clean layer story, but the dep
+graph still has a few pressure points that should be treated as architectural signals rather
+than isolated mistakes.
 
 #### 3.1.1 Current-state audit
 
@@ -155,7 +164,9 @@ Full Cargo.toml analysis across all 28 crates shows a mostly clean layer story, 
 - **L4** (roko-cli, roko-orchestrator): Depend on all layers. Expected for entry points.
 
 **Current-state coupling findings:**
-- `roko-agent` reaches into `roko-learn` for persistence-oriented learning hooks, which means the agent side is still writing across a boundary that should be carried by the Bus.
+- `roko-agent` does not have a runtime dependency on `roko-learn`; the relationship is a
+  dev-dependency in tests. The real live layering pressure is the conductor/learn boundary,
+  not agent runtime code reaching into learning internals.
 - `roko-cli` imports from almost everything. Some of that is legitimate for the main entry point, but some of it is accidental coupling that makes the binary look flatter than the architecture really is.
 - `roko-fs` and `roko-std` are too loosely separated in the docs and their surrounding imports. The storage/runtime boundary is correct in spirit, but the present shape does not make it crisp enough.
 - HDC still leaks through `roko-primitives` in places where a focused `roko-hdc` boundary would be cleaner.
@@ -211,12 +222,13 @@ Six crates need formal layer assignment:
 
 ### 3.4 Proposed Target Dep Graph
 
-REF20 proposes a clean rewrite boundary for the dep graph rather than another round of ad hoc coupling repairs. The target shape is:
+REF20 proposes a clean rewrite boundary for the dep graph rather than another round of ad hoc
+coupling repairs. The target shape below is proposed, not present in the current workspace:
 
 - `roko-core` stays the shared type-and-trait nucleus.
-- `roko-bus` becomes the kernel transport crate for Bus traits, topics, and in-process broadcast primitives.
-- `roko-hdc` becomes the focused hyperdimensional computing crate instead of leaking HDC through `roko-primitives`.
-- `roko-spi` holds the extension SPI so plugins do not need to depend on kernel crates directly.
+- `roko-bus` would become the kernel transport crate for Bus traits, topics, and in-process broadcast primitives.
+- `roko-hdc` would become the focused hyperdimensional computing crate instead of leaking HDC through `roko-primitives`.
+- `roko-spi` would hold the extension SPI so plugins do not need to depend on kernel crates directly.
 - `roko-std` splits into `roko-defaults` and `roko-tools`.
 - `roko-compose` splits into `roko-compose-core` and `roko-templates`.
 
@@ -800,8 +812,9 @@ Roko's current architecture is architecturally sound and theoretically well-grou
 it should no longer be read as the final shape. The current operator model handles the present
 surface with only minor boundary awkwardness, while REF21 defines the v2 rewrite path around the
 two-medium/two-fabric kernel. The five-layer taxonomy is clean with one fixable dependency
-violation. The three cognitive speeds are a genuine innovation extending classical dual-process
-theory. The Engram model is still universal, validated by comparison to the Agent Data Protocol.
+violation. The three cognitive speeds are a strong compositional design claim that extends
+classical dual-process theory. The Engram model is still universal, validated by comparison to
+the Agent Data Protocol.
 
 The architecture's deepest strength is its **categorical composability**: the pipeline is a
 morphism composition, Score is a monoid, and cross-cuts are endofunctors. Those properties are

@@ -4,6 +4,11 @@
 > service integrations, agent templates, and the five-tier plugin SPI. See also
 > [tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
 
+> **Status note**: The shipping tool surface today is the built-in Rust tool
+> registry, MCP integration, and a narrow `roko-plugin` SDK for event sources
+> and feedback collectors. The five-tier plugin SPI, manifest-first plugin
+> loading, registry flow, and `roko plugin` CLI are target-state docs.
+
 ---
 
 ## Sub-documents
@@ -24,10 +29,10 @@
 | 11 | [11-mcp-slack.md](11-mcp-slack.md) | roko-mcp-slack | ~230 | 8 tools: post_message, update_message, reply_thread, add_reaction, upload_file, get_channel_history, get_thread, lookup_user. Socket Mode + HTTP Mode, rate limits, Block Kit |
 | 12 | [12-mcp-scripts.md](12-mcp-scripts.md) | roko-mcp-scripts | ~230 | Config-driven tool wrappers, scripts.toml format, executor with timeout/isolation, collaboration repo scripts (6), knowledge-base scripts (5), discovery mechanism |
 | 13 | [13-mcp-stdio.md](13-mcp-stdio.md) | roko-mcp-stdio | ~210 | Scaffold crate: McpToolHandler trait, McpServerBuilder, JSON-RPC protocol handler, tool registry, error codes, middleware extension points |
-| 14 | [14-plugin-sdk.md](14-plugin-sdk.md) | roko-plugin SDK | ~280 | Five-tier SPI: prompts, profile bundles, declarative tools/MCPs, native trait implementations, WASM sandboxed extensions. Manifest shape, permissions, discovery-not-configuration, ABI bridge, host imports, TypedContext/Custody hooks |
+| 14 | [14-plugin-sdk.md](14-plugin-sdk.md) | roko-plugin SDK | ~280 | Target-state five-tier SPI: prompts, profile bundles, declarative tools/MCPs, native trait implementations, WASM sandboxed extensions. The shipped `roko-plugin` crate today is much narrower: event sources and feedback collectors. |
 | 15 | [15-event-sources.md](15-event-sources.md) | Event Sources | ~280 | 5 event source types: Cron (tokio-cron-scheduler), FileWatch (notify), GitHub webhooks, Slack events, generic webhooks. Subscription configuration, dispatch loop, multi-repository support |
 | 15-16 | [15-16-agent-templates.md](15-16-agent-templates.md) | Agent Templates | ~420 | 18 templates: 6 collaboration (doc-lifecycle, digest, meeting, sync, conflict-detector, freshness), 5 knowledge-base (pm-board, enrich, triage, pm-health, action-tracker), 7 roko (pr-review, slack-notify, auto-plan, code-implementer, gate-fixer, prd-ingestion, review-response). Full system prompts, triggers, subscription summary |
-| 16 | [16-plugin-loading.md](16-plugin-loading.md) | Plugin Loading Mechanisms | ~250 | Discovery-first loader for the five-tier SPI. Manifest roots, `roko plugin` CLI surface, profile composition, validation, sandbox selection, native ABI loading, WASM instantiation |
+| 16 | [16-plugin-loading.md](16-plugin-loading.md) | Plugin Loading Mechanisms | ~250 | Target-state discovery-first loader for the five-tier SPI. Manifest roots, `roko plugin` CLI surface, profile composition, validation, sandbox selection, native ABI loading, and WASM instantiation are planned rather than shipped. |
 
 ---
 
@@ -114,5 +119,5 @@
 - **Agent template count**: 18 templates total (16 original from phase-3-4 plan + 2 additional: prd-ingestion-agent, review-response-agent).
 - **Chain domain framing**: All 423+ DeFi tools are framed as ONE domain plugin. The core framework (roko-core, roko-std) is domain-agnostic.
 - **MCP server status**: MCP client is built and wired in roko-agent. MCP server crates (roko-mcp-github, roko-mcp-slack, roko-mcp-scripts) are planned with complete specs but not yet implemented as code.
-- **Plugin SPI**: The canonical five-tier plugin story is documented in 14-plugin-sdk and 16-plugin-loading; discovery is manifest-driven, not central-config-driven.
+- **Plugin SPI**: The canonical five-tier plugin story in 14-plugin-sdk and 16-plugin-loading is target-state. The current implementation is still centered on built-in Rust tools, MCP integrations, and the narrow `roko-plugin` event-source/feedback SDK.
 - **Mortality reframe**: All legacy mortality-phase references (Conservation, Declining, Terminal) have been translated to Daimon behavioral states (Struggling, Resting, etc.) per `refactoring-prd/08-translation-guide.md`.

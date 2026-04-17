@@ -6,16 +6,25 @@
 > and [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md)
 > and [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
-> **Implementation**: Specified
+> **Implementation**: Target-state design
+>
+> **Implementation status**: The current `roko-plugin` crate is a narrow SDK for event
+> sources and feedback collectors, not the full SPI described here. Tiers 1-3
+> (prompt packs, profile bundles, declarative tool manifests) are a reasonable
+> near-term direction but are not yet loaded by the runtime. Tiers 4-5
+> (native ABI, WASM sandboxed extensions) and any plugin registry are
+> aspirational and deferred until there is real third-party extension pressure.
+> Today's live extension surfaces are the six kernel traits, built-in Rust tools,
+> and MCP integrations.
 
 ---
 
 ## Overview
 
-`roko-plugin` is the user-facing SDK for Roko's extension story. The kernel-facing stable
-contract is the SPI: a layered set of extension points that let third parties contribute a
-Substrate, a Gate, a Scorer axis, a Composer template, a tool, an MCP server, or an entire Role
-without forking core code.
+This chapter describes the target-state user-facing SDK for Roko's extension story. The
+kernel-facing stable contract is the SPI: a layered set of extension points that would let
+third parties contribute a Substrate, a Gate, a Scorer axis, a Composer template, a tool, an
+MCP server, or an entire Role without forking core code.
 
 The design goal is explicit:
 
@@ -242,6 +251,7 @@ Examples:
 - or a domain-specific composer.
 
 Native extensions need an ABI bridge because Rust does not promise a stable plugin ABI.
+That ABI bridge is proposed here; it does not exist in the current workspace.
 The recommended shape is:
 
 - a narrow `roko-extension-abi` crate,
@@ -276,8 +286,12 @@ same policy and observability envelope as built-in traits.
 
 ## Tier 5 WASM Extensions
 
-Tier 5 is the safest path for third-party code that still needs logic.
+Tier 5 is the safest target-state path for third-party code that still needs logic.
 It uses a capability sandbox with explicit host imports and bounded resources.
+
+> **Status note**: The host surface below references future concepts. `Pulse` is
+> not defined in the codebase today, and there is no current
+> `substrate_query_similar` runtime API.
 
 Host imports are intentionally small:
 
@@ -342,7 +356,7 @@ Health is part of the SPI contract, not an afterthought.
 Discovery is by location and manifest, not by mutating `roko.toml` to enumerate every plugin.
 `roko.toml` may still carry global defaults, but it is not the plugin catalog.
 
-Canonical CLI surface:
+Target-state CLI surface:
 
 ```bash
 roko plugin list
@@ -355,12 +369,14 @@ roko plugin info <id>
 roko plugin audit
 ```
 
-The CLI works with installed manifests, registry metadata, and local plugin roots. It should be
-possible to install a plugin and use it without hand-editing a runtime configuration file.
+In the target state, the CLI would work with installed manifests, registry metadata, and local
+plugin roots. Today there is no shipped `roko plugin` command group.
 
 ---
 
 ## Example Flows
+
+These flows are design examples, not current end-user workflows.
 
 ### Add A Prompt Bundle
 

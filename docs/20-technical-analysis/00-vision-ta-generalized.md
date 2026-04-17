@@ -3,7 +3,7 @@
 > TA is NOT chain-only. It is a general-purpose prediction framework with domain-specific instances.
 
 
-> **Implementation**: Specified
+> **Implementation**: Mixed
 
 **Topic**: [Technical Analysis](./INDEX.md)
 **Prerequisites**: [00-architecture](../00-architecture/INDEX.md) for Synapse Architecture, [06-neuro](../06-neuro/INDEX.md) for HDC knowledge encoding
@@ -19,9 +19,24 @@ The core insight: code, markets, research, and operations all share the same str
 
 This document establishes the vision: TA as a domain-agnostic cognitive capability that any Roko agent can use, regardless of whether it operates on blockchains, codebases, research corpora, or any other structured domain. Under the two-mediums/two-fabrics framing in the [glossary](../00-architecture/01-naming-and-glossary.md), TA is one of the places where Roko's compounding and superlinear product claim becomes measurable: each prediction, correction, and replay cycle should make the next cycle cheaper, faster, and better. It is also the measurement and feedback layer for the structural moat described in [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md): TA shows whether architectural coherence, heuristic commons, plugin ecosystem, replication ledger, and Rust-level correctness are compounding together or merely existing as separate features. REF19 adds the honesty test on top of that: which oracle-side primitives are genuinely net-new, which are carefully integrated from prior art, and which claims have enough evidence to support publication. See also [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md) and [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
 
+> **Reality check**: Under the 10-primitive framing used in this chapter, 2
+> primitives exist fully today (`Engram`, `Substrate`), 2 exist partially or in
+> a narrower form than described here (HDC, c-factor), and 6 remain target-state
+> (`Pulse`, a kernel `Bus` trait, demurrage, heuristic commons, replication
+> ledger, plugin SPI). The moat framing in this chapter is aspirational.
+>
+> **Actual edge today**: the live product advantage is a working Rust agent
+> orchestrator with multi-backend LLM dispatch, a 7-rung gate pipeline, HDC
+> support in the learning/neuro stack, episode logging with feedback loops, and
+> an interactive TUI.
+
 ## Moat telemetry
 
-REF18 frames the moat as five interacting components, not a checklist. TA is the instrumentation that tells us whether those components are reinforcing one another across deployments and over time. The shared vocabulary for Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, and c-factor lives in the [glossary](../00-architecture/01-naming-and-glossary.md).
+REF18 frames the target-state moat as five interacting components, not a checklist. TA is the
+instrumentation that would tell us whether those components are reinforcing one another across
+deployments and over time. The shared vocabulary for Engram, Pulse, Bus, Substrate, HDC
+fingerprint, demurrage, and c-factor lives in the
+[glossary](../00-architecture/01-naming-and-glossary.md).
 
 | Moat component | What TA measures | Healthy curve | Drift curve |
 |---|---|---|---|
@@ -266,7 +281,12 @@ Not every TA-facing capability is net-new in isolation. HDC fingerprinting, demu
 | **Predict-publish-correct loop** over Bus + Substrate | Integrated pattern | Makes every prediction a first-class learning cycle across agents and sessions | Forecasting pipelines and stream-processing systems |
 | **Bus subscription API** for predictions and outcomes | Integrated API | Lets dashboards, audits, and external tools subscribe to the same live calibration traffic | Message-bus subscribers and monitoring feeds |
 
-The moat claim stays the same across those rows: a competitor can copy a local feature, but copying the whole TA stack means reproducing the alignment among Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics with falsifiers, c-factor, and the replication ledger.
+The target-state moat claim stays the same across those rows: a competitor can copy a local
+feature, but copying the whole TA stack would mean reproducing the alignment among Engram,
+Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics with falsifiers, c-factor, and
+the replication ledger. Today that alignment is only partially built, so this section should
+be read as a research-hypothesis and instrumentation roadmap rather than a shipping-claims
+table.
 
 ### TA's contribution to the net-new catalog
 

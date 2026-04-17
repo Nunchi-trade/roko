@@ -4,8 +4,9 @@
 > Each connects two or more orthogonal systems—Daimon, Neuro, Dreams, coordination,
 > code intelligence, learning, safety—to produce capabilities no single subsystem provides.
 > These are not incremental improvements. They are **structural compositions**: the Synapse
-> Architecture's trait-based design means each innovation is a new `impl` block that wires
-> existing traits together, not a new subsystem to build from scratch.
+> Architecture's trait-based design means each innovation can often be expressed as trait
+> composition rather than a wholly separate subsystem, even though several examples in this
+> chapter would still require substantial new code.
 >
 > That same composition is part of the moat. The advantage does not come from any isolated
 > primitive. Pulse, HDC fingerprinting, demurrage, the heuristic-with-falsifier pattern,
@@ -18,7 +19,15 @@
 > [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md)
 > and [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
 
-> **Implementation**: Specified
+> **Implementation**: Mixed
+
+> **Reality check**: Most compositions in this chapter depend on primitives that
+> are still target-state. Read this as a research-hypothesis catalog over a
+> partially shipping base, not as a list of fully realized capabilities.
+>
+> **Actual edge today**: the product advantage comes from the working Rust
+> orchestration stack, gates, HDC-enabled learning/neuro pieces, feedback loops,
+> and interfaces already in code.
 
 ---
 
@@ -26,13 +35,14 @@
 
 The right way to read this chapter is not "which primitive is unique by itself?" but "which
 composition is net-new?" Most primitives are valuable because they are carefully integrated
-with the rest of the runtime, not because they are novel in isolation.
+with the rest of the runtime, not because they are novel in isolation. In several rows below,
+the composition is still target-state rather than shipping behavior.
 
 | Primitive cluster | Composition role | Net-new claim |
 |---|---|---|
 | `Pulse` + two-fabric operator generalization | One operator algebra spans ephemeral and durable artifacts | Medium polymorphism becomes a first-class runtime property, not a framework convention |
 | HDC fingerprint + c-factor + worldview clusters | Similarity, collective signal, and emergent domains reinforce routing | The system can compare, organize, and steer knowledge with structural evidence instead of ad hoc metadata |
-| Demurrage + heuristic with falsifier + replication ledger | Ideas decay unless justified; claims stay auditable | Beliefs, heuristics, and research assumptions are continuously corrected by lived evidence |
+| Demurrage + heuristic with falsifier + replication ledger | Ideas decay unless justified; claims stay auditable | Beliefs, heuristics, and research assumptions could be continuously corrected by lived evidence once the supporting runtime surfaces exist |
 | Plugin tiers | Risk-aware extension boundaries | Extensibility is native to the kernel instead of bolted on as a single security model |
 
 This is the core REF19 claim: the primitives are the building blocks, but the **net-new**
@@ -384,9 +394,10 @@ impl Scorer for HdcBeliefState {
 | 6 | Persist belief state across sessions | `.roko/state/beliefs.bin` | Binary HDC vector (1,280 bytes) |
 | 7 | Dream consolidation updates μ_prior | `roko-dreams` (NREM phase) | Slow prior update during Delta |
 
-**Key insight**: The belief vector μ is the agent's **world model compressed to 1,280 bytes**.
-It can be persisted, transmitted between agents, compared via Hamming distance, and composed
-via bundling. No other framework has a world model this compact and algebraically composable.
+**Key insight**: The belief vector μ is the agent's **target-state world model compressed to
+1,280 bytes**. It could be persisted, transmitted between agents, compared via Hamming
+distance, and composed via bundling. If built end-to-end, this would be an unusually compact
+and algebraically composable world-model representation.
 
 ### Test Criteria
 
