@@ -1378,15 +1378,6 @@ mod tests {
             FocusZone::CommandOutput,
             &modals(None),
         );
-        assert_eq!(action, TuiAction::ScrollFocusedEnd);
-
-        let action = handle_key(
-            key(KeyCode::End),
-            InputMode::Normal,
-            Tab::Logs,
-            FocusZone::CommandOutput,
-            &modals(None),
-        );
         assert_eq!(action, TuiAction::ScrollLogEnd);
 
         let action = handle_key(

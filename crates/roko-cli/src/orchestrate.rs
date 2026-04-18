@@ -8,7 +8,7 @@
 
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -57,8 +57,9 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Kind, OperatingFrequency,
-    OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, TaskCategory,
-    TaskComplexityBand, TaskRequirements, ToolRegistry, Verdict, score_model_for_task,
+    OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task, TaskCategory,
+    TaskComplexityBand, TaskRequirements, TaskStatus, ToolRegistry, Verdict,
+    score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -113,11 +114,14 @@ use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
     EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
 };
-use roko_orchestrator::worktree::{WorktreeConfig, WorktreeManager, format_branch_name};
+use roko_orchestrator::executor::recovery::{RecoveryEngine, WarningSeverity};
+use roko_orchestrator::worktree::{
+    WorktreeConfig, WorktreeHealth, WorktreeManager, format_branch_name,
+};
 use roko_orchestrator::{
-    CURRENT_SCHEMA_VERSION, EventKind, EventLog, EventLogSnapshot, ExecutorAction, ExecutorEvent,
-    ExecutorSnapshot, GateResult, ParallelExecutor, PlanState, PostMergeRunner, ReplanResult,
-    ReplanStrategy, discover_plans,
+    CURRENT_SCHEMA_VERSION, DagConfig, EventKind, EventLog, EventLogSnapshot, ExecutorAction,
+    ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor, PlanState, PostMergeRunner,
+    ReplanResult, ReplanStrategy, UnifiedTaskDag, discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::event_bus::{
@@ -1895,6 +1899,14 @@ struct WatcherRunner {
     cancel: TokioCancellationToken,
 }
 
+fn contains_critical_conductor_alert(signals: &[Engram]) -> bool {
+    signals.iter().any(|signal| {
+        signal
+            .tag("severity")
+            .is_some_and(|severity| severity.eq_ignore_ascii_case("critical"))
+    })
+}
+
 impl WatcherRunner {
     fn spawn(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move { self.run().await })
@@ -1933,6 +1945,12 @@ impl WatcherRunner {
                                 })
                                 .collect();
                             if !alert_signals.is_empty() {
+                                if contains_critical_conductor_alert(&alert_signals) {
+                                    tracing::error!(
+                                        "[conductor] watcher runner observed critical alert; requesting orchestrator shutdown"
+                                    );
+                                    self.cancel.cancel();
+                                }
                                 if let Some(root) = self.signals_path.parent() {
                                     match FileSubstrate::open(root).await {
                                         Ok(substrate) => {
@@ -3862,6 +3880,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
+        Self::validate_executor_recovery_snapshot(snapshot_json)?;
         let snapshot = snapshot_migrate::load_executor_snapshot(snapshot_json)
             .map_err(|e| anyhow!("bad snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
@@ -3997,12 +4016,11 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
+        Self::validate_executor_recovery_snapshot(executor_json)?;
         let exec_snap = snapshot_migrate::load_executor_snapshot(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
-        let log_snap: EventLogSnapshot = serde_json::from_str(event_log_json)
-            .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), exec_snap);
-        let event_log = EventLog::restore(log_snap);
+        let event_log = Self::restore_event_log_snapshot(event_log_json)?;
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
@@ -4120,6 +4138,32 @@ impl PlanRunner {
                 .ok()
                 .map(PerplexitySearchClient::new),
         })
+    }
+
+    fn validate_executor_recovery_snapshot(snapshot_json: &str) -> Result<()> {
+        let recovered = RecoveryEngine::new()
+            .recover_from_snapshot(snapshot_json)
+            .map_err(|err| anyhow!("bad snapshot: {err}"))?;
+        let critical_warnings = RecoveryEngine::validate_recovery(&recovered)
+            .into_iter()
+            .filter(|warning| warning.severity == WarningSeverity::Critical)
+            .collect::<Vec<_>>();
+        if critical_warnings.is_empty() {
+            return Ok(());
+        }
+
+        let detail = critical_warnings
+            .iter()
+            .map(|warning| format!("{} ({})", warning.plan_id, warning.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(anyhow!("bad snapshot: {detail}"))
+    }
+
+    fn restore_event_log_snapshot(event_log_json: &str) -> Result<EventLog> {
+        let snapshot: EventLogSnapshot = serde_json::from_str(event_log_json)
+            .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
+        EventLog::restore_verified(snapshot).map_err(|e| anyhow!("bad event log snapshot: {e}"))
     }
 
     /// Thread an optional Claude resume id from upper-layer orchestration
@@ -4850,6 +4894,170 @@ impl PlanRunner {
 
     fn worktrees_enabled(&self) -> bool {
         self.executor.config().use_worktrees && self.cloud_execution.is_none()
+    }
+
+    fn touch_active_plan_worktrees(&self) {
+        if !self.worktrees_enabled() {
+            return;
+        }
+
+        for plan_id in self.executor.active_plans() {
+            if self.worktrees.get(&plan_id).is_some() {
+                self.worktrees.touch(&plan_id);
+            }
+        }
+    }
+
+    async fn record_plan_worktree_health(
+        &self,
+        plan_id: &str,
+        path: &Path,
+    ) -> Option<WorktreeHealth> {
+        if !self.worktrees_enabled() || self.worktrees.get(plan_id).is_none() {
+            return None;
+        }
+
+        let health = match self.worktrees.check_health(plan_id).await {
+            Ok(health) => health,
+            Err(err) => {
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    path = %path.display(),
+                    error = %err,
+                    "[orchestrate] worktree health probe failed"
+                );
+                self.event_log.append(
+                    EventKind::ErrorOccurred,
+                    serde_json::json!({
+                        "plan_id": plan_id,
+                        "error": format!("worktree health probe failed: {err}"),
+                        "path": path.display().to_string(),
+                    }),
+                );
+                return None;
+            }
+        };
+
+        if health != WorktreeHealth::Ok {
+            tracing::warn!(
+                plan_id = %plan_id,
+                path = %path.display(),
+                health = ?health,
+                "[orchestrate] plan worktree is unhealthy; falling back to repo root for dispatch"
+            );
+            self.event_log.append(
+                EventKind::ErrorOccurred,
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "error": "worktree unhealthy",
+                    "health": format!("{health:?}"),
+                    "path": path.display().to_string(),
+                }),
+            );
+        }
+
+        Some(health)
+    }
+
+    fn runtime_task_dag(&self) -> Result<Option<UnifiedTaskDag>, roko_orchestrator::DagError> {
+        let mut plan_tasks = BTreeMap::new();
+        let mut plan_deps = HashMap::new();
+
+        for (plan_id, tracker) in &self.task_trackers {
+            if tracker.tasks_file.tasks.is_empty() {
+                continue;
+            }
+
+            let tasks = tracker
+                .tasks_file
+                .tasks
+                .iter()
+                .map(|task| task_def_to_dag_task(task, tracker.completed.contains(&task.id)))
+                .collect::<Vec<_>>();
+            plan_tasks.insert(plan_id.clone(), tasks);
+
+            let deps = tracker
+                .tasks_file
+                .tasks
+                .iter()
+                .flat_map(|task| task.depends_on_plan.iter().cloned())
+                .collect::<HashSet<_>>();
+            if !deps.is_empty() {
+                plan_deps.insert(plan_id.clone(), deps);
+            }
+        }
+
+        if plan_tasks.is_empty() {
+            return Ok(None);
+        }
+
+        UnifiedTaskDag::build(
+            &plan_tasks,
+            &plan_deps,
+            DagConfig {
+                infer_file_overlap: false,
+                max_wave_width: 0,
+            },
+        )
+        .map(Some)
+    }
+
+    fn emit_runtime_dag_surface(&mut self) {
+        let dag = match self.runtime_task_dag() {
+            Ok(Some(dag)) => dag,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!("[orchestrate] failed to build runtime DAG summary: {err}");
+                return;
+            }
+        };
+        let waves = match dag.waves() {
+            Ok(waves) => waves,
+            Err(err) => {
+                tracing::warn!("[orchestrate] failed to compute runtime DAG waves: {err}");
+                return;
+            }
+        };
+        let stats = dag.stats();
+        let next_wave = waves
+            .first()
+            .map(|wave| wave.tasks.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        self.emit_conductor_signal(
+            Kind::Custom("orchestrator.dag.summary".into()),
+            serde_json::json!({
+                "nodes": stats.nodes,
+                "edges": stats.edges,
+                "waves": stats.waves,
+                "next_wave_width": next_wave.len(),
+                "next_wave": next_wave,
+            }),
+        );
+        tracing::info!(
+            nodes = stats.nodes,
+            edges = stats.edges,
+            waves = stats.waves,
+            next_wave_width = next_wave.len(),
+            next_wave = ?next_wave,
+            "[orchestrate] runtime DAG summary"
+        );
+    }
+
+    fn arm_speculative_model_override(&mut self, plan_id: &str, task: &str) -> Option<String> {
+        let tracker = self.task_trackers.get(plan_id)?;
+        if tracker.last_impl_task_id.as_deref() != Some(task) {
+            return None;
+        }
+
+        let last_model = tracker.last_impl_model_slug.as_deref()?;
+        let next_model = self.next_tier_model_slug(last_model);
+        if next_model == last_model {
+            return None;
+        }
+
+        self.force_model_override = Some(next_model.clone());
+        Some(next_model)
     }
 
     async fn routing_load_snapshot(&self) -> RoutingLoadSnapshot {
@@ -5643,6 +5851,7 @@ impl PlanRunner {
                 });
             }
         }
+        self.emit_runtime_dag_surface();
 
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
@@ -5662,6 +5871,7 @@ impl PlanRunner {
             }
 
             let completed_plans = self.executor.completed_plans();
+            self.touch_active_plan_worktrees();
             for plan_id in &plan_ids {
                 let Some(state) = self.executor.plan_state(plan_id) else {
                     continue;
@@ -6623,6 +6833,84 @@ impl PlanRunner {
                 self.event_log.append(
                     EventKind::PhaseTransition,
                     serde_json::json!({"plan_id": &plan_id, "event": "Reorder", "new_position": new_position}),
+                );
+            }
+            ExecutorAction::StartSpeculativeExecution {
+                plan_id,
+                task,
+                backup_role,
+                expected_minutes,
+                elapsed_minutes,
+            } => {
+                tracing::warn!(
+                    "[orchestrate] StartSpeculativeExecution plan={plan_id} task={task} backup_role={backup_role:?} expected_minutes={expected_minutes} elapsed_minutes={elapsed_minutes}"
+                );
+                let escalated_model = self.arm_speculative_model_override(&plan_id, &task);
+                self.event_log.append(
+                    EventKind::PhaseTransition,
+                    serde_json::json!({
+                        "plan_id": &plan_id,
+                        "event": "StartSpeculativeExecution",
+                        "task": &task,
+                        "backup_role": format!("{backup_role:?}"),
+                        "expected_minutes": expected_minutes,
+                        "elapsed_minutes": elapsed_minutes,
+                        "forced_model": escalated_model,
+                    }),
+                );
+                self.emit_conductor_signal(
+                    Kind::Custom("orchestrator.speculation.started".into()),
+                    serde_json::json!({
+                        "plan_id": &plan_id,
+                        "task": &task,
+                        "backup_role": format!("{backup_role:?}"),
+                        "expected_minutes": expected_minutes,
+                        "elapsed_minutes": elapsed_minutes,
+                        "forced_model": escalated_model,
+                    }),
+                );
+                self.emit_execution_event(
+                    &plan_id,
+                    crate::serve::events::ExecutionEvent::WatcherAlert {
+                        watcher: "speculative-execution".to_string(),
+                        message: format!(
+                            "armed speculative retry for {task} after {elapsed_minutes}m (expected {expected_minutes}m)"
+                        ),
+                    },
+                );
+            }
+            ExecutorAction::CancelSpeculativeExecution { plan_id, task } => {
+                tracing::info!(
+                    "[orchestrate] CancelSpeculativeExecution plan={plan_id} task={task}"
+                );
+                if self
+                    .task_trackers
+                    .get(&plan_id)
+                    .is_some_and(|tracker| tracker.last_impl_task_id.as_deref() == Some(task.as_str()))
+                {
+                    self.force_model_override = None;
+                }
+                self.event_log.append(
+                    EventKind::PhaseTransition,
+                    serde_json::json!({
+                        "plan_id": &plan_id,
+                        "event": "CancelSpeculativeExecution",
+                        "task": &task,
+                    }),
+                );
+                self.emit_conductor_signal(
+                    Kind::Custom("orchestrator.speculation.cancelled".into()),
+                    serde_json::json!({
+                        "plan_id": &plan_id,
+                        "task": &task,
+                    }),
+                );
+                self.emit_execution_event(
+                    &plan_id,
+                    crate::serve::events::ExecutionEvent::WatcherAlert {
+                        watcher: "speculative-execution".to_string(),
+                        message: format!("cancelled speculative retry for {task}"),
+                    },
                 );
             }
             _ => unreachable!("non-exhaustive ExecutorAction variant"),
@@ -12846,11 +13134,20 @@ impl PlanRunner {
             return Ok(self.workdir.clone());
         }
         self.clear_stale_worktree_locks().await;
-        self.worktrees
+        let handle = self
+            .worktrees
             .ensure_for_plan(plan_id)
             .await
-            .map(|handle| handle.path)
-            .map_err(|err| anyhow!("worktree unavailable for plan={plan_id}: {err}"))
+            .map_err(|err| anyhow!("worktree unavailable for plan={plan_id}: {err}"))?;
+        self.worktrees.touch(plan_id);
+        if self
+            .record_plan_worktree_health(plan_id, &handle.path)
+            .await
+            .is_some_and(|health| health != WorktreeHealth::Ok)
+        {
+            return Ok(self.workdir.clone());
+        }
+        Ok(handle.path)
     }
 
     #[cfg(test)]
@@ -15041,6 +15338,20 @@ fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInpu
     }
 }
 
+fn task_def_to_dag_task(task: &crate::task_parser::TaskDef, completed: bool) -> Task {
+    let mut dag_task = Task::new(task.id.clone(), task.title.clone());
+    dag_task.status = if completed {
+        TaskStatus::Done
+    } else {
+        TaskStatus::Pending
+    };
+    dag_task.files = task.files.clone();
+    dag_task.role = task.role.clone();
+    dag_task.acceptance = task.acceptance.clone();
+    dag_task.depends_on = task.depends_on.clone();
+    dag_task
+}
+
 /// Convert declared task context files into Claude CLI `--read` args.
 fn task_read_cli_args(task_def: &crate::task_parser::TaskDef) -> Vec<String> {
     task_def
@@ -15364,6 +15675,39 @@ mod tests {
         )
         .await
         .expect("plan runner")
+    }
+
+    #[tokio::test]
+    async fn from_snapshots_rejects_tampered_event_log_snapshot() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut snapshot = ExecutorSnapshot::new(0);
+        snapshot
+            .plan_states
+            .insert("plan-1".to_string(), PlanState::new("plan-1"));
+        snapshot.queue_order.push("plan-1".to_string());
+        let executor_json = snapshot.to_json().expect("executor json");
+
+        let event_log = EventLog::new();
+        event_log.append(EventKind::PlanStarted, serde_json::json!({"plan_id": "plan-1"}));
+        let mut log_snapshot = event_log.snapshot();
+        log_snapshot.entries[0].payload = serde_json::json!({"plan_id": "tampered"});
+        let event_log_json = serde_json::to_string(&log_snapshot).expect("event log json");
+
+        let err = match PlanRunner::from_snapshots(
+            &executor_json,
+            &event_log_json,
+            tmp.path(),
+            Config::default(),
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("tampered event log snapshot should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("bad event log snapshot"));
     }
 
     fn write_plan_revision_fixture(workdir: &Path) -> PathBuf {
@@ -16181,6 +16525,31 @@ depends_on = []
     }
 
     #[tokio::test]
+    async fn touch_active_plan_worktrees_refreshes_last_active_timestamp() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let mut runner = runner_for_repo(tmp.path(), true).await;
+        assert!(runner.executor.add_plan(PlanState::new("plan-1")));
+        let _ = runner.plan_exec_dir("plan-1").await;
+        let before = runner
+            .worktrees
+            .get("plan-1")
+            .expect("plan worktree")
+            .last_active_ms;
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        runner.touch_active_plan_worktrees();
+
+        let after = runner
+            .worktrees
+            .get("plan-1")
+            .expect("plan worktree")
+            .last_active_ms;
+        assert!(after > before, "expected {after} > {before}");
+    }
+
+    #[tokio::test]
     async fn ensure_plan_exec_dir_errors_when_worktree_creation_fails() {
         let tmp = TempDir::new().expect("tempdir");
         let runner = runner_for_repo(tmp.path(), true).await;
@@ -16191,6 +16560,26 @@ depends_on = []
             .expect_err("non-git worktree acquisition should fail");
 
         assert!(err.to_string().contains("worktree unavailable"));
+    }
+
+    #[tokio::test]
+    async fn ensure_plan_exec_dir_falls_back_when_worktree_is_unhealthy() {
+        let Some(tmp) = init_git_repo() else {
+            return;
+        };
+        let runner = runner_for_repo(tmp.path(), true).await;
+        let plan_dir = runner.plan_exec_dir("plan-1").await;
+        std::fs::remove_dir_all(&plan_dir).expect("remove plan worktree");
+
+        let exec_dir = runner
+            .ensure_plan_exec_dir("plan-1")
+            .await
+            .expect("fallback to repo root");
+        assert_eq!(exec_dir, tmp.path());
+
+        let snapshot = runner.event_log_snapshot().expect("event log snapshot");
+        assert!(snapshot.contains("worktree unhealthy"));
+        assert!(snapshot.contains("Missing"));
     }
 
     #[tokio::test]
@@ -16230,6 +16619,174 @@ depends_on = []
 
         assert!(runner.worktrees.get("plan-1").is_none());
         assert!(!plan_dir.exists(), "plan worktree should be removed");
+    }
+
+    #[tokio::test]
+    async fn speculative_dispatch_arms_and_clears_model_override() {
+        let tmp = TempDir::new().expect("tempdir");
+        let plan_dir = write_plan_revision_fixture(tmp.path());
+        let tasks = TasksFile::parse(&plan_dir.join("tasks.toml")).expect("parse tasks");
+
+        let snapshot_json = ExecutorSnapshot::new(0).to_json().expect("snapshot json");
+        let mut config = Config::default();
+        config
+            .agent
+            .tier_models
+            .insert("focused".to_string(), "claude-sonnet-4-6".to_string());
+        config
+            .agent
+            .tier_models
+            .insert("architectural".to_string(), "claude-opus-4-6".to_string());
+        let mut runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            config,
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .expect("runner");
+        assert!(runner.executor.add_plan(PlanState::new("plan-1")));
+        runner
+            .task_trackers
+            .insert("plan-1".to_string(), TaskTracker::new(tasks, plan_dir));
+        let tracker = runner
+            .task_trackers
+            .get_mut("plan-1")
+            .expect("tracker should exist");
+        tracker.last_impl_task_id = Some("T1".to_string());
+        tracker.last_impl_model_slug = Some("claude-haiku-4-5".to_string());
+
+        runner
+            .dispatch_action(ExecutorAction::StartSpeculativeExecution {
+                plan_id: "plan-1".to_string(),
+                task: "T1".to_string(),
+                backup_role: AgentRole::Implementer,
+                expected_minutes: 1,
+                elapsed_minutes: 2,
+            })
+            .await;
+        assert_eq!(
+            runner.force_model_override.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+
+        runner
+            .dispatch_action(ExecutorAction::CancelSpeculativeExecution {
+                plan_id: "plan-1".to_string(),
+                task: "T1".to_string(),
+            })
+            .await;
+        assert_eq!(runner.force_model_override, None);
+    }
+
+    #[tokio::test]
+    async fn runtime_dag_surface_builds_cross_plan_waves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let runner = runner_for_repo(tmp.path(), false).await;
+        let plan_root = tmp.path().join(".roko").join("plans");
+        let plan_a = plan_root.join("plan-a");
+        let plan_b = plan_root.join("plan-b");
+        fs::create_dir_all(&plan_a).expect("create plan-a");
+        fs::create_dir_all(&plan_b).expect("create plan-b");
+        fs::write(
+            plan_a.join("tasks.toml"),
+            r#"[meta]
+plan = "plan-a"
+iteration = 1
+total = 1
+done = 0
+status = "ready"
+
+[[task]]
+id = "T1"
+title = "Seed"
+status = "ready"
+tier = "focused"
+files = ["src/lib.rs"]
+depends_on = []
+depends_on_plan = []
+verify = []
+timeout_secs = 30
+max_retries = 0
+acceptance = []
+"#,
+        )
+        .expect("write plan-a tasks");
+        fs::write(
+            plan_b.join("tasks.toml"),
+            r#"[meta]
+plan = "plan-b"
+iteration = 1
+total = 1
+done = 0
+status = "ready"
+
+[[task]]
+id = "T2"
+title = "Follow-on"
+status = "ready"
+tier = "focused"
+files = ["src/main.rs"]
+depends_on = []
+depends_on_plan = ["plan-a"]
+verify = []
+timeout_secs = 30
+max_retries = 0
+acceptance = []
+"#,
+        )
+        .expect("write plan-b tasks");
+
+        let mut runner = runner;
+        runner.task_trackers.insert(
+            "plan-a".to_string(),
+            TaskTracker::new(
+                TasksFile::parse(&plan_a.join("tasks.toml")).expect("parse plan-a"),
+                plan_a,
+            ),
+        );
+        runner.task_trackers.insert(
+            "plan-b".to_string(),
+            TaskTracker::new(
+                TasksFile::parse(&plan_b.join("tasks.toml")).expect("parse plan-b"),
+                plan_b,
+            ),
+        );
+
+        let dag = runner
+            .runtime_task_dag()
+            .expect("build dag")
+            .expect("dag should exist");
+        let waves = dag.waves().expect("waves");
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].tasks[0].to_string(), "plan-a:T1");
+        assert_eq!(waves[1].tasks[0].to_string(), "plan-b:T2");
+
+        runner.emit_runtime_dag_surface();
+        assert!(runner.conductor_signals.iter().any(|signal| {
+            signal.kind == Kind::Custom("orchestrator.dag.summary".into())
+        }));
+    }
+
+    #[test]
+    fn critical_conductor_alert_helper_detects_critical_signals() {
+        let warning = Engram::builder(Kind::Custom("conductor:alert:ghost-turn".into()))
+            .body(Body::text("warn"))
+            .tag("severity", "warning")
+            .build();
+        let critical = Engram::builder(Kind::Custom("conductor:alert:iteration-loop".into()))
+            .body(Body::text("critical"))
+            .tag("severity", "critical")
+            .build();
+        let emitted = Engram::builder(Kind::Custom("conductor:alert:iteration-loop".into()))
+            .body(Body::text("critical"))
+            .tag("severity", "Critical")
+            .build();
+
+        assert!(!contains_critical_conductor_alert(&[warning]));
+        assert!(contains_critical_conductor_alert(&[critical]));
+        assert!(contains_critical_conductor_alert(&[emitted]));
     }
 
     #[test]

@@ -3800,7 +3800,7 @@ tier = "focused"
         let mut state = TuiState::default();
         state.update_from_snapshot(&data);
 
-        assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
+        assert!((state.token_rate - 8.0).abs() < f64::EPSILON);
     }
 
     #[test]

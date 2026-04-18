@@ -188,10 +188,12 @@ impl TaintTracker {
                 .provenance
                 .taint_info
                 .as_ref()
-                .map(TaintReason::from_taint_info)
-                .unwrap_or_else(|| {
+                .map_or_else(
+                    || {
                     TaintReason::external(format!("signal author {}", signal.provenance.author))
-                });
+                },
+                    TaintReason::from_taint_info,
+                );
             self.mark_tainted(signal.id, reason);
             true
         } else {
