@@ -12,6 +12,7 @@ use crate::http::ReqwestPoster;
 use crate::provider::openai_compat::{max_tokens_for_model, tool_registry_for_options};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
+    tool_loop_max_iterations,
 };
 use crate::tool_loop::backends::create_tool_loop_backend;
 use crate::tool_loop::{OpenAiCompatBackend, ToolLoop, ToolLoopAgent};
@@ -33,7 +34,7 @@ fn gemini_tool_loop_agent(
     model: &ModelProfile,
     options: &AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
-    let (registry, tools) = tool_registry_for_options(options)?;
+    let (registry, tools) = tool_registry_for_options(model, options)?;
     let resolver: Arc<dyn HandlerResolver> =
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
@@ -59,7 +60,7 @@ fn gemini_tool_loop_agent(
         .with_poster(Box::new(ReqwestPoster::new()));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
-        .with_max_iterations(50)
+        .with_max_iterations(tool_loop_max_iterations(50))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -84,7 +85,7 @@ fn gemini_native_tool_loop_agent(
     model: &ModelProfile,
     options: &AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
-    let (registry, tools) = tool_registry_for_options(options)?;
+    let (registry, tools) = tool_registry_for_options(model, options)?;
     let resolver: Arc<dyn HandlerResolver> =
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
@@ -93,7 +94,7 @@ fn gemini_native_tool_loop_agent(
         create_tool_loop_backend(provider, model, options, Arc::new(ReqwestPoster::new()))?;
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-        .with_max_iterations(50)
+        .with_max_iterations(tool_loop_max_iterations(50))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 

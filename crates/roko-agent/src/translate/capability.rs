@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use roko_core::config::schema::ModelProfile;
-use roko_core::tool::{ToolFormat, format::profile_for_model};
+use roko_core::tool::{ToolDef, ToolFormat, format::profile_for_model};
 
 use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
 
@@ -127,6 +127,18 @@ pub fn capabilities_from_profile(profile: &ModelProfile) -> ModelCapabilities {
         supports_partial: profile.supports_partial,
         supports_tool_streaming: false,
     }
+}
+
+/// Enforce the model's configured tool-count ceiling before dispatch.
+#[must_use]
+pub fn cap_tools_for_profile(profile: &ModelProfile, mut tools: Vec<ToolDef>) -> Vec<ToolDef> {
+    let limit = usize::from(
+        capabilities_from_profile(profile)
+            .max_tools_before_degrade
+            .max(1),
+    );
+    tools.truncate(limit);
+    tools
 }
 
 fn tool_format_from_str(tool_format: &str) -> ToolFormat {
@@ -345,6 +357,33 @@ mod tests {
             capabilities_for("random-model-123").max_tools_before_degrade,
             profile_for_model("random-model-123").max_tools_before_degrade
         );
+    }
+
+    #[test]
+    fn cap_tools_for_profile_truncates_to_model_limit() {
+        let profile = ModelProfile {
+            provider: "openai".to_string(),
+            slug: "qwen3-32b".to_string(),
+            supports_tools: true,
+            tool_format: "openai_json".to_string(),
+            max_tools: Some(2),
+            ..Default::default()
+        };
+        let tools = (0..5)
+            .map(|index| {
+                roko_core::tool::ToolDef::new(
+                    format!("tool_{index}"),
+                    "test tool",
+                    roko_core::tool::ToolCategory::Read,
+                    roko_core::tool::ToolPermission::read_only(),
+                )
+            })
+            .collect();
+
+        let capped = cap_tools_for_profile(&profile, tools);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].name, "tool_0");
+        assert_eq!(capped[1].name, "tool_1");
     }
 
     #[test]

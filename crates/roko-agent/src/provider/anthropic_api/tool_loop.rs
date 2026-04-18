@@ -13,6 +13,7 @@ use crate::http::{HttpPoster, ReqwestPoster};
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderSemaphores, build_tool_dispatcher,
+    tool_loop_max_iterations,
 };
 use crate::tool_loop::{LlmBackend, LlmError, ToolLoop, ToolLoopAgent};
 use crate::translate::{
@@ -27,35 +28,21 @@ pub(super) fn create_tool_loop_agent(
     model: &ModelProfile,
     options: &AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
-    let (registry, tools) = tool_registry_for_options(options)?;
+    let (registry, tools) = tool_registry_for_options(model, options)?;
     let resolver: Arc<dyn HandlerResolver> =
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
     let translator: Arc<dyn Translator> = Arc::new(AnthropicTranslator);
-    let timeout_ms = options
-        .timeout_ms
-        .or(provider.timeout_ms)
-        .unwrap_or(120_000);
+    let backend = create_tool_loop_backend_with_api_key(
+        api_key,
+        provider,
+        model,
+        options,
+        Box::new(ReqwestPoster::new()),
+    )?;
 
-    let mut backend = AnthropicMessagesBackend::new(api_key, model.slug.clone())
-        .with_provider_id(model.provider.clone())
-        .with_base_url(super::AnthropicApiAdapter::base_url(provider))
-        .with_timeout_ms(timeout_ms)
-        .with_max_tokens(
-            model
-                .max_output
-                .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(DEFAULT_MAX_TOKENS),
-        )
-        .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
-        .with_poster(Box::new(ReqwestPoster::new()));
-
-    if let Some(provider_semaphores) = options.provider_semaphores.clone() {
-        backend = backend.with_provider_semaphores(provider_semaphores);
-    }
-
-    let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
-        .with_max_iterations(50)
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend)
+        .with_max_iterations(tool_loop_max_iterations(50))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 
@@ -73,6 +60,50 @@ pub(super) fn create_tool_loop_agent(
     }
 
     Ok(Box::new(agent))
+}
+
+pub(crate) fn create_tool_loop_backend(
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+    options: &AgentOptions,
+    poster: Box<dyn HttpPoster>,
+) -> Result<Arc<dyn LlmBackend>, AgentCreationError> {
+    let api_key = provider.resolve_api_key().ok_or_else(|| {
+        AgentCreationError::MissingApiKey(provider.api_key_env.clone().unwrap_or_default())
+    })?;
+    create_tool_loop_backend_with_api_key(api_key, provider, model, options, poster)
+}
+
+fn create_tool_loop_backend_with_api_key(
+    api_key: String,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+    options: &AgentOptions,
+    poster: Box<dyn HttpPoster>,
+) -> Result<Arc<dyn LlmBackend>, AgentCreationError> {
+    let timeout_ms = options
+        .timeout_ms
+        .or(provider.timeout_ms)
+        .unwrap_or(120_000);
+
+    let mut backend = AnthropicMessagesBackend::new(api_key, model.slug.clone())
+        .with_provider_id(model.provider.clone())
+        .with_base_url(super::AnthropicApiAdapter::base_url(provider))
+        .with_timeout_ms(timeout_ms)
+        .with_max_tokens(
+            model
+                .max_output
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(DEFAULT_MAX_TOKENS),
+        )
+        .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+        .with_poster(poster);
+
+    if let Some(provider_semaphores) = options.provider_semaphores.clone() {
+        backend = backend.with_provider_semaphores(provider_semaphores);
+    }
+
+    Ok(Arc::new(backend))
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -597,10 +628,20 @@ mod tests {
         .to_string();
         let poster = MockPoster::new(vec![Ok(first_response), Ok(second_response)]);
 
-        let (registry, tools) = tool_registry_for_options(&AgentOptions {
-            tools: Some("ls".to_string()),
-            ..Default::default()
-        })
+        let (registry, tools) = tool_registry_for_options(
+            &ModelProfile {
+                provider: "anthropic".to_string(),
+                slug: "claude-sonnet-4-6".to_string(),
+                context_window: 200_000,
+                supports_tools: true,
+                tool_format: "anthropic_blocks".to_string(),
+                ..Default::default()
+            },
+            &AgentOptions {
+                tools: Some("ls".to_string()),
+                ..Default::default()
+            },
+        )
         .expect("tools");
         let resolver: Arc<dyn HandlerResolver> =
             Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));

@@ -81,6 +81,7 @@ pub mod shutdown;
 pub mod signal_kinds;
 pub mod state_hub;
 pub mod task;
+pub mod temperament;
 pub mod tool;
 pub mod traits;
 pub mod verdict;
@@ -97,7 +98,8 @@ pub use build::{BuildCommand, BuildSystem};
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
-    ChatMessage, ContentBlock, ImageUrl, MessageContent, ToolCallFunction, ToolCallMessage,
+    ChatMessage, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
+    ResponseMetadata, SessionState, ToolCallFunction, ToolCallMessage, Usage,
 };
 pub use conductor::ConductorDecision;
 pub use context::Context;
@@ -139,6 +141,7 @@ pub use dashboard_snapshot::{
     TrendBucket, TrendBuckets,
 };
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
+pub use temperament::Temperament;
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
     FailureTrace, FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink,

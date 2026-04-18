@@ -31,8 +31,8 @@ use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
 use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
-use roko_agent::provider::{AgentOptions, create_agent_for_model};
 use roko_agent::translate::BackendResponse;
+use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::{App, ApprovalChannel};
 use roko_cli::{
@@ -1763,6 +1763,7 @@ fn cmd_model_route(
         max_queue_wait_hours: 0.0,
         daimon_policy: DaimonPolicy::default(),
         thinking_level: None,
+        temperament: Some(config.agent.temperament_for_role(role.label())),
         previous_model: Some(requested_slug.clone()),
         plan_context_tokens: None,
     };
@@ -3728,18 +3729,27 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
 
                 let (routing_config, timeout_ms) =
                     with_perplexity_research_model(&config, &model_slug, true);
-                let agent = create_agent_for_model(
+                let agent = spawn_agent_scoped(
                     &routing_config,
-                    &model_slug,
-                    AgentOptions {
+                    SpawnAgentSpec {
+                        model: model_slug.clone(),
+                        command: None,
                         timeout_ms: Some(timeout_ms),
+                        system_prompt: None,
+                        cached_content: None,
+                        tools: None,
+                        mcp_config: None,
                         working_dir: Some(workdir.clone()),
-                        ..Default::default()
+                        env: Vec::new(),
+                        extra_args: Vec::new(),
+                        effort: None,
+                        bare_mode: false,
+                        dangerously_skip_permissions: false,
+                        name: String::new(),
+                        role: Some("researcher".to_string()),
                     },
-                )
-                .with_context(|| {
-                    format!("create Perplexity deep research agent for model {model_slug}")
-                })?;
+                    format!("create Perplexity deep research agent for model {model_slug}"),
+                )?;
                 println!("⏳ Deep research submitted ({model_slug}). This takes 1-10 min...");
 
                 let input = roko_core::Engram::builder(Kind::Prompt)
@@ -3916,20 +3926,27 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                         }),
                         model_profile,
                     );
-                    let agent = create_agent_for_model(
+                    let agent = spawn_agent_scoped(
                         &routing_config,
-                        &model_slug,
-                        AgentOptions {
+                        SpawnAgentSpec {
+                            model: model_slug.clone(),
+                            command: None,
                             timeout_ms: Some(timeout_ms),
+                            system_prompt: None,
+                            cached_content: None,
+                            tools: None,
+                            mcp_config: None,
                             effort: Some(config.gemini.thinking_level.clone()),
                             name: format!("gemini:{model_slug}"),
                             working_dir: Some(workdir.clone()),
-                            ..Default::default()
+                            env: Vec::new(),
+                            extra_args: Vec::new(),
+                            bare_mode: false,
+                            dangerously_skip_permissions: false,
+                            role: Some("researcher".to_string()),
                         },
-                    )
-                    .with_context(|| {
-                        format!("create Gemini research agent for model {model_slug}")
-                    })?;
+                        format!("create Gemini research agent for model {model_slug}"),
+                    )?;
 
                     let input = roko_core::Engram::builder(Kind::Prompt)
                         .body(Body::text(&combined_prompt))
@@ -4018,19 +4035,32 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 );
                 let (routing_config, timeout_ms) =
                     with_perplexity_research_model(&config, &model_slug, false);
-                let agent = create_agent_for_model(
+                let agent = spawn_agent_scoped(
                     &routing_config,
-                    &model_slug,
-                    AgentOptions {
+                    SpawnAgentSpec {
+                        model: model_slug.clone(),
+                        command: None,
                         timeout_ms: Some(timeout_ms),
+                        system_prompt: None,
+                        cached_content: None,
+                        tools: None,
+                        mcp_config: None,
                         working_dir: Some(workdir.clone()),
-                        ..Default::default()
-                    }
-                    .with_perplexity_search_options(search_opts),
-                )
-                .with_context(|| {
-                    format!("create Perplexity research agent for model {model_slug}")
-                })?;
+                        env: Vec::new(),
+                        extra_args: vec![format!(
+                            "{}{}",
+                            roko_agent::provider::PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX,
+                            serde_json::to_string(&search_opts)
+                                .expect("Perplexity search options must serialize"),
+                        )],
+                        effort: None,
+                        bare_mode: false,
+                        dangerously_skip_permissions: false,
+                        name: String::new(),
+                        role: Some("researcher".to_string()),
+                    },
+                    format!("create Perplexity research agent for model {model_slug}"),
+                )?;
 
                 let input = roko_core::Engram::builder(Kind::Prompt)
                     .body(Body::text(&combined_prompt))

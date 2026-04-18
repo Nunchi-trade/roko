@@ -58,8 +58,7 @@ use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Kind, OperatingFrequency,
     OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task, TaskCategory,
-    TaskComplexityBand, TaskRequirements, TaskStatus, ToolRegistry, Verdict,
-    score_model_for_task,
+    TaskComplexityBand, TaskRequirements, TaskStatus, ToolRegistry, Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -2840,6 +2839,7 @@ fn cascade_routing_context(
 
     let crate_familiarity = runner.crate_familiarity_tracker.score_for_task(task_def);
     let affect = runner.daimon.query();
+    let routing_config = load_roko_config(&runner.workdir).unwrap_or_default();
     let (ready_queue_depth, max_queue_wait_hours) = runner
         .task_trackers
         .get(plan_id)
@@ -2867,6 +2867,7 @@ fn cascade_routing_context(
         max_queue_wait_hours,
         daimon_policy: DaimonPolicy::new(affect.confidence, affect.behavioral_state),
         thinking_level: Some(runner.config.agent.effort.clone()),
+        temperament: Some(routing_config.agent.temperament_for_role(role.label())),
         previous_model: None,
         plan_context_tokens: None,
     }
@@ -5021,7 +5022,12 @@ impl PlanRunner {
         let stats = dag.stats();
         let next_wave = waves
             .first()
-            .map(|wave| wave.tasks.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .map(|wave| {
+                wave.tasks
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
 
         self.emit_conductor_signal(
@@ -6883,11 +6889,9 @@ impl PlanRunner {
                 tracing::info!(
                     "[orchestrate] CancelSpeculativeExecution plan={plan_id} task={task}"
                 );
-                if self
-                    .task_trackers
-                    .get(&plan_id)
-                    .is_some_and(|tracker| tracker.last_impl_task_id.as_deref() == Some(task.as_str()))
-                {
+                if self.task_trackers.get(&plan_id).is_some_and(|tracker| {
+                    tracker.last_impl_task_id.as_deref() == Some(task.as_str())
+                }) {
                     self.force_model_override = None;
                 }
                 self.event_log.append(
@@ -12354,6 +12358,100 @@ impl PlanRunner {
                     success: task_result.gate_passed,
                 },
             )
+        } else if self.config.agent.command == "ollama" {
+            use parking_lot::RwLock;
+            use roko_agent::OllamaLlmBackend;
+            use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
+            use roko_agent::tool_loop::{StopReason, ToolLoop};
+            use roko_agent::translate::{OllamaTranslator, Translator};
+            use roko_core::tool::{ToolContext, ToolHandler, ToolRegistry, VecToolRegistry};
+            use std::collections::HashSet;
+
+            let allowed_tool_names: HashSet<&str> = task_allowed_tools_csv
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect();
+            let tools: Vec<roko_core::tool::ToolDef> =
+                if let Some(registry) = self.tool_registry.as_deref() {
+                    registry
+                        .for_role(role)
+                        .into_iter()
+                        .filter(|tool| {
+                            allowed_tool_names.is_empty()
+                                || allowed_tool_names.contains(tool.name.as_str())
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    let registry = StaticToolRegistry::new();
+                    registry
+                        .for_role(role)
+                        .into_iter()
+                        .filter(|tool| {
+                            allowed_tool_names.is_empty()
+                                || allowed_tool_names.contains(tool.name.as_str())
+                        })
+                        .cloned()
+                        .collect()
+                };
+            let registry =
+                Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
+            let resolver: Arc<dyn HandlerResolver> =
+                Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
+                    roko_std::tool::handlers::handler_for(name)
+                });
+            let dispatcher = Arc::new(
+                ToolDispatcher::new(registry, resolver).with_safety(self.safety_layer.clone()),
+            );
+            let translator: Arc<dyn Translator> = Arc::new(OllamaTranslator);
+            let base_url = self
+                .config
+                .agent
+                .env
+                .iter()
+                .find(|(key, _)| key == "OLLAMA_HOST")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            let backend: Arc<dyn roko_agent::tool_loop::LlmBackend> = Arc::new(
+                OllamaLlmBackend::new(&selected_model)
+                    .with_base_url(base_url)
+                    .with_timeout_ms(self.effective_task_timeout_ms(task_def.as_ref())),
+            );
+            let tool_loop = ToolLoop::new(translator, dispatcher, backend)
+                .with_max_iterations(usize::try_from(dispatch_turn_limit).unwrap_or(usize::MAX));
+            let external_actions = Arc::new(RwLock::new(Vec::new()));
+            let tool_ctx = ToolContext::testing(&exec_dir)
+                .with_external_actions(Arc::clone(&external_actions));
+            let output = tool_loop
+                .run(&role_instruction, &task_text, &tools, &tool_ctx)
+                .await;
+            let success = matches!(output.stop_reason, StopReason::Stop);
+            let body_text = if success {
+                output.final_text.clone()
+            } else {
+                format!(
+                    "agent stopped: {:?} after {} iterations",
+                    output.stop_reason, output.iterations
+                )
+            };
+            let output_signal = Engram::builder(Kind::AgentOutput)
+                .body(Body::text(body_text))
+                .provenance(Provenance::agent(&format!("ollama:{selected_model}")))
+                .tag("agent", format!("ollama:{selected_model}"))
+                .tag("model", &selected_model)
+                .tag("tool_calls", output.tool_calls.len().to_string())
+                .tag("iterations", output.iterations.to_string())
+                .build();
+            (
+                "ollama_tool_loop".to_string(),
+                AgentResult {
+                    output: output_signal,
+                    trace: Vec::new(),
+                    usage: output.total_usage,
+                    success,
+                },
+            )
         } else {
             let task_role = task_def
                 .as_ref()
@@ -15688,7 +15786,10 @@ mod tests {
         let executor_json = snapshot.to_json().expect("executor json");
 
         let event_log = EventLog::new();
-        event_log.append(EventKind::PlanStarted, serde_json::json!({"plan_id": "plan-1"}));
+        event_log.append(
+            EventKind::PlanStarted,
+            serde_json::json!({"plan_id": "plan-1"}),
+        );
         let mut log_snapshot = event_log.snapshot();
         log_snapshot.entries[0].payload = serde_json::json!({"plan_id": "tampered"});
         let event_log_json = serde_json::to_string(&log_snapshot).expect("event log json");
@@ -16764,9 +16865,12 @@ acceptance = []
         assert_eq!(waves[1].tasks[0].to_string(), "plan-b:T2");
 
         runner.emit_runtime_dag_surface();
-        assert!(runner.conductor_signals.iter().any(|signal| {
-            signal.kind == Kind::Custom("orchestrator.dag.summary".into())
-        }));
+        assert!(
+            runner
+                .conductor_signals
+                .iter()
+                .any(|signal| { signal.kind == Kind::Custom("orchestrator.dag.summary".into()) })
+        );
     }
 
     #[test]

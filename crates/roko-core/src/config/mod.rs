@@ -15,6 +15,7 @@ pub mod presets;
 pub mod schema;
 
 // Re-exports for ergonomic use.
+pub use crate::temperament::Temperament;
 pub use compat::from_mori_toml;
 pub use presets::Preset;
 pub use schema::{

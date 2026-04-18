@@ -44,6 +44,7 @@ use crate::dispatcher::{HandlerResolver, ToolDispatcher};
 use crate::gemini::GeminiAdapter;
 use crate::mock::MockAgent;
 use crate::{Agent, ExecAgent};
+use roko_core::Temperament;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
@@ -82,6 +83,7 @@ pub const PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX: &str = "pplx.search_options=";
 
 thread_local! {
     static ACTIVE_SAFETY_LAYER: RefCell<Option<SafetyLayer>> = const { RefCell::new(None) };
+    static ACTIVE_TEMPERAMENT: RefCell<Option<Temperament>> = const { RefCell::new(None) };
 }
 
 /// Return the static adapter for a provider kind.
@@ -111,6 +113,10 @@ pub fn create_agent_for_model(
         return Ok(mock_agent);
     }
     let safety_layer = current_safety_layer().or_else(|| Some(SafetyLayer::from_config(config)));
+    let effective_temperament = safety_layer
+        .as_ref()
+        .map(|layer| config.agent.temperament_for_role(&layer.role))
+        .unwrap_or(config.agent.temperament);
     let resolved = resolve_model(config, model_key);
     let profile = resolved
         .profile
@@ -195,8 +201,10 @@ pub fn create_agent_for_model(
     }
 
     let adapter = adapter_for_kind(provider_config.kind);
-    with_safety_layer(safety_layer, || {
-        adapter.create_agent(&provider_config, &profile, &options)
+    with_temperament(Some(effective_temperament), || {
+        with_safety_layer(safety_layer, || {
+            adapter.create_agent(&provider_config, &profile, &options)
+        })
     })
 }
 
@@ -269,6 +277,19 @@ pub fn current_safety_layer() -> Option<SafetyLayer> {
     ACTIVE_SAFETY_LAYER.with(|slot| slot.borrow().clone())
 }
 
+#[must_use]
+pub(crate) fn with_temperament<R>(temperament: Option<Temperament>, f: impl FnOnce() -> R) -> R {
+    let scope = set_active_temperament(temperament);
+    let result = f();
+    drop(scope);
+    result
+}
+
+#[must_use]
+pub(crate) fn current_temperament() -> Option<Temperament> {
+    ACTIVE_TEMPERAMENT.with(|slot| *slot.borrow())
+}
+
 struct SafetyLayerScope {
     previous: Option<SafetyLayer>,
 }
@@ -284,6 +305,43 @@ impl Drop for SafetyLayerScope {
 fn set_active_safety_layer(layer: Option<SafetyLayer>) -> SafetyLayerScope {
     let previous = ACTIVE_SAFETY_LAYER.with(|slot| slot.replace(layer));
     SafetyLayerScope { previous }
+}
+
+struct TemperamentScope {
+    previous: Option<Temperament>,
+}
+
+impl Drop for TemperamentScope {
+    fn drop(&mut self) {
+        ACTIVE_TEMPERAMENT.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+fn set_active_temperament(temperament: Option<Temperament>) -> TemperamentScope {
+    let previous = ACTIVE_TEMPERAMENT.with(|slot| slot.replace(temperament));
+    TemperamentScope { previous }
+}
+
+#[must_use]
+pub(crate) fn tool_limit_for_temperament(limit: usize) -> usize {
+    let adjusted = match current_temperament().unwrap_or_default() {
+        Temperament::Conservative => limit.saturating_mul(3) / 4,
+        Temperament::Balanced | Temperament::Exploratory => limit,
+        Temperament::Aggressive => limit / 2,
+    };
+    adjusted.max(1)
+}
+
+#[must_use]
+pub(crate) fn tool_loop_max_iterations(default_limit: usize) -> usize {
+    match current_temperament().unwrap_or_default() {
+        Temperament::Conservative => default_limit.saturating_add(10),
+        Temperament::Balanced => default_limit,
+        Temperament::Aggressive => default_limit.saturating_sub(15).max(10),
+        Temperament::Exploratory => default_limit.saturating_add(20),
+    }
 }
 
 #[must_use]

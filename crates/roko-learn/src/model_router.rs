@@ -46,10 +46,10 @@ use crate::bandits::EwcRegularizer;
 use crate::cost_table::CostTable;
 use parking_lot::RwLock;
 use rand::Rng;
-use roko_core::DaimonPolicy;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 pub use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::{DaimonPolicy, Temperament};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -152,6 +152,8 @@ pub struct RoutingContext {
     pub daimon_policy: DaimonPolicy,
     /// Requested thinking / reasoning level for this task, if any.
     pub thinking_level: Option<String>,
+    /// Optional typed temperament propagated from agent identity or config.
+    pub temperament: Option<Temperament>,
     /// Model used for the previous task in the same plan.
     pub previous_model: Option<String>,
     /// Estimated shared prefix size for cached context reuse.
@@ -159,6 +161,20 @@ pub struct RoutingContext {
 }
 
 impl RoutingContext {
+    /// Attach a typed temperament to the routing context.
+    #[must_use]
+    pub fn with_temperament(mut self, temperament: Temperament) -> Self {
+        self.temperament = Some(temperament);
+        self
+    }
+
+    /// Parse and attach a temperament label to the routing context.
+    #[must_use]
+    pub fn with_temperament_label(mut self, label: &str) -> Self {
+        self.temperament = Temperament::from_label(label);
+        self
+    }
+
     /// Encode into a fixed-length feature vector of dimension [`CONTEXT_DIM`].
     #[must_use]
     pub fn to_features(&self) -> Vec<f64> {
@@ -1369,6 +1385,7 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::new(0.5, roko_core::BehavioralState::Engaged),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
         }

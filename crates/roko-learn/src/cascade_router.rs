@@ -30,7 +30,7 @@ use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{BehavioralState, DaimonPolicy};
+use roko_core::{BehavioralState, DaimonPolicy, Temperament};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -783,6 +783,18 @@ fn conductor_load_tier_shift(ctx: &RoutingContext) -> i8 {
     }
 }
 
+fn temperament_tier_shift(ctx: &RoutingContext) -> i8 {
+    ctx.temperament
+        .map(Temperament::routing_tier_shift)
+        .unwrap_or(0)
+}
+
+fn temperament_exploration_multiplier(ctx: &RoutingContext) -> f64 {
+    ctx.temperament
+        .map(Temperament::exploration_multiplier)
+        .unwrap_or(1.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThinkingPreference {
     Neutral,
@@ -1370,6 +1382,26 @@ impl CascadeRouter {
             .unwrap_or(model)
     }
 
+    fn bias_model_for_temperament_among(
+        &self,
+        model: ModelSpec,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let shift = temperament_tier_shift(ctx);
+        if shift == 0 {
+            return model;
+        }
+
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let target_rank = target_tier_rank(current_rank, shift);
+        candidates
+            .iter()
+            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .map(ModelSpec::from_slug)
+            .unwrap_or(model)
+    }
+
     fn apply_context_biases_among(
         &self,
         route: CascadeModel,
@@ -1380,6 +1412,8 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let primary =
             self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary = self.bias_model_for_temperament_among(route.primary.clone(), ctx, candidates);
         let route = self.retarget_route_primary(route, candidates, primary);
         let primary =
             self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
@@ -2841,7 +2875,7 @@ impl CascadeRouter {
         candidates: &[String],
         frontier: Option<&[String]>,
     ) -> Vec<(String, f64)> {
-        let base_alpha = self.linucb.current_alpha();
+        let base_alpha = self.linucb.current_alpha() * temperament_exploration_multiplier(ctx);
 
         self.linucb
             .score_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
@@ -2950,6 +2984,7 @@ fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> R
         // would leak live dispatch bias into offline evaluation.
         daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
         thinking_level: None,
+        temperament: None,
         previous_model: primary_result.output.tag("model").map(str::to_string),
         plan_context_tokens: Some((prompt.len() as u64).div_ceil(4)),
     }
@@ -3327,6 +3362,7 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
         }
@@ -4223,6 +4259,24 @@ mod tests {
 
         let result = cascade.route(&ctx);
         assert_eq!(result.primary.slug, "gemini-2.5-flash-lite");
+    }
+
+    #[test]
+    fn conservative_temperament_biases_static_routing_toward_stronger_tiers() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx().with_temperament(Temperament::Conservative);
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "claude-opus-4");
+    }
+
+    #[test]
+    fn aggressive_temperament_biases_static_routing_toward_cheaper_tiers() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx().with_temperament(Temperament::Aggressive);
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "claude-haiku-3-5");
     }
 
     #[tokio::test]

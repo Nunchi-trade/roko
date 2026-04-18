@@ -169,6 +169,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         default_model,
         default_backend: d.default_backend,
         default_effort,
+        temperament: d.temperament,
         context_limit_k: m.context_limit_k.unwrap_or(d.context_limit_k),
         bare_mode: m.agent_bare_mode.unwrap_or(d.bare_mode),
         command: None,

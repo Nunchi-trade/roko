@@ -15,7 +15,7 @@ use crate::perplexity::types::SearchOptions;
 use crate::provider::openai_compat::tool_registry_for_options;
 use crate::provider::{
     AgentCreationError, AgentOptions, PERPLEXITY_SEARCH_OPTIONS_ARG_PREFIX, ProviderAdapter,
-    ProviderError, build_tool_dispatcher,
+    ProviderError, build_tool_dispatcher, tool_loop_max_iterations,
 };
 use crate::tool_loop::ToolLoop;
 use crate::translate::{OpenAiTranslator, Translator};
@@ -134,7 +134,7 @@ fn perplexity_tool_loop_agent(
     model: &ModelProfile,
     options: &AgentOptions,
 ) -> Result<Box<dyn Agent>, AgentCreationError> {
-    let (registry, tools) = tool_registry_for_options(options)?;
+    let (registry, tools) = tool_registry_for_options(model, options)?;
     let resolver: Arc<dyn HandlerResolver> =
         Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
     let dispatcher = build_tool_dispatcher(registry, resolver);
@@ -149,7 +149,7 @@ fn perplexity_tool_loop_agent(
     ));
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend.clone())
-        .with_max_iterations(50)
+        .with_max_iterations(tool_loop_max_iterations(50))
         .with_context_token_limit(usize::try_from(model.context_window).unwrap_or(usize::MAX))
         .with_model_profile(model.clone());
 

@@ -168,7 +168,7 @@ impl Agent for MorphableAgent {
         result.output = derived_output(&result.output, output_kind, output_body)
             .provenance(Provenance::agent(self.name()))
             .tag("role", self.identity.role.label())
-            .tag("temperament", &self.identity.temperament)
+            .tag("temperament", self.identity.temperament.to_string())
             .build();
         result
     }
@@ -210,7 +210,7 @@ fn default_transition_matrix() -> HashMap<AgentRole, Vec<AgentRole>> {
 mod tests {
     use super::*;
     use crate::mock::MockAgent;
-    use roko_core::{Body, Context, Engram, Kind};
+    use roko_core::{Body, Context, Engram, Kind, Temperament};
 
     fn prompt(text: &str) -> Engram {
         Engram::builder(Kind::Prompt).body(Body::text(text)).build()
@@ -218,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn morphable_agent_applies_role_tag() {
-        let identity = AgentIdentity::new(AgentRole::Implementer, "steady");
+        let identity = AgentIdentity::new(AgentRole::Implementer, Temperament::Balanced);
         let agent = MorphableAgent::new(Box::new(MockAgent::reply("ok")), identity);
         let result = agent.run(&prompt("hi"), &Context::at(0)).await;
         assert_eq!(result.output.tag("role"), Some("implementer"));
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn morph_rejects_disallowed_transition() {
-        let identity = AgentIdentity::new(AgentRole::Implementer, "steady");
+        let identity = AgentIdentity::new(AgentRole::Implementer, Temperament::Balanced);
         let mut agent =
             MorphableAgent::new(Box::new(MockAgent::reply("ok")), identity).with_transitions(
                 HashMap::from([(AgentRole::Implementer, vec![AgentRole::Auditor])]),

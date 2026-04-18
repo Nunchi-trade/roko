@@ -211,6 +211,7 @@ fn default_ctx() -> RoutingContext {
         max_queue_wait_hours: 0.0,
         daimon_policy: DaimonPolicy::default(),
         thinking_level: None,
+        temperament: None,
         previous_model: None,
         plan_context_tokens: None,
     }

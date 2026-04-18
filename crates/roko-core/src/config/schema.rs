@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, ProviderKind};
+use crate::temperament::Temperament;
 use crate::tool::{ToolFormat, profile_for_model};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -208,6 +209,7 @@ impl RokoConfig {
         let _ = writeln!(out, "default_model = \"{}\"", cfg.agent.default_model);
         let _ = writeln!(out, "default_backend = \"{}\"", cfg.agent.default_backend);
         let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
+        let _ = writeln!(out, "temperament = \"{}\"", cfg.agent.temperament);
         let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
         let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
 
@@ -216,6 +218,7 @@ impl RokoConfig {
         let _ = writeln!(out, "# role = \"implementer\"");
         let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
         let _ = writeln!(out, "# effort = \"high\"");
+        let _ = writeln!(out, "# temperament = \"exploratory\"");
         let _ = writeln!(out, "# context_limit_k = 200");
         let _ = writeln!(out, "# tools = [\"read\", \"edit\", \"bash\", \"git-*\"]");
         let _ = writeln!(
@@ -1293,6 +1296,9 @@ pub struct AgentConfig {
     /// Default reasoning effort (`"low"`, `"medium"`, `"high"`, `"max"`).
     #[serde(default = "default_effort", alias = "effort")]
     pub default_effort: String,
+    /// Default agent temperament for roles without a local override.
+    #[serde(default)]
+    pub temperament: Temperament,
     /// Context window limit in thousands of tokens.
     #[serde(default = "default_context_limit_k")]
     pub context_limit_k: u32,
@@ -1356,6 +1362,7 @@ impl Default for AgentConfig {
             default_model: default_model(),
             default_backend: default_backend(),
             default_effort: default_effort(),
+            temperament: Temperament::default(),
             context_limit_k: default_context_limit_k(),
             bare_mode: default_true(),
             command: None,
@@ -1428,6 +1435,9 @@ pub struct RoleOverride {
     /// Reasoning effort override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Temperament override for this role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament: Option<Temperament>,
     /// Context window override (in thousands of tokens).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit_k: Option<u32>,
@@ -1470,6 +1480,24 @@ impl RoleOverride {
         }
         (budget.max_tokens_per_turn.is_some() || budget.max_cost_usd_cents_per_turn.is_some())
             .then_some(budget)
+    }
+
+    /// Resolve the effective temperament for this role override.
+    #[must_use]
+    pub fn resolved_temperament(&self, default: Temperament) -> Temperament {
+        self.temperament.unwrap_or(default)
+    }
+}
+
+impl AgentConfig {
+    /// Resolve the effective temperament for `role_label`.
+    #[must_use]
+    pub fn temperament_for_role(&self, role_label: &str) -> Temperament {
+        self.roles
+            .get(role_label)
+            .map_or(self.temperament, |override_cfg| {
+                override_cfg.resolved_temperament(self.temperament)
+            })
     }
 }
 
@@ -3495,11 +3523,13 @@ auto_plan = true
 [agent]
 default_model = "claude-opus-4-6"
 default_effort = "high"
+temperament = "balanced"
 
 [agent.roles.implementer]
 role = "code_implementer"
 model = "claude-sonnet-4-6"
 effort = "max"
+temperament = "exploratory"
 tools = ["read_file", "git-*"]
 context_limit_k = 300
 budget = { max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 550 }
@@ -3513,11 +3543,13 @@ turn_budget_usd = 5.0
         let cfg = RokoConfig::from_toml(toml).expect("parse");
         assert_eq!(cfg.agent.default_model, "claude-opus-4-6");
         assert_eq!(cfg.agent.default_effort, "high");
+        assert_eq!(cfg.agent.temperament, Temperament::Balanced);
 
         let imp = cfg.agent.roles.get("implementer").expect("implementer");
         assert_eq!(imp.role.as_deref(), Some("code_implementer"));
         assert_eq!(imp.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(imp.effort.as_deref(), Some("max"));
+        assert_eq!(imp.temperament, Some(Temperament::Exploratory));
         assert_eq!(
             imp.tools.as_deref(),
             Some(&["read_file".to_string(), "git-*".to_string()][..])
@@ -3542,10 +3574,18 @@ turn_budget_usd = 5.0
                 .and_then(|routing| routing.force_backend.as_deref()),
             Some("claude")
         );
+        assert_eq!(
+            cfg.agent.temperament_for_role("implementer"),
+            Temperament::Exploratory
+        );
 
         let arch = cfg.agent.roles.get("architect").expect("architect");
         assert_eq!(arch.model.as_deref(), Some("claude-opus-4-6"));
         assert!((arch.turn_budget_usd.expect("budget") - 5.0).abs() < f32::EPSILON);
+        assert_eq!(
+            cfg.agent.temperament_for_role("architect"),
+            Temperament::Balanced
+        );
         assert_eq!(
             arch.effective_budget(),
             Some(AgentBudget {
