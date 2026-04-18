@@ -49,14 +49,6 @@ pub enum Decay {
 }
 
 impl Decay {
-    fn stable_weight(weight: f32) -> f32 {
-        if weight.is_finite() {
-            weight.clamp(0.0, 1.0)
-        } else {
-            0.0
-        }
-    }
-
     /// Apply decay to get a weight multiplier at the given age (milliseconds since emission).
     ///
     /// Clamped to `[0.0, 1.0]`. Negative ages (clock skew) return `1.0`.
@@ -67,9 +59,6 @@ impl Decay {
             return 1.0;
         }
         let age_ms = age_ms as f32;
-        if !age_ms.is_finite() {
-            return 0.0;
-        }
         match self {
             Self::None => 1.0,
             Self::HalfLife { half_life_ms } => {
@@ -77,7 +66,7 @@ impl Decay {
                     return 0.0;
                 }
                 let hl = *half_life_ms as f32;
-                Self::stable_weight((0.5_f32).powf(age_ms / hl))
+                (0.5_f32).powf(age_ms / hl)
             }
             Self::Ttl { ttl_ms } => {
                 if age_ms >= *ttl_ms as f32 {
@@ -87,11 +76,11 @@ impl Decay {
                 }
             }
             Self::Ebbinghaus { strength, scale_ms } => {
-                if *scale_ms == 0 || !strength.is_finite() || *strength <= 0.0 {
+                if *scale_ms == 0 || *strength <= 0.0 {
                     return 0.0;
                 }
                 let scale = (*strength) * (*scale_ms as f32);
-                Self::stable_weight((-age_ms / scale).exp())
+                (-age_ms / scale).exp()
             }
         }
     }
@@ -99,7 +88,7 @@ impl Decay {
     /// Is this signal still meaningfully alive (weight > threshold)?
     #[must_use]
     pub fn is_alive(&self, age_ms: i64, threshold: f32) -> bool {
-        threshold.is_finite() && self.apply(age_ms) > threshold
+        self.apply(age_ms) > threshold
     }
 
     // ─── Convenience constructors matching agent-chain pheromone half-lives ────
@@ -189,26 +178,5 @@ mod tests {
     fn zero_half_life_decays_immediately() {
         let d = Decay::HalfLife { half_life_ms: 0 };
         assert_eq!(d.apply(1), 0.0);
-    }
-
-    #[test]
-    fn ebbinghaus_with_non_finite_strength_returns_zero() {
-        let d = Decay::Ebbinghaus {
-            strength: f32::NAN,
-            scale_ms: 1000,
-        };
-        assert_eq!(d.apply(1000), 0.0);
-    }
-
-    #[test]
-    fn infinite_age_is_safely_clamped() {
-        let d = Decay::HalfLife { half_life_ms: 1 };
-        assert_eq!(d.apply(i64::MAX), 0.0);
-    }
-
-    #[test]
-    fn non_finite_threshold_never_counts_as_alive() {
-        let d = Decay::None;
-        assert!(!d.is_alive(0, f32::NAN));
     }
 }

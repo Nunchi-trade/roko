@@ -33,10 +33,6 @@ use crate::prompt::estimate_tokens;
 use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, PadState};
-use roko_core::{
-    Body, Budget, Composer, ContentHash, Context, Engram, Kind, Provenance, Scorer,
-    error::Result,
-};
 use roko_core::tool::ToolDef;
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
@@ -274,7 +270,13 @@ impl SystemPromptBuilder {
         let rendered_sections = self
             .tuned_sections(token_budget, counter)
             .into_iter()
-            .map(|section| RenderedSection::new(section, None))
+            .map(|section| {
+                let section = section.enforce_hard_cap();
+                RenderedSection {
+                    rendered: render_section(&section),
+                    section,
+                }
+            })
             .collect::<Vec<_>>();
 
         let mut kept = vec![None; rendered_sections.len()];
@@ -622,117 +624,6 @@ impl SystemPromptBuilder {
                 .with_hard_cap(RELEVANT_TECHNIQUES_TOKEN_BUDGET),
         )
     }
-
-    fn effective_token_budget(&self, budget: &Budget) -> Option<usize> {
-        match (budget.max_tokens, self.token_budget) {
-            (Some(external), Some(internal)) => Some(external.min(internal)),
-            (Some(external), None) => Some(external),
-            (None, Some(internal)) => Some(internal),
-            (None, None) => None,
-        }
-    }
-
-    fn rendered_sections_for_compose(&self, signals: &[Engram]) -> Vec<RenderedSection> {
-        let mut rendered = self
-            .build_sections()
-            .into_iter()
-            .map(|section| RenderedSection::new(section, None))
-            .collect::<Vec<_>>();
-
-        rendered.extend(signals.iter().filter_map(|signal| {
-            PromptSection::from_signal(signal)
-                .ok()
-                .map(|section| RenderedSection::new(section, Some(signal.id)))
-        }));
-        rendered.sort_by(|left, right| compare_sections(&left.section, &right.section));
-        rendered
-    }
-
-    fn compose_prompt(
-        &self,
-        signals: &[Engram],
-        budget: &Budget,
-    ) -> (String, Vec<ContentHash>, usize) {
-        let rendered_sections = self.rendered_sections_for_compose(signals);
-        let effective_token_budget = self.effective_token_budget(budget);
-
-        if effective_token_budget.is_none()
-            && budget.max_signals.is_none()
-            && budget.max_bytes.is_none()
-        {
-            let prompt = assemble_selected_sections(
-                &rendered_sections,
-                &rendered_sections
-                    .iter()
-                    .map(|section| Some(section.rendered.clone()))
-                    .collect::<Vec<_>>(),
-                self.cache_markers,
-            );
-            let lineage = rendered_sections
-                .iter()
-                .filter_map(|section| section.source_id)
-                .collect::<Vec<_>>();
-            return (prompt, lineage, rendered_sections.len());
-        }
-
-        let mut kept = vec![None; rendered_sections.len()];
-        let mut selection_order = (0..rendered_sections.len()).collect::<Vec<_>>();
-        selection_order.sort_by(|&a, &b| {
-            rendered_sections[b]
-                .section
-                .priority
-                .cmp(&rendered_sections[a].section.priority)
-                .then_with(|| {
-                    rendered_sections[a]
-                        .section
-                        .cache_layer
-                        .cmp(&rendered_sections[b].section.cache_layer)
-                })
-                .then_with(|| compare_sections(&rendered_sections[a].section, &rendered_sections[b].section))
-        });
-
-        for index in selection_order {
-            let rendered = &rendered_sections[index].rendered;
-            let is_critical = rendered_sections[index].section.priority == SectionPriority::Critical;
-
-            if candidate_fits_budget(
-                &rendered_sections,
-                &kept,
-                index,
-                rendered,
-                self.cache_markers,
-                effective_token_budget,
-                budget.max_bytes,
-                budget.max_signals,
-                is_critical,
-            ) {
-                kept[index] = Some(rendered.clone());
-                continue;
-            }
-
-            if is_critical {
-                kept[index] = truncate_to_fit_budget(
-                    &rendered_sections,
-                    &kept,
-                    index,
-                    rendered,
-                    self.cache_markers,
-                    effective_token_budget,
-                    budget.max_bytes,
-                );
-            }
-        }
-
-        let prompt = assemble_selected_sections(&rendered_sections, &kept, self.cache_markers);
-        let lineage = rendered_sections
-            .iter()
-            .enumerate()
-            .filter_map(|(index, section)| kept[index].as_ref().and(section.source_id))
-            .collect::<Vec<_>>();
-        let kept_count = kept.iter().filter(|section| section.is_some()).count();
-
-        (prompt, lineage, kept_count)
-    }
 }
 
 fn adjusted_priority(
@@ -898,31 +789,16 @@ fn render_playbook(playbook: &Playbook) -> String {
 struct RenderedSection {
     section: PromptSection,
     rendered: String,
-    source_id: Option<ContentHash>,
-}
-
-impl RenderedSection {
-    fn new(section: PromptSection, source_id: Option<ContentHash>) -> Self {
-        let section = section.enforce_hard_cap();
-        let rendered = render_section(&section);
-        Self {
-            section,
-            rendered,
-            source_id,
-        }
-    }
-}
-
-fn compare_sections(a: &PromptSection, b: &PromptSection) -> std::cmp::Ordering {
-    a.cache_layer
-        .cmp(&b.cache_layer)
-        .then_with(|| b.priority.cmp(&a.priority))
-        .then_with(|| section_order_rank(&a.name).cmp(&section_order_rank(&b.name)))
-        .then_with(|| a.name.cmp(&b.name))
 }
 
 fn sort_sections(sections: &mut [PromptSection]) {
-    sections.sort_by(compare_sections);
+    sections.sort_by(|a, b| {
+        a.cache_layer
+            .cmp(&b.cache_layer)
+            .then_with(|| b.priority.cmp(&a.priority))
+            .then_with(|| section_order_rank(&a.name).cmp(&section_order_rank(&b.name)))
+            .then_with(|| a.name.cmp(&b.name))
+    });
 }
 
 fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> String {
@@ -930,7 +806,13 @@ fn assemble_sections(mut sections: Vec<PromptSection>, cache_markers: bool) -> S
 
     let rendered = sections
         .into_iter()
-        .map(|section| RenderedSection::new(section, None))
+        .map(|section| {
+            let section = section.enforce_hard_cap();
+            RenderedSection {
+                rendered: render_section(&section),
+                section,
+            }
+        })
         .collect::<Vec<_>>();
     let kept = rendered
         .iter()
@@ -1048,90 +930,6 @@ fn truncate_to_fit(
     best
 }
 
-fn candidate_fits_budget(
-    sections: &[RenderedSection],
-    kept: &[Option<String>],
-    index: usize,
-    candidate: &str,
-    cache_markers: bool,
-    max_tokens: Option<usize>,
-    max_bytes: Option<usize>,
-    max_signals: Option<usize>,
-    bypass_signal_cap: bool,
-) -> bool {
-    let mut next = kept.to_vec();
-    next[index] = Some(candidate.to_string());
-    let assembled = assemble_selected_sections(sections, &next, cache_markers);
-
-    if let Some(limit) = max_tokens {
-        if estimate_tokens(&assembled) > limit {
-            return false;
-        }
-    }
-
-    if let Some(limit) = max_bytes {
-        if assembled.len() > limit {
-            return false;
-        }
-    }
-
-    if !bypass_signal_cap {
-        if let Some(limit) = max_signals {
-            if next.iter().filter(|section| section.is_some()).count() > limit {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-fn truncate_to_fit_budget(
-    sections: &[RenderedSection],
-    kept: &[Option<String>],
-    index: usize,
-    rendered: &str,
-    cache_markers: bool,
-    max_tokens: Option<usize>,
-    max_bytes: Option<usize>,
-) -> Option<String> {
-    let mut boundaries = rendered
-        .char_indices()
-        .map(|(boundary, _)| boundary)
-        .collect::<Vec<_>>();
-    boundaries.push(rendered.len());
-
-    let mut low = 0usize;
-    let mut high = boundaries.len();
-    let mut best = None;
-
-    while low < high {
-        let mid = (low + high) / 2;
-        let candidate = &rendered[..boundaries[mid]];
-
-        if !candidate.is_empty()
-            && candidate_fits_budget(
-                sections,
-                kept,
-                index,
-                candidate,
-                cache_markers,
-                max_tokens,
-                max_bytes,
-                None,
-                true,
-            )
-        {
-            best = Some(candidate.to_string());
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-
-    best
-}
-
 fn section_order_rank(name: &str) -> u8 {
     match name {
         "role_identity" => 0,
@@ -1227,46 +1025,13 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
     }
 }
 
-impl Composer for SystemPromptBuilder {
-    fn compose(
-        &self,
-        signals: &[Engram],
-        budget: &Budget,
-        _scorer: &dyn Scorer,
-        _ctx: &Context,
-    ) -> Result<Engram> {
-        let (prompt, lineage, sections) = self.compose_prompt(signals, budget);
-        Ok(Engram::builder(Kind::Prompt)
-            .body(Body::text(prompt.clone()))
-            .provenance(Provenance::trusted(self.name()))
-            .lineage(lineage)
-            .tag("sections", sections.to_string())
-            .tag("tokens", estimate_tokens(&prompt).to_string())
-            .tag("cache_markers", self.cache_markers.to_string())
-            .build())
-    }
-
-    fn name(&self) -> &str {
-        "system_prompt_builder"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Composer, Context, Engram, Score, Scorer};
     use roko_core::tool::{ToolCategory, ToolPermission};
     use roko_learn::playbook::{Playbook, PlaybookStep};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
     use roko_learn::skill_library::Skill;
-
-    struct NoopScorer;
-
-    impl Scorer for NoopScorer {
-        fn score(&self, _signal: &Engram, _ctx: &Context) -> Score {
-            Score::NEUTRAL
-        }
-    }
 
     fn test_tool(name: &str) -> ToolDef {
         ToolDef::new(
@@ -1980,67 +1745,5 @@ mod tests {
         assert!(prompt.contains("ROLE"));
         assert!(prompt.contains("## Current Task"));
         assert!(!prompt.contains("remaining budget"));
-    }
-
-    #[test]
-    fn composer_trait_adapter_preserves_layer_order_and_tracks_lineage() {
-        let extra = PromptSection::new("workspace_hint", "Extra workspace hint.")
-            .with_priority(SectionPriority::Normal)
-            .with_cache_layer(CacheLayer::Workspace)
-            .with_placement(Placement::Middle)
-            .into_signal()
-            .expect("invariant: prompt section should serialize");
-
-        let composed = SystemPromptBuilder::new("ROLE")
-            .with_conventions("CONVENTIONS")
-            .with_task("TASK")
-            .compose(
-                &[extra.clone()],
-                &Budget::unlimited(),
-                &NoopScorer,
-                &Context::at(0),
-            )
-            .expect("invariant: system prompt builder should compose");
-
-        let body = composed
-            .body
-            .as_text()
-            .expect("invariant: composed prompt should be text");
-        let role = body
-            .find("ROLE")
-            .expect("invariant: composed prompt should include the role");
-        let conventions = body
-            .find("## Project Conventions")
-            .expect("invariant: composed prompt should include conventions");
-        let extra_hint = body
-            .find("Extra workspace hint.")
-            .expect("invariant: composed prompt should include extra prompt sections");
-        let task = body
-            .find("## Current Task")
-            .expect("invariant: composed prompt should include task context");
-
-        assert!(role < conventions);
-        assert!(conventions < extra_hint);
-        assert!(extra_hint < task);
-        assert_eq!(composed.lineage, vec![extra.id]);
-        assert_eq!(composed.provenance.author, "system_prompt_builder");
-    }
-
-    #[test]
-    fn composer_trait_adapter_respects_builder_token_budget() {
-        let composed = SystemPromptBuilder::new("ROLE")
-            .with_task("task details that are too long for the remaining budget")
-            .with_token_budget(24)
-            .compose(&[], &Budget::unlimited(), &NoopScorer, &Context::at(0))
-            .expect("invariant: system prompt builder should compose");
-
-        let body = composed
-            .body
-            .as_text()
-            .expect("invariant: composed prompt should be text");
-
-        assert!(estimate_tokens(body) <= 24);
-        assert!(body.contains("ROLE"));
-        assert!(body.contains("## Current Task"));
     }
 }

@@ -98,8 +98,6 @@ pub enum Kind {
     Service,
     /// A prediction claim (for predictive foraging).
     Prediction,
-    /// A composite signal that must be interpreted as multiple kinds at once.
-    Compound(Vec<Kind>),
 
     // ─── Extension ───────────────────────────────────────────────────────
     /// Custom kind identified by a dotted string. Extensions should use
@@ -142,31 +140,14 @@ impl Kind {
             Self::Transaction => "transaction",
             Self::Service => "service",
             Self::Prediction => "prediction",
-            Self::Compound(_) => "compound",
             Self::Custom(s) => s.as_str(),
         }
-    }
-
-    /// Canonical bytes for hashing and durable identity checks.
-    #[must_use]
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_else(|_| self.to_string().into_bytes())
     }
 }
 
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Compound(parts) => {
-                let rendered = parts
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("+");
-                write!(f, "compound({rendered})")
-            }
-            _ => f.write_str(self.as_str()),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -192,32 +173,17 @@ mod tests {
     }
 
     #[test]
-    fn compound_kind_has_stable_label_and_display() {
-        let kind = Kind::Compound(vec![Kind::Task, Kind::Prompt]);
-        assert_eq!(kind.as_str(), "compound");
-        assert_eq!(kind.to_string(), "compound(task+prompt)");
-    }
-
-    #[test]
     fn serde_roundtrip() {
         for k in [
             Kind::ProcessSpawn,
             Kind::GateVerdict,
             Kind::ToolInvocation,
             Kind::ToolHealthDegraded,
-            Kind::Compound(vec![Kind::Task, Kind::PromptSection]),
             Kind::Custom("x.y".into()),
         ] {
             let json = serde_json::to_string(&k).unwrap();
             let parsed: Kind = serde_json::from_str(&json).unwrap();
             assert_eq!(k, parsed);
         }
-    }
-
-    #[test]
-    fn canonical_bytes_distinguish_compound_members() {
-        let left = Kind::Compound(vec![Kind::Task, Kind::Prompt]);
-        let right = Kind::Compound(vec![Kind::Task, Kind::PromptSection]);
-        assert_ne!(left.canonical_bytes(), right.canonical_bytes());
     }
 }
