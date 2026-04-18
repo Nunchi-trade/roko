@@ -34,7 +34,19 @@ use roko_core::{
     BehavioralState, ContentHash, EmotionalTag, OperatingFrequencyAffect, PadVector, Task,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+mod phase2_stubs;
+
+pub use self::phase2_stubs::{
+    adjusted_thresholds, pad_cosine_similarity, AffectBehaviorModulation, AffectBehaviorStrategy,
+    AffectOctant, AffectWeightedQuery, AgentId, BehavioralStateThresholds,
+    BehavioralStateTracker, BorrowedAffect, ContagionEvent, ContagionTrigger, ContrarianConfig,
+    ContrarianTracker, DimensionDef, DimensionSource, DimensionWeights, DomainRegistration,
+    EfficiencyEvent, EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector,
+    ResourcePressure, ScoredEntry, SomaticField, SomaticMarkerFiredEvent,
+    StrategyTransferMapper, TierBias, TierThresholds, ValidationArc, fatigue_response,
+};
 
 const STRATEGY_DIMENSIONS: usize = 8;
 const DEFAULT_SOMATIC_NEIGHBORS: usize = 5;
@@ -1476,6 +1488,21 @@ pub struct DaimonState {
     /// Active strategy-space definition for interpreting 8D coordinates.
     #[serde(default)]
     pub strategy_space: StrategySpaceDefinition,
+    /// Per-crate confidence hints for coding-domain integrations.
+    #[serde(default)]
+    pub crate_confidence_map: HashMap<String, f64>,
+    /// Rolling contrarian retrieval tracker.
+    #[serde(default)]
+    pub contrarian_tracker: ContrarianTracker,
+    /// Familiarity model for error-category appraisal scaling.
+    #[serde(default)]
+    pub error_patterns: ErrorPatternTracker,
+    /// Failure-streak tracker for fatigue detection.
+    #[serde(default)]
+    pub fatigue_detector: FatigueDetector,
+    /// Borrowed peer affect awaiting accelerated decay.
+    #[serde(default)]
+    pub borrowed_affect: Vec<BorrowedAffect>,
     /// Optional persistence path for best-effort autosaves.
     #[serde(skip, default)]
     persistence_path: Option<PathBuf>,
@@ -1496,6 +1523,11 @@ impl DaimonState {
             half_life_hours: default_half_life_hours(),
             somatic_landscape: SomaticLandscape::new(),
             strategy_space: StrategySpaceDefinition::default(),
+            crate_confidence_map: HashMap::new(),
+            contrarian_tracker: ContrarianTracker::default(),
+            error_patterns: ErrorPatternTracker::default(),
+            fatigue_detector: FatigueDetector::default(),
+            borrowed_affect: Vec::new(),
             persistence_path: None,
         }
     }
