@@ -5,7 +5,7 @@
 //!   `go vet ./...`, `gofmt -l .` commands as [`BuildCommand`] descriptors.
 //! - [`GoLanguageProvider`]: parses single and grouped `import` statements and
 //!   extracts `func`, `type ... struct`, `type ... interface`, `const`, and
-//!   `var` symbols from Go source text.
+//!   `var` symbols from Go source text, including grouped `const`/`var` blocks.
 
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::unnecessary_literal_bound)]
@@ -69,8 +69,8 @@ impl BuildSystem for GoBuildSystem {
 ///
 /// Uses line-by-line heuristic parsing to extract imports and symbol
 /// definitions. Handles single imports (`import "pkg"`), grouped imports
-/// (`import ( ... )`), and top-level declarations (`func`, `type struct`,
-/// `type interface`, `const`, `var`).
+/// (`import ( ... )`), top-level declarations (`func`, `type struct`,
+/// `type interface`, `const`, `var`), and grouped `const`/`var` blocks.
 pub struct GoLanguageProvider;
 
 impl LanguageProvider for GoLanguageProvider {
@@ -119,8 +119,33 @@ impl LanguageProvider for GoLanguageProvider {
 
     fn extract_symbols(&self, source: &str) -> Vec<Symbol> {
         let mut symbols = Vec::new();
+        let mut decl_group = None;
+
         for (line_idx, line) in source.lines().enumerate() {
             let line_num = line_idx + 1;
+
+            if let Some(keyword) = decl_group {
+                let trimmed = line.trim();
+                if trimmed == ")" {
+                    decl_group = None;
+                    continue;
+                }
+                if let Some(sym) = extract_go_group_member(trimmed, line_num, keyword) {
+                    symbols.push(sym);
+                }
+                continue;
+            }
+
+            let trimmed = line.trim();
+            if is_go_decl_group_start(trimmed, "const") {
+                decl_group = Some("const");
+                continue;
+            }
+            if is_go_decl_group_start(trimmed, "var") {
+                decl_group = Some("var");
+                continue;
+            }
+
             if let Some(sym) = extract_go_symbol(line, line_num) {
                 symbols.push(sym);
             }
@@ -305,6 +330,31 @@ fn try_extract_go_const_or_var(trimmed: &str, line_num: usize, keyword: &str) ->
     }
 
     let name = extract_go_identifier(rest);
+    if name.is_empty() {
+        return None;
+    }
+
+    Some(Symbol {
+        visibility: go_visibility(&name),
+        name,
+        kind: SymbolKind::Const,
+        line: line_num,
+    })
+}
+
+fn is_go_decl_group_start(trimmed: &str, keyword: &str) -> bool {
+    let prefix = format!("{keyword} ");
+    trimmed
+        .strip_prefix(&prefix)
+        .is_some_and(|rest| rest.trim_start().starts_with('('))
+}
+
+fn extract_go_group_member(trimmed: &str, line_num: usize, _keyword: &str) -> Option<Symbol> {
+    if trimmed.is_empty() || trimmed.starts_with("//") {
+        return None;
+    }
+
+    let name = extract_go_identifier(trimmed);
     if name.is_empty() {
         return None;
     }
@@ -521,6 +571,29 @@ import (
         assert_eq!(syms[0].kind, SymbolKind::Const);
         assert_eq!(syms[1].name, "DefaultTimeout");
         assert_eq!(syms[1].kind, SymbolKind::Const); // var also maps to Const
+    }
+
+    #[test]
+    fn extract_grouped_const_and_var_blocks() {
+        let lang = GoLanguageProvider;
+        let src = "\
+const (
+\tMaxRetries = 3
+\tdefaultTimeout = 30
+)
+
+var (
+\tDebug = false
+)
+";
+        let syms = lang.extract_symbols(src);
+        assert_eq!(syms.len(), 3);
+        assert_eq!(syms[0].name, "MaxRetries");
+        assert_eq!(syms[0].visibility, Visibility::Public);
+        assert_eq!(syms[1].name, "defaultTimeout");
+        assert_eq!(syms[1].visibility, Visibility::Private);
+        assert_eq!(syms[2].name, "Debug");
+        assert_eq!(syms[2].kind, SymbolKind::Const);
     }
 
     #[test]

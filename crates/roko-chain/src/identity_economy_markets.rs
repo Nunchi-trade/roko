@@ -9,7 +9,9 @@
 //! from `docs/14-identity-economy`.
 
 use crate::{
-    identity_economy_identity::{AgentId, Blake3Hash, GateType, GateVerdict, Signature, X402Receipt},
+    identity_economy_identity::{
+        AgentId, Blake3Hash, GateType, GateVerdict, Signature, X402Receipt,
+    },
     phase2::{HiringModel, u256},
 };
 use std::{collections::HashMap, time::Duration};

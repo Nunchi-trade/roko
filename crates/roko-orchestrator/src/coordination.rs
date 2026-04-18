@@ -77,7 +77,10 @@ impl fmt::Display for CustomKindError {
                 "custom kind identifiers must use ASCII alphanumeric characters or '_' (found {ch:?})"
             ),
             Self::BuiltInCollision { name } => {
-                write!(f, "custom kind identifier collides with built-in kind '{name}'")
+                write!(
+                    f,
+                    "custom kind identifier collides with built-in kind '{name}'"
+                )
             }
         }
     }
@@ -130,7 +133,10 @@ impl fmt::Display for SubnetIdError {
                 write!(f, "subnet name must be 1..=64 chars, got {len}")
             }
             Self::InvalidCharacter(ch) => {
-                write!(f, "subnet name must use ASCII alphanumeric characters or '-' (found {ch:?})")
+                write!(
+                    f,
+                    "subnet name must use ASCII alphanumeric characters or '-' (found {ch:?})"
+                )
             }
         }
     }
@@ -362,8 +368,7 @@ pub fn pheromone_decay(
     half_life: Duration,
     confirmations: u32,
 ) -> f64 {
-    let effective_half_life =
-        half_life.mul_f64(f64::from(confirmations).mul_add(0.5, 1.0));
+    let effective_half_life = half_life.mul_f64(f64::from(confirmations).mul_add(0.5, 1.0));
     let elapsed = SystemTime::now()
         .duration_since(deposited_at)
         .unwrap_or_default();
@@ -373,10 +378,7 @@ pub fn pheromone_decay(
 /// Compute the effective confirmation count, weighted by confirmer reputation.
 #[must_use]
 pub fn effective_confirmations(confirmations: &[(AgentId, f64)]) -> f64 {
-    confirmations
-        .iter()
-        .map(|(_, rep)| clamp_unit(*rep))
-        .sum()
+    confirmations.iter().map(|(_, rep)| clamp_unit(*rep)).sum()
 }
 
 /// Promotion thresholds for the Pattern -> Wisdom -> Consensus cascade.
@@ -470,11 +472,7 @@ impl ResponseThresholds {
         let i_n = clamp_unit(intensity).powf(n);
         let theta_n = theta.powf(n);
         let denom = i_n + theta_n;
-        if denom == 0.0 {
-            0.0
-        } else {
-            i_n / denom
-        }
+        if denom == 0.0 { 0.0 } else { i_n / denom }
     }
 
     /// Lower the threshold after a successful response.
@@ -571,11 +569,7 @@ pub fn specialization_index(strategy: &[f64; STRATEGY_DIMS]) -> SpecializationIn
         .map(|s| -s * s.ln())
         .sum();
     let h_max = STRATEGY_DIMS_F64.ln();
-    if h_max == 0.0 {
-        0.0
-    } else {
-        1.0 - h / h_max
-    }
+    if h_max == 0.0 { 0.0 } else { 1.0 - h / h_max }
 }
 
 /// The five axes used to measure collective intelligence.
@@ -777,7 +771,8 @@ mod tests {
     #[test]
     fn scope_hierarchy_treats_subnet_as_mid_tier() {
         let local = PheromoneScope::Local("store-a".to_owned());
-        let subnet = PheromoneScope::Subnet(SubnetId::new("collective-a".to_owned(), "eng").unwrap());
+        let subnet =
+            PheromoneScope::Subnet(SubnetId::new("collective-a".to_owned(), "eng").unwrap());
         let mesh = PheromoneScope::Mesh("collective-a".to_owned());
         let global = PheromoneScope::Global;
 

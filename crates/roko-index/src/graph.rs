@@ -69,6 +69,19 @@ impl SymbolGraph {
         self.forward.values().map(Vec::len).sum()
     }
 
+    /// Number of edges in the graph for one edge kind.
+    pub fn edge_count_by_kind(&self, kind: EdgeKind) -> usize {
+        self.forward
+            .values()
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|(_, edge_kind)| *edge_kind == kind)
+                    .count()
+            })
+            .sum()
+    }
+
     /// Return the forward neighbors (dependencies) of a node.
     pub fn neighbors(&self, id: &SymbolId) -> Vec<&SymbolId> {
         self.forward

@@ -31,5 +31,8 @@ pub use hdc::{HdcFingerprint, fingerprint_file, fingerprint_symbol, similarity};
 pub use parser::{SourceFile, parse_source};
 pub use symbol::{SymbolId, SymbolRef, find_symbol};
 pub use workspace::{
-    CallGraph, CallGraphDirection, CallGraphEdge, SearchResult, SymbolInfo, WorkspaceIndex,
+    AssembledContext, CallGraph, CallGraphDirection, CallGraphEdge, CodeIndex, CodeSlice,
+    ContextOverlay, EmbeddingQuery, FileAst, HdcQuery, ImplementationMatch, IndexStats,
+    KeywordQuery, PrivacyConfig, ReferenceKind, ReferenceMatch, SearchResult, SearchScope,
+    StructuralQuery, SymbolContext, SymbolInfo, WorkspaceIndex, WorkspaceMap, WorkspaceMapEntry,
 };
