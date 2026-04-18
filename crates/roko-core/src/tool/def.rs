@@ -224,8 +224,13 @@ impl ToolSchema {
     /// provide a concrete schema so invalid calls fail fast.
     #[must_use]
     pub fn any_object() -> Self {
+        // `properties` must be present (even empty) so strict JSON-Schema
+        // validators (LM Studio's Zod, some Anthropic-compat servers) accept
+        // the tool. Omitting it causes "properties: Required" errors from
+        // backends that treat `function.parameters` as a strict object schema.
         Self(serde_json::json!({
             "type": "object",
+            "properties": {},
             "additionalProperties": true,
         }))
     }
