@@ -26,6 +26,12 @@ const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
 const DEFAULT_PLAYBOOK_LIMIT: usize = 12;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 45.0;
+/// Number of passing verdicts required to promote one tier.
+pub const PROMOTION_SUCCESS_THRESHOLD: usize = 3;
+/// Number of failing verdicts required to demote one tier.
+pub const DEMOTION_FAILURE_THRESHOLD: usize = 2;
+/// Entry age multiplier that triggers an expiry review relative to half-life.
+pub const EXPIRY_REVIEW_HALF_LIFE_MULTIPLIER: f64 = 2.0;
 
 /// Summary of a recurring causal pattern observed in raw episodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -244,10 +250,10 @@ impl TierProgression {
         let successes = verdicts.iter().filter(|verdict| verdict.passed).count();
         let failures = verdicts.len().saturating_sub(successes);
 
-        if successes >= 3 {
+        if successes >= PROMOTION_SUCCESS_THRESHOLD {
             return TierProgressionDecision::Promote(promote_tier(entry.tier));
         }
-        if failures >= 2 {
+        if failures >= DEMOTION_FAILURE_THRESHOLD {
             return TierProgressionDecision::Demote(demote_tier(entry.tier));
         }
         if entry_needs_expiry_review(entry) {
@@ -871,7 +877,7 @@ fn demote_tier(current: KnowledgeTier) -> KnowledgeTier {
 fn entry_needs_expiry_review(entry: &KnowledgeEntry) -> bool {
     let half_life_days = entry.effective_half_life_days().max(0.1);
     let age_days = (Utc::now() - entry.created_at).num_seconds().max(0) as f64 / 86_400.0;
-    age_days >= half_life_days * 2.0
+    age_days >= half_life_days * EXPIRY_REVIEW_HALF_LIFE_MULTIPLIER
 }
 
 fn sorted_ids(ids: &BTreeSet<String>) -> Vec<String> {

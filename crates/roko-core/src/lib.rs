@@ -122,7 +122,7 @@ pub use project::{
     DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
     detect_from_files_with_cargo_toml,
 };
-pub use provenance::Provenance;
+pub use provenance::{Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, TaintInfo};
 pub use query::{Budget, Query};
 pub use score::Score;
 pub use signal_kinds::*;

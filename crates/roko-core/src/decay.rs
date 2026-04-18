@@ -7,6 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
+fn finite_weight(weight: f32) -> f32 {
+    if weight.is_finite() {
+        weight.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// How a signal's weight diminishes over time.
 ///
 /// `Decay::apply(age_ms)` returns a multiplier in `[0.0, 1.0]` that scales
@@ -49,6 +57,15 @@ pub enum Decay {
 }
 
 impl Decay {
+    /// Returns `true` when this decay function's parameters are finite.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Self::None | Self::HalfLife { .. } | Self::Ttl { .. } => true,
+            Self::Ebbinghaus { strength, .. } => strength.is_finite(),
+        }
+    }
+
     /// Apply decay to get a weight multiplier at the given age (milliseconds since emission).
     ///
     /// Clamped to `[0.0, 1.0]`. Negative ages (clock skew) return `1.0`.
@@ -66,7 +83,7 @@ impl Decay {
                     return 0.0;
                 }
                 let hl = *half_life_ms as f32;
-                (0.5_f32).powf(age_ms / hl)
+                finite_weight((0.5_f32).powf(age_ms / hl))
             }
             Self::Ttl { ttl_ms } => {
                 if age_ms >= *ttl_ms as f32 {
@@ -76,11 +93,11 @@ impl Decay {
                 }
             }
             Self::Ebbinghaus { strength, scale_ms } => {
-                if *scale_ms == 0 || *strength <= 0.0 {
+                if *scale_ms == 0 || !strength.is_finite() || *strength <= 0.0 {
                     return 0.0;
                 }
                 let scale = (*strength) * (*scale_ms as f32);
-                (-age_ms / scale).exp()
+                finite_weight((-age_ms / scale).exp())
             }
         }
     }
@@ -88,7 +105,7 @@ impl Decay {
     /// Is this signal still meaningfully alive (weight > threshold)?
     #[must_use]
     pub fn is_alive(&self, age_ms: i64, threshold: f32) -> bool {
-        self.apply(age_ms) > threshold
+        threshold.is_finite() && self.apply(age_ms) > threshold
     }
 
     // ─── Convenience constructors matching agent-chain pheromone half-lives ────
@@ -178,5 +195,22 @@ mod tests {
     fn zero_half_life_decays_immediately() {
         let d = Decay::HalfLife { half_life_ms: 0 };
         assert_eq!(d.apply(1), 0.0);
+    }
+
+    #[test]
+    fn non_finite_ebbinghaus_strength_decays_to_zero() {
+        let d = Decay::Ebbinghaus {
+            strength: f32::NAN,
+            scale_ms: 1000,
+        };
+        assert!(!d.is_finite());
+        assert_eq!(d.apply(1000), 0.0);
+    }
+
+    #[test]
+    fn is_alive_rejects_non_finite_thresholds() {
+        let d = Decay::HalfLife { half_life_ms: 1000 };
+        assert!(!d.is_alive(100, f32::NAN));
+        assert!(!d.is_alive(100, f32::INFINITY));
     }
 }

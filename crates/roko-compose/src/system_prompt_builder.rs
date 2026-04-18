@@ -30,10 +30,13 @@
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
 use crate::prompt::estimate_tokens;
-use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::prompt::{
+    AttentionBidder, CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority,
+};
 use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
+use roko_core::{Budget, Composer, Context, Engram, Result, Scorer};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
@@ -626,6 +629,28 @@ impl SystemPromptBuilder {
     }
 }
 
+impl Composer for SystemPromptBuilder {
+    fn compose(
+        &self,
+        signals: &[Engram],
+        budget: &Budget,
+        scorer: &dyn Scorer,
+        ctx: &Context,
+    ) -> Result<Engram> {
+        let mut built_sections = self
+            .build_sections()
+            .into_iter()
+            .map(PromptSection::into_signal)
+            .collect::<Result<Vec<_>>>()?;
+        built_sections.extend(signals.iter().cloned());
+        PromptComposer::new().compose(&built_sections, budget, scorer, ctx)
+    }
+
+    fn name(&self) -> &str {
+        "system_prompt_builder"
+    }
+}
+
 fn adjusted_priority(
     base_priority: u8,
     section: &str,
@@ -1029,9 +1054,18 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
 mod tests {
     use super::*;
     use roko_core::tool::{ToolCategory, ToolPermission};
+    use roko_core::{Budget, Context, Kind, Score, Scorer};
     use roko_learn::playbook::{Playbook, PlaybookStep};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
     use roko_learn::skill_library::Skill;
+
+    struct ConstScorer;
+
+    impl Scorer for ConstScorer {
+        fn score(&self, _signal: &Engram, _ctx: &Context) -> Score {
+            Score::NEUTRAL
+        }
+    }
 
     fn test_tool(name: &str) -> ToolDef {
         ToolDef::new(
@@ -1099,6 +1133,24 @@ mod tests {
         assert!(!prompt.contains("Conventions"));
         assert!(!prompt.contains("Domain"));
         assert!(!prompt.contains("Anti-Patterns"));
+    }
+
+    #[test]
+    fn composer_impl_merges_builder_sections_with_input_signals() {
+        let builder =
+            SystemPromptBuilder::new("You are an implementer.").with_conventions("Use snake_case.");
+        let extra = PromptSection::new("extra_context", "Ship the migration.")
+            .into_signal()
+            .expect("section signal");
+        let prompt = builder
+            .compose(&[extra], &Budget::default(), &ConstScorer, &Context::now())
+            .expect("composed prompt");
+
+        assert_eq!(prompt.kind, Kind::Prompt);
+        let rendered = prompt.body.as_text().expect("text prompt");
+        assert!(rendered.contains("You are an implementer."));
+        assert!(rendered.contains("Use snake_case."));
+        assert!(rendered.contains("Ship the migration."));
     }
 
     #[test]

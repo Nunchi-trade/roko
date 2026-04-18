@@ -79,7 +79,7 @@ impl Engram {
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(self.kind.as_str().as_bytes());
+        hasher.update(self.kind.identity_key().as_bytes());
         hasher.update(b"|");
         hasher.update(&self.body.canonical_bytes());
         hasher.update(b"|");
@@ -446,5 +446,18 @@ mod tests {
         let s = Engram::builder(Kind::GateVerdict).build();
         assert!(s.is(&Kind::GateVerdict));
         assert!(!s.is(&Kind::Task));
+    }
+
+    #[test]
+    fn compound_kind_hash_distinguishes_components() {
+        let a = Engram::builder(Kind::Compound(vec![Kind::Task, Kind::Prompt]))
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        let b = Engram::builder(Kind::Compound(vec![Kind::Task, Kind::PromptSection]))
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        assert_ne!(a.id, b.id);
     }
 }

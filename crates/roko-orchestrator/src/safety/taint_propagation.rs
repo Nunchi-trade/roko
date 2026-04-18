@@ -27,7 +27,7 @@
 //! ```
 
 use parking_lot::Mutex;
-use roko_core::{ContentHash, Engram};
+use roko_core::{ContentHash, Engram, TaintInfo};
 use std::collections::HashMap;
 
 /// Why a particular [`ContentHash`] is considered tainted.
@@ -42,6 +42,8 @@ pub struct TaintReason {
     pub category: String,
     /// Human-readable explanation; kept brief to stay loggable.
     pub detail: String,
+    /// Upstream tainted hash that caused propagation, when known.
+    pub inherited_from: Option<ContentHash>,
 }
 
 impl TaintReason {
@@ -50,6 +52,7 @@ impl TaintReason {
         Self {
             category: category.into(),
             detail: detail.into(),
+            inherited_from: None,
         }
     }
 
@@ -67,6 +70,22 @@ impl TaintReason {
     /// signal during propagation.
     pub fn propagated(detail: impl Into<String>) -> Self {
         Self::new("propagated", detail)
+    }
+
+    /// Convert this tracker-local reason into the shared provenance metadata shape.
+    #[must_use]
+    pub fn to_taint_info(&self) -> TaintInfo {
+        let mut info = TaintInfo::new(self.category.clone(), self.detail.clone());
+        info.inherited_from = self.inherited_from;
+        info
+    }
+
+    fn from_taint_info(info: &TaintInfo) -> Self {
+        Self {
+            category: info.category.clone(),
+            detail: info.detail.clone(),
+            inherited_from: info.inherited_from,
+        }
     }
 }
 
@@ -118,6 +137,12 @@ impl TaintTracker {
         self.inner.lock().get(hash).cloned()
     }
 
+    /// Retrieve structured taint metadata suitable for storing in provenance.
+    #[must_use]
+    pub fn taint_info(&self, hash: &ContentHash) -> Option<TaintInfo> {
+        self.reason(hash).map(|reason| reason.to_taint_info())
+    }
+
     /// Propagate taint from parents to `child`.
     ///
     /// If any parent in `parents` is currently tainted, `child` is marked
@@ -143,7 +168,9 @@ impl TaintTracker {
                 .get(&child)
                 .is_some_and(|r| r.category != "propagated");
             if !already_specific {
-                let reason = TaintReason::propagated(format!("inherited from {}", parent.short()));
+                let mut reason =
+                    TaintReason::propagated(format!("inherited from {}", parent.short()));
+                reason.inherited_from = Some(parent);
                 guard.insert(child, reason);
             }
             true
@@ -157,8 +184,14 @@ impl TaintTracker {
     /// if the signal's provenance is clean.
     pub fn observe_signal(&self, signal: &Engram) -> bool {
         if signal.provenance.tainted {
-            let reason =
-                TaintReason::external(format!("signal author {}", signal.provenance.author));
+            let reason = signal
+                .provenance
+                .taint_info
+                .as_ref()
+                .map(TaintReason::from_taint_info)
+                .unwrap_or_else(|| {
+                    TaintReason::external(format!("signal author {}", signal.provenance.author))
+                });
             self.mark_tainted(signal.id, reason);
             true
         } else {
@@ -267,6 +300,19 @@ mod tests {
     }
 
     #[test]
+    fn taint_info_roundtrips_from_reason() {
+        let tracker = TaintTracker::new();
+        let id = h(b"info");
+        tracker.mark_tainted(id, TaintReason::external("webhook"));
+        let info = tracker
+            .taint_info(&id)
+            .expect("taint info should be present");
+        assert_eq!(info.category, "external");
+        assert_eq!(info.detail, "webhook");
+        assert_eq!(info.inherited_from, None);
+    }
+
+    #[test]
     fn reason_on_clean_returns_none() {
         let tracker = TaintTracker::new();
         assert!(tracker.reason(&h(b"absent")).is_none());
@@ -293,6 +339,7 @@ mod tests {
         let reason = tracker.reason(&child).expect("child reason");
         assert_eq!(reason.category, "propagated");
         assert!(reason.detail.contains(&parent.short()));
+        assert_eq!(reason.inherited_from, Some(parent));
     }
 
     #[test]
@@ -377,6 +424,25 @@ mod tests {
         assert!(!tracker.is_tainted(&clean_signal.id));
         let reason = tracker.reason(&tainted_signal.id).expect("has reason");
         assert_eq!(reason.category, "external");
+    }
+
+    #[test]
+    fn observe_signal_prefers_provenance_taint_info() {
+        use roko_core::{Body, Engram, Kind, Provenance, TaintInfo};
+
+        let tainted_signal = Engram::builder(Kind::AgentOutput)
+            .body(Body::text("external payload"))
+            .provenance(
+                Provenance::trusted("gateway")
+                    .with_taint_info(TaintInfo::external("webhook payload")),
+            )
+            .build();
+
+        let tracker = TaintTracker::new();
+        assert!(tracker.observe_signal(&tainted_signal));
+        let reason = tracker.reason(&tainted_signal.id).expect("has reason");
+        assert_eq!(reason.category, "external");
+        assert_eq!(reason.detail, "webhook payload");
     }
 
     #[test]

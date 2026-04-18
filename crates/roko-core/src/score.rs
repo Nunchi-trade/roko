@@ -26,6 +26,22 @@
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, Mul};
 
+fn finite_unit_interval(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
+}
+
 /// A multi-dimensional quality score for a signal.
 ///
 /// Scores are typically computed at query time by a [`Scorer`](crate::Scorer)
@@ -77,12 +93,12 @@ impl Score {
 
     /// Construct a `Score`; values are clamped to their respective valid ranges.
     #[must_use]
-    pub const fn new(confidence: f32, novelty: f32, utility: f32, reputation: f32) -> Self {
+    pub fn new(confidence: f32, novelty: f32, utility: f32, reputation: f32) -> Self {
         Self {
-            confidence: confidence.clamp(0.0, 1.0),
-            novelty: novelty.clamp(0.0, 1.0),
-            utility: if utility > 0.0 { utility } else { 0.0 },
-            reputation: if reputation > 0.0 { reputation } else { 0.0 },
+            confidence: finite_unit_interval(confidence),
+            novelty: finite_unit_interval(novelty),
+            utility: finite_non_negative(utility),
+            reputation: finite_non_negative(reputation),
             precision: 0.0,
             salience: 0.0,
             coherence: 0.0,
@@ -91,7 +107,7 @@ impl Score {
 
     /// Construct a `Score` with the extended axes populated explicitly.
     #[must_use]
-    pub const fn new_extended(
+    pub fn new_extended(
         confidence: f32,
         novelty: f32,
         utility: f32,
@@ -101,14 +117,26 @@ impl Score {
         coherence: f32,
     ) -> Self {
         Self {
-            confidence: confidence.clamp(0.0, 1.0),
-            novelty: novelty.clamp(0.0, 1.0),
-            utility: if utility > 0.0 { utility } else { 0.0 },
-            reputation: if reputation > 0.0 { reputation } else { 0.0 },
-            precision: precision.clamp(0.0, 1.0),
-            salience: salience.clamp(0.0, 1.0),
-            coherence: coherence.clamp(0.0, 1.0),
+            confidence: finite_unit_interval(confidence),
+            novelty: finite_unit_interval(novelty),
+            utility: finite_non_negative(utility),
+            reputation: finite_non_negative(reputation),
+            precision: finite_unit_interval(precision),
+            salience: finite_unit_interval(salience),
+            coherence: finite_unit_interval(coherence),
         }
+    }
+
+    /// Returns `true` when every axis is finite.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        self.confidence.is_finite()
+            && self.novelty.is_finite()
+            && self.utility.is_finite()
+            && self.reputation.is_finite()
+            && self.precision.is_finite()
+            && self.salience.is_finite()
+            && self.coherence.is_finite()
     }
 
     /// Scalar effective score combining the primary axes plus salience and coherence.
@@ -123,6 +151,9 @@ impl Score {
     /// - precision is tracked separately and does not affect the scalar score
     #[must_use]
     pub fn effective(&self) -> f32 {
+        if !self.is_finite() {
+            return 0.0;
+        }
         let salience_factor = if self.salience == 0.0 {
             1.0
         } else {
@@ -133,23 +164,25 @@ impl Score {
         } else {
             0.5 + 0.5 * self.coherence
         };
-        self.confidence
-            * (1.0 + self.novelty)
-            * (1.0 + self.utility)
-            * self.reputation
-            * salience_factor
-            * coherence_factor
+        finite_non_negative(
+            self.confidence
+                * (1.0 + self.novelty)
+                * (1.0 + self.utility)
+                * self.reputation
+                * salience_factor
+                * coherence_factor,
+        )
     }
 
     /// Is this score above the given threshold on the effective axis?
     #[must_use]
     pub fn exceeds(&self, threshold: f32) -> bool {
-        self.effective() > threshold
+        threshold.is_finite() && self.effective() > threshold
     }
 
     /// Compute a score from a confidence value alone, using neutral reputation.
     #[must_use]
-    pub const fn from_confidence(confidence: f32) -> Self {
+    pub fn from_confidence(confidence: f32) -> Self {
         Self::new(confidence, 0.0, 0.0, 1.0)
     }
 }
@@ -166,13 +199,13 @@ impl Mul for Score {
     type Output = Self;
     fn mul(self, other: Self) -> Self {
         Self {
-            confidence: (self.confidence * other.confidence).clamp(0.0, 1.0),
-            novelty: (self.novelty * other.novelty).clamp(0.0, 1.0),
-            utility: self.utility * other.utility,
-            reputation: self.reputation * other.reputation,
-            precision: (self.precision * other.precision).clamp(0.0, 1.0),
-            salience: (self.salience * other.salience).clamp(0.0, 1.0),
-            coherence: (self.coherence * other.coherence).clamp(0.0, 1.0),
+            confidence: finite_unit_interval(self.confidence * other.confidence),
+            novelty: finite_unit_interval(self.novelty * other.novelty),
+            utility: finite_non_negative(self.utility * other.utility),
+            reputation: finite_non_negative(self.reputation * other.reputation),
+            precision: finite_unit_interval(self.precision * other.precision),
+            salience: finite_unit_interval(self.salience * other.salience),
+            coherence: finite_unit_interval(self.coherence * other.coherence),
         }
     }
 }
@@ -183,13 +216,13 @@ impl Add for Score {
     type Output = Self;
     fn add(self, other: Self) -> Self {
         Self {
-            confidence: (self.confidence + other.confidence).clamp(0.0, 1.0),
-            novelty: (self.novelty + other.novelty).clamp(0.0, 1.0),
-            utility: self.utility + other.utility,
-            reputation: self.reputation + other.reputation,
-            precision: (self.precision + other.precision).clamp(0.0, 1.0),
-            salience: (self.salience + other.salience).clamp(0.0, 1.0),
-            coherence: (self.coherence + other.coherence).clamp(0.0, 1.0),
+            confidence: finite_unit_interval(self.confidence + other.confidence),
+            novelty: finite_unit_interval(self.novelty + other.novelty),
+            utility: finite_non_negative(self.utility + other.utility),
+            reputation: finite_non_negative(self.reputation + other.reputation),
+            precision: finite_unit_interval(self.precision + other.precision),
+            salience: finite_unit_interval(self.salience + other.salience),
+            coherence: finite_unit_interval(self.coherence + other.coherence),
         }
     }
 }
@@ -298,5 +331,42 @@ mod tests {
         let high = Score::new_extended(0.9, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0); // effective = 0.9
         assert!(!low.exceeds(0.5));
         assert!(high.exceeds(0.5));
+    }
+
+    #[test]
+    fn constructors_scrub_non_finite_axes() {
+        let score = Score::new_extended(
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NAN,
+            f32::NEG_INFINITY,
+        );
+        assert_eq!(score, Score::ZERO);
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn effective_returns_zero_for_non_finite_scores() {
+        let score = Score {
+            confidence: 0.8,
+            novelty: 0.2,
+            utility: f32::INFINITY,
+            reputation: 1.0,
+            precision: 0.0,
+            salience: 0.0,
+            coherence: 0.0,
+        };
+        assert_eq!(score.effective(), 0.0);
+        assert!(!score.is_finite());
+    }
+
+    #[test]
+    fn exceeds_rejects_non_finite_thresholds() {
+        let score = Score::new(0.9, 0.0, 0.0, 1.0);
+        assert!(!score.exceeds(f32::NAN));
+        assert!(!score.exceeds(f32::INFINITY));
     }
 }

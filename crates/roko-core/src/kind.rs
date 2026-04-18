@@ -7,6 +7,7 @@
 //! this crate.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 
 /// The category of a signal. Determines how its body should be interpreted.
@@ -74,6 +75,8 @@ pub enum Kind {
     PlaybookRule,
     /// A learned skill (reusable procedure).
     Skill,
+    /// A structural grouping of several kinds under one compound label.
+    Compound(Vec<Kind>),
 
     // ─── Observability ───────────────────────────────────────────────────
     /// A metric reading (scalar measurement).
@@ -130,6 +133,7 @@ impl Kind {
             Self::Episode => "episode",
             Self::PlaybookRule => "playbook_rule",
             Self::Skill => "skill",
+            Self::Compound(_) => "compound",
             Self::Metric => "metric",
             Self::ExperimentResult => "experiment_result",
             Self::ToolInvocation => "tool_invocation",
@@ -141,6 +145,25 @@ impl Kind {
             Self::Service => "service",
             Self::Prediction => "prediction",
             Self::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Canonical identity key used when hashing or serializing nested kinds.
+    #[must_use]
+    pub fn identity_key(&self) -> Cow<'_, str> {
+        match self {
+            Self::Compound(parts) => {
+                let mut identity = String::from("compound(");
+                for (index, part) in parts.iter().enumerate() {
+                    if index > 0 {
+                        identity.push('+');
+                    }
+                    identity.push_str(part.identity_key().as_ref());
+                }
+                identity.push(')');
+                Cow::Owned(identity)
+            }
+            _ => Cow::Borrowed(self.as_str()),
         }
     }
 }
@@ -168,6 +191,13 @@ mod tests {
     }
 
     #[test]
+    fn compound_kind_has_stable_identity_key() {
+        let kind = Kind::Compound(vec![Kind::Task, Kind::PromptSection]);
+        assert_eq!(kind.as_str(), "compound");
+        assert_eq!(kind.identity_key(), "compound(task+prompt_section)");
+    }
+
+    #[test]
     fn display_matches_as_str() {
         assert_eq!(format!("{}", Kind::Task), "task");
     }
@@ -179,6 +209,7 @@ mod tests {
             Kind::GateVerdict,
             Kind::ToolInvocation,
             Kind::ToolHealthDegraded,
+            Kind::Compound(vec![Kind::Task, Kind::Prompt]),
             Kind::Custom("x.y".into()),
         ] {
             let json = serde_json::to_string(&k).unwrap();
