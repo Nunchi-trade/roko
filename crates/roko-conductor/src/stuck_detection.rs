@@ -132,6 +132,64 @@ impl Default for StuckThresholds {
     }
 }
 
+impl StuckThresholds {
+    /// Create thresholds using the docs-facing names for the built-in heuristics.
+    #[must_use]
+    pub const fn new(
+        output_loop: usize,
+        no_progress_ms: i64,
+        gate_loop: usize,
+        compile_loop: usize,
+        empty_output: usize,
+        excessive_retry: u32,
+    ) -> Self {
+        Self {
+            output_loop_count: output_loop,
+            no_progress_ms,
+            gate_loop_count: gate_loop,
+            compile_loop_count: compile_loop,
+            empty_output_count: empty_output,
+            excessive_retry_count: excessive_retry,
+        }
+    }
+
+    /// Docs-compatible alias for the output-loop threshold.
+    #[must_use]
+    pub const fn output_loop(&self) -> usize {
+        self.output_loop_count
+    }
+
+    /// Docs-compatible alias for the no-progress threshold.
+    #[must_use]
+    pub const fn no_progress(&self) -> i64 {
+        self.no_progress_ms
+    }
+
+    /// Docs-compatible alias for the gate-loop threshold.
+    #[must_use]
+    pub const fn gate_loop(&self) -> usize {
+        self.gate_loop_count
+    }
+
+    /// Docs-compatible alias for the compile-loop threshold.
+    #[must_use]
+    pub const fn compile_loop(&self) -> usize {
+        self.compile_loop_count
+    }
+
+    /// Docs-compatible alias for the empty-output threshold.
+    #[must_use]
+    pub const fn empty_output(&self) -> usize {
+        self.empty_output_count
+    }
+
+    /// Docs-compatible alias for the excessive-retry threshold.
+    #[must_use]
+    pub const fn excessive_retry(&self) -> u32 {
+        self.excessive_retry_count
+    }
+}
+
 // ---- StuckDetector ----------------------------------------------------------
 
 /// The stuck detector: analyzes a sequence of [`ActivityEntry`] records
@@ -264,6 +322,7 @@ impl StuckDetector {
             frequency: OperatingFrequency::Theta,
             action,
             reason,
+            stuck_kinds: stuck_signals.iter().map(|signal| signal.kind).collect(),
             primary_signal,
             stuck_signals,
             iterations_without_progress,
@@ -495,6 +554,12 @@ impl MetaCognitionAction {
             Self::Escalate => "escalate",
         }
     }
+
+    /// Docs-compatible alias for [`Self::label`].
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.label()
+    }
 }
 
 /// Theta-frequency assessment of the agent's current cognitive state.
@@ -506,6 +571,8 @@ pub struct MetaCognitionAssessment {
     pub action: MetaCognitionAction,
     /// Human-readable explanation of the recommendation.
     pub reason: String,
+    /// The categories of stuck patterns seen in this assessment.
+    pub stuck_kinds: Vec<StuckKind>,
     /// The primary stuck signal detected, if any.
     pub primary_signal: Option<StuckSignal>,
     /// All stuck signals detected in this pass.
@@ -541,6 +608,27 @@ impl MetaCognitionAssessment {
                     .build(),
             ),
         }
+    }
+
+    /// Docs-compatible alias for [`Self::to_signal`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the assessment cannot be serialized into JSON for the signal
+    /// body payload.
+    #[must_use]
+    pub fn to_engram(&self) -> Option<Engram> {
+        self.to_signal().map(|_| {
+            Engram::builder(Kind::Custom("conductor.meta_cognition".into()))
+                .body(
+                    Body::from_json(self)
+                        .expect("meta-cognition assessment should serialize to JSON"),
+                )
+                .tag("frequency", "theta")
+                .tag("action", self.action.as_str())
+                .tag("reason", self.reason.as_str())
+                .build()
+        })
     }
 }
 
@@ -1090,5 +1178,32 @@ mod tests {
         let assessment = hook().assess(&history);
         assert_eq!(assessment.action, MetaCognitionAction::Continue);
         assert!(assessment.to_signal().is_none());
+    }
+
+    #[test]
+    fn docs_facing_aliases_work() {
+        let thresholds = StuckThresholds::new(4, 300_000, 3, 3, 3, 6);
+        assert_eq!(thresholds.output_loop(), 4);
+        assert_eq!(thresholds.no_progress(), 300_000);
+        assert_eq!(thresholds.gate_loop(), 3);
+        assert_eq!(thresholds.compile_loop(), 3);
+        assert_eq!(thresholds.empty_output(), 3);
+        assert_eq!(thresholds.excessive_retry(), 6);
+        assert_eq!(MetaCognitionAction::Escalate.as_str(), "escalate");
+
+        let mut history = make_history(&["same", "same", "same", "same"], 1000, 1000);
+        for entry in &mut history {
+            entry.gate_result = Some("fail:test:assertion".into());
+        }
+
+        let assessment = hook().assess(&history);
+        assert!(!assessment.stuck_kinds.is_empty());
+        let docs_signal = assessment.to_engram().expect("docs-facing signal");
+        let runtime_signal = assessment.to_signal().expect("runtime signal");
+        assert_eq!(docs_signal.tag("action"), runtime_signal.tag("action"));
+        assert_eq!(
+            docs_signal.kind,
+            Kind::Custom("conductor.meta_cognition".into())
+        );
     }
 }

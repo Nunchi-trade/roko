@@ -7,6 +7,8 @@ use roko_core::{Body, Context, Engram, Kind, Policy};
 
 /// Maximum implementer attempts before firing.
 pub const MAX_IMPLEMENTER_ATTEMPTS: usize = 3;
+/// Docs-compatible alias for [`MAX_IMPLEMENTER_ATTEMPTS`].
+pub const MAX_ITERATION_LOOP: usize = MAX_IMPLEMENTER_ATTEMPTS;
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "iteration-loop";

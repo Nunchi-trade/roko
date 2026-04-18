@@ -47,5 +47,13 @@ pub use roko_core::{ConductorDecision, PhaseKind, PlanPhase};
 // Re-export primary types from this crate.
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState, FailureRecord};
 pub use conductor::{Conductor, RoutingBias};
+pub use diagnosis::{
+    Diagnosis, DiagnosisEngine, DiagnosisResult, ErrorCategory, ErrorPattern, SuggestedIntervention,
+};
+pub use health::{HealthCheckResult, HealthMonitor, HealthStatus, SystemSnapshot};
 pub use interventions::{InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy};
 pub use state_machine::{PhaseTransition, phase_timeout};
+pub use stuck_detection::{
+    ActivityEntry, MetaCognitionAction, MetaCognitionAssessment, MetaCognitionHook, StuckDetector,
+    StuckKind, StuckSignal, StuckThresholds,
+};
