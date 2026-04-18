@@ -56,6 +56,7 @@ use tokio::sync::broadcast;
 use tracing::trace;
 
 use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+use crate::lifecycle::LifecycleTransition;
 
 /// A sequenced, timestamped envelope wrapping a user event.
 #[derive(Debug, Clone)]
@@ -145,6 +146,8 @@ pub enum RokoEvent {
         /// UTC timestamp for when the signal was emitted.
         issued_at: chrono::DateTime<chrono::Utc>,
     },
+    /// Emitted when an agent lifecycle state changes.
+    AgentLifecycleTransition(LifecycleTransition),
 }
 
 /// Shared interior state backing both [`EventBus`] and [`BusSender`].

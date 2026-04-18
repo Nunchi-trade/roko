@@ -26,6 +26,15 @@ pub mod event_bus;
 pub mod heartbeat;
 pub mod heartbeat_attention;
 pub mod heartbeat_probes;
+pub mod lifecycle;
 pub mod metrics;
 pub mod process;
 pub mod resource;
+
+pub use lifecycle::{
+    Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,
+    GitOpsRetryPolicy, HealthProbeConfig, HookSpec, LifecycleHooks, LifecycleTransition,
+    LifecycleTransitionReason, MachineLifecycleState, MeshRegistered, NeuroInitialized,
+    ProbeHandler, ProbeSpec, Ready, ResourcesAllocated, RestartBackoff, RoutingConfigured,
+    ToolsLoaded, Unvalidated, Validated,
+};

@@ -54,6 +54,7 @@ pub mod format;
 pub mod gemini;
 pub mod http;
 pub mod introspection;
+pub mod lifecycle;
 pub mod mcp;
 pub mod metamorphosis;
 pub mod mock;
@@ -101,6 +102,7 @@ pub use gemini::{
     GenerateContentResponse, GroundingMetadata,
 };
 pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn};
+pub use lifecycle::*;
 pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};
 pub use mock::MockAgent;
 pub use multi_pool::{KillReport, MultiAgentPool, WarmEntry};
