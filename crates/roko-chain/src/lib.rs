@@ -14,6 +14,7 @@ pub mod alloy_impl;
 pub mod client;
 pub mod gate;
 pub mod mock;
+pub mod phase2;
 pub mod types;
 pub mod wallet;
 pub mod witness;
@@ -24,6 +25,7 @@ pub use gate::{
     WalletGate, WalletGateConfig,
 };
 pub use mock::{MockChainClient, MockChainWallet, paired_mocks};
+pub use phase2::*;
 pub use types::{
     BlockNumber, CallResult, ChainError, ChainHeader, ChainResult, LogEntry, Receipt, TxHash,
     TxRequest,
