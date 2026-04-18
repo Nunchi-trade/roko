@@ -690,6 +690,8 @@ mod tests {
             v: Option<bool>,
         }
         assert!(serde_json::from_str::<Wrap>(r#"{"v": "maybe"}"#).is_err());
+        let parsed: Wrap = serde_json::from_str(r#"{"v": "false"}"#).unwrap();
+        assert_eq!(parsed.v, Some(false));
     }
 
     #[test]

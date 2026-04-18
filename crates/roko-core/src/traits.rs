@@ -11,6 +11,7 @@ use crate::{
     Budget, ContentHash, Context, Engram, Outcome, Query, Score, Selection, Verdict, error::Result,
 };
 use async_trait::async_trait;
+use roko_primitives::HdcVector;
 
 // ─── Substrate ─────────────────────────────────────────────────────────────
 
@@ -32,21 +33,35 @@ use async_trait::async_trait;
 /// Substrates are `Send + Sync`. Impls must handle concurrent access internally.
 #[async_trait]
 pub trait Substrate: Send + Sync {
-    /// Store a signal. Returns its content hash. Idempotent on content.
-    async fn put(&self, signal: Engram) -> Result<ContentHash>;
+    /// Store an engram. Returns its content hash. Idempotent on content.
+    async fn put(&self, engram: Engram) -> Result<ContentHash>;
 
-    /// Retrieve a signal by content hash. Does not apply decay.
+    /// Retrieve an engram by content hash. Does not apply decay.
     async fn get(&self, id: &ContentHash) -> Result<Option<Engram>>;
 
-    /// Query for signals matching the given filter. Impls may apply decay
+    /// Query for engrams matching the given filter. Impls may apply decay
     /// when evaluating `min_weight` and when ordering results.
     async fn query(&self, q: &Query, ctx: &Context) -> Result<Vec<Engram>>;
 
-    /// Remove signals whose effective weight (score × decay) has fallen
-    /// below `threshold` at `ctx.now_ms`. Returns count of pruned signals.
+    /// Query by HDC similarity against a fingerprint, returning ranked matches.
+    ///
+    /// The default implementation reports no indexed matches, which keeps
+    /// existing substrates source-compatible until they add native support.
+    async fn query_similar(
+        &self,
+        _fp: &HdcVector,
+        _radius: f32,
+        _limit: usize,
+        _ctx: &Context,
+    ) -> Result<Vec<(ContentHash, f32)>> {
+        Ok(Vec::new())
+    }
+
+    /// Remove engrams whose effective weight (score × decay) has fallen
+    /// below `threshold` at `ctx.now_ms`. Returns count of pruned engrams.
     async fn prune(&self, threshold: f32, ctx: &Context) -> Result<usize>;
 
-    /// Optional: total count of stored signals (for metrics/health checks).
+    /// Optional: total count of stored engrams (for metrics/health checks).
     async fn len(&self) -> Result<usize> {
         Ok(0)
     }
@@ -64,20 +79,20 @@ pub trait Substrate: Send + Sync {
 
 // ─── Scorer ────────────────────────────────────────────────────────────────
 
-/// Rates a signal along multi-dimensional axes.
+/// Rates an engram along multi-dimensional axes.
 ///
-/// Scorers are pure functions of `(signal, context)`. They compose freely:
+/// Scorers are pure functions of `(engram, context)`. They compose freely:
 /// use `CompositeScorer` to combine several scorers via +/× operations.
 ///
 /// # Examples of Scorers
 ///
-/// - `RelevanceScorer`: how well does this signal match the current goal?
-/// - `RecencyScorer`: how recent is this signal?
+/// - `RelevanceScorer`: how well does this engram match the current goal?
+/// - `RecencyScorer`: how recent is this engram?
 /// - `ReputationScorer`: how trustworthy is its author?
-/// - `CatalyticScorer`: how many downstream signals does this enable?
+/// - `CatalyticScorer`: how many downstream engrams does this enable?
 pub trait Scorer: Send + Sync {
-    /// Score a signal in the given context.
-    fn score(&self, signal: &Engram, ctx: &Context) -> Score;
+    /// Score an engram in the given context.
+    fn score(&self, engram: &Engram, ctx: &Context) -> Score;
 
     /// Human-readable name.
     fn name(&self) -> &'static str {
@@ -87,11 +102,11 @@ pub trait Scorer: Send + Sync {
 
 // ─── Gate ──────────────────────────────────────────────────────────────────
 
-/// Verifies a signal against ground truth, producing a [`Verdict`].
+/// Verifies an engram against ground truth, producing a [`Verdict`].
 ///
 /// Gates are the bridge to external reality: compile, run tests, simulate
 /// transactions, check balances, validate schemas. A gate that returns
-/// `passed = true` is a claim that the signal is correct in some domain.
+/// `passed = true` is a claim that the engram is correct in some domain.
 ///
 /// # Async by default
 ///
@@ -100,8 +115,8 @@ pub trait Scorer: Send + Sync {
 /// a ready future.
 #[async_trait]
 pub trait Gate: Send + Sync {
-    /// Verify the signal and return a verdict.
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict;
+    /// Verify the engram and return a verdict.
+    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict;
 
     /// Human-readable name (appears in verdicts).
     fn name(&self) -> &str;
@@ -109,7 +124,7 @@ pub trait Gate: Send + Sync {
 
 // ─── Router ────────────────────────────────────────────────────────────────
 
-/// Selects one signal from many candidates.
+/// Selects one engram from many candidates.
 ///
 /// Routers are the decision-making layer: which model to call, which backend
 /// to use, which gate to run next, which bounty to claim. They learn via
@@ -122,7 +137,7 @@ pub trait Gate: Send + Sync {
 /// - `CascadeRouter` — multi-stage confidence → UCB
 /// - `WeightedRouter` — softmax over scorers
 pub trait Router: Send + Sync {
-    /// Select one signal from the candidates. None = no selection made.
+    /// Select one engram from the candidates. None = no selection made.
     fn select(&self, candidates: &[Engram], ctx: &Context) -> Option<Selection>;
 
     /// Learn from a selection's actual outcome.
@@ -134,18 +149,18 @@ pub trait Router: Send + Sync {
 
 // ─── Composer ──────────────────────────────────────────────────────────────
 
-/// Combines multiple signals into one new signal under a [`Budget`].
+/// Combines multiple engrams into one new engram under a [`Budget`].
 ///
 /// Composers are the assembly layer: prompts from sections, context packs
 /// from fragments, transactions from operations, plans from tasks, bounties
 /// from sub-bounties. Output respects budget constraints (tokens, bytes,
-/// signal count, wall time).
+/// engram count, wall time).
 pub trait Composer: Send + Sync {
-    /// Combine input signals into a new composed signal.
+    /// Combine input engrams into a new composed engram.
     /// The composer may use the scorer to rank/select inputs under budget.
     fn compose(
         &self,
-        signals: &[Engram],
+        engrams: &[Engram],
         budget: &Budget,
         scorer: &dyn Scorer,
         ctx: &Context,
@@ -157,14 +172,14 @@ pub trait Composer: Send + Sync {
 
 // ─── Policy ────────────────────────────────────────────────────────────────
 
-/// Watches a stream of signals and emits new signals in response.
+/// Watches a stream of engrams and emits new engrams in response.
 ///
 /// Policies are the reactive/behavioral layer: conductor watchers, circuit
 /// breakers, episode logging, pheromone reactions, heartbeat emission,
 /// promotion to chain, sentinel detection. They run continuously over the
-/// signal stream and may produce zero, one, or many output signals per tick.
+/// engram stream and may produce zero, one, or many output engrams per tick.
 pub trait Policy: Send + Sync {
-    /// Examine the recent signal stream and produce new signals (interventions).
+    /// Examine the recent engram stream and produce new engrams (interventions).
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram>;
 
     /// Human-readable name.

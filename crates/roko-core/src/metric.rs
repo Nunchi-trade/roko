@@ -490,7 +490,7 @@ mod tests {
     fn headlines_pass_rate_across_plans() {
         let hash = ConfigHash::from("h".to_string());
         // 4 first-attempt records: 3 pass, 1 fail → 75%
-        let mut make = |plan: &str, passed: bool| {
+        let make = |plan: &str, passed: bool| {
             let mut r = TaskMetric::new(hash.clone(), plan, "t1");
             r.iteration = 1;
             r.gate_passed = passed;

@@ -104,7 +104,7 @@ pub use chat_types::{
 pub use conductor::ConductorDecision;
 pub use context::Context;
 pub use decay::Decay;
-pub use engram::{Engram, EngramBuilder};
+pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
 pub use hash::ContentHash;
 pub use kind::Kind;
@@ -126,6 +126,7 @@ pub use project::{
 };
 pub use provenance::{Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, TaintInfo};
 pub use query::{Budget, Query};
+pub use roko_primitives::HdcVector;
 pub use score::Score;
 pub use signal_kinds::*;
 pub use task::{
