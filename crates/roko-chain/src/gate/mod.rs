@@ -5,12 +5,14 @@
 //! a `Engram` describing a planned transaction, and the gate answers "is this
 //! safe to sign?". Two complementary checks live here:
 //!
-//! * [`WalletGate`] — balance / nonce / optional-allowance checks against a
+//! * [`WalletGate`] — balance / nonce checks against a
 //!   [`ChainWallet`](crate::ChainWallet) bound to a [`ChainClient`](crate::ChainClient).
 //!   Fails fast if the wallet cannot afford the tx or its nonce is out of sync.
+//!   If callers request allowance enforcement today, the gate reports that as
+//!   unsupported instead of silently pretending the check happened.
 //! * [`TxSimGate`] — simulates the planned tx through a pluggable
-//!   [`TxSimulator`] (mirage fork, alloy `eth_call`, or a mock) and returns a
-//!   verdict on revert / gas overrun.
+//!   [`TxSimulator`] (for example an alloy `eth_call` wrapper, a caller-owned
+//!   mirage adapter, or a mock) and returns a verdict on revert / gas overrun.
 //!
 //! # Engram contract
 //!

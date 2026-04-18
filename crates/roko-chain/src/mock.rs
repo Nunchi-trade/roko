@@ -101,8 +101,9 @@ impl MockChainClient {
         self.state.write().headers.push(header);
     }
 
-    /// Mine an empty block with an auto-assigned number / zero-hash parent.
-    /// Useful for tests that just need the tip to advance.
+    /// Mine an empty block with an auto-assigned number and the previous
+    /// block's hash as parent. Useful for tests that just need the tip to
+    /// advance.
     #[allow(clippy::significant_drop_tightening)]
     pub fn mine_empty_block(&self) -> BlockNumber {
         let mut s = self.state.write();
@@ -241,7 +242,7 @@ struct MockWalletState {
     submitted: Vec<(TxHash, TxRequest)>,
     tx_counter: u64,
     /// Optional hook: a paired client into which submitted txs should be
-    /// injected as pending receipts.
+    /// injected as freshly mined receipts.
     paired_client: Option<MockChainClient>,
 }
 

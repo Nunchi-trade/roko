@@ -4,8 +4,10 @@
 //! On-chain client abstractions for Roko.
 //!
 //! `ChainClient` reads chain state; `ChainWallet` signs and submits transactions.
-//! These traits are backend-agnostic — see [`mock`] for test doubles, and the
-//! future `MirageChainClient` / `AlloyChainClient` impls for real backends.
+//! These traits are backend-agnostic — this crate ships [`mock`] test doubles
+//! and an optional Alloy-backed JSON-RPC backend. Other substrates, including
+//! mirage-rs, can be adapted behind the same traits, but no dedicated mirage
+//! backend ships here today.
 
 #[cfg(feature = "alloy-backend")]
 pub mod alloy_impl;

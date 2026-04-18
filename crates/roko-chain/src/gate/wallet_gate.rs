@@ -8,10 +8,10 @@
 //! nonce — catching nonce gaps *before* a signed tx leaves the process.
 //!
 //! The `require_allowance_for` config field is reserved for a future ERC-20
-//! allowance check (§33.4.12 Permit2 work). It is accepted today and exposed
-//! via [`WalletGateConfig`] so callers can wire it in without changing their
-//! type, but this gate does not yet perform the allowance call — the check
-//! will be added alongside the Permit2 helpers.
+//! allowance check (§33.4.12 Permit2 work). Until that work lands,
+//! configuring it causes [`WalletGate`] to fail closed with an explicit
+//! "unsupported" result rather than passing as if the allowance had been
+//! enforced.
 
 use async_trait::async_trait;
 use roko_core::{Body, Context, Engram, traits::Gate, verdict::Verdict};
@@ -36,8 +36,9 @@ pub struct WalletGateConfig {
     pub min_balance_wei: u128,
     /// Optional ERC-20 token address the wallet must have an allowance for.
     ///
-    /// Reserved for the §33.4.12 Permit2 work — accepted by the config
-    /// today but not yet enforced by [`WalletGate::verify`].
+    /// Reserved for the §33.4.12 Permit2 work. Setting this field today
+    /// causes [`WalletGate`] to fail closed with an explicit unsupported
+    /// result instead of silently skipping allowance enforcement.
     pub require_allowance_for: Option<[u8; 20]>,
     /// When `true`, a pinned nonce on the tx must match the wallet's
     /// current nonce exactly.
@@ -63,7 +64,6 @@ impl Default for WalletGateConfig {
 #[derive(Clone)]
 pub struct WalletGate {
     wallet: Arc<dyn ChainWallet>,
-    #[allow(dead_code)] // reserved for future allowance / chain_id checks
     client: Arc<dyn ChainClient>,
     config: WalletGateConfig,
     name: String,
@@ -71,8 +71,9 @@ pub struct WalletGate {
 
 /// Classification of a single wallet readiness check.
 ///
-/// Produced by [`WalletGate::check`]; the `verify` entry point turns these
-/// into [`Verdict`]s.
+/// Balance-oriented outcomes are produced by [`WalletGate::check`]; the
+/// [`Gate::verify`] entry point turns these into [`Verdict`]s and can also
+/// emit [`WalletCheck::NonceGap`] when strict nonce checking is enabled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalletCheck {
     /// Balance is sufficient to cover the requested amount.
@@ -138,10 +139,20 @@ impl WalletGate {
     }
 
     /// Inspect the underlying wallet balance and classify against the
-    /// requested `needed_wei`. Returns a [`WalletCheck`] describing the
-    /// outcome. Used internally by [`Gate::verify`]; exposed publicly so
-    /// callers can pre-flight checks without constructing a `Engram`.
+    /// requested `needed_wei`.
+    ///
+    /// This helper covers balance readiness only. [`Gate::verify`] layers
+    /// strict-nonce checking on top when the tx pins a nonce.
     pub async fn check(&self, needed_wei: u128) -> WalletCheck {
+        if self.config.require_allowance_for.is_some() {
+            return WalletCheck::Unsupported {
+                reason: format!(
+                    "allowance checking is configured, but WalletGate does not enforce ERC-20 allowances yet (client={})",
+                    self.client.name()
+                ),
+            };
+        }
+
         let balance = match self.wallet.balance(None).await {
             Ok(b) => b,
             Err(e) => {
@@ -378,6 +389,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn check_reports_unsupported_when_allowance_is_requested() {
+        let (client, wallet) = paired_mocks(1_000);
+        let gate = WalletGate::new(
+            Arc::new(wallet),
+            Arc::new(client),
+            WalletGateConfig {
+                require_allowance_for: Some([0x11; 20]),
+                ..WalletGateConfig::default()
+            },
+        );
+
+        let result = gate.check(100).await;
+        assert!(matches!(
+            result,
+            WalletCheck::Unsupported { ref reason }
+                if reason.contains("does not enforce ERC-20 allowances yet")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn check_strict_nonce_flags_gap() {
         // The wallet sits at nonce=0; the signal pins nonce=5 → verify should
         // fail. `check` itself doesn't touch nonces; this exercises verify.
@@ -502,6 +533,31 @@ mod tests {
         }));
         let verdict = gate.verify(&signal, &Context::now()).await;
         assert!(verdict.passed, "strict_nonce=false must skip nonce check");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn verify_fails_closed_when_allowance_is_requested() {
+        let (client, wallet) = paired_mocks(1_000);
+        let gate = WalletGate::new(
+            Arc::new(wallet),
+            Arc::new(client),
+            WalletGateConfig {
+                require_allowance_for: Some([0x22; 20]),
+                ..WalletGateConfig::default()
+            },
+        );
+        let signal = tx_signal_json(serde_json::json!({
+            "value": 100,
+        }));
+
+        let verdict = gate.verify(&signal, &Context::now()).await;
+        assert!(!verdict.passed);
+        assert!(verdict.reason.contains("wallet check unsupported"));
+        assert!(
+            verdict
+                .reason
+                .contains("does not enforce ERC-20 allowances yet")
+        );
     }
 
     #[test]
