@@ -30,45 +30,8 @@ use parking_lot::Mutex;
 use roko_core::{ContentHash, Engram};
 use std::collections::HashMap;
 
-/// Why a particular [`ContentHash`] is considered tainted.
-///
-/// Reasons are informational — they travel with the taint flag so that
-/// downstream audits can explain refusals ("refused: came from untrusted
-/// webhook"). They are not interpreted semantically by the tracker itself.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TaintReason {
-    /// Short machine-readable category (e.g. `"external"`, `"user_input"`,
-    /// `"propagated"`).
-    pub category: String,
-    /// Human-readable explanation; kept brief to stay loggable.
-    pub detail: String,
-}
-
-impl TaintReason {
-    /// Build a new [`TaintReason`] from a category tag and an explanation.
-    pub fn new(category: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self {
-            category: category.into(),
-            detail: detail.into(),
-        }
-    }
-
-    /// Convenience constructor for taint coming from an external source.
-    pub fn external(detail: impl Into<String>) -> Self {
-        Self::new("external", detail)
-    }
-
-    /// Convenience constructor for taint coming from user input.
-    pub fn user_input(detail: impl Into<String>) -> Self {
-        Self::new("user_input", detail)
-    }
-
-    /// Convenience constructor for taint that was inherited from a parent
-    /// signal during propagation.
-    pub fn propagated(detail: impl Into<String>) -> Self {
-        Self::new("propagated", detail)
-    }
-}
+/// Backward-compatible alias for the structured taint metadata carried in `roko-core`.
+pub use roko_core::TaintInfo as TaintReason;
 
 /// Tracks taint status across a signal DAG.
 ///
@@ -143,7 +106,10 @@ impl TaintTracker {
                 .get(&child)
                 .is_some_and(|r| r.category != "propagated");
             if !already_specific {
-                let reason = TaintReason::propagated(format!("inherited from {}", parent.short()));
+                let reason = TaintReason::propagated(
+                    format!("inherited from {}", parent.short()),
+                    [parent],
+                );
                 guard.insert(child, reason);
             }
             true
@@ -157,13 +123,43 @@ impl TaintTracker {
     /// if the signal's provenance is clean.
     pub fn observe_signal(&self, signal: &Engram) -> bool {
         if signal.provenance.tainted {
-            let reason =
-                TaintReason::external(format!("signal author {}", signal.provenance.author));
+            let reason = signal.provenance.taint_info.clone().unwrap_or_else(|| {
+                TaintReason::external(format!("signal author {}", signal.provenance.author))
+            });
             self.mark_tainted(signal.id, reason);
             true
         } else {
             false
         }
+    }
+
+    /// Check for contradictions between signal provenance and tracked taint state.
+    #[must_use]
+    pub fn coherence_issues(&self, signal: &Engram) -> Vec<String> {
+        let mut issues = signal
+            .provenance
+            .coherence_issues()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        let tracked = self.reason(&signal.id);
+        match (signal.provenance.tainted, tracked.as_ref()) {
+            (true, None) => issues.push("tainted signal missing tracker entry".to_string()),
+            (false, Some(_)) => {
+                issues.push("clean signal contradicts tracked taint state".to_string())
+            }
+            (true, Some(reason)) => {
+                if let Some(taint_info) = signal.provenance.taint_info.as_ref()
+                    && taint_info.category != reason.category
+                {
+                    issues.push("tracker taint category disagrees with provenance".to_string());
+                }
+            }
+            (false, None) => {}
+        }
+
+        issues
     }
 
     /// Forget all recorded taint. Useful between isolated runs/tests.
@@ -377,6 +373,7 @@ mod tests {
         assert!(!tracker.is_tainted(&clean_signal.id));
         let reason = tracker.reason(&tainted_signal.id).expect("has reason");
         assert_eq!(reason.category, "external");
+        assert_eq!(reason.detail, "external source");
     }
 
     #[test]
@@ -403,7 +400,25 @@ mod tests {
     fn taint_reason_constructors_set_category() {
         assert_eq!(TaintReason::external("x").category, "external");
         assert_eq!(TaintReason::user_input("x").category, "user_input");
-        assert_eq!(TaintReason::propagated("x").category, "propagated");
+        assert_eq!(TaintReason::propagated("x", []).category, "propagated");
         assert_eq!(TaintReason::new("custom", "x").category, "custom");
+    }
+
+    #[test]
+    fn coherence_checker_flags_tracker_drift() {
+        use roko_core::{Body, Engram, Kind, Provenance};
+
+        let signal = Engram::builder(Kind::AgentOutput)
+            .body(Body::text("safe"))
+            .provenance(Provenance::trusted("worker"))
+            .build();
+
+        let tracker = TaintTracker::new();
+        tracker.mark_tainted(signal.id, TaintReason::external("stale entry"));
+
+        assert_eq!(
+            tracker.coherence_issues(&signal),
+            vec!["clean signal contradicts tracked taint state".to_string()]
+        );
     }
 }

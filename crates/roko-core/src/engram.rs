@@ -79,7 +79,7 @@ impl Engram {
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(self.kind.as_str().as_bytes());
+        hasher.update(&self.kind.canonical_bytes());
         hasher.update(b"|");
         hasher.update(&self.body.canonical_bytes());
         hasher.update(b"|");
@@ -337,6 +337,20 @@ mod tests {
             .tag("priority", "low")
             .build();
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn content_hash_distinguishes_compound_kinds() {
+        let task_prompt = Engram::builder(Kind::Compound(vec![Kind::Task, Kind::Prompt]))
+            .body(Body::text("same body"))
+            .created_at_ms(0)
+            .build();
+        let task_section =
+            Engram::builder(Kind::Compound(vec![Kind::Task, Kind::PromptSection]))
+                .body(Body::text("same body"))
+                .created_at_ms(0)
+                .build();
+        assert_ne!(task_prompt.id, task_section.id);
     }
 
     #[test]

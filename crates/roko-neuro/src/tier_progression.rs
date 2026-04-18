@@ -26,6 +26,7 @@ const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
 const DEFAULT_PLAYBOOK_LIMIT: usize = 12;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 45.0;
+const EXPIRY_REVIEW_AGE_MULTIPLIER: f64 = 2.0;
 
 /// Summary of a recurring causal pattern observed in raw episodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,6 +163,48 @@ impl TierProgressionDecision {
     }
 }
 
+/// Explicit tier transition rule derived from gate verdict counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierTransitionRule {
+    /// Tier the entry must currently be in for this rule to apply.
+    pub from: KnowledgeTier,
+    /// Verdict count required to trigger the transition.
+    pub min_verdicts: usize,
+    /// Tier reached when the rule fires.
+    pub to: KnowledgeTier,
+}
+
+const PROMOTION_RULES: [TierTransitionRule; 2] = [
+    TierTransitionRule {
+        from: KnowledgeTier::Transient,
+        min_verdicts: 3,
+        to: KnowledgeTier::Working,
+    },
+    TierTransitionRule {
+        from: KnowledgeTier::Working,
+        min_verdicts: 3,
+        to: KnowledgeTier::Consolidated,
+    },
+];
+
+const DEMOTION_RULES: [TierTransitionRule; 3] = [
+    TierTransitionRule {
+        from: KnowledgeTier::Persistent,
+        min_verdicts: 2,
+        to: KnowledgeTier::Consolidated,
+    },
+    TierTransitionRule {
+        from: KnowledgeTier::Consolidated,
+        min_verdicts: 2,
+        to: KnowledgeTier::Working,
+    },
+    TierTransitionRule {
+        from: KnowledgeTier::Working,
+        min_verdicts: 2,
+        to: KnowledgeTier::Transient,
+    },
+];
+
 /// Tiered compressor over raw episode logs.
 #[derive(Debug, Clone, Copy)]
 pub struct TierProgression {
@@ -244,17 +287,42 @@ impl TierProgression {
         let successes = verdicts.iter().filter(|verdict| verdict.passed).count();
         let failures = verdicts.len().saturating_sub(successes);
 
-        if successes >= 3 {
-            return TierProgressionDecision::Promote(promote_tier(entry.tier));
+        if let Some(rule) = Self::promotion_rule(entry.tier) {
+            if successes >= rule.min_verdicts {
+                return TierProgressionDecision::Promote(rule.to);
+            }
         }
-        if failures >= 2 {
-            return TierProgressionDecision::Demote(demote_tier(entry.tier));
+        if let Some(rule) = Self::demotion_rule(entry.tier) {
+            if failures >= rule.min_verdicts {
+                return TierProgressionDecision::Demote(rule.to);
+            }
         }
         if entry_needs_expiry_review(entry) {
             return TierProgressionDecision::ReviewExpiry;
         }
 
         TierProgressionDecision::NoChange
+    }
+
+    /// Explicit promotion rule for the current implementation, if any.
+    #[must_use]
+    pub const fn promotion_rule(tier: KnowledgeTier) -> Option<TierTransitionRule> {
+        match tier {
+            KnowledgeTier::Transient => Some(PROMOTION_RULES[0]),
+            KnowledgeTier::Working => Some(PROMOTION_RULES[1]),
+            KnowledgeTier::Consolidated | KnowledgeTier::Persistent => None,
+        }
+    }
+
+    /// Explicit demotion rule for the current implementation, if any.
+    #[must_use]
+    pub const fn demotion_rule(tier: KnowledgeTier) -> Option<TierTransitionRule> {
+        match tier {
+            KnowledgeTier::Persistent => Some(DEMOTION_RULES[0]),
+            KnowledgeTier::Consolidated => Some(DEMOTION_RULES[1]),
+            KnowledgeTier::Working => Some(DEMOTION_RULES[2]),
+            KnowledgeTier::Transient => None,
+        }
     }
 
     /// Whether an entry should be reviewed for expiry.
@@ -852,26 +920,10 @@ fn compare_heuristics(left: &HeuristicRule, right: &HeuristicRule) -> std::cmp::
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn promote_tier(current: KnowledgeTier) -> KnowledgeTier {
-    match current {
-        KnowledgeTier::Transient => KnowledgeTier::Working,
-        KnowledgeTier::Working => KnowledgeTier::Consolidated,
-        KnowledgeTier::Consolidated | KnowledgeTier::Persistent => current,
-    }
-}
-
-fn demote_tier(current: KnowledgeTier) -> KnowledgeTier {
-    match current {
-        KnowledgeTier::Persistent => KnowledgeTier::Consolidated,
-        KnowledgeTier::Consolidated => KnowledgeTier::Working,
-        KnowledgeTier::Working | KnowledgeTier::Transient => KnowledgeTier::Transient,
-    }
-}
-
 fn entry_needs_expiry_review(entry: &KnowledgeEntry) -> bool {
     let half_life_days = entry.effective_half_life_days().max(0.1);
     let age_days = (Utc::now() - entry.created_at).num_seconds().max(0) as f64 / 86_400.0;
-    age_days >= half_life_days * 2.0
+    age_days >= half_life_days * EXPIRY_REVIEW_AGE_MULTIPLIER
 }
 
 fn sorted_ids(ids: &BTreeSet<String>) -> Vec<String> {
@@ -1071,12 +1123,10 @@ mod tests {
 
         assert!(!report.insights.is_empty());
         assert!(report.heuristics.is_empty());
-        assert!(
-            report
-                .insights
-                .iter()
-                .all(|insight| insight.source_episodes.len() < 5)
-        );
+        assert!(report
+            .insights
+            .iter()
+            .all(|insight| insight.source_episodes.len() < 5));
     }
 
     #[test]
@@ -1319,5 +1369,62 @@ mod tests {
             TierProgressionDecision::ReviewExpiry
         );
         assert_eq!(TierProgression::evaluate_promotion(&entry, &[]), None);
+    }
+
+    #[test]
+    fn explicit_transition_rules_match_current_thresholds() {
+        assert_eq!(
+            TierProgression::promotion_rule(KnowledgeTier::Transient),
+            Some(TierTransitionRule {
+                from: KnowledgeTier::Transient,
+                min_verdicts: 3,
+                to: KnowledgeTier::Working,
+            })
+        );
+        assert_eq!(
+            TierProgression::promotion_rule(KnowledgeTier::Working),
+            Some(TierTransitionRule {
+                from: KnowledgeTier::Working,
+                min_verdicts: 3,
+                to: KnowledgeTier::Consolidated,
+            })
+        );
+        assert_eq!(
+            TierProgression::promotion_rule(KnowledgeTier::Consolidated),
+            None
+        );
+        assert_eq!(
+            TierProgression::promotion_rule(KnowledgeTier::Persistent),
+            None
+        );
+
+        assert_eq!(
+            TierProgression::demotion_rule(KnowledgeTier::Transient),
+            None
+        );
+        assert_eq!(
+            TierProgression::demotion_rule(KnowledgeTier::Working),
+            Some(TierTransitionRule {
+                from: KnowledgeTier::Working,
+                min_verdicts: 2,
+                to: KnowledgeTier::Transient,
+            })
+        );
+        assert_eq!(
+            TierProgression::demotion_rule(KnowledgeTier::Consolidated),
+            Some(TierTransitionRule {
+                from: KnowledgeTier::Consolidated,
+                min_verdicts: 2,
+                to: KnowledgeTier::Working,
+            })
+        );
+        assert_eq!(
+            TierProgression::demotion_rule(KnowledgeTier::Persistent),
+            Some(TierTransitionRule {
+                from: KnowledgeTier::Persistent,
+                min_verdicts: 2,
+                to: KnowledgeTier::Consolidated,
+            })
+        );
     }
 }
