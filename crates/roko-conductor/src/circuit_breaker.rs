@@ -6,12 +6,13 @@
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Maximum number of failures allowed per plan before the circuit breaks.
 pub const MAX_PLAN_FAILURES: u32 = 2;
 
 /// Per-plan failure record.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureRecord {
     /// Number of failures recorded.
     pub count: u32,
@@ -19,6 +20,16 @@ pub struct FailureRecord {
     pub last_failure_ms: Option<i64>,
     /// Descriptions of each failure (most recent last).
     pub reasons: Vec<String>,
+}
+
+/// Serializable circuit-breaker state for persistence across restarts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CircuitBreakerState {
+    /// Maximum failures threshold active when the snapshot was captured.
+    pub max_failures: u32,
+    /// Per-plan failure records keyed by `plan_id`.
+    #[serde(default)]
+    pub records: HashMap<String, FailureRecord>,
 }
 
 /// Circuit breaker that tracks per-plan failures using a concurrent map.
@@ -46,6 +57,16 @@ impl CircuitBreaker {
             max_failures,
             records: DashMap::new(),
         }
+    }
+
+    /// Rebuild a circuit breaker from a previously persisted state snapshot.
+    #[must_use]
+    pub fn from_state(state: CircuitBreakerState) -> Self {
+        let cb = Self::new(state.max_failures);
+        for (plan_id, record) in state.records {
+            cb.records.insert(plan_id, record);
+        }
+        cb
     }
 
     /// Record a failure for the given plan.
@@ -99,6 +120,19 @@ impl CircuitBreaker {
     #[must_use]
     pub fn get_record(&self, plan_id: &str) -> Option<FailureRecord> {
         self.records.get(plan_id).map(|r| r.value().clone())
+    }
+
+    /// Capture a serializable snapshot of the current breaker state.
+    #[must_use]
+    pub fn snapshot_state(&self) -> CircuitBreakerState {
+        CircuitBreakerState {
+            max_failures: self.max_failures,
+            records: self
+                .records
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect(),
+        }
     }
 
     /// Number of plans currently tracked.
@@ -254,5 +288,27 @@ mod tests {
         let decoded: FailureRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.count, 3);
         assert_eq!(decoded.reasons.len(), 3);
+    }
+
+    #[test]
+    fn snapshot_state_roundtrip_preserves_threshold_and_records() {
+        let cb = CircuitBreaker::new(3);
+        cb.record_failure("plan-1", "compile", 100);
+        cb.record_failure("plan-1", "tests", 200);
+        cb.record_failure("plan-2", "timeout", 300);
+
+        let restored = CircuitBreaker::from_state(cb.snapshot_state());
+
+        assert_eq!(restored.max_failures(), 3);
+        assert_eq!(restored.failure_count("plan-1"), 2);
+        assert_eq!(restored.failure_count("plan-2"), 1);
+        assert_eq!(
+            restored
+                .get_record("plan-1")
+                .expect("plan-1 record should exist")
+                .reasons,
+            vec!["compile", "tests"]
+        );
+        assert!(!restored.is_tripped("plan-1"));
     }
 }

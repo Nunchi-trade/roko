@@ -136,7 +136,14 @@ pub fn outputs_to_signals(outputs: &[WatcherOutput]) -> Vec<Engram> {
                 )))
                 .body(body)
                 .tag("watcher", &o.watcher)
-                .tag("severity", format!("{:?}", o.severity))
+                .tag(
+                    "severity",
+                    match o.severity {
+                        Severity::Info => "info",
+                        Severity::Warning => "warning",
+                        Severity::Critical => "critical",
+                    },
+                )
                 .build(),
             )
         })

@@ -15,6 +15,28 @@ use roko_core::PlanPhase;
 use super::SpeculativeExecution;
 use super::plan_state::PlanState;
 
+/// Serializable per-plan failure record captured from the conductor circuit breaker.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedCircuitBreakerFailureRecord {
+    /// Number of failures recorded.
+    pub count: u32,
+    /// Unix milliseconds of the last failure.
+    pub last_failure_ms: Option<i64>,
+    /// Descriptions of each failure (most recent last).
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// Serializable conductor circuit-breaker snapshot carried alongside executor state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedCircuitBreakerState {
+    /// Maximum failures threshold active when the snapshot was taken.
+    pub max_failures: u32,
+    /// Per-plan failure records keyed by `plan_id`.
+    #[serde(default)]
+    pub records: HashMap<String, PersistedCircuitBreakerFailureRecord>,
+}
+
 /// Serializable snapshot of the entire executor state.
 ///
 /// The runtime writes this periodically (or on every significant event)
@@ -35,6 +57,9 @@ pub struct ExecutorSnapshot {
     /// Queue order: `plan_id`s in execution priority order.
     #[serde(default)]
     pub queue_order: Vec<String>,
+    /// Optional conductor circuit-breaker state captured with the executor snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductor_circuit_breaker: Option<PersistedCircuitBreakerState>,
     /// Live speculative execution branches, keyed by `plan:task`.
     #[serde(default)]
     pub speculative_executions: HashMap<String, SpeculativeExecution>,
@@ -60,6 +85,7 @@ impl ExecutorSnapshot {
             schema_version: current_schema_version(),
             plan_states: HashMap::new(),
             queue_order: Vec::new(),
+            conductor_circuit_breaker: None,
             speculative_executions: HashMap::new(),
             timestamp_ms,
         }
@@ -176,6 +202,7 @@ impl ExecutorSnapshot {
             schema_version: current_schema_version(),
             plan_states,
             queue_order,
+            conductor_circuit_breaker: None,
             speculative_executions: HashMap::new(),
             timestamp_ms,
         })
@@ -197,6 +224,7 @@ mod tests {
         assert_eq!(restored.timestamp_ms, 1000);
         assert!(restored.plan_states.is_empty());
         assert!(restored.queue_order.is_empty());
+        assert!(restored.conductor_circuit_breaker.is_none());
     }
 
     #[test]
@@ -225,6 +253,7 @@ mod tests {
             restored.plan_states["plan-2"].current_phase,
             PlanPhase::Gating
         );
+        assert!(restored.conductor_circuit_breaker.is_none());
     }
 
     #[test]
@@ -280,6 +309,7 @@ mod tests {
         assert!(ps.last_error.is_none());
         assert!(!ps.paused);
         assert_eq!(ps.priority, 0);
+        assert!(restored.conductor_circuit_breaker.is_none());
     }
 
     #[test]
@@ -309,6 +339,7 @@ mod tests {
             restored.plan_states["plan-b"].current_phase,
             PlanPhase::Complete
         );
+        assert!(restored.conductor_circuit_breaker.is_none());
     }
 
     #[test]
@@ -322,5 +353,36 @@ mod tests {
         let json = snap.to_json().unwrap();
         let restored = ExecutorSnapshot::from_json(&json).unwrap();
         assert!(restored.plan_states["done-plan"].is_terminal());
+    }
+
+    #[test]
+    fn snapshot_with_circuit_breaker_roundtrips() {
+        let mut snap = ExecutorSnapshot::new(21);
+        let mut circuit_breaker = PersistedCircuitBreakerState {
+            max_failures: 2,
+            ..PersistedCircuitBreakerState::default()
+        };
+        circuit_breaker.records.insert(
+            "plan-1".into(),
+            PersistedCircuitBreakerFailureRecord {
+                count: 2,
+                last_failure_ms: Some(200),
+                reasons: vec!["compile".into(), "tests".into()],
+            },
+        );
+        snap.conductor_circuit_breaker = Some(circuit_breaker);
+
+        let json = snap.to_json().unwrap();
+        let restored = ExecutorSnapshot::from_json(&json).unwrap();
+        let restored_breaker = restored
+            .conductor_circuit_breaker
+            .expect("circuit breaker state should roundtrip");
+
+        assert_eq!(restored_breaker.max_failures, 2);
+        assert_eq!(restored_breaker.records["plan-1"].count, 2);
+        assert_eq!(
+            restored_breaker.records["plan-1"].reasons,
+            vec!["compile", "tests"]
+        );
     }
 }

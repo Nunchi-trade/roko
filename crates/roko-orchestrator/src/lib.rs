@@ -30,7 +30,8 @@ pub use dag::{
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
     CURRENT_SCHEMA_VERSION, ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PlanState, PlanStateMachine, SpeculativeExecution,
+    GateResult, ParallelExecutor, PersistedCircuitBreakerFailureRecord,
+    PersistedCircuitBreakerState, PlanState, PlanStateMachine, SpeculativeExecution,
     TransitionError, current_schema_version,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};

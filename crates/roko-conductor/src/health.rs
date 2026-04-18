@@ -156,8 +156,8 @@ impl HealthMonitor {
                     check_fn: check_terminal_liveness,
                 },
                 NamedCheck {
-                    name: "golem_status",
-                    check_fn: check_golem_status,
+                    name: "chain_status",
+                    check_fn: check_chain_status,
                 },
                 NamedCheck {
                     name: "spec_drift",
@@ -254,18 +254,18 @@ fn check_terminal_liveness(snapshot: &SystemSnapshot) -> HealthCheckResult {
     )
 }
 
-/// Check chain / golem connection status.
-fn check_golem_status(snapshot: &SystemSnapshot) -> HealthCheckResult {
+/// Check chain connection status.
+fn check_chain_status(snapshot: &SystemSnapshot) -> HealthCheckResult {
     let now = snapshot.now_ms;
 
     if !snapshot.chain_expected {
-        return HealthCheckResult::healthy("golem_status", "chain not required", now);
+        return HealthCheckResult::healthy("chain_status", "chain not required", now);
     }
 
     if snapshot.chain_connected {
-        HealthCheckResult::healthy("golem_status", "chain connected", now)
+        HealthCheckResult::healthy("chain_status", "chain connected", now)
     } else {
-        HealthCheckResult::degraded("golem_status", "chain connection lost", now)
+        HealthCheckResult::degraded("chain_status", "chain connection lost", now)
     }
 }
 
@@ -416,7 +416,7 @@ mod tests {
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
-        let result = check_golem_status(&snap);
+        let result = check_chain_status(&snap);
         assert_eq!(result.status, HealthStatus::Degraded);
     }
 
@@ -428,7 +428,7 @@ mod tests {
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
-        let result = check_golem_status(&snap);
+        let result = check_chain_status(&snap);
         assert_eq!(result.status, HealthStatus::Healthy);
     }
 

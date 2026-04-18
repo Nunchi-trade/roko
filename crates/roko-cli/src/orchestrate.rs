@@ -42,7 +42,9 @@ use roko_compose::{
 use roko_conductor::diagnosis::{
     DiagnosisEngine, DiagnosisResult, ErrorCategory, SuggestedIntervention,
 };
-use roko_conductor::{Conductor, ConductorDecision};
+use roko_conductor::health::{HealthMonitor, HealthStatus, SystemSnapshot};
+use roko_conductor::stuck_detection::{ActivityEntry, MetaCognitionHook, StuckDetector, StuckKind};
+use roko_conductor::{CircuitBreakerState, Conductor, ConductorDecision, FailureRecord};
 use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
@@ -127,7 +129,8 @@ use roko_orchestrator::worktree::{
 };
 use roko_orchestrator::{
     CURRENT_SCHEMA_VERSION, DagConfig, EventKind, EventLog, EventLogSnapshot, ExecutorAction,
-    ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor, PlanState, PostMergeRunner,
+    ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
+    PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanState, PostMergeRunner,
     ReplanResult, ReplanStrategy, UnifiedTaskDag, discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
@@ -171,6 +174,8 @@ const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
 const EFFICIENCY_SIGNAL_TAIL: usize = 256;
+const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
+const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
 
@@ -735,6 +740,46 @@ pub fn save_snapshot_atomic(snapshot: &ExecutorSnapshot, path: &Path) -> Result<
     std::fs::rename(&tmp_path, path)
         .with_context(|| format!("rename snapshot {}", path.display()))?;
     Ok(())
+}
+
+fn persisted_circuit_breaker_state(state: CircuitBreakerState) -> PersistedCircuitBreakerState {
+    PersistedCircuitBreakerState {
+        max_failures: state.max_failures,
+        records: state
+            .records
+            .into_iter()
+            .map(|(plan_id, record)| {
+                (
+                    plan_id,
+                    PersistedCircuitBreakerFailureRecord {
+                        count: record.count,
+                        last_failure_ms: record.last_failure_ms,
+                        reasons: record.reasons,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn restored_circuit_breaker_state(state: PersistedCircuitBreakerState) -> CircuitBreakerState {
+    CircuitBreakerState {
+        max_failures: state.max_failures,
+        records: state
+            .records
+            .into_iter()
+            .map(|(plan_id, record)| {
+                (
+                    plan_id,
+                    FailureRecord {
+                        count: record.count,
+                        last_failure_ms: record.last_failure_ms,
+                        reasons: record.reasons,
+                    },
+                )
+            })
+            .collect(),
+    }
 }
 
 async fn wait_for_shutdown_signal() -> Result<&'static str> {
@@ -2793,6 +2838,14 @@ pub struct PlanRunner {
     safety_layer: SafetyLayer,
     /// Signals accumulated during the current plan run for conductor evaluation.
     conductor_signals: Vec<Engram>,
+    /// Periodic support-surface health checks.
+    health_monitor: HealthMonitor,
+    /// Runtime stuck-pattern detector driven from task/gate history.
+    stuck_detector: StuckDetector,
+    /// Theta-cadence meta-cognition hook layered on the stuck detector.
+    meta_cognition_hook: MetaCognitionHook,
+    /// Most recent observed agent progress timestamp in unix milliseconds.
+    last_agent_progress_ms: i64,
     /// Learned intervention policy for failed task dispatch / verification retries.
     retry_conductor: ConductorBandit,
     /// Context attribution tracker for per-(tier, source_type) demotion decisions.
@@ -2903,6 +2956,8 @@ struct TaskTracker {
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
     gate_failure_count: u32,
+    /// Bounded activity history used by stuck detection and meta-cognition.
+    activity_history: Vec<ActivityEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3281,6 +3336,7 @@ impl TaskTracker {
             last_prompt_sections: Vec::new(),
             last_skill_request: None,
             gate_failure_count: 0,
+            activity_history: Vec::new(),
         };
         tracker.advance_group_index();
         tracker
@@ -3362,6 +3418,18 @@ impl TaskTracker {
         let started_ms = self.ready_since_ms.get(task_id)?;
         let elapsed_ms = now_ms().saturating_sub(*started_ms);
         Some(elapsed_ms as f64 / 3_600_000.0)
+    }
+
+    fn current_iteration(&self) -> u32 {
+        self.impl_round.saturating_add(1)
+    }
+
+    fn push_activity(&mut self, entry: ActivityEntry) {
+        self.activity_history.push(entry);
+        if self.activity_history.len() > MAX_CONDUCTOR_ACTIVITY_HISTORY {
+            let excess = self.activity_history.len() - MAX_CONDUCTOR_ACTIVITY_HISTORY;
+            self.activity_history.drain(0..excess);
+        }
     }
 
     /// Whether any unfinished task is currently blocked only by cross-plan deps.
@@ -4102,6 +4170,10 @@ impl PlanRunner {
             conductor: Arc::new(Conductor::new()),
             safety_layer,
             conductor_signals: Vec::new(),
+            health_monitor: HealthMonitor::new(),
+            stuck_detector: StuckDetector::new(),
+            meta_cognition_hook: MetaCognitionHook::new(),
+            last_agent_progress_ms: 0,
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -4176,6 +4248,12 @@ impl PlanRunner {
         Self::validate_executor_recovery_snapshot(snapshot_json)?;
         let snapshot = snapshot_migrate::load_executor_snapshot(snapshot_json)
             .map_err(|e| anyhow!("bad snapshot: {e}"))?;
+        let conductor = snapshot
+            .conductor_circuit_breaker
+            .clone()
+            .map(restored_circuit_breaker_state)
+            .map(Conductor::from_circuit_breaker_state)
+            .unwrap_or_else(Conductor::new);
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
@@ -4237,9 +4315,13 @@ impl PlanRunner {
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
-            conductor: Arc::new(Conductor::new()),
+            conductor: Arc::new(conductor),
             safety_layer,
             conductor_signals: Vec::new(),
+            health_monitor: HealthMonitor::new(),
+            stuck_detector: StuckDetector::new(),
+            meta_cognition_hook: MetaCognitionHook::new(),
+            last_agent_progress_ms: 0,
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -4315,6 +4397,12 @@ impl PlanRunner {
         Self::validate_executor_recovery_snapshot(executor_json)?;
         let exec_snap = snapshot_migrate::load_executor_snapshot(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
+        let conductor = exec_snap
+            .conductor_circuit_breaker
+            .clone()
+            .map(restored_circuit_breaker_state)
+            .map(Conductor::from_circuit_breaker_state)
+            .unwrap_or_else(Conductor::new);
         let executor = ParallelExecutor::from_snapshot(config.executor.clone(), exec_snap);
         let event_log = Self::restore_event_log_snapshot(event_log_json)?;
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
@@ -4377,9 +4465,13 @@ impl PlanRunner {
             cancel,
             task_trackers,
             gemini_plan_caches: HashMap::new(),
-            conductor: Arc::new(Conductor::new()),
+            conductor: Arc::new(conductor),
             safety_layer,
             conductor_signals: Vec::new(),
+            health_monitor: HealthMonitor::new(),
+            stuck_detector: StuckDetector::new(),
+            meta_cognition_hook: MetaCognitionHook::new(),
+            last_agent_progress_ms: 0,
             retry_conductor: ConductorBandit::load_or_new(&conductor_policy_path(workdir)),
             attribution_tracker: ContextAttributionTracker::load(
                 &workdir.join(".roko").join("context-attribution.jsonl"),
@@ -5572,6 +5664,112 @@ impl PlanRunner {
         ]
     }
 
+    fn conductor_system_snapshot(&self, active_agents: usize) -> SystemSnapshot {
+        let active_agents = u32::try_from(active_agents).unwrap_or(u32::MAX);
+        SystemSnapshot {
+            // The runtime supervisor is not yet the canonical launch owner, so only
+            // publish liveness expectations when it is already tracking processes.
+            active_agents,
+            expected_agents: if active_agents == 0 { 0 } else { active_agents },
+            last_agent_heartbeat_ms: self.last_agent_progress_ms,
+            chain_connected: false,
+            chain_expected: false,
+            spec_hash_at_start: String::new(),
+            spec_hash_current: String::new(),
+            coverage_history: Vec::new(),
+            now_ms: now_unix_ms_i64(),
+            heartbeat_timeout_ms: CONDUCTOR_HEARTBEAT_TIMEOUT_MS,
+        }
+    }
+
+    fn run_health_monitor(&mut self, snapshot: &SystemSnapshot) {
+        for result in self.health_monitor.check_all(snapshot) {
+            let severity = match result.status {
+                HealthStatus::Healthy => continue,
+                HealthStatus::Degraded => "warning",
+                HealthStatus::Critical => "critical",
+            };
+            let check_name = result.name.clone();
+            let payload = serde_json::json!({
+                "check": check_name,
+                "checked_at_ms": result.checked_at_ms,
+                "message": result.message,
+                "status": result.status,
+            });
+            self.emit_tagged_conductor_signal(
+                Kind::Custom("conductor:alert:health_monitor".into()),
+                payload,
+                &[
+                    ("watcher", "health_monitor".to_string()),
+                    ("severity", severity.to_string()),
+                    ("check", result.name),
+                ],
+            );
+        }
+    }
+
+    fn run_stuck_detection(&mut self) {
+        let plan_ids = self.task_trackers.keys().cloned().collect::<Vec<_>>();
+        for plan_id in plan_ids {
+            let (signals, meta_signal) = {
+                let Some(tracker) = self.task_trackers.get(&plan_id) else {
+                    continue;
+                };
+                if tracker.activity_history.is_empty() {
+                    continue;
+                }
+
+                let stuck_signals = self.stuck_detector.check_all(&tracker.activity_history);
+                let meta = self.meta_cognition_hook.assess(&tracker.activity_history);
+                let meta_signal = if meta.action
+                    == roko_conductor::stuck_detection::MetaCognitionAction::Continue
+                {
+                    None
+                } else {
+                    Body::from_json(&meta).ok().map(|body| {
+                        Engram::builder(Kind::Custom("roko.meta_cognition".into()))
+                            .body(body)
+                            .tag("frequency", "theta")
+                            .tag("action", meta.action.label())
+                            .tag("reason", meta.reason.clone())
+                            .tag("plan_id", plan_id.clone())
+                            .build()
+                    })
+                };
+                (stuck_signals, meta_signal)
+            };
+
+            for stuck in signals {
+                let severity = match stuck.kind {
+                    StuckKind::GateLoop | StuckKind::CompileLoop | StuckKind::ExcessiveRetries => {
+                        "critical"
+                    }
+                    _ => "warning",
+                };
+                let payload = serde_json::json!({
+                    "plan_id": plan_id,
+                    "kind": stuck.kind,
+                    "confidence": stuck.confidence,
+                    "duration_ms": stuck.duration_ms,
+                    "description": stuck.description,
+                });
+                self.emit_tagged_conductor_signal(
+                    Kind::Custom("conductor:alert:stuck_detector".into()),
+                    payload,
+                    &[
+                        ("plan_id", plan_id.clone()),
+                        ("watcher", "stuck_detector".to_string()),
+                        ("severity", severity.to_string()),
+                    ],
+                );
+            }
+
+            if let Some(meta_signal) = meta_signal {
+                self.push_conductor_signal(meta_signal);
+            }
+        }
+    }
+
     async fn maybe_run_heartbeat(
         &mut self,
         heartbeat_clock: &mut HeartbeatClock,
@@ -5614,6 +5812,12 @@ impl PlanRunner {
                 delta_due,
             ),
         };
+
+        let system_snapshot = self.conductor_system_snapshot(active_agents);
+        self.run_health_monitor(&system_snapshot);
+        if matches!(frequency, OperatingFrequency::Theta) {
+            self.run_stuck_detection();
+        }
 
         if let Err(err) = persist_heartbeat_snapshot(&self.workdir, &snapshot) {
             tracing::warn!(error = %err, "failed to persist heartbeat snapshot");
@@ -5676,13 +5880,35 @@ impl PlanRunner {
 
     /// Push a conductor signal so watchers can detect anomalies (§7).
     fn emit_conductor_signal(&mut self, kind: Kind, body: serde_json::Value) {
-        let sig = maybe_attest_engram(
+        self.push_conductor_signal(
             Engram::builder(kind)
                 .body(Body::Json(body))
                 .emotional_tag(self.daimon.emotional_tag("conductor"))
                 .build(),
         );
-        self.conductor_signals.push(sig);
+    }
+
+    fn emit_tagged_conductor_signal(
+        &mut self,
+        kind: Kind,
+        body: serde_json::Value,
+        tags: &[(&str, String)],
+    ) {
+        let mut builder = Engram::builder(kind)
+            .body(Body::Json(body))
+            .emotional_tag(self.daimon.emotional_tag("conductor"));
+        for (key, value) in tags {
+            builder = builder.tag(*key, value);
+        }
+        self.push_conductor_signal(builder.build());
+    }
+
+    fn push_conductor_signal(&mut self, signal: Engram) {
+        let mut signal = signal;
+        if signal.emotional_tag.is_none() {
+            signal.emotional_tag = Some(self.daimon.emotional_tag("conductor"));
+        }
+        self.conductor_signals.push(maybe_attest_engram(signal));
     }
 
     /// Take a snapshot of the current executor state.
@@ -5695,7 +5921,10 @@ impl PlanRunner {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        let snap = self.executor.snapshot(ts);
+        let mut snap = self.executor.snapshot(ts);
+        snap.conductor_circuit_breaker = Some(persisted_circuit_breaker_state(
+            self.conductor.circuit_breaker().snapshot_state(),
+        ));
         snap.to_json().map_err(|e| anyhow!("snapshot: {e}"))
     }
 
@@ -5727,7 +5956,10 @@ impl PlanRunner {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        let exec_snapshot = self.executor.snapshot(ts);
+        let mut exec_snapshot = self.executor.snapshot(ts);
+        exec_snapshot.conductor_circuit_breaker = Some(persisted_circuit_breaker_state(
+            self.conductor.circuit_breaker().snapshot_state(),
+        ));
         save_snapshot_atomic(&exec_snapshot, &exec_path)?;
 
         // Event log snapshot — atomic write.
@@ -5771,7 +6003,10 @@ impl PlanRunner {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        let snapshot = self.executor.snapshot(ts);
+        let mut snapshot = self.executor.snapshot(ts);
+        snapshot.conductor_circuit_breaker = Some(persisted_circuit_breaker_state(
+            self.conductor.circuit_breaker().snapshot_state(),
+        ));
         save_snapshot_atomic(&snapshot, snapshot_path)?;
         Ok(())
     }
@@ -5839,6 +6074,13 @@ impl PlanRunner {
                     "current_group_index": tracker.current_group_index,
                     "impl_round": tracker.impl_round,
                     "ready_since_ms": tracker.ready_since_ms,
+                    "gate_failure_count": tracker.gate_failure_count,
+                    "last_gate_failure": tracker.last_gate_failure,
+                    "last_gate_failure_phase": tracker.last_gate_failure_phase,
+                    "last_gate_failure_rung": tracker.last_gate_failure_rung,
+                    "last_impl_task_id": tracker.last_impl_task_id,
+                    "last_impl_output_hash": tracker.last_impl_output_hash.map(|hash| hash.to_hex()),
+                    "activity_history": tracker.activity_history,
                 })
             })
             .collect();
@@ -5897,6 +6139,32 @@ impl PlanRunner {
                 .unwrap_or_default();
             let current_group_index = entry["current_group_index"].as_u64().unwrap_or(0) as usize;
             let impl_round = entry["impl_round"].as_u64().unwrap_or(0) as u32;
+            let gate_failure_count = entry["gate_failure_count"].as_u64().unwrap_or(0) as u32;
+            let last_gate_failure = entry
+                .get("last_gate_failure")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let last_gate_failure_phase = entry
+                .get("last_gate_failure_phase")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let last_gate_failure_rung = entry
+                .get("last_gate_failure_rung")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok());
+            let last_impl_task_id = entry
+                .get("last_impl_task_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let last_impl_output_hash = entry
+                .get("last_impl_output_hash")
+                .and_then(|value| value.as_str())
+                .and_then(ContentHash::from_hex);
+            let activity_history = entry
+                .get("activity_history")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<Vec<ActivityEntry>>(value).ok())
+                .unwrap_or_default();
             let ready_since_ms = entry
                 .get("ready_since_ms")
                 .and_then(|value| value.as_object())
@@ -5915,6 +6183,13 @@ impl PlanRunner {
             tracker.skipped = skipped;
             tracker.current_group_index = current_group_index;
             tracker.impl_round = impl_round;
+            tracker.gate_failure_count = gate_failure_count;
+            tracker.last_gate_failure = last_gate_failure;
+            tracker.last_gate_failure_phase = last_gate_failure_phase;
+            tracker.last_gate_failure_rung = last_gate_failure_rung;
+            tracker.last_impl_task_id = last_impl_task_id;
+            tracker.last_impl_output_hash = last_impl_output_hash;
+            tracker.activity_history = activity_history;
             tracker.ready_since_ms = ready_since_ms;
             if let Some(extra_completed) = completed_from_snapshot.get(&plan_id) {
                 merge_completed_tasks(&mut tracker, extra_completed);
@@ -6940,6 +7215,27 @@ impl PlanRunner {
                                 ExecutorEvent::GateFailed
                             }
                         };
+                        if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
+                            let gate_result = if passed {
+                                "pass".to_string()
+                            } else {
+                                tracker
+                                    .last_gate_failure_phase
+                                    .as_deref()
+                                    .map(|phase| format!("fail:{phase}"))
+                                    .unwrap_or_else(|| "fail".to_string())
+                            };
+                            tracker.push_activity(ActivityEntry::new(
+                                now_unix_ms_i64(),
+                                tracker
+                                    .last_impl_output_hash
+                                    .map(|hash| hash.to_hex())
+                                    .unwrap_or_default(),
+                                0,
+                                Some(gate_result),
+                                tracker.current_iteration(),
+                            ));
+                        }
                         self.apply_event_and_emit(
                             &plan_id,
                             &format!("rung-{effective_rung}"),
@@ -10771,6 +11067,15 @@ impl PlanRunner {
         }
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.failed.push(task_id.to_string());
+            tracker.push_activity(ActivityEntry::new(
+                now_unix_ms_i64(),
+                result
+                    .map(|agent_result| agent_result.output.id.to_hex())
+                    .unwrap_or_default(),
+                0,
+                None,
+                tracker.current_iteration(),
+            ));
         }
 
         // Emit observability trace event for the failed agent dispatch.
@@ -11521,12 +11826,13 @@ impl PlanRunner {
             EventKind::PhaseTransition,
             serde_json::json!({"plan_id": plan_id, "event": format!("{event:?}")}),
         );
-        self.emit_conductor_signal(
+        self.emit_tagged_conductor_signal(
             Kind::PlanPhase,
             serde_json::json!({
                 "plan_id": plan_id,
                 "event": format!("{event:?}"),
             }),
+            &[("plan_id", plan_id.to_string())],
         );
     }
 
@@ -13044,6 +13350,12 @@ impl PlanRunner {
         // Feed the raw agent turn into the conductor stream so the stuck-pattern
         // watcher can compare consecutive outputs across turns.
         self.emit_agent_turn_signal(&result.output);
+        let files_changed_count = self
+            .git_changed_files(&exec_dir)
+            .await
+            .ok()
+            .and_then(|files| u32::try_from(files.len()).ok())
+            .unwrap_or(0);
 
         // ── Context attribution feedback ──────────────────────────────
         // Scan agent output for references to injected context sections.
@@ -13284,6 +13596,8 @@ impl PlanRunner {
                     "cost_usd": task_cost,
                     "duration_ms": result.usage.wall_ms,
                     "timeout_secs": timeout_secs,
+                    "output_hash": result.output.id.to_hex(),
+                    "files_changed_count": files_changed_count,
                     "tokens": u64::from(result.usage.input_tokens) + u64::from(result.usage.output_tokens),
                     "success": result.success,
                 }),
@@ -14324,6 +14638,7 @@ impl PlanRunner {
     /// on non-action kinds.
     fn emit_agent_turn_signal(&mut self, output: &Engram) {
         if let Some(signal) = conductor_signal_from_output(output) {
+            self.last_agent_progress_ms = now_unix_ms_i64();
             self.conductor_signals.push(signal);
         }
     }
@@ -14688,13 +15003,17 @@ impl PlanRunner {
 
         let mut task_files = Vec::new();
         let mut seen_files = HashSet::new();
-        if let Ok(changed_files) = self.git_changed_files(exec_dir).await {
+        let changed_file_count = if let Ok(changed_files) = self.git_changed_files(exec_dir).await {
+            let changed_file_count = u32::try_from(changed_files.len()).unwrap_or(u32::MAX);
             for file in changed_files {
                 if seen_files.insert(file.clone()) {
                     task_files.push(file);
                 }
             }
-        }
+            changed_file_count
+        } else {
+            0
+        };
         for file in &td.files {
             if seen_files.insert(file.clone()) {
                 task_files.push(file.clone());
@@ -14713,6 +15032,13 @@ impl PlanRunner {
         );
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_skill_request = Some(request);
+            tracker.push_activity(ActivityEntry::new(
+                now_unix_ms_i64(),
+                result.output.id.to_hex(),
+                changed_file_count,
+                None,
+                tracker.current_iteration(),
+            ));
         }
 
         Ok(())

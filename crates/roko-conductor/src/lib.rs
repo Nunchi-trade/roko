@@ -45,7 +45,7 @@ pub mod watchers;
 pub use roko_core::{ConductorDecision, PhaseKind, PlanPhase};
 
 // Re-export primary types from this crate.
-pub use circuit_breaker::CircuitBreaker;
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState, FailureRecord};
 pub use conductor::{Conductor, RoutingBias};
 pub use interventions::{InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy};
 pub use state_machine::{PhaseTransition, phase_timeout};

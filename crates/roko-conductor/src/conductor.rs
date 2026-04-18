@@ -6,7 +6,7 @@
 //! stream, collects their outputs, and merges them via the
 //! [`InterventionPolicy`](crate::interventions::InterventionPolicy).
 
-use crate::circuit_breaker::CircuitBreaker;
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use crate::interventions::{
     InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy, outputs_to_signals,
 };
@@ -139,6 +139,12 @@ impl Conductor {
     #[must_use]
     pub const fn circuit_breaker(&self) -> &CircuitBreaker {
         &self.circuit_breaker
+    }
+
+    /// Build a conductor with a previously persisted circuit-breaker state.
+    #[must_use]
+    pub fn from_circuit_breaker_state(state: CircuitBreakerState) -> Self {
+        Self::new().with_circuit_breaker(CircuitBreaker::from_state(state))
     }
 
     /// Return the most recently computed routing bias snapshot.
@@ -424,6 +430,27 @@ mod tests {
         c.circuit_breaker().record_failure("plan-1", "err2", 200);
 
         let d = c.evaluate(&plan_stream, &Context::at(300));
+        assert!(d.is_terminal());
+    }
+
+    #[test]
+    fn conductor_can_boot_from_circuit_breaker_state() {
+        let mut state = CircuitBreakerState {
+            max_failures: 2,
+            ..CircuitBreakerState::default()
+        };
+        state.records.insert(
+            "plan-1".to_string(),
+            crate::circuit_breaker::FailureRecord {
+                count: 2,
+                last_failure_ms: Some(200),
+                reasons: vec!["compile".into(), "tests".into()],
+            },
+        );
+
+        let c = Conductor::from_circuit_breaker_state(state);
+        let d = c.evaluate(&plan_phase_stream("plan-1"), &Context::at(300));
+
         assert!(d.is_terminal());
     }
 
