@@ -52,7 +52,7 @@ fn default_somatic_tree() -> SomaticTree {
     KdTree::new()
 }
 
-/// Current affect snapshot.
+/// Current single-layer affect snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffectState {
     /// Current PAD vector.
@@ -97,6 +97,7 @@ impl AffectState {
         let factor = decay_factor(elapsed_hours, half_life_hours);
         if factor != 1.0 {
             self.pad.decay_by_factor(factor);
+            // Confidence mean-reverts toward the neutral midpoint, not toward zero.
             self.confidence = (0.5 + (self.confidence - 0.5) * factor).clamp(0.0, 1.0);
         }
         self.refresh_behavioral_state();
@@ -122,6 +123,10 @@ impl AffectState {
     }
 
     /// Build an emotional annotation from the current affect state.
+    ///
+    /// The shipping runtime uses the current PAD state for both the immediate
+    /// signal and the `mood_snapshot`; deeper mood/personality layers are not
+    /// modeled here.
     #[must_use]
     pub fn emotional_tag(&self, trigger: impl Into<String>) -> EmotionalTag {
         let normalized_intensity = (self.pad.magnitude() / 3.0_f64.sqrt()).clamp(0.0, 1.0) as f32;
@@ -2244,6 +2249,31 @@ mod tests {
         assert_eq!(tag.trigger, "task_outcome");
         assert!(tag.intensity > 0.0);
         assert_eq!(tag.pad, state.query().pad);
+        assert_eq!(tag.mood_snapshot, tag.pad);
+    }
+
+    #[test]
+    fn affect_state_decay_moves_toward_neutral_and_midpoint() {
+        let updated_at = Utc::now() - chrono::Duration::hours(4);
+        let mut state = AffectState {
+            pad: PadVector::new(0.8, -0.6, 0.4),
+            confidence: 0.9,
+            behavioral_state: BehavioralState::Focused,
+            updated_at,
+        };
+        let now = Utc::now();
+
+        state.decay(4.0, now);
+
+        assert!((state.pad.pleasure - 0.4).abs() < 1e-10);
+        assert!((state.pad.arousal + 0.3).abs() < 1e-10);
+        assert!((state.pad.dominance - 0.2).abs() < 1e-10);
+        assert!((state.confidence - 0.7).abs() < 1e-10);
+        assert_eq!(
+            state.behavioral_state,
+            BehavioralState::classify(state.pad, state.confidence)
+        );
+        assert_eq!(state.updated_at, now);
     }
 
     #[test]

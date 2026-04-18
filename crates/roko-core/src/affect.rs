@@ -102,6 +102,9 @@ pub enum BehavioralState {
 
 impl BehavioralState {
     /// Classify a behavioral state from the current PAD vector and confidence.
+    ///
+    /// This classifier is memoryless: it uses only the current snapshot and
+    /// applies no hysteresis, dwell-time, or transition cooldown.
     #[must_use]
     pub fn classify(pad: PadVector, confidence: f64) -> Self {
         let p = pad.pleasure;
@@ -157,7 +160,7 @@ impl DaimonPolicy {
     }
 }
 
-/// Optional emotional metadata attached to an Engram.
+/// Optional PAD-based emotional metadata attached to an Engram.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmotionalTag {
     /// Immediate PAD signal associated with the engram.
@@ -166,7 +169,9 @@ pub struct EmotionalTag {
     pub intensity: f32,
     /// Human-readable or machine-generated trigger label.
     pub trigger: String,
-    /// Snapshot of the broader affective mood when the engram was created.
+    /// Snapshot of the current PAD state when the engram was created.
+    ///
+    /// The live runtime does not persist a separate mood/personality layer.
     pub mood_snapshot: PadVector,
 }
 
@@ -217,6 +222,22 @@ mod tests {
         assert_eq!(
             BehavioralState::classify(PadVector::new(0.0, 0.2, 0.0), 0.5),
             BehavioralState::Exploring
+        );
+    }
+
+    #[test]
+    fn behavioral_state_classification_uses_documented_threshold_precedence() {
+        assert_eq!(
+            BehavioralState::classify(PadVector::neutral(), 0.0),
+            BehavioralState::Engaged
+        );
+        assert_eq!(
+            BehavioralState::classify(PadVector::new(0.5, 0.5, -0.4), 0.8),
+            BehavioralState::Struggling
+        );
+        assert_eq!(
+            BehavioralState::classify(PadVector::new(0.5, 0.0, 0.4), 0.8),
+            BehavioralState::Coasting
         );
     }
 
