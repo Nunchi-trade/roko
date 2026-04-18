@@ -11,6 +11,19 @@ use std::collections::HashMap;
 
 use roko_core::task::{Task, TaskCategory, TaskComplexityBand};
 
+/// High-level curriculum mode used by the learning docs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurriculumMode {
+    /// Front-load easier tasks.
+    EasyFirst,
+    /// Front-load harder tasks.
+    HardFirst,
+    /// Interleave easier and harder tasks.
+    Interleaved,
+    /// Adapt ordering based on observed success.
+    Adaptive,
+}
+
 /// Strategy used to reorder tasks.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CurriculumStrategy {
@@ -25,6 +38,19 @@ pub enum CurriculumStrategy {
         /// Minimum rolling success rate that triggers easier ordering.
         success_threshold: f64,
     },
+}
+
+impl From<CurriculumMode> for CurriculumStrategy {
+    fn from(value: CurriculumMode) -> Self {
+        match value {
+            CurriculumMode::EasyFirst => Self::EasyFirst,
+            CurriculumMode::HardFirst => Self::HardFirst,
+            CurriculumMode::Interleaved => Self::Interleaved,
+            CurriculumMode::Adaptive => Self::Adaptive {
+                success_threshold: 0.7,
+            },
+        }
+    }
 }
 
 /// Small adaptive difficulty model for scheduling tasks.
@@ -83,6 +109,62 @@ impl DifficultyModel {
             _ => 0.0,
         }
     }
+}
+
+/// Task scheduler that applies a curriculum model to a task set.
+#[derive(Debug, Clone)]
+pub struct CurriculumScheduler {
+    /// Scheduler mode.
+    pub mode: CurriculumMode,
+    /// Difficulty model used for ordering.
+    pub difficulty_model: DifficultyModel,
+}
+
+impl CurriculumScheduler {
+    /// Construct a scheduler for `mode`.
+    #[must_use]
+    pub fn new(mode: CurriculumMode) -> Self {
+        let strategy = CurriculumStrategy::from(mode.clone());
+        Self {
+            mode,
+            difficulty_model: DifficultyModel::new(strategy),
+        }
+    }
+
+    /// Reorder `tasks` according to the current difficulty model.
+    #[must_use]
+    pub fn schedule(&self, tasks: &[Task]) -> Vec<Task> {
+        reorder_tasks(tasks, &self.difficulty_model)
+    }
+}
+
+/// Aggregate tool-usage profile observed during a curriculum phase.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolUsageProfile {
+    /// Tool name.
+    pub tool_name: String,
+    /// Number of observed uses.
+    pub usage_count: u64,
+    /// Empirical success rate for uses of this tool.
+    pub success_rate: f64,
+}
+
+/// Frequent sequence of tool calls observed in successful tasks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolSequencePattern {
+    /// Ordered tool names in the sequence.
+    pub tools: Vec<String>,
+    /// Number of tasks that exhibited the sequence.
+    pub support_count: u32,
+}
+
+/// Advisory warning surfaced during curriculum analysis.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolWarning {
+    /// Tool the warning applies to.
+    pub tool_name: String,
+    /// Human-readable warning message.
+    pub message: String,
 }
 
 /// Reorder tasks according to the chosen curriculum strategy.

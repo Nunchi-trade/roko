@@ -259,6 +259,7 @@ fn push_duration_alert(
     current_value: f64,
     threshold: f64,
     slice: Option<(&str, &str)>,
+    include_improvements: bool,
 ) {
     if baseline_value <= 0.0 {
         return;
@@ -282,6 +283,23 @@ fn push_duration_alert(
             ),
             slice: slice.map(|(role, complexity)| (role.to_string(), complexity.to_string())),
         });
+    } else if include_improvements && increase < -0.01 {
+        alerts.push(RegressionAlert {
+            metric_name: "duration".into(),
+            severity: AlertSeverity::Improvement,
+            baseline_value,
+            current_value,
+            change_fraction: increase,
+            threshold,
+            description: format!(
+                "{}Average duration decreased {:.1}% (baseline {:.0}ms -> current {:.0}ms)",
+                slice_prefix(slice),
+                (-increase) * 100.0,
+                baseline_value,
+                current_value,
+            ),
+            slice: slice.map(|(role, complexity)| (role.to_string(), complexity.to_string())),
+        });
     }
 }
 
@@ -291,6 +309,7 @@ fn push_iterations_alert(
     current_value: f64,
     threshold: f64,
     slice: Option<(&str, &str)>,
+    include_improvements: bool,
 ) {
     if baseline_value <= 0.0 {
         return;
@@ -309,6 +328,23 @@ fn push_iterations_alert(
                 "{}Average iterations increased {:.1}% (baseline {:.2} -> current {:.2})",
                 slice_prefix(slice),
                 increase * 100.0,
+                baseline_value,
+                current_value,
+            ),
+            slice: slice.map(|(role, complexity)| (role.to_string(), complexity.to_string())),
+        });
+    } else if include_improvements && increase < -0.01 {
+        alerts.push(RegressionAlert {
+            metric_name: "iterations".into(),
+            severity: AlertSeverity::Improvement,
+            baseline_value,
+            current_value,
+            change_fraction: increase,
+            threshold,
+            description: format!(
+                "{}Average iterations decreased {:.1}% (baseline {:.2} -> current {:.2})",
+                slice_prefix(slice),
+                (-increase) * 100.0,
                 baseline_value,
                 current_value,
             ),
@@ -345,8 +381,16 @@ pub fn detect_regressions(
     }
 
     let current_baseline = compute_baseline(current, thresholds.min_records);
-    let baseline_overall_iterations = reconstruct_overall_avg_iterations(&baseline.slices);
-    let current_overall_iterations = reconstruct_overall_avg_iterations(&current_baseline.slices);
+    let baseline_overall_iterations = if baseline.overall_avg_iterations > 0.0 {
+        baseline.overall_avg_iterations
+    } else {
+        reconstruct_overall_avg_iterations(&baseline.slices)
+    };
+    let current_overall_iterations = if current_baseline.overall_avg_iterations > 0.0 {
+        current_baseline.overall_avg_iterations
+    } else {
+        reconstruct_overall_avg_iterations(&current_baseline.slices)
+    };
 
     push_pass_rate_alert(
         &mut alerts,
@@ -370,6 +414,7 @@ pub fn detect_regressions(
         current_baseline.overall_avg_duration_ms,
         thresholds.duration_increase,
         None,
+        true,
     );
     push_iterations_alert(
         &mut alerts,
@@ -377,6 +422,7 @@ pub fn detect_regressions(
         current_overall_iterations,
         thresholds.iterations_increase,
         None,
+        true,
     );
 
     for baseline_slice in &baseline.slices {
@@ -421,6 +467,7 @@ pub fn detect_regressions(
             current_slice.avg_duration_ms,
             thresholds.duration_increase,
             slice,
+            true,
         );
         push_iterations_alert(
             &mut alerts,
@@ -428,6 +475,7 @@ pub fn detect_regressions(
             current_slice.avg_iterations,
             thresholds.iterations_increase,
             slice,
+            true,
         );
     }
 

@@ -67,6 +67,8 @@ pub mod active_inference;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
 pub mod anomaly;
+/// Research-oriented bandit shells used to match the learning docs.
+pub mod bandit_research;
 pub mod bandits;
 pub mod baseline;
 /// Budget tracking and enforcement guardrails for routing decisions.
@@ -93,6 +95,8 @@ pub mod events;
 pub mod hdc_clustering;
 /// HDC fingerprint helpers for episode memory.
 pub mod hdc_fingerprint;
+/// Heuristic, worldview, and research-provenance shells for learning parity.
+pub mod heuristics;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
@@ -107,6 +111,8 @@ pub mod prompt_experiment;
 pub mod provider_health;
 pub mod quality_judge;
 pub mod regression;
+/// Lookahead and calibration shells around the shipped cascade router.
+pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.
 pub mod routing_log;
 pub mod runtime_feedback;

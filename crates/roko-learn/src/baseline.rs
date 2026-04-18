@@ -54,6 +54,10 @@ pub struct Baseline {
     pub overall_avg_cost: f64,
     /// Overall average duration across all records.
     pub overall_avg_duration_ms: f64,
+    /// Overall average number of iterations across all records.
+    pub overall_avg_iterations: f64,
+    /// Total number of records in the overall aggregate.
+    pub overall_n_records: usize,
     /// Total number of records.
     pub total_records: usize,
     /// Minimum number of records that should be present before trusting the baseline.
@@ -132,6 +136,8 @@ pub fn compute_baseline(records: &[TaskMetric], min_records: usize) -> Baseline 
             overall_pass_rate: 0.0,
             overall_avg_cost: 0.0,
             overall_avg_duration_ms: 0.0,
+            overall_avg_iterations: 0.0,
+            overall_n_records: 0,
             total_records: 0,
             min_records_for_confidence: min_records,
         };
@@ -209,12 +215,16 @@ pub fn compute_baseline(records: &[TaskMetric], min_records: usize) -> Baseline 
         records.iter().map(|r| r.cost_usd).sum::<f64>() / total_records as f64;
     let overall_avg_duration_ms: f64 =
         records.iter().map(|r| r.wall_time_ms as f64).sum::<f64>() / total_records as f64;
+    let overall_avg_iterations: f64 =
+        records.iter().map(|r| f64::from(r.iteration)).sum::<f64>() / total_records as f64;
 
     Baseline {
         slices,
         overall_pass_rate,
         overall_avg_cost,
         overall_avg_duration_ms,
+        overall_avg_iterations,
+        overall_n_records: total_records,
         total_records,
         min_records_for_confidence: min_records,
     }

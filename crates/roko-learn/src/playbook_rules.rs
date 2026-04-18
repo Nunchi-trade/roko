@@ -351,6 +351,16 @@ impl PlaybookRules {
         }
     }
 
+    /// Record a validated prediction for `rule_id`.
+    pub fn validate(&self, rule_id: &str) {
+        self.record_outcome(rule_id, true);
+    }
+
+    /// Record a contradicted prediction for `rule_id`.
+    pub fn contradict(&self, rule_id: &str) {
+        self.record_outcome(rule_id, false);
+    }
+
     /// Remove all rules with `confidence < min_confidence` (strict).
     ///
     /// Returns the count of rules removed.

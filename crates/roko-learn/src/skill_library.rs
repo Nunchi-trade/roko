@@ -1065,6 +1065,37 @@ impl SkillLibrary {
         self.persist().await
     }
 
+    /// Register a skill, or update an existing entry with the same name.
+    ///
+    /// When a skill already exists, the higher-scoring definition wins while
+    /// preserving the stronger accumulated telemetry.
+    pub async fn register_or_update(&self, skill: &Skill) -> Result<(), SkillLibraryError> {
+        let mut incoming = skill.clone();
+        incoming.normalize();
+        {
+            let mut guard = self.skills.write();
+            if let Some(existing) = guard.get(&incoming.name).cloned() {
+                let mut merged = if incoming.score >= existing.score {
+                    incoming
+                } else {
+                    existing.clone()
+                };
+                merged.usage_count = merged.usage_count.max(existing.usage_count);
+                merged.match_count = merged.match_count.max(existing.match_count);
+                merged.validated_count = merged.validated_count.max(existing.validated_count);
+                merged.success_rate = if existing.usage_count == 0 {
+                    merged.success_rate
+                } else {
+                    existing.success_rate.max(merged.success_rate)
+                };
+                guard.insert(merged.name.clone(), merged);
+            } else {
+                guard.insert(incoming.name.clone(), incoming);
+            }
+        }
+        self.persist().await
+    }
+
     /// Retrieve a cloned snapshot of the skill with the given name.
     pub fn get(&self, name: &str) -> Option<Skill> {
         self.skills.read().get(name).cloned()
@@ -1121,6 +1152,23 @@ impl SkillLibrary {
             .read()
             .values()
             .filter(|s| s.tags.iter().any(|t| t == tag))
+            .cloned()
+            .collect()
+    }
+
+    /// Return all skills that touched any of the supplied `files`.
+    pub fn search_by_files(&self, files: &[String]) -> Vec<Skill> {
+        let file_set: std::collections::BTreeSet<&str> =
+            files.iter().map(std::string::String::as_str).collect();
+        self.skills
+            .read()
+            .values()
+            .filter(|skill| {
+                skill
+                    .files
+                    .iter()
+                    .any(|file| file_set.contains(file.as_str()))
+            })
             .cloned()
             .collect()
     }
