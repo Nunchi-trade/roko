@@ -18,12 +18,15 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
 pub mod agents_md;
+pub mod attention;
+pub mod auction;
 pub mod budget;
 pub mod compaction;
 pub mod context_assembler;
 pub mod context_provider;
 pub mod conventions;
 pub mod enrichment;
+pub mod foraging;
 pub mod prompt;
 pub mod prompt_hints;
 pub mod role_prompts;
@@ -35,6 +38,13 @@ pub mod templates;
 pub mod token_counter;
 
 pub use agents_md::AgentsMd;
+pub use attention::{
+    ModelAttentionCurves, PositionAttentionModel, dynamic_placement, placement_adjusted_score,
+};
+pub use auction::{
+    AuctionDiagnostics, FairnessConfig, LearningBidder, SectionAllocation, SubsystemId,
+    detect_bid_correlation, is_pareto_optimal,
+};
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
 pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
@@ -44,6 +54,10 @@ pub use context_provider::{
     is_local_model, pheromone_context,
 };
 pub use conventions::{ProjectConventions, detect_conventions};
+pub use foraging::{
+    MultiPatchForager, RetrievalSignal, SourceForagingProfile, estimate_context_sufficiency,
+    should_stop_searching, social_foraging_boost,
+};
 pub use prompt::{
     AttentionBidder, CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer,
     PromptSection, SectionPriority, estimate_tokens,
