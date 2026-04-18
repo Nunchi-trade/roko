@@ -87,11 +87,14 @@ impl RolePromptTemplate for QuickReviewerTemplate {
 
         // 3. workspace_map — Session / High / Middle / hard_cap 6k
         sections.push(
-            PromptSection::new("workspace_map", truncate(&input.workspace_map, budget.workspace_map))
-                .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Workspace)
-                .with_placement(Placement::Middle)
-                .with_hard_cap(budget.workspace_map),
+            PromptSection::new(
+                "workspace_map",
+                truncate(&input.workspace_map, budget.workspace_map),
+            )
+            .with_priority(SectionPriority::High)
+            .with_cache_layer(CacheLayer::Workspace)
+            .with_placement(Placement::Middle)
+            .with_hard_cap(budget.workspace_map),
         );
 
         // 4. brief — Session / High / Middle / hard_cap 4k

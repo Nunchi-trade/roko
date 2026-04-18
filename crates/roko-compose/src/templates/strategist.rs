@@ -96,11 +96,14 @@ impl RolePromptTemplate for StrategistTemplate {
         // 3. workspace_map — Session / High / Middle / hard_cap 12k
         // Strategist gets a generous workspace budget for full plan analysis.
         sections.push(
-            PromptSection::new("workspace_map", truncate(&input.workspace_map, workspace_map_cap))
-                .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Workspace)
-                .with_placement(Placement::Middle)
-                .with_hard_cap(workspace_map_cap),
+            PromptSection::new(
+                "workspace_map",
+                truncate(&input.workspace_map, workspace_map_cap),
+            )
+            .with_priority(SectionPriority::High)
+            .with_cache_layer(CacheLayer::Workspace)
+            .with_placement(Placement::Middle)
+            .with_hard_cap(workspace_map_cap),
         );
 
         // 4. prd2_extract — Session / High / Middle / hard_cap 8k

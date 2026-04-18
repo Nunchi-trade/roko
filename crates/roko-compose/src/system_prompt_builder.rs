@@ -33,8 +33,8 @@ use crate::prompt::estimate_tokens;
 use crate::prompt::{
     AttentionBidder, CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority,
 };
-use crate::token_counter::TokenCounter;
 use crate::templates::common::PromptBudget;
+use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
 use roko_core::{Budget, Composer, Context, Engram, Result, Scorer};

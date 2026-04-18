@@ -557,9 +557,11 @@ mod tests {
 
         let errors = log.entries_by_kind(&EventKind::ErrorOccurred);
         assert_eq!(errors.len(), 2);
-        assert!(errors
-            .iter()
-            .all(|e| e.event_kind == EventKind::ErrorOccurred));
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.event_kind == EventKind::ErrorOccurred)
+        );
     }
 
     #[test]

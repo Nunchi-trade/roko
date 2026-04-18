@@ -588,6 +588,28 @@ enum NeuroCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Copy the local neuro store into a backup directory.
+    Backup {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Directory to write the backup files into.
+        destination: PathBuf,
+        /// Overwrite existing backup files in the destination directory.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Restore the local neuro store from a backup directory.
+    Restore {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Directory created by `roko neuro backup`.
+        source: PathBuf,
+        /// Overwrite existing local neuro store files.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -4620,7 +4642,215 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
 
             Ok(EXIT_SUCCESS)
         }
+        NeuroCmd::Backup {
+            workdir,
+            destination,
+            force,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let report = backup_neuro_store(&wd, &destination, force)?;
+
+            if cli.json {
+                let payload = serde_json::json!({
+                    "workdir": wd,
+                    "backup_dir": destination,
+                    "knowledge_store": report.live.knowledge,
+                    "knowledge_backup": report.snapshot.knowledge,
+                    "confirmations_store": report.live.confirmations,
+                    "confirmations_backup": report.snapshot.confirmations,
+                    "confirmations_present": report.confirmations_present,
+                    "force": force,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!("Neuro backup written to {}:", destination.display());
+            println!("  knowledge: {}", report.snapshot.knowledge.display());
+            if report.confirmations_present {
+                println!(
+                    "  confirmations: {}",
+                    report.snapshot.confirmations.display()
+                );
+            } else {
+                println!("  confirmations: (none)");
+            }
+
+            Ok(EXIT_SUCCESS)
+        }
+        NeuroCmd::Restore {
+            workdir,
+            source,
+            force,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let report = restore_neuro_store(&wd, &source, force)?;
+
+            if cli.json {
+                let payload = serde_json::json!({
+                    "workdir": wd,
+                    "backup_dir": source,
+                    "knowledge_store": report.live.knowledge,
+                    "knowledge_backup": report.snapshot.knowledge,
+                    "confirmations_store": report.live.confirmations,
+                    "confirmations_backup": report.snapshot.confirmations,
+                    "confirmations_present": report.confirmations_present,
+                    "force": force,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!("Neuro backup restored from {}:", source.display());
+            println!("  knowledge: {}", report.live.knowledge.display());
+            if report.confirmations_present {
+                println!("  confirmations: {}", report.live.confirmations.display());
+            } else {
+                println!("  confirmations: (none)");
+            }
+
+            Ok(EXIT_SUCCESS)
+        }
     }
+}
+
+const NEURO_KNOWLEDGE_FILE: &str = "knowledge.jsonl";
+const NEURO_CONFIRMATIONS_FILE: &str = "knowledge-confirmations.jsonl";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NeuroFileSet {
+    knowledge: PathBuf,
+    confirmations: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NeuroTransferReport {
+    live: NeuroFileSet,
+    snapshot: NeuroFileSet,
+    confirmations_present: bool,
+}
+
+fn backup_neuro_store(
+    workdir: &Path,
+    destination: &Path,
+    force: bool,
+) -> Result<NeuroTransferReport> {
+    let live = neuro_live_files(workdir);
+    let snapshot = neuro_snapshot_files(destination);
+    let confirmations_present = sync_neuro_store_files(&live, &snapshot, force, "backup")?;
+    Ok(NeuroTransferReport {
+        live,
+        snapshot,
+        confirmations_present,
+    })
+}
+
+fn restore_neuro_store(workdir: &Path, source: &Path, force: bool) -> Result<NeuroTransferReport> {
+    let live = neuro_live_files(workdir);
+    let snapshot = neuro_snapshot_files(source);
+    let confirmations_present = sync_neuro_store_files(&snapshot, &live, force, "restore")?;
+    Ok(NeuroTransferReport {
+        live,
+        snapshot,
+        confirmations_present,
+    })
+}
+
+fn neuro_live_files(workdir: &Path) -> NeuroFileSet {
+    let store = KnowledgeStore::for_workdir(workdir);
+    NeuroFileSet {
+        knowledge: store.path().to_path_buf(),
+        confirmations: store.confirmations_path().to_path_buf(),
+    }
+}
+
+fn neuro_snapshot_files(root: &Path) -> NeuroFileSet {
+    NeuroFileSet {
+        knowledge: root.join(NEURO_KNOWLEDGE_FILE),
+        confirmations: root.join(NEURO_CONFIRMATIONS_FILE),
+    }
+}
+
+fn sync_neuro_store_files(
+    source: &NeuroFileSet,
+    destination: &NeuroFileSet,
+    force: bool,
+    operation: &str,
+) -> Result<bool> {
+    let destination_root = destination
+        .knowledge
+        .parent()
+        .ok_or_else(|| anyhow!("resolve {operation} destination directory"))?;
+    ensure_neuro_directory(destination_root, operation)?;
+
+    copy_neuro_file(&source.knowledge, &destination.knowledge, force, operation)?;
+    sync_optional_neuro_file(
+        &source.confirmations,
+        &destination.confirmations,
+        force,
+        operation,
+    )
+}
+
+fn ensure_neuro_directory(path: &Path, operation: &str) -> Result<()> {
+    if path.exists() && !path.is_dir() {
+        bail!(
+            "{operation} target must be a directory, found file at {}",
+            path.display()
+        );
+    }
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("create {operation} directory {}", path.display()))?;
+    Ok(())
+}
+
+fn copy_neuro_file(source: &Path, destination: &Path, force: bool, operation: &str) -> Result<()> {
+    if !source.exists() {
+        bail!("{operation} source file not found: {}", source.display());
+    }
+    if destination.exists() && !force {
+        bail!(
+            "{operation} would overwrite {}. Re-run with --force to replace it.",
+            destination.display()
+        );
+    }
+    std::fs::copy(source, destination).with_context(|| {
+        format!(
+            "{operation} {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sync_optional_neuro_file(
+    source: &Path,
+    destination: &Path,
+    force: bool,
+    operation: &str,
+) -> Result<bool> {
+    if source.exists() {
+        copy_neuro_file(source, destination, force, operation)?;
+        return Ok(true);
+    }
+
+    if destination.exists() {
+        if !force {
+            bail!(
+                "{operation} would leave stale optional file at {}. Re-run with --force to replace it.",
+                destination.display()
+            );
+        }
+        std::fs::remove_file(destination).with_context(|| {
+            format!(
+                "{operation} remove stale optional file {}",
+                destination.display()
+            )
+        })?;
+    }
+
+    Ok(false)
 }
 
 async fn cmd_subscription(cli: &Cli, cmd: SubscriptionCmd) -> Result<i32> {
@@ -6788,6 +7018,29 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_neuro_backup_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "neuro", "backup", "/tmp/neuro-backup"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Neuro {
+                cmd: NeuroCmd::Backup { destination, force, .. }
+            }) if destination == PathBuf::from("/tmp/neuro-backup") && !force
+        ));
+    }
+
+    #[test]
+    fn cli_parses_neuro_restore_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "neuro", "restore", "/tmp/neuro-backup", "--force"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Neuro {
+                cmd: NeuroCmd::Restore { source, force, .. }
+            }) if source == PathBuf::from("/tmp/neuro-backup") && force
+        ));
+    }
+
+    #[test]
     fn cli_parses_experiment_model_create_subcommand() {
         let cli = Cli::try_parse_from([
             "roko",
@@ -7364,6 +7617,51 @@ mod tests {
         assert!(roko.join("metrics").is_dir());
         assert!(roko.join("runtime").is_dir());
         assert!(roko.join("runs").is_dir());
+    }
+
+    #[test]
+    fn backup_neuro_store_copies_live_files_into_snapshot_dir() {
+        let workdir = tempdir().unwrap();
+        let backup_dir = tempdir().unwrap();
+        let neuro_dir = workdir.path().join(".roko").join("neuro");
+        std::fs::create_dir_all(&neuro_dir).unwrap();
+        std::fs::write(neuro_dir.join(NEURO_KNOWLEDGE_FILE), b"{\"id\":\"k1\"}\n").unwrap();
+        std::fs::write(
+            neuro_dir.join(NEURO_CONFIRMATIONS_FILE),
+            b"{\"id\":\"c1\"}\n",
+        )
+        .unwrap();
+
+        let report = backup_neuro_store(workdir.path(), backup_dir.path(), false).unwrap();
+
+        assert_eq!(
+            std::fs::read(report.snapshot.knowledge).unwrap(),
+            b"{\"id\":\"k1\"}\n"
+        );
+        assert_eq!(
+            std::fs::read(report.snapshot.confirmations).unwrap(),
+            b"{\"id\":\"c1\"}\n"
+        );
+        assert!(report.confirmations_present);
+    }
+
+    #[test]
+    fn restore_neuro_store_requires_force_for_existing_target_and_removes_stale_optional_file() {
+        let workdir = tempdir().unwrap();
+        let backup_dir = tempdir().unwrap();
+        let neuro_dir = workdir.path().join(".roko").join("neuro");
+        std::fs::create_dir_all(&neuro_dir).unwrap();
+        std::fs::write(neuro_dir.join(NEURO_KNOWLEDGE_FILE), b"old\n").unwrap();
+        std::fs::write(neuro_dir.join(NEURO_CONFIRMATIONS_FILE), b"stale\n").unwrap();
+        std::fs::write(backup_dir.path().join(NEURO_KNOWLEDGE_FILE), b"new\n").unwrap();
+
+        let err = restore_neuro_store(workdir.path(), backup_dir.path(), false).unwrap_err();
+        assert!(err.to_string().contains("Re-run with --force"));
+
+        let report = restore_neuro_store(workdir.path(), backup_dir.path(), true).unwrap();
+        assert_eq!(std::fs::read(report.live.knowledge).unwrap(), b"new\n");
+        assert!(!report.live.confirmations.exists());
+        assert!(!report.confirmations_present);
     }
 
     #[test]

@@ -301,7 +301,8 @@ impl RoleSystemPromptSpec {
             .with_affect_state(self.affect_state);
 
         if self.complexity != Complexity::Standard {
-            builder = builder.with_budget_profile(adjusted_budget_for(self.role, self.complexity).budget);
+            builder =
+                builder.with_budget_profile(adjusted_budget_for(self.role, self.complexity).budget);
         }
 
         if let Some(registry) = section_effectiveness {

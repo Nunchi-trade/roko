@@ -184,16 +184,10 @@ impl TaintTracker {
     /// if the signal's provenance is clean.
     pub fn observe_signal(&self, signal: &Engram) -> bool {
         if signal.provenance.tainted {
-            let reason = signal
-                .provenance
-                .taint_info
-                .as_ref()
-                .map_or_else(
-                    || {
-                    TaintReason::external(format!("signal author {}", signal.provenance.author))
-                },
-                    TaintReason::from_taint_info,
-                );
+            let reason = signal.provenance.taint_info.as_ref().map_or_else(
+                || TaintReason::external(format!("signal author {}", signal.provenance.author)),
+                TaintReason::from_taint_info,
+            );
             self.mark_tainted(signal.id, reason);
             true
         } else {

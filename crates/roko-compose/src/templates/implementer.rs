@@ -101,11 +101,14 @@ impl RolePromptTemplate for ImplementerTemplate {
 
         // 5. workspace_map — Session / High / hard_cap 20k
         sections.push(
-            PromptSection::new("workspace_map", truncate(&input.workspace_map, budget.workspace_map))
-                .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Workspace)
-                .with_placement(Placement::Middle)
-                .with_hard_cap(budget.workspace_map),
+            PromptSection::new(
+                "workspace_map",
+                truncate(&input.workspace_map, budget.workspace_map),
+            )
+            .with_priority(SectionPriority::High)
+            .with_cache_layer(CacheLayer::Workspace)
+            .with_placement(Placement::Middle)
+            .with_hard_cap(budget.workspace_map),
         );
 
         // 6. preflight — Session / Normal / hard_cap 5k
@@ -129,7 +132,7 @@ impl RolePromptTemplate for ImplementerTemplate {
         // 8. prev_reviews — Dynamic / High / hard_cap 15k (only when present)
         if let Some(ref reviews) = input.prev_reviews {
             sections.push(
-            PromptSection::new("prev_reviews", truncate(reviews, budget.reviews))
+                PromptSection::new("prev_reviews", truncate(reviews, budget.reviews))
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End)

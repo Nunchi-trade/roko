@@ -435,7 +435,8 @@ pub use context::{
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
 pub use knowledge_store::{
-    DEFAULT_GC_MIN_CONFIDENCE, KnowledgeConfirmationRecord, KnowledgeStats, KnowledgeStore,
+    DEFAULT_GC_MIN_CONFIDENCE, KnowledgeConfirmationRecord, KnowledgeQueryBreakdown,
+    KnowledgeQueryHit, KnowledgeStats, KnowledgeStore, QUERY_SCORE_FLOOR,
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};

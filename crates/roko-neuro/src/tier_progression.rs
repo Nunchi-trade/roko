@@ -26,6 +26,9 @@ const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
 const DEFAULT_PLAYBOOK_LIMIT: usize = 12;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 45.0;
+const TIER_PROGRESSION_D1_SOURCE: &str = "tier-progression:d1";
+const TIER_PROGRESSION_D2_SOURCE: &str = "tier-progression:d2";
+const TIER_PROGRESSION_D3_SOURCE: &str = "tier-progression:d3";
 /// Number of passing verdicts required to promote one tier.
 pub const PROMOTION_SUCCESS_THRESHOLD: usize = 3;
 /// Number of failing verdicts required to demote one tier.
@@ -469,7 +472,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Insight,
-            source: None,
+            source: Some(TIER_PROGRESSION_D1_SOURCE.to_string()),
             content: value.summary(),
             confidence: value.confidence,
             confidence_weight: value.confidence,
@@ -498,7 +501,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Heuristic,
-            source: None,
+            source: Some(TIER_PROGRESSION_D2_SOURCE.to_string()),
             content: value.summary(),
             confidence: value.confidence,
             confidence_weight: value.confidence,
@@ -527,7 +530,7 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
         Self {
             id: format!("playbook:{:016x}", stable_hash(value.markdown.as_bytes())),
             kind: KnowledgeKind::StrategyFragment,
-            source: None,
+            source: Some(TIER_PROGRESSION_D3_SOURCE.to_string()),
             content: value.markdown.clone(),
             confidence: if value.rules.is_empty() { 0.0 } else { 1.0 },
             confidence_weight: if value.rules.is_empty() { 0.0 } else { 1.0 },
@@ -1325,5 +1328,52 @@ mod tests {
             TierProgressionDecision::ReviewExpiry
         );
         assert_eq!(TierProgression::evaluate_promotion(&entry, &[]), None);
+    }
+
+    #[test]
+    fn evaluate_tier_progression_returns_no_change_at_saturation_bounds() {
+        let persistent = KnowledgeEntry {
+            id: "entry-persistent".to_string(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Already saturated".to_string(),
+            confidence: 0.9,
+            confidence_weight: 0.9,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-1".to_string()],
+            tags: vec!["tier".to_string()],
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now(),
+            half_life_days: 30.0,
+            tier: KnowledgeTier::Persistent,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+        };
+        let transient = KnowledgeEntry {
+            tier: KnowledgeTier::Transient,
+            ..persistent.clone()
+        };
+
+        let promote = vec![
+            GateVerdict::new("compile", true),
+            GateVerdict::new("test", true),
+            GateVerdict::new("lint", true),
+        ];
+        let demote = vec![
+            GateVerdict::new("compile", false),
+            GateVerdict::new("test", false),
+        ];
+
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&persistent, &promote),
+            TierProgressionDecision::Promote(KnowledgeTier::Persistent)
+        );
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&transient, &demote),
+            TierProgressionDecision::Demote(KnowledgeTier::Transient)
+        );
     }
 }

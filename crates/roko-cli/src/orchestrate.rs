@@ -118,7 +118,8 @@ use roko_learn::skill_library::{
 };
 use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
-    EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier, NeuroStore,
+    ContextAssembler, EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore,
+    KnowledgeTier, NeuroStore,
 };
 use roko_orchestrator::executor::recovery::{RecoveryEngine, WarningSeverity};
 use roko_orchestrator::worktree::{
@@ -8828,7 +8829,7 @@ impl PlanRunner {
         role: AgentRole,
         task_def: Option<&crate::task_parser::TaskDef>,
         task_text: &str,
-        task_tier: Option<&str>,
+        _task_tier: Option<&str>,
         current_model: &str,
     ) -> LearnedContext {
         use roko_learn::playbook_rules::MatchContext;
@@ -8913,12 +8914,7 @@ impl PlanRunner {
             parts.push(strategy_fragments);
         }
 
-        // 5. Durable knowledge queried from NeuroStore for this task.
-        if let Some(knowledge_context) = self.build_knowledge_context(task_text, task_tier) {
-            parts.push(knowledge_context);
-        }
-
-        // 6. Prompt experiment variants — check if any active experiment applies.
+        // 5. Prompt experiment variants — check if any active experiment applies.
         let mut experiment_variant_id = None;
         // Check standard prompt section names for active experiments.
         {
@@ -8932,7 +8928,7 @@ impl PlanRunner {
             }
         }
 
-        // 7. Crate familiarity score from cascade router observations (§9).
+        // 6. Crate familiarity score from cascade router observations (§9).
         let obs_count = self.learning.cascade_router().total_observations();
         if obs_count > 0 {
             let familiarity = (obs_count as f64 / 100.0).min(1.0);
@@ -8948,30 +8944,6 @@ impl PlanRunner {
             matched_rule_id,
             experiment_variant_id,
         }
-    }
-
-    fn build_knowledge_context(&self, task_text: &str, task_tier: Option<&str>) -> Option<String> {
-        let query_limit = match task_tier.unwrap_or("focused") {
-            "mechanical" => 3,
-            "focused" => 5,
-            "integrative" => 5,
-            "architectural" => 6,
-            _ => 4,
-        };
-
-        let Ok(entries) = NeuroStore::query(&self.knowledge_store, task_text, query_limit) else {
-            tracing::debug!("[orchestrate] knowledge query failed for task context");
-            return None;
-        };
-        let entries: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| entry.kind != KnowledgeKind::StrategyFragment)
-            .collect();
-        if entries.is_empty() {
-            return None;
-        }
-
-        Some(render_knowledge_context(entries))
     }
 
     /// Record a successful task result: persist output, episode, mark completed.
@@ -12264,6 +12236,10 @@ impl PlanRunner {
             tracker.last_context_knowledge_ids.clear();
         }
 
+        let task_affect_state = self
+            .current_pad_state()
+            .with_somatic_hint(somatic_signal.valence, somatic_signal.intensity);
+
         // ── Build context via tiered ContextProvider ───────────────
         let context_sections = if let Some(ref td) = task_def {
             let context_provider = ContextProvider::new(self.workdir.clone())
@@ -12346,6 +12322,23 @@ impl PlanRunner {
         } else {
             Vec::new()
         };
+        let (neuro_context_sections, neuro_context_knowledge_ids) = if let Some(ref td) = task_def {
+            self.build_context_assembler_sections(
+                plan_id,
+                td,
+                task_def.as_ref().map(|task| task.tier.as_str()),
+                task_affect_state,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+            tracker
+                .last_context_knowledge_ids
+                .extend(neuro_context_knowledge_ids);
+            tracker.last_context_knowledge_ids.sort();
+            tracker.last_context_knowledge_ids.dedup();
+        }
 
         let claude_tools_csv = claude_tool_allowlist_with(role, self.tool_registry.as_deref());
         let task_allowed_tools_csv = if let Some(task) = task_def.as_ref() {
@@ -12385,9 +12378,6 @@ impl PlanRunner {
             "[orchestrate] format_bandit: model={selected_model} role={role:?} tools={tool_count} → {selected_format:?}",
         );
 
-        let task_affect_state = self
-            .current_pad_state()
-            .with_somatic_hint(somatic_signal.valence, somatic_signal.intensity);
         let role_key = format!("{role:?}");
         let section_effectiveness = self.learning.section_effectiveness_snapshot();
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
@@ -12433,6 +12423,17 @@ impl PlanRunner {
                 )
                 .into_signal()
                 .map_err(|e| anyhow!("context section: {e}"))?,
+            );
+        }
+        for cs in neuro_context_sections {
+            sections.push(
+                apply_section_effectiveness_to_prompt_section(
+                    cs,
+                    &role_key,
+                    &section_effectiveness,
+                )
+                .into_signal()
+                .map_err(|e| anyhow!("neuro context section: {e}"))?,
             );
         }
 
@@ -14718,45 +14719,114 @@ impl PlanRunner {
     }
 }
 
-fn render_knowledge_context(entries: Vec<KnowledgeEntry>) -> String {
-    use std::fmt::Write as _;
-
-    let mut content = String::from("## Durable Knowledge\n");
-    for (idx, entry) in entries.into_iter().enumerate() {
-        let confidence = entry.confidence.clamp(0.0, 1.0);
-        let source = entry.source.as_deref().unwrap_or("-");
-        let tags = if entry.tags.is_empty() {
-            String::from("-")
-        } else {
-            entry.tags.join(", ")
-        };
-        let episodes = if entry.source_episodes.is_empty() {
-            String::from("-")
-        } else {
-            entry.source_episodes.join(", ")
-        };
-
-        if let Some(warning) = entry.refutation_warning() {
-            let _ = write!(
-                content,
-                "\n### {}. Warning {:?} ({confidence:.2})\nSource: {source}\nWeight: {:.2}\nTags: {tags}\nEpisodes: {episodes}\n{warning}\n```\n{}\n```\n",
-                idx + 1,
-                entry.kind,
-                entry.confidence_weight,
-                entry.content.trim(),
-            );
-        } else {
-            let _ = write!(
-                content,
-                "\n### {}. {:?} ({confidence:.2})\nSource: {source}\nTags: {tags}\nEpisodes: {episodes}\n```\n{}\n```\n",
-                idx + 1,
-                entry.kind,
-                entry.content.trim(),
-            );
-        }
+fn render_neuro_chunk(chunk: &roko_neuro::ContextChunk) -> Option<String> {
+    let heading = match &chunk.source {
+        roko_compose::ContextSource::KnowledgeEntry { .. } => "## Neuro Knowledge",
+        roko_compose::ContextSource::Episode { .. } => "## Neuro Episodes",
+        roko_compose::ContextSource::RecentSignal { .. } => "## Neuro Signals",
+        _ => return None,
+    };
+    let body = chunk.content.trim();
+    if body.is_empty() {
+        return None;
     }
+    Some(format!("{heading}\n\n{body}"))
+}
 
-    content
+impl PlanRunner {
+    fn build_context_assembler_sections(
+        &self,
+        plan_id: &str,
+        task_def: &crate::task_parser::TaskDef,
+        task_tier: Option<&str>,
+        affect_state: PadState,
+    ) -> (Vec<PromptSection>, Vec<String>) {
+        let mut task_input = task_def_to_input(task_def);
+        // Inline file excerpts are already covered by the main ContextProvider.
+        task_input.read_files.clear();
+
+        let neuro_budget = match task_tier.unwrap_or("focused") {
+            "mechanical" => 900,
+            "focused" => 1_400,
+            "integrative" => 1_600,
+            "architectural" => 2_000,
+            _ => 1_200,
+        };
+        let episode_store = Arc::new(EpisodeLogger::new(
+            self.workdir.join(".roko").join("episodes.jsonl"),
+        ));
+        let assembler =
+            ContextAssembler::new(Arc::new(self.knowledge_store.clone()), episode_store)
+                .with_affect_state(Some(affect_state))
+                .with_max_context_tokens(neuro_budget);
+        let signals_path = self.workdir.join(".roko").join("signals.jsonl");
+        let mut chunks = assembler.gather(&self.workdir, &task_input, plan_id, &signals_path);
+        chunks.retain(|chunk| {
+            matches!(
+                chunk.source,
+                roko_compose::ContextSource::KnowledgeEntry { .. }
+                    | roko_compose::ContextSource::Episode { .. }
+                    | roko_compose::ContextSource::RecentSignal { .. }
+            )
+        });
+
+        let mut knowledge_ids = chunks
+            .iter()
+            .filter_map(|chunk| match &chunk.source {
+                roko_compose::ContextSource::KnowledgeEntry { entry_id, .. } => {
+                    Some(entry_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        knowledge_ids.sort();
+        knowledge_ids.dedup();
+
+        let mut rendered = HashSet::new();
+        let sections = chunks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, chunk)| {
+                let content = render_neuro_chunk(&chunk)?;
+                if !rendered.insert(content.clone()) {
+                    return None;
+                }
+
+                let (priority, placement, hard_cap, label) = match &chunk.source {
+                    roko_compose::ContextSource::KnowledgeEntry { .. } => (
+                        SectionPriority::Normal,
+                        Placement::Middle,
+                        900,
+                        format!("neuro_knowledge_{idx}"),
+                    ),
+                    roko_compose::ContextSource::Episode { .. } => (
+                        SectionPriority::Low,
+                        Placement::Middle,
+                        700,
+                        format!("neuro_episode_{idx}"),
+                    ),
+                    roko_compose::ContextSource::RecentSignal { .. } => (
+                        SectionPriority::Low,
+                        Placement::Middle,
+                        600,
+                        format!("neuro_signal_{idx}"),
+                    ),
+                    _ => return None,
+                };
+
+                Some(
+                    PromptSection::new(label, content)
+                        .with_priority(priority)
+                        .with_cache_layer(roko_compose::CacheLayer::Volatile)
+                        .with_placement(placement)
+                        .with_bidder(AttentionBidder::Neuro)
+                        .with_hard_cap(hard_cap),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        (sections, knowledge_ids)
+    }
 }
 
 fn build_success_knowledge_entry(

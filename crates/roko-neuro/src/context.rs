@@ -2390,7 +2390,11 @@ mod tests {
                 .count(),
             1
         );
-        assert!(compressed.iter().any(|chunk| chunk.content == "unrelated deployment note"));
+        assert!(
+            compressed
+                .iter()
+                .any(|chunk| chunk.content == "unrelated deployment note")
+        );
     }
 
     #[test]

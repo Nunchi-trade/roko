@@ -22,6 +22,8 @@ use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeTier, NeuroStore};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
+/// Minimum total query score an entry must exceed to be returned.
+pub const QUERY_SCORE_FLOOR: f64 = 0.0;
 /// Minimum retained confidence for AntiKnowledge entries.
 const ANTI_KNOWLEDGE_CONFIDENCE_FLOOR: f64 = 0.3;
 /// Multiplier applied when a knowledge entry has multiple independent sources.
@@ -31,6 +33,8 @@ const MIN_TAG_OVERLAP: usize = 1;
 /// Minimum number of shared content keywords for two entries to be
 /// considered similar (applied when tag overlap meets the threshold).
 const MIN_KEYWORD_OVERLAP: usize = 2;
+#[cfg(feature = "hdc")]
+const HDC_SIMILARITY_BASELINE: f64 = 0.5;
 
 /// A record emitted when a newly ingested knowledge entry overlaps with
 /// an existing entry, indicating that an insight has been independently
@@ -87,6 +91,34 @@ pub struct KnowledgeStats {
     pub oldest_entry: Option<KnowledgeEntry>,
     /// Newest entry in the store, if any.
     pub newest_entry: Option<KnowledgeEntry>,
+}
+
+/// Score breakdown for one knowledge query result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeQueryBreakdown {
+    /// Keyword overlap between the query and the entry tags/content.
+    pub keyword_score: f64,
+    /// Confidence after anti-knowledge floors, confirmation boosts, and
+    /// emotional consolidation adjustments.
+    pub effective_confidence: f64,
+    /// Exponential freshness multiplier derived from effective half-life.
+    pub recency_factor: f64,
+    /// Retrieval multiplier derived from emotional congruence and intensity.
+    pub emotional_boost: f64,
+    /// Optional HDC similarity contribution when the `hdc` feature is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdc_similarity: Option<f64>,
+}
+
+/// One scored hit returned from the durable knowledge query path.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeQueryHit {
+    /// The matched entry.
+    pub entry: KnowledgeEntry,
+    /// Total score used for ranking.
+    pub total_score: f64,
+    /// Individual scoring components that contributed to `total_score`.
+    pub breakdown: KnowledgeQueryBreakdown,
 }
 
 impl KnowledgeStore {
@@ -169,13 +201,16 @@ impl KnowledgeStore {
             return Ok(());
         }
 
-        let entries = prepare_entries_for_ingest(entries);
-
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
         }
 
         let _guard = self.write_gate.lock();
+        let existing = self.read_all().unwrap_or_default();
+        let entries = dedupe_entries_for_ingest(prepare_entries_for_ingest(entries), &existing);
+        if entries.is_empty() {
+            return Ok(());
+        }
 
         let mut has_antiknowledge = false;
         for entry in &entries {
@@ -192,7 +227,7 @@ impl KnowledgeStore {
         }
 
         if has_antiknowledge {
-            let mut current = self.read_all()?;
+            let mut current = existing;
             current.extend(entries.iter().cloned());
 
             for anti in &entries {
@@ -217,7 +252,6 @@ impl KnowledgeStore {
         }
 
         // Detect confirmations by comparing new entries against existing ones.
-        let existing = self.read_all().unwrap_or_default();
         let confirmations = detect_confirmations(&existing, &entries);
 
         let mut file = OpenOptions::new()
@@ -247,13 +281,34 @@ impl KnowledgeStore {
     /// Relevance is scored by keyword overlap in tags/content, multiplied
     /// by confidence, recency, and a 1.5× confirmation boost for entries
     /// backed by multiple independent episodes. When the `hdc` feature is
-    /// enabled, HDC similarity is added as an extra signal.
+    /// enabled, HDC similarity is added as an extra signal. Only entries with
+    /// `total_score > QUERY_SCORE_FLOOR` are returned.
     ///
     /// # Errors
     ///
     /// Returns an error if the backing file cannot be read.
     pub fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
-        self.query_filtered(topic, limit, |_| true)
+        Ok(self
+            .query_hits(topic, limit)?
+            .into_iter()
+            .map(|hit| hit.entry)
+            .collect())
+    }
+
+    /// Query the store for scored hits relevant to `topic`.
+    ///
+    /// The current contract is:
+    ///
+    /// `total_score = keyword_score * effective_confidence * recency_factor * emotional_boost + hdc_similarity`
+    ///
+    /// where `hdc_similarity` is zero when the `hdc` feature is disabled or
+    /// the entry has no valid stored HDC vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_hits(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeQueryHit>> {
+        self.query_hits_filtered(topic, limit, |_| true)
     }
 
     /// Query the store for entries of a specific knowledge kind relevant to
@@ -273,15 +328,33 @@ impl KnowledgeStore {
         kind: KnowledgeKind,
         limit: usize,
     ) -> Result<Vec<KnowledgeEntry>> {
-        self.query_filtered(topic, limit, |entry| entry.kind == kind)
+        Ok(self
+            .query_kind_hits(topic, kind, limit)?
+            .into_iter()
+            .map(|hit| hit.entry)
+            .collect())
     }
 
-    fn query_filtered<F>(
+    /// Query the store for scored hits of a specific kind relevant to `topic`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_kind_hits(
+        &self,
+        topic: &str,
+        kind: KnowledgeKind,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeQueryHit>> {
+        self.query_hits_filtered(topic, limit, |entry| entry.kind == kind)
+    }
+
+    fn query_hits_filtered<F>(
         &self,
         topic: &str,
         limit: usize,
         mut include: F,
-    ) -> Result<Vec<KnowledgeEntry>>
+    ) -> Result<Vec<KnowledgeQueryHit>>
     where
         F: FnMut(&KnowledgeEntry) -> bool,
     {
@@ -294,31 +367,19 @@ impl KnowledgeStore {
         let topic_terms = tokenize(topic);
         let topic_norm = normalize(topic);
 
-        let mut scored: Vec<(f64, KnowledgeEntry)> = entries
+        let mut scored: Vec<KnowledgeQueryHit> = entries
             .into_iter()
             .filter_map(|entry| {
                 if !include(&entry) {
                     return None;
                 }
-                let keyword_score = keyword_score(&entry, &topic_terms, &topic_norm);
-                let recency = recency_factor(&entry, now);
-                let confidence = effective_confidence(&entry);
-                let emotional = emotional_retrieval_boost(&entry);
-                let score = keyword_score * confidence * recency * emotional;
-
-                #[cfg(feature = "hdc")]
-                let score = score + hdc_similarity(&entry, topic);
-
-                (score > 0.0).then_some((score, entry))
+                score_entry_for_query(entry, &topic_terms, &topic_norm, topic, now)
             })
             .collect();
 
-        scored.sort_by(|left, right| compare_scores(left, right));
-        Ok(scored
-            .into_iter()
-            .take(limit)
-            .map(|(_, entry)| entry)
-            .collect())
+        scored.sort_by(compare_hit_scores);
+        scored.truncate(limit);
+        Ok(scored)
     }
 
     /// Compute aggregate statistics over the current knowledge corpus.
@@ -889,20 +950,19 @@ fn confirmation_boost(entry: &KnowledgeEntry) -> f64 {
     }
 }
 
-fn compare_scores(
-    left: &(f64, KnowledgeEntry),
-    right: &(f64, KnowledgeEntry),
-) -> std::cmp::Ordering {
+fn compare_hit_scores(left: &KnowledgeQueryHit, right: &KnowledgeQueryHit) -> std::cmp::Ordering {
     right
-        .0
-        .partial_cmp(&left.0)
+        .total_score
+        .partial_cmp(&left.total_score)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| {
-            effective_confidence(&right.1)
-                .partial_cmp(&effective_confidence(&left.1))
+            right
+                .breakdown
+                .effective_confidence
+                .partial_cmp(&left.breakdown.effective_confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .then_with(|| right.1.created_at.cmp(&left.1.created_at))
+        .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
 }
 
 fn emotional_retrieval_boost(entry: &KnowledgeEntry) -> f64 {
@@ -923,7 +983,46 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
     };
     let entry_vec = HdcVector::from_bytes(&bytes);
     let topic_vec = KnowledgeHdcEncoder.encode_query(topic);
-    topic_vec.similarity(&entry_vec) as f64
+    (topic_vec.similarity(&entry_vec) as f64 - HDC_SIMILARITY_BASELINE).max(0.0)
+}
+
+fn score_entry_for_query(
+    entry: KnowledgeEntry,
+    topic_terms: &[String],
+    topic_norm: &str,
+    _topic: &str,
+    now: DateTime<Utc>,
+) -> Option<KnowledgeQueryHit> {
+    let keyword = keyword_score(&entry, topic_terms, topic_norm);
+    let recency = recency_factor(&entry, now);
+    let confidence = effective_confidence(&entry);
+    let emotional = emotional_retrieval_boost(&entry);
+
+    #[cfg(feature = "hdc")]
+    let hdc = {
+        let similarity = hdc_similarity(&entry, _topic);
+        (similarity > 0.0).then_some(similarity)
+    };
+    #[cfg(feature = "hdc")]
+    let hdc_contribution = hdc.unwrap_or(0.0);
+
+    #[cfg(not(feature = "hdc"))]
+    let hdc: Option<f64> = None;
+    #[cfg(not(feature = "hdc"))]
+    let hdc_contribution = 0.0;
+
+    let total = keyword * confidence * recency * emotional + hdc_contribution;
+    (total > QUERY_SCORE_FLOOR).then_some(KnowledgeQueryHit {
+        entry,
+        total_score: total,
+        breakdown: KnowledgeQueryBreakdown {
+            keyword_score: keyword,
+            effective_confidence: confidence,
+            recency_factor: recency,
+            emotional_boost: emotional,
+            hdc_similarity: hdc,
+        },
+    })
 }
 
 /// Compare two knowledge entries for topic-level similarity using tag
@@ -952,6 +1051,25 @@ fn entries_are_similar(existing: &KnowledgeEntry, new_entry: &KnowledgeEntry) ->
     let keyword_overlap = existing_keywords.intersection(&new_keywords).count();
 
     keyword_overlap >= MIN_KEYWORD_OVERLAP
+}
+
+fn dedupe_entries_for_ingest(
+    entries: Vec<KnowledgeEntry>,
+    existing: &[KnowledgeEntry],
+) -> Vec<KnowledgeEntry> {
+    let mut seen_ids = existing
+        .iter()
+        .filter(|entry| !entry.id.trim().is_empty())
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let id = entry.id.trim();
+            id.is_empty() || seen_ids.insert(id.to_string())
+        })
+        .collect()
 }
 
 /// Scan new entries against existing entries to find confirmations.
@@ -1161,6 +1279,131 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "k-diverse");
         assert_eq!(results[1].id, "k-narrow");
+    }
+
+    #[test]
+    fn query_hits_expose_scoring_breakdown() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Rust async actors and memory stores",
+                &["rust", "async"],
+                0.9,
+                &["ep-a", "ep-b"],
+                now,
+            ))
+            .expect("add first");
+        store
+            .add(entry(
+                KnowledgeKind::Warning,
+                "k2",
+                "Retry loops can amplify flaky async tests",
+                &["testing"],
+                0.8,
+                &["ep-c"],
+                now - Duration::days(10),
+            ))
+            .expect("add second");
+
+        let hits = store.query_hits("rust async", 5).expect("query hits");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].entry.id, "k1");
+        assert!(hits[0].total_score > QUERY_SCORE_FLOOR);
+        assert!(hits[0].breakdown.keyword_score >= 2.0);
+        assert!(hits[0].breakdown.effective_confidence > hits[0].entry.confidence);
+        assert!(hits[0].breakdown.recency_factor > 0.9);
+    }
+
+    #[test]
+    fn query_kind_hits_filter_by_kind() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Prefer small async state machines",
+                &["async"],
+                0.9,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add insight");
+        store
+            .add(entry(
+                KnowledgeKind::StrategyFragment,
+                "k2",
+                "Break async migrations into small compileable steps",
+                &["async", "migration"],
+                0.95,
+                &["ep-b", "ep-c", "ep-d"],
+                now,
+            ))
+            .expect("add strategy fragment");
+
+        let hits = store
+            .query_kind_hits("async migration", KnowledgeKind::StrategyFragment, 5)
+            .expect("query kind hits");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.id, "k2");
+        assert_eq!(hits[0].entry.kind, KnowledgeKind::StrategyFragment);
+    }
+
+    #[test]
+    fn ingest_skips_duplicate_ids() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+        let duplicate = entry(
+            KnowledgeKind::Insight,
+            "dup",
+            "Keep one durable copy",
+            &["dup"],
+            0.8,
+            &["ep-a"],
+            now,
+        );
+
+        store
+            .ingest(vec![duplicate.clone(), duplicate.clone()])
+            .expect("ingest duplicates");
+        store.add(duplicate).expect("add duplicate again");
+
+        let all = store.read_all().expect("read all");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "dup");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn hdc_only_unrelated_entries_do_not_clear_query_floor() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Completely unrelated note about shell prompts",
+                &["misc"],
+                0.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add unrelated");
+
+        let hits = store
+            .query_hits("database migrations", 5)
+            .expect("query hits");
+        assert!(hits.is_empty());
     }
 
     #[test]
