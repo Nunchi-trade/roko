@@ -25,7 +25,6 @@ pub mod state;
 use protocol::{AgentInboundFrame, RelayEvent, RelayMessageRequest, RelayOutboundFrame};
 use state::{AwaitMessageError, BeginMessageError, RegisteredAgent, RelayState};
 
-#[must_use]
 pub fn app(state: Arc<RelayState>) -> Router {
     Router::new()
         .route("/relay/health", get(health))
@@ -103,9 +102,8 @@ fn await_message_error(error: AwaitMessageError) -> (StatusCode, Json<Value>) {
 
 async fn handle_agent_socket(state: Arc<RelayState>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let first_frame = match next_text_frame(&mut stream).await {
-        Some(text) => text,
-        None => return,
+    let Some(first_frame) = next_text_frame(&mut stream).await else {
+        return;
     };
 
     let hello = match serde_json::from_str::<AgentInboundFrame>(&first_frame) {
@@ -158,7 +156,7 @@ async fn handle_agent_socket(state: Arc<RelayState>, socket: WebSocket) {
     while let Some(message) = stream.next().await {
         match message {
             Ok(Message::Text(text)) => {
-                if !handle_agent_frame(&state, &agent_id, &outbound_tx, text.as_str()).await {
+                if !handle_agent_frame(&state, &agent_id, &outbound_tx, text.as_str()) {
                     break;
                 }
             }
@@ -175,7 +173,7 @@ async fn handle_agent_socket(state: Arc<RelayState>, socket: WebSocket) {
     writer.abort();
 }
 
-async fn handle_agent_frame(
+fn handle_agent_frame(
     state: &Arc<RelayState>,
     agent_id: &str,
     outbound_tx: &mpsc::UnboundedSender<RelayOutboundFrame>,
@@ -294,9 +292,8 @@ async fn next_text_frame(stream: &mut futures::stream::SplitStream<WebSocket>) -
     loop {
         match stream.next().await {
             Some(Ok(Message::Text(text))) => return Some(text.to_string()),
-            Some(Ok(Message::Close(_))) | None => return None,
+            Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
             Some(Ok(_)) => {}
-            Some(Err(_)) => return None,
         }
     }
 }

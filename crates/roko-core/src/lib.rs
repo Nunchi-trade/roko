@@ -118,7 +118,13 @@ pub use operating_frequency::{
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use prediction::{
-    PredictionCalibrationSource, PredictionCalibrationSummary, PredictionPolicy, PredictiveScorer,
+    AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,
+    ChainQueryPayload, ChainTarget, ChangeContext, CodingMetric, CodingQueryPayload, CodingScope,
+    ExponentialMovingAverage, OperationsMetric, OperationsQueryPayload, Oracle, OracleDomain,
+    OracleQuery, PredictedValue, Prediction, PredictionAccuracy, PredictionCalibrationSource,
+    PredictionCalibrationSummary, PredictionInterval, PredictionOutcome, PredictionPolicy,
+    PredictionProvenance, PredictionStore, PredictiveScorer, QueryPayload, ResearchMetric,
+    ResearchQueryPayload, ResidualCorrector, SourceReference,
 };
 pub use project::{
     DetectedBuildSystem, Language, ProjectInfo, detect_from_files,

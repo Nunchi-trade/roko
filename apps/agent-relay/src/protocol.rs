@@ -26,7 +26,7 @@ pub struct AgentHello {
 }
 
 /// Directory entry for a connected agent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectedAgent {
     pub agent_id: String,
     #[serde(default)]
@@ -60,7 +60,7 @@ impl RelayMessageRequest {
 }
 
 /// HTTP response returned after a forwarded message completes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayMessageResponse {
     pub message_id: String,
     pub agent_id: String,
@@ -90,7 +90,7 @@ pub enum AgentInboundFrame {
 }
 
 /// Frames the relay sends to agents.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RelayOutboundFrame {
     Ack {
@@ -109,7 +109,7 @@ pub enum RelayOutboundFrame {
 }
 
 /// Optional dashboard event stream payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RelayEvent {
     AgentConnected {

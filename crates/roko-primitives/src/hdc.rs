@@ -118,6 +118,12 @@ impl HdcVector {
         Self { bits }
     }
 
+    /// Alias for [`HdcVector::bind`] using the XOR terminology from TA docs.
+    #[must_use]
+    pub fn xor(&self, other: &Self) -> Self {
+        self.bind(other)
+    }
+
     /// Bundles a slice of vectors using majority vote (tie → 0).
     #[must_use]
     pub fn bundle(vectors: &[&Self]) -> Self {
@@ -221,6 +227,11 @@ impl HdcVector {
         }
         let differing_bits = u16::try_from(differing_bits).unwrap_or(u16::MAX);
         1.0_f32 - (f32::from(differing_bits) / 10_240.0_f32)
+    }
+
+    /// Alias for [`HdcVector::similarity`] using the TA docs' Hamming name.
+    pub fn hamming_similarity(&self, other: &Self) -> f32 {
+        self.similarity(other)
     }
 
     /// Returns Hamming similarity against an rkyv-archived vector (zero-copy).
