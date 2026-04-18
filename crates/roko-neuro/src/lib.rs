@@ -393,6 +393,19 @@ pub trait NeuroStore: Sized {
     /// knowledge entries needed to answer the query.
     fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>>;
 
+    /// Query by a serialized 10,240-bit fingerprint and return the nearest
+    /// durable records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fingerprint length is invalid or the backend
+    /// cannot read the stored knowledge entries needed to answer the query.
+    fn query_similar(
+        &self,
+        fingerprint: &[u8],
+        limit: usize,
+    ) -> Result<Vec<crate::knowledge_store::KnowledgeSimilarityHit>>;
+
     /// Ingest a batch of knowledge entries.
     ///
     /// # Errors
@@ -436,7 +449,7 @@ pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
 pub use knowledge_store::{
     DEFAULT_GC_MIN_CONFIDENCE, KnowledgeConfirmationRecord, KnowledgeQueryBreakdown,
-    KnowledgeQueryHit, KnowledgeStats, KnowledgeStore, QUERY_SCORE_FLOOR,
+    KnowledgeQueryHit, KnowledgeSimilarityHit, KnowledgeStats, KnowledgeStore, QUERY_SCORE_FLOOR,
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};

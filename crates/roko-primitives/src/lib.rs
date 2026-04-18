@@ -17,5 +17,7 @@
 pub mod hdc;
 pub mod tier;
 
-pub use hdc::HdcVector;
+pub use hdc::{
+    BundleAccumulator, DecayingBundleAccumulator, HDC_BITS, HDC_BYTES, HdcVector, ItemMemory,
+};
 pub use tier::{InferenceTier, T2_VITALITY_THRESHOLD, TierError, TierRouter};

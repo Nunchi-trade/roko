@@ -11,7 +11,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,6 @@ pub struct KnowledgeConfirmationRecord {
     pub confirming_entry_id: String,
 }
 
-#[cfg(feature = "hdc")]
 const HDC_VECTOR_BYTES: usize = 1280;
 
 #[cfg(feature = "hdc")]
@@ -119,6 +118,15 @@ pub struct KnowledgeQueryHit {
     pub total_score: f64,
     /// Individual scoring components that contributed to `total_score`.
     pub breakdown: KnowledgeQueryBreakdown,
+}
+
+/// One similarity-ranked hit returned from the durable fingerprint query path.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeSimilarityHit {
+    /// The matched entry.
+    pub entry: KnowledgeEntry,
+    /// Raw Hamming similarity against the supplied fingerprint.
+    pub similarity: f32,
 }
 
 impl KnowledgeStore {
@@ -293,6 +301,44 @@ impl KnowledgeStore {
             .into_iter()
             .map(|hit| hit.entry)
             .collect())
+    }
+
+    /// Query the store by a serialized 10,240-bit fingerprint.
+    ///
+    /// Entries without a valid stored fingerprint are skipped. Results are
+    /// ranked by raw Hamming similarity and then by effective confidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `fingerprint` is not 1280 bytes long or the
+    /// backing file cannot be read.
+    pub fn query_similar(
+        &self,
+        fingerprint: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSimilarityHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        ensure!(
+            fingerprint.len() == HDC_VECTOR_BYTES,
+            "knowledge fingerprints must be {HDC_VECTOR_BYTES} bytes, got {}",
+            fingerprint.len()
+        );
+
+        let entries = self.read_all()?;
+        let mut scored = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let similarity = similarity_against_entry(fingerprint, &entry)?;
+                Some(KnowledgeSimilarityHit { entry, similarity })
+            })
+            .collect::<Vec<_>>();
+
+        scored.sort_by(compare_similarity_hits);
+        scored.truncate(limit);
+        Ok(scored)
     }
 
     /// Query the store for scored hits relevant to `topic`.
@@ -662,6 +708,14 @@ impl NeuroStore for KnowledgeStore {
         KnowledgeStore::query(self, topic, limit)
     }
 
+    fn query_similar(
+        &self,
+        fingerprint: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSimilarityHit>> {
+        KnowledgeStore::query_similar(self, fingerprint, limit)
+    }
+
     fn ingest(&mut self, entries: Vec<KnowledgeEntry>) -> Result<()> {
         KnowledgeStore::ingest(self, entries)
     }
@@ -850,6 +904,23 @@ fn inferred_retention_tier(entry: &KnowledgeEntry) -> KnowledgeTier {
     }
 }
 
+fn compare_similarity_hits(
+    left: &KnowledgeSimilarityHit,
+    right: &KnowledgeSimilarityHit,
+) -> std::cmp::Ordering {
+    right
+        .similarity
+        .partial_cmp(&left.similarity)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            effective_confidence(&right.entry)
+                .partial_cmp(&effective_confidence(&left.entry))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
+        .then_with(|| left.entry.id.cmp(&right.entry.id))
+}
+
 #[cfg(feature = "hdc")]
 fn compare_hits(left: &MemoryHit, right: &MemoryHit) -> std::cmp::Ordering {
     right
@@ -971,6 +1042,20 @@ fn emotional_retrieval_boost(entry: &KnowledgeEntry) -> f64 {
 
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
     kind.as_str()
+}
+
+fn similarity_against_entry(fingerprint: &[u8], entry: &KnowledgeEntry) -> Option<f32> {
+    let stored = entry.hdc_vector.as_deref()?;
+    if stored.len() != HDC_VECTOR_BYTES {
+        return None;
+    }
+
+    let differing_bits = fingerprint
+        .iter()
+        .zip(stored.iter())
+        .map(|(left, right)| (left ^ right).count_ones())
+        .sum::<u32>();
+    Some(1.0 - (differing_bits as f32 / (HDC_VECTOR_BYTES * 8) as f32))
 }
 
 #[cfg(feature = "hdc")]
@@ -1354,6 +1439,76 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.id, "k2");
         assert_eq!(hits[0].entry.kind, KnowledgeKind::StrategyFragment);
+    }
+
+    #[test]
+    fn query_similar_ranks_by_hamming_similarity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut exact = entry(
+            KnowledgeKind::Insight,
+            "k-exact",
+            "Exact fingerprint match",
+            &["fingerprint"],
+            0.9,
+            &["ep-a"],
+            now,
+        );
+        exact.hdc_vector = Some(vec![0; HDC_VECTOR_BYTES]);
+
+        let mut close = entry(
+            KnowledgeKind::Insight,
+            "k-close",
+            "Close fingerprint match",
+            &["fingerprint"],
+            0.8,
+            &["ep-b"],
+            now,
+        );
+        let mut close_fp = vec![0; HDC_VECTOR_BYTES];
+        close_fp[0] = 0b0000_0011;
+        close.hdc_vector = Some(close_fp);
+
+        let mut far = entry(
+            KnowledgeKind::Insight,
+            "k-far",
+            "Far fingerprint match",
+            &["fingerprint"],
+            0.7,
+            &["ep-c"],
+            now,
+        );
+        far.hdc_vector = Some(vec![0xFF; HDC_VECTOR_BYTES]);
+
+        store.ingest(vec![far, close, exact]).expect("ingest");
+
+        let query = vec![0; HDC_VECTOR_BYTES];
+        let hits = store.query_similar(&query, 3).expect("query similar");
+
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].entry.id, "k-exact");
+        assert_eq!(hits[1].entry.id, "k-close");
+        assert_eq!(hits[2].entry.id, "k-far");
+        assert!(hits[0].similarity > hits[1].similarity);
+        assert!(hits[1].similarity > hits[2].similarity);
+    }
+
+    #[test]
+    fn query_similar_rejects_invalid_fingerprint_length() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+
+        let error = store
+            .query_similar(&[0_u8; 16], 1)
+            .expect_err("invalid fingerprint length should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("knowledge fingerprints must be 1280 bytes")
+        );
     }
 
     #[test]
