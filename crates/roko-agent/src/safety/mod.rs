@@ -31,6 +31,7 @@ pub mod bash;
 pub mod capabilities;
 pub mod contract;
 pub mod git;
+pub mod hooks;
 pub mod network;
 pub mod path;
 pub mod provenance;
@@ -60,6 +61,7 @@ use self::scrub::ScrubPolicy;
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
 pub use authz::{AuthorizationEvidence, AuthorizationSource, AuthzDecision, EscalationTarget};
 pub use capabilities::{AgentWarrant, Capability, CapabilityError, check_capability, delegate};
+pub use hooks::{DataSink, HookDecision, SafetyAuditRecord, SafetyHook, TaintLabel, TaintedString};
 pub use provenance::{AttestationLevel, Custody, Taint};
 pub use risk::{
     BetaDistribution, BudgetDimension, OperationalConfidenceTracker, SafetyBudget,

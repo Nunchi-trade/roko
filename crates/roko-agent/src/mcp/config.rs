@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 pub struct McpServerConfig {
     /// Logical name for the server (used as prefix in tool names).
     pub name: String,
+    /// Transport used to reach the server.
+    #[serde(default)]
+    pub transport: McpTransportConfig,
     /// The command to spawn the server process.
+    #[serde(default)]
     pub command: String,
     /// Arguments passed to the command.
     #[serde(default)]
@@ -20,6 +24,23 @@ pub struct McpServerConfig {
     /// Environment variables set for the server process.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Streamable HTTP endpoint for remote MCP servers.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Optional bearer token or environment placeholder for HTTP auth.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+/// MCP server transport kind.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransportConfig {
+    /// Local child process over newline-delimited JSON-RPC.
+    #[default]
+    Stdio,
+    /// Remote Streamable HTTP endpoint.
+    Http,
 }
 
 /// Top-level MCP configuration parsed from `.mcp.json`.
@@ -119,6 +140,7 @@ mod tests {
             "servers": [
                 {
                     "name": "filesystem",
+                    "transport": "stdio",
                     "command": "npx",
                     "args": ["-y", "@modelcontextprotocol/server-filesystem"],
                     "env": {"HOME": "/tmp"}
@@ -133,6 +155,7 @@ mod tests {
         let config: McpConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.servers.len(), 2);
         assert_eq!(config.servers[0].name, "filesystem");
+        assert_eq!(config.servers[0].transport, McpTransportConfig::Stdio);
         assert_eq!(config.servers[0].command, "npx");
         assert_eq!(
             config.servers[0].args,
@@ -141,6 +164,27 @@ mod tests {
         assert_eq!(config.servers[0].env.get("HOME").unwrap(), "/tmp");
         assert_eq!(config.servers[1].name, "git");
         assert!(config.servers[1].env.is_empty());
+        assert_eq!(config.servers[1].transport, McpTransportConfig::Stdio);
+    }
+
+    #[test]
+    fn mcp_config_parse_http_transport() {
+        let json = r#"{
+            "servers": [{
+                "name": "remote-tools",
+                "transport": "http",
+                "endpoint": "https://tools.example.com/mcp",
+                "auth_token": "${MCP_AUTH_TOKEN}"
+            }]
+        }"#;
+        let config: McpConfig = serde_json::from_str(json).unwrap();
+        let server = &config.servers[0];
+        assert_eq!(server.transport, McpTransportConfig::Http);
+        assert_eq!(
+            server.endpoint.as_deref(),
+            Some("https://tools.example.com/mcp")
+        );
+        assert_eq!(server.auth_token.as_deref(), Some("${MCP_AUTH_TOKEN}"));
     }
 
     #[test]
@@ -156,9 +200,12 @@ mod tests {
         let config = McpConfig {
             servers: vec![McpServerConfig {
                 name: "test".to_string(),
+                transport: McpTransportConfig::Stdio,
                 command: "echo".to_string(),
                 args: vec![],
                 env: HashMap::new(),
+                endpoint: None,
+                auth_token: None,
             }],
         };
         let config_path = tmp.path().join(".mcp.json");
@@ -181,9 +228,12 @@ mod tests {
         let config = McpConfig {
             servers: vec![McpServerConfig {
                 name: "parent".to_string(),
+                transport: McpTransportConfig::Stdio,
                 command: "cat".to_string(),
                 args: vec![],
                 env: HashMap::new(),
+                endpoint: None,
+                auth_token: None,
             }],
         };
         let config_path = tmp.path().join(".mcp.json");

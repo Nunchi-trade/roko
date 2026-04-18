@@ -12,15 +12,15 @@ use super::client::McpToolDef;
 
 /// Convert an MCP tool definition into a Roko [`ToolDef`].
 ///
-/// The tool name is prefixed with `{server_prefix}__` to avoid collisions
+/// The tool name is prefixed with `{server_prefix}.` to avoid collisions
 /// when multiple MCP servers expose identically-named tools.
 ///
 /// MCP tools are categorised as [`ToolCategory::Mcp`] and granted
-/// read-only permissions by default (callers can upgrade permissions
-/// after conversion if needed).
+/// write permissions by default. A `readOnly: true` MCP annotation maps
+/// the tool back down to read-only access.
 #[must_use]
 pub fn mcp_to_tool_def(mcp_tool: &McpToolDef, server_prefix: &str) -> ToolDef {
-    let prefixed_name = format!("{server_prefix}__{}", mcp_tool.name);
+    let prefixed_name = format!("{server_prefix}.{}", mcp_tool.name);
 
     let description = mcp_tool
         .description
@@ -34,19 +34,34 @@ pub fn mcp_to_tool_def(mcp_tool: &McpToolDef, server_prefix: &str) -> ToolDef {
             ToolSchema::from_value(v.clone())
         });
 
+    let annotations = mcp_tool.annotations.as_ref();
+    let read_only = annotations.and_then(|a| a.read_only).unwrap_or(false);
+    let open_world = annotations.and_then(|a| a.open_world).unwrap_or(false);
+    let idempotent = annotations.and_then(|a| a.idempotent).unwrap_or(false);
+
     ToolDef {
         name: prefixed_name,
         description,
         parameters: schema,
         category: ToolCategory::Mcp,
-        permission: ToolPermission::read_only(),
+        permission: ToolPermission {
+            read: true,
+            write: !read_only,
+            exec: false,
+            git: false,
+            network: open_world,
+        },
         timeout_ms: 60_000,
         concurrency: ToolConcurrency::Parallel,
-        idempotent: false,
+        idempotent,
         source: ToolSource::Mcp {
             server: server_prefix.to_string(),
         },
-        metadata: None,
+        metadata: annotations.map(|annotations| {
+            serde_json::json!({
+                "mcp_annotations": annotations,
+            })
+        }),
     }
 }
 
@@ -65,6 +80,7 @@ mod tests {
                 },
                 "required": ["path"]
             })),
+            annotations: None,
         }
     }
 
@@ -72,7 +88,7 @@ mod tests {
     fn mcp_to_tool_def_prefixes_name() {
         let mcp = sample_mcp_tool();
         let def = mcp_to_tool_def(&mcp, "filesystem");
-        assert_eq!(def.name, "filesystem__read_file");
+        assert_eq!(def.name, "filesystem.read_file");
     }
 
     #[test]
@@ -97,6 +113,7 @@ mod tests {
             name: "search".to_string(),
             description: None,
             input_schema: None,
+            annotations: None,
         };
         let def = mcp_to_tool_def(&mcp, "code");
         assert_eq!(def.description, "MCP tool: search");
@@ -108,6 +125,7 @@ mod tests {
             name: "list".to_string(),
             description: Some("List items".to_string()),
             input_schema: None,
+            annotations: None,
         };
         let def = mcp_to_tool_def(&mcp, "srv");
         let schema = def.parameters.as_value();
@@ -130,7 +148,8 @@ mod tests {
         assert_eq!(def.concurrency, ToolConcurrency::Parallel);
         assert!(!def.idempotent);
         assert!(def.permission.read);
-        assert!(!def.permission.write);
+        assert!(def.permission.write);
+        assert!(!def.permission.network);
         assert_eq!(
             def.source,
             ToolSource::Mcp {
@@ -138,5 +157,27 @@ mod tests {
             }
         );
         assert_eq!(def.metadata, None);
+    }
+
+    #[test]
+    fn mcp_to_tool_def_maps_read_only_annotation() {
+        let mut mcp = sample_mcp_tool();
+        mcp.annotations = Some(super::super::client::McpToolAnnotations {
+            read_only: Some(true),
+            open_world: Some(true),
+            idempotent: Some(true),
+            title: Some("Read file".to_string()),
+        });
+
+        let def = mcp_to_tool_def(&mcp, "fs");
+
+        assert!(def.permission.read);
+        assert!(!def.permission.write);
+        assert!(def.permission.network);
+        assert!(def.idempotent);
+        assert_eq!(
+            def.metadata.as_ref().unwrap()["mcp_annotations"]["title"],
+            "Read file"
+        );
     }
 }

@@ -15,10 +15,11 @@ pub mod to_tool_def;
 
 pub use bridge::{McpBridgeError, discover_mcp_tools};
 pub use client::{
-    McpClient, McpRequest, McpResponse, McpToolDef, McpToolResult, StdioTransport, Transport,
+    MCP_PROTOCOL_VERSION, McpClient, McpRequest, McpResponse, McpToolAnnotations, McpToolDef,
+    McpToolResult, StdioTransport, Transport,
 };
-pub use config::{McpConfig, McpServerConfig, find_mcp_config};
+pub use config::{McpConfig, McpServerConfig, McpTransportConfig, find_mcp_config};
 pub use dedup::dedup_tools;
-pub use dynamic_registry::DynamicToolRegistry;
+pub use dynamic_registry::{DynamicToolRegistry, MergedToolRegistry};
 pub use handler::{McpHandlerResolver, McpToolHandler};
 pub use to_tool_def::mcp_to_tool_def;

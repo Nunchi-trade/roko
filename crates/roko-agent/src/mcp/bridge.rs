@@ -8,7 +8,9 @@
 use roko_core::tool::ToolDef;
 use tokio::time::{Duration, timeout};
 
-use super::{McpClient, McpConfig, StdioTransport, dedup_tools, mcp_to_tool_def};
+use super::{
+    McpClient, McpConfig, McpTransportConfig, StdioTransport, dedup_tools, mcp_to_tool_def,
+};
 use crate::mcp::client::McpError;
 
 const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -18,6 +20,8 @@ const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum McpBridgeError {
     #[error("failed to spawn MCP server '{server}': {source}")]
     Spawn { server: String, source: McpError },
+    #[error("MCP server '{server}' uses unsupported transport '{transport}'")]
+    UnsupportedTransport { server: String, transport: String },
     #[error("MCP server '{server}' initialize timed out after {timeout_secs}s")]
     InitializeTimeout { server: String, timeout_secs: u64 },
     #[error("MCP server '{server}' initialize failed: {source}")]
@@ -34,6 +38,13 @@ pub async fn discover_mcp_tools(config: &McpConfig) -> Result<Vec<ToolDef>, McpB
     let mut all_server_tools = Vec::new();
 
     for server in &config.servers {
+        if server.transport != McpTransportConfig::Stdio {
+            return Err(McpBridgeError::UnsupportedTransport {
+                server: server.name.clone(),
+                transport: format!("{:?}", server.transport).to_ascii_lowercase(),
+            });
+        }
+
         let transport = StdioTransport::spawn_with_env(&server.command, &server.args, &server.env)
             .map_err(|source| McpBridgeError::Spawn {
                 server: server.name.clone(),
