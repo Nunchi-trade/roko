@@ -27,12 +27,15 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod bash;
+pub mod authz;
 pub mod capabilities;
 pub mod contract;
 pub mod git;
 pub mod network;
 pub mod path;
+pub mod provenance;
 pub mod rate_limit;
+pub mod risk;
 pub mod scrub;
 
 use std::collections::HashMap;
@@ -40,6 +43,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use regex::Regex;
 use roko_core::config::schema::{RokoConfig, RoleOverride};
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
@@ -50,10 +54,17 @@ use self::git::GitPolicy;
 use self::network::NetworkPolicy;
 use self::path::PathPolicy;
 use self::rate_limit::{RateLimitKey, RateLimiter};
+use self::risk::{BudgetCheckResult, ProposedAction};
 use self::scrub::ScrubPolicy;
 
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
+pub use authz::{AuthzDecision, AuthorizationEvidence, AuthorizationSource, EscalationTarget};
 pub use capabilities::{AgentWarrant, Capability, CapabilityError, check_capability, delegate};
+pub use provenance::{AttestationLevel, Custody, Taint};
+pub use risk::{
+    BetaDistribution, BudgetDimension, OperationalConfidenceTracker, SafetyBudget,
+    SafetyBudgetTracker, confidence_multiplier, effective_limit, irreversibility_score,
+};
 
 // ─── Tool-name constants used to match calls to policies ──────────────────
 
@@ -92,6 +103,8 @@ pub struct SafetyLayer {
     pub scrub_policy: ScrubPolicy,
     /// Rate limiter — shared across calls (interior mutability via `Arc`).
     pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Optional adaptive-risk budget tracker shared across calls.
+    pub safety_budget: Option<Arc<Mutex<SafetyBudgetTracker>>>,
     /// Role name used as part of the rate-limit key.
     /// Defaults to `"default"`.
     pub role: String,
@@ -138,6 +151,7 @@ impl SafetyLayer {
             path_policy: PathPolicy::default(),
             scrub_policy: ScrubPolicy::default(),
             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+            safety_budget: None,
             role: "default".into(),
             contract: AgentContract::permissive("default"),
             warrant: None,
@@ -176,6 +190,23 @@ impl SafetyLayer {
     #[must_use]
     pub fn with_warrant(mut self, warrant: AgentWarrant) -> Self {
         self.warrant = Some(warrant);
+        self
+    }
+
+    /// Attach an adaptive-risk budget tracker to the safety layer.
+    #[must_use]
+    pub fn with_safety_budget(mut self, budget: SafetyBudgetTracker) -> Self {
+        self.safety_budget = Some(Arc::new(Mutex::new(budget)));
+        self
+    }
+
+    /// Attach a shared adaptive-risk budget tracker to the safety layer.
+    #[must_use]
+    pub fn with_shared_safety_budget(
+        mut self,
+        budget: Arc<Mutex<SafetyBudgetTracker>>,
+    ) -> Self {
+        self.safety_budget = Some(budget);
         self
     }
 
@@ -246,7 +277,50 @@ impl SafetyLayer {
             }
         }
 
+        if let Some(ref budget) = self.safety_budget {
+            let mut tracker = budget.lock();
+            match tracker.check_and_consume(&ProposedAction::from_tool_call(call)) {
+                BudgetCheckResult::WithinBudget => {}
+                BudgetCheckResult::Exceeded(dimension) => {
+                    return Err(ToolError::PermissionDenied(format!(
+                        "safety budget exceeded: {}",
+                        dimension.as_str()
+                    )));
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Evaluate a tool call through the safety layer and return a unified
+    /// authorization decision.
+    #[must_use]
+    pub fn authorize_call(&self, call: &ToolCall, ctx: &ToolContext) -> AuthzDecision {
+        let mut evidence = vec![AuthorizationEvidence::role_grant(format!(
+            "role `{}` is active for tool `{}`",
+            self.role, call.name
+        ))];
+        if let Some(warrant) = &self.warrant {
+            evidence.push(AuthorizationEvidence::session_approval(format!(
+                "warrant issued by `{}` is attached",
+                warrant.issuer
+            )));
+        }
+
+        if let Err(err) = self.check_pre_execution(call, ctx) {
+            return AuthzDecision::Deny {
+                reason: err.to_string(),
+            };
+        }
+
+        if let Err(err) = self.check_contract(call, ctx) {
+            return AuthzDecision::Deny {
+                reason: err.to_string(),
+            };
+        }
+
+        AuthzDecision::Allow { evidence }
     }
 
     /// Run declarative contract checks for `call` + `ctx`.
@@ -289,7 +363,42 @@ impl SafetyLayer {
         bash::check_command_with_policy(&command, &self.bash_policy)?;
         git::check_git_command_with_policy(&command, &self.git_policy)?;
 
+        if let Some(ref budget) = self.safety_budget {
+            let mut tracker = budget.lock();
+            match tracker.check_and_consume(&ProposedAction::from_exec_command(program, args)) {
+                BudgetCheckResult::WithinBudget => {}
+                BudgetCheckResult::Exceeded(dimension) => {
+                    return Err(ToolError::PermissionDenied(format!(
+                        "safety budget exceeded: {}",
+                        dimension.as_str()
+                    )));
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Evaluate a raw subprocess launch through the unified authorization API.
+    #[must_use]
+    pub fn authorize_exec_command(&self, program: &str, args: &[String]) -> AuthzDecision {
+        let mut evidence = vec![AuthorizationEvidence::role_grant(format!(
+            "role `{}` is active for subprocess `{program}`",
+            self.role
+        ))];
+        if let Some(warrant) = &self.warrant {
+            evidence.push(AuthorizationEvidence::session_approval(format!(
+                "warrant issued by `{}` is attached",
+                warrant.issuer
+            )));
+        }
+
+        match self.check_exec_command(program, args) {
+            Ok(()) => AuthzDecision::Allow { evidence },
+            Err(err) => AuthzDecision::Deny {
+                reason: err.to_string(),
+            },
+        }
     }
 
     /// Scrub secrets from a successful tool result.
@@ -675,6 +784,28 @@ mod tests {
         let layer = SafetyLayer::with_defaults();
         let args = vec!["-c".to_string(), "echo hi".to_string()];
         assert!(layer.check_exec_command("sh", &args).is_ok());
+    }
+
+    #[test]
+    fn authorize_call_denies_blocked_command() {
+        let layer = SafetyLayer::with_defaults();
+        let ctx = test_ctx();
+        let decision = layer.authorize_call(&bash_call("rm -rf /"), &ctx);
+        assert!(matches!(decision, AuthzDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn safety_budget_blocks_after_limit_is_spent() {
+        let layer = SafetyLayer::with_defaults().with_safety_budget(SafetyBudgetTracker::new(
+            risk::SafetyBudget {
+                footprint_limit: 1,
+                ..risk::SafetyBudget::default()
+            },
+        ));
+        let ctx = test_ctx();
+        let call = bash_call("echo hi");
+        assert!(layer.check_pre_execution(&call, &ctx).is_ok());
+        assert!(layer.check_pre_execution(&call, &ctx).is_err());
     }
 
     #[test]
