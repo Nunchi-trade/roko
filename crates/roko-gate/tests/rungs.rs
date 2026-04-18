@@ -237,11 +237,11 @@ fn test_integration_ok() {
     let ctx = Context::now();
     let expected = [
         vec!["compile:cargo"],
-        vec!["test:cargo"],
         vec!["clippy:cargo"],
-        vec!["symbol", "generated_test:cargo"],
-        vec!["property_test:cargo", "verify_chain"],
-        vec!["fact_check"],
+        vec!["test:cargo"],
+        vec!["symbol"],
+        vec!["generated_test:cargo", "verify_chain"],
+        vec!["property_test:cargo", "fact_check"],
         vec!["llm_judge", "integration:build_test:test_integration_ok"],
     ];
 

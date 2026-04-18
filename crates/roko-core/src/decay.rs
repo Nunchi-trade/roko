@@ -122,6 +122,13 @@ impl Decay {
     pub const WISDOM: Self = Self::HalfLife {
         half_life_ms: 86_400_000,
     };
+    /// Gate verdict half-life (24 hours).
+    ///
+    /// Verdict signals should stay queryable across the current workday and the
+    /// next orchestration cycle, but still fade without explicit reinforcement.
+    pub const GATE_VERDICT: Self = Self::HalfLife {
+        half_life_ms: 86_400_000,
+    };
 }
 
 #[cfg(test)]
@@ -189,6 +196,17 @@ mod tests {
         let one_hour_ms = 3_600_000_i64;
         let w = Decay::THREAT.apply(one_hour_ms);
         assert!((w - 0.70710677).abs() < 1e-5);
+    }
+
+    #[test]
+    fn gate_verdict_constant_halves_after_one_day() {
+        assert_eq!(
+            Decay::GATE_VERDICT,
+            Decay::HalfLife {
+                half_life_ms: 86_400_000
+            }
+        );
+        assert!((Decay::GATE_VERDICT.apply(86_400_000) - 0.5).abs() < 1e-6);
     }
 
     #[test]

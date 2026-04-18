@@ -48,7 +48,7 @@ use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::{
-    LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
+    GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
@@ -57,9 +57,10 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Composer, ContentHash, Context, Engram, Kind, OperatingFrequency,
-    OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task, TaskCategory,
-    TaskComplexityBand, TaskRequirements, TaskStatus, ToolRegistry, Verdict, score_model_for_task,
+    AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task,
+    TaskCategory, TaskComplexityBand, TaskRequirements, TaskStatus, ToolRegistry, Verdict,
+    score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -74,9 +75,14 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
+    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, TestGate,
     adaptive_threshold::AdaptiveThresholds,
-    payload::GatePayload,
+    feedback_for_agent,
+    gate_pipeline::GatePipeline,
+    generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate},
+    payload::{BuildSystem, GatePayload},
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
+    rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
@@ -172,6 +178,17 @@ fn model_experiments_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("model-experiments.json")
+}
+
+fn gate_artifact_store_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("artifacts")
+}
+
+fn gate_ratchet_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("gate-ratchet.json")
 }
 
 fn daimon_state_path(workdir: &Path) -> PathBuf {
@@ -2664,6 +2681,10 @@ pub struct PlanRunner {
     health_probes: ProbeRegistry,
     /// Adaptive gate thresholds for retry budgeting.
     adaptive_thresholds: AdaptiveThresholds,
+    /// Content-addressed gate artifact store rooted at `.roko/artifacts/`.
+    gate_artifacts: GateArtifactStore,
+    /// Persisted per-plan rung watermark for regression detection.
+    gate_ratchet: GateRatchet,
     /// Rolling latency registry for routed model/provider pairs.
     latency_registry: LatencyRegistry,
     /// Event bus used to publish post-turn learning signals.
@@ -2708,6 +2729,8 @@ struct TaskTracker {
     last_gate_failure: Option<String>,
     /// Which gate phase failed (e.g. "compile", "test", "clippy").
     last_gate_failure_phase: Option<String>,
+    /// Canonical rung index of the most recent gate failure.
+    last_gate_failure_rung: Option<u32>,
     /// The task id that was most recently dispatched for implementation.
     last_impl_task_id: Option<String>,
     /// Model slug used by the most recently dispatched implementation task.
@@ -2950,6 +2973,126 @@ fn episode_output_text(output: &Engram) -> String {
         .unwrap_or_else(|_| output.id.to_hex())
 }
 
+fn task_tier_to_plan_complexity(tier: &str) -> PlanComplexity {
+    match tier {
+        "mechanical" | "fast" => PlanComplexity::Trivial,
+        "focused" => PlanComplexity::Simple,
+        "integrative" => PlanComplexity::Standard,
+        "architectural" | "complex" | "premium" => PlanComplexity::Complex,
+        _ => PlanComplexity::Simple,
+    }
+}
+
+fn fallback_plan_complexity(tasks: &[crate::task_parser::TaskDef]) -> PlanComplexity {
+    tasks
+        .iter()
+        .map(|task| task_tier_to_plan_complexity(&task.tier))
+        .max()
+        .unwrap_or(PlanComplexity::Simple)
+}
+
+fn primary_gate_phase_to_rung(phase: &str) -> Option<Rung> {
+    match phase {
+        gate if gate.starts_with("compile") => Some(Rung::Compile),
+        gate if gate.starts_with("clippy") => Some(Rung::Lint),
+        gate if gate.starts_with("test") => Some(Rung::Test),
+        "symbol" => Some(Rung::Symbol),
+        gate if gate.starts_with("generated_test") || gate == "verify_chain" => {
+            Some(Rung::GeneratedTest)
+        }
+        gate if gate.starts_with("property_test") || gate == "fact_check" => {
+            Some(Rung::PropertyTest)
+        }
+        gate if gate == "llm_judge" || gate.starts_with("integration") => Some(Rung::Integration),
+        _ => None,
+    }
+}
+
+#[derive(Clone)]
+struct RecordedGateVerdict {
+    rung: Rung,
+    verdict: Verdict,
+}
+
+struct RecordingGate {
+    rung: Rung,
+    inner: Box<dyn Gate>,
+    sink: Arc<Mutex<Vec<RecordedGateVerdict>>>,
+}
+
+impl RecordingGate {
+    fn new(rung: Rung, inner: Box<dyn Gate>, sink: Arc<Mutex<Vec<RecordedGateVerdict>>>) -> Self {
+        Self { rung, inner, sink }
+    }
+}
+
+#[async_trait::async_trait]
+impl Gate for RecordingGate {
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+        let verdict = self.inner.verify(signal, ctx).await;
+        self.sink
+            .lock()
+            .expect("recorded gate sink poisoned")
+            .push(RecordedGateVerdict {
+                rung: self.rung,
+                verdict: verdict.clone(),
+            });
+        verdict
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FsGeneratedArtifactStore {
+    root: PathBuf,
+}
+
+impl FsGeneratedArtifactStore {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn artifact_dir(&self) -> PathBuf {
+        self.root.join("generated-tests")
+    }
+
+    fn matching_entries(&self, prefix: &str) -> Vec<String> {
+        let dir = self.artifact_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+
+        let mut names: Vec<String> = entries
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                entry.file_type().ok().filter(|kind| kind.is_file())?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let logical = format!("generated-tests/{name}");
+                logical.starts_with(prefix).then_some(logical)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+impl GeneratedArtifactStore for FsGeneratedArtifactStore {
+    fn list(&self, _plan: &str, prefix: &str) -> Vec<String> {
+        self.matching_entries(prefix)
+    }
+
+    fn read(&self, _plan: &str, name: &str) -> Option<Vec<u8>> {
+        let relative = name.strip_prefix("generated-tests/")?;
+        if relative.contains("..") || relative.contains('/') {
+            return None;
+        }
+        std::fs::read(self.artifact_dir().join(relative)).ok()
+    }
+}
+
 fn cascade_context_vec(
     runner: &PlanRunner,
     plan_id: &str,
@@ -2978,6 +3121,7 @@ impl TaskTracker {
             _plan_dir: plan_dir,
             last_gate_failure: None,
             last_gate_failure_phase: None,
+            last_gate_failure_rung: None,
             last_impl_task_id: None,
             last_impl_model_slug: None,
             last_dispatch_role_label: None,
@@ -3851,6 +3995,9 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            gate_artifacts: GateArtifactStore::open(gate_artifact_store_path(workdir))
+                .unwrap_or_default(),
+            gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
@@ -3986,6 +4133,9 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            gate_artifacts: GateArtifactStore::open(gate_artifact_store_path(workdir))
+                .unwrap_or_default(),
+            gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
@@ -4123,6 +4273,9 @@ impl PlanRunner {
                     .join("learn")
                     .join("gate-thresholds.json"),
             ),
+            gate_artifacts: GateArtifactStore::open(gate_artifact_store_path(workdir))
+                .unwrap_or_default(),
+            gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
@@ -4613,6 +4766,9 @@ impl PlanRunner {
             .join("gate-thresholds.json");
         if let Err(e) = self.adaptive_thresholds.save(&thresholds_path) {
             tracing::error!("[orchestrate] save adaptive thresholds: {e}");
+        }
+        if let Err(e) = self.gate_ratchet.save(&gate_ratchet_path(&self.workdir)) {
+            tracing::error!("[orchestrate] save gate ratchet: {e}");
         }
         // Persist cascade router observations.
         if let Err(e) = self.learning.save_cascade_router() {
@@ -6400,14 +6556,20 @@ impl PlanRunner {
                 let gate_started = std::time::Instant::now();
                 match self.run_gate_pipeline(&plan_id, rung).await {
                     Ok(passed) => {
+                        let effective_rung = self
+                            .executor
+                            .plan_state(&plan_id)
+                            .and_then(|state| state.gate_results.last())
+                            .map(|result| result.rung)
+                            .unwrap_or(rung);
                         self.gate_runs += 1;
                         self.per_plan_gates
                             .entry(plan_id.clone())
                             .or_default()
-                            .push((format!("rung-{rung}"), passed));
+                            .push((format!("rung-{effective_rung}"), passed));
                         self.event_log.append(
                             EventKind::GateResult,
-                            serde_json::json!({"plan_id": plan_id, "rung": rung, "passed": passed}),
+                            serde_json::json!({"plan_id": plan_id, "rung": effective_rung, "passed": passed}),
                         );
                         // Record gate episode.
                         let wall_ms =
@@ -6415,7 +6577,8 @@ impl PlanRunner {
                         // Gate runs are local process work, so the episode records zero USD cost
                         // while still carrying the latency field alongside it.
                         let gate_cost_usd = 0.0;
-                        let mut ep = Episode::new("gate", format!("{plan_id}:rung-{rung}"));
+                        let mut ep =
+                            Episode::new("gate", format!("{plan_id}:rung-{effective_rung}"));
                         ep.success = passed;
                         ep.usage = Usage {
                             wall_ms,
@@ -6430,7 +6593,7 @@ impl PlanRunner {
                             .map(|tracker| tracker.last_gate_verdicts.clone())
                             .filter(|verdicts| !verdicts.is_empty())
                             .unwrap_or_else(|| {
-                                vec![GateVerdict::new(format!("rung-{rung}"), passed)]
+                                vec![GateVerdict::new(format!("rung-{effective_rung}"), passed)]
                             });
                         ep.input_signal_hash = self
                             .task_trackers
@@ -6438,14 +6601,14 @@ impl PlanRunner {
                             .and_then(|tracker| tracker.last_impl_output_hash)
                             .map(|hash| hash.to_string())
                             .unwrap_or_else(|| plan_id.clone());
-                        let gate_prompt = format!("plan_id={plan_id}\nrung={rung}");
+                        let gate_prompt = format!("plan_id={plan_id}\nrung={effective_rung}");
                         let gate_outcome = if passed { "passed" } else { "failed" };
                         let gate_input = self.enrich_completed_run(
                             ep,
                             &gate_prompt,
                             gate_outcome,
                             &plan_id,
-                            &format!("rung-{rung}"),
+                            &format!("rung-{effective_rung}"),
                             "gate",
                             "",
                             "n/a",
@@ -6456,36 +6619,33 @@ impl PlanRunner {
                         self.record_and_check_learning(gate_input, &plan_id).await;
 
                         // Emit observability metric for gate result.
-                        self.emit_gate_metric(&plan_id, rung, passed, wall_ms);
-
-                        // Update adaptive gate thresholds.
-                        self.adaptive_thresholds.update(rung, passed);
+                        self.emit_gate_metric(&plan_id, effective_rung, passed, wall_ms);
 
                         self.emit_server_event(crate::serve::events::ServerEvent::GateResult {
                             plan_id: plan_id.clone(),
-                            task_id: format!("rung-{rung}"),
-                            gate: format!("rung-{rung}"),
+                            task_id: format!("rung-{effective_rung}"),
+                            gate: format!("rung-{effective_rung}"),
                             passed,
                         });
                         self.emit_execution_event(
                             &plan_id,
                             crate::serve::events::ExecutionEvent::GateResult {
-                                task_id: format!("rung-{rung}"),
-                                gate: format!("rung-{rung}"),
+                                task_id: format!("rung-{effective_rung}"),
+                                gate: format!("rung-{effective_rung}"),
                                 passed,
                                 message: if passed {
-                                    format!("rung-{rung} passed")
+                                    format!("rung-{effective_rung} passed")
                                 } else {
-                                    format!("rung-{rung} failed")
+                                    format!("rung-{effective_rung} failed")
                                 },
                             },
                         );
 
                         let _ = self.daimon.appraise(AffectEvent::GateResult {
                             plan_id: plan_id.clone(),
-                            task_id: format!("rung-{rung}"),
+                            task_id: format!("rung-{effective_rung}"),
                             passed,
-                            rung,
+                            rung: effective_rung,
                         });
 
                         // Store gate failure context for AutoFix phase
@@ -6506,11 +6666,15 @@ impl PlanRunner {
                             if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
                                 tracker.last_gate_failure = Some(failure_context.clone());
                                 tracker.last_gate_failure_phase = Some(phase.to_string());
+                                tracker.last_gate_failure_rung =
+                                    primary_gate_phase_to_rung(phase).map(Rung::as_index);
                             }
 
                             // Emit a FailureTrace for observability.
-                            let trace_id =
-                                Self::trace_id_for(&plan_id, &format!("gate-fail-{rung}"));
+                            let trace_id = Self::trace_id_for(
+                                &plan_id,
+                                &format!("gate-fail-{effective_rung}"),
+                            );
                             let evidence = if failure_context.is_empty() {
                                 failed_gates
                                     .iter()
@@ -6538,7 +6702,7 @@ impl PlanRunner {
                                 .task_trackers
                                 .get(&plan_id)
                                 .and_then(|t| t.last_impl_task_id.clone())
-                                .unwrap_or_else(|| format!("rung-{rung}"));
+                                .unwrap_or_else(|| format!("rung-{effective_rung}"));
                             let anti_content = if failure_context.is_empty() {
                                 format!(
                                     "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {}",
@@ -6560,7 +6724,7 @@ impl PlanRunner {
                             };
                             let gate_failure_tag = self.daimon.emotional_tag("gate_failure");
                             let anti_entry = KnowledgeEntry {
-                                id: format!("anti-gate-{plan_id}-{anti_task_id}-{rung}"),
+                                id: format!("anti-gate-{plan_id}-{anti_task_id}-{effective_rung}"),
                                 kind: KnowledgeKind::AntiKnowledge,
                                 source: Some(format!("gate-failure:{phase}")),
                                 content: anti_content,
@@ -6568,7 +6732,7 @@ impl PlanRunner {
                                 confidence_weight: -0.9,
                                 refuted_insight_id: None,
                                 refutation_evidence: None,
-                                source_episodes: vec![format!("{plan_id}:rung-{rung}")],
+                                source_episodes: vec![format!("{plan_id}:rung-{effective_rung}")],
                                 tags: vec![
                                     "anti-knowledge".to_string(),
                                     "gate-failure".to_string(),
@@ -6603,6 +6767,9 @@ impl PlanRunner {
                         let event = if passed {
                             if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
                                 tracker.gate_failure_count = 0;
+                                tracker.last_gate_failure = None;
+                                tracker.last_gate_failure_phase = None;
+                                tracker.last_gate_failure_rung = None;
                             }
                             ExecutorEvent::GatePassed
                         } else if self.no_replan {
@@ -6611,14 +6778,27 @@ impl PlanRunner {
                             }
                             ExecutorEvent::Fatal(failure_reason)
                         } else {
+                            let mut gate_failure_count = 1;
+                            let mut retry_budget = 3;
                             if let Some(tracker) = self.task_trackers.get_mut(&plan_id) {
                                 tracker.gate_failure_count += 1;
+                                gate_failure_count = tracker.gate_failure_count;
+                                retry_budget = tracker
+                                    .last_gate_failure_rung
+                                    .map(|failing_rung| {
+                                        self.adaptive_thresholds.suggested_max_retries(failing_rung)
+                                    })
+                                    .unwrap_or(3);
                             }
-                            ExecutorEvent::GateFailed
+                            if gate_failure_count > retry_budget {
+                                ExecutorEvent::Fatal(failure_reason)
+                            } else {
+                                ExecutorEvent::GateFailed
+                            }
                         };
                         self.apply_event_and_emit(
                             &plan_id,
-                            &format!("rung-{rung}"),
+                            &format!("rung-{effective_rung}"),
                             &event,
                             "transitioned",
                         );
@@ -6639,7 +6819,7 @@ impl PlanRunner {
                                 self.emit_execution_event(
                                     &plan_id,
                                     crate::serve::events::ExecutionEvent::ReplanTriggered {
-                                        task_id: format!("rung-{rung}"),
+                                        task_id: format!("rung-{effective_rung}"),
                                         strategy: format!("gate_fail_count_{failure_count}"),
                                     },
                                 );
@@ -7384,6 +7564,7 @@ impl PlanRunner {
             tracker.last_context_knowledge_ids.clear();
             tracker.last_gate_verdicts.clear();
             tracker.last_gate_verdict_summaries.clear();
+            tracker.last_gate_failure_rung = None;
         }
 
         let wt_id = format!("{plan_id}-{task_id}");
@@ -9668,6 +9849,7 @@ impl PlanRunner {
                             tracker.gate_failure_count = 0;
                             tracker.last_gate_failure = None;
                             tracker.last_gate_failure_phase = None;
+                            tracker.last_gate_failure_rung = None;
                             tracker.last_impl_task_id = None;
                             tracker.last_impl_model_slug = None;
                             tracker.last_gate_verdict_summaries.clear();
@@ -9725,6 +9907,7 @@ impl PlanRunner {
                     tracker.gate_failure_count = 0;
                     tracker.last_gate_failure = None;
                     tracker.last_gate_failure_phase = None;
+                    tracker.last_gate_failure_rung = None;
                     tracker.last_gate_verdict_summaries.clear();
                 }
                 self.emit_execution_event(
@@ -10062,6 +10245,7 @@ impl PlanRunner {
                     tracker.gate_failure_count = 0;
                     tracker.last_gate_failure = None;
                     tracker.last_gate_failure_phase = None;
+                    tracker.last_gate_failure_rung = None;
                     tracker.last_impl_task_id = None;
                     tracker.last_impl_model_slug = None;
                     tracker.last_gate_verdict_summaries.clear();
@@ -10221,6 +10405,7 @@ impl PlanRunner {
             tracker.gate_failure_count = 0;
             tracker.last_gate_failure = None;
             tracker.last_gate_failure_phase = None;
+            tracker.last_gate_failure_rung = None;
             tracker.last_impl_task_id = None;
             tracker.last_impl_model_slug = None;
             tracker.last_gate_verdict_summaries.clear();
@@ -10264,7 +10449,12 @@ impl PlanRunner {
     ) -> Option<&'a str> {
         verdicts
             .iter()
-            .find(|v| !v.passed && matches!(v.gate_name.as_str(), "compile" | "test" | "clippy"))
+            .find(|v| {
+                !v.passed
+                    && (v.gate_name.starts_with("compile")
+                        || v.gate_name.starts_with("test")
+                        || v.gate_name.starts_with("clippy"))
+            })
             .map(|v| v.gate_name.as_str())
             .or_else(|| {
                 verdicts
@@ -10589,6 +10779,11 @@ impl PlanRunner {
             .get(plan_id)
             .and_then(|t| t.last_gate_failure_phase.clone())
             .unwrap_or_else(|| "unknown".into());
+        let gate_rung = self
+            .task_trackers
+            .get(plan_id)
+            .and_then(|t| t.last_gate_failure_rung)
+            .or_else(|| primary_gate_phase_to_rung(&gate_phase).map(Rung::as_index));
 
         let tracker = self.task_trackers.get(plan_id);
         let last_task_id = tracker.and_then(|t| t.last_impl_task_id.as_deref());
@@ -10612,7 +10807,7 @@ impl PlanRunner {
                 _ => "claude-sonnet-4-6".into(),
             });
 
-        let fix_prompt = if let Some(td) = task_def {
+        let mut fix_prompt = if let Some(td) = task_def {
             let original_prompt = td.build_prompt(plan_id, &self.workdir);
             td.build_fix_prompt(&original_prompt, &gate_phase, &gate_context)
         } else {
@@ -10624,6 +10819,39 @@ impl PlanRunner {
                  Fix the issue and ensure all verification steps pass."
             )
         };
+        if let Some(gate_rung) = gate_rung {
+            let gate_output = gate_context.chars().take(8_000).collect::<String>();
+            let feedback =
+                feedback_for_agent(&gate_output, u8::try_from(gate_rung).unwrap_or(u8::MAX));
+            if !feedback.is_empty() {
+                let mut structured = String::from("\n\n## Structured Gate Feedback\n");
+                if !feedback.errors.is_empty() {
+                    structured.push_str("Errors:\n");
+                    for error in &feedback.errors {
+                        structured.push_str("- ");
+                        structured.push_str(error);
+                        structured.push('\n');
+                    }
+                }
+                if !feedback.warnings.is_empty() {
+                    structured.push_str("Warnings:\n");
+                    for warning in &feedback.warnings {
+                        structured.push_str("- ");
+                        structured.push_str(warning);
+                        structured.push('\n');
+                    }
+                }
+                if !feedback.suggestions.is_empty() {
+                    structured.push_str("Suggestions:\n");
+                    for suggestion in &feedback.suggestions {
+                        structured.push_str("- ");
+                        structured.push_str(suggestion);
+                        structured.push('\n');
+                    }
+                }
+                fix_prompt.push_str(&structured);
+            }
+        }
 
         if !gate_context.is_empty() {
             tracing::info!(
@@ -13005,46 +13233,132 @@ impl PlanRunner {
             payload_builder = payload_builder.lineage([parent_hash]);
         }
         let payload_sig = maybe_attest_engram(payload_builder.build());
-
-        let verdicts = self.run_gate_rung(Some(plan_id), &payload_sig, rung).await;
+        let (aggregate_verdict, recorded_verdicts) = if rung == 0 {
+            self.run_selected_gate_pipeline(plan_id, &payload_sig, &exec_dir)
+                .await
+        } else {
+            let explicit_rung = Rung::from_index(rung).unwrap_or(Rung::Integration);
+            let verdicts = self.run_gate_rung(Some(plan_id), &payload_sig, rung).await;
+            (
+                if verdicts.iter().all(|verdict| verdict.passed) {
+                    Verdict::pass(format!("gate-rung:{plan_id}:{rung}"))
+                } else {
+                    Verdict::fail(
+                        format!("gate-rung:{plan_id}:{rung}"),
+                        "legacy gate rung failed",
+                    )
+                    .with_detail(Self::format_gate_failure_context(&verdicts))
+                },
+                verdicts
+                    .into_iter()
+                    .map(|verdict| RecordedGateVerdict {
+                        rung: explicit_rung,
+                        verdict,
+                    })
+                    .collect(),
+            )
+        };
+        let mut verdicts: Vec<Verdict> = recorded_verdicts
+            .iter()
+            .map(|recorded| recorded.verdict.clone())
+            .collect();
+        let highest_passed_rung = recorded_verdicts
+            .iter()
+            .filter(|recorded| recorded.verdict.passed)
+            .map(|recorded| recorded.rung)
+            .max();
+        if let Some(highest_passed_rung) = highest_passed_rung {
+            if !self
+                .gate_ratchet
+                .can_regress(plan_id, highest_passed_rung.as_index() as u8)
+            {
+                verdicts.push(Verdict::fail(
+                    "ratchet",
+                    format!(
+                        "verification regressed below previously passed rung {}",
+                        highest_passed_rung.label()
+                    ),
+                ));
+            } else {
+                self.gate_ratchet
+                    .record_pass(plan_id.to_string(), highest_passed_rung.as_index() as u8);
+            }
+        }
+        let all_passed = aggregate_verdict.passed && verdicts.iter().all(|verdict| verdict.passed);
+        let primary_failed_rung = recorded_verdicts
+            .iter()
+            .find(|recorded| !recorded.verdict.passed)
+            .map(|recorded| recorded.rung);
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_gate_verdicts = verdicts
                 .iter()
                 .map(|verdict| GateVerdict::new(verdict.gate.clone(), verdict.passed))
                 .collect();
             tracker.last_gate_verdict_summaries = Self::summarize_runtime_verdicts(&verdicts);
+            tracker.last_gate_failure_rung = primary_failed_rung.map(Rung::as_index);
         }
 
         // Persist verdicts.
         let substrate_dir = self.workdir.join(".roko");
         if let Ok(substrate) = FileSubstrate::open(&substrate_dir).await {
-            for verdict in &verdicts {
+            for recorded in &recorded_verdicts {
+                let artifact_hash =
+                    self.persist_gate_artifact(plan_id, recorded.rung, &recorded.verdict);
+                let mut builder = payload_sig
+                    .derive_verdict(
+                        Body::from_json(&recorded.verdict)
+                            .unwrap_or_else(|_| Body::text(format!("{:?}", recorded.verdict))),
+                    )
+                    .provenance(Provenance::trusted("orchestrate"))
+                    .tag("gate", &recorded.verdict.gate)
+                    .tag("passed", recorded.verdict.passed.to_string())
+                    .tag("rung", recorded.rung.as_index().to_string());
+                if let Some(artifact_hash) = artifact_hash {
+                    builder = builder.tag("artifact_hash", artifact_hash.to_hex());
+                }
+                let sig = maybe_attest_engram(builder.build());
+                if Self::verify_gate_signal_chain(&payload_sig, &sig) {
+                    let _ = substrate.put(sig).await;
+                }
+            }
+            if let Some(ratchet_verdict) = verdicts.iter().find(|verdict| verdict.gate == "ratchet")
+            {
                 let sig = maybe_attest_engram(
                     payload_sig
-                        .derive(
-                            Kind::GateVerdict,
-                            Body::from_json(verdict)
-                                .unwrap_or_else(|_| Body::text(format!("{verdict:?}"))),
+                        .derive_verdict(
+                            Body::from_json(ratchet_verdict)
+                                .unwrap_or_else(|_| Body::text(format!("{ratchet_verdict:?}"))),
                         )
                         .provenance(Provenance::trusted("orchestrate"))
-                        .tag("gate", &verdict.gate)
-                        .tag("passed", verdict.passed.to_string())
+                        .tag("gate", &ratchet_verdict.gate)
+                        .tag("passed", ratchet_verdict.passed.to_string())
+                        .tag("rung", rung.to_string())
                         .build(),
                 );
-                let _ = substrate.put(sig).await;
+                if Self::verify_gate_signal_chain(&payload_sig, &sig) {
+                    let _ = substrate.put(sig).await;
+                }
             }
         }
 
         // Record gate results on the plan state.
         if let Some(state) = self.executor.plan_state_mut(plan_id) {
-            for verdict in &verdicts {
-                state
-                    .gate_results
-                    .push(GateResult::from_verdict(verdict, rung));
+            for recorded in &recorded_verdicts {
+                state.gate_results.push(GateResult::from_verdict(
+                    &recorded.verdict,
+                    recorded.rung.as_index(),
+                ));
+            }
+            if verdicts.iter().any(|verdict| verdict.gate == "ratchet") {
+                state.gate_results.push(GateResult::from_verdict(
+                    verdicts
+                        .iter()
+                        .find(|verdict| verdict.gate == "ratchet")
+                        .expect("ratchet verdict should exist"),
+                    rung,
+                ));
             }
         }
-
-        let all_passed = verdicts.iter().all(|v| v.passed);
 
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             if all_passed {
@@ -13064,6 +13378,11 @@ impl PlanRunner {
             } else {
                 tracker.last_skill_request = None;
             }
+        }
+
+        for recorded in &recorded_verdicts {
+            self.adaptive_thresholds
+                .observe(recorded.rung.as_index(), recorded.verdict.passed);
         }
 
         // Increment gate verdict metrics.
@@ -13097,6 +13416,10 @@ impl PlanRunner {
                 "rung": rung,
                 "passed": all_passed,
                 "duration_ms": wall_ms,
+                "selected_rungs": recorded_verdicts
+                    .iter()
+                    .map(|recorded| recorded.rung.label())
+                    .collect::<Vec<_>>(),
                 "test_count": test_count,
             }),
         );
@@ -13275,6 +13598,178 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("create task worktree {wt_id}: {e}"))?;
         Ok(handle.path)
+    }
+
+    fn gate_plan_complexity(&self, plan_id: &str) -> PlanComplexity {
+        self.task_trackers
+            .get(plan_id)
+            .map(|tracker| {
+                tracker
+                    .last_impl_task()
+                    .map(|task| task_tier_to_plan_complexity(&task.tier))
+                    .unwrap_or_else(|| fallback_plan_complexity(&tracker.tasks_file.tasks))
+            })
+            .unwrap_or(PlanComplexity::Simple)
+    }
+
+    fn generated_test_store_for(&self, exec_dir: &Path) -> Option<Arc<dyn GeneratedArtifactStore>> {
+        let store = FsGeneratedArtifactStore::new(exec_dir.to_path_buf());
+        (!store.matching_entries("generated-tests/gen_").is_empty())
+            .then_some(Arc::new(store) as Arc<dyn GeneratedArtifactStore>)
+    }
+
+    fn runtime_gate_config(&self) -> GatesConfig {
+        load_roko_config(&self.workdir)
+            .map(|config| config.gates)
+            .unwrap_or_else(|err| {
+                tracing::warn!("[orchestrate] failed to load roko.toml for gate selection: {err}");
+                GatesConfig::default()
+            })
+    }
+
+    fn gate_rung_caps(
+        &self,
+        exec_dir: &Path,
+        generated_tests: Option<&Arc<dyn GeneratedArtifactStore>>,
+    ) -> RungCaps {
+        let gate_config = self.runtime_gate_config();
+        let build_system = BuildSystem::detect(exec_dir);
+        RungCaps {
+            has_lint_tool: gate_config.clippy_enabled && build_system != BuildSystem::Make,
+            has_symbol_manifest: false,
+            has_generated_tests: generated_tests.is_some(),
+            has_property_tests: false,
+            has_integration_scenario: false,
+        }
+    }
+
+    fn should_skip_selected_rung(&self, rung: Rung) -> bool {
+        !matches!(rung, Rung::Compile | Rung::Test)
+            && self.adaptive_thresholds.should_skip_rung(rung.as_index())
+    }
+
+    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Gate>)> {
+        let gate_config = self.runtime_gate_config();
+        let generated_tests = self.generated_test_store_for(exec_dir);
+        let caps = self.gate_rung_caps(exec_dir, generated_tests.as_ref());
+        let mut selected = select_rungs(
+            self.gate_plan_complexity(plan_id),
+            &caps,
+            self.task_trackers
+                .get(plan_id)
+                .map(|tracker| tracker.gate_failure_count)
+                .unwrap_or(0),
+        );
+
+        selected.retain(|rung| {
+            if *rung == Rung::Test && gate_config.skip_tests {
+                return false;
+            }
+            !self.should_skip_selected_rung(*rung)
+        });
+
+        let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
+        for rung in selected {
+            match rung {
+                Rung::Compile => steps.push((rung, Box::new(CompileGate::cargo()))),
+                Rung::Lint if caps.has_lint_tool => {
+                    steps.push((rung, Box::new(ClippyGate::cargo())));
+                }
+                Rung::Test if !gate_config.skip_tests => {
+                    steps.push((rung, Box::new(TestGate::cargo())));
+                }
+                Rung::GeneratedTest => {
+                    if let Some(store) = generated_tests.clone() {
+                        steps.push((rung, Box::new(GeneratedTestGate::new(store))));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if steps.is_empty() {
+            steps.push((Rung::Compile, Box::new(CompileGate::cargo())));
+        }
+
+        steps
+    }
+
+    async fn run_selected_gate_pipeline(
+        &self,
+        plan_id: &str,
+        payload_sig: &Engram,
+        exec_dir: &Path,
+    ) -> (Verdict, Vec<RecordedGateVerdict>) {
+        let ctx = Context::now();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let mut pipeline = GatePipeline::new(format!("gate-pipeline:{plan_id}"));
+        for (rung, gate) in self.selected_gate_steps(plan_id, exec_dir) {
+            pipeline.push(Box::new(RecordingGate::new(rung, gate, Arc::clone(&sink))));
+        }
+        let aggregate = pipeline.verify(payload_sig, &ctx).await;
+        let verdicts = sink.lock().expect("recorded gate sink poisoned").clone();
+        (aggregate, verdicts)
+    }
+
+    fn persist_gate_artifact(
+        &mut self,
+        plan_id: &str,
+        rung: Rung,
+        verdict: &Verdict,
+    ) -> Option<ContentHash> {
+        let payload = serde_json::json!({
+            "plan_id": plan_id,
+            "rung": rung.as_index(),
+            "gate": verdict.gate,
+            "passed": verdict.passed,
+            "reason": verdict.reason,
+            "detail": verdict.detail,
+            "error_digest": verdict.error_digest,
+            "duration_ms": verdict.duration_ms,
+            "test_count": verdict.test_count,
+        });
+        let bytes = serde_json::to_vec_pretty(&payload).ok()?;
+        match self.gate_artifacts.store(&bytes) {
+            Ok(hash) => Some(hash),
+            Err(err) => {
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    gate = %verdict.gate,
+                    error = %err,
+                    "failed to persist gate artifact"
+                );
+                None
+            }
+        }
+    }
+
+    fn verify_gate_signal_chain(parent: &Engram, verdict_signal: &Engram) -> bool {
+        if verdict_signal.kind != Kind::GateVerdict || verdict_signal.decay != Decay::GATE_VERDICT {
+            return false;
+        }
+        if !verdict_signal.lineage.contains(&parent.id) {
+            return false;
+        }
+        if parent
+            .tags
+            .iter()
+            .any(|(key, value)| verdict_signal.tag(key) != Some(value.as_str()))
+        {
+            return false;
+        }
+        if !verdict_signal.tags.contains_key("gate") || !verdict_signal.tags.contains_key("passed")
+        {
+            return false;
+        }
+        let parent_attested = parent
+            .attestation
+            .as_ref()
+            .is_none_or(|attestation| attestation::verify(parent, attestation));
+        let verdict_attested = verdict_signal
+            .attestation
+            .as_ref()
+            .is_none_or(|attestation| attestation::verify(verdict_signal, attestation));
+        parent_attested && verdict_attested
     }
 
     fn gate_rung_config(&self, plan_id: Option<&str>, rung: u32) -> RungExecutionConfig {

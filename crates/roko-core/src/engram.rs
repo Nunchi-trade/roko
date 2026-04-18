@@ -134,6 +134,35 @@ impl Engram {
             .lineage([self.id])
             .provenance(Provenance::agent("derived"))
     }
+
+    /// Emit a derived gate verdict engram with explicit verdict defaults.
+    ///
+    /// Unlike [`Engram::derive`], this preserves the parent's visible tag set,
+    /// carries forward the full known lineage chain, and applies the
+    /// [`Decay::GATE_VERDICT`] contract.
+    pub fn derive_verdict(&self, body: Body) -> EngramBuilder {
+        let mut builder = EngramBuilder::new(Kind::GateVerdict)
+            .body(body)
+            .decay(Decay::GATE_VERDICT)
+            .lineage(self.derived_lineage())
+            .provenance(Provenance::agent("derived"));
+
+        for (key, value) in &self.tags {
+            builder = builder.tag(key.clone(), value.clone());
+        }
+
+        builder
+    }
+
+    fn derived_lineage(&self) -> Vec<ContentHash> {
+        let mut lineage = Vec::with_capacity(self.lineage.len() + 1);
+        for hash in self.lineage.iter().copied().chain(std::iter::once(self.id)) {
+            if !lineage.contains(&hash) {
+                lineage.push(hash);
+            }
+        }
+        lineage
+    }
 }
 
 // ─── Builder ───────────────────────────────────────────────────────────────
@@ -377,6 +406,34 @@ mod tests {
         let child = parent.derive(Kind::GateVerdict, Body::text("pass")).build();
         assert_eq!(child.lineage, vec![parent.id]);
         assert_eq!(child.kind, Kind::GateVerdict);
+    }
+
+    #[test]
+    fn derive_verdict_preserves_lineage_tags_and_decay() {
+        let ancestor = Engram::builder(Kind::Prompt)
+            .body(Body::text("ancestor"))
+            .created_at_ms(0)
+            .build();
+        let parent = Engram::builder(Kind::Task)
+            .body(Body::text("parent"))
+            .created_at_ms(1)
+            .lineage([ancestor.id])
+            .tag("plan_id", "plan-42")
+            .tag("gate", "compile")
+            .build();
+
+        let child = parent
+            .derive_verdict(Body::text("pass"))
+            .tag("passed", "true")
+            .tag("gate", "test")
+            .build();
+
+        assert_eq!(child.kind, Kind::GateVerdict);
+        assert_eq!(child.decay, Decay::GATE_VERDICT);
+        assert_eq!(child.lineage, vec![ancestor.id, parent.id]);
+        assert_eq!(child.tag("plan_id"), Some("plan-42"));
+        assert_eq!(child.tag("passed"), Some("true"));
+        assert_eq!(child.tag("gate"), Some("test"));
     }
 
     #[test]

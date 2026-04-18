@@ -91,6 +91,35 @@ pub const CANONICAL_ORDER: [Rung; 7] = [
 ];
 
 impl Rung {
+    /// Numeric index in canonical execution order.
+    #[must_use]
+    pub const fn as_index(self) -> u32 {
+        match self {
+            Self::Compile => 0,
+            Self::Lint => 1,
+            Self::Test => 2,
+            Self::Symbol => 3,
+            Self::GeneratedTest => 4,
+            Self::PropertyTest => 5,
+            Self::Integration => 6,
+        }
+    }
+
+    /// Parse a canonical rung index.
+    #[must_use]
+    pub const fn from_index(index: u32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Compile),
+            1 => Some(Self::Lint),
+            2 => Some(Self::Test),
+            3 => Some(Self::Symbol),
+            4 => Some(Self::GeneratedTest),
+            5 => Some(Self::PropertyTest),
+            6 => Some(Self::Integration),
+            _ => None,
+        }
+    }
+
     /// Short display label for TUI / logging.
     #[must_use]
     pub const fn label(self) -> &'static str {
