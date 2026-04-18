@@ -1,11 +1,13 @@
-//! `roko plan` subcommand group — list, show, and create plans.
+//! `roko plan` subcommand helpers for discovered plan directories.
 //!
-//! Plans are declarative task graphs stored as TOML/JSON files under
-//! `plans/` or the legacy `.roko/plans/`. Each plan describes a set of tasks
-//! with dependencies,
-//! assigned agent roles, and gate requirements.
+//! The canonical layout is `plans/<plan-id>/plan.md` with a sibling
+//! `tasks.toml`. Legacy flat markdown files under `plans/` or `.roko/plans/`
+//! are still discoverable, but new plans should use the directory layout.
 
+use std::fs;
 use std::path::{Path, PathBuf};
+
+use roko_orchestrator::{DiscoveryError, PlanInfo, discover_plans};
 
 /// Resolve the plans directory, preferring the top-level layout and falling
 /// back to the legacy `.roko` location.
@@ -17,6 +19,28 @@ pub fn plans_dir(workdir: &Path) -> PathBuf {
     }
 
     workdir.join(".roko").join("plans")
+}
+
+/// Return the stable orchestration id for a discovered plan.
+#[must_use]
+pub fn stable_plan_id(plan_info: &PlanInfo) -> &str {
+    plan_info
+        .frontmatter
+        .as_ref()
+        .and_then(|fm| fm.plan.as_deref())
+        .filter(|plan_id| !plan_id.trim().is_empty())
+        .unwrap_or(&plan_info.base)
+}
+
+/// Return the sibling `tasks.toml` path for a directory-style plan.
+#[must_use]
+pub fn tasks_path(plan_info: &PlanInfo) -> Option<PathBuf> {
+    plan_info
+        .path
+        .file_name()
+        .is_some_and(|name| name == "plan.md")
+        .then(|| plan_info.path.parent().map(|dir| dir.join("tasks.toml")))
+        .flatten()
 }
 
 /// A plan summary (used in list output).
@@ -154,18 +178,120 @@ pub fn list_plan_files(workdir: &Path) -> std::io::Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
     let mut plans = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
+    for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
+        if path.is_dir() {
+            let plan_md = path.join("plan.md");
+            if plan_md.is_file() {
+                plans.push(plan_md);
+            }
+            continue;
+        }
         if path
             .extension()
-            .is_some_and(|ext| ext == "toml" || ext == "json")
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
         {
             plans.push(path);
         }
     }
     plans.sort();
     Ok(plans)
+}
+
+/// Build a display summary from a discovered plan entry.
+#[must_use]
+pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
+    let title = fs::read_to_string(&plan_info.path)
+        .ok()
+        .and_then(|content| extract_markdown_title(&content))
+        .unwrap_or_else(|| stable_plan_id(plan_info).to_string());
+    let tasks_path = tasks_path(plan_info);
+    let (task_count, old_format) = match tasks_path.as_deref() {
+        Some(path) if path.is_file() => {
+            let task_count = crate::task_parser::TasksFile::parse(path)
+                .map(|tasks| tasks.tasks.len())
+                .unwrap_or(0);
+            let old_format = matches!(
+                crate::task_parser::TasksFile::validate_modern_fields(path),
+                Ok(issues) if !issues.is_empty()
+            );
+            (task_count, old_format)
+        }
+        _ => (0, false),
+    };
+
+    PlanSummary {
+        id: stable_plan_id(plan_info).to_string(),
+        title,
+        task_count,
+        tasks_done: 0,
+        tasks_failed: 0,
+        completed: false,
+        old_format,
+        last_error: None,
+    }
+}
+
+/// Discover plans from the canonical plans directory and summarize them.
+///
+/// # Errors
+///
+/// Returns any discovery error reported by [`discover_plans`].
+pub fn summarize_discovered_plans(workdir: &Path) -> Result<Vec<PlanSummary>, DiscoveryError> {
+    let plans = discover_plans(&plans_dir(workdir))?;
+    Ok(plans.iter().map(summarize_plan_info).collect())
+}
+
+/// Find a discovered plan by its stable id or base directory name.
+///
+/// # Errors
+///
+/// Returns any discovery error reported by [`discover_plans`].
+pub fn discover_plan_by_id(
+    workdir: &Path,
+    plan_id: &str,
+) -> Result<Option<PlanInfo>, DiscoveryError> {
+    let plans = discover_plans(&plans_dir(workdir))?;
+    Ok(plans
+        .into_iter()
+        .find(|plan_info| stable_plan_id(plan_info) == plan_id || plan_info.base == plan_id))
+}
+
+fn extract_markdown_title(contents: &str) -> Option<String> {
+    let body = strip_frontmatter(contents);
+    body.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix('#').map(str::trim))
+        .filter(|title| !title.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn strip_frontmatter(contents: &str) -> &str {
+    let stripped = contents.strip_prefix('\u{FEFF}').unwrap_or(contents);
+    let trimmed = stripped.trim_start();
+    if !trimmed.starts_with("---") {
+        return stripped;
+    }
+
+    let after_open = &trimmed[3..];
+    let close_pos_lf = after_open.find("\n---");
+    let close_pos_crlf = after_open.find("\r\n---");
+    let Some(close_pos) = (match (close_pos_lf, close_pos_crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }) else {
+        return stripped;
+    };
+
+    let after_close = &after_open[close_pos..];
+    if let Some(rest) = after_close.strip_prefix("\r\n---") {
+        rest.trim_start_matches(['\r', '\n'])
+    } else if let Some(rest) = after_close.strip_prefix("\n---") {
+        rest.trim_start_matches(['\r', '\n'])
+    } else {
+        stripped
+    }
 }
 
 /// Format a list of plan summaries for display.
@@ -366,30 +492,30 @@ mod tests {
     }
 
     #[test]
-    fn list_plan_files_finds_toml_and_json_in_legacy_dir() {
+    fn list_plan_files_finds_directory_and_legacy_markdown_plans() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".roko").join("plans");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plan1.toml"), "").unwrap();
-        std::fs::write(dir.join("plan2.json"), "").unwrap();
-        std::fs::write(dir.join("notes.txt"), "").unwrap(); // should be excluded
+        std::fs::create_dir_all(dir.join("plan1")).unwrap();
+        std::fs::write(dir.join("plan1").join("plan.md"), "# Plan One\n").unwrap();
+        std::fs::write(dir.join("plan2.md"), "# Plan Two\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
 
         let plans = list_plan_files(tmp.path()).unwrap();
         assert_eq!(plans.len(), 2);
-        assert!(plans.iter().any(|p| p.ends_with("plan1.toml")));
-        assert!(plans.iter().any(|p| p.ends_with("plan2.json")));
+        assert!(plans.iter().any(|p| p.ends_with("plan1/plan.md")));
+        assert!(plans.iter().any(|p| p.ends_with("plan2.md")));
     }
 
     #[test]
     fn list_plan_files_reads_top_level_dir_when_present() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plans");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plan1.toml"), "").unwrap();
+        std::fs::create_dir_all(dir.join("plan1")).unwrap();
+        std::fs::write(dir.join("plan1").join("plan.md"), "# Plan One\n").unwrap();
 
         let plans = list_plan_files(tmp.path()).unwrap();
         assert_eq!(plans.len(), 1);
-        assert!(plans[0].ends_with("plan1.toml"));
+        assert!(plans[0].ends_with("plan1/plan.md"));
     }
 
     #[test]
@@ -409,5 +535,37 @@ mod tests {
         assert!(text.contains("My Plan"));
         assert!(text.contains("done"));
         assert!(text.contains("⚠"));
+    }
+
+    #[test]
+    fn strip_frontmatter_leaves_markdown_body() {
+        let body = strip_frontmatter("---\nplan: alpha\n---\n# Hello\n");
+        assert_eq!(body, "# Hello\n");
+    }
+
+    #[test]
+    fn summarize_plan_info_uses_heading_and_tasks_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plans").join("01-alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plan.md"),
+            "---\nplan: alpha\n---\n# Alpha Title\n\nBody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tasks.toml"),
+            "[meta]\nplan = \"alpha\"\nmax_parallel = 1\n\n[[task]]\nid = \"t1\"\ntitle = \"Task\"\nverify = []\n",
+        )
+        .unwrap();
+
+        let plan_info = discover_plan_by_id(tmp.path(), "alpha")
+            .unwrap()
+            .expect("plan");
+        let summary = summarize_plan_info(&plan_info);
+
+        assert_eq!(summary.id, "alpha");
+        assert_eq!(summary.title, "Alpha Title");
+        assert_eq!(summary.task_count, 1);
     }
 }

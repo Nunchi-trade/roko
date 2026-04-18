@@ -4056,7 +4056,12 @@ impl PlanRunner {
                 );
             }
 
-            let state = PlanState::new(&plan_id);
+            let priority = plan_info
+                .frontmatter
+                .as_ref()
+                .and_then(|fm| fm.priority)
+                .unwrap_or(0);
+            let state = PlanState::new(&plan_id).with_priority(priority);
             executor.add_plan(state);
         }
 
@@ -4254,7 +4259,8 @@ impl PlanRunner {
             .map(restored_circuit_breaker_state)
             .map(Conductor::from_circuit_breaker_state)
             .unwrap_or_else(Conductor::new);
-        let executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
+        let mut executor = ParallelExecutor::from_snapshot(config.executor.clone(), snapshot);
+        Self::reapply_plan_dependencies_from_disk(&mut executor, workdir);
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
@@ -4403,7 +4409,8 @@ impl PlanRunner {
             .map(restored_circuit_breaker_state)
             .map(Conductor::from_circuit_breaker_state)
             .unwrap_or_else(Conductor::new);
-        let executor = ParallelExecutor::from_snapshot(config.executor.clone(), exec_snap);
+        let mut executor = ParallelExecutor::from_snapshot(config.executor.clone(), exec_snap);
+        Self::reapply_plan_dependencies_from_disk(&mut executor, workdir);
         let event_log = Self::restore_event_log_snapshot(event_log_json)?;
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
@@ -4555,6 +4562,38 @@ impl PlanRunner {
         let snapshot: EventLogSnapshot = serde_json::from_str(event_log_json)
             .map_err(|e| anyhow!("bad event log snapshot: {e}"))?;
         EventLog::restore_verified(snapshot).map_err(|e| anyhow!("bad event log snapshot: {e}"))
+    }
+
+    fn reapply_plan_dependencies_from_disk(executor: &mut ParallelExecutor, workdir: &Path) {
+        let plans_dir = plans_dir(workdir);
+        let Ok(plans) = discover_plans(&plans_dir) else {
+            tracing::warn!(
+                plans_dir = %plans_dir.display(),
+                "[orchestrate] unable to restore cross-plan dependencies from disk"
+            );
+            return;
+        };
+
+        let deps = plans
+            .into_iter()
+            .filter_map(|plan_info| {
+                let depends_on = plan_info
+                    .frontmatter
+                    .as_ref()
+                    .map(|fm| fm.depends_on.clone())
+                    .unwrap_or_default();
+                if depends_on.is_empty() {
+                    return None;
+                }
+                let plan_id = plan_info
+                    .frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.plan.clone())
+                    .unwrap_or(plan_info.base);
+                Some((plan_id, depends_on))
+            })
+            .collect();
+        executor.set_plan_dependencies(deps);
     }
 
     /// Thread an optional Claude resume id from upper-layer orchestration
@@ -6767,6 +6806,14 @@ impl PlanRunner {
                 );
             }
         }
+    }
+
+    /// Run a discovered plans directory through the orchestration loop.
+    ///
+    /// This is the documented runtime entrypoint used by `roko plan run`.
+    #[instrument(skip_all, fields(plan_dir = %path.display()))]
+    pub async fn run(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        self.run_task_plans(path).await
     }
 
     /// Run plans using tasks.toml files, routing through the full 14-phase

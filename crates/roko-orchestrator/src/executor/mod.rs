@@ -113,7 +113,7 @@ impl Default for ExecutorConfig {
 
 impl ExecutorConfig {
     const fn default_max_concurrent_tasks() -> usize {
-        4
+        8
     }
 
     const fn default_task_timeout_secs() -> u64 {
@@ -125,7 +125,7 @@ impl ExecutorConfig {
     }
 
     const fn default_auto_replan() -> bool {
-        true
+        false
     }
 
     const fn default_use_worktrees() -> bool {
@@ -567,6 +567,8 @@ mod tests {
     #[test]
     fn executor_config_disables_worktrees_by_default() {
         assert!(!ExecutorConfig::default().use_worktrees);
+        assert_eq!(ExecutorConfig::default().max_concurrent_tasks, 8);
+        assert!(!ExecutorConfig::default().auto_replan);
     }
 
     #[test]

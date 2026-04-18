@@ -37,8 +37,8 @@ use roko_cli::serve_runtime::RokoCliRuntime;
 use roko_cli::tui::{App, ApprovalChannel};
 use roko_cli::{
     Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
-    PipeMode, Plan, PlanSummary, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs,
-    config_cmd, load_layered, run_init_wizard, run_once,
+    PipeMode, Plan, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd,
+    load_layered, run_init_wizard, run_once,
 };
 use roko_core::agent::{AgentRole, ProviderKind};
 use roko_core::config::ServeDeployWebhookConfig;
@@ -448,7 +448,7 @@ enum PlanCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
         /// Resume from `.roko/state/executor.json` in the working directory.
-        #[arg(long = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
+        #[arg(long = "resume", visible_alias = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
         resume_plan: Option<PathBuf>,
         /// Launch the connected approval TUI while the plan runs.
         #[arg(long)]
@@ -3110,49 +3110,12 @@ fn cmd_inject(
     Ok(EXIT_SUCCESS)
 }
 
-fn plan_has_old_tasks_format(workdir: &Path, plan_path: &Path) -> bool {
-    let Some(plan_stem) = plan_path.file_stem() else {
-        return false;
-    };
-
-    let tasks_path = roko_cli::plan::plans_dir(workdir)
-        .join(plan_stem)
-        .join("tasks.toml");
-    if !tasks_path.is_file() {
-        return false;
-    }
-
-    matches!(
-        roko_cli::task_parser::TasksFile::validate_modern_fields(&tasks_path),
-        Ok(issues) if !issues.is_empty()
-    )
-}
-
 async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
         PlanCmd::List { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let files =
-                roko_cli::plan::list_plan_files(&wd).map_err(|e| anyhow!("list plans: {e}"))?;
-            let summaries: Vec<PlanSummary> = files
-                .iter()
-                .map(|p| {
-                    let id = p
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    PlanSummary {
-                        id,
-                        title: "(unloaded)".into(),
-                        task_count: 0,
-                        tasks_done: 0,
-                        tasks_failed: 0,
-                        completed: false,
-                        old_format: plan_has_old_tasks_format(&wd, p),
-                        last_error: None,
-                    }
-                })
-                .collect();
+            let summaries =
+                roko_cli::plan::summarize_discovered_plans(&wd).map_err(|e| anyhow!("{e}"))?;
 
             if cli.json {
                 println!("{}", roko_cli::plan::format_plan_list_json(&summaries));
@@ -3163,17 +3126,57 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
         }
         PlanCmd::Show { plan_id, workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let plans_dir = roko_cli::plan::plans_dir(&wd);
-            let path = plans_dir.join(format!("{plan_id}.toml"));
-            if path.exists() {
-                println!("plan file: {}", path.display());
+            let Some(plan_info) =
+                roko_cli::plan::discover_plan_by_id(&wd, &plan_id).map_err(|e| anyhow!("{e}"))?
+            else {
+                eprintln!("plan '{plan_id}' not found");
+                return Ok(EXIT_AGENT_FAILURE);
+            };
+            let summary = roko_cli::plan::summarize_plan_info(&plan_info);
+            let tasks_path = roko_cli::plan::tasks_path(&plan_info);
+            let stable_id = roko_cli::plan::stable_plan_id(&plan_info);
+
+            if cli.json {
+                let payload = json!({
+                    "plan_id": stable_id,
+                    "base": plan_info.base,
+                    "title": summary.title,
+                    "plan_path": plan_info.path,
+                    "tasks_path": tasks_path,
+                    "task_count": summary.task_count,
+                    "frontmatter": plan_info.frontmatter,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
-                let alt = plans_dir.join(format!("{plan_id}.json"));
-                if !alt.exists() {
-                    eprintln!("plan '{plan_id}' not found");
-                    return Ok(EXIT_AGENT_FAILURE);
+                println!("plan: {stable_id}");
+                println!("base: {}", plan_info.base);
+                println!("title: {}", summary.title);
+                println!("plan file: {}", plan_info.path.display());
+                println!(
+                    "tasks file: {}",
+                    tasks_path
+                        .as_deref()
+                        .filter(|path| path.is_file())
+                        .map_or_else(|| "(none)".to_string(), |path| path.display().to_string())
+                );
+                println!("task count: {}", summary.task_count);
+                if let Some(frontmatter) = plan_info.frontmatter.as_ref() {
+                    if !frontmatter.depends_on.is_empty() {
+                        println!("depends_on: {}", frontmatter.depends_on.join(", "));
+                    }
+                    if !frontmatter.parallel_with.is_empty() {
+                        println!("parallel_with: {}", frontmatter.parallel_with.join(", "));
+                    }
+                    if let Some(priority) = frontmatter.priority {
+                        println!("priority: {priority}");
+                    }
+                    if !frontmatter.tags.is_empty() {
+                        println!("tags: {}", frontmatter.tags.join(", "));
+                    }
+                    if let Some(milestone) = frontmatter.milestone.as_deref() {
+                        println!("milestone: {milestone}");
+                    }
                 }
-                println!("plan file: {}", alt.display());
             }
             Ok(EXIT_SUCCESS)
         }
@@ -3190,19 +3193,44 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             let plans_dir = roko_cli::plan::plans_dir(&wd);
             std::fs::create_dir_all(&plans_dir).map_err(|e| anyhow!("create plans dir: {e}"))?;
-            let path = plans_dir.join(format!("{plan_id}.toml"));
+            let plan_dir = plans_dir.join(&plan_id);
+            let legacy_plan = plans_dir.join(format!("{plan_id}.md"));
+            if plan_dir.exists() || legacy_plan.exists() {
+                bail!("plan '{plan_id}' already exists");
+            }
+            std::fs::create_dir_all(&plan_dir).map_err(|e| anyhow!("create plan dir: {e}"))?;
+            let plan_md_path = plan_dir.join("plan.md");
+            let tasks_path = plan_dir.join("tasks.toml");
 
-            // Write a minimal plan skeleton.
-            let content = format!(
-                "# Plan: {}\n# {}\n\n[plan]\nid = \"{}\"\ntitle = \"{}\"\ntasks = []\n",
-                plan.title, plan.description, plan.id, plan.title,
+            let yaml_plan_id = serde_json::to_string(&plan.id)?;
+            let plan_md = format!(
+                "---\nplan: {yaml_plan_id}\n---\n# {}\n\n{}\n",
+                plan.title,
+                if plan.description.is_empty() {
+                    "Describe the plan here.".to_string()
+                } else {
+                    plan.description.clone()
+                }
             );
-            std::fs::write(&path, content).map_err(|e| anyhow!("write plan: {e}"))?;
+            let tasks_toml = format!(
+                "[meta]\nplan = {:?}\nmax_parallel = 1\n\n# Add [[task]] entries below.\n",
+                plan.id
+            );
+            std::fs::write(&plan_md_path, plan_md)
+                .map_err(|e| anyhow!("write {}: {e}", plan_md_path.display()))?;
+            std::fs::write(&tasks_path, tasks_toml)
+                .map_err(|e| anyhow!("write {}: {e}", tasks_path.display()))?;
 
             if cli.json {
-                println!(r#"{{"created":"{}","path":"{}"}}"#, plan_id, path.display());
+                let payload = json!({
+                    "created": plan_id,
+                    "plan_dir": plan_dir,
+                    "plan_path": plan_md_path,
+                    "tasks_path": tasks_path,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if !cli.quiet {
-                println!("created plan '{}' at {}", plan_id, path.display());
+                println!("created plan '{}' at {}", plan_id, plan_dir.display());
             }
             Ok(EXIT_SUCCESS)
         }
@@ -3310,9 +3338,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 runner.set_approval_tx(Some(approval_channel.tx));
             }
 
-            // Use task-driven execution (reads tasks.toml directly) instead of
-            // the phase-machine executor which expects enrichment phases.
-            let report = runner.run_task_plans(&plans_dir).await?;
+            let report = runner.run(&plans_dir).await?;
 
             // State is auto-saved during and after the run.
             let snap_path = wd.join(".roko").join("state").join("executor.json");
@@ -6759,6 +6785,20 @@ mod tests {
     #[test]
     fn cli_parses_plan_resume_flag() {
         let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume-plan"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plan {
+                cmd: PlanCmd::Run {
+                    resume_plan: Some(_),
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_plan_resume_flag_documented_alias() {
+        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Plan {

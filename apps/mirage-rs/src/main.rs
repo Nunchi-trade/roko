@@ -278,7 +278,8 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
 
     // Prefund the synthetic ERC-8004 bootstrap deployer so contract creation
     // succeeds even on a real mainnet fork (where the address has 0 balance).
-    fork.db.set_balance(ERC8004_BOOTSTRAP_DEPLOYER, U256::from(10_u128.pow(18)));
+    fork.db
+        .set_balance(ERC8004_BOOTSTRAP_DEPLOYER, U256::from(10_u128.pow(18)));
 
     let erc8004_contracts =
         bootstrap_erc8004_contracts(&mut fork).context("bootstrap ERC-8004 contracts")?;

@@ -1573,9 +1573,7 @@ fn register_state_mutation_methods(
                 serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| {
                     invalid_params(MirageError::InvalidParams("nonce out of u64 range".into()))
                 })?,
-                serde_json::Value::String(s) => {
-                    parse_hex_quantity(s).map_err(invalid_params)?
-                }
+                serde_json::Value::String(s) => parse_hex_quantity(s).map_err(invalid_params)?,
                 _ => {
                     return Err(invalid_params(MirageError::InvalidParams(
                         "nonce must be a number or hex string".into(),
