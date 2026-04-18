@@ -226,9 +226,11 @@ pub fn feedback_for_agent(gate_output: &str, rung: u8) -> GateFeedback {
     // non-trivial, assume it is an unrecognized error format and surface the
     // first useful line as an actionable error.
     if errors.is_empty() && warnings.is_empty() && suggestions.is_empty() {
-        if let Some(line) = gate_output.lines().map(str::trim).find(|line| {
-            !line.is_empty() && !is_noise(line)
-        }) {
+        if let Some(line) = gate_output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !is_noise(line))
+        {
             errors.push(line.to_string());
             has_errors = true;
         }

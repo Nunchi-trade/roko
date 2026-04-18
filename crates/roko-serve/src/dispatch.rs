@@ -1463,8 +1463,14 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                     let suggested_subscription =
                         Subscription::new(template_name.clone(), signal.kind.as_str());
                     tokio::spawn(async move {
-                        dispatch_agent(state, suggested_subscription, signal, dispatcher, repo_ctx)
-                            .await;
+                        Box::pin(dispatch_agent(
+                            state,
+                            suggested_subscription,
+                            signal,
+                            dispatcher,
+                            repo_ctx,
+                        ))
+                        .await;
                     });
                 }
                 Ok(None) => {}
@@ -1488,7 +1494,14 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                 let sub_for_task = sub.clone();
                 let repo_ctx = repo_ctx.clone();
                 tokio::spawn(async move {
-                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher, repo_ctx).await;
+                    Box::pin(dispatch_agent(
+                        state,
+                        sub_for_task.clone(),
+                        signal,
+                        dispatcher,
+                        repo_ctx,
+                    ))
+                    .await;
                     sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {

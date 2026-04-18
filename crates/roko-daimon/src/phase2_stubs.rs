@@ -567,18 +567,29 @@ enum TransferRole {
 fn classify_transfer_role(label: &str, index: usize) -> TransferRole {
     let normalized = label.trim().to_ascii_lowercase();
 
-    if contains_any(&normalized, &["complex", "difficulty", "volatility", "unstable"]) {
+    if contains_any(
+        &normalized,
+        &["complex", "difficulty", "volatility", "unstable"],
+    ) {
         return TransferRole::Difficulty;
     }
     if contains_any(
         &normalized,
-        &["risk", "danger", "leverage", "exposure", "blast", "slippage"],
+        &[
+            "risk", "danger", "leverage", "exposure", "blast", "slippage",
+        ],
     ) {
         return TransferRole::Danger;
     }
     if contains_any(
         &normalized,
-        &["novel", "familiar", "correlation", "similarity", "ambiguity"],
+        &[
+            "novel",
+            "familiar",
+            "correlation",
+            "similarity",
+            "ambiguity",
+        ],
     ) {
         return TransferRole::Familiarity;
     }
@@ -599,13 +610,26 @@ fn classify_transfer_role(label: &str, index: usize) -> TransferRole {
     }
     if contains_any(
         &normalized,
-        &["revers", "rollback", "recover", "counterparty", "exit", "undo"],
+        &[
+            "revers",
+            "rollback",
+            "recover",
+            "counterparty",
+            "exit",
+            "undo",
+        ],
     ) {
         return TransferRole::Recoverability;
     }
     if contains_any(
         &normalized,
-        &["dependency", "coupling", "regulatory", "compliance", "integration"],
+        &[
+            "dependency",
+            "coupling",
+            "regulatory",
+            "compliance",
+            "integration",
+        ],
     ) {
         return TransferRole::Coupling;
     }
@@ -656,7 +680,10 @@ impl StrategyTransferMapper {
 
     /// Transfer coordinates from the source layout into the target layout.
     #[must_use]
-    pub fn transfer(&self, source_coords: &[f64; STRATEGY_DIMENSIONS]) -> [f64; STRATEGY_DIMENSIONS] {
+    pub fn transfer(
+        &self,
+        source_coords: &[f64; STRATEGY_DIMENSIONS],
+    ) -> [f64; STRATEGY_DIMENSIONS] {
         let mut target_coords = [0.5; STRATEGY_DIMENSIONS];
         for &(src_idx, target_idx) in &self.dimension_map {
             target_coords[target_idx] = source_coords[src_idx];
@@ -830,9 +857,11 @@ impl FatigueDetector {
 
         let many_failures = state.consecutive_failures >= 3;
         let pleasure_drop = state.pleasure_at_start - state.current_pleasure > 0.15;
-        let duration_hours =
-            state.last_failure_at.signed_duration_since(state.first_failure_at).num_minutes() as f64
-                / 60.0;
+        let duration_hours = state
+            .last_failure_at
+            .signed_duration_since(state.first_failure_at)
+            .num_minutes() as f64
+            / 60.0;
         let rapid_failures = duration_hours < 2.0;
 
         many_failures && pleasure_drop && rapid_failures
@@ -956,8 +985,7 @@ impl DaimonState {
         let a_delta = (event.source_pad.arousal * 0.3).min(0.3);
         let now = Utc::now();
 
-        self.state
-            .apply_delta(p_delta, a_delta, 0.0, 0.0, now);
+        self.state.apply_delta(p_delta, a_delta, 0.0, 0.0, now);
         self.borrowed_affect.push(BorrowedAffect {
             source: event.source,
             p_delta,

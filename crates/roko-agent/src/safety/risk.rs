@@ -461,7 +461,11 @@ fn modified_files(call: &ToolCall) -> Vec<String> {
             files.push(path.to_string());
         }
     }
-    if let Some(paths) = call.arguments.get("paths").and_then(|value| value.as_array()) {
+    if let Some(paths) = call
+        .arguments
+        .get("paths")
+        .and_then(|value| value.as_array())
+    {
         for path in paths.iter().filter_map(|value| value.as_str()) {
             files.push(path.to_string());
         }
@@ -496,7 +500,10 @@ mod tests {
             confidence: 1.0,
             estimated_cost: 0.0,
         };
-        assert_eq!(tracker.check_and_consume(&action), BudgetCheckResult::WithinBudget);
+        assert_eq!(
+            tracker.check_and_consume(&action),
+            BudgetCheckResult::WithinBudget
+        );
         assert_eq!(
             tracker.check_and_consume(&action),
             BudgetCheckResult::Exceeded(BudgetDimension::Footprint)

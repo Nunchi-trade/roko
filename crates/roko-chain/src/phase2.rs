@@ -25,10 +25,7 @@ use crate::ChainResult;
 use async_trait::async_trait;
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{
-        Arc, Mutex,
-        atomic::AtomicU64,
-    },
+    sync::{Arc, Mutex, atomic::AtomicU64},
 };
 
 /// Simplified address representation for deferred chain stubs.
@@ -569,7 +566,10 @@ pub enum DaMode {
     /// Full rollup mode.
     Rollup,
     /// AnyTrust committee-backed mode.
-    AnyTrust { committee_size: usize, threshold: usize },
+    AnyTrust {
+        committee_size: usize,
+        threshold: usize,
+    },
     /// Celestia-backed data availability.
     Celestia { namespace: [u8; 32] },
 }
@@ -1034,9 +1034,15 @@ pub struct ReputationMessage {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReputationChangeReason {
     /// Reputation change after job completion.
-    JobCompletion { job_hash: [u8; 32], quality_score: f64 },
+    JobCompletion {
+        job_hash: [u8; 32],
+        quality_score: f64,
+    },
     /// Reputation change due to slashing.
-    Slash { violation_type: ViolationType, amount: u256 },
+    Slash {
+        violation_type: ViolationType,
+        amount: u256,
+    },
     /// Reputation changed due to demurrage decay.
     DemurrageDecay,
     /// Reputation changed due to peer review.
@@ -1589,7 +1595,10 @@ pub enum MirageError {
     /// Internal simulator error.
     InternalError { message: String },
     /// Execution reverted with optional data.
-    ExecutionReverted { message: String, data: Option<Bytes> },
+    ExecutionReverted {
+        message: String,
+        data: Option<Bytes>,
+    },
     /// Fork setup or fetch error.
     ForkError { message: String },
     /// Referenced snapshot id was not found.
@@ -1822,7 +1831,10 @@ pub enum DisputeLevel {
     /// Governance vote escalation.
     GovernanceVote { proposal_id: [u8; 32] },
     /// Fully resolved dispute.
-    Resolved { winner: u256, outcome: DisputeOutcome },
+    Resolved {
+        winner: u256,
+        outcome: DisputeOutcome,
+    },
 }
 
 /// Outcomes of a knowledge dispute.
@@ -2006,7 +2018,10 @@ impl CollusionDetector {
         *count += 1;
 
         if *count > self.config.mutual_assignment_threshold {
-            CollusionRisk::MutualAssignmentFlag { pair: key, count: *count }
+            CollusionRisk::MutualAssignmentFlag {
+                pair: key,
+                count: *count,
+            }
         } else {
             CollusionRisk::None
         }

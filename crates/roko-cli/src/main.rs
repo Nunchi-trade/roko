@@ -728,6 +728,7 @@ enum DeployCmd {
 #[derive(Debug, Subcommand)]
 enum ConfigCmd {
     /// Interactive wizard: detects installed LLM CLIs, writes global config.
+    #[command(visible_alias = "wizard")]
     Init {
         /// Skip all confirmation prompts.
         #[arg(long)]
@@ -6959,6 +6960,17 @@ mod tests {
             cli.command,
             Some(Command::Config {
                 cmd: ConfigCmd::Show { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_config_wizard_alias() {
+        let cli = Cli::try_parse_from(["roko", "config", "wizard"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Init { .. }
             })
         ));
     }

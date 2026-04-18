@@ -151,12 +151,7 @@ pub struct CausalEdgeSnap {
 impl CausalEdgeSnap {
     /// Construct a causal-edge snapshot.
     #[must_use]
-    pub fn new(
-        edge: impl Into<String>,
-        lag: u64,
-        confidence: f64,
-        discovered_at: u64,
-    ) -> Self {
+    pub fn new(edge: impl Into<String>, lag: u64, confidence: f64, discovered_at: u64) -> Self {
         Self {
             edge: edge.into(),
             lag,
@@ -177,7 +172,9 @@ impl NeuroDigest {
     /// Construct an empty Neuro digest.
     #[must_use]
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 }
 
@@ -210,7 +207,11 @@ impl AgentStateVector {
             schema_version: 1,
             agent_id,
             timestamp,
-            pad: [pad.pleasure as f32, pad.arousal as f32, pad.dominance as f32],
+            pad: [
+                pad.pleasure as f32,
+                pad.arousal as f32,
+                pad.dominance as f32,
+            ],
             budget_snapshot: BudgetSnapshot::default(),
             top5_causal_edges: Vec::new(),
             neuro_digest: NeuroDigest::default(),
@@ -317,11 +318,7 @@ pub struct ArtQualityAssessment {
 impl ArtQualityAssessment {
     /// Construct a quality assessment.
     #[must_use]
-    pub fn new(
-        art_id: impl Into<String>,
-        rating: f64,
-        rationale: impl Into<String>,
-    ) -> Self {
+    pub fn new(art_id: impl Into<String>, rating: f64, rationale: impl Into<String>) -> Self {
         Self {
             art_id: art_id.into(),
             rating,

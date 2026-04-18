@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::phase2::shared::{DepotentiationSummary, InsightRecord, PatternRecord};
 use crate::phase2::shared::ModelTier;
+use crate::phase2::shared::{DepotentiationSummary, InsightRecord, PatternRecord};
 
 /// Three-phase dream state machine described by the docs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::phase2::shared::{Hypothesis, ModelTier};
 use crate::DreamTrigger;
+use crate::phase2::shared::{Hypothesis, ModelTier};
 
 /// Nightmare classes recognized by the advanced dream safety layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

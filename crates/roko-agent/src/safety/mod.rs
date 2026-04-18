@@ -26,8 +26,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-pub mod bash;
 pub mod authz;
+pub mod bash;
 pub mod capabilities;
 pub mod contract;
 pub mod git;
@@ -58,7 +58,7 @@ use self::risk::{BudgetCheckResult, ProposedAction};
 use self::scrub::ScrubPolicy;
 
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
-pub use authz::{AuthzDecision, AuthorizationEvidence, AuthorizationSource, EscalationTarget};
+pub use authz::{AuthorizationEvidence, AuthorizationSource, AuthzDecision, EscalationTarget};
 pub use capabilities::{AgentWarrant, Capability, CapabilityError, check_capability, delegate};
 pub use provenance::{AttestationLevel, Custody, Taint};
 pub use risk::{
@@ -202,10 +202,7 @@ impl SafetyLayer {
 
     /// Attach a shared adaptive-risk budget tracker to the safety layer.
     #[must_use]
-    pub fn with_shared_safety_budget(
-        mut self,
-        budget: Arc<Mutex<SafetyBudgetTracker>>,
-    ) -> Self {
+    pub fn with_shared_safety_budget(mut self, budget: Arc<Mutex<SafetyBudgetTracker>>) -> Self {
         self.safety_budget = Some(budget);
         self
     }

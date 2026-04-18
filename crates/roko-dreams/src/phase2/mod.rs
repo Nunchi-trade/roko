@@ -27,12 +27,12 @@ pub mod threat;
 pub use advanced::{
     ComputationalMicrostate, ConstitutionalPrinciple, ConstitutionalSelfCritique, DreamJournal,
     DreamJournalEntry, DreamTrendAnalysis, InsightEnvironmentSnapshot, LucidDreamMonitor,
-    NightmareClass, NightmareContainment, NightmareDecision, NightmareDetector, NightmareReport,
-    NeuroinformedLucidMonitor, PrincipleSeverity, TemporalValidityTracker,
+    NeuroinformedLucidMonitor, NightmareClass, NightmareContainment, NightmareDecision,
+    NightmareDetector, NightmareReport, PrincipleSeverity, TemporalValidityTracker,
 };
 pub use cycle::{
-    DreamOutcomeEvent, DreamPhase, DreamQualityDashboard, DreamQualityTrend,
-    ExtendedDreamPhase, MicroConsolidation,
+    DreamOutcomeEvent, DreamPhase, DreamQualityDashboard, DreamQualityTrend, ExtendedDreamPhase,
+    MicroConsolidation,
 };
 pub use divergence::{DivergenceMetrics, DivergenceTargets};
 pub use evolution::{
@@ -47,12 +47,11 @@ pub use hypnagogia::{
 };
 pub use imagination::{
     Association, AssociationEngine, AssociationStrength, BacktrackingCounterfactualConfig,
-    CausalEdge, CausalGraph, CombinationalConfig, CounterfactualEngine,
-    CounterfactualHypothesis, CreativityMode, DeltaEpisodeEncoder, DepotentiationConfig,
-    ExploratoryConfig, GenerationMode, ImaginationBudget, ImaginationModeAllocations,
-    ImaginationQualityReport, ImaginationROITracker, ImaginationValidator,
-    InteractiveCounterfactualConfig, InterventionEngine, ModeROI, TransformationalConfig,
-    WorldModelConfig,
+    CausalEdge, CausalGraph, CombinationalConfig, CounterfactualEngine, CounterfactualHypothesis,
+    CreativityMode, DeltaEpisodeEncoder, DepotentiationConfig, ExploratoryConfig, GenerationMode,
+    ImaginationBudget, ImaginationModeAllocations, ImaginationQualityReport, ImaginationROITracker,
+    ImaginationValidator, InteractiveCounterfactualConfig, InterventionEngine, ModeROI,
+    TransformationalConfig, WorldModelConfig,
 };
 pub use integration::{
     CircadianScheduler, DreamShareConfig, DreamShareMode, DreamShareProtocol,

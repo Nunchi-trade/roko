@@ -39,13 +39,13 @@ use std::collections::{HashMap, HashSet};
 mod phase2_stubs;
 
 pub use self::phase2_stubs::{
-    adjusted_thresholds, pad_cosine_similarity, AffectBehaviorModulation, AffectBehaviorStrategy,
-    AffectOctant, AffectWeightedQuery, AgentId, BehavioralStateThresholds,
-    BehavioralStateTracker, BorrowedAffect, ContagionEvent, ContagionTrigger, ContrarianConfig,
-    ContrarianTracker, DimensionDef, DimensionSource, DimensionWeights, DomainRegistration,
-    EfficiencyEvent, EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector,
-    ResourcePressure, ScoredEntry, SomaticField, SomaticMarkerFiredEvent,
-    StrategyTransferMapper, TierBias, TierThresholds, ValidationArc, fatigue_response,
+    AffectBehaviorModulation, AffectBehaviorStrategy, AffectOctant, AffectWeightedQuery, AgentId,
+    BehavioralStateThresholds, BehavioralStateTracker, BorrowedAffect, ContagionEvent,
+    ContagionTrigger, ContrarianConfig, ContrarianTracker, DimensionDef, DimensionSource,
+    DimensionWeights, DomainRegistration, EfficiencyEvent, EmotionalProvenance,
+    ErrorPatternTracker, FatigueAction, FatigueDetector, ResourcePressure, ScoredEntry,
+    SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper, TierBias, TierThresholds,
+    ValidationArc, adjusted_thresholds, fatigue_response, pad_cosine_similarity,
 };
 
 const STRATEGY_DIMENSIONS: usize = 8;
