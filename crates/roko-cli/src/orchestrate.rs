@@ -362,6 +362,34 @@ fn predictive_policy_sections(
         .collect()
 }
 
+fn predictive_calibration_summary_section(
+    calibration: &CalibrationTracker,
+    model_slug: &str,
+    task_category: &str,
+) -> Option<PromptSection> {
+    let summary = calibration.summary(model_slug, task_category);
+    if summary.sample_count == 0 {
+        return None;
+    }
+
+    Some(
+        PromptSection::new(
+            "predictive-calibration-summary",
+            format!(
+                "Routing-log calibration for {model_slug}/{task_category}: accuracy {:.0}%, coverage {:.0}%, mean bias {:+.2} over {} runs.",
+                summary.recent_accuracy * 100.0,
+                summary.coverage * 100.0,
+                summary.mean_bias,
+                summary.sample_count,
+            ),
+        )
+        .with_priority(SectionPriority::Normal)
+        .with_placement(Placement::Middle)
+        .with_hard_cap(192)
+        .with_bidder(AttentionBidder::Oracles),
+    )
+}
+
 fn cfactor_policy_sections(source: Arc<dyn CFactorSource>) -> Vec<PromptSection> {
     let policy = CFactorPolicy::new(source).with_min_episode_count(6);
     policy
@@ -2248,6 +2276,121 @@ fn select_prompt_skills(
         .filter(|skill| skill.score >= 0.5)
         .filter(|skill| !skill.tags.iter().any(|tag| tag == "outcome:failure"))
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LearnedQueryContext {
+    files: Vec<String>,
+    tags: Vec<String>,
+    match_category: Option<String>,
+    error_signature: Option<String>,
+    role: String,
+}
+
+fn learned_query_context(
+    role: AgentRole,
+    task_def: Option<&crate::task_parser::TaskDef>,
+    task_text: &str,
+    last_gate_failure: Option<&str>,
+) -> LearnedQueryContext {
+    let mut files = Vec::new();
+    let mut seen_files = HashSet::new();
+    if let Some(task) = task_def {
+        for file in &task.files {
+            if seen_files.insert(file.clone()) {
+                files.push(file.clone());
+            }
+        }
+    }
+
+    let mut tags = BTreeMap::new();
+    for text in std::iter::once(task_text)
+        .chain(task_def.into_iter().map(|task| task.title.as_str()))
+        .chain(
+            task_def
+                .into_iter()
+                .filter_map(|task| task.description.as_deref()),
+        )
+    {
+        for symbol in extract_task_symbols(text) {
+            let key = symbol.to_ascii_lowercase();
+            tags.entry(key).or_insert(symbol);
+        }
+    }
+    if let Some(crate_name) = task_crate_name(task_def) {
+        let key = crate_name.to_ascii_lowercase();
+        tags.entry(key).or_insert(crate_name);
+    }
+
+    LearnedQueryContext {
+        files,
+        tags: tags.into_values().collect(),
+        match_category: Some(default_task_category(role.label()).to_string()),
+        error_signature: learned_error_signature(last_gate_failure),
+        role: role.label().to_ascii_lowercase(),
+    }
+}
+
+fn learned_error_signature(last_gate_failure: Option<&str>) -> Option<String> {
+    let failure = last_gate_failure?.trim();
+    if failure.is_empty() {
+        return None;
+    }
+
+    if let Some(code) = extract_rust_error_code(failure) {
+        return Some(code);
+    }
+
+    failure
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(160).collect())
+}
+
+fn extract_rust_error_code(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 5 {
+        return None;
+    }
+
+    for idx in 0..=bytes.len() - 5 {
+        if bytes[idx] != b'E' {
+            continue;
+        }
+        if bytes[idx + 1..idx + 5].iter().all(u8::is_ascii_digit) {
+            return text.get(idx..idx + 5).map(str::to_string);
+        }
+    }
+
+    None
+}
+
+fn routing_budget_pressure(
+    budget: &crate::config::BudgetConfig,
+    plan_spent: f64,
+    task_spent: f64,
+) -> f64 {
+    fn normalize(spend: f64, max_budget: f64, warn_fraction: f64) -> f64 {
+        if max_budget <= 0.0 {
+            return 0.0;
+        }
+
+        let warn_threshold = (max_budget * warn_fraction).clamp(0.0, max_budget);
+        if spend <= warn_threshold {
+            return 0.0;
+        }
+
+        let remaining = (max_budget - warn_threshold).max(f64::EPSILON);
+        ((spend - warn_threshold) / remaining).clamp(0.0, 1.0)
+    }
+
+    let warn_fraction = (f64::from(budget.warn_at_percent) / 100.0).clamp(0.0, 1.0);
+    normalize(plan_spent, budget.max_plan_usd, warn_fraction).max(normalize(
+        task_spent,
+        budget.max_task_usd,
+        warn_fraction,
+    ))
 }
 
 fn slug_matches(lhs: &str, rhs: &str) -> bool {
@@ -8681,6 +8824,7 @@ impl PlanRunner {
     /// into `CompletedRunInput` so confidence gets updated.
     fn build_learned_context(
         &self,
+        plan_id: &str,
         role: AgentRole,
         task_def: Option<&crate::task_parser::TaskDef>,
         task_text: &str,
@@ -8692,15 +8836,29 @@ impl PlanRunner {
         let mut parts: Vec<String> = Vec::new();
         let mut matched_skill_id: Option<String> = None;
         let mut matched_rule_id: Option<String> = None;
+        let query_ctx = learned_query_context(
+            role,
+            task_def,
+            task_text,
+            self.task_trackers
+                .get(plan_id)
+                .and_then(|tracker| tracker.last_gate_failure.as_deref()),
+        );
 
-        // 1. Relevant skills from the skill library (search by role tag)
-        let role_tag = format!("{role:?}").to_lowercase();
-        let skills = self.skill_library.search_by_tag(&role_tag);
+        // 1. Relevant skills from the skill library.
+        let skills = self.skill_library.select(
+            &SkillQuery {
+                tags: query_ctx.tags.clone(),
+                category: query_ctx.match_category.clone(),
+                files_hint: query_ctx.files.clone(),
+            },
+            3,
+        );
         if !skills.is_empty() {
             // Track the top skill as the matched one for confidence updates.
             matched_skill_id = skills.first().map(|s| s.name.clone());
             let mut skill_section = String::from("## Relevant Skills from Past Successes\n");
-            for skill in skills.iter().take(3) {
+            for skill in &skills {
                 skill_section.push_str(&format!("- **{}**: {}\n", skill.name, skill.summary));
             }
             parts.push(skill_section);
@@ -8708,11 +8866,11 @@ impl PlanRunner {
 
         // 2. Applicable playbook rules
         let match_ctx = MatchContext {
-            files: Vec::new(),
-            tags: Vec::new(),
-            category: None,
-            error_signature: None,
-            role: role_tag.clone(),
+            files: query_ctx.files.clone(),
+            tags: query_ctx.tags.clone(),
+            category: query_ctx.match_category.clone(),
+            error_signature: query_ctx.error_signature.clone(),
+            role: query_ctx.role.clone(),
         };
         let rules = self.learning.playbook_rules().select(&match_ctx, 5);
         if !rules.is_empty() {
@@ -11605,14 +11763,16 @@ impl PlanRunner {
         // ── Budget check before dispatch ─────────────────────────────
         self.ensure_task_budget_available(plan_id, task)?;
         let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
-        let budget = &self.config.budget;
-        if plan_spent >= budget.max_plan_usd {
+        if plan_spent >= self.config.budget.max_plan_usd {
             return Err(anyhow!(
                 "plan {plan_id} budget exhausted: ${plan_spent:.2} >= ${:.2} max",
-                budget.max_plan_usd
+                self.config.budget.max_plan_usd
             ));
         }
         self.warn_plan_budget_pressure(plan_id, plan_spent);
+        let last_cost_usd = self.task_spent(plan_id, task);
+        let budget_pressure =
+            routing_budget_pressure(&self.config.budget, plan_spent, last_cost_usd);
 
         // ── Try to load structured task definition ──────────────────
         let plan_dir = plans_dir(&self.workdir).join(plan_id);
@@ -11728,6 +11888,7 @@ impl PlanRunner {
             routing_ctx.active_agents = load_snapshot.active_agents;
             routing_ctx.ready_queue_depth = load_snapshot.ready_queue_depth;
             routing_ctx.max_queue_wait_hours = load_snapshot.max_queue_wait_hours;
+            routing_ctx.conductor_load = routing_ctx.conductor_load.max(budget_pressure);
             let routing_bias = {
                 let mut signals = self.conductor_signals.clone();
                 if let Ok(efficiency_signals) = load_efficiency_signals_sync(
@@ -11823,6 +11984,8 @@ impl PlanRunner {
                     routing_stage = explanation.stage.label().to_string();
                     routing_reason = if cost_spike {
                         "cost_spike"
+                    } else if budget_pressure > 0.0 {
+                        "budget_pressure"
                     } else if !routing_bias.deprioritize.is_empty() {
                         "conductor_deprioritize"
                     } else if routing_bias.prefer_cheaper {
@@ -11903,7 +12066,6 @@ impl PlanRunner {
             self.config.budget.max_plan_usd,
             f64::from(self.config.budget.warn_at_percent) / 100.0,
         );
-        let last_cost_usd = self.task_spent(plan_id, task);
         match budget.record_cost(last_cost_usd, "task") {
             BudgetAction::Block => {
                 return Err(anyhow!(
@@ -11914,7 +12076,7 @@ impl PlanRunner {
             BudgetAction::RouteToCheaper => {
                 selected_model = mechanical_tier_model(&self.config)
                     .unwrap_or_else(|| "claude-haiku-4-5".into());
-                routing_reason = "budget_guardrail".to_string();
+                routing_reason = "budget_pressure_guardrail".to_string();
             }
             BudgetAction::Warn { percent_used, .. } => {
                 tracing::warn!(pct = percent_used, "budget warning");
@@ -12300,6 +12462,7 @@ impl PlanRunner {
 
         // ── Inject learned knowledge (skills, playbook rules, patterns) ──
         let learned = self.build_learned_context(
+            plan_id,
             role,
             task_def.as_ref(),
             &task_text,
@@ -12376,6 +12539,21 @@ impl PlanRunner {
         let predictive_calibration = load_predictive_calibration(&self.workdir).await;
         let cfactor_source = load_cfactor_source(&self.workdir).await;
         if let Some(calibration) = predictive_calibration.as_ref() {
+            if let Some(summary_section) = predictive_calibration_summary_section(
+                calibration.as_ref(),
+                &selected_model,
+                &task_category_label,
+            ) {
+                sections.push(
+                    apply_section_effectiveness_to_prompt_section(
+                        summary_section,
+                        &role_key,
+                        &section_effectiveness,
+                    )
+                    .into_signal()
+                    .map_err(|e| anyhow!("predictive-calibration summary section: {e}"))?,
+                );
+            }
             for policy_section in predictive_policy_sections(
                 calibration.clone(),
                 &selected_model,
@@ -17959,6 +18137,84 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
         assert!(rendered.contains("matching_skill"));
         assert!(rendered.contains("confidence: 91%"));
         assert!(rendered.contains("Telemetry: 75% success over 4 uses"));
+    }
+
+    #[test]
+    fn learned_query_context_uses_task_metadata_and_error_signature() {
+        let task: crate::task_parser::TaskDef = toml::from_str(
+            r#"
+id = "T1"
+title = "Wire PromptComposer into orchestrate"
+description = "Update the PromptComposer path in crates/roko-cli."
+status = "pending"
+tier = "focused"
+files = ["crates/roko-cli/src/orchestrate.rs", "crates/roko-cli/src/orchestrate.rs"]
+depends_on = []
+depends_on_plan = []
+verify = []
+"#,
+        )
+        .unwrap();
+
+        let ctx = learned_query_context(
+            AgentRole::Implementer,
+            Some(&task),
+            "Wire PromptComposer into orchestrate and preserve PromptComposer hints",
+            Some("error[E0308]: mismatched types\nexpected `String`, found `&str`"),
+        );
+
+        assert_eq!(
+            ctx.files,
+            vec!["crates/roko-cli/src/orchestrate.rs".to_string()]
+        );
+        assert_eq!(ctx.match_category.as_deref(), Some("implementation"));
+        assert_eq!(ctx.error_signature.as_deref(), Some("E0308"));
+        assert_eq!(ctx.role, "implementer");
+        assert!(ctx.tags.contains(&"PromptComposer".to_string()));
+        assert!(ctx.tags.contains(&"roko-cli".to_string()));
+    }
+
+    #[test]
+    fn routing_budget_pressure_starts_at_warn_threshold_and_caps() {
+        let mut budget = crate::config::BudgetConfig::default();
+        budget.max_plan_usd = 10.0;
+        budget.max_task_usd = 2.0;
+        budget.warn_at_percent = 80;
+        let tol = 1e-9;
+
+        assert!((routing_budget_pressure(&budget, 8.0, 1.6) - 0.0).abs() < f64::EPSILON);
+        assert!((routing_budget_pressure(&budget, 9.0, 1.6) - 0.5).abs() < tol);
+        assert!((routing_budget_pressure(&budget, 8.0, 1.9) - 0.75).abs() < tol);
+        assert!((routing_budget_pressure(&budget, 10.0, 2.0) - 1.0).abs() < tol);
+    }
+
+    #[test]
+    fn predictive_calibration_summary_section_uses_tracker_metrics() {
+        let mut tracker = CalibrationTracker::default();
+        for success in [true, true, false, true] {
+            let mut record = roko_learn::prediction::PredictionRecord::register(
+                "task",
+                "gpt-5.4",
+                "implementation",
+                "standard",
+                0.75,
+                0.25,
+                1_000,
+            );
+            record.resolve(success, 0.25, 1_000);
+            tracker.record_prediction(&record);
+        }
+
+        let section = predictive_calibration_summary_section(&tracker, "gpt-5.4", "implementation")
+            .expect("summary section");
+
+        assert_eq!(section.name, "predictive-calibration-summary");
+        assert!(
+            section
+                .content
+                .contains("Routing-log calibration for gpt-5.4/implementation")
+        );
+        assert!(section.content.contains("over 4 runs"));
     }
 
     #[test]
