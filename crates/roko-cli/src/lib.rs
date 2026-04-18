@@ -23,6 +23,11 @@
 
 extern crate self as roko_cli;
 
+/// Canonical default port for the shipping `roko-serve` control plane.
+pub const DEFAULT_SERVE_PORT: u16 = 9090;
+/// Canonical default base URL for CLI and TUI calls into `roko-serve`.
+pub const DEFAULT_SERVE_URL: &str = "http://localhost:9090";
+
 pub mod agent_config;
 pub mod agent_episode;
 pub mod agent_exec;

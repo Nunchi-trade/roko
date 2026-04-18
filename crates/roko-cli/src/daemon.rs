@@ -393,7 +393,7 @@ pub fn daemon_install() -> Result<()> {
     let logs_dir = home_dir.join(".roko").join("logs");
     fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
 
-    let plist = launchd::generate_plist(9090);
+    let plist = launchd::generate_plist(crate::DEFAULT_SERVE_PORT);
     fs::write(&plist_path, plist).with_context(|| format!("write {}", plist_path.display()))?;
 
     let status = Command::new("launchctl")

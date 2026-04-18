@@ -2894,7 +2894,7 @@ fn resolve_agent_stream_server_url() -> String {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .unwrap_or_else(|| "http://localhost:6677".to_string())
+        .unwrap_or_else(|| roko_cli::DEFAULT_SERVE_URL.to_string())
 }
 
 fn resolve_agent_stream_auth_token() -> Option<String> {

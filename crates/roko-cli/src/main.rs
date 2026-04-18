@@ -271,7 +271,7 @@ enum Command {
         #[arg(long, default_value = "nunchi-intelligence")]
         agent: String,
         /// roko-serve base URL.
-        #[arg(long, default_value = "http://localhost:6677")]
+        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
         serve_url: String,
     },
     /// Search durable knowledge and memory entries.
@@ -354,7 +354,7 @@ enum DaemonCmd {
     Start {
         #[arg(long)]
         foreground: bool,
-        #[arg(long, default_value = "9090")]
+        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_PORT)]
         port: u16,
     },
     Stop,
@@ -368,7 +368,7 @@ enum DaemonCmd {
     Reload,
     // SIGHUP equivalent — re-scan subscriptions/templates without restart
     Restart {
-        #[arg(long, default_value = "9090")]
+        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_PORT)]
         port: u16,
     },
     Install,
@@ -1185,7 +1185,7 @@ async fn cmd_event_sources(cli: &Cli, cmd: EventSourcesCmd) -> Result<i32> {
 async fn cmd_headless(cli: &Cli) -> Result<i32> {
     let workdir = resolve_workdir(cli);
     prepare_runtime_hooks(&workdir, cli.quiet);
-    roko_cli::daemon::daemon_start(&workdir, false, 9090).await?;
+    roko_cli::daemon::daemon_start(&workdir, false, roko_cli::DEFAULT_SERVE_PORT).await?;
     Ok(EXIT_SUCCESS)
 }
 
@@ -7135,6 +7135,64 @@ mod tests {
                 }
             }) if model == "glm-5-1" && complexity == "integrative"
         ));
+    }
+
+    #[test]
+    fn cli_chat_defaults_to_canonical_serve_url() {
+        let cli = Cli::try_parse_from(["roko", "chat"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Chat { serve_url, .. }) if serve_url == roko_cli::DEFAULT_SERVE_URL
+        ));
+    }
+
+    #[test]
+    fn cli_daemon_start_defaults_to_canonical_port() {
+        let cli = Cli::try_parse_from(["roko", "daemon", "start"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Daemon {
+                cmd: DaemonCmd::Start { port, .. }
+            }) if port == roko_cli::DEFAULT_SERVE_PORT
+        ));
+    }
+
+    #[test]
+    fn cli_daemon_restart_defaults_to_canonical_port() {
+        let cli = Cli::try_parse_from(["roko", "daemon", "restart"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Daemon {
+                cmd: DaemonCmd::Restart { port }
+            }) if port == roko_cli::DEFAULT_SERVE_PORT
+        ));
+    }
+
+    #[test]
+    fn cli_parses_prd_draft_new_instead_of_top_level_new() {
+        let cli = Cli::try_parse_from(["roko", "prd", "draft", "new", "Ship", "it"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Prd {
+                cmd: PrdCmd::Draft {
+                    cmd: PrdDraftCmd::New { title }
+                }
+            }) if title == vec!["Ship".to_string(), "it".to_string()]
+        ));
+    }
+
+    #[test]
+    fn cli_treats_absent_top_level_new_as_prompt_text() {
+        let cli = Cli::try_parse_from(["roko", "new"]).unwrap();
+        assert_eq!(cli.prompt.as_deref(), Some("new"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_treats_absent_top_level_explain_as_prompt_text() {
+        let cli = Cli::try_parse_from(["roko", "explain"]).unwrap();
+        assert_eq!(cli.prompt.as_deref(), Some("explain"));
+        assert!(cli.command.is_none());
     }
 
     #[test]
