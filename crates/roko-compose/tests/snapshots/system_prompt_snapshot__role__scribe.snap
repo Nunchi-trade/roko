@@ -47,6 +47,10 @@ Prefer deterministic fixtures and readable snapshot diffs.
 
 ## Tool Instructions
 
+## MCP Tools (free, instant)
+
+You have MCP server tools. Use them for file reading, searching, and navigation instead of shelling out. They are faster and do not consume subprocess budget.
+
 Claude tool allowlist: Read,Edit,Bash
 
 Use only the tools granted to your role.
@@ -153,6 +157,10 @@ Prefer deterministic fixtures and readable snapshot diffs.
 
 <!-- TOOLS -->
 ## Tool Instructions
+
+## MCP Tools (free, instant)
+
+You have MCP server tools. Use them for file reading, searching, and navigation instead of shelling out. They are faster and do not consume subprocess budget.
 
 Claude tool allowlist: Read,Edit,Bash
 

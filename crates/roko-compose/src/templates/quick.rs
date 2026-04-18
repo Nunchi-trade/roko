@@ -12,9 +12,10 @@
 //! Ports Mori's `quick_reviewer_prompt` and `quick_fix_prompt` from
 //! `prompts.rs:3468` and `prompts.rs:3622`.
 
-use super::common::{format_prior_review, format_verdict_instructions};
+use super::common::{budget_for, format_prior_review, format_verdict_instructions};
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::AgentRole;
 
 // ─── Quick Reviewer ──────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ impl RolePromptTemplate for QuickReviewerTemplate {
     type Input = QuickReviewerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        let budget = budget_for(AgentRole::QuickReviewer);
         let mut sections = Vec::with_capacity(6);
 
         // 1. agents_instructions — System / Critical / Start
@@ -76,41 +78,41 @@ impl RolePromptTemplate for QuickReviewerTemplate {
 
         // 2. plan_spec — Session / Critical / Start / hard_cap 50k
         sections.push(
-            PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
+            PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))
                 .with_priority(SectionPriority::Critical)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
-                .with_hard_cap(50_000),
+                .with_hard_cap(budget.plan),
         );
 
         // 3. workspace_map — Session / High / Middle / hard_cap 6k
         sections.push(
-            PromptSection::new("workspace_map", truncate(&input.workspace_map, 6_000))
+            PromptSection::new("workspace_map", truncate(&input.workspace_map, budget.workspace_map))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(6_000),
+                .with_hard_cap(budget.workspace_map),
         );
 
         // 4. brief — Session / High / Middle / hard_cap 4k
         sections.push(
-            PromptSection::new("brief", truncate(&input.brief, 4_000))
+            PromptSection::new("brief", truncate(&input.brief, budget.brief))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(4_000),
+                .with_hard_cap(budget.brief),
         );
 
         // 5. prior_review — Dynamic / High / End / hard_cap 3k (only on iteration 2+)
         if input.iteration > 1 {
             if let Some(ref review) = input.prior_review {
-                let formatted = format_prior_review(&truncate(review, 3_000));
+                let formatted = format_prior_review(&truncate(review, budget.reviews));
                 sections.push(
                     PromptSection::new("prior_review", formatted)
                         .with_priority(SectionPriority::High)
                         .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::End)
-                        .with_hard_cap(3_000),
+                        .with_hard_cap(budget.reviews),
                 );
             }
         }

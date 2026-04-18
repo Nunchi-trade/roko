@@ -5,8 +5,10 @@
 //! task checklist. On iteration 2+, it also processes prior review feedback
 //! and generates remediation instructions.
 
+use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::AgentRole;
 
 /// Typed input for the strategist template. All fields are pre-read strings —
 /// no filesystem access.
@@ -68,6 +70,10 @@ impl RolePromptTemplate for StrategistTemplate {
     type Input = StrategistInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        let budget = budget_for(AgentRole::Strategist);
+        let workspace_map_cap = budget.workspace_map.min(12_000);
+        let prd2_cap = budget.prd2.min(8_000);
+        let prior_reviews_cap = budget.plan.min(10_000);
         let mut sections = Vec::with_capacity(10);
 
         // 1. agents_instructions — System / Critical / Start
@@ -80,42 +86,42 @@ impl RolePromptTemplate for StrategistTemplate {
 
         // 2. plan_spec — Session / Critical / Start / hard_cap 50k
         sections.push(
-            PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
+            PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))
                 .with_priority(SectionPriority::Critical)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
-                .with_hard_cap(50_000),
+                .with_hard_cap(budget.plan),
         );
 
         // 3. workspace_map — Session / High / Middle / hard_cap 12k
         // Strategist gets a generous workspace budget for full plan analysis.
         sections.push(
-            PromptSection::new("workspace_map", truncate(&input.workspace_map, 12_000))
+            PromptSection::new("workspace_map", truncate(&input.workspace_map, workspace_map_cap))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(12_000),
+                .with_hard_cap(workspace_map_cap),
         );
 
         // 4. prd2_extract — Session / High / Middle / hard_cap 8k
         sections.push(
-            PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 8_000))
+            PromptSection::new("prd2_extract", truncate(&input.prd2_extract, prd2_cap))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(8_000),
+                .with_hard_cap(prd2_cap),
         );
 
         // 5. cross_plan_context — Session / Normal / Middle / hard_cap 4k
         sections.push(
             PromptSection::new(
                 "cross_plan_context",
-                truncate(&input.cross_plan_context, 4_000),
+                truncate(&input.cross_plan_context, budget.context),
             )
             .with_priority(SectionPriority::Normal)
             .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
-            .with_hard_cap(4_000),
+            .with_hard_cap(budget.context),
         );
 
         // 6. decomposition — Session / Normal / Middle / hard_cap 12k (only when present)
@@ -155,11 +161,11 @@ impl RolePromptTemplate for StrategistTemplate {
         if input.iteration > 1 {
             if let Some(ref reviews) = input.prior_reviews {
                 sections.push(
-                    PromptSection::new("prior_reviews", truncate(reviews, 10_000))
+                    PromptSection::new("prior_reviews", truncate(reviews, prior_reviews_cap))
                         .with_priority(SectionPriority::High)
                         .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::End)
-                        .with_hard_cap(10_000),
+                        .with_hard_cap(prior_reviews_cap),
                 );
             }
         }

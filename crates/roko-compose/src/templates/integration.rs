@@ -4,8 +4,10 @@
 //! The integration tester runs workspace-wide tests after batch merges
 //! and reports failures without fixing them.
 
+use super::common::budget_for;
 use super::{RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::AgentRole;
 
 /// Typed input for the integration tester template. All fields are pre-read
 /// strings — no filesystem access.
@@ -52,6 +54,8 @@ impl RolePromptTemplate for IntegrationTemplate {
     type Input = IntegrationInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        let budget = budget_for(AgentRole::IntegrationTester);
+        let manifest_cap = budget.context.min(2_000);
         let mut sections = Vec::with_capacity(6);
 
         // 1. agents_instructions — System / Critical / Start
@@ -85,33 +89,33 @@ impl RolePromptTemplate for IntegrationTemplate {
         // 3. integration_memo — Session / High / Middle / hard_cap 4k (only when present)
         if let Some(ref memo) = input.integration_memo {
             sections.push(
-                PromptSection::new("integration_memo", truncate(memo, 4_000))
+                PromptSection::new("integration_memo", truncate(memo, budget.brief))
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
-                    .with_hard_cap(4_000),
+                    .with_hard_cap(budget.brief),
             );
         }
 
         // 4. fixture_manifest — Session / Normal / Middle / hard_cap 2k (only when present)
         if let Some(ref fixtures) = input.fixture_manifest {
             sections.push(
-                PromptSection::new("fixture_manifest", truncate(fixtures, 2_000))
+                PromptSection::new("fixture_manifest", truncate(fixtures, manifest_cap))
                     .with_priority(SectionPriority::Normal)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
-                    .with_hard_cap(2_000),
+                    .with_hard_cap(manifest_cap),
             );
         }
 
         // 5. dependency_manifest — Session / Normal / Middle / hard_cap 2k (only when present)
         if let Some(ref deps) = input.dependency_manifest {
             sections.push(
-                PromptSection::new("dependency_manifest", truncate(deps, 2_000))
+                PromptSection::new("dependency_manifest", truncate(deps, manifest_cap))
                     .with_priority(SectionPriority::Normal)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
-                    .with_hard_cap(2_000),
+                    .with_hard_cap(manifest_cap),
             );
         }
 

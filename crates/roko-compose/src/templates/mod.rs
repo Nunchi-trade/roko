@@ -8,10 +8,13 @@
 
 pub mod assembly;
 pub mod common;
+pub mod conductor;
 pub mod implementer;
 pub mod integration;
 pub mod prompts;
 pub mod quick;
+pub mod refactorer;
+pub mod researcher;
 pub mod reviewer;
 pub mod scribe;
 pub mod strategist;
@@ -19,9 +22,12 @@ pub mod task_impl;
 
 pub use assembly::PromptAssembler;
 pub use common::{PromptBudget, budget_for};
+pub use conductor::ConductorTemplate;
 pub use implementer::{ImplementerInput, ImplementerTemplate};
 pub use integration::{IntegrationInput, IntegrationTemplate};
 pub use quick::{QuickFixInput, QuickFixTemplate, QuickReviewerInput, QuickReviewerTemplate};
+pub use refactorer::RefactorerTemplate;
+pub use researcher::ResearcherTemplate;
 pub use reviewer::{Reviewer, ReviewerInput, ReviewerTemplate};
 pub use scribe::{FileSnippet, ScribeInput, ScribeTemplate};
 pub use strategist::{StrategistInput, StrategistTemplate};

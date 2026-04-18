@@ -5,8 +5,8 @@
 //!
 //! - [`PromptSection`] — typed payload for a labeled, priority-tagged prompt fragment
 //! - [`PromptComposer`] — combines sections into a final prompt under a token budget
-//! - [`SectionScorer`] and [`ActiveInferenceScorer`] — rank sections by
-//!   priority/recency or goal-directed expected free energy, respectively
+//! - [`SectionScorer`] and [`GoalDirectedHeuristicScorer`] — rank sections by
+//!   priority/recency or goal-directed heuristic relevance, respectively
 //!
 //! # Design principle
 //!
@@ -53,11 +53,12 @@ pub use role_prompts::{
     DEFAULT_CONVENTIONS_SUFFIX, RoleSystemPromptSpec, TaskContext, role_identity_for,
     tool_allowlist_instructions,
 };
-pub use scorer::{ActiveInferenceScorer, SectionScorer};
+pub use scorer::{ActiveInferenceScorer, GoalDirectedHeuristicScorer, SectionScorer};
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
-    PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate, QuickReviewerInput,
-    QuickReviewerTemplate, Reviewer, ReviewerInput, ReviewerTemplate, RolePromptTemplate,
-    ScribeInput, ScribeTemplate, budget_for, scribe::ScribeVariant,
+    ConductorTemplate, PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate,
+    QuickReviewerInput, QuickReviewerTemplate, RefactorerTemplate, ResearcherTemplate, Reviewer,
+    ReviewerInput, ReviewerTemplate, RolePromptTemplate, ScribeInput, ScribeTemplate, budget_for,
+    scribe::ScribeVariant,
 };
 pub use token_counter::TokenCounter;

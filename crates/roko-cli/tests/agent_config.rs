@@ -52,6 +52,7 @@ turn_budget_usd = 5.5
                 force_tier: Some("focused".to_string()),
             }),
             turn_budget_usd: Some(5.5),
+            temperament: None,
         }
     );
 }
@@ -80,4 +81,5 @@ model = "gpt-5.4-mini"
     assert!(role.thresholds.is_none());
     assert!(role.routing_overrides.is_none());
     assert!(role.turn_budget_usd.is_none());
+    assert!(role.temperament.is_none());
 }

@@ -35,8 +35,9 @@ use roko_compose::enrichment::{
     StepOutcome, StepSelector, estimate_enrichment,
 };
 use roko_compose::{
-    AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
-    PromptSection, SectionPriority, SectionScorer, TaskContext,
+    AttentionBidder, Complexity as PromptComplexity, ContextProvider, PadState, Placement,
+    PlanArtifacts, PromptComposer, PromptSection, SectionPriority, SectionScorer, TaskContext,
+    estimate_tokens,
 };
 use roko_conductor::diagnosis::{
     DiagnosisEngine, DiagnosisResult, ErrorCategory, SuggestedIntervention,
@@ -14649,6 +14650,7 @@ fn build_system_prompt_with_context(
         tools_csv,
         PromptBuildOptions {
             affect_state,
+            complexity: Some(prompt_budget_complexity(task_def)),
             extra_conventions: task_dispatch_conventions(task_def),
             ..PromptBuildOptions::default()
         },
@@ -14680,6 +14682,7 @@ fn build_system_prompt_with_context_validated(
         tools_csv,
         PromptBuildOptions {
             affect_state,
+            complexity: Some(prompt_budget_complexity(task_def)),
             extra_conventions: task_dispatch_conventions(task_def),
             relevant_skills: relevant_skills.to_vec(),
             relevant_playbooks: relevant_playbooks.to_vec(),
@@ -14690,11 +14693,24 @@ fn build_system_prompt_with_context_validated(
     )
 }
 
+fn prompt_budget_complexity(task_def: Option<&crate::task_parser::TaskDef>) -> PromptComplexity {
+    match task_def.map(|task| task.tier.as_str()) {
+        Some("fast" | "mechanical") => PromptComplexity::Trivial,
+        Some("complex" | "premium" | "architectural") => PromptComplexity::Complex,
+        _ => PromptComplexity::Standard,
+    }
+}
+
 fn effective_context_window_tokens(config: &Config) -> usize {
     config.prompt.token_budget
 }
 
 fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<String> {
+    let non_empty_sections = context_sections
+        .iter()
+        .map(|section| section.content.trim())
+        .filter(|section| !section.is_empty())
+        .count();
     let content = context_sections
         .iter()
         .map(|section| section.content.trim())
@@ -14703,6 +14719,16 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
         .join("\n\n");
 
     if content.is_empty() {
+        return None;
+    }
+
+    let token_estimate = estimate_tokens(&content);
+    if non_empty_sections < 2 && token_estimate < 48 {
+        tracing::debug!(
+            non_empty_sections,
+            token_estimate,
+            "skipping underspecified relevant-context layer"
+        );
         None
     } else {
         Some(format!("## Relevant Context\n\n{content}"))
@@ -15061,6 +15087,7 @@ impl PlanRunner {
             tools_csv,
             PromptBuildOptions {
                 affect_state: Some(self.current_pad_state()),
+                complexity: None,
                 extra_conventions: Some(
                     "Treat enrichment as a pre-dispatch analysis step. Preserve task context, read_files, and dependency ordering so later agent turns receive accurate context.".to_string(),
                 ),

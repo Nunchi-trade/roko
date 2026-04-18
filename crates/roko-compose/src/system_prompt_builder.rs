@@ -34,6 +34,7 @@ use crate::prompt::{
     AttentionBidder, CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority,
 };
 use crate::token_counter::TokenCounter;
+use crate::templates::common::PromptBudget;
 use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
 use roko_core::{Budget, Composer, Context, Engram, Result, Scorer};
@@ -80,6 +81,8 @@ pub struct SystemPromptBuilder {
     cache_markers: bool,
     /// Optional token budget enforced by [`build_with_counter`](Self::build_with_counter).
     token_budget: Option<usize>,
+    /// Optional per-layer section caps derived from role/complexity budget policy.
+    budget_profile: Option<PromptBudget>,
     /// Learned section-effectiveness data scoped to one role.
     section_effectiveness: Option<SectionEffectivenessConfig>,
 }
@@ -135,6 +138,7 @@ impl SystemPromptBuilder {
             affect_state: None,
             cache_markers: false,
             token_budget: None,
+            budget_profile: None,
             section_effectiveness: None,
         }
     }
@@ -231,6 +235,13 @@ impl SystemPromptBuilder {
     #[must_use]
     pub const fn with_token_budget(mut self, token_budget: usize) -> Self {
         self.token_budget = Some(token_budget);
+        self
+    }
+
+    /// Apply per-layer section caps from the shared role budget table.
+    #[must_use]
+    pub const fn with_budget_profile(mut self, budget_profile: PromptBudget) -> Self {
+        self.budget_profile = Some(budget_profile);
         self
     }
 
@@ -340,66 +351,76 @@ impl SystemPromptBuilder {
         let mut sections = Vec::with_capacity(10);
 
         // Layer 1: Role Identity
-        sections.push(
+        if let Some(section) = self.apply_budget_profile(
             PromptSection::new("role_identity", &self.role_identity)
                 .with_priority(self.effective_priority("role_identity", SectionPriority::Critical))
                 .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
-        );
+        ) {
+            sections.push(section);
+        }
 
         // Layer 2: Conventions
         if let Some(ref conv) = self.conventions {
             if !conv.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("conventions", conv)
                         .with_priority(
                             self.effective_priority("conventions", SectionPriority::High),
                         )
                         .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 5: Tool Instructions (grouped in System cache tier)
         if let Some(ref tools) = self.tools {
             if !tools.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("tool_instructions", tools)
                         .with_priority(
                             self.effective_priority("tool_instructions", SectionPriority::Normal),
                         )
                         .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Middle),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 3: Domain Context
         if let Some(ref domain) = self.domain {
             if !domain.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("domain_context", domain)
                         .with_priority(
                             self.effective_priority("domain_context", SectionPriority::High),
                         )
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 3b: Relevant Context
         if let Some(ref context) = self.context {
             if !context.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("context_layer", format!("## Relevant Context\n{context}"))
                         .with_priority(
                             self.effective_priority("context_layer", SectionPriority::High),
                         )
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
@@ -411,14 +432,16 @@ impl SystemPromptBuilder {
         // Layer 4: Task Context
         if let Some(ref task) = self.task {
             if !task.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("task_context", task)
                         .with_priority(
                             self.effective_priority("task_context", SectionPriority::Critical),
                         )
                         .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
@@ -435,26 +458,30 @@ impl SystemPromptBuilder {
                 .map(|p| format!("- {p}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(
+            if let Some(section) = self.apply_budget_profile(
                 PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
                     .with_priority(
                         self.effective_priority("anti_patterns", SectionPriority::Normal),
                     )
                     .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::End),
-            );
+            ) {
+                sections.push(section);
+            }
         }
 
         // Layer 8: Affect Guidance
         if let Some(affect) = self.affect_guidance() {
-            sections.push(
+            if let Some(section) = self.apply_budget_profile(
                 PromptSection::new("affect_guidance", affect)
                     .with_priority(
                         self.effective_priority("affect_guidance", SectionPriority::Normal),
                     )
                     .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End),
-            );
+            ) {
+                sections.push(section);
+            }
         }
 
         sort_sections(&mut sections);
@@ -618,7 +645,7 @@ impl SystemPromptBuilder {
             );
         }
 
-        Some(
+        self.apply_budget_profile(
             PromptSection::new("relevant_techniques", rendered)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
@@ -626,6 +653,30 @@ impl SystemPromptBuilder {
                 .with_bidder(AttentionBidder::PlaybookRules)
                 .with_hard_cap(RELEVANT_TECHNIQUES_TOKEN_BUDGET),
         )
+    }
+
+    fn apply_budget_profile(&self, mut section: PromptSection) -> Option<PromptSection> {
+        let Some(cap) = self.section_budget_cap(&section.name) else {
+            return Some(section);
+        };
+        if cap == 0 {
+            return None;
+        }
+        section.hard_cap = Some(match section.hard_cap {
+            Some(existing) => existing.min(cap),
+            None => cap,
+        });
+        Some(section)
+    }
+
+    fn section_budget_cap(&self, section_name: &str) -> Option<usize> {
+        let budget = self.budget_profile?;
+        match section_name {
+            "conventions" | "tool_instructions" | "anti_patterns" => Some(budget.instructions),
+            "domain_context" | "context_layer" | "pheromone_signals" => Some(budget.context),
+            "relevant_techniques" => Some(budget.skills),
+            _ => None,
+        }
     }
 }
 
@@ -1046,7 +1097,8 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
     match layer {
         CacheLayer::Role => Some("<!-- cache:system -->"),
         CacheLayer::Workspace => Some("<!-- cache:session -->"),
-        CacheLayer::Plan | CacheLayer::Volatile => None,
+        CacheLayer::Plan => Some("<!-- cache:task -->"),
+        CacheLayer::Volatile => Some("<!-- cache:dynamic -->"),
     }
 }
 

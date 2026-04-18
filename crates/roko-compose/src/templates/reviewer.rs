@@ -5,8 +5,10 @@
 //! prefix (plan, workspace map, prd2, brief) and differ only in role identity
 //! and instructions.
 
+use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::AgentRole;
 
 /// Which reviewer variant to generate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +113,10 @@ impl RolePromptTemplate for ReviewerTemplate {
     type Input = ReviewerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        let budget = budget_for(match self.variant {
+            Reviewer::Architect => AgentRole::Architect,
+            Reviewer::Auditor | Reviewer::Combined => AgentRole::Auditor,
+        });
         let mut sections = Vec::with_capacity(8);
 
         // 1. agents_instructions — System / Critical
@@ -123,41 +129,41 @@ impl RolePromptTemplate for ReviewerTemplate {
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(
-            PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
+            PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))
                 .with_priority(SectionPriority::Critical)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
-                .with_hard_cap(50_000),
+                .with_hard_cap(budget.plan),
         );
 
         // 3. workspace_map — Session / High / hard_cap 6k (reviewer budget is smaller)
         sections.push(
             PromptSection::new(
                 "workspace_map",
-                truncate(&input.filtered_workspace_map, 6_000),
+                truncate(&input.filtered_workspace_map, budget.workspace_map),
             )
             .with_priority(SectionPriority::High)
             .with_cache_layer(CacheLayer::Workspace)
             .with_placement(Placement::Middle)
-            .with_hard_cap(6_000),
+            .with_hard_cap(budget.workspace_map),
         );
 
         // 4. prd2_extract — Session / High / hard_cap 6k
         sections.push(
-            PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 6_000))
+            PromptSection::new("prd2_extract", truncate(&input.prd2_extract, budget.prd2))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(6_000),
+                .with_hard_cap(budget.prd2),
         );
 
         // 5. brief — Session / High / hard_cap 4k
         sections.push(
-            PromptSection::new("brief", truncate(&input.brief, 4_000))
+            PromptSection::new("brief", truncate(&input.brief, budget.brief))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(4_000),
+                .with_hard_cap(budget.brief),
         );
 
         // 6. reviewer_criteria — System / Normal
@@ -188,11 +194,11 @@ impl RolePromptTemplate for ReviewerTemplate {
         // 8. prior_findings — Dynamic / High / hard_cap 15k (only on iteration 2+)
         if let Some(ref findings) = input.prior_findings {
             sections.push(
-                PromptSection::new("prior_findings", truncate(findings, 15_000))
+                PromptSection::new("prior_findings", truncate(findings, budget.reviews))
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End)
-                    .with_hard_cap(15_000),
+                    .with_hard_cap(budget.reviews),
             );
         }
 

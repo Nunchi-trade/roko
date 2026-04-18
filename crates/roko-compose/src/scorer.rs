@@ -1,9 +1,9 @@
 //! Scorers for prompt sections.
 //!
 //! `SectionScorer` ranks `Engram<PromptSection>` inputs by priority, recency,
-//! and cache-layer fit. `ActiveInferenceScorer` adds goal-directed scoring for
-//! router-facing composition surfaces so budget pressure keeps sections that
-//! are both goal-aligned and information-bearing.
+//! and cache-layer fit. `GoalDirectedHeuristicScorer` adds goal-directed
+//! heuristic scoring for router-facing composition surfaces so budget pressure
+//! keeps sections that are both goal-aligned and information-bearing.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -89,20 +89,20 @@ impl Scorer for SectionScorer {
     }
 }
 
-/// Goal-directed scorer that approximates expected free energy for prompt sections.
+/// Goal-directed heuristic scorer for prompt sections.
 ///
 /// Pragmatic value is derived from similarity between the current goal embedding
 /// and the section embedding. Epistemic value is shaped by belief strength over
 /// the section's topic plus an uncertainty bonus for underexplored sections.
 #[derive(Clone, Debug)]
-pub struct ActiveInferenceScorer {
+pub struct GoalDirectedHeuristicScorer {
     goal_text: String,
     goal_embeddings: Vec<f32>,
     prior_beliefs: HashMap<String, f64>,
     embedding_dimensions: usize,
 }
 
-impl ActiveInferenceScorer {
+impl GoalDirectedHeuristicScorer {
     /// Create a scorer for a specific goal string.
     #[must_use]
     pub fn new(goal: impl AsRef<str>) -> Self {
@@ -199,7 +199,7 @@ impl ActiveInferenceScorer {
     }
 }
 
-impl Scorer for ActiveInferenceScorer {
+impl Scorer for GoalDirectedHeuristicScorer {
     fn score(&self, signal: &Engram, _ctx: &Context) -> Score {
         let Ok(section) = PromptSection::from_signal(signal) else {
             return Score::ZERO;
@@ -224,9 +224,12 @@ impl Scorer for ActiveInferenceScorer {
     }
 
     fn name(&self) -> &'static str {
-        "active_inference_scorer"
+        "goal_directed_heuristic_scorer"
     }
 }
+
+/// Temporary compatibility alias while external callsites migrate to the honest name.
+pub type ActiveInferenceScorer = GoalDirectedHeuristicScorer;
 
 fn embed_text(text: &str, dimensions: usize) -> Vec<f32> {
     let mut vector = vec![0.0_f32; dimensions.max(1)];
@@ -379,8 +382,8 @@ mod tests {
     }
 
     #[test]
-    fn active_inference_prefers_goal_aligned_sections() {
-        let scorer = ActiveInferenceScorer::new("reduce routing latency")
+    fn goal_directed_heuristic_prefers_goal_aligned_sections() {
+        let scorer = GoalDirectedHeuristicScorer::new("reduce routing latency")
             .with_prior_beliefs(HashMap::from([("routing".to_string(), 0.85)]));
         let aligned = make_signal(
             SectionPriority::Normal,
@@ -399,5 +402,6 @@ mod tests {
 
         assert!(aligned_score.effective() > unrelated_score.effective());
         assert!(aligned_score.salience >= unrelated_score.salience);
+        assert_eq!(scorer.name(), "goal_directed_heuristic_scorer");
     }
 }

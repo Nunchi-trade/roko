@@ -331,10 +331,17 @@ impl Composer for PromptComposer {
         // per-section hard cap at decode time so downstream accounting
         // reflects the actual bytes that will land in the prompt.
         // Split critical sections out — they MUST be included.
-        let (critical, optional): (Vec<_>, Vec<_>) = signals
+        let decoded_sections = signals
             .iter()
             .filter_map(|s| PromptSection::from_signal(s).ok().map(|p| (p, s)))
             .map(|(p, s)| (p.enforce_hard_cap(), s))
+            .collect::<Vec<_>>();
+        let decoded_section_names = decoded_sections
+            .iter()
+            .map(|(section, _)| section.name.clone())
+            .collect::<Vec<_>>();
+        let (critical, optional): (Vec<_>, Vec<_>) = decoded_sections
+            .into_iter()
             .partition(|(p, _)| p.priority == SectionPriority::Critical);
 
         let critical_tokens: usize = critical.iter().map(|(s, _)| s.estimated_tokens()).sum();
@@ -403,6 +410,20 @@ impl Composer for PromptComposer {
                 .then_with(|| a.0.cache_layer.cmp(&b.0.cache_layer))
         });
 
+        let kept_section_names = kept
+            .iter()
+            .map(|(section, _)| section.name.clone())
+            .collect::<Vec<_>>();
+        let kept_name_set = kept_section_names
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>();
+        let dropped_section_names = decoded_section_names
+            .iter()
+            .filter(|name| !kept_name_set.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Concatenate.
         let prompt_text = render_sections(&kept, self.include_headers);
 
@@ -413,7 +434,17 @@ impl Composer for PromptComposer {
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
             .tag("sections", kept.len().to_string())
+            .tag("sections_decoded", decoded_section_names.len().to_string())
+            .tag("sections_dropped", dropped_section_names.len().to_string())
             .tag("tokens", token_total.to_string())
+            .tag(
+                "budget_tokens_limit",
+                budget
+                    .max_tokens
+                    .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string()),
+            )
+            .tag("kept_section_names", kept_section_names.join(","))
+            .tag("dropped_section_names", dropped_section_names.join(","))
             .tag("distinct_bidders", bidder_count(&kept).to_string())
             .tag("auction_total_bid", format!("{:.4}", allocation.total_bid))
             .tag(

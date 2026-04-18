@@ -235,6 +235,7 @@ const NOVELTY_PENALTY_WEIGHT: f64 = 0.35;
 const MARGINAL_VALUE_STOP_RATIO: f64 = 0.5;
 const CONTRARIAN_RETRIEVAL_RATIO: f64 = 0.15;
 const CONTRARIAN_NEUTRAL_BAND: f64 = 0.1;
+const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.85;
 
 impl ContextAssembler {
     /// Create a new assembler with the default 4K gathered-context budget.
@@ -372,7 +373,7 @@ impl ContextAssembler {
             .ceil()
             .max(MIN_CHUNK_BUDGET_TOKENS as f64)
             .min(budget as f64) as usize;
-        let candidates = chunks
+        let candidates = dedup_similar_chunks(chunks)
             .into_iter()
             .map(|chunk| ContextCandidate::new(chunk))
             .collect::<Vec<_>>();
@@ -1117,6 +1118,38 @@ fn chunk_attention_priority(chunk: &ContextChunk) -> AttentionPriority {
         ContextSource::RecentSignal { .. } => AttentionPriority::Background,
         _ => AttentionPriority::Normal,
     }
+}
+
+fn dedup_similar_chunks(chunks: Vec<ContextChunk>) -> Vec<ContextChunk> {
+    let mut deduped: Vec<ContextChunk> = Vec::new();
+
+    'outer: for chunk in chunks {
+        for existing in &mut deduped {
+            if semantic_similarity(&existing.content, &chunk.content) < DEDUP_SIMILARITY_THRESHOLD {
+                continue;
+            }
+
+            if chunk_dedup_rank(&chunk) > chunk_dedup_rank(existing) {
+                *existing = chunk;
+            }
+            continue 'outer;
+        }
+
+        deduped.push(chunk);
+    }
+
+    deduped
+}
+
+fn chunk_dedup_rank(chunk: &ContextChunk) -> (u8, i64, usize) {
+    let priority = match chunk_attention_priority(chunk) {
+        AttentionPriority::Critical => 3,
+        AttentionPriority::High => 2,
+        AttentionPriority::Normal => 1,
+        AttentionPriority::Background => 0,
+    };
+    let relevance = (chunk.relevance * 1000.0).round() as i64;
+    (priority, relevance, chunk.content.len())
 }
 
 fn source_family(source: &ContextSource) -> SourceFamily {
@@ -2326,6 +2359,38 @@ mod tests {
                 .iter()
                 .any(|chunk| chunk.content == "second chunk" || chunk.content == "third chunk")
         );
+    }
+
+    #[test]
+    fn compress_dedups_near_identical_chunks_before_selection() {
+        let dir = TempDir::new().expect("tempdir");
+        let assembler = ContextAssembler::new(
+            Arc::new(KnowledgeStore::new(dir.path().join("knowledge.jsonl"))),
+            Arc::new(EpisodeStore::new(dir.path().join("episodes.jsonl"))),
+        )
+        .with_max_context_tokens(64);
+        let chunks = vec![
+            ranked_chunk(
+                "reuse the same migration rollback sequence after validating the health check",
+                0.95,
+            ),
+            ranked_chunk(
+                "reuse the same migration rollback sequence after validating health checks",
+                0.70,
+            ),
+            ranked_chunk("unrelated deployment note", 0.60),
+        ];
+
+        let compressed = assembler.compress(chunks);
+
+        assert_eq!(
+            compressed
+                .iter()
+                .filter(|chunk| chunk.content.contains("migration rollback sequence"))
+                .count(),
+            1
+        );
+        assert!(compressed.iter().any(|chunk| chunk.content == "unrelated deployment note"));
     }
 
     #[test]
