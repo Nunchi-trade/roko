@@ -113,7 +113,7 @@ impl HypnagogiaEngine {
     pub const ID: crate::DreamsSubsystemId = crate::DreamsSubsystemId::Hypnagogia;
     /// Human-readable subsystem label.
     pub const LABEL: &'static str = "Hypnagogia";
-    /// Marker string used by the legacy placeholder surface.
+    /// Marker string retained for compatibility with older summaries.
     pub const MARKER: &'static str = "roko-dreams subsystem: hypnagogia";
 
     /// Construct a default hypnagogia engine.
@@ -159,7 +159,7 @@ impl HypnagogiaEngine {
         self.homuncular_observer(loosened.into_iter().chain(interrupted).collect())
     }
 
-    /// Returns the legacy marker string for compatibility with the old placeholder.
+    /// Returns the compatibility marker string used by older summaries.
     #[must_use]
     pub const fn interrupt(self) -> &'static str {
         Self::MARKER
@@ -450,7 +450,7 @@ fn hypnagogia_id(
 }
 
 impl HypnagogiaEngine {
-    /// Returns a static marker describing placeholder behavior.
+    /// Returns the compatibility marker string used by older summaries.
     #[must_use]
     pub const fn replay(self) -> &'static str {
         Self::MARKER
@@ -461,24 +461,30 @@ impl HypnagogiaEngine {
 mod tests {
     use super::*;
 
-    fn episode(
-        id: &str,
-        task_id: &str,
-        model: &str,
-        success: bool,
-        failure_reason: Option<&str>,
-    ) -> Episode {
-        let mut episode = Episode::new("agent", task_id);
-        episode.id = id.to_string();
-        episode.task_id = task_id.to_string();
-        episode.model = model.to_string();
-        episode.success = success;
-        episode.failure_reason = failure_reason.map(ToOwned::to_owned);
-        episode
+    #[test]
+    fn shipped_engine_identity_and_legacy_markers_remain_stable() {
+        let engine = HypnagogiaEngine::new();
+
+        assert_eq!(engine, HypnagogiaEngine::default());
+        assert_eq!(HypnagogiaEngine::ID, crate::DreamsSubsystemId::Hypnagogia);
+        assert_eq!(HypnagogiaEngine::LABEL, "Hypnagogia");
+        assert_eq!(
+            HypnagogiaEngine::new().summary(),
+            crate::DreamsSubsystemSummary::new(
+                HypnagogiaEngine::ID,
+                HypnagogiaEngine::LABEL,
+                HypnagogiaEngine::MARKER,
+            )
+        );
+        assert_eq!(
+            HypnagogiaEngine::new().interrupt(),
+            HypnagogiaEngine::MARKER
+        );
+        assert_eq!(HypnagogiaEngine::new().replay(), HypnagogiaEngine::MARKER);
     }
 
     #[test]
-    fn pipeline_emits_candidate_insights() {
+    fn pipeline_emits_bounded_candidate_insights() {
         let engine = HypnagogiaEngine::default();
         let signals = vec![
             KnowledgeEntry {
@@ -486,8 +492,8 @@ mod tests {
                 kind: KnowledgeKind::Insight,
                 source: Some("dream".to_string()),
                 content: "recurrent compile failure".to_string(),
-                confidence: 0.8,
-                confidence_weight: 0.8,
+                confidence: 1.0,
+                confidence_weight: 1.0,
                 refuted_insight_id: None,
                 refutation_evidence: None,
                 source_episodes: vec!["ep-1".to_string()],
@@ -506,8 +512,8 @@ mod tests {
                 kind: KnowledgeKind::Insight,
                 source: Some("dream".to_string()),
                 content: "recurrent test failure".to_string(),
-                confidence: 0.6,
-                confidence_weight: 0.6,
+                confidence: 1.0,
+                confidence_weight: 1.0,
                 refuted_insight_id: None,
                 refutation_evidence: None,
                 source_episodes: vec!["ep-2".to_string()],
@@ -521,18 +527,70 @@ mod tests {
                 emotional_provenance: None,
                 hdc_vector: None,
             },
+            KnowledgeEntry {
+                id: "sig-3".to_string(),
+                kind: KnowledgeKind::Insight,
+                source: Some("dream".to_string()),
+                content: "recurrent review failure".to_string(),
+                confidence: 1.0,
+                confidence_weight: 1.0,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-3".to_string()],
+                tags: vec!["review".to_string(), "dream".to_string()],
+                source_model: Some("claude-haiku-4-5".to_string()),
+                model_generality: 1.0,
+                created_at: Utc::now(),
+                half_life_days: 30.0,
+                tier: KnowledgeTier::Working,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            },
+            KnowledgeEntry {
+                id: "sig-4".to_string(),
+                kind: KnowledgeKind::Insight,
+                source: Some("dream".to_string()),
+                content: "recurrent deployment failure".to_string(),
+                confidence: 1.0,
+                confidence_weight: 1.0,
+                refuted_insight_id: None,
+                refutation_evidence: None,
+                source_episodes: vec!["ep-4".to_string()],
+                tags: vec!["deploy".to_string(), "dream".to_string()],
+                source_model: Some("claude-haiku-4-5".to_string()),
+                model_generality: 1.0,
+                created_at: Utc::now(),
+                half_life_days: 30.0,
+                tier: KnowledgeTier::Working,
+                emotional_tag: None,
+                emotional_provenance: None,
+                hdc_vector: None,
+            },
         ];
-        let episodes = vec![
-            episode("ep-1", "task-1", "claude-haiku-4-5", false, Some("timeout")),
-            episode("ep-2", "task-2", "claude-haiku-4-5", true, None),
-            episode("ep-3", "task-3", "claude-haiku-4-5", false, Some("compile")),
-        ];
-        let output = engine.run(&signals, &episodes, Utc::now());
-        assert!(!output.is_empty());
+        let output = engine.run(&signals, &[], Utc::now());
+
+        assert_eq!(output.len(), engine.observer.max_candidates);
         assert!(
             output
                 .iter()
-                .any(|entry| entry.tags.iter().any(|tag| tag == "hypnagogia"))
+                .any(|entry| entry.content.starts_with("Sleep-onset association:"))
         );
+        assert!(
+            output
+                .iter()
+                .all(|entry| entry.source.as_deref() == Some("dream"))
+        );
+        assert!(
+            output
+                .iter()
+                .any(|entry| entry.id.starts_with("dream-hypnagogia-"))
+        );
+
+        let unique_ids = output
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique_ids.len(), output.len());
     }
 }

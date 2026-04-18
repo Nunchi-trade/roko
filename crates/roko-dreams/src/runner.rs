@@ -408,7 +408,7 @@ pub struct DreamRuntimeControls {
     /// Replay planner configuration.
     #[serde(default)]
     pub replay: DreamReplayPolicy,
-    /// Optional sleep-time compute budget.
+    /// Optional offline consolidation budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<DreamBudget>,
     /// Scheduling policy.
@@ -646,6 +646,10 @@ impl DreamRunner {
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
         let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
+        cycle.configure_threats(
+            self.controls.threat_simulation,
+            self.controls.threat_severity_floor,
+        );
         cycle.run_budgeted(&mut self.controls.budget).await
     }
 }
@@ -974,6 +978,21 @@ mod tests {
         let policy = DreamSchedulePolicy::default();
         let delay = policy.trigger_delay(DreamTrigger::Manual, None, None, Utc::now());
         assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn schedule_scheduled_trigger_uses_cron_expression() {
+        let policy = DreamSchedulePolicy {
+            scheduled_cron: Some("0 * * * * * *".to_string()),
+            ..DreamSchedulePolicy::default()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-04-18T12:34:15Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+
+        let delay = policy.trigger_delay(DreamTrigger::Scheduled, None, None, now);
+
+        assert_eq!(delay, Some(Duration::from_secs(45)));
     }
 
     #[test]

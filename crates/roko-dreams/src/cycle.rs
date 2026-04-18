@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use crate::hypnagogia::HypnagogiaEngine;
 use crate::imagination::synthesize_hypotheses;
 use crate::runner::DreamBudget;
-use crate::threat::threat_warning_entries;
+use crate::threat::threat_warning_entries_with_floor;
 
 const DREAMS_SUCCESS_REGRESSION_THRESHOLD: f64 = 0.20;
 const DREAMS_REGRESSION_MIN_RECORDS: usize = 5;
@@ -336,6 +336,8 @@ pub struct DreamCycle {
     playbook_store: Arc<PlaybookStore>,
     dispatcher: Arc<dyn AgentDispatcher>,
     last_dream_at: Option<DateTime<Utc>>,
+    threat_simulation: bool,
+    threat_severity_floor: f64,
 }
 
 impl std::fmt::Debug for DreamCycle {
@@ -346,6 +348,8 @@ impl std::fmt::Debug for DreamCycle {
             .field("playbook_store", &self.playbook_store.root())
             .field("dispatcher", &"<dispatcher>")
             .field("last_dream_at", &self.last_dream_at)
+            .field("threat_simulation", &self.threat_simulation)
+            .field("threat_severity_floor", &self.threat_severity_floor)
             .finish()
     }
 }
@@ -365,6 +369,8 @@ impl DreamCycle {
             playbook_store,
             dispatcher,
             last_dream_at: None,
+            threat_simulation: true,
+            threat_severity_floor: 0.20,
         }
     }
 
@@ -377,6 +383,13 @@ impl DreamCycle {
     /// Override the last completed dream timestamp used to filter batches.
     pub fn set_last_dream_at(&mut self, last_dream_at: Option<DateTime<Utc>>) {
         self.last_dream_at = last_dream_at;
+    }
+
+    /// Configure whether dream threat warnings are emitted and what severity
+    /// floor they must meet before persistence.
+    pub fn configure_threats(&mut self, enabled: bool, severity_floor: f64) {
+        self.threat_simulation = enabled;
+        self.threat_severity_floor = severity_floor.clamp(0.0, 1.0);
     }
 
     /// Run a full offline learning pass.
@@ -506,7 +519,13 @@ impl DreamCycle {
                 HypnagogiaEngine::default().run(&review_entries, &processed_episodes, started_at);
             liminal_entries.extend(hypnagogic);
             liminal_entries.extend(synthesize_hypotheses(&processed_episodes, started_at));
-            liminal_entries.extend(threat_warning_entries(&processed_episodes, started_at));
+            if self.threat_simulation {
+                liminal_entries.extend(threat_warning_entries_with_floor(
+                    &processed_episodes,
+                    started_at,
+                    self.threat_severity_floor,
+                ));
+            }
         }
         for entry in liminal_entries {
             if written_knowledge_ids.insert(entry.id.clone()) {
@@ -2861,6 +2880,56 @@ mod tests {
                 .performance_notes
                 .iter()
                 .any(|note| note == DREAMS_PERFORMANCE_STALLED_NOTE)
+        );
+    }
+
+    #[tokio::test]
+    async fn cycle_can_disable_threat_warnings() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        for idx in 0..2 {
+            let mut ep = episode(
+                &format!("threat-{idx}"),
+                "plan-threat",
+                "implementation",
+                "claude-haiku-4-5",
+                false,
+                Some("timeout"),
+            );
+            ep.tokens_used = 400;
+            ep.duration_secs = 60.0;
+            write_episode(&logger, &ep).await;
+        }
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store.clone(),
+            playbook_store,
+            dispatcher,
+        );
+        cycle.configure_threats(false, 0.0);
+
+        let report = cycle.run().await.expect("run");
+        assert_eq!(report.processed_episodes, 2);
+
+        let entries = knowledge_store.read_all().expect("read knowledge");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.tags.iter().any(|tag| tag == "threat"))
         );
     }
 

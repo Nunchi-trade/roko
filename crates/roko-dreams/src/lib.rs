@@ -1,7 +1,8 @@
 //! Dreams subsystem crate.
 //!
-//! This package owns the dream-cycle runtime, heartbeat helpers, and the
-//! remaining placeholder subsystem types that still live in the dreams domain.
+//! This package owns the shipping dream-cycle runtime, heartbeat helpers, and
+//! compatibility metadata for the subsystem surfaces that still live in the
+//! dreams domain.
 
 #![allow(
     clippy::assigning_clones,
@@ -68,14 +69,14 @@ pub enum DreamsSubsystemId {
     Hypnagogia,
 }
 
-/// Summary metadata for one dreams subsystem placeholder.
+/// Summary metadata for one dreams subsystem compatibility surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DreamsSubsystemSummary {
     /// Stable subsystem identifier.
     pub id: DreamsSubsystemId,
     /// Human-readable label.
     pub label: &'static str,
-    /// Static marker string describing placeholder behavior.
+    /// Static marker string describing compatibility behavior.
     pub marker: &'static str,
 }
 
@@ -105,7 +106,7 @@ impl DreamsEngine {
         Self
     }
 
-    /// Summary metadata for this subsystem placeholder.
+    /// Summary metadata for this subsystem compatibility surface.
     #[must_use]
     pub const fn summary(self) -> DreamsSubsystemSummary {
         DreamsSubsystemSummary::new(Self::ID, Self::LABEL, Self::MARKER)

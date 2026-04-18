@@ -374,6 +374,7 @@ mod tests {
         failure_reason: Option<&str>,
         minutes_ago: i64,
         tokens_used: u64,
+        gate_verdicts: Vec<GateVerdict>,
     ) -> Episode {
         let timestamp = Utc::now() - chrono::Duration::minutes(minutes_ago);
         let mut episode = Episode::new("agent", task_id);
@@ -382,6 +383,7 @@ mod tests {
         episode.model = model.to_string();
         episode.success = success;
         episode.failure_reason = failure_reason.map(str::to_owned);
+        episode.gate_verdicts = gate_verdicts;
         episode.timestamp = timestamp;
         episode.started_at = timestamp;
         episode.completed_at = timestamp;
@@ -390,29 +392,116 @@ mod tests {
     }
 
     #[test]
-    fn consequence_mode_prefers_high_signal_episodes() {
+    fn consequence_mode_prefers_higher_utility_and_reports_score() {
         let episodes = vec![
-            episode("a", "task-1", "haiku", true, None, 30, 10),
-            episode("b", "task-2", "haiku", false, Some("timeout"), 5, 500),
-            episode("c", "task-3", "haiku", true, None, 2, 20),
+            episode(
+                "a",
+                "task-1",
+                "haiku",
+                true,
+                None,
+                10,
+                1_000,
+                vec![
+                    GateVerdict::new("compile", true),
+                    GateVerdict::new("test", true),
+                ],
+            ),
+            episode(
+                "b",
+                "task-2",
+                "haiku",
+                true,
+                None,
+                10,
+                100,
+                vec![GateVerdict::new("compile", true)],
+            ),
+            episode(
+                "c",
+                "task-2",
+                "haiku",
+                true,
+                None,
+                10,
+                100,
+                vec![GateVerdict::new("compile", true)],
+            ),
         ];
         let policy = DreamReplayPolicy {
             mode: DreamReplayMode::Consequence,
-            max_episodes: 2,
+            max_episodes: 3,
             ..DreamReplayPolicy::default()
         };
-        let batch = select_replay_episodes(&episodes, &policy, Utc::now());
-        assert_eq!(batch.episodes.len(), 2);
-        assert_eq!(batch.episodes[0].id, "b");
+        let now = Utc::now();
+        let batch = select_replay_episodes(&episodes, &policy, now);
+        let scored = score_candidates(&episodes, &policy, now);
+        let scored_by_id = scored
+            .into_iter()
+            .map(|candidate| (candidate.episode.id, candidate.utility))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            batch
+                .episodes
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(batch.mode, DreamReplayMode::Consequence);
+        assert_eq!(batch.hypothetical_count, 0);
+        let expected_utility = batch
+            .episodes
+            .iter()
+            .map(|episode| scored_by_id[&episode.id])
+            .sum::<f64>();
+        assert!((batch.utility_score - expected_utility).abs() < 1e-9);
     }
 
     #[test]
     fn causal_mode_returns_failure_chain_roots() {
         let episodes = vec![
-            episode("a", "task-1", "haiku", true, None, 30, 10),
-            episode("b", "task-1", "haiku", false, Some("timeout"), 20, 10),
-            episode("c", "task-1", "haiku", false, Some("timeout"), 10, 10),
-            episode("d", "task-2", "haiku", true, None, 5, 10),
+            episode(
+                "a",
+                "task-1",
+                "haiku",
+                true,
+                None,
+                30,
+                10,
+                vec![GateVerdict::new("compile", true)],
+            ),
+            episode(
+                "b",
+                "task-1",
+                "haiku",
+                false,
+                Some("timeout"),
+                20,
+                10,
+                vec![GateVerdict::new("compile", false)],
+            ),
+            episode(
+                "c",
+                "task-1",
+                "haiku",
+                false,
+                Some("timeout"),
+                10,
+                10,
+                vec![GateVerdict::new("compile", false)],
+            ),
+            episode(
+                "d",
+                "task-2",
+                "haiku",
+                true,
+                None,
+                5,
+                10,
+                vec![GateVerdict::new("compile", true)],
+            ),
         ];
         let policy = DreamReplayPolicy {
             mode: DreamReplayMode::Causal,
@@ -434,6 +523,7 @@ mod tests {
             Some("timeout"),
             5,
             20,
+            vec![GateVerdict::new("compile", false)],
         )];
         let policy = DreamReplayPolicy {
             mode: DreamReplayMode::Hypothetical,
@@ -445,5 +535,63 @@ mod tests {
         assert!(batch.episodes[0].id.contains("-hyp-0"));
         assert!(batch.episodes[0].success);
         assert_eq!(batch.episodes[0].trigger_kind, "dream:hypothetical");
+    }
+
+    #[test]
+    fn random_mode_is_deterministic_and_respects_max_episodes() {
+        let episodes = vec![
+            episode(
+                "a",
+                "task-1",
+                "haiku",
+                true,
+                None,
+                10,
+                1_000,
+                vec![GateVerdict::new("compile", true)],
+            ),
+            episode(
+                "b",
+                "task-2",
+                "haiku",
+                true,
+                None,
+                10,
+                100,
+                vec![GateVerdict::new("compile", true)],
+            ),
+            episode(
+                "c",
+                "task-3",
+                "haiku",
+                true,
+                None,
+                10,
+                100,
+                vec![GateVerdict::new("compile", true)],
+            ),
+        ];
+        let policy = DreamReplayPolicy {
+            mode: DreamReplayMode::Random,
+            max_episodes: 2,
+            ..DreamReplayPolicy::default()
+        };
+        let first = select_replay_episodes(&episodes, &policy, Utc::now());
+        let second = select_replay_episodes(&episodes, &policy, Utc::now());
+
+        assert_eq!(first.mode, DreamReplayMode::Random);
+        assert_eq!(first.episodes.len(), 2);
+        assert_eq!(
+            first
+                .episodes
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            second
+                .episodes
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }
