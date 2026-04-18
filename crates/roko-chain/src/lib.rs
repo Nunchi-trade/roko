@@ -13,6 +13,8 @@
 pub mod alloy_impl;
 pub mod client;
 pub mod gate;
+pub mod identity_economy_identity;
+pub mod identity_economy_markets;
 pub mod mock;
 pub mod phase2;
 pub mod types;
