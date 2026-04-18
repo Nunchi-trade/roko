@@ -23,6 +23,9 @@
 
 pub mod cancel;
 pub mod event_bus;
+pub mod heartbeat;
+pub mod heartbeat_attention;
+pub mod heartbeat_probes;
 pub mod metrics;
 pub mod process;
 pub mod resource;

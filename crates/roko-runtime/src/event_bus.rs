@@ -55,6 +55,8 @@ use std::{
 use tokio::sync::broadcast;
 use tracing::trace;
 
+use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+
 /// A sequenced, timestamped envelope wrapping a user event.
 #[derive(Debug, Clone)]
 pub struct Envelope<E> {
@@ -99,7 +101,7 @@ pub enum PublishOrigin {
 }
 
 /// Events shared across the runtime event bus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RokoEvent {
     /// Emitted when repeated gate failures should trigger a plan revision.
     PlanRevision {
@@ -126,6 +128,22 @@ pub enum RokoEvent {
         published_at: chrono::DateTime<chrono::Utc>,
         /// Where the publish originated.
         origin: PublishOrigin,
+    },
+    /// Emitted when the runtime heartbeat policy publishes a cognitive tick.
+    HeartbeatTick(HeartbeatTick),
+    /// Emitted when an urgent condition bypasses normal heartbeat cadence.
+    HeartbeatWakeup {
+        /// Wakeup condition that triggered the early gamma tick.
+        condition: WakeupCondition,
+        /// UTC timestamp for when the wakeup was emitted.
+        issued_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Emitted when heartbeat meta-cognition or scheduling requests loop control.
+    CognitiveSignal {
+        /// Control signal produced by heartbeat governance.
+        signal: CognitiveSignal,
+        /// UTC timestamp for when the signal was emitted.
+        issued_at: chrono::DateTime<chrono::Utc>,
     },
 }
 
