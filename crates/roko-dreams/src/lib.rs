@@ -40,6 +40,7 @@
 pub mod cycle;
 pub mod hypnagogia;
 pub mod imagination;
+pub mod phase2;
 pub mod replay;
 pub mod runner;
 pub mod threat;
