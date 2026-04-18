@@ -47,6 +47,8 @@ pub mod react;
 
 pub use capability::{
     ModelCapabilities, capabilities_for, capabilities_from_profile, translator_for,
+    translator_for_capabilities, translator_for_profile, translator_name_for,
+    translator_name_for_capabilities, translator_name_for_profile,
 };
 pub use claude::ClaudeTranslator;
 pub use gemini::GeminiTranslator;

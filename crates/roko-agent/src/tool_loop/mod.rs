@@ -270,8 +270,17 @@ impl ToolLoop {
         }
 
         let messages = result_msg::initial_messages(system, user);
-        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx, None)
-            .await
+        self.run_inner(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            None,
+            SessionState::default(),
+        )
+        .await
     }
 
     /// Run a fresh tool loop and forward streaming chunks as each backend turn arrives.
@@ -292,6 +301,7 @@ impl ToolLoop {
             tools,
             ctx,
             Some(event_tx),
+            SessionState::default(),
         )
         .await
     }
@@ -311,6 +321,7 @@ impl ToolLoop {
             tools,
             ctx,
             None,
+            cp.session,
         )
         .await
     }
@@ -325,9 +336,10 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
         event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+        initial_session: SessionState,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
-        let mut session = SessionState::default();
+        let mut session = initial_session;
         let mut turn_history: Vec<Turn> = Vec::new();
 
         loop {
@@ -335,7 +347,8 @@ impl ToolLoop {
 
             // §36.54 — iteration cap.
             if max_iter::is_exhausted(iterations, self.max_iterations) {
-                let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                    .with_session(session.clone());
                 return ToolLoopOutput {
                     final_text: String::new(),
                     iterations,
@@ -348,7 +361,8 @@ impl ToolLoop {
 
             // §36.45 — cancellation between turns.
             if ctx.is_cancelled() {
-                let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                    .with_session(session.clone());
                 return ToolLoopOutput {
                     final_text: String::new(),
                     iterations,
@@ -373,7 +387,8 @@ impl ToolLoop {
             } {
                 Ok(r) => r,
                 Err(e) => {
-                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                        .with_session(session.clone());
                     return ToolLoopOutput {
                         final_text: String::new(),
                         iterations,
@@ -391,7 +406,8 @@ impl ToolLoop {
             let calls = match self.translator.parse_calls(&response) {
                 Ok(c) => c,
                 Err(e) => {
-                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                        .with_session(session.clone());
                     return ToolLoopOutput {
                         final_text: String::new(),
                         iterations,
@@ -447,7 +463,8 @@ impl ToolLoop {
                         Intervention::EscalateModel
                         | Intervention::HumanHandoff
                         | Intervention::Abort => {
-                            let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                            let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                                .with_session(session.clone());
                             return ToolLoopOutput {
                                 final_text: String::new(),
                                 iterations,
@@ -467,7 +484,7 @@ impl ToolLoop {
             self.prune_context_if_needed(&mut messages);
 
             iterations += 1;
-            self.save_checkpoint_snapshot(iterations, &all_calls, &messages);
+            self.save_checkpoint_snapshot(iterations, &all_calls, &messages, &session);
         }
     }
 
@@ -547,12 +564,14 @@ impl ToolLoop {
         iterations: usize,
         all_calls: &[ToolCall],
         messages: &[serde_json::Value],
+        session: &SessionState,
     ) {
         let Some(path) = self.checkpoint_path.as_deref() else {
             return;
         };
 
-        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec());
+        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec())
+            .with_session(session.clone());
         if let Err(err) = cp.save(path) {
             tracing::warn!(path = %path.display(), error = %err, "failed to persist tool loop checkpoint");
         }

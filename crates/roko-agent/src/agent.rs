@@ -66,6 +66,15 @@ impl AgentResult {
         v.push(self.output.clone());
         v
     }
+
+    /// All engrams produced by this run (trace + output), in chronological order.
+    ///
+    /// Compatibility alias for older docs and callers that still use the
+    /// `all_engrams` name.
+    #[must_use]
+    pub fn all_engrams(&self) -> Vec<Engram> {
+        self.all_signals()
+    }
 }
 
 /// Build an output signal that keeps the full upstream lineage from `input`.

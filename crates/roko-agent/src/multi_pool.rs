@@ -16,11 +16,11 @@ use crate::pool::{AgentInstanceId, AgentTask, InstanceStatus, TaskOutcome};
 // ─── WarmEntry ───────────────────────────────────────────────────────────
 
 /// A pre-spawned agent waiting in the warm pool.
-struct WarmEntry {
+pub struct WarmEntry {
     /// The agent implementation, ready to run.
-    agent: Arc<dyn Agent>,
+    pub agent: Arc<dyn Agent>,
     /// When this entry was added to the warm pool.
-    spawned_at: Instant,
+    pub spawned_at: Instant,
 }
 
 // ─── ActiveEntry ─────────────────────────────────────────────────────────
@@ -290,6 +290,11 @@ impl MultiAgentPool {
     #[must_use]
     pub fn total_warm_count(&self) -> usize {
         self.warm.len()
+    }
+
+    /// Compatibility alias for docs that name the stale-entry eviction path explicitly.
+    pub fn evict_stale_warm(&mut self, role: AgentRole, max_idle: Duration) -> usize {
+        self.evict_warm(role, max_idle)
     }
 
     // ── Active instances ─────────────────────────────────────────────────
@@ -571,6 +576,16 @@ impl MultiAgentPool {
         }
 
         active_count + warm_count
+    }
+
+    /// Compatibility alias for plan-scoped kill operations.
+    pub fn kill_by_plan(&mut self, plan_id: &str) -> usize {
+        self.kill_plan_agents(plan_id)
+    }
+
+    /// Compatibility alias for role-scoped kill operations.
+    pub fn kill_by_role(&mut self, role: AgentRole) -> usize {
+        self.kill_role(role)
     }
 
     // ── Queries ──────────────────────────────────────────────────────────

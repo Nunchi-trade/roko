@@ -103,14 +103,14 @@ pub use gemini::{
 pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn};
 pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};
 pub use mock::MockAgent;
-pub use multi_pool::MultiAgentPool;
+pub use multi_pool::{KillReport, MultiAgentPool, WarmEntry};
 pub use ollama::agent::{OllamaAgent, OllamaLlmBackend};
 pub use openai_compat_backend::OpenAiCompatLlmBackend;
 pub use perplexity::{
     Annotation, PerplexityChatAgent, PerplexityDeepResearchAgent, PerplexityEmbedAgent,
     PerplexityMetadata, PerplexitySearchClient, SearchOptions, SearchResult,
 };
-pub use pool::{AgentInstanceId, AgentPool};
+pub use pool::{AgentInstanceId, AgentPool, AgentTask, InstanceStatus, TaskOutcome};
 pub use provider::{
     ProviderAdapter, adapter_for_kind, create_agent_for_model, current_safety_layer,
     with_scoped_safety_layer,
@@ -120,6 +120,9 @@ pub use safety::{
     AgentWarrant, Capability, CapabilityError, SafetyLayer, check_capability, delegate,
 };
 pub use streaming::{StreamAccumulator, StreamChunk};
-pub use task_runner::{TaskResult, TaskRunner};
+pub use task_runner::{
+    AgentEvent, Anomaly, AnomalyDetector, BudgetAction, BudgetGuardrail, ConductorAction,
+    ConductorBandit, CostTable, EventBus, ModelPricing, TaskResult, TaskRunner, TaskRunnerError,
+};
 pub use tool_loop::ToolLoopAgent;
 pub use usage::Usage;

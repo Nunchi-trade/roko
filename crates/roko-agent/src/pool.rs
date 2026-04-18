@@ -110,6 +110,8 @@ pub struct AgentTask {
     pub input: roko_core::Engram,
     /// The context for the agent run.
     pub ctx: roko_core::Context,
+    /// Higher-priority tasks should be scheduled before lower-priority tasks.
+    pub priority: u32,
 }
 
 impl AgentTask {
@@ -120,7 +122,19 @@ impl AgentTask {
         input: roko_core::Engram,
         ctx: roko_core::Context,
     ) -> Self {
-        Self { id, input, ctx }
+        Self {
+            id,
+            input,
+            ctx,
+            priority: 0,
+        }
+    }
+
+    /// Assign an explicit scheduling priority to the task.
+    #[must_use]
+    pub const fn with_priority(mut self, priority: u32) -> Self {
+        self.priority = priority;
+        self
     }
 }
 

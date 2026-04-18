@@ -62,6 +62,14 @@ pub fn find_mcp_config(start_dir: &Path) -> Option<Result<(PathBuf, McpConfig), 
             break;
         }
     }
+
+    let home_candidate = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".mcp.json"));
+    if let Some(candidate) = home_candidate.filter(|candidate| candidate.is_file()) {
+        return Some(load_config(&candidate));
+    }
+
     None
 }
 

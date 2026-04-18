@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -139,8 +140,21 @@ impl StdioTransport {
     /// The process is started with stdin/stdout piped for JSON-RPC communication.
     /// Stderr is inherited so server logs appear in the parent's stderr.
     pub fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
+        Self::spawn_with_env(command, args, &HashMap::new())
+    }
+
+    /// Spawn a child MCP server process with additional environment variables.
+    ///
+    /// The provided environment is layered on top of the current process
+    /// environment before the child process is started.
+    pub fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<Self, McpError> {
         let mut child = tokio::process::Command::new(command)
             .args(args)
+            .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())

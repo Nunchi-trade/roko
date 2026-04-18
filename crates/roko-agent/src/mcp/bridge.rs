@@ -34,12 +34,11 @@ pub async fn discover_mcp_tools(config: &McpConfig) -> Result<Vec<ToolDef>, McpB
     let mut all_server_tools = Vec::new();
 
     for server in &config.servers {
-        let transport = StdioTransport::spawn(&server.command, &server.args).map_err(|source| {
-            McpBridgeError::Spawn {
+        let transport = StdioTransport::spawn_with_env(&server.command, &server.args, &server.env)
+            .map_err(|source| McpBridgeError::Spawn {
                 server: server.name.clone(),
                 source,
-            }
-        })?;
+            })?;
         let client = McpClient::new(transport);
 
         match timeout(MCP_DISCOVERY_TIMEOUT, client.initialize()).await {
