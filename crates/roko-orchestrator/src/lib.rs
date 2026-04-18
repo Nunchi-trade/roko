@@ -12,6 +12,8 @@
 
 #![deny(missing_docs)]
 
+/// Coordination primitives derived from the coordination docs.
+pub mod coordination;
 pub mod dag;
 pub mod event_log;
 pub mod executor;
@@ -26,6 +28,13 @@ pub mod worktree;
 pub use dag::{
     DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability, ExecutionWave,
     IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
+};
+pub use coordination::{
+    AgentId, CohortMetrics, CohortWeights, CollectiveId, CustomKindError, MorphogeneticParams,
+    MorphogeneticState, Pheromone, PheromoneKind, PheromoneScope, PromotionConfig,
+    ResponseThresholds, SpecializationIndex, SubnetId, SubnetIdError, STRATEGY_DIMS,
+    WisdomGate, c_factor, check_promotion, current_intensity, effective_confirmations,
+    pheromone_decay, specialization_index, validate_custom_kind,
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
