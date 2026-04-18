@@ -223,8 +223,17 @@ pub fn feedback_for_agent(gate_output: &str, rung: u8) -> GateFeedback {
     }
 
     // If there are no classified lines but the output is non-empty and
-    // non-trivial, assume it is an unrecognized error format and include
-    // a summary as a single error.
+    // non-trivial, assume it is an unrecognized error format and surface the
+    // first useful line as an actionable error.
+    if errors.is_empty() && warnings.is_empty() && suggestions.is_empty() {
+        if let Some(line) = gate_output.lines().map(str::trim).find(|line| {
+            !line.is_empty() && !is_noise(line)
+        }) {
+            errors.push(line.to_string());
+            has_errors = true;
+        }
+    }
+
     let passed = !has_errors;
 
     GateFeedback {
@@ -310,6 +319,14 @@ Finished dev [unoptimized]
         let fb = feedback_for_agent(output, 2);
         assert_eq!(fb.item_count(), 3);
         assert!(!fb.is_empty());
+    }
+
+    #[test]
+    fn feedback_surfaces_unclassified_non_noise_output_as_error() {
+        let output = "build step failed unexpectedly";
+        let fb = feedback_for_agent(output, 2);
+        assert!(!fb.passed);
+        assert_eq!(fb.errors, vec!["build step failed unexpectedly"]);
     }
 
     #[test]

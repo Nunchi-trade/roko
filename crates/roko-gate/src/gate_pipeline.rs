@@ -28,6 +28,38 @@ use roko_core::{Context, Engram, Gate, TestCount, Verdict};
 use std::fmt;
 use std::time::Instant;
 
+const DEFAULT_PIPELINE_NAME: &str = "gate-pipeline";
+
+/// Builder seed for [`GatePipeline::new`].
+///
+/// The docs describe two common entrypoints:
+/// passing a display name first and pushing gates later, or seeding the
+/// pipeline from an existing gate vector and naming it afterward.
+pub enum GatePipelineSeed {
+    /// Start with an empty pipeline named `String`.
+    Name(String),
+    /// Start with a prebuilt list of gates and the default pipeline name.
+    Gates(Vec<Box<dyn Gate>>),
+}
+
+impl From<String> for GatePipelineSeed {
+    fn from(value: String) -> Self {
+        Self::Name(value)
+    }
+}
+
+impl From<&str> for GatePipelineSeed {
+    fn from(value: &str) -> Self {
+        Self::Name(value.to_string())
+    }
+}
+
+impl From<Vec<Box<dyn Gate>>> for GatePipelineSeed {
+    fn from(value: Vec<Box<dyn Gate>>) -> Self {
+        Self::Gates(value)
+    }
+}
+
 /// A [`Gate`] that runs a fixed sequence of inner gates.
 ///
 /// Construct with [`GatePipeline::new`] and append inner gates via
@@ -40,13 +72,23 @@ pub struct GatePipeline {
 }
 
 impl GatePipeline {
-    /// Construct an empty pipeline named `name` with short-circuit enabled.
+    /// Construct a pipeline from either a name or a prebuilt gate vector.
+    ///
+    /// Passing a name starts with an empty pipeline. Passing gates uses the
+    /// default display name until [`Self::with_name`] overrides it.
     #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            gates: Vec::new(),
-            short_circuit: true,
-            name: name.into(),
+    pub fn new(seed: impl Into<GatePipelineSeed>) -> Self {
+        match seed.into() {
+            GatePipelineSeed::Name(name) => Self {
+                gates: Vec::new(),
+                short_circuit: true,
+                name,
+            },
+            GatePipelineSeed::Gates(gates) => Self {
+                gates,
+                short_circuit: true,
+                name: DEFAULT_PIPELINE_NAME.to_string(),
+            },
         }
     }
 
@@ -62,18 +104,27 @@ impl GatePipeline {
         self
     }
 
-    /// Disable short-circuiting: every inner gate runs, even after a failure.
+    /// Override the pipeline display name.
     #[must_use]
-    pub const fn without_short_circuit(mut self) -> Self {
-        self.short_circuit = false;
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 
-    /// Re-enable short-circuiting (the default).
+    /// Toggle short-circuiting.
+    ///
+    /// When enabled, the pipeline stops on the first failure. When disabled,
+    /// every inner gate executes and the aggregate verdict records them all.
     #[must_use]
-    pub const fn with_short_circuit(mut self) -> Self {
-        self.short_circuit = true;
+    pub const fn with_short_circuit(mut self, enabled: bool) -> Self {
+        self.short_circuit = enabled;
         self
+    }
+
+    /// Disable short-circuiting: every inner gate runs, even after a failure.
+    #[must_use]
+    pub const fn without_short_circuit(self) -> Self {
+        self.with_short_circuit(false)
     }
 
     /// True if short-circuit mode is active.
@@ -534,8 +585,21 @@ mod tests {
     async fn with_short_circuit_reenables_flag() {
         let pipeline = GatePipeline::new("flip")
             .without_short_circuit()
-            .with_short_circuit();
+            .with_short_circuit(true);
         assert!(pipeline.short_circuit());
+    }
+
+    #[tokio::test]
+    async fn docs_style_constructor_from_gate_vec_is_supported() {
+        let pipeline = GatePipeline::new(vec![
+            Box::new(MockGate::new("a", true)) as Box<dyn Gate>,
+            Box::new(MockGate::new("b", true)),
+        ])
+        .with_name("docs")
+        .with_short_circuit(true);
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(v.passed);
+        assert_eq!(v.gate, "docs");
     }
 
     #[tokio::test]

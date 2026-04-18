@@ -1,9 +1,9 @@
-//! Complexity-based rung selection for the 6-rung gate pipeline (§10.14).
+//! Complexity-based rung selection for the 7-rung gate pipeline.
 //!
 //! Decides **which rungs to run** based on a plan's complexity and prior
-//! failure count. Trivial plans don't pay for property tests; complex plans
-//! run every rung. On repeated failure the selector escalates: a Trivial
-//! plan that has failed twice is promoted to Standard, running additional
+//! failure count. Trivial plans pay only for compilation; complex plans run
+//! every rung. On repeated failure the selector escalates: a Trivial plan
+//! that has failed twice is promoted to Standard, running additional
 //! verification rungs.
 //!
 //! This is a **pure function** — no I/O, no global state, no randomness.
@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlanComplexity {
-    /// Single-line / derive-only change. Compile + test only.
+    /// Single-line / derive-only change. Compile only.
     Trivial,
-    /// Small feature, few files. Adds lint + symbol checking.
+    /// Small feature, few files. Adds linting.
     Simple,
-    /// Normal plan. Adds generated behavioural tests.
+    /// Normal plan. Adds the project's tests plus symbol checking.
     Standard,
     /// Large cross-crate work. Full rung suite.
     Complex,
@@ -190,21 +190,15 @@ impl RungCaps {
 ///
 /// | Complexity | Compile | Lint | Test | Symbol | GenTest | PropTest | Integration |
 /// |---|---|---|---|---|---|---|---|
-/// | Trivial    |    ✓    |      |  ✓   |        |         |          |             |
-/// | Simple     |    ✓    |  ✓   |  ✓   |   ✓    |         |          |             |
-/// | Standard   |    ✓    |  ✓   |  ✓   |   ✓    |    ✓    |          |             |
+/// | Trivial    |    ✓    |      |      |        |         |          |             |
+/// | Simple     |    ✓    |  ✓   |      |        |         |          |             |
+/// | Standard   |    ✓    |  ✓   |  ✓   |   ✓    |         |          |             |
 /// | Complex    |    ✓    |  ✓   |  ✓   |   ✓    |    ✓    |    ✓     |      ✓      |
 const fn base_rungs(complexity: PlanComplexity) -> &'static [Rung] {
     match complexity {
-        PlanComplexity::Trivial => &[Rung::Compile, Rung::Test],
-        PlanComplexity::Simple => &[Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol],
-        PlanComplexity::Standard => &[
-            Rung::Compile,
-            Rung::Lint,
-            Rung::Test,
-            Rung::Symbol,
-            Rung::GeneratedTest,
-        ],
+        PlanComplexity::Trivial => &[Rung::Compile],
+        PlanComplexity::Simple => &[Rung::Compile, Rung::Lint],
+        PlanComplexity::Standard => &[Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol],
         PlanComplexity::Complex => &[
             Rung::Compile,
             Rung::Lint,
@@ -265,32 +259,23 @@ mod tests {
     // ── Base selection (0 prior failures) ────────────────────────────
 
     #[test]
-    fn trivial_selects_compile_and_test() {
+    fn trivial_selects_compile_only() {
         let rungs = select_rungs(PlanComplexity::Trivial, &all_caps(), 0);
-        assert_eq!(rungs, vec![Rung::Compile, Rung::Test]);
+        assert_eq!(rungs, vec![Rung::Compile]);
     }
 
     #[test]
-    fn simple_selects_compile_lint_test_symbol() {
+    fn simple_selects_compile_and_lint() {
         let rungs = select_rungs(PlanComplexity::Simple, &all_caps(), 0);
-        assert_eq!(
-            rungs,
-            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
-        );
+        assert_eq!(rungs, vec![Rung::Compile, Rung::Lint]);
     }
 
     #[test]
-    fn standard_selects_five_rungs() {
+    fn standard_selects_compile_lint_test_and_symbol() {
         let rungs = select_rungs(PlanComplexity::Standard, &all_caps(), 0);
         assert_eq!(
             rungs,
-            vec![
-                Rung::Compile,
-                Rung::Lint,
-                Rung::Test,
-                Rung::Symbol,
-                Rung::GeneratedTest,
-            ]
+            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
         );
     }
 
@@ -321,10 +306,7 @@ mod tests {
         };
         let rungs = select_rungs(PlanComplexity::Standard, &caps, 0);
         assert!(!rungs.contains(&Rung::Symbol));
-        assert_eq!(
-            rungs,
-            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::GeneratedTest,]
-        );
+        assert_eq!(rungs, vec![Rung::Compile, Rung::Lint, Rung::Test]);
     }
 
     #[test]
@@ -341,7 +323,7 @@ mod tests {
             ..RungCaps::all()
         };
         let rungs = select_rungs(PlanComplexity::Simple, &caps, 0);
-        assert_eq!(rungs, vec![Rung::Compile, Rung::Test, Rung::Symbol]);
+        assert_eq!(rungs, vec![Rung::Compile]);
     }
 
     #[test]
@@ -363,14 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn test_always_present() {
+    fn standard_and_complex_include_test() {
         let caps = RungCaps::default();
-        for complexity in [
-            PlanComplexity::Trivial,
-            PlanComplexity::Simple,
-            PlanComplexity::Standard,
-            PlanComplexity::Complex,
-        ] {
+        for complexity in [PlanComplexity::Standard, PlanComplexity::Complex] {
             let rungs = select_rungs(complexity, &caps, 0);
             assert!(
                 rungs.contains(&Rung::Test),
@@ -385,10 +362,7 @@ mod tests {
     fn one_failure_escalates_trivial_to_simple() {
         let rungs = select_rungs(PlanComplexity::Trivial, &all_caps(), 1);
         // Should match Simple base selection.
-        assert_eq!(
-            rungs,
-            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
-        );
+        assert_eq!(rungs, vec![Rung::Compile, Rung::Lint]);
     }
 
     #[test]
@@ -396,13 +370,7 @@ mod tests {
         let rungs = select_rungs(PlanComplexity::Trivial, &all_caps(), 2);
         assert_eq!(
             rungs,
-            vec![
-                Rung::Compile,
-                Rung::Lint,
-                Rung::Test,
-                Rung::Symbol,
-                Rung::GeneratedTest,
-            ]
+            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
         );
     }
 
@@ -427,7 +395,7 @@ mod tests {
             ..RungCaps::all()
         };
         let rungs = select_rungs(PlanComplexity::Trivial, &caps, 1);
-        assert_eq!(rungs, vec![Rung::Compile, Rung::Test, Rung::Symbol]);
+        assert_eq!(rungs, vec![Rung::Compile]);
     }
 
     // ── is_selected (base policy, no escalation) ─────────────────────
@@ -481,33 +449,33 @@ mod tests {
     fn decision_table_full_matrix() {
         let all = all_caps();
 
-        // Trivial: Compile, Test
+        // Trivial: Compile only
         let t = select_rungs(PlanComplexity::Trivial, &all, 0);
         assert!(t.contains(&Rung::Compile));
         assert!(!t.contains(&Rung::Lint));
-        assert!(t.contains(&Rung::Test));
+        assert!(!t.contains(&Rung::Test));
         assert!(!t.contains(&Rung::Symbol));
         assert!(!t.contains(&Rung::GeneratedTest));
         assert!(!t.contains(&Rung::PropertyTest));
         assert!(!t.contains(&Rung::Integration));
 
-        // Simple: +Lint, +Symbol
+        // Simple: +Lint
         let s = select_rungs(PlanComplexity::Simple, &all, 0);
         assert!(s.contains(&Rung::Compile));
         assert!(s.contains(&Rung::Lint));
-        assert!(s.contains(&Rung::Test));
-        assert!(s.contains(&Rung::Symbol));
+        assert!(!s.contains(&Rung::Test));
+        assert!(!s.contains(&Rung::Symbol));
         assert!(!s.contains(&Rung::GeneratedTest));
         assert!(!s.contains(&Rung::PropertyTest));
         assert!(!s.contains(&Rung::Integration));
 
-        // Standard: +GeneratedTest
+        // Standard: +Test, +Symbol
         let st = select_rungs(PlanComplexity::Standard, &all, 0);
         assert!(st.contains(&Rung::Compile));
         assert!(st.contains(&Rung::Lint));
         assert!(st.contains(&Rung::Test));
         assert!(st.contains(&Rung::Symbol));
-        assert!(st.contains(&Rung::GeneratedTest));
+        assert!(!st.contains(&Rung::GeneratedTest));
         assert!(!st.contains(&Rung::PropertyTest));
         assert!(!st.contains(&Rung::Integration));
 

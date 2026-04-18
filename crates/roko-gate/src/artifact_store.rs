@@ -93,10 +93,22 @@ impl ArtifactStore {
         self.inner.get(hash).map(Vec::as_slice)
     }
 
+    /// Alias for [`Self::retrieve`].
+    #[must_use]
+    pub fn get(&self, hash: &ContentHash) -> Option<&[u8]> {
+        self.retrieve(hash)
+    }
+
     /// Returns `true` if an artifact with the given hash is stored.
     #[must_use]
     pub fn exists(&self, hash: &ContentHash) -> bool {
         self.inner.contains_key(hash)
+    }
+
+    /// Alias for [`Self::exists`].
+    #[must_use]
+    pub fn contains(&self, hash: &ContentHash) -> bool {
+        self.exists(hash)
     }
 
     /// Number of distinct artifacts currently stored.
