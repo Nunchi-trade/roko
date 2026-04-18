@@ -237,7 +237,6 @@ fn pulse_active(heartbeat: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::atmosphere::Atmosphere;
     use super::super::super::state::{PhaseStatus, PhaseStep, TuiState};
     use super::*;
     use ratatui::Terminal;

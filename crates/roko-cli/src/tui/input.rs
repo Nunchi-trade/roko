@@ -1429,6 +1429,7 @@ mod tests {
         assert_eq!(action, TuiAction::WaveNext);
     }
 
+    #[test]
     fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
         let action = handle_key(
             key(KeyCode::Char('d')),

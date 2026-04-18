@@ -4815,6 +4815,10 @@ impl PlanRunner {
                     .await
             }
             RokoEvent::PrdPublished { .. } => false,
+            RokoEvent::HeartbeatTick(_)
+            | RokoEvent::HeartbeatWakeup { .. }
+            | RokoEvent::CognitiveSignal { .. }
+            | RokoEvent::AgentLifecycleTransition(_) => false,
         }
     }
 

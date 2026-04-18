@@ -30,6 +30,8 @@ use tracing::{error, info, instrument, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
 pub mod launchd;
+/// Linux systemd user-service helpers for daemon installation.
+pub mod systemd;
 
 use crate::config::RepoRegistry;
 use crate::load_layered;
@@ -381,8 +383,47 @@ pub async fn daemon_restart(workdir: &Path, port: u16) -> Result<()> {
     daemon_start(workdir, false, port).await
 }
 
-/// Install the daemon as a macOS LaunchAgent.
+/// Install the daemon under the host service manager.
 pub fn daemon_install() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return daemon_install_launchd();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return systemd::install_systemd(crate::DEFAULT_SERVE_PORT);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(anyhow!(
+            "daemon install is only supported on macOS (launchd) and Linux (systemd)"
+        ))
+    }
+}
+
+/// Uninstall the daemon from the host service manager.
+pub fn daemon_uninstall() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return daemon_uninstall_launchd();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return systemd::uninstall_systemd();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(anyhow!(
+            "daemon uninstall is only supported on macOS (launchd) and Linux (systemd)"
+        ))
+    }
+}
+
+fn daemon_install_launchd() -> Result<()> {
     let plist_path = launchd::plist_path();
     let plist_dir = plist_path
         .parent()
@@ -413,8 +454,7 @@ pub fn daemon_install() -> Result<()> {
     Ok(())
 }
 
-/// Uninstall the daemon LaunchAgent.
-pub fn daemon_uninstall() -> Result<()> {
+fn daemon_uninstall_launchd() -> Result<()> {
     let plist_path = launchd::plist_path();
 
     let status = Command::new("launchctl")

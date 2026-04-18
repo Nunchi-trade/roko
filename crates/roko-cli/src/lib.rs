@@ -37,6 +37,7 @@ pub mod clean;
 pub mod config;
 pub mod config_cmd;
 pub mod daemon;
+pub mod deployment;
 pub mod episode;
 pub mod event_sources;
 mod heartbeat;
@@ -75,6 +76,7 @@ pub use config::{
 };
 pub use config_cmd::{EditTarget, WizardInputs, run_init_wizard};
 pub use daemon::{DaemonConfig, DaemonMode, DaemonState, DaemonStatus};
+pub use deployment::SigstoreVerifier;
 pub use episode::EpisodePolicy;
 pub use inject::{InjectKind, InjectRequest};
 pub use oneshot::{OneshotMode, OneshotResult};

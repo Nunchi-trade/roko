@@ -15,17 +15,17 @@ use std::path::Path;
 pub enum SecretsCmd {
     /// Store a secret (reads value from stdin).
     Set {
-        /// Secret namespace (e.g. `llm`).
+        /// Secret namespace or dotted secret name (e.g. `llm` or `anthropic.api_key`).
         namespace: String,
-        /// Secret key within namespace (e.g. `anthropic`).
-        key: String,
+        /// Secret key within namespace (e.g. `anthropic`). Optional when namespace is dotted.
+        key: Option<String>,
     },
     /// Retrieve a secret value.
     Get {
-        /// Secret namespace (e.g. `llm`).
+        /// Secret namespace or dotted secret name (e.g. `llm` or `anthropic.api_key`).
         namespace: String,
-        /// Secret key within namespace (e.g. `anthropic`).
-        key: String,
+        /// Secret key within namespace (e.g. `anthropic`). Optional when namespace is dotted.
+        key: Option<String>,
     },
     /// List secret keys, optionally filtered by namespace.
     List {
@@ -34,10 +34,10 @@ pub enum SecretsCmd {
     },
     /// Rotate a secret (reads new value from stdin).
     Rotate {
-        /// Secret namespace (e.g. `llm`).
+        /// Secret namespace or dotted secret name (e.g. `llm` or `anthropic.api_key`).
         namespace: String,
-        /// Secret key within namespace (e.g. `anthropic`).
-        key: String,
+        /// Secret key within namespace (e.g. `anthropic`). Optional when namespace is dotted.
+        key: Option<String>,
     },
 }
 
@@ -54,16 +54,18 @@ pub fn dispatch_secrets(cmd: &SecretsCmd, workdir: &Path) -> Result<()> {
     }
 }
 
-fn cmd_set(store: &FileStore, namespace: &str, key: &str) -> Result<()> {
+fn cmd_set(store: &FileStore, namespace: &str, key: &Option<String>) -> Result<()> {
+    let (namespace, key) = secret_name_parts(namespace, key.as_deref())?;
     let value = read_value_from_stdin()?;
-    let ns = Namespace::new(namespace, key);
+    let ns = Namespace::new(&namespace, &key);
     store.set(&ns, value).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("secret {namespace}.{key} stored");
     Ok(())
 }
 
-fn cmd_get(store: &FileStore, namespace: &str, key: &str) -> Result<()> {
-    let ns = Namespace::new(namespace, key);
+fn cmd_get(store: &FileStore, namespace: &str, key: &Option<String>) -> Result<()> {
+    let (namespace, key) = secret_name_parts(namespace, key.as_deref())?;
+    let ns = Namespace::new(&namespace, &key);
     match store.get(&ns).map_err(|e| anyhow::anyhow!("{e}"))? {
         Some(value) => {
             println!("{value}");
@@ -120,14 +122,33 @@ fn cmd_list(store: &FileStore, namespace: Option<&str>, secrets_path: &Path) -> 
     Ok(())
 }
 
-fn cmd_rotate(store: &FileStore, namespace: &str, key: &str) -> Result<()> {
+fn cmd_rotate(store: &FileStore, namespace: &str, key: &Option<String>) -> Result<()> {
+    let (namespace, key) = secret_name_parts(namespace, key.as_deref())?;
     let new_value = read_value_from_stdin()?;
-    let ns = Namespace::new(namespace, key);
+    let ns = Namespace::new(&namespace, &key);
     store
         .rotate(&ns, new_value)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("secret {namespace}.{key} rotated");
     Ok(())
+}
+
+fn secret_name_parts(namespace: &str, key: Option<&str>) -> Result<(String, String)> {
+    if let Some(key) = key {
+        return Ok((namespace.to_string(), key.to_string()));
+    }
+
+    let (namespace, key) = namespace.split_once('.').ok_or_else(|| {
+        anyhow::anyhow!("secret name must be either <namespace> <key> or <namespace.key>")
+    })?;
+
+    if namespace.trim().is_empty() || key.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "secret namespace and key must not be empty"
+        ));
+    }
+
+    Ok((namespace.trim().to_string(), key.trim().to_string()))
 }
 
 /// Read a secret value from stdin, trimming trailing whitespace.
@@ -156,7 +177,25 @@ mod tests {
         match w.cmd {
             SecretsCmd::Set { namespace, key } => {
                 assert_eq!(namespace, "llm");
-                assert_eq!(key, "anthropic");
+                assert_eq!(key.as_deref(), Some("anthropic"));
+            }
+            _ => panic!("expected Set"),
+        }
+    }
+
+    #[test]
+    fn secrets_cmd_parse_set_dotted_name() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(subcommand)]
+            cmd: SecretsCmd,
+        }
+        let w = Wrapper::parse_from(["test", "set", "anthropic.api_key"]);
+        match w.cmd {
+            SecretsCmd::Set { namespace, key } => {
+                assert_eq!(namespace, "anthropic.api_key");
+                assert!(key.is_none());
             }
             _ => panic!("expected Set"),
         }
@@ -174,7 +213,7 @@ mod tests {
         match w.cmd {
             SecretsCmd::Get { namespace, key } => {
                 assert_eq!(namespace, "rpc");
-                assert_eq!(key, "alchemy");
+                assert_eq!(key.as_deref(), Some("alchemy"));
             }
             _ => panic!("expected Get"),
         }
@@ -222,10 +261,17 @@ mod tests {
         match w.cmd {
             SecretsCmd::Rotate { namespace, key } => {
                 assert_eq!(namespace, "llm");
-                assert_eq!(key, "anthropic");
+                assert_eq!(key.as_deref(), Some("anthropic"));
             }
             _ => panic!("expected Rotate"),
         }
+    }
+
+    #[test]
+    fn secret_name_parts_accepts_dotted_name() {
+        let (namespace, key) = secret_name_parts("anthropic.api_key", None).unwrap();
+        assert_eq!(namespace, "anthropic");
+        assert_eq!(key, "api_key");
     }
 
     #[test]
@@ -235,7 +281,7 @@ mod tests {
         std::fs::create_dir_all(workdir.join(".roko")).unwrap();
         let cmd = SecretsCmd::Get {
             namespace: "llm".into(),
-            key: "anthropic".into(),
+            key: Some("anthropic".into()),
         };
         // Should succeed (prints "(not set)"), not panic.
         let result = dispatch_secrets(&cmd, workdir);

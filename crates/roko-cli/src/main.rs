@@ -25,7 +25,7 @@ mod plan_validate;
 
 use agent_serve::AgentCmd;
 use anyhow::{Context as _, Result, anyhow, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use commands::experiment::{ExperimentCmd, dispatch_experiment};
 use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
@@ -232,6 +232,12 @@ enum Command {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Manage profile-aware secrets.
+    #[command(name = "secret", visible_alias = "secrets")]
+    Secret {
+        #[command(subcommand)]
+        cmd: roko_cli::SecretsCmd,
+    },
     /// Manage standalone agent runtimes.
     Agent {
         #[command(subcommand)]
@@ -309,6 +315,18 @@ enum Command {
         #[command(subcommand)]
         cmd: DeployCmd,
     },
+    /// Update this binary when installed by a release installer.
+    Update {
+        /// Verify release artifacts with Sigstore/cosign after download.
+        #[arg(long)]
+        verify: bool,
+    },
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     /// Manage daemon mode.
     Daemon {
         #[command(subcommand)]
@@ -374,6 +392,13 @@ enum DaemonCmd {
     Install,
     // macOS launchd plist generation
     Uninstall, // remove launchd plist
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 #[derive(Debug, Subcommand)]
@@ -992,6 +1017,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             dispatch_config(cmd).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Secret { cmd } => {
+            let workdir = resolve_workdir(cli);
+            roko_cli::secrets::dispatch_secrets(&cmd, &workdir)?;
+            Ok(EXIT_SUCCESS)
+        }
         Command::Agent { cmd } => cmd_agent(cli, cmd).await,
         Command::Inject {
             session,
@@ -1033,6 +1063,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Experiment { cmd } => dispatch_experiment(cli, cmd),
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
+        Command::Update { verify } => cmd_update(verify),
+        Command::Completions { shell } => {
+            print_completions(shell);
+            Ok(EXIT_SUCCESS)
+        }
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Dashboard {
             page,
@@ -6018,6 +6053,73 @@ async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     }
 }
 
+fn cmd_update(verify: bool) -> Result<i32> {
+    if verify {
+        println!(
+            "release verification uses Sigstore bundles with cosign; pass a downloaded artifact and bundle to the SigstoreVerifier API or verify with cosign verify-blob"
+        );
+    }
+
+    println!(
+        "self-update installer receipts are not wired in this source build; reinstall with cargo install roko-cli --locked or use the cargo-dist installer release"
+    );
+    Ok(EXIT_SUCCESS)
+}
+
+fn print_completions(shell: CompletionShell) {
+    let words = completion_words();
+    match shell {
+        CompletionShell::Bash => print_bash_completions(&words),
+        CompletionShell::Zsh => print_zsh_completions(&words),
+        CompletionShell::Fish => print_fish_completions(&words),
+    }
+}
+
+fn completion_words() -> Vec<String> {
+    let mut command = Cli::command();
+    command.build();
+    let mut words = command
+        .get_subcommands()
+        .map(|cmd| cmd.get_name().to_string())
+        .collect::<Vec<_>>();
+    words.sort();
+    words.dedup();
+    words
+}
+
+fn print_bash_completions(words: &[String]) {
+    let words = words.join(" ");
+    println!(
+        r#"# roko bash completions
+_roko()
+{{
+    local cur="${{COMP_WORDS[COMP_CWORD]}}"
+    COMPREPLY=( $(compgen -W "{words}" -- "$cur") )
+}}
+complete -F _roko roko"#
+    );
+}
+
+fn print_zsh_completions(words: &[String]) {
+    let words = words.join(" ");
+    println!(
+        r#"#compdef roko
+_roko() {{
+  local -a commands
+  commands=({words})
+  _describe 'roko command' commands
+}}
+_roko "$@""#
+    );
+}
+
+fn print_fish_completions(words: &[String]) {
+    println!("# roko fish completions");
+    for word in words {
+        println!("complete -c roko -f -n '__fish_use_subcommand' -a '{word}'");
+    }
+}
+
 async fn cmd_deploy_fly(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
 
@@ -6998,9 +7100,40 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_top_level_secret_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "secret", "get", "anthropic.api_key"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Secret {
+                cmd: roko_cli::SecretsCmd::Get { namespace, key }
+            }) if namespace == "anthropic.api_key" && key.is_none()
+        ));
+    }
+
+    #[test]
     fn cli_parses_replay_subcommand() {
         let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Replay { .. })));
+    }
+
+    #[test]
+    fn cli_parses_update_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "update", "--verify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update { verify: true })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_completions_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "completions", "zsh"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completions {
+                shell: CompletionShell::Zsh
+            })
+        ));
     }
 
     #[test]
