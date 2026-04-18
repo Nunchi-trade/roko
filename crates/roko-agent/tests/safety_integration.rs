@@ -1,6 +1,6 @@
-//! Integration tests: safety policies wired into the dispatcher pipeline.
+//! Integration tests: the safety layer wired into the dispatcher pipeline.
 //!
-//! Each test constructs a `ToolDispatcher` with a `SafetyPolicy`, then
+//! Each test constructs a `ToolDispatcher` with a `SafetyLayer`, then
 //! dispatches a tool call that should be blocked. The handler is a no-op
 //! echo — the point is that the dispatcher never reaches it.
 
@@ -10,9 +10,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
 use roko_agent::safety::SafetyLayer;
-use roko_agent::safety::bash::BashPolicy;
-use roko_agent::safety::git::GitPolicy;
-use roko_agent::safety::network::NetworkPolicy;
 use roko_agent::safety::rate_limit::{RateLimitPolicy, RateLimiter};
 use roko_core::tool::{
     ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolHandler,
@@ -87,6 +84,42 @@ async fn bash_rm_rf_blocked_by_dispatcher() {
     let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
 
     let call = ToolCall::new("c1", "bash", serde_json::json!({ "command": "rm -rf /" }));
+    let result = dispatcher.dispatch(call, &ctx_with_exec()).await;
+
+    match result {
+        ToolResult::Err(ToolError::CommandNotAllowed(msg)) => {
+            assert!(
+                msg.contains("rm -rf /"),
+                "error should mention the denied pattern, got: {msg}"
+            );
+        }
+        other => panic!("expected CommandNotAllowed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_tests_rm_rf_blocked_by_dispatcher() {
+    let registry: Arc<dyn roko_core::tool::ToolRegistry> =
+        Arc::new(VecToolRegistry::from_tools(vec![tool(
+            "run_tests",
+            ToolPermission::executes(),
+            ToolConcurrency::Serial,
+        )]));
+    let resolver = resolver_from(vec![(
+        "run_tests",
+        Arc::new(NoopHandler {
+            tool_name: "run_tests",
+        }) as Arc<dyn ToolHandler>,
+    )]);
+
+    let layer = SafetyLayer::with_defaults();
+    let dispatcher = ToolDispatcher::new(registry, resolver).with_safety(layer);
+
+    let call = ToolCall::new(
+        "c1-run-tests",
+        "run_tests",
+        serde_json::json!({ "command": "rm -rf /" }),
+    );
     let result = dispatcher.dispatch(call, &ctx_with_exec()).await;
 
     match result {
@@ -304,7 +337,7 @@ async fn no_policy_means_pass_through() {
         Arc::new(NoopHandler { tool_name: "bash" }) as Arc<dyn ToolHandler>,
     )]);
 
-    // No with_safety_policy call — defaults to SafetyPolicy::none().
+    // No safety layer attached: calls pass through for backward compatibility.
     let dispatcher = ToolDispatcher::new(registry, resolver);
 
     // This dangerous command would be blocked with policies, but passes

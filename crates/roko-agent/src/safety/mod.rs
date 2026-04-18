@@ -36,6 +36,7 @@ pub mod rate_limit;
 pub mod scrub;
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -259,23 +260,34 @@ impl SafetyLayer {
     ///
     /// This is intentionally narrower than [`Self::check_pre_execution`]: generic
     /// subprocesses do not expose structured tool arguments, so we only validate
-    /// direct git invocations and shell-wrapper command strings that can be
-    /// reasoned about before spawn.
+    /// what can be reasoned about before spawn: warranted exec capability, the
+    /// rendered command line for direct invocations, and shell-wrapper command
+    /// strings.
     pub fn check_exec_command(&self, program: &str, args: &[String]) -> Result<(), ToolError> {
-        if let Some(command) = shell_command_arg(program, args) {
-            bash::check_command_with_policy(command, &self.bash_policy)?;
-            git::check_git_command_with_policy(command, &self.git_policy)?;
-            return Ok(());
+        let command = shell_command_arg(program, args)
+            .map(str::to_owned)
+            .unwrap_or_else(|| render_exec_command(program, args));
+
+        if let Some(ref limiter) = self.rate_limiter {
+            let key = RateLimitKey {
+                role: self.role.clone(),
+                tool: exec_rate_limit_subject(program, &command),
+            };
+            limiter.check_and_record(&key)?;
         }
 
-        if is_git_program(program) {
-            let mut command = String::from("git");
-            if !args.is_empty() {
-                command.push(' ');
-                command.push_str(&args.join(" "));
-            }
-            git::check_git_command_with_policy(&command, &self.git_policy)?;
+        if let Some(ref warrant) = self.warrant
+            && let Some(required) = exec_capability_from_command(&command)
+            && !check_capability(warrant, &required)
+        {
+            return Err(ToolError::PermissionDenied(format!(
+                "missing capability for subprocess `{}`: {:?}",
+                program, required
+            )));
         }
+
+        bash::check_command_with_policy(&command, &self.bash_policy)?;
+        git::check_git_command_with_policy(&command, &self.git_policy)?;
 
         Ok(())
     }
@@ -459,6 +471,33 @@ fn shell_command_arg<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
     })
 }
 
+fn render_exec_command(program: &str, args: &[String]) -> String {
+    let display_program = display_program_name(program);
+    if args.is_empty() {
+        display_program.to_string()
+    } else {
+        format!("{display_program} {}", args.join(" "))
+    }
+}
+
+fn exec_rate_limit_subject(program: &str, command: &str) -> String {
+    let executable = exec_capability_from_command(command)
+        .and_then(|capability| match capability {
+            Capability::Exec(name) => Some(name),
+            _ => None,
+        })
+        .unwrap_or_else(|| display_program_name(program).to_string());
+    format!("exec:{executable}")
+}
+
+fn display_program_name(program: &str) -> &str {
+    Path::new(program)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .and_then(OsStr::to_str)
+        .unwrap_or(program)
+}
+
 fn is_shell_program(program: &str) -> bool {
     let Some(name) = Path::new(program)
         .file_name()
@@ -593,6 +632,41 @@ mod tests {
             "origin".to_string(),
             "main".to_string(),
         ];
+        assert!(layer.check_exec_command("git", &args).is_err());
+    }
+
+    #[test]
+    fn exec_command_blocks_direct_dangerous_command() {
+        let layer = SafetyLayer::with_defaults();
+        let args = vec!["-rf".to_string(), "/".to_string()];
+        assert!(layer.check_exec_command("/bin/rm", &args).is_err());
+    }
+
+    #[test]
+    fn exec_command_requires_warrant_for_subprocess() {
+        let layer = SafetyLayer::with_defaults().with_warrant(AgentWarrant::new(
+            "issuer",
+            vec![Capability::Exec("git".into())],
+            1,
+        ));
+        let args = vec!["status".to_string()];
+        assert!(layer.check_exec_command("git", &args).is_ok());
+        assert!(
+            layer
+                .check_exec_command("cargo", &["check".to_string()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn exec_command_rate_limit_applies() {
+        let mut layer = SafetyLayer::with_defaults();
+        layer.rate_limiter = Some(Arc::new(RateLimiter::new(rate_limit::RateLimitPolicy {
+            max_calls_per_window: 1,
+            window_duration: std::time::Duration::from_secs(60),
+        })));
+        let args = vec!["status".to_string()];
+        assert!(layer.check_exec_command("git", &args).is_ok());
         assert!(layer.check_exec_command("git", &args).is_err());
     }
 
