@@ -496,6 +496,23 @@ impl ExperimentStore {
         winners
     }
 
+    /// Return the winning variant of a concluded experiment, if it reached
+    /// statistical significance (confidence >= 0.95).
+    ///
+    /// This is a convenience accessor; the auto-promotion in
+    /// `LearningRuntime::record_completed_run` calls `on_experiment_concluded`
+    /// which already promotes winners into the cascade router. This method
+    /// exposes the winner for callers that need the variant content directly.
+    pub fn promote_winner(&self, experiment_id: &str) -> Option<ExperimentWinner> {
+        let experiment = self.experiments.get(experiment_id)?;
+        let winner = experiment.concluded_winner()?;
+        if winner.confidence >= 0.95 {
+            Some(winner)
+        } else {
+            None
+        }
+    }
+
     /// Write concluded winners to the static-overrides file.
     ///
     /// # Errors

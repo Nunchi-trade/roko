@@ -41,11 +41,12 @@ mod phase2_stubs;
 pub use self::phase2_stubs::{
     AffectBehaviorModulation, AffectBehaviorStrategy, AffectOctant, AffectWeightedQuery, AgentId,
     BehavioralStateThresholds, BehavioralStateTracker, BorrowedAffect, ContagionEvent,
-    ContagionTrigger, ContrarianConfig, ContrarianTracker, DimensionDef, DimensionSource,
-    DimensionWeights, DomainRegistration, EfficiencyEvent, EmotionalProvenance,
-    ErrorPatternTracker, FatigueAction, FatigueDetector, ResourcePressure, ScoredEntry,
-    SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper, TierBias, TierThresholds,
-    ValidationArc, adjusted_thresholds, fatigue_response, pad_cosine_similarity,
+    ContagionTrigger, ContrarianConfig, ContrarianTracker, CrateConfidence,
+    CrateFatigueSuggestion, DimensionDef, DimensionSource, DimensionWeights, DomainRegistration,
+    EfficiencyEvent, EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector,
+    ResourcePressure, ScoredEntry, SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper,
+    TierBias, TierThresholds, ValidationArc, adjusted_thresholds, fatigue_response,
+    pad_cosine_similarity,
 };
 
 const STRATEGY_DIMENSIONS: usize = 8;
@@ -1640,6 +1641,9 @@ pub struct DaimonState {
     /// Per-crate confidence hints for coding-domain integrations.
     #[serde(default)]
     pub crate_confidence_map: HashMap<String, f64>,
+    /// Per-crate confidence and fatigue tracking (DAIM-03).
+    #[serde(default)]
+    pub crate_trackers: HashMap<String, CrateConfidence>,
     /// Rolling contrarian retrieval tracker.
     #[serde(default)]
     pub contrarian_tracker: ContrarianTracker,
@@ -1676,6 +1680,7 @@ impl DaimonState {
             somatic_landscape: SomaticLandscape::new(),
             strategy_space: StrategySpaceDefinition::default(),
             crate_confidence_map: HashMap::new(),
+            crate_trackers: HashMap::new(),
             contrarian_tracker: ContrarianTracker::default(),
             error_patterns: ErrorPatternTracker::default(),
             fatigue_detector: FatigueDetector::default(),

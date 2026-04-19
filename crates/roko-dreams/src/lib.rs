@@ -55,8 +55,8 @@ pub use imagination::{
     imagine, synthesize_hypotheses,
 };
 pub use replay::{
-    DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, select_replay_episodes,
-    select_replay_episodes_with_affect,
+    DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, MattarDawConfig, ReplayUtility,
+    compute_replay_utility, select_replay_episodes, select_replay_episodes_with_affect,
 };
 pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use runner::{

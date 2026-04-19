@@ -96,6 +96,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub learning: LearningConfig,
 
+    /// Knowledge demurrage (Gesellian decay) settings.
+    #[serde(default)]
+    pub demurrage: DemurrageConfig,
+
     /// Terminal UI preferences.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -158,6 +162,7 @@ impl Default for RokoConfig {
             conductor: ConductorConfig::default(),
             watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
+            demurrage: DemurrageConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
             scheduler: SchedulerConfig::default(),
@@ -386,6 +391,21 @@ impl RokoConfig {
             out,
             "replan_gate_attempts = {}\n",
             cfg.learning.replan_gate_attempts
+        );
+    }
+
+    fn write_example_demurrage(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Knowledge demurrage --");
+        let _ = writeln!(out, "[demurrage]");
+        let _ = writeln!(
+            out,
+            "rate_per_hour = {}",
+            cfg.demurrage.rate_per_hour
+        );
+        let _ = writeln!(
+            out,
+            "min_balance = {}\n",
+            cfg.demurrage.min_balance
         );
     }
 
@@ -718,6 +738,7 @@ impl RokoConfig {
         Self::write_example_budget(&mut out, &cfg);
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
+        Self::write_example_demurrage(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
         Self::write_example_scheduler(&mut out, &cfg);
         Self::write_example_webhooks(&mut out, &cfg);
@@ -2187,6 +2208,40 @@ impl Default for LearningConfig {
             replan_on_gate_failure: true,
             replan_max_per_plan: default_replan_max_per_plan(),
             replan_gate_attempts: default_replan_gate_attempts(),
+        }
+    }
+}
+
+// ---- [demurrage] ---------------------------------------------------------
+
+/// Knowledge demurrage configuration.
+///
+/// Controls the Gesellian decay applied to playbook rules and knowledge
+/// entries so that stale, unvalidated heuristics naturally fade.
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f64
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DemurrageConfig {
+    /// Exponential decay rate per hour applied to playbook rule balances.
+    #[serde(default = "default_demurrage_rate_per_hour")]
+    pub rate_per_hour: f64,
+    /// Rules with balance below this threshold are deprioritized in retrieval.
+    #[serde(default = "default_demurrage_min_balance")]
+    pub min_balance: f64,
+}
+
+const fn default_demurrage_rate_per_hour() -> f64 {
+    0.01
+}
+
+const fn default_demurrage_min_balance() -> f64 {
+    0.1
+}
+
+impl Default for DemurrageConfig {
+    fn default() -> Self {
+        Self {
+            rate_per_hour: default_demurrage_rate_per_hour(),
+            min_balance: default_demurrage_min_balance(),
         }
     }
 }
@@ -4020,6 +4075,7 @@ port = 3000
         assert!(example.contains("[budget]"));
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
+        assert!(example.contains("[demurrage]"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[serve]"));
         assert!(example.contains("[serve.auth]"));

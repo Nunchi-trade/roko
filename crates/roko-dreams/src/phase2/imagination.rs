@@ -112,10 +112,121 @@ pub struct InterventionEngine {
 }
 
 /// Directed causal structure inferred from replayed episodes.
+///
+/// Implements a simplified Pearl Structural Causal Model (SCM) with three
+/// inference levels: Association (L1), Intervention (L2), Counterfactual (L3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CausalGraph {
     /// Directed edges `(cause -> effect)` with evidence counts.
     pub edges: Vec<CausalEdge>,
+}
+
+/// A single causal variable in the SCM.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CausalVariable {
+    /// Variable name (e.g. "model", "gate\_verdict", "task\_outcome").
+    pub name: String,
+    /// Observed value in the original episode.
+    pub observed_value: serde_json::Value,
+}
+
+/// Result of a counterfactual generation step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CounterfactualResult {
+    /// Pearl level used for generation.
+    pub level: GenerationMode,
+    /// The intervention applied.
+    pub intervention: CausalVariable,
+    /// Projected outcome after propagation.
+    pub projected_outcome: String,
+    /// Confidence in the projection.
+    pub confidence: f64,
+    /// Plausibility score (0-1, higher = more plausible).
+    pub plausibility: f64,
+    /// Source episode ID.
+    pub source_episode_id: String,
+}
+
+impl CausalGraph {
+    /// Build a causal graph from observed episodes by inferring
+    /// co-occurrence edges between episode features.
+    #[must_use]
+    pub fn from_episodes(episodes: &[CausalVariable], outcomes: &[(&str, bool)]) -> Self {
+        let mut edges = Vec::new();
+        // Infer model -> outcome edges
+        let mut model_outcomes: HashMap<String, (usize, usize)> = HashMap::new();
+        for (ep_id, success) in outcomes {
+            let model = episodes
+                .iter()
+                .find(|v| v.name == "model")
+                .map(|v| v.observed_value.as_str().unwrap_or("unknown").to_string())
+                .unwrap_or_else(|| ep_id.to_string());
+            let entry = model_outcomes.entry(model).or_insert((0, 0));
+            entry.0 += 1;
+            if *success {
+                entry.1 += 1;
+            }
+        }
+        for (model, (total, successes)) in &model_outcomes {
+            let strength = *successes as f64 / (*total).max(1) as f64;
+            edges.push(CausalEdge {
+                cause: format!("model:{model}"),
+                effect: "outcome".to_string(),
+                strength,
+                evidence_count: *total,
+            });
+        }
+        Self { edges }
+    }
+
+    /// Find all direct effects of a given cause variable.
+    #[must_use]
+    pub fn effects_of(&self, cause: &str) -> Vec<&CausalEdge> {
+        self.edges
+            .iter()
+            .filter(|e| e.cause == cause)
+            .collect()
+    }
+
+    /// Find all direct causes of a given effect variable.
+    #[must_use]
+    pub fn causes_of(&self, effect: &str) -> Vec<&CausalEdge> {
+        self.edges
+            .iter()
+            .filter(|e| e.effect == effect)
+            .collect()
+    }
+
+    /// Propagate an intervention through the graph, returning affected
+    /// variables and their projected changes.
+    #[must_use]
+    pub fn propagate_intervention(
+        &self,
+        intervention_cause: &str,
+        max_depth: usize,
+    ) -> Vec<(String, f64)> {
+        let mut affected = Vec::new();
+        let mut frontier = vec![(intervention_cause.to_string(), 1.0_f64)];
+        let mut visited = std::collections::HashSet::new();
+        let mut depth = 0;
+
+        while !frontier.is_empty() && depth < max_depth {
+            let mut next_frontier = Vec::new();
+            for (cause, strength_so_far) in &frontier {
+                if !visited.insert(cause.clone()) {
+                    continue;
+                }
+                for edge in self.effects_of(cause) {
+                    let propagated_strength = strength_so_far * edge.strength;
+                    affected.push((edge.effect.clone(), propagated_strength));
+                    next_frontier.push((edge.effect.clone(), propagated_strength));
+                }
+            }
+            frontier = next_frontier;
+            depth += 1;
+        }
+        affected
+    }
 }
 
 /// One directed causal edge in the inferred graph.
@@ -132,6 +243,11 @@ pub struct CausalEdge {
 }
 
 /// Counterfactual search configuration over the causal graph.
+///
+/// Implements Pearl's three-level causal hierarchy:
+/// - Level 1 (Association): "What patterns continue?" -- observational
+/// - Level 2 (Intervention): "What if we change X?" -- do-calculus
+/// - Level 3 (Counterfactual): "What would have happened?" -- backtracking
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CounterfactualEngine {
     /// Maximum latent variables to infer during abduction.
@@ -140,6 +256,155 @@ pub struct CounterfactualEngine {
     pub pruning_radius: f32,
     /// Maximum causal-chain traversal depth.
     pub max_chain_depth: usize,
+}
+
+impl CounterfactualEngine {
+    /// Create a default engine configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            max_latent_vars: 4,
+            pruning_radius: 0.5,
+            max_chain_depth: 3,
+        }
+    }
+
+    /// Pearl Level 1: Association -- project trends from replayed episodes.
+    ///
+    /// Finds recurring patterns and extrapolates them.  Pure observation,
+    /// no intervention.
+    #[must_use]
+    pub fn generate_association(
+        &self,
+        graph: &CausalGraph,
+        episode_id: &str,
+        variable: &str,
+    ) -> CounterfactualResult {
+        let effects = graph.effects_of(variable);
+        let avg_strength = if effects.is_empty() {
+            0.5
+        } else {
+            effects.iter().map(|e| e.strength).sum::<f64>() / effects.len() as f64
+        };
+        let total_evidence: usize = effects.iter().map(|e| e.evidence_count).sum();
+
+        CounterfactualResult {
+            level: GenerationMode::Association,
+            intervention: CausalVariable {
+                name: variable.to_string(),
+                observed_value: serde_json::Value::String("trend_projection".to_string()),
+            },
+            projected_outcome: format!(
+                "Pattern {variable} has average strength {avg_strength:.2} across {total_evidence} observations"
+            ),
+            confidence: (avg_strength * 0.8).clamp(0.1, 0.9),
+            plausibility: (0.5 + total_evidence.min(10) as f64 * 0.04).clamp(0.0, 1.0),
+            source_episode_id: episode_id.to_string(),
+        }
+    }
+
+    /// Pearl Level 2: Intervention -- mutate one variable, propagate effects.
+    ///
+    /// do(X = x'): hold everything else fixed, change X, and observe the
+    /// downstream consequences through the causal graph.
+    #[must_use]
+    pub fn generate_intervention(
+        &self,
+        graph: &CausalGraph,
+        episode_id: &str,
+        variable: &str,
+        new_value: &str,
+    ) -> CounterfactualResult {
+        let affected = graph.propagate_intervention(variable, self.max_chain_depth);
+        let total_impact: f64 = affected.iter().map(|(_, s)| s).sum();
+        let affected_names: Vec<&str> = affected.iter().map(|(n, _)| n.as_str()).collect();
+
+        CounterfactualResult {
+            level: GenerationMode::Intervention,
+            intervention: CausalVariable {
+                name: variable.to_string(),
+                observed_value: serde_json::Value::String(new_value.to_string()),
+            },
+            projected_outcome: format!(
+                "do({variable} = {new_value}) affects {}: total impact {total_impact:.2}",
+                if affected_names.is_empty() {
+                    "nothing downstream".to_string()
+                } else {
+                    affected_names.join(", ")
+                }
+            ),
+            confidence: (0.4 + total_impact * 0.3).clamp(0.1, 0.85),
+            plausibility: if affected.is_empty() {
+                0.3
+            } else {
+                (0.5 + total_impact * 0.2).clamp(0.2, 0.9)
+            },
+            source_episode_id: episode_id.to_string(),
+        }
+    }
+
+    /// Pearl Level 3: Counterfactual -- backtracking from observed outcome.
+    ///
+    /// Given an observed failure, reason backwards: "what initial conditions
+    /// would have produced a different outcome?"  Three steps:
+    /// 1. Abduction: infer latent variables from the observed outcome
+    /// 2. Action: apply the intervention
+    /// 3. Prediction: propagate through the modified model
+    #[must_use]
+    pub fn generate_counterfactual(
+        &self,
+        graph: &CausalGraph,
+        episode_id: &str,
+        variable: &str,
+        new_value: &str,
+        original_success: bool,
+    ) -> CounterfactualResult {
+        // Step 1: Abduction -- find causes of the observed outcome
+        let outcome_causes = graph.causes_of("outcome");
+        let relevant_cause = outcome_causes
+            .iter()
+            .find(|e| e.cause.contains(variable))
+            .or_else(|| outcome_causes.first());
+
+        // Step 2: Action -- apply intervention to the cause
+        let abduced_strength = relevant_cause.map(|e| e.strength).unwrap_or(0.5);
+
+        // Step 3: Prediction -- would the outcome have differed?
+        let counterfactual_success_prob = if original_success {
+            // Was successful; would changing X have caused failure?
+            (abduced_strength * 0.6).clamp(0.1, 0.8)
+        } else {
+            // Was failure; would changing X have fixed it?
+            (1.0 - abduced_strength * 0.4).clamp(0.2, 0.9)
+        };
+
+        let outcome_change = if original_success {
+            "might have failed"
+        } else {
+            "might have succeeded"
+        };
+
+        CounterfactualResult {
+            level: GenerationMode::Counterfactual,
+            intervention: CausalVariable {
+                name: variable.to_string(),
+                observed_value: serde_json::Value::String(new_value.to_string()),
+            },
+            projected_outcome: format!(
+                "Had {variable} been {new_value}, episode {outcome_change} \
+                 (P={counterfactual_success_prob:.2}, abduced strength={abduced_strength:.2})"
+            ),
+            confidence: (counterfactual_success_prob * 0.7).clamp(0.1, 0.8),
+            plausibility: (0.3 + abduced_strength * 0.4).clamp(0.2, 0.85),
+            source_episode_id: episode_id.to_string(),
+        }
+    }
+}
+
+impl Default for CounterfactualEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Configuration for combinational creativity.

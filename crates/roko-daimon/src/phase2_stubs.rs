@@ -883,6 +883,121 @@ pub enum FatigueAction {
     HelpRequest,
 }
 
+/// Per-crate confidence and fatigue tracking for coding-domain integrations.
+///
+/// Tracks gate pass/fail rates per crate, consecutive streaks, and a fatigue
+/// score that increases with sustained work on the same crate without breaks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrateConfidence {
+    /// Crate name (e.g. "roko-agent", "roko-dreams").
+    pub crate_name: String,
+    /// Confidence score from 0.0 (no confidence) to 1.0 (high confidence).
+    pub confidence: f64,
+    /// Number of consecutive gate failures on this crate.
+    pub consecutive_failures: u32,
+    /// Number of consecutive gate successes on this crate.
+    pub consecutive_successes: u32,
+    /// Fatigue score: increases with consecutive work on the same crate,
+    /// decreases with time away.  Range [0.0, 1.0].
+    pub fatigue: f64,
+    /// Timestamp of the last task completion on this crate (epoch ms).
+    pub last_worked_at_ms: i64,
+    /// Total tasks attempted on this crate.
+    pub total_tasks: u32,
+    /// Total gate passes on this crate.
+    pub total_passes: u32,
+}
+
+impl CrateConfidence {
+    /// Create a new tracker for a crate with default neutral confidence.
+    #[must_use]
+    pub fn new(crate_name: impl Into<String>) -> Self {
+        Self {
+            crate_name: crate_name.into(),
+            confidence: 0.5,
+            consecutive_failures: 0,
+            consecutive_successes: 0,
+            fatigue: 0.0,
+            last_worked_at_ms: 0,
+            total_tasks: 0,
+            total_passes: 0,
+        }
+    }
+
+    /// Record a gate pass on this crate.
+    pub fn record_success(&mut self, now_ms: i64) {
+        self.total_tasks += 1;
+        self.total_passes += 1;
+        self.consecutive_successes += 1;
+        self.consecutive_failures = 0;
+        // Confidence increases on success, with diminishing returns
+        self.confidence = (self.confidence + 0.05 * (1.0 - self.confidence)).clamp(0.0, 1.0);
+        self.update_fatigue(now_ms);
+        self.last_worked_at_ms = now_ms;
+    }
+
+    /// Record a gate failure on this crate.
+    pub fn record_failure(&mut self, now_ms: i64) {
+        self.total_tasks += 1;
+        self.consecutive_failures += 1;
+        self.consecutive_successes = 0;
+        // Confidence drops more sharply on failure
+        self.confidence = (self.confidence - 0.10 * self.confidence).clamp(0.0, 1.0);
+        self.update_fatigue(now_ms);
+        self.last_worked_at_ms = now_ms;
+    }
+
+    /// Update fatigue based on time since last work and consecutive tasks.
+    fn update_fatigue(&mut self, now_ms: i64) {
+        if self.last_worked_at_ms == 0 {
+            self.fatigue = 0.1;
+            return;
+        }
+        let elapsed_hours = (now_ms - self.last_worked_at_ms).max(0) as f64 / 3_600_000.0;
+        // Fatigue decays with time away (half-life of 2 hours)
+        let decay = (-elapsed_hours / 2.0).exp();
+        self.fatigue *= decay;
+        // Fatigue increases with each consecutive task
+        self.fatigue = (self.fatigue + 0.15).clamp(0.0, 1.0);
+    }
+
+    /// Whether fatigue is high enough to suggest switching crates.
+    #[must_use]
+    pub fn is_fatigued(&self) -> bool {
+        self.fatigue > 0.7
+    }
+
+    /// Compute the overall gate pass rate for this crate.
+    #[must_use]
+    pub fn pass_rate(&self) -> f64 {
+        if self.total_tasks == 0 {
+            return 0.5;
+        }
+        self.total_passes as f64 / self.total_tasks as f64
+    }
+
+    /// Apply time-based fatigue decay without recording a new task.
+    pub fn decay_fatigue(&mut self, now_ms: i64) {
+        if self.last_worked_at_ms == 0 {
+            return;
+        }
+        let elapsed_hours = (now_ms - self.last_worked_at_ms).max(0) as f64 / 3_600_000.0;
+        let decay = (-elapsed_hours / 2.0).exp();
+        self.fatigue = (self.fatigue * decay).clamp(0.0, 1.0);
+    }
+}
+
+/// Suggestion produced when a crate is fatigued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrateFatigueSuggestion {
+    /// The crate that is fatigued.
+    pub fatigued_crate: String,
+    /// Suggested alternative crate to work on.
+    pub suggested_crate: Option<String>,
+    /// Human-readable suggestion.
+    pub reason: String,
+}
+
 /// Select the documented fatigue response for a behavioral state.
 #[must_use]
 pub const fn fatigue_response(state: &BehavioralState) -> FatigueAction {
@@ -971,12 +1086,88 @@ impl DaimonState {
     }
 
     /// Return the stored confidence hint for one crate or module.
+    ///
+    /// Prefers the detailed `CrateConfidence` tracker if available, falling back
+    /// to the legacy `crate_confidence_map`.
     #[must_use]
     pub fn crate_confidence(&self, crate_name: &str) -> f64 {
+        if let Some(tracker) = self.crate_trackers.get(crate_name) {
+            return tracker.confidence;
+        }
         self.crate_confidence_map
             .get(crate_name)
             .copied()
             .unwrap_or(0.50)
+    }
+
+    /// Record a gate pass for a crate, updating confidence and fatigue.
+    pub fn record_crate_success(&mut self, crate_name: &str, now_ms: i64) {
+        let tracker = self
+            .crate_trackers
+            .entry(crate_name.to_string())
+            .or_insert_with(|| CrateConfidence::new(crate_name));
+        tracker.record_success(now_ms);
+        // Sync legacy map
+        self.crate_confidence_map
+            .insert(crate_name.to_string(), tracker.confidence);
+        self.autosave();
+    }
+
+    /// Record a gate failure for a crate, updating confidence and fatigue.
+    pub fn record_crate_failure(&mut self, crate_name: &str, now_ms: i64) {
+        let tracker = self
+            .crate_trackers
+            .entry(crate_name.to_string())
+            .or_insert_with(|| CrateConfidence::new(crate_name));
+        tracker.record_failure(now_ms);
+        // Sync legacy map
+        self.crate_confidence_map
+            .insert(crate_name.to_string(), tracker.confidence);
+        self.autosave();
+    }
+
+    /// Check if a crate is fatigued and suggest an alternative.
+    ///
+    /// Returns `Some(suggestion)` when fatigue is high for `crate_name`,
+    /// suggesting the least-fatigued alternative crate that has been worked on.
+    #[must_use]
+    pub fn check_crate_fatigue(&self, crate_name: &str) -> Option<CrateFatigueSuggestion> {
+        let tracker = self.crate_trackers.get(crate_name)?;
+        if !tracker.is_fatigued() {
+            return None;
+        }
+        // Find the least-fatigued alternative
+        let suggested = self
+            .crate_trackers
+            .values()
+            .filter(|t| t.crate_name != crate_name && !t.is_fatigued())
+            .min_by(|a, b| {
+                a.fatigue
+                    .partial_cmp(&b.fatigue)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|t| t.crate_name.clone());
+
+        Some(CrateFatigueSuggestion {
+            fatigued_crate: crate_name.to_string(),
+            suggested_crate: suggested.clone(),
+            reason: format!(
+                "Fatigue on {} is {:.0}%. {}",
+                crate_name,
+                tracker.fatigue * 100.0,
+                suggested
+                    .as_deref()
+                    .map(|s| format!("Consider switching to {s}."))
+                    .unwrap_or_else(|| "Consider taking a break.".to_string())
+            ),
+        })
+    }
+
+    /// Decay fatigue on all tracked crates for the current timestamp.
+    pub fn decay_all_crate_fatigue(&mut self, now_ms: i64) {
+        for tracker in self.crate_trackers.values_mut() {
+            tracker.decay_fatigue(now_ms);
+        }
     }
 
     /// Apply peer-derived emotional contagion with the documented attenuation rules.

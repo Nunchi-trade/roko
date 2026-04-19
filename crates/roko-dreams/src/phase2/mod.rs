@@ -47,9 +47,10 @@ pub use hypnagogia::{
 };
 pub use imagination::{
     Association, AssociationEngine, AssociationStrength, BacktrackingCounterfactualConfig,
-    CausalEdge, CausalGraph, CombinationalConfig, CounterfactualEngine, CounterfactualHypothesis,
-    CreativityMode, DeltaEpisodeEncoder, DepotentiationConfig, ExploratoryConfig, GenerationMode,
-    ImaginationBudget, ImaginationModeAllocations, ImaginationQualityReport, ImaginationROITracker,
+    CausalEdge, CausalGraph, CausalVariable, CombinationalConfig, CounterfactualEngine,
+    CounterfactualHypothesis, CounterfactualResult, CreativityMode, DeltaEpisodeEncoder,
+    DepotentiationConfig, ExploratoryConfig, GenerationMode, ImaginationBudget,
+    ImaginationModeAllocations, ImaginationQualityReport, ImaginationROITracker,
     ImaginationValidator, InteractiveCounterfactualConfig, InterventionEngine, ModeROI,
     TransformationalConfig, WorldModelConfig,
 };

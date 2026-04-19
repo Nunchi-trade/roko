@@ -2555,6 +2555,25 @@ fn render_strategy_fragments(entries: &[KnowledgeEntry]) -> String {
     content
 }
 
+/// Query AntiKnowledge entries from the neuro store and convert them to
+/// anti-pattern strings for injection into layer 7 of the system prompt.
+fn query_anti_knowledge_patterns(
+    knowledge_store: &KnowledgeStore,
+    task_text: &str,
+    limit: usize,
+) -> Vec<String> {
+    match knowledge_store.query_kind(task_text, KnowledgeKind::AntiKnowledge, limit) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| entry.content)
+            .collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to query AntiKnowledge for anti-patterns");
+            Vec::new()
+        }
+    }
+}
+
 fn build_strategy_fragment_context(
     knowledge_store: &KnowledgeStore,
     role: AgentRole,
@@ -12814,6 +12833,8 @@ impl PlanRunner {
             let relevant_context = build_relevant_context_layer(&context_sections);
             let context_window_tokens = effective_context_window_tokens(&self.config);
             let pheromone_chunks = self.active_pheromone_chunks();
+            let neuro_anti_patterns =
+                query_anti_knowledge_patterns(&self.knowledge_store, task, 5);
             build_system_prompt_with_context_validated(
                 role,
                 plan_id,
@@ -12828,6 +12849,7 @@ impl PlanRunner {
                 Some(&section_effectiveness),
                 code_ctx,
                 pheromone_chunks,
+                neuro_anti_patterns,
             )?
         };
         let role_section = PromptSection::new("role", &role_instruction)
@@ -15903,6 +15925,7 @@ fn build_system_prompt_with_context_validated(
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
     code_context: Vec<String>,
     pheromones: Vec<roko_compose::ContextChunk>,
+    extra_anti_patterns: Vec<String>,
 ) -> Result<String> {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -15918,11 +15941,11 @@ fn build_system_prompt_with_context_validated(
             affect_state,
             complexity: Some(prompt_budget_complexity(task_def)),
             extra_conventions: task_dispatch_conventions(task_def),
+            extra_anti_patterns,
             relevant_skills: relevant_skills.to_vec(),
             relevant_playbooks: relevant_playbooks.to_vec(),
             code_context,
             pheromones,
-            ..PromptBuildOptions::default()
         },
         context_window_tokens,
         section_effectiveness,
