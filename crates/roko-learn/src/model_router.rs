@@ -158,6 +158,12 @@ pub struct RoutingContext {
     pub previous_model: Option<String>,
     /// Estimated shared prefix size for cached context reuse.
     pub plan_context_tokens: Option<u64>,
+    /// Affect-adjusted tier thresholds from the Daimon behavioral state.
+    ///
+    /// When `Some`, the cascade router uses `t0_ceiling` / `t1_ceiling` to
+    /// determine how aggressively to shift tiers based on prediction error
+    /// (`1.0 - affect_confidence`).
+    pub tier_thresholds: Option<roko_daimon::TierThresholds>,
 }
 
 impl RoutingContext {
@@ -1388,6 +1394,7 @@ mod tests {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         }
     }
 

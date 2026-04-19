@@ -19,10 +19,15 @@ pub type AssetId = String;
 
 /// A zero-cost cognitive probe.
 ///
-/// Probes are deterministic, side-effect-free checks that evaluate a single
-/// dimension of the current engine state and contribute to the aggregate
+/// Heartbeat probes are deterministic, side-effect-free checks that evaluate a
+/// single dimension of the current engine state and contribute to the aggregate
 /// prediction error.
-pub trait Probe: Send + Sync {
+///
+/// This is distinct from [`roko_core::obs::health::Probe`], which is a
+/// readiness/liveness health check returning pass/fail. `HeartbeatProbe`
+/// evaluates a continuous signal (0.0..=1.0) for prediction-error tracking and
+/// tier selection.
+pub trait HeartbeatProbe: Send + Sync {
     /// Evaluate this probe against the current engine state.
     fn evaluate(&self, state: &EngineState) -> f32;
 
@@ -483,20 +488,20 @@ impl ProbeResults {
     }
 }
 
-/// The probe registry: an ordered list of probes evaluated on each gamma tick.
+/// The heartbeat probe registry: an ordered list of probes evaluated on each gamma tick.
 #[derive(Default)]
-pub struct ProbeRegistry {
-    probes: Vec<Box<dyn Probe>>,
+pub struct HeartbeatProbeRegistry {
+    probes: Vec<Box<dyn HeartbeatProbe>>,
 }
 
-impl ProbeRegistry {
+impl HeartbeatProbeRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Register a new probe.
-    pub fn register(&mut self, probe: Box<dyn Probe>) {
+    pub fn register(&mut self, probe: Box<dyn HeartbeatProbe>) {
         self.probes.push(probe);
     }
 
@@ -554,7 +559,7 @@ impl PriceDeltaProbe {
     }
 }
 
-impl Probe for PriceDeltaProbe {
+impl HeartbeatProbe for PriceDeltaProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         state
             .tracked_assets()
@@ -592,7 +597,7 @@ impl TvlDeltaProbe {
     }
 }
 
-impl Probe for TvlDeltaProbe {
+impl HeartbeatProbe for TvlDeltaProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         (state.tvl_delta_percent().abs() / 0.05).min(1.0)
     }
@@ -621,7 +626,7 @@ impl PositionHealthProbe {
     }
 }
 
-impl Probe for PositionHealthProbe {
+impl HeartbeatProbe for PositionHealthProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         state
             .positions()
@@ -665,7 +670,7 @@ impl GasSpikeProbe {
     }
 }
 
-impl Probe for GasSpikeProbe {
+impl HeartbeatProbe for GasSpikeProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let baseline = state.gas_ema_gwei().max(1.0);
         let ratio = state.gas_price_gwei() / baseline;
@@ -696,7 +701,7 @@ impl CreditBalanceProbe {
     }
 }
 
-impl Probe for CreditBalanceProbe {
+impl HeartbeatProbe for CreditBalanceProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let balance = state.korai_balance();
         let daily_burn = state.daily_burn_rate().max(0.01);
@@ -734,7 +739,7 @@ impl RsiProbe {
     }
 }
 
-impl Probe for RsiProbe {
+impl HeartbeatProbe for RsiProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let rsi = state.rsi_14();
         if !(20.0..=80.0).contains(&rsi) {
@@ -770,7 +775,7 @@ impl MacdProbe {
     }
 }
 
-impl Probe for MacdProbe {
+impl HeartbeatProbe for MacdProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let macd = state.macd();
         if macd.just_crossed {
@@ -806,7 +811,7 @@ impl CircuitBreakerProbe {
     }
 }
 
-impl Probe for CircuitBreakerProbe {
+impl HeartbeatProbe for CircuitBreakerProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         if state.any_circuit_breaker_active() {
             1.0
@@ -839,7 +844,7 @@ impl BuildHealthProbe {
     }
 }
 
-impl Probe for BuildHealthProbe {
+impl HeartbeatProbe for BuildHealthProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         match state.last_build_result() {
             BuildResult::Success => 0.0,
@@ -873,7 +878,7 @@ impl TestRegressionProbe {
     }
 }
 
-impl Probe for TestRegressionProbe {
+impl HeartbeatProbe for TestRegressionProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let delta = state.test_pass_count_delta();
         if delta < 0 {
@@ -907,7 +912,7 @@ impl ComplexityDriftProbe {
     }
 }
 
-impl Probe for ComplexityDriftProbe {
+impl HeartbeatProbe for ComplexityDriftProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         (state.complexity_delta_percent() / 10.0).clamp(0.0, 1.0)
     }
@@ -936,7 +941,7 @@ impl DependencyRiskProbe {
     }
 }
 
-impl Probe for DependencyRiskProbe {
+impl HeartbeatProbe for DependencyRiskProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         match state.new_vulnerability_count() {
             0 => 0.0,
@@ -970,7 +975,7 @@ impl CoverageDeltaProbe {
     }
 }
 
-impl Probe for CoverageDeltaProbe {
+impl HeartbeatProbe for CoverageDeltaProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let delta = state.coverage_delta_percent();
         if delta < -2.0 {
@@ -1004,7 +1009,7 @@ impl ErrorRateProbe {
     }
 }
 
-impl Probe for ErrorRateProbe {
+impl HeartbeatProbe for ErrorRateProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         let failure_rate = state.gate_failure_rate_last_n(10);
         if failure_rate > 0.5 {
@@ -1040,7 +1045,7 @@ impl WorldModelDriftProbe {
     }
 }
 
-impl Probe for WorldModelDriftProbe {
+impl HeartbeatProbe for WorldModelDriftProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         cosine_distance(state.predicted_state_vector(), state.actual_state_vector()).clamp(0.0, 1.0)
     }
@@ -1069,7 +1074,7 @@ impl CausalConsistencyProbe {
     }
 }
 
-impl Probe for CausalConsistencyProbe {
+impl HeartbeatProbe for CausalConsistencyProbe {
     fn evaluate(&self, state: &EngineState) -> f32 {
         match state.lineage_dag_issues() {
             0 => 0.0,

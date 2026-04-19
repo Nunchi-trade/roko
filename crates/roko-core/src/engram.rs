@@ -9,7 +9,7 @@
 //! - **Traced** — lineage tracks which engrams this derived from
 //! - **Composable** — engrams combine into new engrams via [`Composer`]s
 
-use crate::{Attestation, Body, ContentHash, Decay, EmotionalTag, Kind, Provenance, Score};
+use crate::{Attestation, Body, ContentHash, Decay, EmotionalTag, Kind, Provenance, Pulse, Score};
 use roko_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -182,6 +182,81 @@ impl Engram {
         }
 
         builder
+    }
+
+    /// Promote a single [`Pulse`] to a synthetic [`Engram`].
+    ///
+    /// The resulting engram carries the pulse's kind, body, tags, and timestamp.
+    /// Provenance is marked `"pulse_promotion"` and decay is `None`.
+    #[must_use]
+    pub fn from_pulse_synthetic(p: &Pulse) -> Self {
+        let mut builder = EngramBuilder::new(p.kind.clone())
+            .body(p.body.clone())
+            .created_at_ms(p.created_at_ms)
+            .provenance(Provenance::agent("pulse_promotion"));
+        for (k, v) in &p.tags {
+            builder = builder.tag(k.clone(), v.clone());
+        }
+        builder.build()
+    }
+
+    /// Combine multiple [`Pulse`]s into a single summary [`Engram`].
+    ///
+    /// Uses the first pulse's kind, concatenates text bodies (or collects
+    /// JSON bodies into an array), and merges all tags. Useful for gate
+    /// defaults that need to persist a batch of ephemeral events.
+    #[must_use]
+    pub fn from_pulses(pulses: &[Pulse]) -> Self {
+        if pulses.is_empty() {
+            return EngramBuilder::new(Kind::Episode)
+                .provenance(Provenance::agent("pulse_batch"))
+                .build();
+        }
+
+        let kind = pulses[0].kind.clone();
+        let body = if pulses.len() == 1 {
+            pulses[0].body.clone()
+        } else {
+            // Concatenate text bodies, or collect as JSON array.
+            let texts: Vec<&str> = pulses
+                .iter()
+                .filter_map(|p| {
+                    if let Body::Text(s) = &p.body {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if texts.len() == pulses.len() {
+                Body::text(texts.join("\n"))
+            } else {
+                let values: Vec<serde_json::Value> = pulses
+                    .iter()
+                    .map(|p| serde_json::to_value(&p.body).unwrap_or_default())
+                    .collect();
+                Body::Json(serde_json::Value::Array(values))
+            }
+        };
+
+        // Merge tags from all pulses (later values win on key collision).
+        let mut tags = BTreeMap::new();
+        for p in pulses {
+            for (k, v) in &p.tags {
+                tags.insert(k.clone(), v.clone());
+            }
+        }
+
+        let earliest = pulses.iter().map(|p| p.created_at_ms).min().unwrap_or(0);
+
+        let mut builder = EngramBuilder::new(kind)
+            .body(body)
+            .created_at_ms(earliest)
+            .provenance(Provenance::agent("pulse_batch"));
+        for (k, v) in tags {
+            builder = builder.tag(k, v);
+        }
+        builder.build()
     }
 
     /// Bind this engram to another in HDC space when both fingerprints exist.

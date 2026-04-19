@@ -755,6 +755,22 @@ impl From<&crate::provider_health::ProviderHealth> for ProviderHealthSnapshotKey
 }
 
 fn behavioral_state_tier_shift(ctx: &RoutingContext) -> i8 {
+    // When affect-adjusted tier thresholds are available, derive the shift
+    // from prediction error (`1.0 - affect_confidence`) against the per-state
+    // ceilings.  High prediction error (above t1_ceiling) pushes toward
+    // Premium (+1); low error (within t0_ceiling) pulls toward Fast (-1).
+    if let Some(thresholds) = &ctx.tier_thresholds {
+        let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
+        return if prediction_error > thresholds.t1_ceiling {
+            1 // exceed Standard ceiling → escalate to Premium
+        } else if prediction_error <= thresholds.t0_ceiling {
+            -1 // within Fast ceiling → save cost
+        } else {
+            0 // within Standard band → no shift
+        };
+    }
+
+    // Fallback: hardcoded per-state shift when no thresholds are supplied.
     match ctx.daimon_policy.behavioral_state {
         BehavioralState::Struggling => 1,
         BehavioralState::Coasting | BehavioralState::Resting | BehavioralState::Focused => -1,
@@ -2759,7 +2775,15 @@ impl CascadeRouter {
 
     fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
         let stats = self.confidence_stats.lock();
-        let low_confidence = ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
+
+        // Use tier-threshold-derived confidence boundary when available,
+        // falling back to the fixed LOW_AFFECT_CONFIDENCE_THRESHOLD.
+        let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
+        let low_confidence = ctx
+            .tier_thresholds
+            .as_ref()
+            .map(|th| prediction_error > th.t0_ceiling)
+            .unwrap_or(ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD);
 
         let mut scores: Vec<(String, f64)> = candidates
             .iter()
@@ -2987,6 +3011,7 @@ fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> R
         temperament: None,
         previous_model: primary_result.output.tag("model").map(str::to_string),
         plan_context_tokens: Some((prompt.len() as u64).div_ceil(4)),
+        tier_thresholds: None,
     }
 }
 
@@ -3365,6 +3390,7 @@ mod tests {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         }
     }
 

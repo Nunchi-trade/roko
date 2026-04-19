@@ -32,6 +32,7 @@ fn default_ctx() -> RoutingContext {
         temperament: None,
         previous_model: None,
         plan_context_tokens: None,
+        tier_thresholds: None,
     }
 }
 

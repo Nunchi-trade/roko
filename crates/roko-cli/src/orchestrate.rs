@@ -3093,6 +3093,9 @@ fn cascade_routing_context(
         temperament: Some(routing_config.agent.temperament_for_role(role.label())),
         previous_model: None,
         plan_context_tokens: None,
+        tier_thresholds: Some(roko_daimon::adjusted_thresholds(
+            &affect.behavioral_state,
+        )),
     }
 }
 

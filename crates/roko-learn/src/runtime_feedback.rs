@@ -1042,6 +1042,7 @@ impl LearningRuntime {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         if episode
             .extra
@@ -2211,6 +2212,7 @@ mod tests {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         for _ in 0..60 {
             router.record_observation(&ctx, "claude-sonnet-4-20250514", 0.9, true);
@@ -2342,6 +2344,7 @@ mod tests {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         assert_eq!(
             runtime.cascade_router().route(&before_ctx).primary.slug,
@@ -2559,6 +2562,7 @@ mod tests {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         let selected = runtime
             .cascade_router()
@@ -2601,6 +2605,7 @@ mod tests {
             temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
 
         let recorded = runtime.record_conductor_intervention(

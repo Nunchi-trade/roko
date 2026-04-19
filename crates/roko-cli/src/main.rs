@@ -1824,6 +1824,7 @@ fn cmd_model_route(
         temperament: Some(config.agent.temperament_for_role(role.label())),
         previous_model: Some(requested_slug.clone()),
         plan_context_tokens: None,
+        tier_thresholds: None,
     };
 
     let router = CascadeRouter::load_or_new(&cascade_router_path(workdir), model_slugs.clone());

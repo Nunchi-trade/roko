@@ -59,6 +59,7 @@ pub mod conductor;
 pub mod config;
 pub mod context;
 pub mod dashboard_snapshot;
+pub mod datum;
 pub mod decay;
 pub mod engram;
 pub mod error;
@@ -73,6 +74,7 @@ pub mod phase;
 pub mod polyglot;
 pub mod prediction;
 pub mod project;
+pub mod pulse;
 pub mod provenance;
 pub mod query;
 pub mod score;
@@ -103,6 +105,7 @@ pub use chat_types::{
 };
 pub use conductor::ConductorDecision;
 pub use context::Context;
+pub use datum::Datum;
 pub use decay::Decay;
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
@@ -131,6 +134,7 @@ pub use project::{
     detect_from_files_with_cargo_toml,
 };
 pub use provenance::{Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, TaintInfo};
+pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
 pub use score::Score;

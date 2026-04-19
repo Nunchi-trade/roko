@@ -152,6 +152,7 @@ async fn explain_routing(
         temperament: None,
         previous_model: Some(resolved.slug.clone()),
         plan_context_tokens: None,
+        tier_thresholds: None,
     };
 
     let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
