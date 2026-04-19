@@ -22,6 +22,7 @@
 //! 3. **Zero unsafe.** All concurrency goes through `tokio::sync` or `std::sync::atomic`.
 
 pub mod cancel;
+pub mod delta_consumer;
 pub mod event_bus;
 pub mod heartbeat;
 pub mod heartbeat_attention;
@@ -30,6 +31,7 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod process;
 pub mod resource;
+pub mod theta_consumer;
 
 pub use lifecycle::{
     Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,

@@ -149,6 +149,25 @@ impl Rule {
     }
 }
 
+impl roko_core::Demurrage for Rule {
+    fn balance(&self) -> f64 {
+        self.balance
+    }
+
+    fn demurrage_rate(&self) -> f64 {
+        self.demurrage_rate
+    }
+
+    fn tick(&mut self, elapsed_hours: f64) {
+        let now_ms = self.last_decay_at_ms + (elapsed_hours * 3_600_000.0) as i64;
+        self.tick_demurrage(now_ms);
+    }
+
+    fn replenish(&mut self, amount: f64) {
+        Rule::replenish(self, amount);
+    }
+}
+
 /// Context supplied at prompt-compose time for trigger matching.
 #[derive(Debug, Clone)]
 pub struct MatchContext {

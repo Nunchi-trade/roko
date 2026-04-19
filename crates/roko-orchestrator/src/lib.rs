@@ -15,6 +15,8 @@
 /// Coordination primitives derived from the coordination docs.
 pub mod coordination;
 pub mod dag;
+/// WebSocket relay for mesh-scope pheromone synchronization.
+pub mod mesh_relay;
 pub mod event_log;
 pub mod executor;
 pub mod merge_queue;
@@ -29,9 +31,10 @@ pub use coordination::{
     AgentId, CohortMetrics, CohortWeights, CollectiveId, CustomKindError, MorphogeneticParams,
     MorphogeneticState, Pheromone, PheromoneKind, PheromoneScope, PromotionConfig,
     ResponseThresholds, STRATEGY_DIMS, SpecializationIndex, SubnetId, SubnetIdError, WisdomGate,
-    c_factor, check_promotion, current_intensity, effective_confirmations, pheromone_decay,
-    specialization_index, validate_custom_kind,
+    c_factor, check_promotion, current_intensity, effective_confirmations, hill_response,
+    pheromone_decay, specialization_index, validate_custom_kind,
 };
+pub use mesh_relay::{MeshRelay, PeerState, SeqNo, SequencedPheromone};
 pub use dag::{
     CpmAnalysis, DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability,
     ExecutionWave, FusionConfig, IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,

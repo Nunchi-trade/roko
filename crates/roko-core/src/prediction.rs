@@ -711,6 +711,71 @@ impl PredictionStore {
             .cloned()
             .collect()
     }
+
+    /// Resolve a prediction and feed accuracy back into calibration and
+    /// residual correction (TA-15 feedback loop wiring).
+    ///
+    /// This combines three feedback loops:
+    /// 1. After resolution: update Oracle accuracy metrics via `resolve()`
+    /// 2. Feed accuracy into `CalibrationTracker` for confidence adjustment
+    /// 3. Feed residual into `ResidualCorrector` for bias correction
+    pub async fn resolve_with_feedback(
+        &self,
+        prediction_id: &ContentHash,
+        outcome: &Engram,
+        oracle: &dyn Oracle,
+        calibration: &CalibrationTracker,
+        corrector: &ResidualCorrector,
+    ) -> Result<PredictionAccuracy> {
+        let accuracy = self.resolve(prediction_id, outcome, oracle).await?;
+
+        // Feed accuracy into calibration tracker
+        calibration.update_accuracy(&accuracy);
+
+        // Feed residual into corrector for bias estimation
+        corrector.update(
+            &accuracy.domain.to_string(),
+            &accuracy.category,
+            accuracy.residual,
+        );
+
+        Ok(accuracy)
+    }
+
+    /// Attempt to resolve predictions that match a gate verdict outcome.
+    ///
+    /// Scans pending predictions for any whose domain matches the verdict's
+    /// domain and whose horizon has elapsed, then resolves them. Returns
+    /// all accuracy results.
+    pub async fn resolve_from_gate_verdict(
+        &self,
+        verdict_engram: &Engram,
+        oracle: &dyn Oracle,
+        calibration: &CalibrationTracker,
+        corrector: &ResidualCorrector,
+    ) -> Vec<PredictionAccuracy> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let due = self.pending_resolutions(now_ms).await;
+        let mut results = Vec::new();
+
+        for prediction in &due {
+            match self
+                .resolve_with_feedback(
+                    &prediction.id,
+                    verdict_engram,
+                    oracle,
+                    calibration,
+                    corrector,
+                )
+                .await
+            {
+                Ok(accuracy) => results.push(accuracy),
+                Err(_) => continue,
+            }
+        }
+
+        results
+    }
 }
 
 fn prediction_domain(prediction: &Prediction) -> Option<&OracleDomain> {

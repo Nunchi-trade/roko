@@ -527,6 +527,49 @@ impl MorphogeneticState {
     pub fn specialization_index(&self) -> SpecializationIndex {
         specialization_index(&self.strategy)
     }
+
+    /// Update morphogenetic field using Gierer-Meinhardt reaction-diffusion dynamics.
+    ///
+    /// Per dimension `i`:
+    ///   `ds_i = alpha * returns_i * pressure - beta * collective_i / size - mu * (s_i - baseline) + N(0, sigma)`
+    ///
+    /// After computing deltas, the strategy vector is re-normalized to sum to 1.0
+    /// and accumulators are reset.
+    pub fn update(&mut self, params: &MorphogeneticParams) {
+        let pressure = params.resource_pressure_scalar;
+        let size = (self.collective_size as f64).max(1.0);
+
+        for i in 0..STRATEGY_DIMS {
+            let activation = params.alpha * self.attributed_returns[i] * pressure;
+            let inhibition = params.beta * self.collective_pheromone[i] / size;
+            let decay = params.mu * (self.strategy[i] - params.baseline);
+            let noise = box_muller_normal() * params.sigma_noise;
+            self.strategy[i] += activation - inhibition - decay + noise;
+            // Prevent negative concentrations.
+            if self.strategy[i] < 0.001 {
+                self.strategy[i] = 0.001;
+            }
+        }
+
+        // Re-normalize to sum to 1.0.
+        let sum: f64 = self.strategy.iter().sum();
+        if sum > 0.0 {
+            for s in &mut self.strategy {
+                *s /= sum;
+            }
+        }
+
+        // Reset accumulators for next cycle.
+        self.attributed_returns = [0.0; STRATEGY_DIMS];
+        self.collective_pheromone = [0.0; STRATEGY_DIMS];
+    }
+
+    /// Record a return observation for a specific strategy dimension.
+    pub fn attribute_return(&mut self, dimension: usize, value: f64) {
+        if dimension < STRATEGY_DIMS {
+            self.attributed_returns[dimension] += value;
+        }
+    }
 }
 
 /// Morphogenetic parameters controlling reaction-diffusion dynamics.
@@ -570,6 +613,33 @@ pub fn specialization_index(strategy: &[f64; STRATEGY_DIMS]) -> SpecializationIn
         .sum();
     let h_max = STRATEGY_DIMS_F64.ln();
     if h_max == 0.0 { 0.0 } else { 1.0 - h / h_max }
+}
+
+/// Hill function for sigmoid response thresholds.
+///
+/// `H(x) = x^n / (k^n + x^n)`
+///
+/// - `concentration`: the input signal level
+/// - `k`: half-maximal concentration (threshold)
+/// - `n`: Hill coefficient (steepness, typically 1-4)
+#[must_use]
+pub fn hill_response(concentration: f64, k: f64, n: f64) -> f64 {
+    if k <= 0.0 || n <= 0.0 {
+        return 0.0;
+    }
+    let x_n = concentration.abs().powf(n);
+    let k_n = k.powf(n);
+    let denom = k_n + x_n;
+    if denom == 0.0 { 0.0 } else { x_n / denom }
+}
+
+/// Generate a single standard-normal sample using the Box-Muller transform.
+fn box_muller_normal() -> f64 {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let u1: f64 = rng.r#gen::<f64>().max(1e-15); // avoid ln(0)
+    let u2: f64 = rng.r#gen::<f64>();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
 }
 
 /// The five axes used to measure collective intelligence.
@@ -780,5 +850,98 @@ mod tests {
         assert!(mesh.is_broader_than(&subnet));
         assert!(global.is_broader_than(&mesh));
         assert!(!local.is_broader_than(&subnet));
+    }
+
+    #[test]
+    fn morphogenetic_update_diverges_strategies() {
+        let params = MorphogeneticParams {
+            sigma_noise: 0.0, // deterministic for testing
+            ..Default::default()
+        };
+
+        let mut state = MorphogeneticState::default();
+
+        // Attribute strong returns to dimension 0 (depth).
+        state.attribute_return(0, 1.0);
+        // Collective signal on dimension 2 (execution).
+        state.collective_pheromone[2] = 0.5;
+        state.collective_size = 3;
+
+        let initial_spec = state.specialization_index();
+        state.update(&params);
+
+        // Strategy should have diverged — specialization increases.
+        let updated_spec = state.specialization_index();
+        assert!(
+            updated_spec > initial_spec,
+            "specialization should increase: {updated_spec} > {initial_spec}"
+        );
+
+        // Strategy still sums to 1.0.
+        let sum: f64 = state.strategy.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "strategy should be normalized: sum={sum}"
+        );
+
+        // Accumulators should be reset.
+        assert_eq!(state.attributed_returns, [0.0; STRATEGY_DIMS]);
+        assert_eq!(state.collective_pheromone, [0.0; STRATEGY_DIMS]);
+    }
+
+    #[test]
+    fn morphogenetic_update_preserves_positive_concentrations() {
+        let params = MorphogeneticParams {
+            beta: 10.0,        // very strong inhibition
+            sigma_noise: 0.0,
+            ..Default::default()
+        };
+
+        let mut state = MorphogeneticState::default();
+        state.collective_pheromone = [1.0; STRATEGY_DIMS];
+        state.collective_size = 1;
+
+        state.update(&params);
+
+        // All concentrations must remain positive.
+        for (i, &s) in state.strategy.iter().enumerate() {
+            assert!(s > 0.0, "dimension {i} should be positive: {s}");
+        }
+    }
+
+    #[test]
+    fn attribute_return_accumulates_per_dimension() {
+        let mut state = MorphogeneticState::default();
+        state.attribute_return(3, 0.5);
+        state.attribute_return(3, 0.3);
+        state.attribute_return(7, 1.0);
+        assert!((state.attributed_returns[3] - 0.8).abs() < 1e-10);
+        assert!((state.attributed_returns[7] - 1.0).abs() < 1e-10);
+
+        // Out-of-bounds dimension is silently ignored.
+        state.attribute_return(99, 1.0);
+    }
+
+    #[test]
+    fn hill_response_is_correct_sigmoid() {
+        // At concentration == k, Hill function should return 0.5.
+        let h = hill_response(0.5, 0.5, 2.0);
+        assert!((h - 0.5).abs() < 1e-10, "H(k, k, n) = 0.5, got {h}");
+
+        // At zero concentration, response is 0.
+        assert_eq!(hill_response(0.0, 0.5, 2.0), 0.0);
+
+        // At very high concentration, response approaches 1.
+        let h_high = hill_response(100.0, 0.5, 2.0);
+        assert!(h_high > 0.999, "H(100, 0.5, 2) should be ~1.0, got {h_high}");
+
+        // Higher n -> steeper curve.
+        let h_n1 = hill_response(0.3, 0.5, 1.0);
+        let h_n4 = hill_response(0.3, 0.5, 4.0);
+        assert!(h_n1 > h_n4, "lower n should give higher response at sub-threshold: {h_n1} > {h_n4}");
+
+        // Edge cases.
+        assert_eq!(hill_response(1.0, 0.0, 2.0), 0.0); // k=0
+        assert_eq!(hill_response(1.0, 1.0, 0.0), 0.0);  // n=0
     }
 }

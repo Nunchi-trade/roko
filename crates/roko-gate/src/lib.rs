@@ -48,6 +48,7 @@ pub mod code_exec;
 pub mod compile;
 pub mod diff_gate;
 pub mod env_builder;
+pub mod eval_generator;
 pub mod fact_check;
 pub mod feedback;
 pub mod gate_pipeline;
@@ -76,6 +77,7 @@ pub use code_exec::{
 pub use compile::CompileGate;
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
 pub use gate_pipeline::GatePipeline;

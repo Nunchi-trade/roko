@@ -543,6 +543,70 @@ impl HeartbeatProbeRegistry {
     pub fn is_empty(&self) -> bool {
         self.probes.is_empty()
     }
+
+    /// Evaluate only probes belonging to the given domain.
+    pub fn evaluate_domain(&self, domain: &ProbeDomain, state: &EngineState) -> Vec<ProbeResult> {
+        self.probes
+            .iter()
+            .filter(|probe| &probe.domain() == domain)
+            .map(|probe| {
+                let value = probe.evaluate(state);
+                ProbeResult::new(
+                    probe.name(),
+                    value,
+                    value,
+                    0.0,
+                    2.0,
+                    probe.weight(),
+                    probe.domain(),
+                )
+            })
+            .collect()
+    }
+
+    /// Return the set of distinct domains represented by registered probes.
+    pub fn domains(&self) -> Vec<ProbeDomain> {
+        let mut seen = Vec::new();
+        for probe in &self.probes {
+            let domain = probe.domain();
+            if !seen.contains(&domain) {
+                seen.push(domain);
+            }
+        }
+        seen
+    }
+
+    /// Alias for `len()` — number of registered probes.
+    pub fn probe_count(&self) -> usize {
+        self.probes.len()
+    }
+
+    /// Create a registry pre-populated with all 16 default probes.
+    ///
+    /// Registers 8 chain probes, 6 coding probes, and 2 universal probes.
+    pub fn with_defaults() -> Self {
+        let mut registry = Self::new();
+        // Chain probes (8)
+        registry.register(Box::new(PriceDeltaProbe::new()));
+        registry.register(Box::new(TvlDeltaProbe::new()));
+        registry.register(Box::new(PositionHealthProbe::new()));
+        registry.register(Box::new(GasSpikeProbe::new()));
+        registry.register(Box::new(CreditBalanceProbe::new()));
+        registry.register(Box::new(RsiProbe::new()));
+        registry.register(Box::new(MacdProbe::new()));
+        registry.register(Box::new(CircuitBreakerProbe::new()));
+        // Coding probes (6)
+        registry.register(Box::new(BuildHealthProbe::new()));
+        registry.register(Box::new(TestRegressionProbe::new()));
+        registry.register(Box::new(ComplexityDriftProbe::new()));
+        registry.register(Box::new(DependencyRiskProbe::new()));
+        registry.register(Box::new(CoverageDeltaProbe::new()));
+        registry.register(Box::new(ErrorRateProbe::new()));
+        // Universal probes (2)
+        registry.register(Box::new(WorldModelDriftProbe::new()));
+        registry.register(Box::new(CausalConsistencyProbe::new()));
+        registry
+    }
 }
 
 /// Detects significant price changes since the last tick.

@@ -635,6 +635,15 @@ impl HeartbeatPolicy {
         compute_theta_interval(regime, &self.config)
     }
 
+    /// Compute the adaptive interval for any speed given the current regime.
+    ///
+    /// - Gamma: Calm is slower, Crisis is faster (clamped to config range).
+    /// - Theta: 120s (Calm) to 30s (Crisis)
+    /// - Delta: scales down from idle timeout in Crisis
+    pub fn adaptive_interval(&self, speed: HeartbeatSpeed, regime: Regime) -> Duration {
+        adaptive_interval(speed, regime, &self.config)
+    }
+
     /// Emit one tick for a specific speed.
     pub fn emit_tick(&self, speed: HeartbeatSpeed) -> HeartbeatTick {
         let interval = match speed {
@@ -1633,6 +1642,70 @@ const fn uncertainty_index(uncertainty: Uncertainty) -> usize {
     }
 }
 
+/// Compute the adaptive interval for a given speed and regime.
+///
+/// Each speed has a distinct range that scales with environmental regime:
+/// - **Gamma**: base 10s; Calm ×1.5, Normal ×1.0, Volatile ×0.5, Crisis ×0.33
+/// - **Theta**: uses `compute_theta_interval` (30-120s range)
+/// - **Delta**: base 3600s; Calm ×1.0, Normal ×0.5, Volatile ×0.25, Crisis ×0.167
+pub fn adaptive_interval(speed: HeartbeatSpeed, regime: Regime, config: &ClockConfig) -> Duration {
+    match speed {
+        HeartbeatSpeed::Gamma => {
+            let regime_multiplier = match regime {
+                Regime::Calm => 1.5,
+                Regime::Normal => 1.0,
+                Regime::Volatile => 0.5,
+                Regime::Crisis => 0.33,
+            };
+            let base = Duration::from_secs(config.gamma_base_interval_secs);
+            Duration::from_secs_f64(base.as_secs_f64() * regime_multiplier)
+                .max(Duration::from_secs(config.gamma_min_interval_secs))
+                .min(Duration::from_secs(config.gamma_max_interval_secs))
+        }
+        HeartbeatSpeed::Theta => compute_theta_interval(regime, config),
+        HeartbeatSpeed::Delta => {
+            let regime_multiplier = match regime {
+                Regime::Calm => 1.0,
+                Regime::Normal => 0.5,
+                Regime::Volatile => 0.25,
+                Regime::Crisis => 0.167,
+            };
+            let base = Duration::from_secs(config.delta_idle_timeout_secs);
+            // Scale: Calm=300s, Crisis=~50s; clamped to [60s, delta_idle_timeout_secs]
+            Duration::from_secs_f64(base.as_secs_f64() * regime_multiplier)
+                .max(Duration::from_secs(60))
+                .min(Duration::from_secs(config.delta_idle_timeout_secs))
+        }
+    }
+}
+
+/// Select an inference tier from probe anomaly count and environmental regime.
+///
+/// Implements dual-process T0/T1/T2 adaptive gating (BEAT-10).
+/// The threshold adapts by regime: lower in Crisis (more sensitive), higher in
+/// Calm (less sensitive). Roughly 80% of ticks stay at T0, 15% at T1, 5% at T2.
+#[allow(clippy::cast_precision_loss)]
+pub fn select_tier_from_probes(
+    anomaly_count: usize,
+    regime: Regime,
+    gating_config: &GatingConfig,
+) -> InferenceTier {
+    // Regime-adjusted threshold: Crisis is more sensitive (lower threshold)
+    let regime_factor = match regime {
+        Regime::Crisis => 0.5,
+        Regime::Volatile => 0.75,
+        Regime::Normal => 1.0,
+        Regime::Calm => 1.25,
+    };
+    let threshold = (gating_config.base_threshold * regime_factor)
+        .clamp(gating_config.threshold_min, gating_config.threshold_max);
+
+    // Convert anomaly count to a prediction-error-like signal in [0, 1]
+    let anomaly_signal = (anomaly_count as f32 * 0.1).min(1.0);
+
+    gate_tier(anomaly_signal, threshold, false, *gating_config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1684,5 +1757,59 @@ mod tests {
         let before = dimension.expected_prob(1);
         dimension.observe(1);
         assert!(dimension.expected_prob(1) > before);
+    }
+
+    #[test]
+    fn adaptive_interval_gamma_scales_with_regime() {
+        let config = ClockConfig::default();
+        let calm = adaptive_interval(HeartbeatSpeed::Gamma, Regime::Calm, &config);
+        let crisis = adaptive_interval(HeartbeatSpeed::Gamma, Regime::Crisis, &config);
+        assert!(calm > crisis, "Calm gamma should be slower than Crisis");
+    }
+
+    #[test]
+    fn adaptive_interval_theta_scales_with_regime() {
+        let config = ClockConfig::default();
+        let calm = adaptive_interval(HeartbeatSpeed::Theta, Regime::Calm, &config);
+        let crisis = adaptive_interval(HeartbeatSpeed::Theta, Regime::Crisis, &config);
+        assert!(calm > crisis, "Calm theta should be slower than Crisis");
+    }
+
+    #[test]
+    fn adaptive_interval_delta_scales_with_regime() {
+        let config = ClockConfig::default();
+        let calm = adaptive_interval(HeartbeatSpeed::Delta, Regime::Calm, &config);
+        let crisis = adaptive_interval(HeartbeatSpeed::Delta, Regime::Crisis, &config);
+        assert!(calm > crisis, "Calm delta should be slower than Crisis");
+    }
+
+    #[test]
+    fn select_tier_from_probes_calm_low_anomaly_is_t0() {
+        let config = GatingConfig::default();
+        assert_eq!(
+            select_tier_from_probes(0, Regime::Calm, &config),
+            InferenceTier::T0
+        );
+    }
+
+    #[test]
+    fn select_tier_from_probes_crisis_escalates_faster() {
+        let config = GatingConfig::default();
+        // 3 anomalies in Calm may stay T0/T1, in Crisis should go higher
+        let calm_tier = select_tier_from_probes(3, Regime::Calm, &config);
+        let crisis_tier = select_tier_from_probes(3, Regime::Crisis, &config);
+        assert!(
+            u8::from(crisis_tier) >= u8::from(calm_tier),
+            "Crisis should escalate same anomalies to equal or higher tier"
+        );
+    }
+
+    #[test]
+    fn select_tier_from_probes_high_anomalies_reach_t2() {
+        let config = GatingConfig::default();
+        assert_eq!(
+            select_tier_from_probes(10, Regime::Normal, &config),
+            InferenceTier::T2
+        );
     }
 }
