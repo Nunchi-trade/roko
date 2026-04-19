@@ -78,6 +78,7 @@ use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, TestGate,
+    VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     feedback_for_agent,
     gate_pipeline::GatePipeline,
@@ -123,6 +124,7 @@ use roko_neuro::{
     ContextAssembler, EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore,
     KnowledgeTier, NeuroStore,
 };
+use roko_orchestrator::coordination::{Pheromone, PheromoneKind, PheromoneScope};
 use roko_orchestrator::executor::recovery::{RecoveryEngine, WarningSeverity};
 use roko_orchestrator::worktree::{
     WorktreeConfig, WorktreeHealth, WorktreeManager, format_branch_name,
@@ -2882,6 +2884,8 @@ pub struct PlanRunner {
     gate_artifacts: GateArtifactStore,
     /// Persisted per-plan rung watermark for regression detection.
     gate_ratchet: GateRatchet,
+    /// Optional verdict publisher for broadcasting gate verdicts as Pulses.
+    verdict_publisher: Option<VerdictPublisher>,
     /// Rolling latency registry for routed model/provider pairs.
     latency_registry: LatencyRegistry,
     /// Event bus used to publish post-turn learning signals.
@@ -2910,6 +2914,10 @@ pub struct PlanRunner {
     /// single `sonar` search before dispatching complex tasks so the agent
     /// receives grounded best-practice context.
     search_client: Option<PerplexitySearchClient>,
+    /// Ambient pheromone field deposited by gate verdicts (COORD-04).
+    pheromone_field: Vec<Pheromone>,
+    /// Per-gate failure counts for pattern pheromone detection.
+    pheromone_gate_failures: HashMap<String, u32>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4222,6 +4230,7 @@ impl PlanRunner {
             gate_artifacts: GateArtifactStore::open(gate_artifact_store_path(workdir))
                 .unwrap_or_default(),
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
+            verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
@@ -4238,6 +4247,8 @@ impl PlanRunner {
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
+            pheromone_field: Vec::new(),
+            pheromone_gate_failures: HashMap::new(),
         })
     }
 
@@ -4371,6 +4382,7 @@ impl PlanRunner {
             gate_artifacts: GateArtifactStore::open(gate_artifact_store_path(workdir))
                 .unwrap_or_default(),
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
+            verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
@@ -4387,6 +4399,8 @@ impl PlanRunner {
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
+            pheromone_field: Vec::new(),
+            pheromone_gate_failures: HashMap::new(),
         })
     }
 
@@ -4522,6 +4536,7 @@ impl PlanRunner {
             gate_artifacts: GateArtifactStore::open(gate_artifact_store_path(workdir))
                 .unwrap_or_default(),
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
+            verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
@@ -4538,6 +4553,8 @@ impl PlanRunner {
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
+            pheromone_field: Vec::new(),
+            pheromone_gate_failures: HashMap::new(),
         })
     }
 
@@ -4621,6 +4638,14 @@ impl PlanRunner {
     /// Attach an approval IPC sender for connected TUI sessions.
     pub fn set_approval_tx(&mut self, tx: Option<mpsc::Sender<ApprovalRequest>>) {
         self.approval_tx = tx;
+    }
+
+    /// Attach a verdict publisher for GATE-05 verdict-as-signal reentry.
+    ///
+    /// When set, every gate verdict produced by the rung dispatch is published
+    /// as a `Pulse` with `Kind::GateVerdict` and topic `gate.verdict.emitted`.
+    pub fn set_verdict_publisher(&mut self, publisher: VerdictPublisher) {
+        self.verdict_publisher = Some(publisher);
     }
 
     /// Enable cloud execution behavior for the current plan run.
@@ -5100,6 +5125,45 @@ impl PlanRunner {
     #[must_use]
     pub const fn adaptive_thresholds(&self) -> &AdaptiveThresholds {
         &self.adaptive_thresholds
+    }
+
+    /// Collect active (non-evaporated) pheromones as `ContextChunk`s for
+    /// prompt enrichment (COORD-03). Evaporation threshold is 0.05.
+    fn active_pheromone_chunks(&self) -> Vec<roko_compose::ContextChunk> {
+        const EVAPORATION_THRESHOLD: f64 = 0.05;
+        self.pheromone_field
+            .iter()
+            .filter(|p| !p.is_evaporated(EVAPORATION_THRESHOLD))
+            .map(|p| {
+                let kind_label = match &p.kind {
+                    PheromoneKind::Threat => "Threat",
+                    PheromoneKind::Opportunity => "Opportunity",
+                    PheromoneKind::Wisdom => "Wisdom",
+                    PheromoneKind::Alpha => "Alpha",
+                    PheromoneKind::Pattern => "Pattern",
+                    PheromoneKind::Anomaly => "Anomaly",
+                    PheromoneKind::Consensus => "Consensus",
+                    PheromoneKind::Custom(name) => name.as_str(),
+                };
+                let intensity = p.current_intensity();
+                let content = format!(
+                    "[{kind_label}] intensity={intensity:.2}, source={}, scope={:?}, confirmations={}",
+                    p.source, p.scope, p.confirmations
+                );
+                roko_compose::ContextChunk {
+                    content,
+                    source: roko_compose::ContextSource::Pheromone {
+                        kind: kind_label.to_string(),
+                        source: p.source.clone(),
+                    },
+                    relevance: intensity,
+                    track_record: None,
+                    confidence: None,
+                    recency: None,
+                    emotional_tag: None,
+                }
+            })
+            .collect()
     }
 
     /// In-memory efficiency events collected during this run.
@@ -12749,6 +12813,7 @@ impl PlanRunner {
         } else {
             let relevant_context = build_relevant_context_layer(&context_sections);
             let context_window_tokens = effective_context_window_tokens(&self.config);
+            let pheromone_chunks = self.active_pheromone_chunks();
             build_system_prompt_with_context_validated(
                 role,
                 plan_id,
@@ -12762,6 +12827,7 @@ impl PlanRunner {
                 context_window_tokens,
                 Some(&section_effectiveness),
                 code_ctx,
+                pheromone_chunks,
             )?
         };
         let role_section = PromptSection::new("role", &role_instruction)
@@ -13937,6 +14003,39 @@ impl PlanRunner {
                 .observe(recorded.rung.as_index(), recorded.verdict.passed);
         }
 
+        // Deposit pheromones from gate verdicts (COORD-04).
+        for recorded in &recorded_verdicts {
+            let gate_name = &recorded.verdict.gate;
+            let (kind, intensity) = if recorded.verdict.passed {
+                self.pheromone_gate_failures.remove(gate_name);
+                (PheromoneKind::Opportunity, 0.8)
+            } else {
+                let count = self
+                    .pheromone_gate_failures
+                    .entry(gate_name.clone())
+                    .or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    self.pheromone_field.push(Pheromone::new(
+                        PheromoneKind::Pattern,
+                        0.7,
+                        PheromoneKind::Pattern.default_half_life(),
+                        format!("gate:{gate_name}"),
+                        PheromoneScope::Local(plan_id.to_string()),
+                    ));
+                }
+                (PheromoneKind::Threat, 0.9)
+            };
+            let half_life = kind.default_half_life();
+            self.pheromone_field.push(Pheromone::new(
+                kind,
+                intensity,
+                half_life,
+                format!("gate:{gate_name}"),
+                PheromoneScope::Local(plan_id.to_string()),
+            ));
+        }
+
         // Increment gate verdict metrics.
         for v in &verdicts {
             let verdict_str = if v.passed { "pass" } else { "fail" };
@@ -14350,6 +14449,8 @@ impl PlanRunner {
                 config.llm_judge_min_score = Some(nominal as f32);
             }
         }
+        // GATE-05: attach verdict publisher for Pulse-based reentry.
+        config.verdict_publisher = self.verdict_publisher.clone();
         config
     }
 
@@ -15801,6 +15902,7 @@ fn build_system_prompt_with_context_validated(
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
     code_context: Vec<String>,
+    pheromones: Vec<roko_compose::ContextChunk>,
 ) -> Result<String> {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -15819,6 +15921,7 @@ fn build_system_prompt_with_context_validated(
             relevant_skills: relevant_skills.to_vec(),
             relevant_playbooks: relevant_playbooks.to_vec(),
             code_context,
+            pheromones,
             ..PromptBuildOptions::default()
         },
         context_window_tokens,

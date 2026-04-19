@@ -141,6 +141,13 @@ pub enum ContextSource {
     Decomposition,
     /// IDs and titles of sibling tasks in the same plan.
     SiblingTasks,
+    /// Ambient pheromone signal from the stigmergic coordination layer.
+    Pheromone {
+        /// Pheromone kind (e.g. "Threat", "Opportunity", "Pattern").
+        kind: String,
+        /// Source agent that deposited the pheromone.
+        source: String,
+    },
 }
 
 /// Normalized PAD state used to bias retrieval when Daimon is available.
@@ -1492,6 +1499,7 @@ fn context_source_label(source: &ContextSource) -> String {
         ContextSource::PrdExtract => "directive:prd_extract".to_string(),
         ContextSource::Decomposition => "directive:decomposition".to_string(),
         ContextSource::SiblingTasks => "directive:sibling_tasks".to_string(),
+        ContextSource::Pheromone { kind, source } => format!("pheromone:{kind}:{source}"),
     }
 }
 

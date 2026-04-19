@@ -247,7 +247,9 @@ const fn bidder_for_context_source(source: &ContextSource) -> AttentionBidder {
             AttentionBidder::CodeIntelligence
         }
         ContextSource::ResearchMemo => AttentionBidder::Research,
-        ContextSource::RecentSignal { .. } => AttentionBidder::Oracles,
+        ContextSource::RecentSignal { .. } | ContextSource::Pheromone { .. } => {
+            AttentionBidder::Oracles
+        }
         ContextSource::AntiPattern
         | ContextSource::Verification
         | ContextSource::TaskBrief
@@ -1060,6 +1062,7 @@ const fn context_source_type(source: &ContextSource) -> &'static str {
         ContextSource::PrdExtract => "prd_extract",
         ContextSource::Decomposition => "decomposition",
         ContextSource::SiblingTasks => "sibling_tasks",
+        ContextSource::Pheromone { .. } => "pheromone",
     }
 }
 

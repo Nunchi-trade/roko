@@ -36,6 +36,7 @@ pub mod rung_selector;
 pub mod shell;
 pub mod symbol_gate;
 pub mod test_gate;
+pub mod verdict_publisher;
 pub mod verify_chain_gate;
 
 pub use adaptive_threshold::{AdaptiveThresholds, RungStats};
@@ -57,3 +58,4 @@ pub use rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_canonical_
 pub use rung_selector::{PlanComplexity, Rung, RungCaps, is_selected, select_rungs};
 pub use shell::ShellGate;
 pub use test_gate::{TestGate, parse_test_counts};
+pub use verdict_publisher::VerdictPublisher;

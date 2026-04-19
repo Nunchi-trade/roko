@@ -1,7 +1,7 @@
 //! Shared system-prompt assembly helpers for CLI execution paths.
 
 use anyhow::Result;
-use roko_compose::{Complexity, PadState, RoleSystemPromptSpec, TaskContext};
+use roko_compose::{Complexity, ContextChunk, PadState, RoleSystemPromptSpec, TaskContext};
 use roko_core::AgentRole;
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
@@ -24,6 +24,8 @@ pub struct PromptBuildOptions {
     pub relevant_playbooks: Vec<Playbook>,
     /// Optional code-intelligence context chunks injected as domain context.
     pub code_context: Vec<String>,
+    /// Optional ambient pheromone signals injected into the system prompt.
+    pub pheromones: Vec<ContextChunk>,
 }
 
 fn build_spec(

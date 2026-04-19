@@ -58,6 +58,8 @@ pub struct RungExecutionConfig {
     pub integration_test_pattern: Option<String>,
     /// Build system for the integration scenario. Defaults to cargo.
     pub integration_build_system: Option<BuildSystem>,
+    /// Optional verdict publisher for broadcasting gate outcomes.
+    pub verdict_publisher: Option<crate::verdict_publisher::VerdictPublisher>,
 }
 
 /// Execute a single canonical rung of the 7-rung runtime mapping.
