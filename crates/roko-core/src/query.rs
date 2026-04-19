@@ -115,8 +115,8 @@ impl Query {
 pub struct Budget {
     /// Maximum token count (rough estimate: ~4 bytes per token).
     pub max_tokens: Option<usize>,
-    /// Maximum number of input signals to include.
-    pub max_signals: Option<usize>,
+    /// Maximum number of input pulses to include.
+    pub max_pulses: Option<usize>,
     /// Maximum output byte size.
     pub max_bytes: Option<usize>,
     /// Maximum wall-clock milliseconds a composer may spend.
@@ -139,11 +139,11 @@ impl Budget {
         }
     }
 
-    /// Budget with a signal count cap only.
+    /// Budget with a pulse count cap only.
     #[must_use]
-    pub fn signals(n: usize) -> Self {
+    pub fn pulses(n: usize) -> Self {
         Self {
-            max_signals: Some(n),
+            max_pulses: Some(n),
             ..Default::default()
         }
     }
@@ -205,7 +205,7 @@ mod tests {
     fn budget_tokens_only() {
         let b = Budget::tokens(500);
         assert_eq!(b.max_tokens, Some(500));
-        assert!(b.max_signals.is_none());
+        assert!(b.max_pulses.is_none());
     }
 
     #[test]

@@ -1431,6 +1431,12 @@ impl DreamDistillationCandidate {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
         })
     }
 }
@@ -1577,6 +1583,12 @@ fn playbook_knowledge_entry(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
     }
 }
 
@@ -1642,6 +1654,12 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
     }
 }
 
@@ -1778,6 +1796,12 @@ fn generate_cross_domain_strategy_hypotheses(
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
         });
     }
 
@@ -2064,6 +2088,12 @@ fn build_mistake_insight_entry(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
     }
 }
 
@@ -2113,6 +2143,12 @@ fn review_insights_from_heuristics(
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
             }
         })
         .collect()

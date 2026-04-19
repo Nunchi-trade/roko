@@ -262,6 +262,43 @@ impl KnowledgeStore {
         // Detect confirmations by comparing new entries against existing ones.
         let confirmations = detect_confirmations(&existing, &entries);
 
+        // Apply tier promotions for confirmed entries.
+        if !confirmations.is_empty() {
+            let mut updated_existing = existing;
+            for confirmation in &confirmations {
+                if let Some(entry) = updated_existing
+                    .iter_mut()
+                    .find(|e| e.id == confirmation.confirmed_entry_id)
+                {
+                    entry.confirmation_count = entry.confirmation_count.saturating_add(1);
+
+                    // Add distinct context from the confirming entry's source episodes.
+                    if let Some(confirming) = entries
+                        .iter()
+                        .find(|e| e.id == confirmation.confirming_entry_id)
+                    {
+                        for ep in &confirming.source_episodes {
+                            if !entry.distinct_contexts.contains(ep) {
+                                entry.distinct_contexts.push(ep.clone());
+                            }
+                        }
+                    }
+
+                    // Auto-promote based on thresholds.
+                    match entry.tier {
+                        KnowledgeTier::Transient if entry.confirmation_count >= 2 => {
+                            entry.tier = KnowledgeTier::Working;
+                        }
+                        KnowledgeTier::Working if entry.distinct_contexts.len() >= 3 => {
+                            entry.tier = KnowledgeTier::Consolidated;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.rewrite_all(&updated_existing)?;
+        }
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -393,6 +430,19 @@ impl KnowledgeStore {
         limit: usize,
     ) -> Result<Vec<KnowledgeQueryHit>> {
         self.query_hits_filtered(topic, limit, |entry| entry.kind == kind)
+    }
+
+    /// Filter all entries by their validation tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn by_tier(&self, tier: KnowledgeTier) -> Result<Vec<KnowledgeEntry>> {
+        Ok(self
+            .read_all()?
+            .into_iter()
+            .filter(|entry| entry.tier == tier)
+            .collect())
     }
 
     fn query_hits_filtered<F>(
@@ -1239,6 +1289,12 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
         }
     }
 
@@ -1641,6 +1697,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add anti knowledge");
 
@@ -1802,6 +1864,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add anti knowledge");
 
@@ -1852,6 +1920,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add anti knowledge");
 
@@ -1892,6 +1966,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add oldest");
         store
@@ -1914,6 +1994,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add middle");
         store
@@ -1936,6 +2022,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add newest");
 
@@ -2182,6 +2274,12 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
         };
 
         assert!(!entries_are_similar(&existing, &anti));
@@ -2365,6 +2463,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add tiered");
 
@@ -2399,6 +2503,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add persistent");
 

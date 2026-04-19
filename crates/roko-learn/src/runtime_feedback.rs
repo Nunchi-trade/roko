@@ -2438,6 +2438,9 @@ mod tests {
             last_applied: None,
             created_at: Utc::now(),
             source_episodes: vec![],
+            balance: 1.0,
+            demurrage_rate: 0.01,
+            last_decay_at_ms: Utc::now().timestamp_millis(),
         };
         runtime.playbook_rules.upsert(rule.clone()).unwrap();
         runtime.playbook_rules.save().unwrap();

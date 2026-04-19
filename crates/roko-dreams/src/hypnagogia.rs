@@ -331,6 +331,12 @@ fn loosened_association(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
     }
 }
 
@@ -377,6 +383,12 @@ fn interrupt_to_insight(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
     }
 }
 
@@ -416,6 +428,12 @@ fn dali_insight(episode: &Episode, created_at: DateTime<Utc>) -> KnowledgeEntry 
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
     }
 }
 
@@ -506,6 +524,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             },
             KnowledgeEntry {
                 id: "sig-2".to_string(),
@@ -526,6 +550,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             },
             KnowledgeEntry {
                 id: "sig-3".to_string(),
@@ -546,6 +576,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             },
             KnowledgeEntry {
                 id: "sig-4".to_string(),
@@ -566,6 +602,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             },
         ];
         let output = engine.run(&signals, &[], Utc::now());

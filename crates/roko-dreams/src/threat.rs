@@ -129,6 +129,12 @@ pub fn threat_warning_entries_with_floor(
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
         });
     }
     out

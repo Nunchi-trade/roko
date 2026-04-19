@@ -270,6 +270,18 @@ pub struct KnowledgeEntry {
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
+    /// Number of independent confirmations from different episodes.
+    /// Used for tier promotion: 2+ for Transient->Working.
+    #[serde(default)]
+    pub confirmation_count: u32,
+    /// Distinct context IDs (e.g. plan/task combos) that confirmed this entry.
+    /// Used for tier promotion: 3+ distinct contexts for Working->Consolidated.
+    #[serde(default)]
+    pub distinct_contexts: Vec<String>,
+    /// Whether this entry has been explicitly deprecated.
+    /// Required for demoting Persistent entries.
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 impl KnowledgeEntry {
@@ -487,6 +499,12 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
         };
 
         assert_eq!(entry.effective_half_life_days(), 100.0);

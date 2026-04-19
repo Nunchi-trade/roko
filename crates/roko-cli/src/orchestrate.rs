@@ -7222,6 +7222,9 @@ impl PlanRunner {
                                     &gate_failure_tag,
                                 )),
                                 hdc_vector: None,
+                                confirmation_count: 0,
+                                distinct_contexts: Vec::new(),
+                                deprecated: false,
                             };
                             if let Err(e) = self.knowledge_store.add(anti_entry) {
                                 tracing::warn!(
@@ -15298,6 +15301,9 @@ fn build_success_knowledge_entry(
             .as_ref()
             .map(EmotionalProvenance::from_tag),
         hdc_vector: None,
+        confirmation_count: 0,
+        distinct_contexts: Vec::new(),
+        deprecated: false,
     }
 }
 
@@ -18794,6 +18800,12 @@ verify = []
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .unwrap();
 
@@ -18821,6 +18833,12 @@ verify = []
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .unwrap();
 
@@ -18878,6 +18896,12 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .unwrap();
 

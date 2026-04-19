@@ -269,6 +269,9 @@ impl DistillationCandidate {
             emotional_tag,
             emotional_provenance,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         })
     }
 }

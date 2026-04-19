@@ -365,6 +365,44 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Code intelligence: build, search, and inspect the workspace index.
+    Index {
+        #[command(subcommand)]
+        cmd: IndexCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IndexCmd {
+    /// Build a code index for the workspace (or specified directory).
+    Build {
+        /// Directory to index (default: cwd / --repo).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Search the code index.
+    Search {
+        /// Search query text.
+        query: String,
+        /// Restrict to a symbol kind (function, struct, enum, trait, const, type, module, impl).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Search strategy: keyword, structural, hybrid.
+        #[arg(long, default_value = "keyword")]
+        strategy: String,
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Directory to index (default: cwd / --repo).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Show index statistics.
+    Stats {
+        /// Directory to index (default: cwd / --repo).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1091,6 +1129,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             roko_cli::worker::run_worker(port).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Index { cmd } => cmd_index(cli, cmd),
     }
 }
 
@@ -6079,6 +6118,151 @@ fn cmd_update(verify: bool) -> Result<i32> {
         "self-update installer receipts are not wired in this source build; reinstall with cargo install roko-cli --locked or use the cargo-dist installer release"
     );
     Ok(EXIT_SUCCESS)
+}
+
+// -----------------------------------------------------------------------
+// Index subcommands
+// -----------------------------------------------------------------------
+
+fn cmd_index(cli: &Cli, cmd: IndexCmd) -> Result<i32> {
+    let workdir = resolve_workdir(cli);
+    match cmd {
+        IndexCmd::Build { path } => {
+            let target = path.unwrap_or_else(|| workdir.clone());
+            let start = Instant::now();
+            let idx = roko_index::WorkspaceIndex::load(&target)
+                .with_context(|| format!("build index for {}", target.display()))?;
+            let elapsed = start.elapsed();
+            let stats = idx.stats();
+            println!("Index built in {:.2}s", elapsed.as_secs_f64());
+            println!("  Files:   {}", stats.indexed_files);
+            println!("  Symbols: {}", stats.total_symbols);
+            println!("  Edges:   {}", stats.total_edges);
+            for (lang, count) in &stats.languages {
+                println!("  {lang}: {count} files");
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        IndexCmd::Search {
+            query,
+            kind,
+            strategy,
+            limit,
+            path,
+        } => {
+            let target = path.unwrap_or_else(|| workdir.clone());
+            let idx = roko_index::WorkspaceIndex::load(&target)
+                .with_context(|| format!("build index for {}", target.display()))?;
+
+            let sym_kind = if let Some(ref k) = kind {
+                Some(parse_symbol_kind(k)?)
+            } else {
+                None
+            };
+
+            let search_strategy = match strategy.as_str() {
+                "keyword" => roko_index::SearchStrategy::Keyword(roko_index::KeywordQuery {
+                    text: query.clone(),
+                    scope: roko_index::SearchScope::Both,
+                    case_sensitive: false,
+                    whole_word: false,
+                }),
+                "structural" => {
+                    roko_index::SearchStrategy::Structural(roko_index::StructuralQuery {
+                        kind: sym_kind,
+                        visibility: None,
+                        file_pattern: Some(query.clone()),
+                        has_callers: None,
+                        min_pagerank: None,
+                    })
+                }
+                "hybrid" => roko_index::SearchStrategy::Hybrid {
+                    keyword: Some(roko_index::KeywordQuery {
+                        text: query.clone(),
+                        scope: roko_index::SearchScope::Both,
+                        case_sensitive: false,
+                        whole_word: false,
+                    }),
+                    structural: sym_kind.map(|k| roko_index::StructuralQuery {
+                        kind: Some(k),
+                        ..Default::default()
+                    }),
+                    hdc: None,
+                },
+                other => bail!("unknown search strategy: {other} (expected keyword, structural, or hybrid)"),
+            };
+
+            let results = idx.search(search_strategy, limit);
+            if results.is_empty() {
+                println!("No results found for \"{query}\"");
+            } else {
+                println!("{:<50} {:<10} {:<6} {:<8}", "NAME", "KIND", "LINE", "SCORE");
+                println!("{}", "-".repeat(76));
+                for r in &results {
+                    println!(
+                        "{:<50} {:<10} {:<6} {:.4}",
+                        r.symbol.id.symbol_name,
+                        format!("{:?}", r.symbol.id.kind),
+                        r.symbol.line,
+                        r.score,
+                    );
+                }
+                println!("\n{} result(s)", results.len());
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        IndexCmd::Stats { path } => {
+            let target = path.unwrap_or_else(|| workdir.clone());
+            let idx = roko_index::WorkspaceIndex::load(&target)
+                .with_context(|| format!("build index for {}", target.display()))?;
+            let stats = idx.stats();
+
+            println!("=== Index Statistics ===\n");
+            println!("Files indexed:  {}", stats.indexed_files);
+            println!("Total symbols:  {}", stats.total_symbols);
+            println!("Total edges:    {}", stats.total_edges);
+
+            println!("\nEdge breakdown:");
+            for (kind, count) in &stats.edge_breakdown {
+                println!("  {kind}: {count}");
+            }
+
+            println!("\nLanguages:");
+            for (lang, count) in &stats.languages {
+                println!("  {lang}: {count} files");
+            }
+
+            if !stats.top_symbols_by_pagerank.is_empty() {
+                println!("\nTop-10 symbols by PageRank:");
+                println!("{:<50} {:<10} {:<8}", "NAME", "KIND", "SCORE");
+                println!("{}", "-".repeat(70));
+                for r in &stats.top_symbols_by_pagerank {
+                    println!(
+                        "{:<50} {:<10} {:.6}",
+                        r.symbol.id.symbol_name,
+                        format!("{:?}", r.symbol.id.kind),
+                        r.score,
+                    );
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+fn parse_symbol_kind(s: &str) -> Result<roko_core::language::SymbolKind> {
+    use roko_core::language::SymbolKind;
+    match s.to_lowercase().as_str() {
+        "function" | "fn" => Ok(SymbolKind::Function),
+        "struct" => Ok(SymbolKind::Struct),
+        "enum" => Ok(SymbolKind::Enum),
+        "trait" => Ok(SymbolKind::Trait),
+        "const" => Ok(SymbolKind::Const),
+        "type" => Ok(SymbolKind::Type),
+        "module" | "mod" => Ok(SymbolKind::Module),
+        "impl" => Ok(SymbolKind::Impl),
+        other => bail!("unknown symbol kind: {other} (expected function, struct, enum, trait, const, type, module, impl)"),
+    }
 }
 
 fn print_completions(shell: CompletionShell) {

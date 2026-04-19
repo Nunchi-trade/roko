@@ -1765,6 +1765,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add knowledge");
 
@@ -1861,6 +1867,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add knowledge");
 
@@ -1912,6 +1924,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add strategy fragment");
         knowledge_store
@@ -1934,6 +1952,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add anti-knowledge");
         knowledge_store
@@ -1956,6 +1980,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add insight");
 
@@ -2158,6 +2188,12 @@ mod tests {
                     emotional_tag: None,
                     emotional_provenance: None,
                     hdc_vector: None,
+
+                    confirmation_count: 0,
+
+                    distinct_contexts: Vec::new(),
+
+                    deprecated: false,
                 })
                 .expect("add anti-knowledge");
         }
@@ -2182,6 +2218,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add strategy");
 
@@ -2253,6 +2295,12 @@ mod tests {
                     emotional_tag: None,
                     emotional_provenance: None,
                     hdc_vector: None,
+
+                    confirmation_count: 0,
+
+                    distinct_contexts: Vec::new(),
+
+                    deprecated: false,
                 })
                 .expect("add heuristic");
         }
@@ -2277,6 +2325,12 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
             })
             .expect("add warning");
 

@@ -257,6 +257,10 @@ impl TierProgression {
             return TierProgressionDecision::Promote(promote_tier(entry.tier));
         }
         if failures >= DEMOTION_FAILURE_THRESHOLD {
+            // Persistent entries cannot be demoted without explicit deprecation.
+            if entry.tier == KnowledgeTier::Persistent && !entry.deprecated {
+                return TierProgressionDecision::NoChange;
+            }
             return TierProgressionDecision::Demote(demote_tier(entry.tier));
         }
         if entry_needs_expiry_review(entry) {
@@ -492,6 +496,9 @@ impl From<&InsightRecord> for KnowledgeEntry {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         }
     }
 }
@@ -521,6 +528,9 @@ impl From<&HeuristicRule> for KnowledgeEntry {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         }
     }
 }
@@ -556,6 +566,9 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         }
     }
 }
@@ -1245,6 +1258,9 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         };
         let verdicts = vec![
             GateVerdict::new("compile", true),
@@ -1283,6 +1299,9 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         };
         let verdicts = vec![
             GateVerdict::new("compile", false),
@@ -1320,6 +1339,9 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         };
 
         assert!(TierProgression::needs_expiry_review(&entry));
@@ -1351,6 +1373,9 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
         };
         let transient = KnowledgeEntry {
             tier: KnowledgeTier::Transient,

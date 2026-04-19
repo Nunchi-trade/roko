@@ -86,6 +86,25 @@ pub struct Rule {
     pub created_at: DateTime<Utc>,
     /// Identifiers of the episodes whose cluster generated this rule.
     pub source_episodes: Vec<String>,
+    /// Attention budget decayed via Gesellian demurrage tax.
+    /// Rules must be actively validated to replenish balance.
+    /// Rules with depleted balance are deprioritized in retrieval.
+    #[serde(default = "default_balance")]
+    pub balance: f64,
+    /// Hourly decay rate for the attention budget (default 0.01 per hour).
+    #[serde(default = "default_demurrage_rate")]
+    pub demurrage_rate: f64,
+    /// Millisecond timestamp of the last demurrage decay application.
+    #[serde(default)]
+    pub last_decay_at_ms: i64,
+}
+
+fn default_balance() -> f64 {
+    1.0
+}
+
+fn default_demurrage_rate() -> f64 {
+    0.01
 }
 
 impl Rule {
@@ -107,7 +126,26 @@ impl Rule {
             last_applied: None,
             created_at: Utc::now(),
             source_episodes: Vec::new(),
+            balance: 1.0,
+            demurrage_rate: 0.01,
+            last_decay_at_ms: Utc::now().timestamp_millis(),
         }
+    }
+
+    /// Apply continuous demurrage decay to the rule's attention budget.
+    ///
+    /// `balance *= (1 - demurrage_rate) ^ elapsed_hours`
+    pub fn tick_demurrage(&mut self, now_ms: i64) {
+        let elapsed_hours = (now_ms - self.last_decay_at_ms) as f64 / 3_600_000.0;
+        if elapsed_hours > 0.0 {
+            self.balance *= (1.0 - self.demurrage_rate).powf(elapsed_hours);
+            self.last_decay_at_ms = now_ms;
+        }
+    }
+
+    /// Replenish the attention budget (capped at 1.0).
+    pub fn replenish(&mut self, amount: f64) {
+        self.balance = (self.balance + amount).min(1.0);
     }
 }
 
@@ -250,25 +288,34 @@ impl PlaybookRules {
             return Vec::new();
         }
 
-        // Build a sorted list of (rule_id, confidence, last_applied) for matching
-        // rules, sort it, then acquire the write lock to stamp last_applied.
-        let mut order: Vec<(String, f64, Option<DateTime<Utc>>)> = self
+        // Build a sorted list of (rule_id, confidence, last_applied, balance)
+        // for matching rules, sort it, then acquire the write lock to stamp
+        // last_applied.
+        let mut order: Vec<(String, f64, Option<DateTime<Utc>>, f64)> = self
             .rules
             .read()
             .iter()
             .filter(|r| matching_ids.contains(&r.rule_id))
-            .map(|r| (r.rule_id.clone(), r.confidence, r.last_applied))
+            .map(|r| (r.rule_id.clone(), r.confidence, r.last_applied, r.balance))
             .collect();
 
-        // Sort: confidence descending, then last_applied descending (None last).
+        // Sort: rules with balance < 0.1 are deprioritized (sorted after
+        // higher-balance rules). Within each group, sort by confidence
+        // descending, then last_applied descending.
         order.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let a_healthy = a.3 >= 0.1;
+            let b_healthy = b.3 >= 0.1;
+            b_healthy
+                .cmp(&a_healthy)
+                .then_with(|| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| cmp_opt_dt_desc(a.2, b.2))
         });
 
         let selected_ids: Vec<String> =
-            order.into_iter().map(|(id, _, _)| id).take(limit).collect();
+            order.into_iter().map(|(id, _, _, _)| id).take(limit).collect();
 
         // Acquire write lock to stamp last_applied and collect clones.
         let mut guard = self.rules.write();
@@ -344,6 +391,7 @@ impl PlaybookRules {
             if validated {
                 rule.confidence = (rule.confidence + 0.05).min(0.95);
                 rule.validations = rule.validations.saturating_add(1);
+                rule.replenish(0.05);
             } else {
                 rule.confidence = (rule.confidence - 0.10).max(0.0);
                 rule.contradictions = rule.contradictions.saturating_add(1);
@@ -359,6 +407,16 @@ impl PlaybookRules {
     /// Record a contradicted prediction for `rule_id`.
     pub fn contradict(&self, rule_id: &str) {
         self.record_outcome(rule_id, false);
+    }
+
+    /// Apply demurrage decay to all rules' attention budgets.
+    ///
+    /// Call this at the start of each feedback cycle (e.g. `record_completed_run`).
+    pub fn tick_demurrage_all(&self, now_ms: i64) {
+        let mut guard = self.rules.write();
+        for rule in guard.iter_mut() {
+            rule.tick_demurrage(now_ms);
+        }
     }
 
     /// Remove all rules with `confidence < min_confidence` (strict).
@@ -718,6 +776,9 @@ mod tests {
             last_applied: None,
             created_at: now,
             source_episodes: Vec::new(),
+            balance: 1.0,
+            demurrage_rate: 0.01,
+            last_decay_at_ms: now.timestamp_millis(),
         }
     }
 

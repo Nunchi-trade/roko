@@ -279,7 +279,7 @@ const fn bidder_tag(bidder: AttentionBidder) -> &'static str {
 ///
 /// # Budget
 ///
-/// Respects `Budget::max_tokens`. If unset, only `max_signals` limits
+/// Respects `Budget::max_tokens`. If unset, only `max_pulses` limits
 /// inclusion. If a critical section alone exceeds `max_tokens`, the composer
 /// returns an error rather than silently dropping it.
 pub struct PromptComposer {
@@ -360,7 +360,7 @@ impl Composer for PromptComposer {
             .max_tokens
             .map_or(usize::MAX, |m| m.saturating_sub(critical_tokens));
         let remaining_signals = budget
-            .max_signals
+            .max_pulses
             .map_or(usize::MAX, |m| m.saturating_sub(critical.len()));
 
         let mut kept: Vec<(PromptSection, &Engram)> = critical;
@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_respects_max_signals() {
+    fn composer_respects_max_pulses() {
         let composer = PromptComposer::new();
         let sections: Vec<_> = (0..10)
             .map(|i| {
@@ -1266,7 +1266,7 @@ mod tests {
                 &sections,
                 &Budget {
                     max_tokens: None,
-                    max_signals: Some(3),
+                    max_pulses: Some(3),
                     max_bytes: None,
                     max_wall_ms: None,
                 },

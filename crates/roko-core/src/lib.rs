@@ -75,6 +75,7 @@ pub mod polyglot;
 pub mod prediction;
 pub mod project;
 pub mod pulse;
+pub mod pulse_bus;
 pub mod provenance;
 pub mod query;
 pub mod score;
@@ -135,6 +136,7 @@ pub use project::{
 };
 pub use provenance::{Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, TaintInfo};
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
+pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
 pub use score::Score;
@@ -162,5 +164,5 @@ pub use tool::{
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use traits::{Bus, Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
