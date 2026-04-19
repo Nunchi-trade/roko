@@ -38,10 +38,11 @@ pub use dag::{
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
-    CURRENT_SCHEMA_VERSION, ExecutorAction, ExecutorConfig, ExecutorEvent, ExecutorSnapshot,
-    GateResult, ParallelExecutor, PersistedCircuitBreakerFailureRecord,
-    PersistedCircuitBreakerState, PlanState, PlanStateMachine, SpeculativeExecution,
-    TransitionError, current_schema_version,
+    CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
+    ExecutorSnapshot, GateResult, ParallelExecutor, PersistedCircuitBreakerFailureRecord,
+    PersistedCircuitBreakerState, PlanState, PlanStateMachine, SnapshotConfig,
+    SnapshotIntegrityError, SnapshotVerifier, SpeculativeExecution, TransitionError,
+    current_schema_version,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};
 pub use plan_discovery::{

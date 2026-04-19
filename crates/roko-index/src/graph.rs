@@ -15,6 +15,11 @@ use roko_core::language::SymbolKind;
 static CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(").expect("call regex"));
 
+/// Matches `PascalCase` identifiers that likely refer to types.
+static TYPE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Z][A-Za-z0-9_]*)\b").expect("type ref regex")
+});
+
 // ─── Edge kinds ─────────────────────────────────────────────────────────
 
 /// The kind of relationship between two symbols.
@@ -29,6 +34,8 @@ pub enum EdgeKind {
     Implements,
     /// One symbol is contained within another (e.g. method in impl block).
     Contains,
+    /// One symbol references a type (struct/enum/trait) in its signature or body.
+    TypeRef,
 }
 
 /// A directed edge in the symbol graph.
@@ -190,12 +197,18 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
     // Phase 2: build name -> SymbolId lookups for import and call resolution.
     let mut name_to_ids: HashMap<&str, Vec<SymbolId>> = HashMap::new();
     let mut function_name_to_ids: HashMap<&str, Vec<SymbolId>> = HashMap::new();
+    let mut type_name_to_ids: HashMap<&str, Vec<SymbolId>> = HashMap::new();
     for file in files {
         for sym in &file.symbols {
             let id = SymbolId::from_symbol(sym, &file.path);
             name_to_ids.entry(&sym.name).or_default().push(id.clone());
             if sym.kind == SymbolKind::Function {
                 function_name_to_ids.entry(&sym.name).or_default().push(id);
+            } else if matches!(
+                sym.kind,
+                SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::Type
+            ) {
+                type_name_to_ids.entry(&sym.name).or_default().push(id);
             }
         }
     }
@@ -298,6 +311,71 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
                                 target.clone(),
                                 EdgeKind::Calls,
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 5: infer TypeRef edges from function signatures and bodies.
+    // When a PascalCase identifier in a function matches a known type name, add
+    // a TypeRef edge.  This is heuristic — no full type resolution needed.
+    if !type_name_to_ids.is_empty() {
+        for file in files {
+            let total_lines = file.content.lines().count();
+            if total_lines == 0 {
+                continue;
+            }
+
+            let mut symbols = file.symbols.iter().collect::<Vec<_>>();
+            symbols.sort_by_key(|sym| sym.line);
+
+            for (index, sym) in symbols.iter().enumerate() {
+                if sym.kind != SymbolKind::Function {
+                    continue;
+                }
+
+                let start_line = sym.line;
+                if start_line == 0 || start_line > total_lines {
+                    continue;
+                }
+
+                let end_line = symbols
+                    .get(index + 1)
+                    .map(|next| next.line.saturating_sub(1))
+                    .unwrap_or(total_lines);
+
+                if end_line < start_line {
+                    continue;
+                }
+
+                let source_id = SymbolId::from_symbol(sym, &file.path);
+                for (_line_idx, line) in file
+                    .content
+                    .lines()
+                    .enumerate()
+                    .skip(start_line.saturating_sub(1))
+                    .take(end_line.saturating_sub(start_line).saturating_add(1))
+                {
+                    for capture in TYPE_REF_RE.captures_iter(line) {
+                        let candidate =
+                            capture.get(1).map(|m| m.as_str()).unwrap_or_default();
+                        if candidate.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(targets) = type_name_to_ids.get(candidate) {
+                            for target in targets {
+                                add_edge(
+                                    &mut forward,
+                                    &mut reverse,
+                                    &mut seen_edges,
+                                    source_id.clone(),
+                                    target.clone(),
+                                    EdgeKind::TypeRef,
+                                );
+                            }
                         }
                     }
                 }

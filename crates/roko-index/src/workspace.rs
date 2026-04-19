@@ -231,6 +231,8 @@ pub enum ReferenceKind {
     Implements,
     /// A graph edge induced by containment.
     Contains,
+    /// A graph edge induced by a type reference.
+    TypeRef,
 }
 
 /// Reference-like location returned by the code index.
@@ -812,6 +814,10 @@ impl WorkspaceIndex {
                     "contains".to_string(),
                     self.graph.edge_count_by_kind(EdgeKind::Contains),
                 ),
+                (
+                    "type_ref".to_string(),
+                    self.graph.edge_count_by_kind(EdgeKind::TypeRef),
+                ),
             ]),
             languages,
             top_symbols_by_pagerank: top_symbols,
@@ -843,6 +849,7 @@ impl WorkspaceIndex {
                 EdgeKind::Calls,
                 EdgeKind::Implements,
                 EdgeKind::Contains,
+                EdgeKind::TypeRef,
             ] {
                 references.extend(self.references_for_kind(&symbol.id, kind));
             }
@@ -1544,6 +1551,7 @@ const fn reference_kind(kind: &EdgeKind) -> ReferenceKind {
         EdgeKind::Imports => ReferenceKind::Imports,
         EdgeKind::Implements => ReferenceKind::Implements,
         EdgeKind::Contains => ReferenceKind::Contains,
+        EdgeKind::TypeRef => ReferenceKind::TypeRef,
     }
 }
 

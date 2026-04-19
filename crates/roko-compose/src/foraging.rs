@@ -170,7 +170,38 @@ pub fn estimate_context_sufficiency(retrieved_chunks: &[ContextChunk], task: &Ta
 /// Stop when either the MVT ratio falls below 1.0 or sufficiency is high enough.
 #[must_use]
 pub fn should_stop_searching(mvt_ratio: f64, sufficiency: f64, sufficiency_threshold: f64) -> bool {
-    mvt_ratio <= 1.0 || sufficiency >= sufficiency_threshold
+    should_stop_searching_calibrated(mvt_ratio, sufficiency, sufficiency_threshold, None)
+}
+
+/// Calibration-aware stopping decision.
+///
+/// `calibration_factor` adjusts the MVT threshold. `None` or `Some(1.0)` gives
+/// the default behavior. Values above 1.0 make stopping easier (well-calibrated);
+/// values below 1.0 make stopping harder (poorly calibrated).
+#[must_use]
+pub fn should_stop_searching_calibrated(
+    mvt_ratio: f64,
+    sufficiency: f64,
+    sufficiency_threshold: f64,
+    calibration_factor: Option<f64>,
+) -> bool {
+    let threshold = calibration_factor.unwrap_or(1.0).clamp(0.5, 2.0);
+    mvt_ratio <= threshold || sufficiency >= sufficiency_threshold
+}
+
+/// Derive a calibration factor from a [`CalibrationTracker`] summary.
+///
+/// Maps `recent_accuracy` (0.0..1.0) to a factor that adjusts the MVT stopping
+/// threshold. High accuracy (>0.7) produces a factor >1.0 (stop sooner);
+/// low accuracy (<0.5) produces a factor <1.0 (search longer).
+///
+/// The mapping is linear: `factor = 0.5 + recent_accuracy`.
+#[must_use]
+pub fn calibration_to_foraging_factor(recent_accuracy: f64, confidence: f64) -> f64 {
+    if confidence < 0.1 {
+        return 1.0;
+    }
+    (0.5 + recent_accuracy).clamp(0.5, 1.5)
 }
 
 fn context_chunk_identifier(chunk: &ContextChunk) -> Option<String> {
@@ -271,5 +302,37 @@ mod tests {
         assert!(should_stop_searching(1.2, 0.9, 0.85));
         assert!(should_stop_searching(0.9, 0.1, 0.85));
         assert!(!should_stop_searching(1.2, 0.2, 0.85));
+    }
+
+    #[test]
+    fn calibrated_stop_well_calibrated_stops_sooner() {
+        // mvt_ratio = 1.1, normally would NOT stop (1.1 > 1.0).
+        // But with a well-calibrated model (accuracy=0.8 -> factor=1.3),
+        // the threshold becomes 1.3, so 1.1 <= 1.3 -> stops.
+        let factor = calibration_to_foraging_factor(0.8, 0.5);
+        assert!(factor > 1.0);
+        assert!(should_stop_searching_calibrated(1.1, 0.2, 0.85, Some(factor)));
+    }
+
+    #[test]
+    fn calibrated_stop_poorly_calibrated_searches_longer() {
+        // mvt_ratio = 0.9, normally WOULD stop (0.9 <= 1.0).
+        // But with a poorly calibrated model (accuracy=0.2 -> factor=0.7),
+        // the threshold becomes 0.7, so 0.9 > 0.7 -> does NOT stop.
+        let factor = calibration_to_foraging_factor(0.2, 0.5);
+        assert!(factor < 1.0);
+        assert!(!should_stop_searching_calibrated(0.9, 0.2, 0.85, Some(factor)));
+    }
+
+    #[test]
+    fn calibration_factor_cold_start() {
+        let factor = calibration_to_foraging_factor(0.5, 0.05);
+        assert!((factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn calibration_factor_is_clamped() {
+        assert!(calibration_to_foraging_factor(1.0, 1.0) <= 1.5);
+        assert!(calibration_to_foraging_factor(0.0, 1.0) >= 0.5);
     }
 }

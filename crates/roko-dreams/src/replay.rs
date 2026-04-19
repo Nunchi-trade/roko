@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 use chrono::{DateTime, Utc};
+use roko_core::PadVector;
 use roko_learn::episode_logger::{Episode, GateVerdict};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -111,6 +112,64 @@ pub fn select_replay_episodes(
             .into_iter()
             .map(|candidate| candidate.episode)
             .collect(),
+        utility_score,
+        hypothetical_count,
+    }
+}
+
+/// Select replay episodes with optional emotional biasing from the daimon.
+///
+/// When `emotional_context` is `Some`, the PAD vector modulates replay:
+/// - Negative pleasure (valence) biases toward replaying failures
+/// - High arousal increases effective `max_episodes` (more intense replay)
+#[must_use]
+pub fn select_replay_episodes_with_affect(
+    episodes: &[Episode],
+    policy: &DreamReplayPolicy,
+    now: DateTime<Utc>,
+    emotional_context: Option<&PadVector>,
+) -> DreamReplayBatch {
+    let Some(pad) = emotional_context else {
+        return select_replay_episodes(episodes, policy, now);
+    };
+
+    // Arousal-based intensity: high arousal (>0) increases max_episodes by up to 50%.
+    let arousal_factor = 1.0 + 0.5 * pad.arousal.max(0.0);
+    let effective_max = ((policy.max_episodes as f64) * arousal_factor).round() as usize;
+
+    let adjusted_policy = DreamReplayPolicy {
+        max_episodes: effective_max,
+        ..policy.clone()
+    };
+
+    // Score candidates with emotional bias.
+    let mut candidates = score_candidates(episodes, &adjusted_policy, now);
+
+    // Negative pleasure biases toward failure episodes (multiplier on failed episodes).
+    // At pleasure = -1.0, failures get 1.5x utility; at pleasure = 0 or positive, no change.
+    let failure_bias = 1.0 + 0.5 * (-pad.pleasure).max(0.0);
+    for candidate in &mut candidates {
+        if !candidate.episode.success {
+            candidate.utility *= failure_bias;
+        }
+    }
+
+    let selected = match adjusted_policy.mode {
+        DreamReplayMode::Random => select_random(candidates, effective_max),
+        DreamReplayMode::Consequence => select_consequence(candidates, effective_max),
+        DreamReplayMode::Causal => select_causal(candidates, effective_max),
+        DreamReplayMode::Hypothetical => select_hypothetical(candidates, effective_max),
+    };
+
+    let utility_score = selected.iter().map(|c| c.utility).sum::<f64>();
+    let hypothetical_count = selected
+        .iter()
+        .filter(|c| c.episode.extra.contains_key("dream:hypothetical"))
+        .count();
+
+    DreamReplayBatch {
+        mode: adjusted_policy.mode,
+        episodes: selected.into_iter().map(|c| c.episode).collect(),
         utility_score,
         hypothetical_count,
     }
@@ -593,5 +652,90 @@ mod tests {
                 .map(|episode| episode.id.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn emotional_context_none_delegates_to_base() {
+        let episodes = vec![episode(
+            "a",
+            "task-1",
+            "haiku",
+            true,
+            None,
+            10,
+            100,
+            vec![GateVerdict::new("compile", true)],
+        )];
+        let policy = DreamReplayPolicy::default();
+        let now = Utc::now();
+        let base = select_replay_episodes(&episodes, &policy, now);
+        let with_affect = select_replay_episodes_with_affect(&episodes, &policy, now, None);
+        assert_eq!(base.episodes.len(), with_affect.episodes.len());
+    }
+
+    #[test]
+    fn high_arousal_increases_effective_max() {
+        let episodes: Vec<_> = (0..10)
+            .map(|i| {
+                episode(
+                    &format!("ep-{i}"),
+                    &format!("task-{i}"),
+                    "haiku",
+                    true,
+                    None,
+                    i * 5,
+                    100,
+                    vec![GateVerdict::new("compile", true)],
+                )
+            })
+            .collect();
+        let policy = DreamReplayPolicy {
+            mode: DreamReplayMode::Consequence,
+            max_episodes: 4,
+            ..DreamReplayPolicy::default()
+        };
+        let now = Utc::now();
+        let neutral = select_replay_episodes(&episodes, &policy, now);
+        let high_arousal = PadVector::new(0.0, 1.0, 0.0);
+        let biased =
+            select_replay_episodes_with_affect(&episodes, &policy, now, Some(&high_arousal));
+        assert!(biased.episodes.len() >= neutral.episodes.len());
+    }
+
+    #[test]
+    fn negative_pleasure_biases_toward_failures() {
+        let episodes = vec![
+            episode(
+                "success",
+                "task-1",
+                "haiku",
+                true,
+                None,
+                5,
+                100,
+                vec![GateVerdict::new("compile", true)],
+            ),
+            episode(
+                "failure",
+                "task-2",
+                "haiku",
+                false,
+                Some("error"),
+                5,
+                100,
+                vec![GateVerdict::new("compile", false)],
+            ),
+        ];
+        let policy = DreamReplayPolicy {
+            mode: DreamReplayMode::Consequence,
+            max_episodes: 2,
+            ..DreamReplayPolicy::default()
+        };
+        let now = Utc::now();
+        let negative_pad = PadVector::new(-1.0, 0.0, 0.0);
+        let biased =
+            select_replay_episodes_with_affect(&episodes, &policy, now, Some(&negative_pad));
+        assert!(!biased.episodes.is_empty());
+        assert!(!biased.episodes[0].success);
     }
 }

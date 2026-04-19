@@ -43,6 +43,7 @@ pub mod imagination;
 pub mod phase2;
 pub mod replay;
 pub mod runner;
+pub mod staging;
 pub mod threat;
 
 pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
@@ -53,7 +54,11 @@ pub use imagination::{
     CausalModel, CounterfactualQuery, ImaginationMode, ImaginationOutcome, counterfactual_episode,
     imagine, synthesize_hypotheses,
 };
-pub use replay::{DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, select_replay_episodes};
+pub use replay::{
+    DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, select_replay_episodes,
+    select_replay_episodes_with_affect,
+};
+pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use runner::{
     DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine, DreamHeartbeatPolicy,
     DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner, DreamRuntimeControls,

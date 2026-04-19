@@ -39,6 +39,7 @@ pub mod health;
 pub mod interventions;
 pub mod state_machine;
 pub mod stuck_detection;
+pub mod threshold_learner;
 pub mod watchers;
 
 // Re-export core types for convenience.
@@ -59,3 +60,4 @@ pub use stuck_detection::{
     ActivityEntry, MetaCognitionAction, MetaCognitionAssessment, MetaCognitionHook, StuckDetector,
     StuckKind, StuckSignal, StuckThresholds,
 };
+pub use threshold_learner::{AdaptiveThreshold, InterventionOutcome, ThresholdLearner};

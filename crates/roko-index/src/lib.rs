@@ -21,6 +21,8 @@
 pub mod graph;
 pub mod hdc;
 pub mod parser;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 pub mod symbol;
 pub mod workspace;
 

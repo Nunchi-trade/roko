@@ -113,7 +113,7 @@ pub use error::{Result, RokoError};
 pub use hash::ContentHash;
 pub use kind::Kind;
 pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
-pub use loop_tick::{TickOutcome, loop_tick};
+pub use loop_tick::{TickConfig, TickOutcome, loop_tick, loop_tick_with_config};
 pub use metric::{ConfigHash, Headlines, TaskMetric, compute_headlines};
 pub use operating_frequency::{
     OperatingFrequency, OperatingFrequencyAffect, OperatingFrequencyScheduleContext,

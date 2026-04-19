@@ -20,5 +20,13 @@ roko-lang-rust = { path = "../roko-lang-rust" }
 roko-lang-typescript = { path = "../roko-lang-typescript" }
 tracing = { workspace = true }
 
+rusqlite = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+
+[features]
+default = []
+sqlite = ["dep:rusqlite", "dep:blake3"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }

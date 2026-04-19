@@ -10,6 +10,7 @@ use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use crate::interventions::{
     InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy, outputs_to_signals,
 };
+use crate::threshold_learner::{InterventionOutcome, ThresholdLearner};
 use crate::watchers::{
     CompileFailRepeatWatcher, ContextWindowPressureWatcher, CostOverrunWatcher, GhostTurnWatcher,
     IterationLoopWatcher, ReviewLoopWatcher, SpecDriftWatcher, StuckPatternWatcher,
@@ -19,8 +20,10 @@ use parking_lot::Mutex;
 use roko_core::{
     Body, CognitiveSignal, ConductorDecision, ConductorEvaluation, Context, Engram, Kind, Policy,
 };
+use roko_learn::provider_health::ProviderHealthTracker;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Tag key on intervention signals for the plan ID.
 pub const PLAN_ID_TAG: &str = "plan_id";
@@ -61,6 +64,10 @@ pub struct Conductor {
     circuit_breaker: CircuitBreaker,
     /// Most recent routing bias derived from the live signal stream.
     routing_bias: Mutex<RoutingBias>,
+    /// Per-provider health tracker for routing decisions (COND-09).
+    provider_health: Option<Arc<ProviderHealthTracker>>,
+    /// Adaptive threshold learner (COND-03).
+    threshold_learner: Mutex<ThresholdLearner>,
 }
 
 impl std::fmt::Debug for Conductor {
@@ -100,6 +107,8 @@ impl Conductor {
             policy: Box::new(WorstSeverityPolicy),
             circuit_breaker: CircuitBreaker::default(),
             routing_bias: Mutex::new(RoutingBias::default()),
+            provider_health: None,
+            threshold_learner: Mutex::new(ThresholdLearner::new()),
         }
     }
 
@@ -120,6 +129,8 @@ impl Conductor {
             policy: Box::new(WorstSeverityPolicy),
             circuit_breaker: CircuitBreaker::default(),
             routing_bias: Mutex::new(RoutingBias::default()),
+            provider_health: None,
+            threshold_learner: Mutex::new(ThresholdLearner::new()),
         }
     }
 
@@ -147,6 +158,33 @@ impl Conductor {
     #[must_use]
     pub fn from_circuit_breaker_state(state: CircuitBreakerState) -> Self {
         Self::new().with_circuit_breaker(CircuitBreaker::from_state(state))
+    }
+
+    /// Set a provider health tracker for routing-aware decisions (COND-09).
+    #[must_use]
+    pub fn with_provider_health(mut self, tracker: Arc<ProviderHealthTracker>) -> Self {
+        self.provider_health = Some(tracker);
+        self
+    }
+
+    /// Set a pre-loaded threshold learner (COND-03).
+    #[must_use]
+    pub fn with_threshold_learner(self, learner: ThresholdLearner) -> Self {
+        *self.threshold_learner.lock() = learner;
+        self
+    }
+
+    /// Access the threshold learner for recording outcomes or persistence.
+    pub fn with_learner<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut ThresholdLearner) -> R,
+    {
+        f(&mut self.threshold_learner.lock())
+    }
+
+    /// Record an intervention outcome for threshold learning.
+    pub fn record_intervention_outcome(&self, outcome: InterventionOutcome) {
+        self.threshold_learner.lock().record_outcome(outcome);
     }
 
     /// Return the most recently computed routing bias snapshot.
@@ -190,7 +228,20 @@ impl Conductor {
         self.update_routing_bias(stream, &watcher_outputs);
 
         // Derive cognitive signals from watcher outputs.
-        let signals = derive_cognitive_signals(&watcher_outputs);
+        let mut signals = derive_cognitive_signals(&watcher_outputs);
+
+        // COND-09: Check provider health and emit escalation signals.
+        if let Some(ref tracker) = self.provider_health {
+            if let Some(provider) = extract_provider(stream) {
+                if !tracker.is_healthy(&provider) {
+                    signals.push(CognitiveSignal::Escalate { to_tier: 2 });
+                    tracing::info!(
+                        provider = %provider,
+                        "provider unhealthy — emitting escalate signal"
+                    );
+                }
+            }
+        }
 
         // Apply escalation policy.
         let decision = self.policy.evaluate(&watcher_outputs, ctx);
@@ -208,6 +259,22 @@ impl Conductor {
 
         decision.with_signals(signals)
     }
+}
+
+/// Extract the provider name from the signal stream (most recent `provider` tag).
+fn extract_provider(stream: &[Engram]) -> Option<String> {
+    stream.iter().rev().find_map(|s| {
+        s.tag("provider").map(str::to_owned).or_else(|| {
+            s.body
+                .as_json::<serde_json::Value>()
+                .ok()
+                .and_then(|json| {
+                    json.get("provider")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+        })
+    })
 }
 
 /// Extract the plan ID from the signal stream (most recent `PlanPhase` tag).

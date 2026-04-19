@@ -41,8 +41,9 @@ pub use action::ExecutorAction;
 pub use plan_state::{GateResult, PlanState};
 pub use reorder::{priority_reorder, reorder_queue};
 pub use snapshot::{
-    CURRENT_SCHEMA_VERSION, ExecutorSnapshot, PersistedCircuitBreakerFailureRecord,
-    PersistedCircuitBreakerState, current_schema_version,
+    CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorSnapshot, PersistedCircuitBreakerFailureRecord,
+    PersistedCircuitBreakerState, SnapshotConfig, SnapshotIntegrityError, SnapshotVerifier,
+    current_schema_version,
 };
 pub use state_machine::{ExecutorEvent, PlanStateMachine, TransitionError};
 
