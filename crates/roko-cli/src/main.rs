@@ -4659,6 +4659,7 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
 
             println!("Knowledge stats for {}:", store.path().display());
             println!("  total entries: {}", stats.total_entries);
+            println!("  anti-knowledge: {}", stats.anti_knowledge_count);
             println!(
                 "  average confidence: {}",
                 stats
@@ -4671,7 +4672,21 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
                 println!("    (empty)");
             } else {
                 for (kind, count) in &stats.kind_counts {
-                    println!("    {kind:<16} {count}");
+                    println!("    {kind:<20} {count}");
+                }
+            }
+            println!("  entries by tier:");
+            if stats.tier_counts.is_empty() {
+                println!("    (empty)");
+            } else {
+                for (tier, count) in &stats.tier_counts {
+                    println!("    {tier:<20} {count}");
+                }
+            }
+            if !stats.source_counts.is_empty() {
+                println!("  entries by source:");
+                for (source, count) in &stats.source_counts {
+                    println!("    {source:<20} {count}");
                 }
             }
 

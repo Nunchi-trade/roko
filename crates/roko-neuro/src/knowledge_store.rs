@@ -36,6 +36,20 @@ const MIN_KEYWORD_OVERLAP: usize = 2;
 #[cfg(feature = "hdc")]
 const HDC_SIMILARITY_BASELINE: f64 = 0.5;
 
+/// HDC similarity threshold at which an AntiKnowledge match logs a warning.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_WARN_THRESHOLD: f64 = 0.5;
+/// HDC similarity threshold at which a new entry's confidence is discounted.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_DISCOUNT_THRESHOLD: f64 = 0.7;
+/// HDC similarity threshold at which a new entry is rejected entirely.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_REJECT_THRESHOLD: f64 = 0.9;
+/// Confidence multiplier applied when a new entry conflicts with AntiKnowledge
+/// at the discount threshold.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_DISCOUNT_FACTOR: f64 = 0.5;
+
 /// A record emitted when a newly ingested knowledge entry overlaps with
 /// an existing entry, indicating that an insight has been independently
 /// confirmed by a separate episode.
@@ -53,6 +67,20 @@ pub struct KnowledgeConfirmationRecord {
     pub confirmed_entry_id: String,
     /// ID of the new entry that confirmed the existing one.
     pub confirming_entry_id: String,
+}
+
+/// A record of a conflict detected between a newly ingested entry and an
+/// existing AntiKnowledge entry. Emitted during `ingest()` for observability.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AntiKnowledgeConflict {
+    /// ID of the new entry that conflicts with AntiKnowledge.
+    pub entry_id: String,
+    /// ID of the existing AntiKnowledge entry.
+    pub anti_knowledge_id: String,
+    /// HDC similarity score between the two entries.
+    pub similarity: f64,
+    /// Action taken: "warned", "discounted", or "rejected".
+    pub action: String,
 }
 
 const HDC_VECTOR_BYTES: usize = 1280;
@@ -84,6 +112,12 @@ pub struct KnowledgeStats {
     pub total_entries: usize,
     /// Number of entries per semantic kind.
     pub kind_counts: BTreeMap<String, usize>,
+    /// Number of entries per validation tier.
+    pub tier_counts: BTreeMap<String, usize>,
+    /// Number of entries per source label.
+    pub source_counts: BTreeMap<String, usize>,
+    /// Number of AntiKnowledge entries.
+    pub anti_knowledge_count: usize,
     /// Mean confidence across all entries.
     pub average_confidence: Option<f64>,
     /// Oldest entry in the store, if any.
@@ -118,6 +152,79 @@ pub struct KnowledgeQueryHit {
     pub total_score: f64,
     /// Individual scoring components that contributed to `total_score`.
     pub breakdown: KnowledgeQueryBreakdown,
+}
+
+/// Versioned header written as the first line of a backup JSONL file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupHeader {
+    /// Backup format version. Currently `1`.
+    pub version: u32,
+    /// When the backup was created.
+    pub created_at: DateTime<Utc>,
+    /// Number of entries in the backup.
+    pub entry_count: usize,
+    /// Path of the source knowledge store that was exported.
+    pub source_path: String,
+}
+
+/// Filter criteria for [`KnowledgeStore::export`].
+#[derive(Debug, Clone, Default)]
+pub struct ExportFilter {
+    /// Only export entries of these kinds. `None` means all kinds.
+    pub kinds: Option<Vec<KnowledgeKind>>,
+    /// Minimum confidence threshold.
+    pub min_confidence: Option<f64>,
+    /// Only export entries with at least one of these tags.
+    pub tags: Option<Vec<String>>,
+    /// Only export entries created after this timestamp.
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl ExportFilter {
+    fn matches(&self, entry: &KnowledgeEntry) -> bool {
+        if let Some(kinds) = &self.kinds {
+            if !kinds.contains(&entry.kind) {
+                return false;
+            }
+        }
+        if let Some(min) = self.min_confidence {
+            if entry.confidence < min {
+                return false;
+            }
+        }
+        if let Some(required_tags) = &self.tags {
+            if !required_tags.iter().any(|t| entry.tags.contains(t)) {
+                return false;
+            }
+        }
+        if let Some(since) = self.since {
+            if entry.created_at < since {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Options for [`KnowledgeStore::import`].
+#[derive(Debug, Clone)]
+pub struct ImportOptions {
+    /// Confidence multiplier applied to each imported entry (default 0.85).
+    pub confidence_discount: f64,
+    /// Whether to reset all imported entries to `KnowledgeTier::Transient`.
+    pub reset_tier: bool,
+    /// Label recorded in the `source` field of each imported entry.
+    pub source_label: String,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            confidence_discount: 0.85,
+            reset_tier: true,
+            source_label: "restore".to_owned(),
+        }
+    }
 }
 
 /// One similarity-ranked hit returned from the durable fingerprint query path.
@@ -216,6 +323,16 @@ impl KnowledgeStore {
         let _guard = self.write_gate.lock();
         let existing = self.read_all().unwrap_or_default();
         let entries = dedupe_entries_for_ingest(prepare_entries_for_ingest(entries), &existing);
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // NEURO-04: Check new non-AntiKnowledge entries against existing
+        // AntiKnowledge entries using HDC similarity. Entries that are
+        // near-duplicates of refuted knowledge are rejected; moderate
+        // conflicts have their confidence discounted.
+        #[cfg(feature = "hdc")]
+        let entries = check_against_anti_knowledge(entries, &existing);
         if entries.is_empty() {
             return Ok(());
         }
@@ -491,6 +608,9 @@ impl KnowledgeStore {
         let entries = self.read_all()?;
         let total_entries = entries.len();
         let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut tier_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut source_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut anti_knowledge_count = 0usize;
         let mut confidence_sum = 0.0;
         let mut oldest_entry: Option<&KnowledgeEntry> = None;
         let mut newest_entry: Option<&KnowledgeEntry> = None;
@@ -499,6 +619,26 @@ impl KnowledgeStore {
             *kind_counts
                 .entry(knowledge_kind_label(entry.kind).to_owned())
                 .or_insert(0) += 1;
+
+            let tier_label = match entry.tier {
+                KnowledgeTier::Transient => "transient",
+                KnowledgeTier::Working => "working",
+                KnowledgeTier::Consolidated => "consolidated",
+                KnowledgeTier::Persistent => "persistent",
+            };
+            *tier_counts.entry(tier_label.to_owned()).or_insert(0) += 1;
+
+            if let Some(source) = entry.source.as_deref() {
+                let trimmed = source.trim();
+                if !trimmed.is_empty() {
+                    *source_counts.entry(trimmed.to_owned()).or_insert(0) += 1;
+                }
+            }
+
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                anti_knowledge_count += 1;
+            }
+
             confidence_sum += entry.confidence;
 
             if oldest_entry
@@ -524,10 +664,129 @@ impl KnowledgeStore {
         Ok(KnowledgeStats {
             total_entries,
             kind_counts,
+            tier_counts,
+            source_counts,
+            anti_knowledge_count,
             average_confidence,
             oldest_entry: oldest_entry.cloned(),
             newest_entry: newest_entry.cloned(),
         })
+    }
+
+    /// Export the knowledge store to a JSONL file with versioned backup header.
+    ///
+    /// Entries can be filtered by kind, minimum confidence, tags, and date.
+    /// Returns the number of entries exported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or the output cannot be
+    /// written.
+    pub fn export(
+        &self,
+        output: &Path,
+        filter: &ExportFilter,
+    ) -> Result<usize> {
+        let entries = self.read_all()?;
+        let filtered: Vec<_> = entries
+            .into_iter()
+            .filter(|e| filter.matches(e))
+            .collect();
+        let count = filtered.len();
+
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).context("create export directory")?;
+        }
+
+        let header = BackupHeader {
+            version: 1,
+            created_at: Utc::now(),
+            entry_count: count,
+            source_path: self.path.display().to_string(),
+        };
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(output)
+            .with_context(|| format!("create export file at {}", output.display()))?;
+
+        let header_line = serde_json::to_string(&header).context("serialize backup header")?;
+        writeln!(file, "{header_line}").context("write backup header")?;
+
+        for entry in &filtered {
+            let line = serde_json::to_string(entry).context("serialize knowledge entry")?;
+            writeln!(file, "{line}").context("write knowledge entry")?;
+        }
+
+        file.flush().context("flush export")?;
+        file.sync_all().context("sync export")?;
+
+        Ok(count)
+    }
+
+    /// Import knowledge entries from a versioned JSONL backup file.
+    ///
+    /// Restored entries are reset to [`KnowledgeTier::Transient`] and their
+    /// confidence is multiplied by the given discount factor (default 0.85)
+    /// per the backup/restore spec. The source label is recorded on each
+    /// imported entry.
+    ///
+    /// Returns the number of entries imported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, has an unsupported
+    /// version, or entries cannot be ingested.
+    pub fn import(
+        &self,
+        input: &Path,
+        options: &ImportOptions,
+    ) -> Result<usize> {
+        let file = File::open(input)
+            .with_context(|| format!("open import file at {}", input.display()))?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+
+        // Read and validate the header line.
+        let header_line = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("import file is empty"))?
+            .context("read import header")?;
+
+        let header: BackupHeader = serde_json::from_str(&header_line)
+            .context("parse backup header (is this a versioned backup file?)")?;
+
+        if header.version > 1 {
+            anyhow::bail!(
+                "unsupported backup version {} (this build supports version 1)",
+                header.version
+            );
+        }
+
+        let mut entries = Vec::new();
+        for line in lines {
+            let line = line.context("read import line")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(mut entry) = serde_json::from_str::<KnowledgeEntry>(&line) {
+                if options.reset_tier {
+                    entry.tier = KnowledgeTier::Transient;
+                }
+                entry.confidence *= options.confidence_discount;
+                entry.source = Some(options.source_label.clone());
+                entries.push(entry);
+            }
+        }
+
+        let count = entries.len();
+        if !entries.is_empty() {
+            self.ingest(entries)?;
+        }
+
+        Ok(count)
     }
 
     /// Decay confidence for old entries using their configured half-life.
@@ -1248,6 +1507,85 @@ fn detect_confirmations(
     }
 
     confirmations
+}
+
+/// Check new non-AntiKnowledge entries against existing AntiKnowledge entries
+/// using HDC similarity. Returns the filtered/modified list of entries:
+/// - similarity > 0.9: entry rejected entirely
+/// - similarity > 0.7: entry confidence discounted by 0.5x
+/// - similarity > 0.5: warning logged
+#[cfg(feature = "hdc")]
+fn check_against_anti_knowledge(
+    entries: Vec<KnowledgeEntry>,
+    existing: &[KnowledgeEntry],
+) -> Vec<KnowledgeEntry> {
+    let anti_entries: Vec<_> = existing
+        .iter()
+        .filter(|e| e.kind == KnowledgeKind::AntiKnowledge)
+        .collect();
+
+    if anti_entries.is_empty() {
+        return entries;
+    }
+
+    // Pre-encode all AntiKnowledge entries.
+    let encoder = KnowledgeHdcEncoder;
+    let anti_vectors: Vec<_> = anti_entries
+        .iter()
+        .map(|e| (e, fingerprint_entry(e)))
+        .collect();
+
+    let mut result = Vec::with_capacity(entries.len());
+
+    for mut entry in entries {
+        if entry.kind == KnowledgeKind::AntiKnowledge {
+            result.push(entry);
+            continue;
+        }
+
+        let entry_vec = encoder.encode_entry(&entry);
+        let mut worst_similarity = 0.0_f64;
+        let mut worst_anti_id = String::new();
+
+        for (anti_entry, anti_vec) in &anti_vectors {
+            let sim = entry_vec.similarity(anti_vec) as f64;
+            if sim > worst_similarity {
+                worst_similarity = sim;
+                worst_anti_id = anti_entry.id.clone();
+            }
+        }
+
+        if worst_similarity > ANTI_KNOWLEDGE_REJECT_THRESHOLD {
+            tracing::warn!(
+                entry_id = %entry.id,
+                anti_knowledge_id = %worst_anti_id,
+                similarity = worst_similarity,
+                "rejecting entry: near-duplicate of refuted AntiKnowledge"
+            );
+            continue; // reject
+        }
+
+        if worst_similarity > ANTI_KNOWLEDGE_DISCOUNT_THRESHOLD {
+            tracing::warn!(
+                entry_id = %entry.id,
+                anti_knowledge_id = %worst_anti_id,
+                similarity = worst_similarity,
+                "discounting entry confidence: conflicts with AntiKnowledge"
+            );
+            entry.confidence *= ANTI_KNOWLEDGE_DISCOUNT_FACTOR;
+        } else if worst_similarity > ANTI_KNOWLEDGE_WARN_THRESHOLD {
+            tracing::warn!(
+                entry_id = %entry.id,
+                anti_knowledge_id = %worst_anti_id,
+                similarity = worst_similarity,
+                "potential conflict with AntiKnowledge"
+            );
+        }
+
+        result.push(entry);
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -2515,5 +2853,305 @@ mod tests {
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].tier, KnowledgeTier::Persistent);
+    }
+
+    #[test]
+    fn stats_includes_tier_and_source_counts() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        // Use low confidence so normalize_entry_tier does not auto-promote.
+        let mut e1 = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "something useful",
+            &["rust"],
+            0.5,
+            &["ep-a"],
+            now,
+        );
+        e1.tier = KnowledgeTier::Working;
+        e1.source = Some("local".to_owned());
+
+        let mut e2 = entry(
+            KnowledgeKind::AntiKnowledge,
+            "k2",
+            "do not retry on 5xx",
+            &["http"],
+            0.5,
+            &["ep-b"],
+            now,
+        );
+        e2.tier = KnowledgeTier::Working;
+
+        store.add(e1).expect("add");
+        store.add(e2).expect("add anti");
+
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.total_entries, 2);
+        assert_eq!(stats.anti_knowledge_count, 1);
+        assert_eq!(stats.tier_counts.get("working"), Some(&2));
+        assert_eq!(stats.source_counts.get("local"), Some(&1));
+    }
+
+    #[test]
+    fn export_import_roundtrip_with_confidence_discount() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "important heuristic",
+            &["rust"],
+            0.5,
+            &["ep-a"],
+            now,
+        );
+        e.tier = KnowledgeTier::Consolidated;
+        store.add(e).expect("add");
+
+        // Export.
+        let backup_path = tmp.path().join("backup.jsonl");
+        let filter = ExportFilter::default();
+        let count = store.export(&backup_path, &filter).expect("export");
+        assert_eq!(count, 1);
+        assert!(backup_path.exists());
+
+        // Import into a fresh store.
+        let store2 = KnowledgeStore::new(tmp.path().join("neuro2").join("knowledge.jsonl"));
+        let options = ImportOptions {
+            confidence_discount: 0.85,
+            reset_tier: true,
+            source_label: "backup-test".to_owned(),
+        };
+        let imported = store2.import(&backup_path, &options).expect("import");
+        assert_eq!(imported, 1);
+
+        let all = store2.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        // Confidence should be discounted: 0.5 * 0.85 = 0.425.
+        assert!((all[0].confidence - 0.425).abs() < 0.01);
+        // Tier should be reset to Transient (low confidence won't trigger promotion).
+        assert_eq!(all[0].tier, KnowledgeTier::Transient);
+        // Source label should be recorded.
+        assert_eq!(all[0].source.as_deref(), Some("backup-test"));
+    }
+
+    #[test]
+    fn export_filter_by_kind_and_confidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "high confidence insight",
+                &["rust"],
+                0.9,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add");
+        store
+            .add(entry(
+                KnowledgeKind::Warning,
+                "k2",
+                "low confidence warning",
+                &["rust"],
+                0.2,
+                &["ep-b"],
+                now,
+            ))
+            .expect("add");
+
+        let backup_path = tmp.path().join("filtered.jsonl");
+        let filter = ExportFilter {
+            kinds: Some(vec![KnowledgeKind::Insight]),
+            min_confidence: Some(0.5),
+            ..Default::default()
+        };
+        let count = store.export(&backup_path, &filter).expect("export");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn import_rejects_unsupported_version() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+
+        let bad_backup = tmp.path().join("bad.jsonl");
+        let header = BackupHeader {
+            version: 99,
+            created_at: Utc::now(),
+            entry_count: 0,
+            source_path: "test".to_owned(),
+        };
+        std::fs::write(
+            &bad_backup,
+            serde_json::to_string(&header).unwrap() + "\n",
+        )
+        .unwrap();
+
+        let result = store.import(&bad_backup, &ImportOptions::default());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported backup version")
+        );
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn anti_knowledge_check_rejects_near_duplicate() {
+        // When a new entry has very high HDC similarity to an existing
+        // AntiKnowledge entry, it should be filtered out.
+        let anti = KnowledgeEntry {
+            id: "anti-1".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff".to_owned(),
+            confidence: 0.9,
+            confidence_weight: 1.0,
+            refuted_insight_id: Some("old-insight".to_owned()),
+            refutation_evidence: Some("caused cascading failures".to_owned()),
+            source_episodes: vec!["ep-a".to_owned()],
+            tags: vec!["http".to_owned(), "retry".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+        };
+
+        // A near-identical entry that should be rejected.
+        let duplicate = KnowledgeEntry {
+            id: "new-1".to_owned(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff".to_owned(),
+            confidence: 0.8,
+            confidence_weight: 1.0,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-b".to_owned()],
+            tags: vec!["http".to_owned(), "retry".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Transient,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+        };
+
+        // An unrelated entry that should pass through.
+        let unrelated = KnowledgeEntry {
+            id: "new-2".to_owned(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "PostgreSQL requires regular VACUUM for performance".to_owned(),
+            confidence: 0.9,
+            confidence_weight: 1.0,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-c".to_owned()],
+            tags: vec!["postgres".to_owned(), "maintenance".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Transient,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+        };
+
+        let existing = vec![anti];
+        let new_entries = prepare_entries_for_ingest(vec![duplicate, unrelated]);
+
+        let result = check_against_anti_knowledge(new_entries, &existing);
+        // The near-duplicate should be rejected, leaving only the unrelated entry.
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "new-2");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn anti_knowledge_check_passes_antiknowledge_entries_through() {
+        // AntiKnowledge entries themselves should not be blocked by existing
+        // AntiKnowledge.
+        let existing_anti = KnowledgeEntry {
+            id: "anti-1".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff".to_owned(),
+            confidence: 0.9,
+            confidence_weight: 1.0,
+            refuted_insight_id: Some("old".to_owned()),
+            refutation_evidence: None,
+            source_episodes: vec!["ep-a".to_owned()],
+            tags: vec!["http".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+        };
+
+        let new_anti = KnowledgeEntry {
+            id: "anti-2".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff -- updated".to_owned(),
+            confidence: 0.95,
+            confidence_weight: 1.0,
+            refuted_insight_id: Some("other".to_owned()),
+            refutation_evidence: None,
+            source_episodes: vec!["ep-b".to_owned()],
+            tags: vec!["http".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+        };
+
+        let existing = vec![existing_anti];
+        let new_entries = prepare_entries_for_ingest(vec![new_anti]);
+        let result = check_against_anti_knowledge(new_entries, &existing);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "anti-2");
     }
 }

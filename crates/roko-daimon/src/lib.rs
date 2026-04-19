@@ -64,6 +64,135 @@ fn default_somatic_tree() -> SomaticTree {
     KdTree::new()
 }
 
+/// Three-layer temporal affect model (Gebhard 2005).
+///
+/// Each layer has a different time constant:
+/// - Emotion: fast (default tau=0.1), reacts immediately to events
+/// - Mood: medium (default tau=0.5), running average of recent emotions
+/// - Temperament: slow (default tau=0.9), stable baseline personality
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlmaLayers {
+    /// Fast emotional response. Updated every tick.
+    pub emotion: PadVector,
+    /// Medium-term mood. Updated every `mood_interval` ticks.
+    pub mood: PadVector,
+    /// Stable personality baseline. Updated every `temperament_interval` ticks.
+    pub temperament: PadVector,
+    /// Emotion layer decay factor per tick (default 0.1).
+    #[serde(default = "AlmaLayers::default_tau_emotion")]
+    pub tau_emotion: f64,
+    /// Mood layer EMA factor (default 0.5).
+    #[serde(default = "AlmaLayers::default_tau_mood")]
+    pub tau_mood: f64,
+    /// Temperament layer EMA factor (default 0.9).
+    #[serde(default = "AlmaLayers::default_tau_temperament")]
+    pub tau_temperament: f64,
+    /// Mood sampling interval in ticks (default 10).
+    #[serde(default = "AlmaLayers::default_mood_interval")]
+    pub mood_interval: u64,
+    /// Temperament sampling interval in ticks (default 100).
+    #[serde(default = "AlmaLayers::default_temperament_interval")]
+    pub temperament_interval: u64,
+}
+
+impl Default for AlmaLayers {
+    fn default() -> Self {
+        Self {
+            emotion: PadVector::neutral(),
+            mood: PadVector::neutral(),
+            temperament: PadVector::neutral(),
+            tau_emotion: Self::default_tau_emotion(),
+            tau_mood: Self::default_tau_mood(),
+            tau_temperament: Self::default_tau_temperament(),
+            mood_interval: Self::default_mood_interval(),
+            temperament_interval: Self::default_temperament_interval(),
+        }
+    }
+}
+
+impl AlmaLayers {
+    fn default_tau_emotion() -> f64 {
+        0.1
+    }
+    fn default_tau_mood() -> f64 {
+        0.5
+    }
+    fn default_tau_temperament() -> f64 {
+        0.9
+    }
+    fn default_mood_interval() -> u64 {
+        10
+    }
+    fn default_temperament_interval() -> u64 {
+        100
+    }
+
+    /// Apply a stimulus to the emotion layer via EMA:
+    /// `emotion = (1 - tau_e) * emotion + tau_e * stimulus`
+    pub fn update_emotion(&mut self, stimulus: &PadVector) {
+        let tau = self.tau_emotion;
+        let retain = 1.0 - tau;
+        self.emotion = PadVector::new(
+            retain * self.emotion.pleasure + tau * stimulus.pleasure,
+            retain * self.emotion.arousal + tau * stimulus.arousal,
+            retain * self.emotion.dominance + tau * stimulus.dominance,
+        )
+        .clamped();
+    }
+
+    /// Update mood layer as EMA of emotion:
+    /// `mood = (1 - tau_m) * mood + tau_m * emotion`
+    pub fn update_mood(&mut self) {
+        let tau = self.tau_mood;
+        let retain = 1.0 - tau;
+        self.mood = PadVector::new(
+            retain * self.mood.pleasure + tau * self.emotion.pleasure,
+            retain * self.mood.arousal + tau * self.emotion.arousal,
+            retain * self.mood.dominance + tau * self.emotion.dominance,
+        )
+        .clamped();
+    }
+
+    /// Update temperament layer as EMA of mood:
+    /// `temperament = (1 - tau_t) * temperament + tau_t * mood`
+    pub fn update_temperament(&mut self) {
+        let tau = self.tau_temperament;
+        let retain = 1.0 - tau;
+        self.temperament = PadVector::new(
+            retain * self.temperament.pleasure + tau * self.mood.pleasure,
+            retain * self.temperament.arousal + tau * self.mood.arousal,
+            retain * self.temperament.dominance + tau * self.mood.dominance,
+        )
+        .clamped();
+    }
+
+    /// Compute the effective affect as a weighted blend:
+    /// 0.5 * emotion + 0.3 * mood + 0.2 * temperament
+    #[must_use]
+    pub fn effective_affect(&self) -> PadVector {
+        PadVector::new(
+            0.5 * self.emotion.pleasure
+                + 0.3 * self.mood.pleasure
+                + 0.2 * self.temperament.pleasure,
+            0.5 * self.emotion.arousal + 0.3 * self.mood.arousal + 0.2 * self.temperament.arousal,
+            0.5 * self.emotion.dominance
+                + 0.3 * self.mood.dominance
+                + 0.2 * self.temperament.dominance,
+        )
+        .clamped()
+    }
+
+    /// Process a tick, updating mood and temperament layers at their intervals.
+    pub fn tick(&mut self, tick_count: u64) {
+        if tick_count > 0 && tick_count % self.mood_interval == 0 {
+            self.update_mood();
+        }
+        if tick_count > 0 && tick_count % self.temperament_interval == 0 {
+            self.update_temperament();
+        }
+    }
+}
+
 /// Current single-layer affect snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffectState {
@@ -76,6 +205,12 @@ pub struct AffectState {
     pub behavioral_state: BehavioralState,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Three-layer ALMA temporal model (Gebhard 2005).
+    #[serde(default)]
+    pub alma: AlmaLayers,
+    /// Total appraisal ticks since creation.
+    #[serde(default)]
+    pub tick_count: u64,
 }
 
 impl Default for AffectState {
@@ -85,6 +220,8 @@ impl Default for AffectState {
             confidence: 0.5,
             behavioral_state: BehavioralState::Engaged,
             updated_at: Utc::now(),
+            alma: AlmaLayers::default(),
+            tick_count: 0,
         }
     }
 }
@@ -124,8 +261,21 @@ impl AffectState {
         confidence: f64,
         now: DateTime<Utc>,
     ) {
-        self.pad.apply_delta(pleasure, arousal, dominance);
+        // Apply deltas to the emotion layer (fast, reactive).
+        let stimulus = PadVector::new(
+            self.alma.emotion.pleasure + pleasure,
+            self.alma.emotion.arousal + arousal,
+            self.alma.emotion.dominance + dominance,
+        )
+        .clamped();
+        self.alma.update_emotion(&stimulus);
+
         self.confidence = (self.confidence + confidence).clamp(0.0, 1.0);
+        self.tick_count += 1;
+        self.alma.tick(self.tick_count);
+
+        // Effective PAD = weighted blend of all three ALMA layers.
+        self.pad = self.alma.effective_affect();
         self.refresh_behavioral_state();
         self.updated_at = now;
     }
@@ -136,13 +286,12 @@ impl AffectState {
 
     /// Build an emotional annotation from the current affect state.
     ///
-    /// The shipping runtime uses the current PAD state for both the immediate
-    /// signal and the `mood_snapshot`; deeper mood/personality layers are not
-    /// modeled here.
+    /// The `mood_snapshot` is taken from the ALMA mood layer, providing
+    /// a slower-moving baseline separate from the immediate emotional PAD.
     #[must_use]
     pub fn emotional_tag(&self, trigger: impl Into<String>) -> EmotionalTag {
         let normalized_intensity = (self.pad.magnitude() / 3.0_f64.sqrt()).clamp(0.0, 1.0) as f32;
-        EmotionalTag::new(self.pad, normalized_intensity, trigger, self.pad)
+        EmotionalTag::new(self.pad, normalized_intensity, trigger, self.alma.mood)
     }
 }
 
@@ -1503,6 +1652,9 @@ pub struct DaimonState {
     /// Borrowed peer affect awaiting accelerated decay.
     #[serde(default)]
     pub borrowed_affect: Vec<BorrowedAffect>,
+    /// Behavioral state tracker with hysteresis and minimum dwell time (DAIM-02).
+    #[serde(default)]
+    pub behavioral_tracker: BehavioralStateTracker,
     /// Optional persistence path for best-effort autosaves.
     #[serde(skip, default)]
     persistence_path: Option<PathBuf>,
@@ -1528,6 +1680,7 @@ impl DaimonState {
             error_patterns: ErrorPatternTracker::default(),
             fatigue_detector: FatigueDetector::default(),
             borrowed_affect: Vec::new(),
+            behavioral_tracker: BehavioralStateTracker::default(),
             persistence_path: None,
         }
     }
@@ -1678,6 +1831,8 @@ impl DaimonState {
     fn rebuild_indexes(&mut self) {
         self.somatic_landscape.rebuild_index();
         self.state.refresh_behavioral_state();
+        // Sync tracker with current state on reload.
+        self.behavioral_tracker.current_state = self.state.behavioral_state;
     }
 }
 
@@ -1776,13 +1931,22 @@ impl AffectEngine for DaimonState {
             }
         }
 
+        // DAIM-02: Use hysteresis tracker instead of memoryless classification.
+        // The tracker enforces minimum dwell time and split entry/exit thresholds,
+        // preventing rapid oscillation between behavioral states.
+        let stable = self
+            .behavioral_tracker
+            .update(&self.state, self.state.tick_count);
+        self.state.behavioral_state = stable;
+
         self.autosave();
         self.state.pad
     }
 
     fn query(&self) -> AffectState {
         let mut state = self.state.clone();
-        state.refresh_behavioral_state();
+        // Use the tracker's current stable state instead of memoryless classification.
+        state.behavioral_state = self.behavioral_tracker.current_state;
         state
     }
 
@@ -2199,13 +2363,14 @@ mod tests {
             rung: 2,
         });
 
+        // ALMA blends emotion with neutral mood/temperament, so effective PAD
+        // is 50% of the emotion layer delta.
         assert!(pad.pleasure < 0.0);
         assert!(pad.arousal > 0.0);
         assert!(pad.dominance < 0.0);
-        assert!(matches!(
-            state.query().behavioral_state,
-            BehavioralState::Exploring | BehavioralState::Struggling
-        ));
+        // With ALMA + hysteresis tracker (min_dwell_ticks=10), a single event
+        // won't transition away from Engaged.
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
         assert!(path.exists());
 
         let reloaded = DaimonState::load_or_new(&path);
@@ -2218,15 +2383,17 @@ mod tests {
 
     #[test]
     fn modulation_escalates_on_negative_state() {
+        // With ALMA + hysteresis, we need enough failures to (1) accumulate
+        // negative emotion across ALMA layers and (2) exceed the tracker's
+        // min_dwell_ticks. Set min_dwell_ticks=0 to test modulation directly.
         let mut state = DaimonState::new();
-        let _ = state.appraise(AffectEvent::TaskOutcome {
-            task_id: "task-a".to_string(),
-            succeeded: false,
-        });
-        let _ = state.appraise(AffectEvent::TaskOutcome {
-            task_id: "task-a".to_string(),
-            succeeded: false,
-        });
+        state.behavioral_tracker.min_dwell_ticks = 0;
+        for _ in 0..8 {
+            let _ = state.appraise(AffectEvent::TaskOutcome {
+                task_id: "task-a".to_string(),
+                succeeded: false,
+            });
+        }
 
         let mut params = DispatchParams::new("claude-haiku-4-5", 20);
         state.modulate(&mut params);
@@ -2281,7 +2448,9 @@ mod tests {
         assert_eq!(tag.trigger, "task_outcome");
         assert!(tag.intensity > 0.0);
         assert_eq!(tag.pad, state.query().pad);
-        assert_eq!(tag.mood_snapshot, tag.pad);
+        // mood_snapshot comes from the ALMA mood layer, which is slower-moving
+        // than the effective PAD. After only 1 tick it stays near neutral.
+        assert_eq!(tag.mood_snapshot, state.state.alma.mood);
     }
 
     #[test]
@@ -2292,6 +2461,8 @@ mod tests {
             confidence: 0.9,
             behavioral_state: BehavioralState::Focused,
             updated_at,
+            alma: AlmaLayers::default(),
+            tick_count: 0,
         };
         let now = Utc::now();
 
@@ -2724,5 +2895,171 @@ mod tests {
         assert_eq!(custom.scope, baseline.scope);
         assert_eq!(custom.reversibility, baseline.reversibility);
         assert_eq!(custom.dependency_depth, baseline.dependency_depth);
+    }
+
+    // --- DAIM-08: ALMA three-layer temporal model tests ---
+
+    #[test]
+    fn alma_emotion_layer_responds_to_stimulus() {
+        let mut alma = AlmaLayers::default();
+        let stimulus = PadVector::new(0.8, -0.4, 0.6);
+        alma.update_emotion(&stimulus);
+
+        // tau_emotion=0.1, so emotion = 0.9*0.0 + 0.1*stimulus
+        assert!((alma.emotion.pleasure - 0.08).abs() < 1e-10);
+        assert!((alma.emotion.arousal - (-0.04)).abs() < 1e-10);
+        assert!((alma.emotion.dominance - 0.06).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_mood_layer_tracks_emotion_via_ema() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(0.6, -0.3, 0.4);
+        alma.update_mood();
+
+        // tau_mood=0.5, so mood = 0.5*0.0 + 0.5*emotion
+        assert!((alma.mood.pleasure - 0.3).abs() < 1e-10);
+        assert!((alma.mood.arousal - (-0.15)).abs() < 1e-10);
+        assert!((alma.mood.dominance - 0.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_temperament_evolves_slowly() {
+        let mut alma = AlmaLayers::default();
+        alma.mood = PadVector::new(0.5, -0.2, 0.3);
+        alma.update_temperament();
+
+        // tau_temperament=0.9, so temperament = 0.1*0.0 + 0.9*mood
+        assert!((alma.temperament.pleasure - 0.45).abs() < 1e-10);
+        assert!((alma.temperament.arousal - (-0.18)).abs() < 1e-10);
+        assert!((alma.temperament.dominance - 0.27).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_effective_affect_blends_all_layers() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(1.0, 0.0, 0.0);
+        alma.mood = PadVector::new(0.0, 1.0, 0.0);
+        alma.temperament = PadVector::new(0.0, 0.0, 1.0);
+
+        let effective = alma.effective_affect();
+
+        // 0.5*emotion + 0.3*mood + 0.2*temperament
+        assert!((effective.pleasure - 0.5).abs() < 1e-10);
+        assert!((effective.arousal - 0.3).abs() < 1e-10);
+        assert!((effective.dominance - 0.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_tick_updates_mood_at_interval() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(0.8, 0.0, 0.0);
+
+        // Mood should not update before interval.
+        alma.tick(5);
+        assert_eq!(alma.mood, PadVector::neutral());
+
+        // Mood updates at tick 10 (default mood_interval=10).
+        alma.tick(10);
+        assert!(alma.mood.pleasure > 0.0);
+    }
+
+    #[test]
+    fn alma_tick_updates_temperament_at_interval() {
+        let mut alma = AlmaLayers::default();
+        alma.mood = PadVector::new(0.5, 0.0, 0.0);
+
+        // Temperament should not update before interval.
+        alma.tick(50);
+        assert_eq!(alma.temperament, PadVector::neutral());
+
+        // Temperament updates at tick 100 (default temperament_interval=100).
+        alma.tick(100);
+        assert!(alma.temperament.pleasure > 0.0);
+    }
+
+    #[test]
+    fn alma_layers_serialize_and_deserialize() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(0.3, -0.1, 0.2);
+        alma.mood = PadVector::new(0.1, 0.0, 0.1);
+
+        let json = serde_json::to_string(&alma).unwrap();
+        let deserialized: AlmaLayers = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(alma, deserialized);
+    }
+
+    #[test]
+    fn alma_backward_compat_missing_fields_defaults() {
+        // Old serialized state without ALMA fields should deserialize with defaults.
+        let json = r#"{"pad":{"pleasure":0.1,"arousal":-0.1,"dominance":0.2},"confidence":0.6,"behavioral_state":"engaged","updated_at":"2025-01-01T00:00:00Z"}"#;
+        let state: AffectState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.alma, AlmaLayers::default());
+        assert_eq!(state.tick_count, 0);
+    }
+
+    // --- DAIM-02: Mood sampling hysteresis tests ---
+
+    #[test]
+    fn hysteresis_prevents_rapid_oscillation() {
+        // Without hysteresis, a single bad event could flip Engaged -> Struggling
+        // and back. With the tracker (min_dwell_ticks=10), rapid flipping is dampened.
+        let mut state = DaimonState::new();
+
+        // Single failure should NOT transition from Engaged.
+        let _ = state.appraise(AffectEvent::GateResult {
+            plan_id: "plan-a".to_string(),
+            task_id: "task-a".to_string(),
+            passed: false,
+            rung: 3,
+        });
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
+
+        // Immediate success should also NOT flip away from Engaged.
+        let _ = state.appraise(AffectEvent::GateResult {
+            plan_id: "plan-a".to_string(),
+            task_id: "task-a".to_string(),
+            passed: true,
+            rung: 3,
+        });
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
+    }
+
+    #[test]
+    fn hysteresis_allows_transition_after_dwell() {
+        let mut state = DaimonState::new();
+        // Set min_dwell_ticks=0 so transition can happen immediately if the
+        // hysteresis thresholds are met.
+        state.behavioral_tracker.min_dwell_ticks = 0;
+
+        // Multiple failures to push into Struggling territory.
+        for _ in 0..8 {
+            let _ = state.appraise(AffectEvent::TaskOutcome {
+                task_id: "t".to_string(),
+                succeeded: false,
+            });
+        }
+
+        assert_eq!(state.query().behavioral_state, BehavioralState::Struggling);
+    }
+
+    #[test]
+    fn behavioral_tracker_persists_across_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+
+        let mut state = DaimonState::load_or_new(&path);
+        state.behavioral_tracker.min_dwell_ticks = 0;
+        for _ in 0..8 {
+            let _ = state.appraise(AffectEvent::TaskOutcome {
+                task_id: "t".to_string(),
+                succeeded: false,
+            });
+        }
+        let before = state.behavioral_tracker.current_state;
+
+        let reloaded = DaimonState::load_or_new(&path);
+        assert_eq!(reloaded.behavioral_tracker.current_state, before);
     }
 }

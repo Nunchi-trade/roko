@@ -104,7 +104,7 @@ pub use chat_types::{
     ChatMessage, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
     ResponseMetadata, SessionState, ToolCallFunction, ToolCallMessage, Usage,
 };
-pub use conductor::ConductorDecision;
+pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use context::Context;
 pub use datum::Datum;
 pub use decay::Decay;

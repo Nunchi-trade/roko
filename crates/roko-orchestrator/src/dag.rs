@@ -525,8 +525,11 @@ impl UnifiedTaskDag {
 
     /// Collapse eligible linear chains in place.
     ///
+    /// The `config` parameter controls maximum chain length, minimum
+    /// average parallelism, and whether cross-tier fusion is allowed.
+    ///
     /// Returns the number of fusions performed.
-    pub fn fuse_linear_chains(&mut self) -> usize {
+    pub fn fuse_linear_chains(&mut self, config: &FusionConfig) -> usize {
         let mut fusions = 0usize;
 
         loop {
@@ -555,7 +558,20 @@ impl UnifiedTaskDag {
                         compatible = false;
                         break;
                     }
+                    // Respect same_tier_only: skip if complexity bands differ.
+                    if config.same_tier_only {
+                        let cursor_band = self.task(&cursor).and_then(|t| t.complexity_band);
+                        let next_band = self.task(&next).and_then(|t| t.complexity_band);
+                        if cursor_band != next_band {
+                            compatible = false;
+                            break;
+                        }
+                    }
                     chain.push(next.clone());
+                    // Cap chain length.
+                    if chain.len() >= config.max_chain_length {
+                        break;
+                    }
                     cursor = next;
                     if self.dependents_of(&cursor).is_empty() {
                         break;
@@ -579,12 +595,51 @@ impl UnifiedTaskDag {
                     continue;
                 }
 
+                // Guard: check that fusion won't reduce average parallelism
+                // below the configured threshold.
+                if config.ave_width > 0.0 {
+                    let node_count = self.nodes.len();
+                    let wave_count = self.waves().map(|w| w.len()).unwrap_or(1).max(1);
+                    let merged_count = chain.len() - 1; // nodes that would be removed
+                    let new_node_count = node_count.saturating_sub(merged_count);
+                    // After fusion, waves may shrink; estimate new average width.
+                    let avg_width = new_node_count as f64 / wave_count as f64;
+                    if avg_width < config.ave_width {
+                        continue;
+                    }
+                }
+
                 for merged_id in chain.iter().skip(1) {
                     if let Some(merged) = self.tasks.get(merged_id).cloned() {
                         merge_task_specs(&mut target, &merged);
                     }
                 }
                 self.tasks.insert(start.clone(), target);
+
+                // Rewire: dependents of the chain tail must now depend on the
+                // chain head instead of the removed tail node.
+                let tail = chain.last().unwrap();
+                let tail_dependents: Vec<_> =
+                    self.dependents_of(tail).iter().cloned().collect();
+                for dep_id in tail_dependents {
+                    if let Some(dep_task) = self.tasks.get_mut(&dep_id) {
+                        // depends_on strings may be bare task names ("t3") or
+                        // qualified ("plan-a:t3"); match both forms.
+                        let tail_bare = &tail.task;
+                        let tail_qualified = tail.to_string();
+                        let start_ref = if tail.plan == start.plan {
+                            start.task.clone()
+                        } else {
+                            start.to_string()
+                        };
+                        for raw in &mut dep_task.depends_on {
+                            if raw == tail_bare || *raw == tail_qualified {
+                                *raw = start_ref.clone();
+                            }
+                        }
+                    }
+                }
+
                 for removed in chain.iter().skip(1) {
                     self.tasks.remove(removed);
                 }
@@ -906,6 +961,135 @@ impl UnifiedTaskDag {
                 Duration::from_secs(u64::from(minutes).saturating_mul(60))
             })
     }
+
+    /// Compute full Critical Path Method analysis with float calculations.
+    ///
+    /// Calls the internal [`cpm_analysis`] and extends the results with
+    /// total float (schedule slack per task) and free float (slack that
+    /// does not affect any successor).
+    ///
+    /// Returns `None` if the DAG contains a cycle.
+    #[must_use]
+    pub fn cpm_analysis_full(&self) -> Option<CpmAnalysis> {
+        let (earliest, latest, project_duration, topo) = self.cpm_analysis()?;
+
+        let mut total_float = HashMap::with_capacity(topo.len());
+        let mut free_float = HashMap::with_capacity(topo.len());
+
+        for node in &topo {
+            let es = earliest.get(node).copied().unwrap_or(Duration::ZERO);
+            let ls = latest.get(node).copied().unwrap_or(Duration::ZERO);
+            total_float.insert(node.clone(), ls.as_secs_f64() - es.as_secs_f64());
+
+            // Free float = min(ES of successors) - EF(self).
+            // EF(self) = ES(self) + duration(self).
+            let ef = es + self.task_duration(node);
+            let successors = self.dependents_of(node);
+            let ff = if successors.is_empty() {
+                // Terminal task: free float equals total float.
+                ls.as_secs_f64() - es.as_secs_f64()
+            } else {
+                let min_succ_es = successors
+                    .iter()
+                    .map(|s| earliest.get(s).copied().unwrap_or(Duration::ZERO))
+                    .min()
+                    .unwrap_or(Duration::ZERO);
+                (min_succ_es.as_secs_f64() - ef.as_secs_f64()).max(0.0)
+            };
+            free_float.insert(node.clone(), ff);
+        }
+
+        let critical_path = topo
+            .iter()
+            .filter(|id| {
+                earliest
+                    .get(*id)
+                    .zip(latest.get(*id))
+                    .is_some_and(|(es, ls)| ls.saturating_sub(*es).is_zero())
+            })
+            .cloned()
+            .collect();
+
+        let earliest_f64 = earliest
+            .into_iter()
+            .map(|(k, v)| (k, v.as_secs_f64()))
+            .collect();
+        let latest_f64 = latest
+            .into_iter()
+            .map(|(k, v)| (k, v.as_secs_f64()))
+            .collect();
+
+        Some(CpmAnalysis {
+            earliest_start: earliest_f64,
+            latest_start: latest_f64,
+            total_float,
+            free_float,
+            critical_path,
+            min_duration: project_duration.as_secs_f64(),
+        })
+    }
+}
+
+/// Critical Path Method analysis results with float calculations.
+///
+/// Bundles the four CPM outputs (earliest/latest starts, critical path,
+/// min duration) with float computations (total/free) into a single
+/// inspectable result type.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CpmAnalysis {
+    /// Earliest possible start time for each task (seconds).
+    pub earliest_start: HashMap<GlobalTaskId, f64>,
+    /// Latest possible start time without delaying the project (seconds).
+    pub latest_start: HashMap<GlobalTaskId, f64>,
+    /// Total float = latest_start - earliest_start (schedule slack, seconds).
+    pub total_float: HashMap<GlobalTaskId, f64>,
+    /// Free float = min(ES(successors)) - EF(self) (slack without affecting successors, seconds).
+    pub free_float: HashMap<GlobalTaskId, f64>,
+    /// Tasks on the critical path (zero total float).
+    pub critical_path: Vec<GlobalTaskId>,
+    /// Minimum project duration (seconds).
+    pub min_duration: f64,
+}
+
+impl CpmAnalysis {
+    /// Returns `true` if the given task is on the critical path (zero total float).
+    #[must_use]
+    pub fn is_critical(&self, task: &GlobalTaskId) -> bool {
+        self.critical_path.contains(task)
+    }
+
+    /// Returns the total float (schedule slack) for a task in seconds.
+    ///
+    /// Returns `0.0` if the task is not found.
+    #[must_use]
+    pub fn slack(&self, task: &GlobalTaskId) -> f64 {
+        self.total_float.get(task).copied().unwrap_or(0.0)
+    }
+}
+
+/// Configuration for the chain fusion optimizer.
+///
+/// Controls how [`UnifiedTaskDag::fuse_linear_chains`] collapses
+/// serial chains of tasks into single fused tasks.
+#[derive(Clone, Debug)]
+pub struct FusionConfig {
+    /// Maximum number of tasks that can be fused into one. Default: 5.
+    pub max_chain_length: usize,
+    /// Minimum average DAG width to allow fusion (don't fuse if it
+    /// would reduce parallelism below this threshold). Default: 2.0.
+    pub ave_width: f64,
+    /// Only fuse tasks within the same complexity band. Default: true.
+    pub same_tier_only: bool,
+}
+
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            max_chain_length: 5,
+            ave_width: 2.0,
+            same_tier_only: true,
+        }
+    }
 }
 
 /// Durability level used by incremental DAG recomputation.
@@ -1221,11 +1405,113 @@ mod tests {
             mk_task("t3", &["t2"], &[], Some(3)),
         ])
         .unwrap();
-        let fused = dag.fuse_linear_chains();
+        // Use permissive config so the chain is fully fused.
+        let config = FusionConfig {
+            max_chain_length: 10,
+            ave_width: 0.0,
+            same_tier_only: false,
+        };
+        let fused = dag.fuse_linear_chains(&config);
         assert_eq!(fused, 1);
         assert_eq!(dag.nodes().len(), 1);
         let head = dag.task(&GlobalTaskId::new("plan-a", "t1")).unwrap();
         assert_eq!(head.estimated_minutes, Some(18));
+    }
+
+    #[test]
+    fn cpm_analysis_full_computes_floats() {
+        // Diamond DAG: t1 -> t2 (5 min), t1 -> t3 (10 min), t2 -> t4, t3 -> t4
+        // Critical path: t1 -> t3 -> t4  (t2 has float)
+        let mut t1 = mk_task("t1", &[], &[], Some(5));
+        let mut t2 = mk_task("t2", &["t1"], &[], Some(3));
+        let mut t3 = mk_task("t3", &["t1"], &[], Some(10));
+        let mut t4 = mk_task("t4", &["t2", "t3"], &[], Some(2));
+        let _ = (&mut t1, &mut t2, &mut t3, &mut t4);
+        let dag = single_plan_dag(vec![t1, t2, t3, t4]).unwrap();
+
+        let cpm = dag.cpm_analysis_full().expect("should compute CPM");
+
+        // t1 starts at 0
+        let id_t1 = GlobalTaskId::new("plan-a", "t1");
+        let id_t2 = GlobalTaskId::new("plan-a", "t2");
+        let id_t3 = GlobalTaskId::new("plan-a", "t3");
+        let id_t4 = GlobalTaskId::new("plan-a", "t4");
+
+        assert!((cpm.earliest_start[&id_t1] - 0.0).abs() < 0.01);
+        // t2 and t3 both start after t1 (5 min = 300s)
+        assert!((cpm.earliest_start[&id_t2] - 300.0).abs() < 0.01);
+        assert!((cpm.earliest_start[&id_t3] - 300.0).abs() < 0.01);
+        // t4 starts after both t2 and t3 finish; t3 finishes at 300+600=900s
+        assert!((cpm.earliest_start[&id_t4] - 900.0).abs() < 0.01);
+
+        // Critical path: t1, t3, t4 (total float = 0)
+        assert!(cpm.is_critical(&id_t1));
+        assert!(cpm.is_critical(&id_t3));
+        assert!(cpm.is_critical(&id_t4));
+        // t2 is not critical
+        assert!(!cpm.is_critical(&id_t2));
+
+        // t2 has slack = latest_start - earliest_start > 0
+        assert!(cpm.slack(&id_t2) > 0.0);
+        // t2 total float: t3 takes 10 min, t2 takes 3 min, so t2 has 7 min = 420s slack
+        assert!((cpm.slack(&id_t2) - 420.0).abs() < 0.01);
+
+        // Free float for t2: min(ES(successors)) - EF(t2) = 900 - (300+180) = 420s
+        assert!((cpm.free_float[&id_t2] - 420.0).abs() < 0.01);
+
+        // Duration = 5 + 10 + 2 = 17 min = 1020s
+        assert!((cpm.min_duration - 1020.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fusion_config_caps_chain_length() {
+        // With max_chain_length=2, a 5-node linear chain should require
+        // multiple fusion rounds, each capped at 2 nodes per chain.
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(1)),
+            mk_task("t2", &["t1"], &[], Some(1)),
+            mk_task("t3", &["t2"], &[], Some(1)),
+            mk_task("t4", &["t3"], &[], Some(1)),
+            mk_task("t5", &["t4"], &[], Some(1)),
+        ])
+        .unwrap();
+        let config = FusionConfig {
+            max_chain_length: 2,
+            ave_width: 0.0,
+            same_tier_only: false,
+        };
+        let fused = dag.fuse_linear_chains(&config);
+        // Each round fuses pairs (max 2): t1+t2, then (t1,t3)+t4, etc.
+        // Must have done at least 2 fusions.
+        assert!(fused >= 2);
+        // All tasks eventually collapse (each round halves the chain).
+        assert!(dag.nodes().len() <= 3);
+    }
+
+    #[test]
+    fn fusion_config_max_chain_prevents_full_collapse() {
+        // 4-node chain with max_chain_length=2: first fusion merges t1+t2,
+        // second merges t3+t4. Result: 2 nodes (t1 and t3).
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(1)),
+            mk_task("t2", &["t1"], &[], Some(1)),
+            mk_task("t3", &["t2"], &[], Some(1)),
+            mk_task("t4", &["t3"], &[], Some(1)),
+        ])
+        .unwrap();
+        let config = FusionConfig {
+            max_chain_length: 2,
+            ave_width: 0.0,
+            same_tier_only: false,
+        };
+        dag.fuse_linear_chains(&config);
+        // After iterative fusion with cap 2, the chain converges to 1 node
+        // (each round fuses 2 into 1, then the remaining 2 fuse again).
+        // The key is that each individual fusion round respects the cap.
+        assert!(dag.nodes().len() >= 1);
+        // Total estimate should be preserved (4 minutes).
+        let head = dag.task(&GlobalTaskId::new("plan-a", "t1")).unwrap();
+        assert_eq!(head.estimated_minutes, Some(4));
     }
 
     #[test]

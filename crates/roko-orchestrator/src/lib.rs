@@ -33,8 +33,8 @@ pub use coordination::{
     specialization_index, validate_custom_kind,
 };
 pub use dag::{
-    DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability, ExecutionWave,
-    IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
+    CpmAnalysis, DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability,
+    ExecutionWave, FusionConfig, IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{

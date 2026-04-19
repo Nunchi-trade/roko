@@ -11,6 +11,8 @@ use tempfile::TempDir;
 fn emotional_tag_serializes_the_shipping_single_layer_schema() {
     let mut state = DaimonState::new();
     state.state.pad = PadVector::new(0.4, -0.2, 0.6);
+    // Set ALMA mood layer to match so mood_snapshot is correct.
+    state.state.alma.mood = PadVector::new(0.4, -0.2, 0.6);
 
     let tag = state.emotional_tag("gate_failure");
     let value = serde_json::to_value(&tag).expect("serialize emotional tag");
@@ -24,7 +26,8 @@ fn emotional_tag_serializes_the_shipping_single_layer_schema() {
     assert!(!object.contains_key("plutchik"));
     assert!(!object.contains_key("discovery_emotion"));
     assert_eq!(tag.pad, state.state.pad);
-    assert_eq!(tag.mood_snapshot, state.state.pad);
+    // mood_snapshot now comes from the ALMA mood layer.
+    assert_eq!(tag.mood_snapshot, state.state.alma.mood);
 }
 
 #[test]

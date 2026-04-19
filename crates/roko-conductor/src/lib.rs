@@ -42,7 +42,7 @@ pub mod stuck_detection;
 pub mod watchers;
 
 // Re-export core types for convenience.
-pub use roko_core::{ConductorDecision, PhaseKind, PlanPhase};
+pub use roko_core::{CognitiveSignal, ConductorDecision, ConductorEvaluation, PhaseKind, PlanPhase};
 
 // Re-export primary types from this crate.
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState, FailureRecord};
@@ -51,7 +51,9 @@ pub use diagnosis::{
     Diagnosis, DiagnosisEngine, DiagnosisResult, ErrorCategory, ErrorPattern, SuggestedIntervention,
 };
 pub use health::{HealthCheckResult, HealthMonitor, HealthStatus, SystemSnapshot};
-pub use interventions::{InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy};
+pub use interventions::{
+    BanditPolicy, InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy,
+};
 pub use state_machine::{PhaseTransition, phase_timeout};
 pub use stuck_detection::{
     ActivityEntry, MetaCognitionAction, MetaCognitionAssessment, MetaCognitionHook, StuckDetector,
