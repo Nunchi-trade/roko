@@ -537,6 +537,7 @@ mod tests {
                 command: "npx".to_string(),
                 args: vec![],
                 env: HashMap::new(),
+                ..Default::default()
             }],
         };
         std::fs::write(

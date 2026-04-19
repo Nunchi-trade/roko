@@ -2596,13 +2596,12 @@ filter = { path = "src/*.rs" }
                         "-y".into(),
                         "@modelcontextprotocol/server-filesystem".into(),
                     ],
-                    env: Default::default(),
+                    ..Default::default()
                 },
                 McpServerConfig {
                     name: "git".into(),
                     command: "mcp-git".into(),
-                    args: Vec::new(),
-                    env: Default::default(),
+                    ..Default::default()
                 },
             ],
         };
