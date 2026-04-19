@@ -41,6 +41,7 @@ pub mod cycle;
 pub mod hypnagogia;
 pub mod imagination;
 pub mod phase2;
+pub mod rehearsal;
 pub mod replay;
 pub mod runner;
 pub mod staging;
@@ -62,8 +63,10 @@ pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use runner::{
     DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine, DreamHeartbeatPolicy,
     DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner, DreamRuntimeControls,
-    DreamSchedulePolicy, DreamTrigger, Episode, Insight, build_dream_review_dispatcher,
+    DreamSchedulePolicy, DreamTrigger, Episode, Insight, IntensiveMode,
+    build_dream_review_dispatcher,
 };
+pub use rehearsal::{RehearsalOutcome, RehearsalReport, rehearse_threats};
 pub use threat::{ThreatScenario, enumerate_threats, threat_warning_entries};
 
 /// Stable subsystem identifiers still surfaced by the dreams crate.

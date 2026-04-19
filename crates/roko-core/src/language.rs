@@ -35,6 +35,10 @@ pub struct Import {
 
 /// The kind of symbol defined in source.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum SymbolKind {
     /// A function or method.
@@ -57,6 +61,10 @@ pub enum SymbolKind {
 
 /// Visibility of a symbol.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum Visibility {
     /// Publicly visible (`pub`).
     Public,

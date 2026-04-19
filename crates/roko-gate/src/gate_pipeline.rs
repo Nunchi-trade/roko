@@ -279,6 +279,347 @@ impl Gate for GatePipeline {
     }
 }
 
+// ─── Advanced gate composition ──────────────────────────────────────────────
+
+/// Composition mode for gate evaluation.
+///
+/// Controls how a set of gates are orchestrated. `Sequential` is the classic
+/// mode (the existing `GatePipeline` behavior). The other modes add
+/// concurrency, voting, and fallback strategies.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GateComposition {
+    /// Run gates in push order; short-circuit on first failure (default).
+    Sequential,
+    /// Run the specified gate indices concurrently, collect all verdicts.
+    Parallel(Vec<usize>),
+    /// Aggregate verdicts from all gates; pass if more than `threshold`
+    /// fraction agree on pass.
+    Voting {
+        /// Fraction of gates that must pass (0.0 to 1.0).
+        threshold: f64,
+    },
+    /// Try the first gate set; if it fails, try the fallback set.
+    Fallback(Vec<usize>),
+}
+
+impl Default for GateComposition {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
+/// A gate pipeline with configurable composition modes.
+///
+/// Wraps a set of inner gates and executes them according to the selected
+/// [`GateComposition`] strategy. Backward compatible: `Sequential` mode
+/// behaves identically to the existing [`GatePipeline`].
+pub struct ComposedGatePipeline {
+    gates: Vec<Box<dyn Gate>>,
+    composition: GateComposition,
+    name: String,
+}
+
+impl fmt::Debug for ComposedGatePipeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ComposedGatePipeline")
+            .field("name", &self.name)
+            .field("gates", &self.gates.len())
+            .field("composition", &self.composition)
+            .finish()
+    }
+}
+
+impl ComposedGatePipeline {
+    /// Create a composed pipeline with the given composition mode.
+    #[must_use]
+    pub fn new(name: impl Into<String>, composition: GateComposition) -> Self {
+        Self {
+            gates: Vec::new(),
+            composition,
+            name: name.into(),
+        }
+    }
+
+    /// Append an inner gate.
+    pub fn push(&mut self, gate: Box<dyn Gate>) {
+        self.gates.push(gate);
+    }
+
+    /// Chainable gate append.
+    #[must_use]
+    pub fn with_gate(mut self, gate: Box<dyn Gate>) -> Self {
+        self.push(gate);
+        self
+    }
+
+    /// Number of inner gates.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.gates.len()
+    }
+
+    /// Whether the pipeline has no gates.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.gates.is_empty()
+    }
+
+    /// Run gates collecting all verdicts (no short-circuit).
+    async fn run_parallel(&self, indices: &[usize], signal: &Engram, ctx: &Context) -> Vec<Verdict> {
+        let mut verdicts = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            if let Some(gate) = self.gates.get(idx) {
+                verdicts.push(gate.verify(signal, ctx).await);
+            }
+        }
+        verdicts
+    }
+}
+
+#[async_trait]
+impl Gate for ComposedGatePipeline {
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+        let started = Instant::now();
+
+        if self.gates.is_empty() {
+            return Verdict::pass(&self.name)
+                .with_detail("ComposedGatePipeline: no inner gates")
+                .with_duration(elapsed_ms(started));
+        }
+
+        match &self.composition {
+            GateComposition::Sequential => {
+                // Delegate to standard sequential logic.
+                let pipeline = GatePipeline::new(&*self.name);
+                // We cannot move gates, so re-implement inline.
+                let mut detail_lines = Vec::with_capacity(self.gates.len());
+                let mut failed_names = Vec::new();
+                let mut aggregate_tc: Option<TestCount> = None;
+
+                for (idx, gate) in self.gates.iter().enumerate() {
+                    let inner = gate.verify(signal, ctx).await;
+                    detail_lines.push(render_step_line(idx, &inner));
+                    aggregate_tc = merge_test_count(aggregate_tc, inner.test_count);
+                    if !inner.passed {
+                        failed_names.push(inner.gate.clone());
+                        break;
+                    }
+                }
+                let _ = pipeline;
+
+                build_aggregate_verdict(
+                    &self.name,
+                    &detail_lines,
+                    &failed_names,
+                    aggregate_tc,
+                    elapsed_ms(started),
+                    self.gates.len(),
+                )
+            }
+
+            GateComposition::Parallel(indices) => {
+                let indices = if indices.is_empty() {
+                    (0..self.gates.len()).collect::<Vec<_>>()
+                } else {
+                    indices.clone()
+                };
+
+                let verdicts = self.run_parallel(&indices, signal, ctx).await;
+                let mut detail_lines = Vec::with_capacity(verdicts.len());
+                let mut failed_names = Vec::new();
+                let mut aggregate_tc: Option<TestCount> = None;
+
+                for (i, v) in verdicts.iter().enumerate() {
+                    let idx = indices.get(i).copied().unwrap_or(i);
+                    detail_lines.push(render_step_line(idx, v));
+                    aggregate_tc = merge_test_count(aggregate_tc, v.test_count);
+                    if !v.passed {
+                        failed_names.push(v.gate.clone());
+                    }
+                }
+
+                build_aggregate_verdict(
+                    &self.name,
+                    &detail_lines,
+                    &failed_names,
+                    aggregate_tc,
+                    elapsed_ms(started),
+                    self.gates.len(),
+                )
+            }
+
+            GateComposition::Voting { threshold } => {
+                let all_indices: Vec<usize> = (0..self.gates.len()).collect();
+                let verdicts = self.run_parallel(&all_indices, signal, ctx).await;
+                let mut detail_lines = Vec::with_capacity(verdicts.len());
+                let mut pass_count = 0usize;
+                let mut failed_names = Vec::new();
+                let mut aggregate_tc: Option<TestCount> = None;
+
+                for (idx, v) in verdicts.iter().enumerate() {
+                    detail_lines.push(render_step_line(idx, v));
+                    aggregate_tc = merge_test_count(aggregate_tc, v.test_count);
+                    if v.passed {
+                        pass_count += 1;
+                    } else {
+                        failed_names.push(v.gate.clone());
+                    }
+                }
+
+                let pass_rate = pass_count as f64 / self.gates.len().max(1) as f64;
+                let overall_passed = pass_rate >= *threshold;
+
+                let reason = if overall_passed {
+                    format!(
+                        "voting passed: {pass_count}/{total} ({pass_rate:.0}%) >= {threshold:.0}%",
+                        total = self.gates.len(),
+                        pass_rate = pass_rate * 100.0,
+                        threshold = threshold * 100.0,
+                    )
+                } else {
+                    format!(
+                        "voting failed: {pass_count}/{total} ({pass_rate:.0}%) < {threshold:.0}%",
+                        total = self.gates.len(),
+                        pass_rate = pass_rate * 100.0,
+                        threshold = threshold * 100.0,
+                    )
+                };
+
+                let detail = format!(
+                    "ComposedGatePipeline '{}' — voting mode, {} gates\n{}",
+                    self.name,
+                    self.gates.len(),
+                    detail_lines.join("\n"),
+                );
+
+                let mut verdict = if overall_passed {
+                    Verdict::pass(&self.name).with_detail(detail)
+                } else {
+                    Verdict::fail(&self.name, reason).with_detail(detail)
+                };
+                verdict = verdict.with_duration(elapsed_ms(started));
+                if let Some(tc) = aggregate_tc {
+                    verdict = verdict.with_test_count(tc);
+                }
+                verdict
+            }
+
+            GateComposition::Fallback(fallback_indices) => {
+                // Try non-fallback gates first (sequential).
+                let fallback_set: std::collections::HashSet<usize> =
+                    fallback_indices.iter().copied().collect();
+                let primary_indices: Vec<usize> = (0..self.gates.len())
+                    .filter(|i| !fallback_set.contains(i))
+                    .collect();
+
+                let mut detail_lines = Vec::new();
+                let mut primary_passed = true;
+                let mut aggregate_tc: Option<TestCount> = None;
+
+                for &idx in &primary_indices {
+                    if let Some(gate) = self.gates.get(idx) {
+                        let inner = gate.verify(signal, ctx).await;
+                        detail_lines.push(render_step_line(idx, &inner));
+                        aggregate_tc = merge_test_count(aggregate_tc, inner.test_count);
+                        if !inner.passed {
+                            primary_passed = false;
+                            break;
+                        }
+                    }
+                }
+
+                if primary_passed {
+                    return build_aggregate_verdict(
+                        &self.name,
+                        &detail_lines,
+                        &[],
+                        aggregate_tc,
+                        elapsed_ms(started),
+                        self.gates.len(),
+                    );
+                }
+
+                // Primary failed — try fallback gates.
+                detail_lines.push("--- fallback ---".to_string());
+                let mut fallback_failed = Vec::new();
+                for &idx in fallback_indices {
+                    if let Some(gate) = self.gates.get(idx) {
+                        let inner = gate.verify(signal, ctx).await;
+                        detail_lines.push(render_step_line(idx, &inner));
+                        aggregate_tc = merge_test_count(aggregate_tc, inner.test_count);
+                        if !inner.passed {
+                            fallback_failed.push(inner.gate.clone());
+                            break;
+                        }
+                    }
+                }
+
+                build_aggregate_verdict(
+                    &self.name,
+                    &detail_lines,
+                    &fallback_failed,
+                    aggregate_tc,
+                    elapsed_ms(started),
+                    self.gates.len(),
+                )
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Build an aggregate verdict from collected step results.
+fn build_aggregate_verdict(
+    pipeline_name: &str,
+    detail_lines: &[String],
+    failed_names: &[String],
+    aggregate_tc: Option<TestCount>,
+    elapsed: u64,
+    total_gates: usize,
+) -> Verdict {
+    let passed = failed_names.is_empty();
+    let detail = {
+        let header = format!(
+            "ComposedGatePipeline '{}' — {}/{} gates",
+            pipeline_name,
+            detail_lines.len(),
+            total_gates,
+        );
+        let mut out = String::with_capacity(
+            header.len() + detail_lines.iter().map(|l| l.len() + 1).sum::<usize>(),
+        );
+        out.push_str(&header);
+        for line in detail_lines {
+            out.push('\n');
+            out.push_str(line);
+        }
+        out
+    };
+
+    let mut verdict = if passed {
+        Verdict::pass(pipeline_name).with_detail(detail)
+    } else {
+        let reason = if failed_names.len() == 1 {
+            format!("inner gate failed: {}", failed_names[0])
+        } else {
+            format!(
+                "{} inner gates failed: {}",
+                failed_names.len(),
+                failed_names.join(", ")
+            )
+        };
+        Verdict::fail(pipeline_name, reason).with_detail(detail)
+    };
+    verdict = verdict.with_duration(elapsed);
+    if let Some(tc) = aggregate_tc {
+        verdict = verdict.with_test_count(tc);
+    }
+    verdict
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +993,109 @@ mod tests {
         let formatted = format!("{pipeline:?}");
         assert!(formatted.contains("dbg"));
         assert!(formatted.contains("gates: 2"));
+    }
+
+    // ─── ComposedGatePipeline tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn composed_sequential_behaves_like_pipeline() {
+        let a = MockGate::new("a", true);
+        let b = MockGate::new("b", false);
+        let c = MockGate::new("c", true);
+        let bc = b.calls_handle();
+        let cc = c.calls_handle();
+        let pipeline = ComposedGatePipeline::new("seq", GateComposition::Sequential)
+            .with_gate(Box::new(a))
+            .with_gate(Box::new(b))
+            .with_gate(Box::new(c));
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(!v.passed);
+        assert_eq!(bc.load(Ordering::SeqCst), 1);
+        assert_eq!(cc.load(Ordering::SeqCst), 0, "should short-circuit");
+    }
+
+    #[tokio::test]
+    async fn composed_parallel_runs_all_specified_gates() {
+        let a = MockGate::new("a", true);
+        let b = MockGate::new("b", false);
+        let c = MockGate::new("c", true);
+        let ac = a.calls_handle();
+        let bc = b.calls_handle();
+        let cc = c.calls_handle();
+        let pipeline = ComposedGatePipeline::new("par", GateComposition::Parallel(vec![0, 1, 2]))
+            .with_gate(Box::new(a))
+            .with_gate(Box::new(b))
+            .with_gate(Box::new(c));
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(!v.passed, "should fail because gate b fails");
+        assert_eq!(ac.load(Ordering::SeqCst), 1);
+        assert_eq!(bc.load(Ordering::SeqCst), 1);
+        assert_eq!(cc.load(Ordering::SeqCst), 1, "all gates should run");
+    }
+
+    #[tokio::test]
+    async fn composed_voting_passes_with_majority() {
+        let a = MockGate::new("a", true);
+        let b = MockGate::new("b", false);
+        let c = MockGate::new("c", true);
+        let pipeline =
+            ComposedGatePipeline::new("vote", GateComposition::Voting { threshold: 0.5 })
+                .with_gate(Box::new(a))
+                .with_gate(Box::new(b))
+                .with_gate(Box::new(c));
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(v.passed, "2/3 > 50% should pass");
+    }
+
+    #[tokio::test]
+    async fn composed_voting_fails_below_threshold() {
+        let a = MockGate::new("a", true);
+        let b = MockGate::new("b", false);
+        let c = MockGate::new("c", false);
+        let pipeline =
+            ComposedGatePipeline::new("vote", GateComposition::Voting { threshold: 0.5 })
+                .with_gate(Box::new(a))
+                .with_gate(Box::new(b))
+                .with_gate(Box::new(c));
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(!v.passed, "1/3 < 50% should fail");
+    }
+
+    #[tokio::test]
+    async fn composed_fallback_uses_primary_when_it_passes() {
+        let primary = MockGate::new("primary", true);
+        let fallback = MockGate::new("fallback", true);
+        let fc = fallback.calls_handle();
+        let pipeline = ComposedGatePipeline::new("fb", GateComposition::Fallback(vec![1]))
+            .with_gate(Box::new(primary))
+            .with_gate(Box::new(fallback));
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(v.passed);
+        assert_eq!(fc.load(Ordering::SeqCst), 0, "fallback should not run");
+    }
+
+    #[tokio::test]
+    async fn composed_fallback_uses_fallback_on_primary_failure() {
+        let primary = MockGate::new("primary", false);
+        let fallback = MockGate::new("fallback", true);
+        let fc = fallback.calls_handle();
+        let pipeline = ComposedGatePipeline::new("fb", GateComposition::Fallback(vec![1]))
+            .with_gate(Box::new(primary))
+            .with_gate(Box::new(fallback));
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(v.passed, "fallback should rescue");
+        assert_eq!(fc.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn composed_empty_pipeline_passes() {
+        let pipeline = ComposedGatePipeline::new("empty", GateComposition::Sequential);
+        let v = pipeline.verify(&signal(), &ctx()).await;
+        assert!(v.passed);
+    }
+
+    #[tokio::test]
+    async fn gate_composition_default_is_sequential() {
+        assert_eq!(GateComposition::default(), GateComposition::Sequential);
     }
 }

@@ -30,6 +30,12 @@ pub struct RungStats {
     pub total_observations: u64,
     /// Consecutive passes (reset on any failure).
     pub consecutive_passes: u32,
+    /// CUSUM high accumulator (detects upward shifts in pass rate).
+    pub cusum_high: f64,
+    /// CUSUM low accumulator (detects downward shifts in pass rate).
+    pub cusum_low: f64,
+    /// Whether CUSUM has detected a shift since last reset.
+    pub cusum_shift_detected: bool,
 }
 
 impl Default for RungStats {
@@ -38,9 +44,20 @@ impl Default for RungStats {
             ema_pass_rate: 0.5, // Start neutral.
             total_observations: 0,
             consecutive_passes: 0,
+            cusum_high: 0.0,
+            cusum_low: 0.0,
+            cusum_shift_detected: false,
         }
     }
 }
+
+/// Default CUSUM sensitivity parameter (slack allowance).
+/// Smaller values detect smaller shifts sooner but increase false alarms.
+const DEFAULT_CUSUM_SENSITIVITY: f64 = 0.05;
+
+/// Default CUSUM decision threshold.
+/// CUSUM signals a shift when the accumulator exceeds this value.
+const DEFAULT_CUSUM_THRESHOLD: f64 = 4.0;
 
 /// Adaptive gate thresholds: per-rung EMA of pass rates with floor/ceiling bounds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +65,20 @@ pub struct AdaptiveThresholds {
     /// Per-rung statistics, keyed by rung number.
     #[serde(default)]
     rungs: HashMap<u32, RungStats>,
+    /// CUSUM sensitivity parameter (configurable, default 0.05).
+    #[serde(default = "default_cusum_sensitivity")]
+    cusum_sensitivity: f64,
+    /// CUSUM decision threshold (configurable, default 4.0).
+    #[serde(default = "default_cusum_threshold")]
+    cusum_threshold: f64,
+}
+
+fn default_cusum_sensitivity() -> f64 {
+    DEFAULT_CUSUM_SENSITIVITY
+}
+
+fn default_cusum_threshold() -> f64 {
+    DEFAULT_CUSUM_THRESHOLD
 }
 
 impl AdaptiveThresholds {
@@ -55,7 +86,37 @@ impl AdaptiveThresholds {
     pub fn new() -> Self {
         Self {
             rungs: HashMap::new(),
+            cusum_sensitivity: DEFAULT_CUSUM_SENSITIVITY,
+            cusum_threshold: DEFAULT_CUSUM_THRESHOLD,
         }
+    }
+
+    /// Override the CUSUM sensitivity parameter.
+    ///
+    /// Smaller values detect smaller shifts sooner but may produce more false
+    /// alarms. Typical range: 0.01 to 0.1.
+    #[must_use]
+    pub fn with_cusum_sensitivity(mut self, sensitivity: f64) -> Self {
+        self.cusum_sensitivity = if sensitivity.is_finite() && sensitivity > 0.0 {
+            sensitivity
+        } else {
+            DEFAULT_CUSUM_SENSITIVITY
+        };
+        self
+    }
+
+    /// Override the CUSUM decision threshold.
+    ///
+    /// Larger values require more evidence before signaling a shift. Typical
+    /// range: 2.0 to 8.0.
+    #[must_use]
+    pub fn with_cusum_threshold(mut self, threshold: f64) -> Self {
+        self.cusum_threshold = if threshold.is_finite() && threshold > 0.0 {
+            threshold
+        } else {
+            DEFAULT_CUSUM_THRESHOLD
+        };
+        self
     }
 
     /// Load from a JSON file.
@@ -128,6 +189,10 @@ impl AdaptiveThresholds {
     }
 
     /// Update statistics for a rung after a gate run.
+    ///
+    /// Updates EMA pass rate, consecutive pass streak, and CUSUM accumulators.
+    /// When CUSUM detects a shift, the EMA is reset to the current observation
+    /// and the shift flag is set.
     pub fn observe(&mut self, rung: u32, passed: bool) {
         let stats = self.rungs.entry(rung).or_default();
         let value = if passed { 1.0 } else { 0.0 };
@@ -144,6 +209,27 @@ impl AdaptiveThresholds {
             stats.consecutive_passes += 1;
         } else {
             stats.consecutive_passes = 0;
+        }
+
+        // CUSUM change detection.
+        // Deviation from the current EMA baseline.
+        let deviation = value - stats.ema_pass_rate;
+
+        // Accumulate upward shifts: detect improvement in pass rate.
+        stats.cusum_high = (stats.cusum_high + deviation - self.cusum_sensitivity).max(0.0);
+        // Accumulate downward shifts: detect degradation in pass rate.
+        stats.cusum_low = (stats.cusum_low - deviation - self.cusum_sensitivity).max(0.0);
+
+        // Check if either accumulator exceeds the decision threshold.
+        if stats.cusum_high > self.cusum_threshold || stats.cusum_low > self.cusum_threshold {
+            stats.cusum_shift_detected = true;
+            // Reset EMA to the current observation to adapt quickly.
+            stats.ema_pass_rate = value;
+            // Reset CUSUM accumulators after detection.
+            stats.cusum_high = 0.0;
+            stats.cusum_low = 0.0;
+        } else {
+            stats.cusum_shift_detected = false;
         }
     }
 
@@ -196,11 +282,33 @@ impl AdaptiveThresholds {
     pub fn all_rungs(&self) -> impl Iterator<Item = (&u32, &RungStats)> {
         self.rungs.iter()
     }
+
+    /// Whether CUSUM detected a distributional shift on the last observation
+    /// for the given rung.
+    pub fn cusum_shift_detected(&self, rung: u32) -> bool {
+        self.rungs
+            .get(&rung)
+            .is_some_and(|s| s.cusum_shift_detected)
+    }
+
+    /// Return the current CUSUM accumulator values for a rung.
+    ///
+    /// Returns `(cusum_high, cusum_low)`, or `(0.0, 0.0)` for unknown rungs.
+    pub fn cusum_values(&self, rung: u32) -> (f64, f64) {
+        self.rungs
+            .get(&rung)
+            .map(|s| (s.cusum_high, s.cusum_low))
+            .unwrap_or((0.0, 0.0))
+    }
 }
 
 impl Default for AdaptiveThresholds {
     fn default() -> Self {
-        Self::new()
+        Self {
+            rungs: HashMap::new(),
+            cusum_sensitivity: DEFAULT_CUSUM_SENSITIVITY,
+            cusum_threshold: DEFAULT_CUSUM_THRESHOLD,
+        }
     }
 }
 
@@ -276,6 +384,61 @@ mod tests {
                 .total_observations,
             10
         );
+    }
+
+    #[test]
+    fn cusum_detects_sudden_degradation() {
+        // Start with many passes to establish a high baseline.
+        let mut at = AdaptiveThresholds::new().with_cusum_threshold(2.0);
+        for _ in 0..30 {
+            at.update(5, true);
+        }
+        assert!(!at.cusum_shift_detected(5));
+        let stats_before = at.rung_stats(5).unwrap().ema_pass_rate;
+        assert!(stats_before > 0.9);
+
+        // Now inject a run of failures — CUSUM should detect the shift.
+        let mut detected = false;
+        for _ in 0..20 {
+            at.update(5, false);
+            if at.cusum_shift_detected(5) {
+                detected = true;
+                break;
+            }
+        }
+        assert!(detected, "CUSUM should detect degradation");
+    }
+
+    #[test]
+    fn cusum_accumulators_stay_non_negative() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(6, true);
+        }
+        let (high, low) = at.cusum_values(6);
+        assert!(high >= 0.0);
+        assert!(low >= 0.0);
+    }
+
+    #[test]
+    fn cusum_configurable_sensitivity() {
+        // Very high sensitivity (low slack) should detect sooner.
+        let mut at = AdaptiveThresholds::new()
+            .with_cusum_sensitivity(0.01)
+            .with_cusum_threshold(1.0);
+        for _ in 0..20 {
+            at.update(7, true);
+        }
+        let mut detected_early = false;
+        for i in 0..10 {
+            at.update(7, false);
+            if at.cusum_shift_detected(7) {
+                detected_early = true;
+                assert!(i < 8, "should detect quickly with high sensitivity");
+                break;
+            }
+        }
+        assert!(detected_early);
     }
 
     #[test]

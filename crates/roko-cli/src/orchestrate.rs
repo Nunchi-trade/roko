@@ -3622,7 +3622,25 @@ impl TaskTracker {
     }
 }
 
+#[cfg(test)]
 fn prioritize_ready_tasks<F>(ready: Vec<String>, mut arousal_for_task: F) -> Vec<String>
+where
+    F: FnMut(&str) -> f64,
+{
+    prioritize_ready_tasks_with_behavior(ready, &mut arousal_for_task, None)
+}
+
+/// Prioritize ready tasks with optional behavioral-state modulation.
+///
+/// When `behavioral_state` is `Some`, the scoring is adjusted:
+/// - **Struggling**: simpler tasks (lower arousal) are boosted, complex tasks penalized.
+/// - **Coasting/Focused**: complex tasks (higher arousal) are allowed/boosted.
+/// - Other states: no additional modulation beyond arousal.
+fn prioritize_ready_tasks_with_behavior<F>(
+    ready: Vec<String>,
+    arousal_for_task: &mut F,
+    behavioral_state: Option<roko_core::BehavioralState>,
+) -> Vec<String>
 where
     F: FnMut(&str) -> f64,
 {
@@ -3633,7 +3651,25 @@ where
         .map(|(idx, task_id)| {
             let base_priority = (ready_count.saturating_sub(idx)) as f64;
             let arousal = arousal_for_task(&task_id).clamp(-1.0, 1.0);
-            let effective_priority = base_priority * (1.0 + arousal * 0.5);
+            let mut effective_priority = base_priority * (1.0 + arousal * 0.5);
+
+            // INT-05: behavioral state modulates task selection.
+            if let Some(state) = behavioral_state {
+                match state {
+                    roko_core::BehavioralState::Struggling => {
+                        // Prefer simpler tasks: penalize high-arousal (complex) tasks,
+                        // boost low-arousal (simple) tasks.
+                        effective_priority *= 1.0 - arousal * 0.3;
+                    }
+                    roko_core::BehavioralState::Coasting
+                    | roko_core::BehavioralState::Focused => {
+                        // Allow complex tasks: boost high-arousal tasks.
+                        effective_priority *= 1.0 + arousal * 0.2;
+                    }
+                    _ => {}
+                }
+            }
+
             (idx, effective_priority, task_id)
         })
         .collect();
@@ -6888,6 +6924,39 @@ impl PlanRunner {
                     playbooks = report.playbooks_created,
                     "[orchestrate] auto-dream consolidation complete"
                 );
+
+                // INT-07: After dream consolidation, promote validated staging
+                // buffer entries into the durable KnowledgeStore.
+                let staging_path = self
+                    .workdir
+                    .join(".roko")
+                    .join("dreams")
+                    .join("staging.json");
+                let mut staging = roko_dreams::StagingBuffer::load_or_new(&staging_path);
+                match staging.promote_validated(&self.knowledge_store) {
+                    Ok(promoted) => {
+                        if !promoted.is_empty() {
+                            tracing::info!(
+                                count = promoted.len(),
+                                "[orchestrate] dream→neuro: promoted {} entries to knowledge store",
+                                promoted.len()
+                            );
+                        }
+                        staging.remove_promoted();
+                        if let Err(e) = staging.save(&staging_path) {
+                            tracing::warn!(
+                                error = %e,
+                                "[orchestrate] failed to save staging buffer after promotion"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "[orchestrate] dream→neuro promotion failed (non-fatal)"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -7953,15 +8022,20 @@ impl PlanRunner {
                 })
                 .unwrap_or_default()
         };
-        let ready = prioritize_ready_tasks(ready, |task_id| {
-            let queue_wait_hours = self
-                .task_trackers
-                .get(plan_id)
-                .and_then(|tracker| tracker.queue_wait_hours(task_id))
-                .unwrap_or(0.0);
-            self.learning
-                .task_arousal_with_queue_wait(task_id, queue_wait_hours)
-        });
+        let behavioral_state = self.daimon.query().behavioral_state;
+        let ready = prioritize_ready_tasks_with_behavior(
+            ready,
+            &mut |task_id: &str| {
+                let queue_wait_hours = self
+                    .task_trackers
+                    .get(plan_id)
+                    .and_then(|tracker| tracker.queue_wait_hours(task_id))
+                    .unwrap_or(0.0);
+                self.learning
+                    .task_arousal_with_queue_wait(task_id, queue_wait_hours)
+            },
+            Some(behavioral_state),
+        );
 
         // Appraise QueueWait for any ready task that has been waiting > 24h.
         if let Some(tracker) = self.task_trackers.get(plan_id) {

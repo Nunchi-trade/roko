@@ -225,6 +225,8 @@ pub enum DreamTrigger {
     Scheduled,
     /// Manual command invocation.
     Manual,
+    /// Accumulated episode count since last dream.
+    EpisodeCount,
 }
 
 impl DreamTrigger {
@@ -235,6 +237,7 @@ impl DreamTrigger {
             Self::Idle => "idle",
             Self::Scheduled => "scheduled",
             Self::Manual => "manual",
+            Self::EpisodeCount => "episode_count",
         }
     }
 }
@@ -260,6 +263,10 @@ pub struct DreamSchedulePolicy {
     /// Factor applied when dream output quality is low.
     #[serde(default = "default_quality_penalty")]
     pub quality_penalty: f64,
+    /// Episode count threshold: trigger after N new episodes since last dream.
+    /// Zero disables this trigger.
+    #[serde(default)]
+    pub episode_count_trigger: usize,
 }
 
 impl Default for DreamSchedulePolicy {
@@ -271,6 +278,7 @@ impl Default for DreamSchedulePolicy {
             manual_enabled: true,
             quality_gain: 0.75,
             quality_penalty: 1.25,
+            episode_count_trigger: 0,
         }
     }
 }
@@ -321,6 +329,7 @@ impl DreamSchedulePolicy {
         match trigger {
             DreamTrigger::Idle | DreamTrigger::Scheduled => self.enabled,
             DreamTrigger::Manual => self.manual_enabled,
+            DreamTrigger::EpisodeCount => self.enabled && self.episode_count_trigger > 0,
         }
     }
 
@@ -340,6 +349,7 @@ impl DreamSchedulePolicy {
             DreamTrigger::Idle => Some(self.idle_delay(report, budget)),
             DreamTrigger::Scheduled => self.cron_delay(now),
             DreamTrigger::Manual => Some(Duration::ZERO),
+            DreamTrigger::EpisodeCount => Some(Duration::ZERO),
         }
     }
 }
@@ -402,6 +412,34 @@ pub struct DreamHeartbeatReport {
     pub delta_ready: bool,
 }
 
+/// Settings for intensive dream mode: longer, more thorough cycles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntensiveMode {
+    /// Whether intensive mode is currently active.
+    #[serde(default)]
+    pub active: bool,
+    /// Replay iteration multiplier (applied to default replay count).
+    #[serde(default = "default_intensive_replay_multiplier")]
+    pub replay_multiplier: u32,
+    /// Maximum counterfactual exploration depth (deeper = more thorough).
+    #[serde(default = "default_intensive_counterfactual_depth")]
+    pub counterfactual_depth: usize,
+    /// Threat rehearsal scenario limit (0 = use default).
+    #[serde(default = "default_intensive_rehearsal_limit")]
+    pub rehearsal_limit: usize,
+}
+
+impl Default for IntensiveMode {
+    fn default() -> Self {
+        Self {
+            active: false,
+            replay_multiplier: default_intensive_replay_multiplier(),
+            counterfactual_depth: default_intensive_counterfactual_depth(),
+            rehearsal_limit: default_intensive_rehearsal_limit(),
+        }
+    }
+}
+
 /// Combined runtime controls for replay, budgeting, and scheduling.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DreamRuntimeControls {
@@ -426,6 +464,9 @@ pub struct DreamRuntimeControls {
     /// Minimum severity required before a threat becomes a warning entry.
     #[serde(default = "default_threat_floor")]
     pub threat_severity_floor: f64,
+    /// Intensive mode settings for deeper dream cycles.
+    #[serde(default)]
+    pub intensive: IntensiveMode,
 }
 
 impl Default for DreamRuntimeControls {
@@ -438,6 +479,7 @@ impl Default for DreamRuntimeControls {
             imagination_mode: ImaginationMode::default(),
             threat_simulation: true,
             threat_severity_floor: 0.20,
+            intensive: IntensiveMode::default(),
         }
     }
 }
@@ -820,6 +862,18 @@ fn default_delta_interval_mins() -> u64 {
 
 fn default_idle_grace_mins() -> u64 {
     15
+}
+
+fn default_intensive_replay_multiplier() -> u32 {
+    3
+}
+
+fn default_intensive_counterfactual_depth() -> usize {
+    8
+}
+
+fn default_intensive_rehearsal_limit() -> usize {
+    50
 }
 
 /// Load the latest persisted dream report from a report directory.

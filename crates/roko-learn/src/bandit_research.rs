@@ -88,15 +88,55 @@ pub struct NeuralRewardNet {
 }
 
 impl NeuralRewardNet {
-    /// Create a network shell with explicit dimensions.
+    /// Create a network with explicit dimensions and Xavier-initialized params.
     #[must_use]
     pub fn new(input_dim: usize, hidden_dims: Vec<usize>, output_dim: usize) -> Self {
+        let total = Self::compute_param_count(input_dim, &hidden_dims, output_dim);
+        let mut params = Vec::with_capacity(total);
+        // Xavier initialization: scale by 1/sqrt(fan_in) for each layer.
+        let mut prev_dim = input_dim;
+        for &h in &hidden_dims {
+            let scale = 1.0 / (prev_dim as f64).sqrt();
+            // Weights.
+            for i in 0..(prev_dim * h) {
+                // Deterministic pseudo-random via simple hash.
+                let seed = (i as f64 * 0.618_033_988_749_895).fract() - 0.5;
+                params.push(seed * scale * 2.0);
+            }
+            // Biases.
+            for _ in 0..h {
+                params.push(0.0);
+            }
+            prev_dim = h;
+        }
+        // Output layer.
+        let scale = 1.0 / (prev_dim as f64).sqrt();
+        for i in 0..(prev_dim * output_dim) {
+            let seed = (i as f64 * 0.618_033_988_749_895).fract() - 0.5;
+            params.push(seed * scale * 2.0);
+        }
+        for _ in 0..output_dim {
+            params.push(0.0);
+        }
+
         Self {
             input_dim,
             hidden_dims,
             output_dim,
-            params: Vec::new(),
+            params,
         }
+    }
+
+    /// Count total parameters for the given architecture.
+    fn compute_param_count(input_dim: usize, hidden_dims: &[usize], output_dim: usize) -> usize {
+        let mut total = 0;
+        let mut prev = input_dim;
+        for &h in hidden_dims {
+            total += prev * h + h; // weights + biases
+            prev = h;
+        }
+        total += prev * output_dim + output_dim;
+        total
     }
 
     /// Replace the parameter vector.
@@ -110,6 +150,95 @@ impl NeuralRewardNet {
     #[must_use]
     pub fn parameter_count(&self) -> usize {
         self.params.len()
+    }
+
+    /// Input dimension.
+    #[must_use]
+    pub const fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    /// Output dimension.
+    #[must_use]
+    pub const fn output_dim(&self) -> usize {
+        self.output_dim
+    }
+
+    /// Forward pass through the network: ReLU hidden layers, linear output.
+    ///
+    /// Returns a vector of length `output_dim` with predicted rewards.
+    #[must_use]
+    pub fn forward(&self, input: &[f64]) -> Vec<f64> {
+        assert_eq!(input.len(), self.input_dim, "input dimension mismatch");
+
+        let mut activations = input.to_vec();
+        let mut offset = 0;
+
+        // Hidden layers with ReLU.
+        for &h in &self.hidden_dims {
+            let fan_in = activations.len();
+            let mut next = Vec::with_capacity(h);
+            for j in 0..h {
+                let mut sum = 0.0;
+                for (i, &a) in activations.iter().enumerate() {
+                    sum += a * self.params[offset + j * fan_in + i];
+                }
+                // Bias.
+                sum += self.params[offset + fan_in * h + j];
+                // ReLU.
+                next.push(sum.max(0.0));
+            }
+            offset += fan_in * h + h;
+            activations = next;
+        }
+
+        // Output layer (linear).
+        let fan_in = activations.len();
+        let mut output = Vec::with_capacity(self.output_dim);
+        for j in 0..self.output_dim {
+            let mut sum = 0.0;
+            for (i, &a) in activations.iter().enumerate() {
+                sum += a * self.params[offset + j * fan_in + i];
+            }
+            sum += self.params[offset + fan_in * self.output_dim + j];
+            output.push(sum);
+        }
+
+        output
+    }
+
+    /// Compute the gradient of output `arm_idx` w.r.t. all parameters.
+    ///
+    /// Uses forward-mode numerical differentiation (finite differences).
+    #[must_use]
+    pub fn gradient(&self, input: &[f64], arm_idx: usize) -> Vec<f64> {
+        let eps = 1e-5;
+        let base = self.forward(input)[arm_idx];
+        let mut grad = Vec::with_capacity(self.params.len());
+        let mut perturbed = self.clone();
+
+        for i in 0..self.params.len() {
+            perturbed.params[i] = self.params[i] + eps;
+            let fwd = perturbed.forward(input)[arm_idx];
+            grad.push((fwd - base) / eps);
+            perturbed.params[i] = self.params[i];
+        }
+
+        grad
+    }
+
+    /// Train the network on buffered examples via SGD.
+    pub fn train_sgd(&mut self, examples: &[(Vec<f64>, usize, f64)], learning_rate: f64, epochs: u32) {
+        for _ in 0..epochs {
+            for (input, arm_idx, target) in examples {
+                let prediction = self.forward(input)[*arm_idx];
+                let error = prediction - target;
+                let grad = self.gradient(input, *arm_idx);
+                for (p, g) in self.params.iter_mut().zip(grad.iter()) {
+                    *p -= learning_rate * error * g;
+                }
+            }
+        }
     }
 }
 
@@ -189,6 +318,122 @@ impl NeuralUCBRouter {
     #[must_use]
     pub fn buffered_examples(&self) -> usize {
         self.training_buffer.len()
+    }
+
+    /// Total observations across all arms.
+    #[must_use]
+    pub fn total_observations(&self) -> usize {
+        self.training_buffer.len()
+    }
+
+    /// Select the best arm for the given context using NeuralUCB.
+    ///
+    /// Returns `(arm_slug, predicted_reward)`.
+    /// Score = f(x; theta) + nu * sqrt(g^T Z^{-1} g) where g is the gradient
+    /// and Z is the per-arm regularized gradient covariance.
+    #[must_use]
+    pub fn select_arm(&self, context: &[f64], arms: &[String]) -> (String, f64) {
+        let predictions = self.network.forward(context);
+        let mut best_arm = arms.first().cloned().unwrap_or_default();
+        let mut best_score = f64::NEG_INFINITY;
+
+        for (idx, arm) in arms.iter().enumerate() {
+            let arm_idx = idx.min(predictions.len().saturating_sub(1));
+            let predicted_reward = predictions[arm_idx];
+
+            // Compute exploration bonus from gradient covariance.
+            let exploration_bonus = if let Some(cov) = self.gradient_covariance.get(arm) {
+                let grad = self.network.gradient(context, arm_idx);
+                // Approximate sqrt(g^T Z^{-1} g) using diagonal of covariance.
+                let mut quad_form = 0.0;
+                for (i, &g) in grad.iter().enumerate() {
+                    let z_inv = if i < cov.len() && i < cov[i].len() && cov[i][i] > 0.0 {
+                        1.0 / (cov[i][i] + self.lambda)
+                    } else {
+                        1.0 / self.lambda
+                    };
+                    quad_form += g * g * z_inv;
+                }
+                quad_form.sqrt()
+            } else {
+                // No covariance data yet — use maximum exploration bonus.
+                1.0
+            };
+
+            let score = predicted_reward + self.nu * exploration_bonus;
+            if score > best_score {
+                best_score = score;
+                best_arm = arm.clone();
+            }
+        }
+
+        (best_arm, best_score)
+    }
+
+    /// Retrain the network on buffered examples if the buffer has reached the
+    /// retrain interval. Updates gradient covariance matrices per arm.
+    ///
+    /// Returns true if retraining occurred.
+    pub fn retrain_if_needed(&mut self, arms: &[String]) -> bool {
+        if (self.training_buffer.len() as u32) < self.retrain_interval {
+            return false;
+        }
+
+        // Build arm index map.
+        let arm_to_idx: HashMap<&str, usize> = arms
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.as_str(), i))
+            .collect();
+
+        // Convert buffer to (context, arm_index, reward) for SGD.
+        let examples: Vec<(Vec<f64>, usize, f64)> = self
+            .training_buffer
+            .iter()
+            .filter_map(|(ctx, arm, reward)| {
+                arm_to_idx.get(arm.as_str()).map(|&idx| (ctx.clone(), idx, *reward))
+            })
+            .collect();
+
+        if examples.is_empty() {
+            return false;
+        }
+
+        // Train for a few epochs with decaying learning rate.
+        self.network.train_sgd(&examples, 0.01, 5);
+
+        // Update per-arm gradient covariance (diagonal approximation).
+        for arm in arms {
+            let arm_idx = arm_to_idx.get(arm.as_str()).copied().unwrap_or(0);
+            let dim = self.network.parameter_count();
+            let mut diag_cov = vec![vec![0.0; dim]; dim];
+
+            let arm_examples: Vec<_> = examples
+                .iter()
+                .filter(|(_, idx, _)| *idx == arm_idx)
+                .collect();
+
+            for (ctx, _, _) in &arm_examples {
+                let grad = self.network.gradient(ctx, arm_idx);
+                // Accumulate outer product diagonal: Z += g * g^T (diagonal only).
+                for (i, &g) in grad.iter().enumerate() {
+                    if i < dim {
+                        diag_cov[i][i] += g * g;
+                    }
+                }
+            }
+
+            // Add regularization.
+            for i in 0..dim {
+                diag_cov[i][i] += self.lambda;
+            }
+
+            self.gradient_covariance.insert(arm.clone(), diag_cov);
+        }
+
+        // Clear the training buffer.
+        self.training_buffer.clear();
+        true
     }
 }
 

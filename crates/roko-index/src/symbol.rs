@@ -18,6 +18,10 @@ use crate::parser::SourceFile;
 /// Composed of the file path, symbol name, and kind. Two symbols with
 /// identical (path, name, kind) are considered the same definition.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct SymbolId {
     /// Path of the file that defines the symbol.
     pub file_path: String,

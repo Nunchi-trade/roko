@@ -1120,6 +1120,12 @@ impl CascadeRouter {
         self.stage_tracking.lock().current
     }
 
+    /// Read the ordered model slug list.
+    #[must_use]
+    pub fn model_slugs(&self) -> &[String] {
+        &self.model_slugs
+    }
+
     /// Total observations recorded across all stages.
     #[must_use]
     pub fn total_observations(&self) -> u64 {

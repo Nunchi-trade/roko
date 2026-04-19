@@ -387,6 +387,285 @@ impl KnowledgeEntry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NEURO-07: Source channel confidence discounting.
+// ---------------------------------------------------------------------------
+
+/// Provenance channel for ingested knowledge entries.
+///
+/// Each channel carries a different trust discount reflecting the reliability
+/// of the data source. On ingest, the entry's confidence is multiplied by
+/// the channel's discount factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceChannel {
+    /// Direct user input -- fully trusted.
+    UserInput,
+    /// Gate verdicts from the validation pipeline.
+    GateVerdict,
+    /// Output produced by an LLM agent.
+    AgentOutput,
+    /// Data retrieved from an external API.
+    ExternalApi,
+    /// Speculative knowledge from dream consolidation.
+    DreamConsolidation,
+}
+
+impl SourceChannel {
+    /// Default trust discount factor for this channel.
+    ///
+    /// The entry's raw confidence is multiplied by this value on ingest.
+    #[must_use]
+    pub const fn discount_factor(self) -> f64 {
+        match self {
+            Self::UserInput => 1.0,
+            Self::GateVerdict => 0.95,
+            Self::AgentOutput => 0.8,
+            Self::ExternalApi => 0.6,
+            Self::DreamConsolidation => 0.5,
+        }
+    }
+
+    /// Apply the channel's discount to a raw confidence value.
+    #[must_use]
+    pub fn apply(self, confidence: f64) -> f64 {
+        (confidence * self.discount_factor()).clamp(0.0, 1.0)
+    }
+
+    /// Infer the source channel from a source label string.
+    #[must_use]
+    pub fn from_source_label(label: &str) -> Self {
+        let normalized = label.trim().to_ascii_lowercase();
+        if normalized.contains("user") || normalized.contains("manual") {
+            Self::UserInput
+        } else if normalized.contains("gate") || normalized.contains("verdict") {
+            Self::GateVerdict
+        } else if normalized.contains("agent") || normalized.contains("llm") {
+            Self::AgentOutput
+        } else if normalized.contains("api") || normalized.contains("external") {
+            Self::ExternalApi
+        } else if normalized.contains("dream") || normalized.contains("consolidat") {
+            Self::DreamConsolidation
+        } else {
+            // Default to agent output for unknown sources.
+            Self::AgentOutput
+        }
+    }
+}
+
+/// Apply source-channel confidence discounting to a batch of entries.
+///
+/// Each entry's confidence is multiplied by the discount factor of the
+/// given source channel.
+pub fn apply_source_discount(entries: &mut [KnowledgeEntry], channel: SourceChannel) {
+    let factor = channel.discount_factor();
+    for entry in entries.iter_mut() {
+        entry.confidence = (entry.confidence * factor).clamp(0.0, 1.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-08: Worldview clustering and cold-tier preservation.
+// ---------------------------------------------------------------------------
+
+/// A cluster of related knowledge entries grouped by tag similarity.
+///
+/// During garbage collection, if an entry is the last representative of
+/// its worldview cluster, it is preserved to prevent losing an entire
+/// conceptual domain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldviewCluster {
+    /// Stable identifier for this cluster.
+    pub id: String,
+    /// Representative tags that define this worldview.
+    pub representative_tags: Vec<String>,
+    /// Number of entries currently in this cluster.
+    pub entry_count: usize,
+}
+
+/// Assign each knowledge entry to a worldview cluster based on tag overlap.
+///
+/// Two entries share a cluster when they have at least `min_tag_overlap`
+/// tags in common. The algorithm uses a simple union-find approach:
+/// entries with shared tags get merged into the same cluster.
+#[must_use]
+pub fn cluster_worldviews(
+    entries: &[KnowledgeEntry],
+    min_tag_overlap: usize,
+) -> Vec<WorldviewCluster> {
+    fn uf_find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]]; // path compression
+            i = parent[i];
+        }
+        i
+    }
+
+    fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = uf_find(parent, a);
+        let rb = uf_find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let min_overlap = min_tag_overlap.max(1);
+    let mut parent: Vec<usize> = (0..entries.len()).collect();
+
+    // O(n^2) pairwise tag overlap -- acceptable for typical knowledge store sizes.
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let overlap = entries[i]
+                .tags
+                .iter()
+                .filter(|tag| entries[j].tags.contains(tag))
+                .count();
+            if overlap >= min_overlap {
+                uf_union(&mut parent, i, j);
+            }
+        }
+    }
+
+    // Group entries by their root representative.
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..entries.len() {
+        let root = uf_find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    groups
+        .into_iter()
+        .map(|(root, members)| {
+            // Collect the union of all tags in this cluster.
+            let mut all_tags: Vec<String> = Vec::new();
+            for &idx in &members {
+                for tag in &entries[idx].tags {
+                    if !all_tags.contains(tag) {
+                        all_tags.push(tag.clone());
+                    }
+                }
+            }
+            all_tags.sort();
+
+            WorldviewCluster {
+                id: format!("wv-{}", entries[root].id),
+                representative_tags: all_tags,
+                entry_count: members.len(),
+            }
+        })
+        .collect()
+}
+
+/// Filter entries for GC, preserving the last representative of each
+/// worldview cluster to prevent losing entire conceptual domains.
+///
+/// Returns entries that should be retained (those above threshold plus
+/// any "last survivor" entries from worldview clusters).
+#[must_use]
+pub fn gc_with_worldview_preservation(
+    entries: Vec<KnowledgeEntry>,
+    min_confidence: f64,
+    min_tag_overlap: usize,
+) -> Vec<KnowledgeEntry> {
+    fn uf_find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = uf_find(parent, a);
+        let rb = uf_find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let threshold = min_confidence.max(0.0);
+
+    // Determine which entries survive the confidence threshold.
+    let mut surviving_indices: Vec<bool> = entries
+        .iter()
+        .map(|entry| {
+            entry.kind == KnowledgeKind::AntiKnowledge
+                || effective_confidence_for_gc(entry) >= threshold
+        })
+        .collect();
+
+    // Build union-find clusters from tag overlap.
+    let mut parent: Vec<usize> = (0..entries.len()).collect();
+    let min_overlap = min_tag_overlap.max(1);
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let overlap = entries[i]
+                .tags
+                .iter()
+                .filter(|tag| entries[j].tags.contains(tag))
+                .count();
+            if overlap >= min_overlap {
+                uf_union(&mut parent, i, j);
+            }
+        }
+    }
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..entries.len() {
+        let root = uf_find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    // For each cluster, if no entry survives, preserve the best one.
+    for members in groups.values() {
+        let any_survive = members.iter().any(|&idx| surviving_indices[idx]);
+        if !any_survive && !members.is_empty() {
+            let best = members
+                .iter()
+                .copied()
+                .max_by(|&a, &b| {
+                    entries[a]
+                        .confidence
+                        .partial_cmp(&entries[b].confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(members[0]);
+            surviving_indices[best] = true;
+        }
+    }
+
+    entries
+        .into_iter()
+        .zip(surviving_indices)
+        .filter(|(_, survives)| *survives)
+        .map(|(entry, _)| entry)
+        .collect()
+}
+
+/// Effective confidence used for GC threshold comparison.
+///
+/// This mirrors the knowledge store's internal effective_confidence logic.
+fn effective_confidence_for_gc(entry: &KnowledgeEntry) -> f64 {
+    let base = entry.confidence.max(0.0);
+    let boost = entry.emotional_consolidation_boost();
+    let confirmation_factor = if entry.confirmation_count >= 2 {
+        1.5
+    } else {
+        1.0
+    };
+    base * boost * confirmation_factor
+}
+
 /// Single entry point for durable knowledge storage backends.
 pub trait NeuroStore: Sized {
     /// Initialize a store at the given path.

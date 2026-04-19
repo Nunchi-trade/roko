@@ -25,6 +25,10 @@ static GO_PROVIDER: GoLanguageProvider = GoLanguageProvider;
 
 /// Serializable symbol summary for MCP responses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct SymbolInfo {
     /// Stable symbol identifier.
     pub id: SymbolId,

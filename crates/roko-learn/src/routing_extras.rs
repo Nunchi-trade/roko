@@ -5,7 +5,9 @@
 
 #![allow(dead_code)]
 
-use crate::cascade_router::CascadeRouter;
+use crate::cascade_router::{CascadeModel, CascadeRouter};
+use crate::model_router::RoutingContext;
+use roko_core::agent::ModelSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -167,6 +169,83 @@ impl LookaheadRouter {
     #[must_use]
     pub fn cache_model_mut(&mut self) -> &mut CacheReuseModel {
         &mut self.cache_model
+    }
+
+    /// Route with tier-downgrade lookahead.
+    ///
+    /// Before committing to the cascade-selected model, checks whether a
+    /// cheaper tier has sufficiently high estimated success probability. If
+    /// `P(success | cheaper_tier) > threshold`, the cheaper model is returned
+    /// instead, saving cost without meaningful quality loss.
+    #[must_use]
+    pub fn route_with_lookahead(
+        &self,
+        ctx: &RoutingContext,
+        calibration: &RouterCalibration,
+        threshold: f64,
+    ) -> CascadeModel {
+        let baseline = self.inner.route(ctx);
+        let baseline_tier = tier_rank_for_slug(&baseline.primary.slug);
+
+        // Only attempt downgrade if we're at Standard or Premium.
+        if baseline_tier == 0 {
+            return baseline;
+        }
+
+        // Check each cheaper tier from cheapest up.
+        let candidates = self.inner.model_slugs();
+        for candidate_slug in candidates {
+            let candidate_tier = tier_rank_for_slug(candidate_slug);
+            if candidate_tier >= baseline_tier {
+                continue;
+            }
+
+            // Look up calibration data for this candidate.
+            if let Some(cal) = calibration.calibration(candidate_slug) {
+                // Estimate success probability from the bin data.
+                let success_prob = estimate_success_probability(cal);
+                if success_prob > threshold {
+                    // Cheaper model is likely to succeed — use it.
+                    let mut downgraded = baseline.clone();
+                    downgraded.primary = ModelSpec::from_slug(candidate_slug);
+                    return downgraded;
+                }
+            }
+        }
+
+        baseline
+    }
+}
+
+/// Estimate success probability from calibration data.
+///
+/// Uses the weighted average of actual success rates across non-empty bins.
+fn estimate_success_probability(cal: &ModelCalibration) -> f64 {
+    let mut total_count = 0u32;
+    let mut weighted_rate = 0.0;
+    for bin in &cal.bins {
+        if bin.count > 0 {
+            total_count += bin.count;
+            weighted_rate += bin.actual_rate * bin.count as f64;
+        }
+    }
+    if total_count == 0 {
+        return 0.5; // No data — neutral prior.
+    }
+    weighted_rate / total_count as f64
+}
+
+/// Map a model slug to a tier rank (0 = fast/cheap, 1 = standard, 2 = premium).
+fn tier_rank_for_slug(slug: &str) -> u8 {
+    if slug.contains("gemini-2.5-flash-lite")
+        || slug.contains("gemini-3.1-flash-lite-preview")
+        || slug.contains("haiku")
+    {
+        0
+    } else if slug.contains("opus") || slug.contains("premium") || slug.contains("gemini-3.1-pro-preview") {
+        2
+    } else {
+        1
     }
 }
 

@@ -22,10 +22,12 @@ tracing = { workspace = true }
 
 rusqlite = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
+rkyv = { version = "0.8", optional = true }
 
 [features]
 default = []
 sqlite = ["dep:rusqlite", "dep:blake3"]
+rkyv = ["dep:rkyv", "roko-core/rkyv"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

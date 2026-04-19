@@ -80,7 +80,7 @@ pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
-pub use gate_pipeline::GatePipeline;
+pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
 pub use generated::{GateError, GateGenerator, GeneratedCheck};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
 pub use process_reward::{

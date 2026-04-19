@@ -305,6 +305,24 @@ impl KnowledgeStore {
         self.ingest(vec![entry])
     }
 
+    /// NEURO-07: Append entries with source-channel confidence discounting.
+    ///
+    /// Each entry's confidence is multiplied by the channel's trust discount
+    /// before being ingested into the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created, an entry
+    /// cannot be serialized, or the write fails.
+    pub fn ingest_with_source(
+        &self,
+        mut entries: Vec<KnowledgeEntry>,
+        channel: crate::SourceChannel,
+    ) -> Result<()> {
+        crate::apply_source_discount(&mut entries, channel);
+        self.ingest(entries)
+    }
+
     /// Append a batch of knowledge entries to the JSONL log.
     ///
     /// # Errors
@@ -831,6 +849,30 @@ impl KnowledgeStore {
                     || effective_confidence(entry) >= threshold
             })
             .collect::<Vec<_>>();
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
+    }
+
+    /// NEURO-08: Garbage-collect entries while preserving the last
+    /// representative of each worldview cluster.
+    ///
+    /// Uses tag-overlap clustering to group related entries. If all entries
+    /// in a cluster would be removed, the highest-confidence entry is kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn gc_preserving_worldviews(
+        &self,
+        min_confidence: f64,
+        min_tag_overlap: usize,
+    ) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let entries =
+            crate::gc_with_worldview_preservation(before, min_confidence, min_tag_overlap);
         let removed = before_len.saturating_sub(entries.len());
         self.rewrite_all(&entries)?;
         Ok(removed)

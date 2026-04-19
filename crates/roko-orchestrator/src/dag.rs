@@ -523,6 +523,86 @@ impl UnifiedTaskDag {
         }
     }
 
+    /// Remove tasks not required to produce the given target task IDs.
+    ///
+    /// Backward BFS from `targets` collects all transitive dependencies.
+    /// Every node NOT in that set is removed from the DAG. Returns the
+    /// number of culled tasks.
+    ///
+    /// Completed tasks are retained if they appear in the target's
+    /// transitive closure (their outputs may still be needed).
+    pub fn cull(&mut self, targets: &[String]) -> usize {
+        // Resolve target strings to GlobalTaskIds. Try GlobalTaskId::parse
+        // first (qualified "plan:task"), then match any node whose task
+        // portion matches (bare "task" name).
+        let mut needed: HashSet<GlobalTaskId> = HashSet::new();
+        let mut queue: std::collections::VecDeque<GlobalTaskId> =
+            std::collections::VecDeque::new();
+
+        for target in targets {
+            if let Some(gid) = GlobalTaskId::parse(target) {
+                if self.tasks.contains_key(&gid) {
+                    queue.push_back(gid.clone());
+                    needed.insert(gid);
+                }
+            } else {
+                // Bare task name — match any node with that task id.
+                for node in &self.nodes {
+                    if node.task == *target {
+                        queue.push_back(node.clone());
+                        needed.insert(node.clone());
+                    }
+                }
+            }
+        }
+
+        // BFS backward through deps.
+        while let Some(node) = queue.pop_front() {
+            for dep in self.deps_of(&node).clone() {
+                if needed.insert(dep.clone()) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+
+        // Collect nodes to remove.
+        let to_remove: Vec<GlobalTaskId> = self
+            .nodes
+            .iter()
+            .filter(|id| !needed.contains(id))
+            .cloned()
+            .collect();
+
+        let culled = to_remove.len();
+        if culled == 0 {
+            return 0;
+        }
+
+        for id in &to_remove {
+            self.tasks.remove(id);
+            self.edges.remove(id);
+            self.reverse_edges.remove(id);
+            self.estimates.remove(id);
+        }
+
+        // Clean up edges pointing to removed nodes in remaining entries.
+        let remove_set: HashSet<&GlobalTaskId> = to_remove.iter().collect();
+        for deps in self.edges.values_mut() {
+            deps.retain(|d| !remove_set.contains(d));
+        }
+        for rev in self.reverse_edges.values_mut() {
+            rev.retain(|d| !remove_set.contains(d));
+        }
+
+        // Rebuild node list.
+        self.nodes = self.tasks.keys().cloned().collect();
+        self.nodes.sort_by(|a, b| {
+            (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str()))
+        });
+
+        culled
+    }
+
     /// Collapse eligible linear chains in place.
     ///
     /// The `config` parameter controls maximum chain length, minimum
@@ -1111,6 +1191,12 @@ pub struct IncrementalDag {
     pub dag: UnifiedTaskDag,
     dirty: HashSet<GlobalTaskId>,
     durability: HashMap<GlobalTaskId, Durability>,
+    /// Global revision counter, incremented on every input change.
+    revision: u64,
+    /// Per-node revision at which the node was last verified clean.
+    verified_at: HashMap<GlobalTaskId, u64>,
+    /// Per-node BLAKE3 hash of the node's inputs (serialized task + deps).
+    input_hashes: HashMap<GlobalTaskId, [u8; 32]>,
 }
 
 impl IncrementalDag {
@@ -1121,7 +1207,28 @@ impl IncrementalDag {
             dag,
             dirty: HashSet::new(),
             durability: HashMap::new(),
+            revision: 0,
+            verified_at: HashMap::new(),
+            input_hashes: HashMap::new(),
         }
+    }
+
+    /// Current global revision counter.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Per-node verified-at revisions.
+    #[must_use]
+    pub fn verified_at_map(&self) -> &HashMap<GlobalTaskId, u64> {
+        &self.verified_at
+    }
+
+    /// Per-node input hashes.
+    #[must_use]
+    pub fn input_hashes_map(&self) -> &HashMap<GlobalTaskId, [u8; 32]> {
+        &self.input_hashes
     }
 
     /// Read-only access to the underlying DAG.
@@ -1141,7 +1248,10 @@ impl IncrementalDag {
     }
 
     /// Mark a task dirty and propagate to dependents.
+    ///
+    /// Increments the global revision counter on each call.
     pub fn mark_dirty(&mut self, task: GlobalTaskId) {
+        self.revision += 1;
         let mut stack = vec![task];
         while let Some(next) = stack.pop() {
             if !self.dirty.insert(next.clone()) {
@@ -1154,6 +1264,61 @@ impl IncrementalDag {
                 stack.push(dependent);
             }
         }
+    }
+
+    /// Salsa-style backdate optimization: check whether a task's inputs
+    /// actually changed before recomputing.
+    ///
+    /// If the BLAKE3 hash of the node's current inputs matches the stored
+    /// hash, the node is "backdated" clean at the current revision and
+    /// removed from the dirty set without recomputation.
+    ///
+    /// Returns `true` if the node is clean (either already clean or
+    /// successfully backdated).
+    pub fn ensure_clean(&mut self, task_id: &GlobalTaskId) -> bool {
+        // Already clean.
+        if !self.dirty.contains(task_id) {
+            return true;
+        }
+
+        let current_hash = self.compute_input_hash(task_id);
+        if let Some(stored) = self.input_hashes.get(task_id) {
+            if *stored == current_hash {
+                // Inputs unchanged — backdate: mark clean at current revision.
+                self.dirty.remove(task_id);
+                self.verified_at.insert(task_id.clone(), self.revision);
+                return true;
+            }
+        }
+
+        // Inputs changed — update stored hash, keep dirty.
+        self.input_hashes.insert(task_id.clone(), current_hash);
+        false
+    }
+
+    /// Compute a BLAKE3 hash of a node's inputs: its serialized task spec
+    /// plus the sorted list of dependency task IDs.
+    fn compute_input_hash(&self, task_id: &GlobalTaskId) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(task_id.to_string().as_bytes());
+        if let Some(task) = self.dag.task(task_id) {
+            if let Ok(json) = serde_json::to_string(task) {
+                hasher.update(json.as_bytes());
+            }
+        }
+        let deps = self.dag.deps_of(task_id);
+        for dep in deps {
+            hasher.update(dep.to_string().as_bytes());
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Mark a task verified at the current revision and store its input hash.
+    pub fn mark_verified(&mut self, task_id: &GlobalTaskId) {
+        self.dirty.remove(task_id);
+        self.verified_at.insert(task_id.clone(), self.revision);
+        let hash = self.compute_input_hash(task_id);
+        self.input_hashes.insert(task_id.clone(), hash);
     }
 
     /// Return the tasks that do not need to be re-executed.
@@ -1853,5 +2018,130 @@ mod tests {
         let dag = single_plan_dag(tasks).unwrap();
         let names: Vec<&str> = dag.nodes().iter().map(|i| i.task.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    // ── ORCH-05: DAG cull tests ─────────────────────────────────────
+
+    #[test]
+    fn cull_removes_unreachable_tasks() {
+        //   t1 → t2 → t3
+        //   t4 (independent)
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+            mk_task("t4", &[], &[], Some(7)),
+        ])
+        .unwrap();
+        assert_eq!(dag.nodes().len(), 4);
+
+        let culled = dag.cull(&["t3".to_string()]);
+        assert_eq!(culled, 1); // t4 removed
+        assert_eq!(dag.nodes().len(), 3);
+        let names: Vec<&str> = dag.nodes().iter().map(|n| n.task.as_str()).collect();
+        assert!(names.contains(&"t1"));
+        assert!(names.contains(&"t2"));
+        assert!(names.contains(&"t3"));
+        assert!(!names.contains(&"t4"));
+    }
+
+    #[test]
+    fn cull_with_multiple_targets() {
+        //   t1 → t2 → t3
+        //   t4 → t5
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+            mk_task("t4", &[], &[], Some(7)),
+            mk_task("t5", &["t4"], &[], Some(2)),
+        ])
+        .unwrap();
+
+        let culled = dag.cull(&["t3".to_string(), "t5".to_string()]);
+        assert_eq!(culled, 0); // all needed
+        assert_eq!(dag.nodes().len(), 5);
+    }
+
+    #[test]
+    fn cull_empty_targets_removes_everything() {
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+        ])
+        .unwrap();
+
+        let culled = dag.cull(&[]);
+        assert_eq!(culled, 2);
+        assert!(dag.nodes().is_empty());
+    }
+
+    #[test]
+    fn cull_preserves_graph_validity() {
+        //   t1 → t2 → t3
+        //         ↗
+        //   t4 ──┘
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2", "t4"], &[], Some(3)),
+            mk_task("t4", &[], &[], Some(7)),
+        ])
+        .unwrap();
+
+        let culled = dag.cull(&["t3".to_string()]);
+        assert_eq!(culled, 0); // all needed for t3
+        // Verify topo sort still works.
+        assert!(dag.topological_sort().is_ok());
+    }
+
+    // ── ORCH-07: IncrementalDag revision tracking tests ─────────────
+
+    #[test]
+    fn incremental_dag_revision_increments_on_dirty() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+        ])
+        .unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        assert_eq!(inc.revision(), 0);
+
+        inc.mark_dirty(GlobalTaskId::new("plan-a", "t1"));
+        assert_eq!(inc.revision(), 1);
+
+        inc.mark_dirty(GlobalTaskId::new("plan-a", "t2"));
+        assert_eq!(inc.revision(), 2);
+    }
+
+    #[test]
+    fn incremental_dag_ensure_clean_backdates() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+        ])
+        .unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        let t1 = GlobalTaskId::new("plan-a", "t1");
+
+        // Compute initial hash.
+        inc.mark_verified(&t1);
+        assert_eq!(inc.verified_at_map().get(&t1), Some(&0));
+
+        // Mark dirty, then ensure_clean — inputs haven't changed so it backdates.
+        inc.mark_dirty(t1.clone());
+        assert!(inc.ensure_clean(&t1));
+        assert_eq!(*inc.verified_at_map().get(&t1).unwrap(), 1);
+    }
+
+    #[test]
+    fn incremental_dag_mark_verified_stores_hash() {
+        let dag = single_plan_dag(vec![mk_task("t1", &[], &[], Some(10))]).unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        let t1 = GlobalTaskId::new("plan-a", "t1");
+
+        assert!(inc.input_hashes_map().get(&t1).is_none());
+        inc.mark_verified(&t1);
+        assert!(inc.input_hashes_map().get(&t1).is_some());
     }
 }

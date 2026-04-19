@@ -2245,6 +2245,132 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// DAIM-04: Somatic marker creation from dream replay episodes.
+// ---------------------------------------------------------------------------
+
+/// Create a somatic marker from an emotionally significant episode.
+///
+/// The episode's PAD state is mapped to valence (pleasure) and intensity
+/// (arousal magnitude). Positive markers bias future decisions toward approach;
+/// negative markers bias toward avoidance.
+#[must_use]
+pub fn create_somatic_marker(
+    episode_hash: ContentHash,
+    pad: &PadVector,
+    strategy_coords: StrategyCoordinates,
+) -> SomaticMarker {
+    SomaticMarker {
+        strategy_coords: strategy_coords.clamped(),
+        valence: pad.pleasure.clamp(-1.0, 1.0),
+        intensity: pad.arousal.abs().clamp(0.0, 1.0),
+        episodes: vec![episode_hash],
+        updated_at: Utc::now(),
+    }
+    .clamped()
+}
+
+/// Create somatic markers from a batch of dream replay results.
+///
+/// Only episodes whose PAD signal exceeds the configured intensity and
+/// valence thresholds produce markers; sub-threshold episodes are skipped.
+pub fn create_somatic_markers_from_dreams(
+    dream_results: &[(ContentHash, PadVector, StrategyCoordinates)],
+) -> Vec<SomaticMarker> {
+    dream_results
+        .iter()
+        .filter(|(_, pad, _)| {
+            pad.arousal.abs() >= SOMATIC_EVENT_INTENSITY_THRESHOLD
+                && pad.pleasure.abs() >= SOMATIC_EVENT_VALENCE_THRESHOLD
+        })
+        .map(|(hash, pad, coords)| create_somatic_marker(*hash, pad, *coords))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// DAIM-05: Full 8D behavioral strategy extraction from PAD octants.
+// ---------------------------------------------------------------------------
+
+/// Behavioral strategy derived from PAD octant mapping.
+///
+/// Each of the eight PAD octants maps to a distinct behavioral approach
+/// that influences agent behavior guidance and prompt composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehavioralStrategy {
+    /// (+P, +A, +D) Exuberant: aggressive exploration, high risk tolerance.
+    Exuberant,
+    /// (+P, +A, -D) Dependent: seek guidance, follow proven playbooks.
+    Dependent,
+    /// (+P, -A, +D) Relaxed: consolidate gains, exploit known patterns.
+    Relaxed,
+    /// (+P, -A, -D) Docile: passive acceptance, minimal intervention.
+    Docile,
+    /// (-P, +A, +D) Hostile: forceful correction, escalate resources.
+    Hostile,
+    /// (-P, +A, -D) Anxious: cautious probing, defensive validation.
+    Anxious,
+    /// (-P, -A, +D) Disdainful: selective engagement, skip low-value work.
+    Disdainful,
+    /// (-P, -A, -D) Bored: idle maintenance, background consolidation.
+    Bored,
+}
+
+impl BehavioralStrategy {
+    /// Human-readable guidance text for prompt composition.
+    #[must_use]
+    pub const fn guidance(self) -> &'static str {
+        match self {
+            Self::Exuberant => "Explore aggressively. Try novel approaches and accept higher risk for potential breakthroughs.",
+            Self::Dependent => "Seek guidance from existing patterns. Follow proven playbooks and ask for clarification when uncertain.",
+            Self::Relaxed => "Consolidate recent gains. Exploit known-good patterns rather than exploring new territory.",
+            Self::Docile => "Make minimal changes. Accept current state and avoid unnecessary intervention.",
+            Self::Hostile => "Apply forceful correction. Escalate model tier, increase retries, and push through blockers.",
+            Self::Anxious => "Proceed cautiously. Add extra validation, prefer conservative strategies, and verify assumptions.",
+            Self::Disdainful => "Be selective. Focus only on high-value tasks and skip marginal work items.",
+            Self::Bored => "Run background maintenance. Trigger dream cycles, consolidate knowledge, and clean up technical debt.",
+        }
+    }
+
+    /// Map this strategy to a dispatch strategy for the agent loop.
+    #[must_use]
+    pub const fn dispatch_strategy(self) -> DispatchStrategy {
+        match self {
+            Self::Exuberant => DispatchStrategy::Exploratory,
+            Self::Dependent => DispatchStrategy::Conservative,
+            Self::Relaxed => DispatchStrategy::Balanced,
+            Self::Docile => DispatchStrategy::Conservative,
+            Self::Hostile => DispatchStrategy::Escalating,
+            Self::Anxious => DispatchStrategy::Conservative,
+            Self::Disdainful => DispatchStrategy::Balanced,
+            Self::Bored => DispatchStrategy::Proactive,
+        }
+    }
+}
+
+/// Extract the full 8D behavioral strategy from a PAD vector.
+///
+/// Maps the PAD vector's sign pattern to one of eight behavioral strategies,
+/// each derived from the corresponding octant of the PAD space.
+#[must_use]
+pub fn strategy_from_pad(pad: &PadVector) -> BehavioralStrategy {
+    // Treat near-zero values as the positive side (approach default).
+    let positive_pleasure = pad.pleasure >= 0.0;
+    let positive_arousal = pad.arousal >= 0.0;
+    let positive_dominance = pad.dominance >= 0.0;
+
+    match (positive_pleasure, positive_arousal, positive_dominance) {
+        (true, true, true) => BehavioralStrategy::Exuberant,
+        (true, true, false) => BehavioralStrategy::Dependent,
+        (true, false, true) => BehavioralStrategy::Relaxed,
+        (true, false, false) => BehavioralStrategy::Docile,
+        (false, true, true) => BehavioralStrategy::Hostile,
+        (false, true, false) => BehavioralStrategy::Anxious,
+        (false, false, true) => BehavioralStrategy::Disdainful,
+        (false, false, false) => BehavioralStrategy::Bored,
+    }
+}
+
 fn apply_somatic_bias(params: &mut DispatchParams, state: &AffectState, signal: &SomaticSignal) {
     if !signal.is_actionable() {
         return;

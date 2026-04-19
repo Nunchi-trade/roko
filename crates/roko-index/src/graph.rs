@@ -24,6 +24,10 @@ static TYPE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// The kind of relationship between two symbols.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum EdgeKind {
     /// One symbol calls another.
@@ -40,6 +44,10 @@ pub enum EdgeKind {
 
 /// A directed edge in the symbol graph.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct SymbolEdge {
     /// Source symbol.
     pub from_id: SymbolId,
@@ -171,6 +179,90 @@ impl SymbolGraph {
         }
 
         results
+    }
+}
+
+// ─── rkyv zero-copy snapshots ────────────────────────────────────────────
+
+/// Flat snapshot of a graph's edges for rkyv serialization.
+///
+/// The graph's internal `HashMap`/`HashSet` structures do not derive rkyv
+/// directly, so we serialize a flat edge list instead and rebuild on load.
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct SymbolGraphSnapshot {
+    /// All edges as `(from, to, kind)` triples.
+    pub edges: Vec<SymbolEdge>,
+}
+
+#[cfg(feature = "rkyv")]
+impl SymbolGraph {
+    /// Create a flat snapshot suitable for rkyv serialization.
+    #[must_use]
+    pub fn snapshot(&self) -> SymbolGraphSnapshot {
+        let mut edges = Vec::new();
+        for (from_id, targets) in &self.forward {
+            for (to_id, kind) in targets {
+                edges.push(SymbolEdge {
+                    from_id: from_id.clone(),
+                    to_id: to_id.clone(),
+                    kind: kind.clone(),
+                });
+            }
+        }
+        SymbolGraphSnapshot { edges }
+    }
+
+    /// Rebuild a graph from a snapshot.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &SymbolGraphSnapshot) -> Self {
+        let mut nodes = HashSet::new();
+        let mut forward: HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>> = HashMap::new();
+        let mut reverse: HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>> = HashMap::new();
+        for edge in &snapshot.edges {
+            nodes.insert(edge.from_id.clone());
+            nodes.insert(edge.to_id.clone());
+            forward
+                .entry(edge.from_id.clone())
+                .or_default()
+                .push((edge.to_id.clone(), edge.kind.clone()));
+            reverse
+                .entry(edge.to_id.clone())
+                .or_default()
+                .push((edge.from_id.clone(), edge.kind.clone()));
+        }
+        Self { nodes, forward, reverse }
+    }
+
+    /// Serialize the graph to an rkyv archive and write it to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph cannot be serialized or the file cannot
+    /// be written.
+    pub fn save_rkyv(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = self.snapshot();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
+            .map_err(|e| format!("rkyv ser: {e}"))?;
+        std::fs::write(path, &bytes)?;
+        Ok(())
+    }
+
+    /// Load a graph from an rkyv archive at `path`.
+    ///
+    /// Deserializes the snapshot and rebuilds the graph indices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the archive is invalid.
+    pub fn load_rkyv(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let bytes = std::fs::read(path)?;
+        let archived = rkyv::access::<ArchivedSymbolGraphSnapshot, rkyv::rancor::Error>(&bytes)
+            .map_err(|e| format!("rkyv access: {e}"))?;
+        let snapshot: SymbolGraphSnapshot =
+            rkyv::deserialize::<SymbolGraphSnapshot, rkyv::rancor::Error>(archived)
+                .map_err(|e| format!("rkyv deser: {e}"))?;
+        Ok(Self::from_snapshot(&snapshot))
     }
 }
 
@@ -452,6 +544,77 @@ pub fn pagerank(graph: &SymbolGraph, iterations: u32, damping: f64) -> HashMap<S
     rank
 }
 
+/// Weight assigned to each edge kind for weighted PageRank.
+fn edge_weight(kind: &EdgeKind) -> f64 {
+    match kind {
+        EdgeKind::Imports => 1.0,
+        EdgeKind::Calls => 0.8,
+        EdgeKind::Implements => 0.9,
+        EdgeKind::Contains => 0.6,
+        EdgeKind::TypeRef => 0.5,
+    }
+}
+
+/// Compute weighted `PageRank` scores over a [`SymbolGraph`].
+///
+/// Like [`pagerank`], but edge weights based on [`EdgeKind`] importance
+/// influence the transfer matrix. Import edges carry full weight (1.0),
+/// call edges 0.8, implements 0.9, contains 0.6, and type-ref edges 0.5.
+#[allow(clippy::cast_precision_loss)]
+pub fn weighted_pagerank(
+    graph: &SymbolGraph,
+    damping: f64,
+    iterations: u32,
+) -> HashMap<SymbolId, f64> {
+    let all_nodes: Vec<&SymbolId> = graph.nodes.iter().collect();
+    let n = all_nodes.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+
+    // Pre-compute weighted out-degree for each node.
+    let weighted_out: HashMap<&SymbolId, f64> = all_nodes
+        .iter()
+        .map(|&id| {
+            let w = graph
+                .forward
+                .get(id)
+                .map(|edges| edges.iter().map(|(_, kind)| edge_weight(kind)).sum::<f64>())
+                .unwrap_or(0.0)
+                .max(f64::MIN_POSITIVE);
+            (id, w)
+        })
+        .collect();
+
+    let n_f = n as f64;
+    let mut rank: HashMap<SymbolId, f64> = all_nodes
+        .iter()
+        .map(|id| ((*id).clone(), 1.0 / n_f))
+        .collect();
+
+    for _ in 0..iterations {
+        let mut new_rank: HashMap<SymbolId, f64> = HashMap::with_capacity(n);
+        let base = (1.0 - damping) / n_f;
+
+        for &node in &all_nodes {
+            let mut incoming_sum = 0.0_f64;
+            if let Some(inbound) = graph.reverse.get(node) {
+                for (src, kind) in inbound {
+                    let src_rank = rank.get(src).copied().unwrap_or(0.0);
+                    let w = edge_weight(kind);
+                    let out_w = weighted_out.get(src).copied().unwrap_or(1.0);
+                    incoming_sum += src_rank * w / out_w;
+                }
+            }
+            new_rank.insert(node.clone(), damping.mul_add(incoming_sum, base));
+        }
+
+        rank = new_rank;
+    }
+
+    rank
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,6 +811,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn weighted_pagerank_hub_highest() {
+        // Same star topology as the unweighted test.
+        let files = vec![
+            make_file("hub.rs", vec![sym("Hub", SymbolKind::Struct)], vec![]),
+            make_file(
+                "a.rs",
+                vec![sym("A", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "b.rs",
+                vec![sym("B", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "c.rs",
+                vec![sym("C", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+        ];
+        let graph = build_graph(&files);
+        let ranks = weighted_pagerank(&graph, 0.85, 30);
+        let hub_id = SymbolId::new("hub.rs", "Hub", SymbolKind::Struct);
+        let hub_rank = ranks.get(&hub_id).copied().unwrap_or(0.0);
+
+        for (id, rank) in &ranks {
+            if *id != hub_id {
+                assert!(
+                    hub_rank > *rank,
+                    "Hub rank {hub_rank} should exceed {id} rank {rank}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_pagerank_converges_like_unweighted_on_cycle() {
+        // A cycle with all the same edge kind should converge to roughly equal
+        // values, matching the unweighted result.
+        let files = vec![
+            make_file(
+                "a.rs",
+                vec![sym("A", SymbolKind::Function)],
+                vec![imp("b::B")],
+            ),
+            make_file(
+                "b.rs",
+                vec![sym("B", SymbolKind::Function)],
+                vec![imp("c::C")],
+            ),
+            make_file(
+                "c.rs",
+                vec![sym("C", SymbolKind::Function)],
+                vec![imp("a::A")],
+            ),
+        ];
+        let graph = build_graph(&files);
+        let ranks = weighted_pagerank(&graph, 0.85, 50);
+        let vals: Vec<f64> = ranks.values().copied().collect();
+        assert_eq!(vals.len(), 3);
+        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            (max - min).abs() < 0.01,
+            "Cycle nodes should have near-equal weighted ranks, max={max} min={min}"
+        );
     }
 
     #[test]
