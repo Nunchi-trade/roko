@@ -284,6 +284,34 @@ pub struct KnowledgeEntry {
     pub deprecated: bool,
 }
 
+impl Default for KnowledgeEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: KnowledgeKind::default(),
+            source: None,
+            content: String::new(),
+            confidence: default_confidence(),
+            confidence_weight: default_confidence_weight(),
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: Vec::new(),
+            tags: Vec::new(),
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now(),
+            half_life_days: default_half_life_days(),
+            tier: KnowledgeTier::default(),
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+        }
+    }
+}
+
 impl KnowledgeEntry {
     /// Return the warning text for an AntiKnowledge entry, if available.
     #[must_use]
@@ -666,6 +694,287 @@ fn effective_confidence_for_gc(entry: &KnowledgeEntry) -> f64 {
     base * boost * confirmation_factor
 }
 
+// ---------------------------------------------------------------------------
+// NEURO-09: Distillation D2 HDC clustering.
+// ---------------------------------------------------------------------------
+
+/// A cluster of knowledge entries grouped by HDC vector similarity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HdcCluster {
+    /// Cluster identifier (0-indexed).
+    pub id: usize,
+    /// Entry IDs belonging to this cluster.
+    pub entry_ids: Vec<String>,
+    /// Number of entries in this cluster.
+    pub entry_count: usize,
+}
+
+/// Group knowledge entries by HDC vector similarity using k-means with
+/// Hamming distance.
+///
+/// Entries without a valid HDC vector are assigned to cluster 0.
+/// The algorithm runs for at most 20 iterations or until convergence.
+#[must_use]
+pub fn hdc_cluster(entries: &[KnowledgeEntry], k: usize) -> Vec<HdcCluster> {
+    const HDC_BYTES: usize = 1280;
+    const MAX_ITERATIONS: usize = 20;
+
+    if entries.is_empty() || k == 0 {
+        return Vec::new();
+    }
+
+    let k = k.min(entries.len());
+
+    // Extract valid HDC vectors; entries without vectors get mapped to cluster 0.
+    let vectors: Vec<Option<&[u8]>> = entries
+        .iter()
+        .map(|e| {
+            e.hdc_vector
+                .as_deref()
+                .filter(|v| v.len() == HDC_BYTES)
+        })
+        .collect();
+
+    // Count entries with valid vectors.
+    let valid_count = vectors.iter().filter(|v| v.is_some()).count();
+    if valid_count == 0 || k <= 1 {
+        return vec![HdcCluster {
+            id: 0,
+            entry_ids: entries.iter().map(|e| e.id.clone()).collect(),
+            entry_count: entries.len(),
+        }];
+    }
+
+    // Initialize centroids: pick first k entries with valid vectors.
+    let mut centroids: Vec<Vec<u8>> = vectors
+        .iter()
+        .filter_map(|v| v.map(|bytes| bytes.to_vec()))
+        .take(k)
+        .collect();
+
+    let mut assignments = vec![0_usize; entries.len()];
+
+    for _iter in 0..MAX_ITERATIONS {
+        let mut changed = false;
+
+        // Assignment step: assign each entry to nearest centroid by Hamming distance.
+        for (i, vec_opt) in vectors.iter().enumerate() {
+            let Some(vec) = vec_opt else {
+                if assignments[i] != 0 {
+                    assignments[i] = 0;
+                    changed = true;
+                }
+                continue;
+            };
+
+            let mut best_cluster = 0;
+            let mut best_dist = u32::MAX;
+            for (c, centroid) in centroids.iter().enumerate() {
+                let dist: u32 = vec
+                    .iter()
+                    .zip(centroid.iter())
+                    .map(|(a, b)| (a ^ b).count_ones())
+                    .sum();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_cluster = c;
+                }
+            }
+
+            if assignments[i] != best_cluster {
+                assignments[i] = best_cluster;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Update step: majority vote for each centroid bit.
+        for (c, centroid) in centroids.iter_mut().enumerate() {
+            let members: Vec<&[u8]> = assignments
+                .iter()
+                .zip(vectors.iter())
+                .filter_map(|(&a, v)| {
+                    if a == c {
+                        v.as_deref()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if members.is_empty() {
+                continue;
+            }
+
+            for byte_idx in 0..HDC_BYTES {
+                let mut new_byte = 0u8;
+                for bit in 0..8 {
+                    let ones: usize = members
+                        .iter()
+                        .filter(|m| (m[byte_idx] >> bit) & 1 == 1)
+                        .count();
+                    if ones * 2 > members.len() {
+                        new_byte |= 1 << bit;
+                    }
+                }
+                centroid[byte_idx] = new_byte;
+            }
+        }
+    }
+
+    // Build cluster output.
+    let mut clusters: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (i, &cluster_id) in assignments.iter().enumerate() {
+        clusters
+            .entry(cluster_id)
+            .or_default()
+            .push(entries[i].id.clone());
+    }
+
+    clusters
+        .into_iter()
+        .map(|(id, entry_ids)| HdcCluster {
+            id,
+            entry_count: entry_ids.len(),
+            entry_ids,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-10: Demurrage balance model for knowledge entries.
+// ---------------------------------------------------------------------------
+
+/// Apply demurrage (relevance decay) to knowledge entries.
+///
+/// Each entry loses `decay_rate` fraction of its confidence per tick unless
+/// actively referenced. Returns the number of entries that had their
+/// confidence reduced.
+#[must_use]
+pub fn apply_demurrage(entries: &mut [KnowledgeEntry], decay_rate: f64) -> usize {
+    let rate = decay_rate.clamp(0.0, 1.0);
+    let mut count = 0;
+    for entry in entries.iter_mut() {
+        let old = entry.confidence;
+        entry.confidence = (entry.confidence * (1.0 - rate)).max(0.0);
+        if (old - entry.confidence).abs() > f64::EPSILON {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Boost a knowledge entry's confidence when it is actively referenced.
+///
+/// This is the counterpart to demurrage: entries that are used regain
+/// relevance. The boost is additive and capped at 1.0.
+pub fn demurrage_reference_boost(entry: &mut KnowledgeEntry, boost: f64) {
+    entry.confidence = (entry.confidence + boost.abs()).min(1.0);
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-11: Cold-tier freeze/thaw.
+// ---------------------------------------------------------------------------
+
+/// Freeze a knowledge entry for cold storage.
+///
+/// Frozen entries are marked with `deprecated = true` and their confidence
+/// is preserved but they should not appear in active search results.
+/// The original confidence is recorded in a tag for thaw restoration.
+pub fn freeze_entry(entry: &mut KnowledgeEntry) {
+    if entry.deprecated {
+        return; // Already frozen.
+    }
+    // Record pre-freeze confidence as a tag for thaw.
+    entry
+        .tags
+        .push(format!("__frozen_confidence:{:.6}", entry.confidence));
+    entry.deprecated = true;
+}
+
+/// Thaw a frozen knowledge entry, restoring it to active status.
+///
+/// Restores the pre-freeze confidence from the saved tag.
+/// Returns `true` if the entry was actually thawed.
+pub fn thaw_entry(entry: &mut KnowledgeEntry) -> bool {
+    if !entry.deprecated {
+        return false; // Not frozen.
+    }
+
+    // Restore pre-freeze confidence.
+    let mut restored_confidence = None;
+    entry.tags.retain(|tag| {
+        if let Some(val) = tag.strip_prefix("__frozen_confidence:") {
+            restored_confidence = val.parse::<f64>().ok();
+            false
+        } else {
+            true
+        }
+    });
+
+    if let Some(conf) = restored_confidence {
+        entry.confidence = conf.clamp(0.0, 1.0);
+    }
+    entry.deprecated = false;
+    true
+}
+
+/// Check if a knowledge entry is frozen (in cold storage).
+#[must_use]
+pub fn is_frozen(entry: &KnowledgeEntry) -> bool {
+    entry.deprecated && entry.tags.iter().any(|t| t.starts_with("__frozen_confidence:"))
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-12: Falsifier records.
+// ---------------------------------------------------------------------------
+
+/// Record tracking when a knowledge entry is contradicted by new evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FalsifierRecord {
+    /// ID of the knowledge entry that was falsified.
+    pub entry_id: String,
+    /// Evidence text explaining the contradiction.
+    pub evidence: String,
+    /// Timestamp when the falsification was recorded.
+    pub falsified_at_ms: i64,
+}
+
+/// Append a falsification record to a collection and mark the entry.
+///
+/// When a falsified entry is later referenced, callers should check the
+/// records and surface a warning.
+pub fn record_falsification(
+    records: &mut Vec<FalsifierRecord>,
+    entries: &mut [KnowledgeEntry],
+    entry_id: &str,
+    evidence: &str,
+) {
+    records.push(FalsifierRecord {
+        entry_id: entry_id.to_string(),
+        evidence: evidence.to_string(),
+        falsified_at_ms: Utc::now().timestamp_millis(),
+    });
+
+    // Halve the confidence of the falsified entry.
+    if let Some(entry) = entries.iter_mut().find(|e| e.id == entry_id) {
+        entry.confidence *= 0.5;
+    }
+}
+
+/// Check if a knowledge entry has been falsified and return the warning.
+#[must_use]
+pub fn falsification_warning<'a>(
+    records: &'a [FalsifierRecord],
+    entry_id: &str,
+) -> Option<&'a FalsifierRecord> {
+    records.iter().find(|r| r.entry_id == entry_id)
+}
+
 /// Single entry point for durable knowledge storage backends.
 pub trait NeuroStore: Sized {
     /// Initialize a store at the given path.
@@ -829,6 +1138,110 @@ mod tests {
             KnowledgeKind::StrategyFragment.as_str(),
             "strategy_fragment"
         );
+    }
+
+    #[test]
+    fn hdc_cluster_single_cluster_when_k1() {
+        let entries = vec![
+            KnowledgeEntry {
+                id: "e1".to_string(),
+                kind: KnowledgeKind::Insight,
+                content: "test".to_string(),
+                confidence: 0.8,
+                ..Default::default()
+            },
+            KnowledgeEntry {
+                id: "e2".to_string(),
+                kind: KnowledgeKind::Heuristic,
+                content: "test2".to_string(),
+                confidence: 0.7,
+                ..Default::default()
+            },
+        ];
+        let clusters = hdc_cluster(&entries, 1);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].entry_count, 2);
+    }
+
+    #[test]
+    fn hdc_cluster_empty_input() {
+        let clusters = hdc_cluster(&[], 3);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn demurrage_reduces_confidence() {
+        let mut entries = vec![KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 1.0,
+            ..Default::default()
+        }];
+        let affected = apply_demurrage(&mut entries, 0.1);
+        assert_eq!(affected, 1);
+        assert!((entries[0].confidence - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn demurrage_reference_boost_restores() {
+        let mut entry = KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.5,
+            ..Default::default()
+        };
+        demurrage_reference_boost(&mut entry, 0.3);
+        assert!((entry.confidence - 0.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn freeze_thaw_roundtrip() {
+        let mut entry = KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.75,
+            ..Default::default()
+        };
+        assert!(!is_frozen(&entry));
+        freeze_entry(&mut entry);
+        assert!(is_frozen(&entry));
+        assert!(entry.deprecated);
+
+        let thawed = thaw_entry(&mut entry);
+        assert!(thawed);
+        assert!(!is_frozen(&entry));
+        assert!(!entry.deprecated);
+        assert!((entry.confidence - 0.75).abs() < 1e-4);
+    }
+
+    #[test]
+    fn freeze_is_idempotent() {
+        let mut entry = KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.5,
+            ..Default::default()
+        };
+        freeze_entry(&mut entry);
+        let tag_count = entry.tags.len();
+        freeze_entry(&mut entry); // second freeze should be no-op
+        assert_eq!(entry.tags.len(), tag_count);
+    }
+
+    #[test]
+    fn falsifier_record_halves_confidence() {
+        let mut records = Vec::new();
+        let mut entries = vec![KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.8,
+            ..Default::default()
+        }];
+        record_falsification(&mut records, &mut entries, "e1", "new data contradicts");
+        assert_eq!(records.len(), 1);
+        assert!((entries[0].confidence - 0.4).abs() < 1e-10);
+
+        let warning = falsification_warning(&records, "e1");
+        assert!(warning.is_some());
+        assert_eq!(warning.unwrap().evidence, "new data contradicts");
+
+        let no_warning = falsification_warning(&records, "e2");
+        assert!(no_warning.is_none());
     }
 
     #[test]

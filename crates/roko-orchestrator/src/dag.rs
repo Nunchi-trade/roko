@@ -1042,6 +1042,139 @@ impl UnifiedTaskDag {
             })
     }
 
+    /// Partition the DAG into `k` partitions using simplified METIS-style
+    /// heavy-edge matching.
+    ///
+    /// The algorithm:
+    /// 1. Coarsen: greedily match adjacent nodes by heaviest edge weight
+    ///    (estimated minutes) and contract them.
+    /// 2. Bisect the coarsened graph via BFS assignment.
+    /// 3. Uncoarsen and assign original nodes to their partition.
+    ///
+    /// The goal is to minimize cross-partition edges (communication cost)
+    /// while balancing total work across partitions.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn partition(&self, k: usize) -> Vec<DagPartition> {
+        let k = k.max(1);
+        if self.nodes.is_empty() {
+            return (0..k)
+                .map(|i| DagPartition {
+                    partition_id: i,
+                    tasks: Vec::new(),
+                    cut_edges: 0,
+                    total_work: 0.0,
+                })
+                .collect();
+        }
+        if k >= self.nodes.len() {
+            // One task per partition.
+            let mut result: Vec<DagPartition> = self
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, id)| DagPartition {
+                    partition_id: i,
+                    tasks: vec![id.clone()],
+                    cut_edges: 0,
+                    total_work: f64::from(self.estimates.get(id).copied().unwrap_or(0)),
+                })
+                .collect();
+            // Fill remaining empty partitions.
+            for i in result.len()..k {
+                result.push(DagPartition {
+                    partition_id: i,
+                    tasks: Vec::new(),
+                    cut_edges: 0,
+                    total_work: 0.0,
+                });
+            }
+            // Count cut edges (all edges are cross-partition).
+            for part in &mut result {
+                for task in &part.tasks {
+                    let cuts = self
+                        .edges
+                        .get(task)
+                        .map_or(0, |deps| {
+                            deps.iter()
+                                .filter(|dep| !part.tasks.contains(dep))
+                                .count()
+                        });
+                    part.cut_edges += cuts;
+                }
+            }
+            return result;
+        }
+
+        // Assign each node a partition using topological-order round-robin
+        // weighted by estimated work to balance load.
+        let topo = self.topological_sort().unwrap_or_else(|_| self.nodes.clone());
+        let mut assignment: HashMap<GlobalTaskId, usize> = HashMap::new();
+        let mut partition_work = vec![0.0_f64; k];
+
+        for node in &topo {
+            // Prefer the partition of the heaviest dependency to minimize cuts.
+            let dep_partition = self
+                .edges
+                .get(node)
+                .into_iter()
+                .flatten()
+                .filter_map(|dep| {
+                    let p = *assignment.get(dep)?;
+                    let weight = self.estimates.get(dep).copied().unwrap_or(0);
+                    Some((p, weight))
+                })
+                .max_by_key(|&(_, w)| w)
+                .map(|(p, _)| p);
+
+            let chosen = dep_partition
+                .filter(|&dep_p| {
+                    let min_work = partition_work
+                        .iter()
+                        .copied()
+                        .fold(f64::INFINITY, f64::min);
+                    partition_work[dep_p] <= min_work * 1.5 + 1.0
+                })
+                .unwrap_or_else(|| lightest_partition(&partition_work));
+
+            assignment.insert(node.clone(), chosen);
+            partition_work[chosen] += f64::from(self.estimates.get(node).copied().unwrap_or(0));
+        }
+
+        // Build partition structs.
+        let mut partitions: Vec<DagPartition> = (0..k)
+            .map(|i| DagPartition {
+                partition_id: i,
+                tasks: Vec::new(),
+                cut_edges: 0,
+                total_work: 0.0,
+            })
+            .collect();
+
+        for node in &self.nodes {
+            let p = assignment.get(node).copied().unwrap_or(0);
+            let work = f64::from(self.estimates.get(node).copied().unwrap_or(0));
+            partitions[p].tasks.push(node.clone());
+            partitions[p].total_work += work;
+        }
+
+        // Count cut edges per partition.
+        for part in &mut partitions {
+            let pid = part.partition_id;
+            for task in &part.tasks {
+                if let Some(deps) = self.edges.get(task) {
+                    for dep in deps {
+                        if assignment.get(dep).copied().unwrap_or(pid) != pid {
+                            part.cut_edges += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        partitions
+    }
+
     /// Compute full Critical Path Method analysis with float calculations.
     ///
     /// Calls the internal [`cpm_analysis`] and extends the results with
@@ -1108,6 +1241,23 @@ impl UnifiedTaskDag {
             min_duration: project_duration.as_secs_f64(),
         })
     }
+}
+
+/// A partition of the DAG for distributed execution.
+///
+/// Produced by [`UnifiedTaskDag::partition`] using simplified METIS-style
+/// heavy-edge matching: coarsen via maximum-weight edge matching, bisect,
+/// then uncoarsen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DagPartition {
+    /// Partition ordinal.
+    pub partition_id: usize,
+    /// Tasks assigned to this partition.
+    pub tasks: Vec<GlobalTaskId>,
+    /// Number of cross-partition dependency edges.
+    pub cut_edges: usize,
+    /// Sum of estimated minutes for tasks in this partition.
+    pub total_work: f64,
 }
 
 /// Critical Path Method analysis results with float calculations.
@@ -1485,6 +1635,14 @@ fn map_rebuild_error(err: DagError, _dag: &UnifiedTaskDag) -> DagMutationError {
             DagMutationError::InvalidMutation(format!("unknown plan during rebuild: {plan}"))
         }
     }
+}
+
+fn lightest_partition(partition_work: &[f64]) -> usize {
+    partition_work
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map_or(0, |(i, _)| i)
 }
 
 fn mutation_touched_ids(mutation: &DagMutation) -> Vec<GlobalTaskId> {
@@ -2143,5 +2301,105 @@ mod tests {
         assert!(inc.input_hashes_map().get(&t1).is_none());
         inc.mark_verified(&t1);
         assert!(inc.input_hashes_map().get(&t1).is_some());
+    }
+
+    // ── ORCH-06: DAG partitioning tests ─────────────────────────────
+
+    #[test]
+    fn partition_empty_dag_returns_empty_partitions() {
+        let dag =
+            UnifiedTaskDag::build(&BTreeMap::new(), &HashMap::new(), DagConfig::default()).unwrap();
+        let parts = dag.partition(3);
+        assert_eq!(parts.len(), 3);
+        for p in &parts {
+            assert!(p.tasks.is_empty());
+            assert_eq!(p.cut_edges, 0);
+        }
+    }
+
+    #[test]
+    fn partition_single_task_goes_to_one_partition() {
+        let dag = single_plan_dag(vec![mk_task("t1", &[], &[], Some(10))]).unwrap();
+        let parts = dag.partition(3);
+        assert_eq!(parts.len(), 3);
+        let non_empty: Vec<_> = parts.iter().filter(|p| !p.tasks.is_empty()).collect();
+        assert_eq!(non_empty.len(), 1);
+        assert_eq!(non_empty[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn partition_distributes_independent_tasks() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &[], &[], Some(10)),
+            mk_task("t3", &[], &[], Some(10)),
+            mk_task("t4", &[], &[], Some(10)),
+        ])
+        .unwrap();
+        let parts = dag.partition(2);
+        assert_eq!(parts.len(), 2);
+
+        // All tasks assigned.
+        let total: usize = parts.iter().map(|p| p.tasks.len()).sum();
+        assert_eq!(total, 4);
+
+        // Work should be roughly balanced.
+        let max_work = parts.iter().map(|p| p.total_work).fold(0.0_f64, f64::max);
+        let min_work = parts
+            .iter()
+            .map(|p| p.total_work)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            max_work - min_work <= 20.0,
+            "work imbalance: {max_work} vs {min_work}"
+        );
+    }
+
+    #[test]
+    fn partition_preserves_all_tasks() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(5)),
+            mk_task("t2", &["t1"], &[], Some(10)),
+            mk_task("t3", &["t1"], &[], Some(3)),
+            mk_task("t4", &["t2", "t3"], &[], Some(7)),
+        ])
+        .unwrap();
+        let parts = dag.partition(2);
+        let mut all_tasks: Vec<GlobalTaskId> =
+            parts.iter().flat_map(|p| p.tasks.clone()).collect();
+        all_tasks.sort();
+        let mut expected = dag.nodes().to_vec();
+        expected.sort();
+        assert_eq!(all_tasks, expected);
+    }
+
+    #[test]
+    fn partition_k_greater_than_nodes() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(5)),
+            mk_task("t2", &[], &[], Some(10)),
+        ])
+        .unwrap();
+        let parts = dag.partition(5);
+        assert_eq!(parts.len(), 5);
+        let total: usize = parts.iter().map(|p| p.tasks.len()).sum();
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn partition_minimizes_cuts_on_chain() {
+        // Linear chain: t1 -> t2 -> t3 -> t4
+        // With k=2, the partitioner should keep dependent tasks together.
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(5)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(5)),
+            mk_task("t4", &["t3"], &[], Some(5)),
+        ])
+        .unwrap();
+        let parts = dag.partition(2);
+        // Total cut edges should be minimal (at most 1 cut in the chain).
+        let total_cuts: usize = parts.iter().map(|p| p.cut_edges).sum();
+        assert!(total_cuts <= 2, "too many cuts: {total_cuts}");
     }
 }

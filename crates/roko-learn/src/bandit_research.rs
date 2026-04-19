@@ -104,9 +104,7 @@ impl NeuralRewardNet {
                 params.push(seed * scale * 2.0);
             }
             // Biases.
-            for _ in 0..h {
-                params.push(0.0);
-            }
+            params.extend(std::iter::repeat_n(0.0, h));
             prev_dim = h;
         }
         // Output layer.
@@ -115,9 +113,7 @@ impl NeuralRewardNet {
             let seed = (i as f64 * 0.618_033_988_749_895).fract() - 0.5;
             params.push(seed * scale * 2.0);
         }
-        for _ in 0..output_dim {
-            params.push(0.0);
-        }
+        params.extend(std::iter::repeat_n(0.0, output_dim));
 
         Self {
             input_dim,
@@ -167,6 +163,10 @@ impl NeuralRewardNet {
     /// Forward pass through the network: ReLU hidden layers, linear output.
     ///
     /// Returns a vector of length `output_dim` with predicted rewards.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len() != self.input_dim`.
     #[must_use]
     pub fn forward(&self, input: &[f64]) -> Vec<f64> {
         assert_eq!(input.len(), self.input_dim, "input dimension mismatch");
@@ -630,4 +630,225 @@ pub enum BanditAnomaly {
         /// Maximum observed performance gap.
         max_gap: f64,
     },
+}
+
+// ─── DiscountedThompson (LEARN-07) ──────────────────────────────────────────
+
+/// Thompson sampling with exponential discounting for non-stationary
+/// environments.
+///
+/// Old observations carry less weight as the discount factor is applied
+/// each round: `alpha_t = gamma * alpha_{t-1} + reward`. When drift is
+/// detected via KL divergence between recent and historical reward
+/// windows, the priors can be soft-reset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscountedThompson {
+    /// Per-arm Thompson state with discounting.
+    arms: Vec<ThompsonArm>,
+    /// Exponential discount factor in `(0, 1]`. 1.0 = no discounting.
+    pub discount_factor: f64,
+    /// Recent reward window per arm for drift detection.
+    recent_windows: HashMap<String, Vec<f64>>,
+    /// Historical reward window per arm for drift detection.
+    historical_windows: HashMap<String, Vec<f64>>,
+    /// Maximum window size for drift detection.
+    window_size: usize,
+    /// KL divergence threshold above which drift is declared.
+    drift_threshold: f64,
+    /// Number of drift resets that have occurred.
+    pub drift_resets: u64,
+}
+
+impl DiscountedThompson {
+    /// Create a new discounted Thompson sampler.
+    ///
+    /// # Arguments
+    /// - `arm_names`: model slugs for each arm
+    /// - `discount_factor`: exponential discount in `(0, 1]`
+    #[must_use]
+    pub fn new(arm_names: Vec<String>, discount_factor: f64) -> Self {
+        let discount_factor = if discount_factor.is_finite() {
+            discount_factor.clamp(0.01, 1.0)
+        } else {
+            0.95
+        };
+        let arms: Vec<ThompsonArm> = arm_names.iter().map(|n| ThompsonArm::new(n)).collect();
+        Self {
+            arms,
+            discount_factor,
+            recent_windows: HashMap::new(),
+            historical_windows: HashMap::new(),
+            window_size: 50,
+            drift_threshold: 0.15,
+            drift_resets: 0,
+        }
+    }
+
+    /// Override the window size for drift detection.
+    #[must_use]
+    pub fn with_window_size(mut self, size: usize) -> Self {
+        self.window_size = size.max(5);
+        self
+    }
+
+    /// Override the KL divergence threshold for drift detection.
+    #[must_use]
+    pub fn with_drift_threshold(mut self, threshold: f64) -> Self {
+        self.drift_threshold = if threshold.is_finite() {
+            threshold.clamp(0.01, 1.0)
+        } else {
+            0.15
+        };
+        self
+    }
+
+    /// Select an arm using Thompson sampling (Beta posterior sampling).
+    ///
+    /// Returns `(arm_index, sampled_value)`. Uses a deterministic
+    /// approximation of Beta sampling: `alpha / (alpha + beta)` + noise
+    /// proportional to posterior uncertainty.
+    #[must_use]
+    pub fn select(&self) -> (usize, f64) {
+        let mut best_idx = 0;
+        let mut best_sample = f64::NEG_INFINITY;
+
+        for (idx, arm) in self.arms.iter().enumerate() {
+            let (alpha, beta) = arm.beta_parameters();
+            let mean = alpha / (alpha + beta);
+            // Approximate posterior variance for ranking.
+            let variance = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
+            // Deterministic "sample" at mean + sqrt(variance) for exploration.
+            let sample = mean + variance.sqrt();
+            if sample > best_sample {
+                best_sample = sample;
+                best_idx = idx;
+            }
+        }
+
+        (best_idx, best_sample)
+    }
+
+    /// Update arm `arm_idx` with a new reward, applying the discount factor
+    /// to existing observations first.
+    pub fn update(&mut self, arm_idx: usize, reward: f64) {
+        if arm_idx >= self.arms.len() {
+            return;
+        }
+
+        let arm = &mut self.arms[arm_idx];
+        let model = arm.model().to_string();
+        arm.apply_update(reward, self.discount_factor);
+
+        // Track windows for drift detection.
+        let recent = self.recent_windows.entry(model.clone()).or_default();
+        recent.push(reward.clamp(0.0, 1.0));
+        if recent.len() > self.window_size {
+            let excess = recent.drain(..1).next().unwrap_or(0.0);
+            let historical = self.historical_windows.entry(model).or_default();
+            historical.push(excess);
+            if historical.len() > self.window_size * 2 {
+                historical.drain(..1);
+            }
+        }
+    }
+
+    /// Check whether drift has been detected for any arm.
+    ///
+    /// Returns a list of arm names where drift was detected.
+    #[must_use]
+    pub fn check_drift(&self) -> Vec<String> {
+        let mut drifted = Vec::new();
+
+        for arm in &self.arms {
+            let model = arm.model();
+            if let Some(recent) = self.recent_windows.get(model) {
+                if let Some(historical) = self.historical_windows.get(model) {
+                    if recent.len() >= 10 && historical.len() >= 10 && detect_drift(recent, historical, self.drift_threshold) {
+                        drifted.push(model.to_string());
+                    }
+                }
+            }
+        }
+
+        drifted
+    }
+
+    /// Soft-reset arms that have drifted. Moves priors closer to
+    /// uninformative Beta(1,1) while retaining some history.
+    pub fn reset_drifted_arms(&mut self) {
+        let drifted = self.check_drift();
+        for arm in &mut self.arms {
+            if drifted.contains(&arm.model().to_string()) {
+                let (alpha, beta) = arm.beta_parameters();
+                // Soft reset: interpolate toward Beta(1,1).
+                let reset_alpha = 0.3 * alpha + 0.7;
+                let reset_beta = 0.3 * beta + 0.7;
+                *arm = ThompsonArm::new(arm.model());
+                arm.apply_update(reset_alpha / (reset_alpha + reset_beta), 1.0);
+                arm.apply_update(1.0 - reset_alpha / (reset_alpha + reset_beta), 1.0);
+                self.drift_resets += 1;
+            }
+        }
+
+        // Clear windows for drifted arms.
+        for model in &drifted {
+            self.recent_windows.remove(model);
+            self.historical_windows.remove(model);
+        }
+    }
+
+    /// Number of arms.
+    #[must_use]
+    pub fn arm_count(&self) -> usize {
+        self.arms.len()
+    }
+
+    /// Access the arm states.
+    #[must_use]
+    pub fn arms(&self) -> &[ThompsonArm] {
+        &self.arms
+    }
+}
+
+/// Detect drift between recent and historical reward distributions using
+/// approximate KL divergence on binned rewards.
+///
+/// Returns `true` when the estimated divergence exceeds `threshold`.
+#[must_use]
+pub fn detect_drift(recent: &[f64], historical: &[f64], threshold: f64) -> bool {
+    if recent.is_empty() || historical.is_empty() {
+        return false;
+    }
+
+    // Bin rewards into 10 buckets and compute KL divergence.
+    const BINS: usize = 10;
+    let smoothing = 1.0 / (BINS as f64);
+
+    let bin_for = |v: f64| -> usize {
+        ((v.clamp(0.0, 1.0) * BINS as f64) as usize).min(BINS - 1)
+    };
+
+    let mut recent_counts = [smoothing; BINS];
+    let mut hist_counts = [smoothing; BINS];
+
+    for &v in recent {
+        recent_counts[bin_for(v)] += 1.0;
+    }
+    for &v in historical {
+        hist_counts[bin_for(v)] += 1.0;
+    }
+
+    let recent_total: f64 = recent_counts.iter().sum();
+    let hist_total: f64 = hist_counts.iter().sum();
+
+    let mut kl = 0.0;
+    for i in 0..BINS {
+        let p = recent_counts[i] / recent_total;
+        let q = hist_counts[i] / hist_total;
+        if p > 0.0 && q > 0.0 {
+            kl += p * (p / q).ln();
+        }
+    }
+
+    kl.abs() > threshold
 }

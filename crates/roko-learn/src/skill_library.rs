@@ -1804,6 +1804,195 @@ fn sanitize_component(value: &str) -> String {
     }
 }
 
+// ─── EvoSkills learning loop (GATE-06) ──────────────────────────────────────
+
+/// An update to apply to the skill library after analyzing episode outcomes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SkillUpdate {
+    /// A successful episode produced a new skill pattern to add.
+    Add {
+        /// Skill to register.
+        skill: Box<Skill>,
+    },
+    /// A gate failure produced an anti-pattern to record.
+    AddAntiPattern {
+        /// Skill name to mark as an anti-pattern.
+        skill_name: String,
+        /// Description of the anti-pattern.
+        anti_pattern: String,
+        /// Gate that failed.
+        failed_gate: String,
+    },
+    /// A skill's confidence should be updated based on new evidence.
+    UpdateConfidence {
+        /// Skill name to update.
+        skill_name: String,
+        /// Whether the latest usage was successful.
+        success: bool,
+    },
+    /// A skill should be retired (confidence dropped too low).
+    Retire {
+        /// Skill name to retire.
+        skill_name: String,
+        /// Reason for retirement.
+        reason: String,
+    },
+}
+
+/// Minimum confidence below which a skill is retired.
+const RETIRE_THRESHOLD: f64 = 0.15;
+
+/// Analyze episodes and produce skill library updates.
+///
+/// After successful task completion: extracts skill patterns and adds them.
+/// After gate failure: extracts anti-patterns and marks them as avoidable.
+/// Skills with very low confidence are flagged for retirement.
+#[must_use]
+pub fn evolve_skills(
+    episodes: &[crate::episode_logger::Episode],
+    existing_skills: &[Skill],
+) -> Vec<SkillUpdate> {
+    let mut updates = Vec::new();
+
+    for episode in episodes {
+        let gate_passed = if !episode.gate_verdicts.is_empty() {
+            episode.gate_verdicts.iter().all(|v| v.passed)
+        } else {
+            episode.success
+        };
+
+        if episode.success && gate_passed {
+            // Successful episode: extract skill pattern.
+            let tags = extra_strings(episode, "task_tags");
+            let category = extra_str(episode, "task_category");
+
+            // Check for near-duplicate.
+            let is_dup = existing_skills.iter().any(|skill| {
+                skill.task_category == category && tag_overlap_ratio(&skill.tags, &tags) >= 0.7
+            });
+
+            if !is_dup {
+                let tool_seq = episode_tool_sequence(episode);
+                let files = episode_files(episode);
+                let name = format!(
+                    "evo_{}_{}_{}",
+                    sanitize_component(&category),
+                    sanitize_component(&extra_str(episode, "complexity_band")),
+                    short_hash(&episode.id),
+                );
+                let skill = Skill::new(
+                    &name,
+                    format!(
+                        "{} task pattern from episode {}",
+                        category,
+                        episode_source_id(episode),
+                    ),
+                    format!("Tool sequence: {}", tool_seq.join(" -> ")),
+                )
+                .with_tags(tags)
+                .with_task_categories(std::iter::once(category))
+                .with_source_episodes(std::iter::once(episode_source_id(episode).to_string()));
+
+                let mut skill = skill;
+                skill.files = files;
+                skill.score = 1.0;
+                skill.validations = 1;
+                skill.first_seen = Some(Utc::now());
+                skill.recompute_confidence();
+
+                updates.push(SkillUpdate::Add { skill: Box::new(skill) });
+            }
+
+            // Update confidence for matching existing skills.
+            for skill in existing_skills {
+                if skill.matches_task_category(&extra_str(episode, "task_category")) {
+                    updates.push(SkillUpdate::UpdateConfidence {
+                        skill_name: skill.name.clone(),
+                        success: true,
+                    });
+                }
+            }
+        } else {
+            // Failed episode: extract anti-pattern.
+            let failed_gates: Vec<String> = episode
+                .gate_verdicts
+                .iter()
+                .filter(|v| !v.passed)
+                .map(|v| v.gate.clone())
+                .collect();
+
+            let category = extra_str(episode, "task_category");
+
+            for gate in &failed_gates {
+                let tool_seq = episode_tool_sequence(episode);
+                let anti_pattern = format!(
+                    "AVOID: {} failed after {}",
+                    gate,
+                    tool_seq.join(" -> "),
+                );
+                let name = format!(
+                    "anti_{}_{}_{}",
+                    sanitize_component(gate),
+                    sanitize_component(&category),
+                    short_hash(&episode.id),
+                );
+
+                updates.push(SkillUpdate::AddAntiPattern {
+                    skill_name: name,
+                    anti_pattern,
+                    failed_gate: gate.clone(),
+                });
+            }
+
+            // Downgrade confidence for matching skills.
+            for skill in existing_skills {
+                if skill.matches_task_category(&category) {
+                    updates.push(SkillUpdate::UpdateConfidence {
+                        skill_name: skill.name.clone(),
+                        success: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Flag skills for retirement if confidence is too low.
+    for skill in existing_skills {
+        if skill.confidence < RETIRE_THRESHOLD
+            && skill.validations + skill.failures >= 5
+        {
+            updates.push(SkillUpdate::Retire {
+                skill_name: skill.name.clone(),
+                reason: format!(
+                    "confidence {:.2} below threshold {RETIRE_THRESHOLD:.2} after {} evaluations",
+                    skill.confidence,
+                    skill.validations + skill.failures,
+                ),
+            });
+        }
+    }
+
+    updates
+}
+
+fn tag_overlap_ratio(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let set_a: std::collections::BTreeSet<&str> = a.iter().map(String::as_str).collect();
+    let set_b: std::collections::BTreeSet<&str> = b.iter().map(String::as_str).collect();
+    let intersection = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

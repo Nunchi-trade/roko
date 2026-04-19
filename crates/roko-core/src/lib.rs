@@ -144,8 +144,8 @@ pub use roko_primitives::HdcVector;
 pub use score::Score;
 pub use signal_kinds::*;
 pub use task::{
-    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight, TaskMeta,
-    TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
+    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight, TaskDomain,
+    TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
 };
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via

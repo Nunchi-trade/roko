@@ -1,7 +1,7 @@
 //! Coordination primitives for pheromones, subnets, morphogenesis, and
 //! cohort intelligence.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
@@ -228,6 +228,15 @@ impl PheromoneKind {
         !matches!(self, Self::Custom(_))
     }
 
+    /// Return true when the kind is Alpha (first-mover advantage).
+    ///
+    /// Alpha pheromones have inverted confirmation dynamics: consensus
+    /// shortens their half-life to prevent lock-in.
+    #[must_use]
+    pub const fn is_alpha(&self) -> bool {
+        matches!(self, Self::Alpha)
+    }
+
     /// Construct a validated custom pheromone kind.
     pub fn custom(name: impl Into<String>) -> Result<Self, CustomKindError> {
         let name = name.into();
@@ -324,10 +333,20 @@ impl Pheromone {
     }
 
     /// Return the effective half-life after confirmation extension.
+    ///
+    /// For most pheromone kinds, confirmations extend the half-life (more
+    /// agreement = longer persistence). Alpha pheromones invert this:
+    /// confirmations shorten the half-life to prevent consensus lock-in.
     #[must_use]
     pub fn effective_half_life(&self) -> Duration {
-        self.half_life
-            .mul_f64(f64::from(self.confirmations).mul_add(0.5, 1.0))
+        if self.kind.is_alpha() {
+            // Alpha paradox: consensus makes alpha expire faster.
+            let divisor = f64::from(self.confirmations).mul_add(0.1, 1.0);
+            self.half_life.mul_f64(1.0 / divisor)
+        } else {
+            self.half_life
+                .mul_f64(f64::from(self.confirmations).mul_add(0.5, 1.0))
+        }
     }
 
     /// Compute the current intensity using the current wall clock.
@@ -723,6 +742,144 @@ impl WisdomGate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// COORD-05: Scope promotion gates
+// ---------------------------------------------------------------------------
+
+/// Gate controlling pheromone scope promotion (e.g., Pattern -> Wisdom).
+///
+/// Prevents gaming by requiring confirmations from a minimum number of
+/// distinct agents and optionally requiring that a gate pass accompanies
+/// each confirmation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromotionGate {
+    /// Minimum total confirmations required for promotion.
+    pub min_confirmations: u32,
+    /// Minimum number of distinct agents among the confirmers.
+    pub min_agents: u32,
+    /// Whether each confirmation must be accompanied by a passing gate result.
+    pub require_gate_pass: bool,
+}
+
+impl Default for PromotionGate {
+    fn default() -> Self {
+        Self {
+            min_confirmations: 3,
+            min_agents: 2,
+            require_gate_pass: false,
+        }
+    }
+}
+
+/// A single confirmation record for scope promotion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Confirmation {
+    /// The agent that confirmed.
+    pub agent: AgentId,
+    /// Whether a gate pass accompanied the confirmation.
+    pub gate_passed: bool,
+}
+
+impl PromotionGate {
+    /// Check whether the given confirmations satisfy the promotion gate.
+    ///
+    /// Returns `true` when there are enough confirmations from enough
+    /// distinct agents (and all gate pass requirements are met).
+    #[must_use]
+    pub fn is_satisfied(&self, confirmations: &[Confirmation]) -> bool {
+        let valid: Vec<_> = if self.require_gate_pass {
+            confirmations.iter().filter(|c| c.gate_passed).collect()
+        } else {
+            confirmations.iter().collect()
+        };
+
+        if (valid.len() as u32) < self.min_confirmations {
+            return false;
+        }
+
+        let distinct_agents: HashSet<&AgentId> = valid.iter().map(|c| &c.agent).collect();
+        distinct_agents.len() as u32 >= self.min_agents
+    }
+}
+
+// ---------------------------------------------------------------------------
+// COORD-06: Niche competition
+// ---------------------------------------------------------------------------
+
+/// Outcome of competition between two pheromones in the same scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompetitionOutcome {
+    /// Pheromone `a` wins and suppresses `b`.
+    Winner,
+    /// Both pheromones coexist without interference.
+    Coexist,
+    /// The two pheromones should be merged into one.
+    Merge,
+}
+
+/// Compete two pheromones in the same scope with overlapping concerns.
+///
+/// The stronger pheromone (higher current intensity) suppresses the weaker
+/// one when their intensity ratio exceeds `niche_overlap_threshold`.
+/// When intensities are very close, the outcome is `Merge`.
+#[must_use]
+pub fn compete(a: &Pheromone, b: &Pheromone, niche_overlap_threshold: f64) -> CompetitionOutcome {
+    let ia = a.current_intensity();
+    let ib = b.current_intensity();
+
+    // Avoid division by zero.
+    let max_intensity = ia.max(ib);
+    if max_intensity < 1e-12 {
+        return CompetitionOutcome::Coexist;
+    }
+
+    let ratio = (ia - ib).abs() / max_intensity;
+
+    if ratio < 0.1 {
+        // Intensities are within 10% — merge.
+        CompetitionOutcome::Merge
+    } else if ratio >= niche_overlap_threshold {
+        // Clear winner by the stronger signal.
+        CompetitionOutcome::Winner
+    } else {
+        CompetitionOutcome::Coexist
+    }
+}
+
+// ---------------------------------------------------------------------------
+// COORD-08: Permissioned subnet enforcement
+// ---------------------------------------------------------------------------
+
+/// Access control configuration for subnet-scoped pheromones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubnetPermissions {
+    /// The set of agents allowed to publish into this subnet.
+    pub allowed_agents: HashSet<String>,
+    /// Whether publications must include an attestation payload.
+    pub require_attestation: bool,
+}
+
+impl SubnetPermissions {
+    /// Check whether `agent` is authorized to publish into this subnet.
+    #[must_use]
+    pub fn is_authorized(&self, agent: &str) -> bool {
+        self.allowed_agents.contains(agent)
+    }
+
+    /// Check whether a publication from `agent` with the given attestation
+    /// status should be accepted.
+    #[must_use]
+    pub fn accept_publication(&self, agent: &str, has_attestation: bool) -> bool {
+        if !self.is_authorized(agent) {
+            return false;
+        }
+        if self.require_attestation && !has_attestation {
+            return false;
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,5 +1100,188 @@ mod tests {
         // Edge cases.
         assert_eq!(hill_response(1.0, 0.0, 2.0), 0.0); // k=0
         assert_eq!(hill_response(1.0, 1.0, 0.0), 0.0);  // n=0
+    }
+
+    // ----- COORD-07: Alpha pheromone paradox fix -----
+
+    #[test]
+    fn alpha_pheromone_half_life_shortens_with_confirmations() {
+        let mut alpha = Pheromone::new(
+            PheromoneKind::Alpha,
+            1.0,
+            Duration::from_secs(3600),
+            "agent-a".to_owned(),
+            PheromoneScope::Global,
+        );
+
+        let base = alpha.effective_half_life();
+        assert_eq!(base, Duration::from_secs(3600));
+
+        alpha.confirmations = 5;
+        let confirmed = alpha.effective_half_life();
+        // 3600 / (1.0 + 5 * 0.1) = 3600 / 1.5 = 2400
+        assert!(
+            confirmed < base,
+            "alpha half-life should shorten: {confirmed:?} < {base:?}"
+        );
+        let expected = Duration::from_secs(3600).mul_f64(1.0 / 1.5);
+        assert!(
+            (confirmed.as_secs_f64() - expected.as_secs_f64()).abs() < 1e-6,
+            "expected {expected:?}, got {confirmed:?}"
+        );
+    }
+
+    #[test]
+    fn non_alpha_half_life_extends_with_confirmations() {
+        let mut wisdom = Pheromone::new(
+            PheromoneKind::Wisdom,
+            1.0,
+            Duration::from_secs(3600),
+            "agent-b".to_owned(),
+            PheromoneScope::Global,
+        );
+
+        let base = wisdom.effective_half_life();
+        wisdom.confirmations = 4;
+        let confirmed = wisdom.effective_half_life();
+        assert!(
+            confirmed > base,
+            "non-alpha half-life should extend: {confirmed:?} > {base:?}"
+        );
+    }
+
+    // ----- COORD-05: Scope promotion gates -----
+
+    #[test]
+    fn promotion_gate_requires_diverse_agents() {
+        let gate = PromotionGate {
+            min_confirmations: 3,
+            min_agents: 2,
+            require_gate_pass: false,
+        };
+
+        // 3 confirmations from 1 agent — fails min_agents.
+        let same_agent = vec![
+            Confirmation { agent: "a1".into(), gate_passed: true },
+            Confirmation { agent: "a1".into(), gate_passed: true },
+            Confirmation { agent: "a1".into(), gate_passed: true },
+        ];
+        assert!(!gate.is_satisfied(&same_agent));
+
+        // 3 confirmations from 2 agents — passes.
+        let diverse = vec![
+            Confirmation { agent: "a1".into(), gate_passed: true },
+            Confirmation { agent: "a2".into(), gate_passed: true },
+            Confirmation { agent: "a1".into(), gate_passed: false },
+        ];
+        assert!(gate.is_satisfied(&diverse));
+    }
+
+    #[test]
+    fn promotion_gate_enforces_gate_pass() {
+        let gate = PromotionGate {
+            min_confirmations: 2,
+            min_agents: 2,
+            require_gate_pass: true,
+        };
+
+        let no_pass = vec![
+            Confirmation { agent: "a1".into(), gate_passed: false },
+            Confirmation { agent: "a2".into(), gate_passed: false },
+        ];
+        assert!(!gate.is_satisfied(&no_pass));
+
+        let with_pass = vec![
+            Confirmation { agent: "a1".into(), gate_passed: true },
+            Confirmation { agent: "a2".into(), gate_passed: true },
+        ];
+        assert!(gate.is_satisfied(&with_pass));
+    }
+
+    // ----- COORD-06: Niche competition -----
+
+    #[test]
+    fn niche_competition_winner_when_large_gap() {
+        let a = Pheromone::new(
+            PheromoneKind::Opportunity,
+            0.9,
+            Duration::from_secs(7200),
+            "agent-a".to_owned(),
+            PheromoneScope::Global,
+        );
+        let b = Pheromone::new(
+            PheromoneKind::Opportunity,
+            0.2,
+            Duration::from_secs(7200),
+            "agent-b".to_owned(),
+            PheromoneScope::Global,
+        );
+
+        let outcome = compete(&a, &b, 0.5);
+        assert_eq!(outcome, CompetitionOutcome::Winner);
+    }
+
+    #[test]
+    fn niche_competition_merge_when_close() {
+        let a = Pheromone::new(
+            PheromoneKind::Pattern,
+            0.80,
+            Duration::from_secs(7200),
+            "agent-a".to_owned(),
+            PheromoneScope::Global,
+        );
+        let b = Pheromone::new(
+            PheromoneKind::Pattern,
+            0.79,
+            Duration::from_secs(7200),
+            "agent-b".to_owned(),
+            PheromoneScope::Global,
+        );
+
+        let outcome = compete(&a, &b, 0.5);
+        assert_eq!(outcome, CompetitionOutcome::Merge);
+    }
+
+    #[test]
+    fn niche_competition_coexist_in_middle_range() {
+        let a = Pheromone::new(
+            PheromoneKind::Threat,
+            0.7,
+            Duration::from_secs(7200),
+            "agent-a".to_owned(),
+            PheromoneScope::Global,
+        );
+        let b = Pheromone::new(
+            PheromoneKind::Threat,
+            0.5,
+            Duration::from_secs(7200),
+            "agent-b".to_owned(),
+            PheromoneScope::Global,
+        );
+
+        let outcome = compete(&a, &b, 0.5);
+        assert_eq!(outcome, CompetitionOutcome::Coexist);
+    }
+
+    // ----- COORD-08: Subnet permissions -----
+
+    #[test]
+    fn subnet_permissions_allow_authorized_agents() {
+        let perms = SubnetPermissions {
+            allowed_agents: HashSet::from(["agent-1".to_string(), "agent-2".to_string()]),
+            require_attestation: false,
+        };
+        assert!(perms.accept_publication("agent-1", false));
+        assert!(!perms.accept_publication("agent-3", false));
+    }
+
+    #[test]
+    fn subnet_permissions_require_attestation() {
+        let perms = SubnetPermissions {
+            allowed_agents: HashSet::from(["agent-1".to_string()]),
+            require_attestation: true,
+        };
+        assert!(!perms.accept_publication("agent-1", false));
+        assert!(perms.accept_publication("agent-1", true));
     }
 }

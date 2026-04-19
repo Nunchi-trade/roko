@@ -1117,6 +1117,7 @@ impl ConfigLayer {
                     speculative_threshold_multiplier: e
                         .speculative_threshold_multiplier
                         .unwrap_or(defaults.speculative_threshold_multiplier),
+                    resource_budget: defaults.resource_budget,
                 }
             }
             None => ExecutorConfig::default(),

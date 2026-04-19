@@ -1078,6 +1078,69 @@ impl AffectState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DAIM-07: Collective emotional contagion with maturity-based decay.
+// ---------------------------------------------------------------------------
+
+/// Compute the contagion susceptibility for an agent based on its maturity.
+///
+/// Older agents are less susceptible to peer emotions. The susceptibility
+/// decays exponentially from 1.0 toward a floor of 0.1 as `tick_count` grows.
+/// The half-life is 500 ticks (configurable via the constant).
+#[must_use]
+pub fn contagion_susceptibility(tick_count: u64) -> f64 {
+    const HALF_LIFE_TICKS: f64 = 500.0;
+    const FLOOR: f64 = 0.1;
+    let raw = 0.5_f64.powf(tick_count as f64 / HALF_LIFE_TICKS);
+    FLOOR + (1.0 - FLOOR) * raw
+}
+
+const CONTAGION_BASE_ATTENUATION: f64 = 0.3;
+const CONTAGION_AROUSAL_CAP: f64 = 0.3;
+
+/// Apply peer-derived emotional contagion with susceptibility attenuation.
+///
+/// The resulting PAD delta is:
+///   `delta = peer_pad * base_attenuation * susceptibility`
+///
+/// Susceptibility decays with agent maturity (`tick_count`). Arousal deltas
+/// are capped at 0.3 to prevent runaway cascades.
+#[must_use]
+pub fn contagion(
+    my_affect: &PadVector,
+    peer_affects: &[PadVector],
+    tick_count: u64,
+) -> PadVector {
+    if peer_affects.is_empty() {
+        return *my_affect;
+    }
+
+    let susceptibility = contagion_susceptibility(tick_count);
+
+    let mut p_sum = 0.0;
+    let mut a_sum = 0.0;
+    let mut d_sum = 0.0;
+
+    for peer in peer_affects {
+        p_sum += peer.pleasure;
+        a_sum += peer.arousal;
+        d_sum += peer.dominance;
+    }
+
+    let n = peer_affects.len() as f64;
+    let p_delta = (p_sum / n) * CONTAGION_BASE_ATTENUATION * susceptibility;
+    let a_delta = ((a_sum / n) * CONTAGION_BASE_ATTENUATION * susceptibility)
+        .clamp(-CONTAGION_AROUSAL_CAP, CONTAGION_AROUSAL_CAP);
+    let d_delta = (d_sum / n) * CONTAGION_BASE_ATTENUATION * susceptibility;
+
+    PadVector::new(
+        my_affect.pleasure + p_delta,
+        my_affect.arousal + a_delta,
+        my_affect.dominance + d_delta,
+    )
+    .clamped()
+}
+
 impl DaimonState {
     /// Return the current cascade thresholds implied by the live behavioral state.
     #[must_use]

@@ -62,6 +62,8 @@
     clippy::use_self
 )]
 
+/// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
+pub mod adas;
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
@@ -86,6 +88,8 @@ pub mod curriculum;
 pub mod drift;
 pub mod efficiency;
 pub mod episode_logger;
+/// Forensic replay API for debugging failed tasks (GATE-07).
+pub mod forensic_replay;
 /// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
 pub mod error_enrichment;
 /// Event subscriber that fans runtime events into learning subsystems.

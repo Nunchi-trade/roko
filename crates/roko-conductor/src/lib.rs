@@ -37,10 +37,14 @@ pub mod conductor;
 pub mod diagnosis;
 pub mod health;
 pub mod interventions;
+/// Self-healing conductor recovery strategies (COND-06).
+pub mod self_healing;
 pub mod state_machine;
 pub mod stuck_detection;
 pub mod threshold_learner;
 pub mod watchers;
+/// Yerkes-Dodson pressure-performance framework (COND-04).
+pub mod yerkes_dodson;
 
 // Re-export core types for convenience.
 pub use roko_core::{CognitiveSignal, ConductorDecision, ConductorEvaluation, PhaseKind, PlanPhase};
@@ -61,3 +65,5 @@ pub use stuck_detection::{
     StuckKind, StuckSignal, StuckThresholds,
 };
 pub use threshold_learner::{AdaptiveThreshold, InterventionOutcome, ThresholdLearner};
+pub use yerkes_dodson::YerkesDodson;
+pub use self_healing::{HealingAction, SelfHealingPolicy, SelfHealingState};

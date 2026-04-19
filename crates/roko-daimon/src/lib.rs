@@ -45,8 +45,8 @@ pub use self::phase2_stubs::{
     CrateFatigueSuggestion, DimensionDef, DimensionSource, DimensionWeights, DomainRegistration,
     EfficiencyEvent, EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector,
     ResourcePressure, ScoredEntry, SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper,
-    TierBias, TierThresholds, ValidationArc, adjusted_thresholds, fatigue_response,
-    pad_cosine_similarity,
+    TierBias, TierThresholds, ValidationArc, adjusted_thresholds, contagion,
+    contagion_susceptibility, fatigue_response, pad_cosine_similarity,
 };
 
 const STRATEGY_DIMENSIONS: usize = 8;
@@ -2246,6 +2246,51 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// DAIM-06: Mood-congruent memory retrieval.
+// ---------------------------------------------------------------------------
+
+/// Score a knowledge entry against the current mood for retrieval biasing.
+///
+/// Four factors are blended:
+/// - **Valence match**: PAD cosine similarity (emotional tone)
+/// - **Arousal match**: closeness of arousal intensity
+/// - **Recency**: exponential decay favoring newer entries
+/// - **Relevance**: semantic similarity passed in from the caller
+///
+/// The output is in `[0.0, 1.0]` and should be used as a soft multiplier
+/// on retrieval scores, not an override.
+#[must_use]
+pub fn mood_congruent_score(
+    entry_pad: &PadVector,
+    entry_created_at: DateTime<Utc>,
+    current_mood: &PadVector,
+    semantic_relevance: f64,
+    now: DateTime<Utc>,
+) -> f64 {
+    // Factor 1: Valence match via PAD cosine similarity -> [0.0, 1.0]
+    let valence_match = current_mood.cosine_similarity(*entry_pad);
+
+    // Factor 2: Arousal match -> [0.0, 1.0], 1.0 when identical intensity
+    let arousal_diff = (current_mood.arousal - entry_pad.arousal).abs();
+    let arousal_match = 1.0 - (arousal_diff / 2.0).clamp(0.0, 1.0);
+
+    // Factor 3: Recency -> exponential decay with 7-day half-life
+    let age_days = now
+        .signed_duration_since(entry_created_at)
+        .num_seconds()
+        .max(0) as f64
+        / 86400.0;
+    let recency = 0.5_f64.powf(age_days / 7.0);
+
+    // Factor 4: Semantic relevance -> pass-through, clamped
+    let relevance = semantic_relevance.clamp(0.0, 1.0);
+
+    // Weighted blend: valence 0.35, arousal 0.15, recency 0.20, relevance 0.30
+    let score = 0.35 * valence_match + 0.15 * arousal_match + 0.20 * recency + 0.30 * relevance;
+    score.clamp(0.0, 1.0)
+}
+
+// ---------------------------------------------------------------------------
 // DAIM-04: Somatic marker creation from dream replay episodes.
 // ---------------------------------------------------------------------------
 
@@ -3192,5 +3237,78 @@ mod tests {
 
         let reloaded = DaimonState::load_or_new(&path);
         assert_eq!(reloaded.behavioral_tracker.current_state, before);
+    }
+
+    // --- DAIM-06: Mood-congruent retrieval ---
+
+    #[test]
+    fn mood_congruent_score_prefers_matching_valence() {
+        let now = Utc::now();
+        let positive_mood = PadVector::new(0.8, 0.3, 0.5);
+        let positive_entry = PadVector::new(0.7, 0.2, 0.4);
+        let negative_entry = PadVector::new(-0.8, -0.3, -0.5);
+
+        let score_match = mood_congruent_score(
+            &positive_entry, now, &positive_mood, 0.8, now,
+        );
+        let score_mismatch = mood_congruent_score(
+            &negative_entry, now, &positive_mood, 0.8, now,
+        );
+
+        assert!(score_match > score_mismatch);
+    }
+
+    #[test]
+    fn mood_congruent_score_decays_with_age() {
+        let now = Utc::now();
+        let mood = PadVector::new(0.5, 0.0, 0.0);
+        let entry_pad = PadVector::new(0.5, 0.0, 0.0);
+        let old = now - chrono::Duration::days(30);
+
+        let score_fresh = mood_congruent_score(&entry_pad, now, &mood, 0.8, now);
+        let score_stale = mood_congruent_score(&entry_pad, old, &mood, 0.8, now);
+
+        assert!(score_fresh > score_stale);
+    }
+
+    // --- DAIM-07: Contagion with maturity decay ---
+
+    #[test]
+    fn contagion_susceptibility_decays_with_maturity() {
+        let young = contagion_susceptibility(0);
+        let mature = contagion_susceptibility(1000);
+        let old = contagion_susceptibility(5000);
+
+        assert!(young > mature);
+        assert!(mature > old);
+        assert!(old >= 0.1); // floor
+    }
+
+    #[test]
+    fn contagion_blends_peer_affect() {
+        let my_pad = PadVector::neutral();
+        let peer_pads = vec![PadVector::new(0.8, 0.2, 0.0)];
+        let result = contagion(&my_pad, &peer_pads, 0);
+
+        // Young agent (tick=0), full susceptibility
+        assert!(result.pleasure > 0.0);
+        assert!(result.arousal > 0.0);
+    }
+
+    #[test]
+    fn contagion_caps_arousal() {
+        let my_pad = PadVector::neutral();
+        let peer_pads = vec![PadVector::new(0.0, 1.0, 0.0)];
+        let result = contagion(&my_pad, &peer_pads, 0);
+
+        // Arousal should be capped at 0.3
+        assert!(result.arousal <= 0.3 + 1e-10);
+    }
+
+    #[test]
+    fn contagion_empty_peers_returns_self() {
+        let my_pad = PadVector::new(0.5, -0.3, 0.2);
+        let result = contagion(&my_pad, &[], 100);
+        assert_eq!(result, my_pad);
     }
 }

@@ -241,6 +241,49 @@ impl TaskQualityProfile {
     }
 }
 
+/// Domain of work — drives gate selection and orchestration templates (ORCH-09).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum TaskDomain {
+    /// Source code changes (compile, test, clippy gates).
+    Code,
+    /// On-chain / smart contract work (additional verification gates).
+    Chain,
+    /// Research and analysis tasks (citation / quality gates).
+    Research,
+    /// Documentation changes (lint / spell gates).
+    Docs,
+    /// User-defined domain with custom gate set.
+    Custom(String),
+}
+
+impl TaskDomain {
+    /// String label for display and serialization.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Code => "code",
+            Self::Chain => "chain",
+            Self::Research => "research",
+            Self::Docs => "docs",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Return the default gate names for this domain.
+    #[must_use]
+    pub fn default_gates(&self) -> Vec<&'static str> {
+        match self {
+            Self::Code => vec!["compile", "test", "clippy", "diff"],
+            Self::Chain => vec!["compile", "test", "clippy", "diff", "invariant-check"],
+            Self::Research => vec!["citation-check", "quality"],
+            Self::Docs => vec!["lint", "spell", "link-check"],
+            Self::Custom(_) => vec!["compile", "test"],
+        }
+    }
+}
+
 /// How much inline/file context the prompt should preload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -384,6 +427,9 @@ pub struct Task {
         serialize_with = "serialize_optional_boolish"
     )]
     pub escalate_on_retry: Option<bool>,
+    /// Work domain — controls which gates are selected (ORCH-09).
+    #[serde(default)]
+    pub domain: Option<TaskDomain>,
 }
 
 impl Task {
@@ -424,6 +470,7 @@ impl Task {
             preferred_model: None,
             preferred_provider: None,
             escalate_on_retry: None,
+            domain: None,
         }
     }
 }

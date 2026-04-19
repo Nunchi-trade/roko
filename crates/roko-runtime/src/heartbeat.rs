@@ -381,6 +381,120 @@ impl CorticalState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BEAT-06: CorticalState shared perception surface — typed channel accessors.
+// ---------------------------------------------------------------------------
+
+impl CorticalState {
+    /// Write the primary emotion label.
+    pub fn set_primary_emotion(&self, label: PlutchikLabel) {
+        self.primary_emotion
+            .store(u8::from(label), Ordering::Release);
+    }
+
+    /// Read the primary emotion label.
+    pub fn primary_emotion(&self) -> PlutchikLabel {
+        PlutchikLabel::from_u8(self.primary_emotion.load(Ordering::Acquire))
+    }
+
+    /// Write the accuracy trend (-1, 0, or 1).
+    pub fn set_accuracy_trend(&self, trend: i8) {
+        self.accuracy_trend
+            .store(trend.clamp(-1, 1), Ordering::Release);
+    }
+
+    /// Read the accuracy trend.
+    pub fn accuracy_trend(&self) -> i8 {
+        self.accuracy_trend.load(Ordering::Acquire)
+    }
+
+    /// Write the surprise rate.
+    pub fn set_surprise_rate(&self, rate: f32) {
+        store_f32(&self.surprise_rate, rate.clamp(0.0, 1.0));
+    }
+
+    /// Read the surprise rate.
+    pub fn surprise_rate(&self) -> f32 {
+        load_f32(&self.surprise_rate)
+    }
+
+    /// Write the knowledge health signal.
+    pub fn set_knowledge_health(&self, health: f32) {
+        store_f32(&self.knowledge_health, health.clamp(0.0, 1.0));
+    }
+
+    /// Read the knowledge health signal.
+    pub fn knowledge_health(&self) -> f32 {
+        load_f32(&self.knowledge_health)
+    }
+
+    /// Write the performance trend.
+    pub fn set_performance_trend(&self, trend: f32) {
+        store_f32(&self.performance_trend, trend.clamp(-1.0, 1.0));
+    }
+
+    /// Read the performance trend.
+    pub fn performance_trend(&self) -> f32 {
+        load_f32(&self.performance_trend)
+    }
+
+    /// Write the compounding momentum signal.
+    pub fn set_compounding_momentum(&self, momentum: f32) {
+        store_f32(&self.compounding_momentum, momentum.clamp(0.0, 1.0));
+    }
+
+    /// Read the compounding momentum signal.
+    pub fn compounding_momentum(&self) -> f32 {
+        load_f32(&self.compounding_momentum)
+    }
+
+    /// Write the gas price signal.
+    pub fn set_gas_gwei(&self, gwei: f32) {
+        store_f32(&self.gas_gwei, gwei.max(0.0));
+    }
+
+    /// Read the gas price signal.
+    pub fn gas_gwei(&self) -> f32 {
+        load_f32(&self.gas_gwei)
+    }
+
+    /// Read the resource health signal.
+    pub fn resource_health(&self) -> f32 {
+        load_f32(&self.resource_health)
+    }
+
+    /// Write the creative mode flag.
+    pub fn set_creative_mode(&self, active: bool) {
+        self.creative_mode
+            .store(u8::from(active), Ordering::Release);
+    }
+
+    /// Read the creative mode flag.
+    pub fn creative_mode(&self) -> bool {
+        self.creative_mode.load(Ordering::Acquire) != 0
+    }
+
+    /// Write the universe size (tracked attention items).
+    pub fn set_universe_size(&self, size: u32) {
+        self.universe_size.store(size, Ordering::Release);
+    }
+
+    /// Read the universe size.
+    pub fn universe_size(&self) -> u32 {
+        self.universe_size.load(Ordering::Acquire)
+    }
+
+    /// Write the active count.
+    pub fn set_active_count(&self, count: u16) {
+        self.active_count.store(count, Ordering::Release);
+    }
+
+    /// Read the active count.
+    pub fn active_count(&self) -> u16 {
+        self.active_count.load(Ordering::Acquire)
+    }
+}
+
 impl Default for CorticalState {
     fn default() -> Self {
         Self::new(PersonalityPreset::Balanced)
@@ -1099,6 +1213,22 @@ pub struct SomaticMarkerRef {
 }
 
 /// The structured output of a single gamma tick.
+///
+/// # BEAT-05: Seven-step loop alignment
+///
+/// Each gamma tick maps to the spec's 7-step cycle:
+///
+/// 1. **Query**: `observation` + `probe_results` — sense the environment
+/// 2. **Score**: `prediction_error` + `anomalies` — evaluate surprise
+/// 3. **Route**: `tier` + `gating_reason` + `deliberation_threshold` — select inference tier
+/// 4. **Compose**: `context_bundle_summary` + `retrieved_entries` — assemble prompt context
+/// 5. **Act**: `actions` + `deliberation` — execute the chosen action
+/// 6. **Verify**: `outcome` — check the result against expectations
+/// 7. **Write**: `episodes_written` + `neuro_mutations` — persist learnings
+///
+/// The `pad_before`/`pad_after` pair captures the affect adaptation that
+/// occurs as a side-effect of the verify→write transition (the "react"
+/// feedback loop).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionCycleRecord {
     /// Tick identifier.
@@ -1107,38 +1237,46 @@ pub struct DecisionCycleRecord {
     pub timestamp: DateTime<Utc>,
     /// Agent identifier.
     pub agent_id: String,
+    // -- Step 1: QUERY (sense the environment) --
     /// PERCEIVE/SENSE observation.
     pub observation: Observation,
     /// Environmental regime at tick time.
     pub regime: Regime,
     /// Probe results.
     pub probe_results: Vec<ProbeReading>,
+    // -- Step 2: SCORE (evaluate surprise) --
     /// Detected anomalies.
     pub anomalies: Vec<Anomaly>,
     /// Aggregate prediction error.
     pub prediction_error: f32,
+    // -- Step 3: ROUTE (select inference tier) --
     /// Deliberation threshold used for tier selection.
     pub deliberation_threshold: f32,
     /// Selected inference tier.
     pub tier: InferenceTier,
     /// Human-readable gating reason.
     pub gating_reason: String,
+    // -- Step 4: COMPOSE (assemble prompt context) --
     /// Context bundle summary.
     pub context_bundle_summary: ContextSummary,
     /// Retrieved durable entries.
     pub retrieved_entries: Vec<EngramSummary>,
     /// Active interventions.
     pub active_interventions: Vec<InterventionSummary>,
+    // -- Step 5: ACT (execute the chosen action) --
     /// Optional deliberation record for T1/T2 ticks.
     pub deliberation: Option<DeliberationRecord>,
     /// Actions emitted by the tick.
     pub actions: Vec<ActionRecord>,
+    // -- Step 6: VERIFY (check result against expectations) --
     /// Optional outcome after verification.
     pub outcome: Option<OutcomeRecord>,
+    // -- Step 7: WRITE (persist learnings) --
     /// Episode identifiers written.
     pub episodes_written: Vec<String>,
     /// Neuro mutations applied.
     pub neuro_mutations: Vec<NeuroMutation>,
+    // -- React (affect adaptation side-effect) --
     /// PAD before tick adaptation.
     pub pad_before: PadVector,
     /// PAD after tick adaptation.

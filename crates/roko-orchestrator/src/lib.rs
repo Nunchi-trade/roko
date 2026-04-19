@@ -28,24 +28,25 @@ pub mod safety;
 pub mod worktree;
 
 pub use coordination::{
-    AgentId, CohortMetrics, CohortWeights, CollectiveId, CustomKindError, MorphogeneticParams,
-    MorphogeneticState, Pheromone, PheromoneKind, PheromoneScope, PromotionConfig,
-    ResponseThresholds, STRATEGY_DIMS, SpecializationIndex, SubnetId, SubnetIdError, WisdomGate,
-    c_factor, check_promotion, current_intensity, effective_confirmations, hill_response,
+    AgentId, CohortMetrics, CohortWeights, CollectiveId, CompetitionOutcome, Confirmation,
+    CustomKindError, MorphogeneticParams, MorphogeneticState, Pheromone, PheromoneKind,
+    PheromoneScope, PromotionConfig, PromotionGate, ResponseThresholds, STRATEGY_DIMS,
+    SpecializationIndex, SubnetId, SubnetIdError, SubnetPermissions, WisdomGate, c_factor,
+    check_promotion, compete, current_intensity, effective_confirmations, hill_response,
     pheromone_decay, specialization_index, validate_custom_kind,
 };
 pub use mesh_relay::{MeshRelay, PeerState, SeqNo, SequencedPheromone};
 pub use dag::{
-    CpmAnalysis, DagConfig, DagError, DagMutation, DagMutationError, DagStats, Durability,
-    ExecutionWave, FusionConfig, IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
+    CpmAnalysis, DagConfig, DagError, DagMutation, DagMutationError, DagPartition, DagStats,
+    Durability, ExecutionWave, FusionConfig, IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
     CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
     ExecutorSnapshot, GateResult, ParallelExecutor, PersistedCircuitBreakerFailureRecord,
-    PersistedCircuitBreakerState, PlanState, PlanStateMachine, SnapshotConfig,
-    SnapshotIntegrityError, SnapshotVerifier, SpeculativeExecution, TransitionError,
-    current_schema_version,
+    PersistedCircuitBreakerState, PlanState, PlanStateMachine, ResourceBudget, ResourceUsage,
+    SnapshotConfig, SnapshotIntegrityError, SnapshotVerifier, SpeculativeExecution,
+    TransitionError, current_schema_version,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};
 pub use plan_discovery::{

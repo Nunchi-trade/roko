@@ -37,7 +37,7 @@ pub use cycle::{
 pub use divergence::{DivergenceMetrics, DivergenceTargets};
 pub use evolution::{
     ArchiveCell, BayesianMemeticFitness, DescriptorDimension, FitnessClassification,
-    FitnessEvaluation, MapElitesArchive, TournamentRecombination,
+    FitnessEvaluation, InsertResult, MapElitesArchive, TournamentRecombination,
 };
 pub use hauntology::{SpectralInfluenceMetrics, SpectralProvenance};
 pub use hypnagogia::{
