@@ -1,7 +1,7 @@
 //! F5 Logs view -- scrollable log tail with level-based coloring.
 //!
 //! Multi-source log view combining:
-//! - Signals from `.roko/signals.jsonl`
+//! - Signals from `.roko/engrams.jsonl`
 //! - Episodes from `.roko/episodes.jsonl`
 //! - Efficiency events from `.roko/learn/efficiency.jsonl`
 //! - Gate results from signal data

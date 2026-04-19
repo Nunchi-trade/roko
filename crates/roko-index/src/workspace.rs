@@ -156,6 +156,26 @@ pub struct EmbeddingQuery {
     pub min_similarity: f32,
 }
 
+/// A unified search strategy combining one or more search dimensions.
+#[derive(Clone, Debug)]
+pub enum SearchStrategy {
+    /// Single keyword/text search.
+    Keyword(KeywordQuery),
+    /// Filter by symbol structure (kind, visibility, file pattern).
+    Structural(StructuralQuery),
+    /// HDC similarity search.
+    Hdc(HdcQuery),
+    /// Hybrid search combining multiple strategies with RRF ranking.
+    Hybrid {
+        /// Optional keyword sub-query.
+        keyword: Option<KeywordQuery>,
+        /// Optional structural sub-query.
+        structural: Option<StructuralQuery>,
+        /// Optional HDC sub-query.
+        hdc: Option<HdcQuery>,
+    },
+}
+
 /// Extracted code slice for prompt assembly or MCP responses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeSlice {
@@ -569,6 +589,42 @@ impl WorkspaceIndex {
             .into_iter()
             .filter(|result| result.score >= f64::from(query.min_similarity))
             .collect()
+    }
+
+    /// Unified search dispatching to the appropriate strategy.
+    ///
+    /// For `SearchStrategy::Hybrid`, results from each sub-strategy are merged
+    /// using Reciprocal Rank Fusion (RRF).
+    pub fn search(&self, strategy: SearchStrategy, limit: usize) -> Vec<SearchResult> {
+        match strategy {
+            SearchStrategy::Keyword(query) => self.keyword_search(&query, limit),
+            SearchStrategy::Structural(query) => self.structural_search(&query, limit),
+            SearchStrategy::Hdc(query) => {
+                let mut q = query;
+                q.max_results = limit;
+                self.hdc_search(&q)
+            }
+            SearchStrategy::Hybrid {
+                keyword,
+                structural,
+                hdc,
+            } => {
+                let oversample = limit.saturating_mul(3).max(30);
+                let mut lists: Vec<Vec<SearchResult>> = Vec::new();
+                if let Some(q) = keyword {
+                    lists.push(self.keyword_search(&q, oversample));
+                }
+                if let Some(q) = structural {
+                    lists.push(self.structural_search(&q, oversample));
+                }
+                if let Some(q) = hdc {
+                    let mut q = q;
+                    q.max_results = oversample;
+                    lists.push(self.hdc_search(&q));
+                }
+                rrf_merge(&lists, 60.0, limit)
+            }
+        }
     }
 
     /// Return the imports for a file.
@@ -1360,6 +1416,42 @@ fn keyword_matches(haystack: &str, needle: &str, whole_word: bool) -> bool {
     }
 }
 
+/// Reciprocal Rank Fusion: merge multiple ranked lists into one.
+///
+/// RRF(d) = sum(1 / (k + rank_i(d))) across all lists that contain `d`.
+/// `k` is typically 60. Results are deduplicated by `SymbolId` and sorted by
+/// descending RRF score.
+fn rrf_merge(lists: &[Vec<SearchResult>], k: f64, limit: usize) -> Vec<SearchResult> {
+    use std::collections::hash_map::Entry;
+
+    let mut scores: HashMap<SymbolId, (f64, SearchResult)> = HashMap::new();
+    for list in lists {
+        for (rank, result) in list.iter().enumerate() {
+            let rrf_score = 1.0 / (k + (rank + 1) as f64);
+            match scores.entry(result.symbol.id.clone()) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().0 += rrf_score;
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((rrf_score, result.clone()));
+                }
+            }
+        }
+    }
+
+    let mut merged: Vec<SearchResult> = scores
+        .into_values()
+        .map(|(rrf_score, mut result)| {
+            result.score = rrf_score;
+            result
+        })
+        .collect();
+
+    sort_search_results(&mut merged);
+    merged.truncate(limit);
+    merged
+}
+
 fn matches_file_pattern(path: &str, pattern: &str) -> bool {
     if pattern.is_empty() || pattern == "*" || pattern == "**" {
         return true;
@@ -1694,6 +1786,118 @@ mod tests {
         ]);
 
         let results = index.semantic_search("alpha", 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol.id.symbol_name, "alpha");
+    }
+
+    fn make_result(name: &str, file: &str, score: f64) -> SearchResult {
+        SearchResult {
+            score,
+            symbol: SymbolInfo {
+                id: SymbolId {
+                    file_path: file.to_string(),
+                    symbol_name: name.to_string(),
+                    kind: SymbolKind::Function,
+                },
+                visibility: Visibility::Public,
+                line: 1,
+                language: "rust".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn rrf_merge_combines_two_lists() {
+        let list_a = vec![
+            make_result("alpha", "a.rs", 1.0),
+            make_result("beta", "b.rs", 0.9),
+        ];
+        let list_b = vec![
+            make_result("beta", "b.rs", 1.0),
+            make_result("gamma", "c.rs", 0.8),
+        ];
+
+        let merged = rrf_merge(&[list_a, list_b], 60.0, 10);
+        assert_eq!(merged.len(), 3);
+        // beta appears in both lists so should have the highest RRF score.
+        assert_eq!(merged[0].symbol.id.symbol_name, "beta");
+        // RRF(beta) = 1/(60+2) + 1/(60+1) = 1/62 + 1/61
+        let expected_beta = 1.0 / 62.0 + 1.0 / 61.0;
+        assert!((merged[0].score - expected_beta).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rrf_merge_respects_limit() {
+        let list = vec![
+            make_result("a", "a.rs", 1.0),
+            make_result("b", "b.rs", 0.9),
+            make_result("c", "c.rs", 0.8),
+        ];
+        let merged = rrf_merge(&[list], 60.0, 2);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn rrf_merge_empty_lists() {
+        let merged = rrf_merge(&[], 60.0, 10);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn unified_search_keyword() {
+        let index = WorkspaceIndex::from_source_files(vec![file(
+            "a.rs",
+            "rust",
+            "fn hello() {}\n",
+            vec![symbol("hello", SymbolKind::Function, 1)],
+            vec![],
+        )]);
+
+        let results = index.search(
+            SearchStrategy::Keyword(KeywordQuery {
+                text: "hello".to_string(),
+                scope: SearchScope::Symbols,
+                case_sensitive: false,
+                whole_word: false,
+            }),
+            10,
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol.id.symbol_name, "hello");
+    }
+
+    #[test]
+    fn unified_search_hybrid() {
+        let index = WorkspaceIndex::from_source_files(vec![
+            file(
+                "a.rs",
+                "rust",
+                "fn alpha() {}\n",
+                vec![symbol("alpha", SymbolKind::Function, 1)],
+                vec![],
+            ),
+            file(
+                "b.rs",
+                "rust",
+                "fn beta() {}\n",
+                vec![symbol("beta", SymbolKind::Function, 1)],
+                vec![],
+            ),
+        ]);
+
+        let results = index.search(
+            SearchStrategy::Hybrid {
+                keyword: Some(KeywordQuery {
+                    text: "alpha".to_string(),
+                    scope: SearchScope::Symbols,
+                    case_sensitive: false,
+                    whole_word: false,
+                }),
+                structural: None,
+                hdc: None,
+            },
+            10,
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol.id.symbol_name, "alpha");
     }

@@ -22,6 +22,8 @@ pub struct PromptBuildOptions {
     pub relevant_skills: Vec<Skill>,
     /// Optional relevant playbooks injected into the system prompt.
     pub relevant_playbooks: Vec<Playbook>,
+    /// Optional code-intelligence context chunks injected as domain context.
+    pub code_context: Vec<String>,
 }
 
 fn build_spec(
@@ -30,6 +32,12 @@ fn build_spec(
     tools_csv: impl Into<String>,
     options: PromptBuildOptions,
 ) -> RoleSystemPromptSpec {
+    let task_context = if options.code_context.is_empty() {
+        task_context
+    } else {
+        let combined = options.code_context.join("\n\n");
+        task_context.with_domain_notes(combined)
+    };
     let mut spec = RoleSystemPromptSpec::new(role, task_context, tools_csv)
         .with_affect_state(options.affect_state)
         .with_cache_markers();

@@ -901,7 +901,7 @@ fn format_uptime(total_secs: u64) -> String {
 }
 
 async fn count_signals_processed(workdir: &Path) -> Result<usize> {
-    let path = workdir.join(".roko").join("signals.jsonl");
+    let path = workdir.join(".roko").join("engrams.jsonl");
     match tokio::fs::read_to_string(&path).await {
         Ok(text) => Ok(text.lines().filter(|line| !line.trim().is_empty()).count()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
@@ -1249,7 +1249,7 @@ async fn graceful_shutdown_daemon(
 }
 
 async fn flush_daemon_artifacts(workdir: &Path) -> Result<()> {
-    flush_file(workdir.join(".roko").join("signals.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("engrams.jsonl")).await?;
     flush_file(workdir.join(".roko").join("episodes.jsonl")).await?;
     flush_file(workdir.join(".roko").join("learn").join("heartbeat.json")).await?;
     flush_file(workdir.join(".roko").join("learn").join("heartbeat.jsonl")).await?;

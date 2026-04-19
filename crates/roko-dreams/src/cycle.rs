@@ -43,7 +43,7 @@ const DREAMS_PERFORMANCE_STALL_MIN_PLANS: usize = 5;
 const DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT: f64 = 0.01;
 const DREAMS_PERFORMANCE_COST_IMPROVEMENT: f64 = 0.01;
 const DREAMS_PERFORMANCE_STALLED_NOTE: &str = "performance stalled — consider: changing decomposition strategy, adjusting model tier, reviewing failing patterns";
-const SIGNALS_LOG_FILE: &str = "signals.jsonl";
+const ENGRAMS_LOG_FILE: &str = "engrams.jsonl";
 
 /// Agent hook used by the dream cycle to review a consolidation batch.
 #[async_trait]
@@ -605,7 +605,7 @@ impl DreamCycle {
             drop_fraction,
         };
 
-        let Some(path) = self.signals_path() else {
+        let Some(path) = self.engrams_path() else {
             return Ok(());
         };
 
@@ -656,7 +656,7 @@ impl DreamCycle {
             return Ok(None);
         };
 
-        let Some(path) = self.signals_path() else {
+        let Some(path) = self.engrams_path() else {
             return Ok(Some(regression));
         };
 
@@ -747,13 +747,13 @@ impl DreamCycle {
         Some(root.join("learn").join("c-factor.jsonl"))
     }
 
-    fn signals_path(&self) -> Option<PathBuf> {
+    fn engrams_path(&self) -> Option<PathBuf> {
         let root = self
             .episode_store
             .path()
             .parent()
             .unwrap_or_else(|| Path::new("."));
-        Some(root.join(SIGNALS_LOG_FILE))
+        Some(root.join(ENGRAMS_LOG_FILE))
     }
 }
 
@@ -2615,7 +2615,7 @@ mod tests {
         let report = cycle.run().await.expect("run");
         assert_eq!(report.processed_episodes, 5);
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].kind.as_str(), "dreams:regression");
@@ -2686,7 +2686,7 @@ mod tests {
         let report = cycle.run().await.expect("run");
         assert_eq!(report.processed_episodes, 5);
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert!(
             signals
@@ -2767,7 +2767,7 @@ mod tests {
             .expect("cfactor regression analysis");
         assert!(regression.drop_fraction > 0.20);
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].kind.as_str(), "cfactor:regression");
@@ -2827,7 +2827,7 @@ mod tests {
         let report = cycle.run().await.expect("run");
         assert!(report.cfactor_regression.is_none());
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert!(
             signals

@@ -114,7 +114,7 @@ output arbitrarily. Roko embeds budget awareness into the core types (Query has 
 Composer takes a Budget parameter).
 
 **Application examples**:
-- `Composer.compose()` takes a `Budget { max_tokens, max_pulses, max_bytes, max_wall_ms }`
+- `Composer.compose()` takes a `Budget { max_tokens, max_signals, max_bytes, max_wall_ms }`
   and assembles context within those constraints.
 - `CascadeRouter` selects the cheapest model tier sufficient for the current prediction
   error, not the most capable.
@@ -408,7 +408,7 @@ every Engram to its verified sources.
 **Rejected**: Agents sharing a single growing context window that amplifies both errors and
 distraction. MAST FM-1.4: loss of conversation history occurs when context exceeds the window.
 
-**Roko's design**: P3 (Budget-Aware) limits context via `Budget { max_tokens, max_pulses,
+**Roko's design**: P3 (Budget-Aware) limits context via `Budget { max_tokens, max_signals,
 max_bytes, max_wall_ms }`. The VCG Attention Auction allocates context optimally rather than
 growing it unboundedly.
 

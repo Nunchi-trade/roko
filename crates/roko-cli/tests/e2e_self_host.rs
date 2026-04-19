@@ -111,13 +111,13 @@ fn self_hosting_workflow_with_mock_dispatcher() {
         "executor snapshot did not record any plans"
     );
 
-    let signals_path = workdir.join(".roko").join("signals.jsonl");
+    let signals_path = workdir.join(".roko").join("engrams.jsonl");
     let signals = fs::read_to_string(&signals_path).expect("read signals");
     assert!(
         signals
             .lines()
             .any(|line| line.contains(r#""gate_verdict""#)),
-        "signals.jsonl missing gate verdict: {signals}"
+        "engrams.jsonl missing gate verdict: {signals}"
     );
 
     let status = run_cli(workdir, &["status"]).success();

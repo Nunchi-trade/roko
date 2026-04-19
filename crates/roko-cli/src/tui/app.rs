@@ -1208,8 +1208,8 @@ impl App {
                 self.tui_state.input_mode = InputMode::Normal;
                 self.tui_state.message_input.clear();
                 if !msg.is_empty() {
-                    // Write inject signal to .roko/signals.jsonl for the orchestrator
-                    let signal_path = self.workdir.join(".roko").join("signals.jsonl");
+                    // Write inject signal to .roko/engrams.jsonl for the orchestrator
+                    let signal_path = self.workdir.join(".roko").join("engrams.jsonl");
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1310,7 +1310,7 @@ impl App {
                 // Execute the confirmed action by writing a signal
                 if let Some(action) = &self.tui_state.pending_confirm {
                     let action_str = action.to_string();
-                    let signal_path = self.workdir.join(".roko").join("signals.jsonl");
+                    let signal_path = self.workdir.join(".roko").join("engrams.jsonl");
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()

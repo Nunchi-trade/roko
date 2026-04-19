@@ -19,7 +19,7 @@ impl std::error::Error for TierError {}
 /// - `T0`: suppress — heuristics only, no LLM call
 /// - `T1`: analyze — light LLM (Haiku-class)
 /// - `T2`: deliberate — full LLM (Opus/Sonnet based on vitality)
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum InferenceTier {
     /// Suppress inference entirely. Returns `None` from `TierRouter`.

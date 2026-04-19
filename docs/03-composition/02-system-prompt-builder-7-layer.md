@@ -1,4 +1,4 @@
-# 02 — SystemPromptBuilder: 7-Layer Prompt Assembly
+# 02 — SystemPromptBuilder: 9-Layer Prompt Assembly
 
 > Layer 2 Scaffold — Synapse Architecture
 > Status: **Implemented** — `roko-compose::system_prompt_builder` (726 lines, 12 tests)
@@ -11,26 +11,29 @@
 
 ## Abstract
 
-The SystemPromptBuilder constructs agent system prompts through a 7-layer architecture that separates stable identity (role, conventions) from volatile context (task, affect). Each layer has a defined purpose, cache tier, and injection point. The builder produces both a flat string (`build()`) and structured sections (`build_sections()`) for use by the PromptComposer's budget-fitting algorithm. Cache alignment markers between tiers enable the inference gateway to place KV-cache breakpoints for maximum prefix reuse.
+The SystemPromptBuilder constructs agent system prompts through a 9-layer architecture that separates stable identity (role, conventions) from volatile context (task, affect). Each layer has a defined purpose, cache tier, and injection point. The builder produces both a flat string (`build()`) and structured sections (`build_sections()`) for use by the PromptComposer's budget-fitting algorithm. Cache alignment markers between tiers enable the inference gateway to place KV-cache breakpoints for maximum prefix reuse.
 
-This document specifies the 7 layers, the builder API, cache alignment strategy, affect-guidance injection, and the wiring into the orchestration pipeline.
+This document specifies the 9 layers, the builder API, cache alignment strategy, affect-guidance injection, and the wiring into the orchestration pipeline.
 
 ---
 
-## 1. The 7 Layers
+## 1. The 9 Layers
 
-The SystemPromptBuilder assembles system prompts in seven ordered layers. Each layer has a defined scope, cache tier, and content source:
+The SystemPromptBuilder assembles system prompts in nine ordered layers. Each layer has a defined scope, cache tier, and content source:
 
 | Layer | Name | Cache Tier | Content Source | Purpose |
 |-------|------|-----------|----------------|---------|
 | 1 | Role Identity | System | `role_prompts.rs` | Who the agent is, what it specializes in |
 | 2 | Conventions | System | CLAUDE.md / project config | Project patterns, style rules, safety constraints |
 | 3a | Domain Context | Session | PRD extracts, workspace map | Domain-specific knowledge for this project |
-| 3b | Relevant Context | Session | Knowledge store, enrichment artifacts | Task-relevant retrieved context |
+| 3b | Assembled Context | Session | Knowledge store, enrichment artifacts | Task-relevant retrieved context |
+| 3c | Pheromone Signals | Session | Stigmergic signals, active context | Active environmental signals guiding behavior |
 | 4 | Task Context | Task | Task TOML, brief, gate errors | What the agent should do right now |
-| 5 | Tool Instructions | Task | Tool definitions, MCP config | What tools are available and how to use them |
-| 6 | Anti-Patterns | Dynamic | Playbook rules, failure history | What mistakes to avoid |
-| 7 | Affect Guidance | Dynamic | Daimon PAD state | Emotional/motivational modulation |
+| 5 | Tool Instructions | System | Tool definitions, MCP config | What tools are available and how to use them |
+| 6a | Relevant Techniques | Task | Playbook rules, learned skills | Learned techniques to prefer for this task |
+| 6b | Anti-Patterns | Task | Failure history, anti-knowledge | What mistakes to avoid |
+| 7 | (reserved) | -- | -- | -- |
+| 8 | Affect Guidance | Dynamic | Daimon PAD state | Emotional/motivational modulation |
 
 ### Layer 1: Role Identity
 
@@ -74,7 +77,7 @@ Project-specific knowledge that changes across sessions but not across tasks wit
 - Workspace map showing project structure
 - Cross-plan context (what other plans have done, shared type registries)
 
-### Layer 3b: Relevant Context
+### Layer 3b: Assembled Context
 
 Task-relevant retrieved context from the knowledge store and enrichment pipeline:
 
@@ -82,7 +85,17 @@ Task-relevant retrieved context from the knowledge store and enrichment pipeline
 - Episode summaries from similar past tasks
 - Enrichment artifacts (research memos, dependency manifests)
 
-This sub-layer is separate from 3a because its content is task-specific, while 3a is session-level. The split allows 3a to be cached at the Session tier while 3b is Task-tier.
+This sub-layer is separate from 3a because its content is task-specific, while 3a is session-level.
+
+### Layer 3c: Pheromone Signals
+
+Active environmental signals that guide agent behavior through stigmergy:
+
+- Recent engrams from the current plan that signal progress or blockers
+- Inter-agent coordination signals (e.g., "crate X was just modified")
+- Environment state indicators (build status, test results, resource usage)
+
+Pheromone signals enable indirect coordination between agents without explicit messaging.
 
 ### Layer 4: Task Context
 
@@ -104,17 +117,25 @@ Available tools and how to use them:
 - Tool-specific instructions (e.g., "prefer using Read over cat")
 - Tool restrictions (e.g., "never use --force")
 
-### Layer 6: Anti-Patterns
+### Layer 6a: Relevant Techniques
+
+Learned skills and playbook sequences that match the current task:
+
+- Playbook rules that match the current task's file paths and crates
+- Skill library entries relevant to the task type
+- Reusable task sequences from prior successful plans
+
+### Layer 6b: Anti-Patterns
 
 Known failure modes and explicit prohibitions:
 
-- Playbook rules that match the current task's file paths and crates
 - Common mistakes from the episode history
 - Anti-knowledge entries (things that are explicitly wrong or dangerous)
+- Gate failure patterns from similar tasks
 
-Anti-patterns are Dynamic-tier because they may change as new failures are recorded, even within a single task's iterations.
+Anti-patterns are Task-tier because they may change as new failures are recorded across task iterations.
 
-### Layer 7: Affect Guidance
+### Layer 8: Affect Guidance
 
 Motivational modulation based on the Daimon's PAD (Pleasure-Arousal-Dominance) state:
 
@@ -183,20 +204,24 @@ The `build()` method produces a flat string with cache alignment markers:
 
 {Layer 2: Conventions}
 
+{Layer 5: Tool Instructions}
+
 <!-- roko:layer:session -->
 {Layer 3a: Domain Context}
 
-{Layer 3b: Relevant Context}
+{Layer 3b: Assembled Context}
+
+{Layer 3c: Pheromone Signals}
 
 <!-- roko:layer:task -->
 {Layer 4: Task Context}
 
-{Layer 5: Tool Instructions}
+{Layer 6a: Relevant Techniques}
+
+{Layer 6b: Anti-Patterns}
 
 <!-- roko:layer:dynamic -->
-{Layer 6: Anti-Patterns}
-
-{Layer 7: Affect Guidance}
+{Layer 8: Affect Guidance}
 ```
 
 The `build_sections()` method produces structured `PromptSection` objects that the PromptComposer can individually score, prioritize, and budget-fit:
@@ -374,13 +399,15 @@ Each layer has a default budget share, adjustable by role:
 |-------|---------------------|-------------|------------|--------|
 | 1. Role Identity | 5% | 5% | 5% | 5% |
 | 2. Conventions | 8% | 8% | 8% | 8% |
-| 3a. Domain Context | 15% | 20% | 20% | 10% |
-| 3b. Relevant Context | 10% | 15% | 5% | 10% |
-| 4. Task Context | 30% | 35% | 25% | 25% |
+| 3a. Domain Context | 12% | 15% | 15% | 8% |
+| 3b. Assembled Context | 8% | 12% | 5% | 8% |
+| 3c. Pheromone Signals | 3% | 3% | 5% | 2% |
+| 4. Task Context | 28% | 33% | 23% | 23% |
 | 5. Tool Instructions | 12% | 12% | 12% | 12% |
-| 6. Anti-Patterns | 10% | 5% | 15% | 10% |
-| 7. Affect Guidance | 2% | 2% | 2% | 2% |
-| *Reserve (conversation turns)* | 8% | 8% | 8% | 18% |
+| 6a. Relevant Techniques | 5% | 3% | 7% | 5% |
+| 6b. Anti-Patterns | 7% | 4% | 10% | 7% |
+| 8. Affect Guidance | 2% | 2% | 2% | 2% |
+| *Reserve (conversation turns)* | 10% | 3% | 8% | 20% |
 
 The Implementer gets the largest Task Context share because it needs detailed code context. The Strategist gets the largest Anti-Patterns share because strategic errors are more costly. The Scribe gets the largest reserve because documentation tasks often require extensive back-and-forth.
 
@@ -388,7 +415,7 @@ The Implementer gets the largest Task Context share because it needs detailed co
 
 ## 8. Dynamic Layer Ordering
 
-The 7 layers are assembled in a fixed canonical order by default. But the optimal ordering may vary by task type. Research from 2025 strongly supports this hypothesis.
+The 9 layers are assembled in a fixed canonical order by default. But the optimal ordering may vary by task type. Research from 2025 strongly supports this hypothesis.
 
 ### 8.1 The Layer Ordering Hypothesis
 
@@ -404,7 +431,7 @@ This suggests the canonical order (role → conventions → knowledge → task �
 /// Represents a learned optimal layer ordering for a task category.
 pub struct LayerOrderPolicy {
     /// Task category → ordered list of layer indices.
-    /// Layer indices correspond to the 7 layers (0..7).
+    /// Layer indices correspond to the 9 layers (0..9).
     pub orderings: HashMap<String, Vec<usize>>,
     /// Observation counts per category for confidence estimation.
     pub observation_counts: HashMap<String, usize>,
@@ -553,7 +580,7 @@ This reduces token overhead in the agent's response without sacrificing reasonin
 
 **Plan-and-Solve Prompting** [Wang et al. 2023]. Improved zero-shot reasoning by splitting into two phases: devise a plan, then execute subtasks sequentially. The Strategist role's Layer 4 content embodies this: the task context includes the decomposition step that breaks down complex tasks before implementation.
 
-**ReAct: Reasoning + Acting** [Yao et al. 2022]. Interleaving reasoning traces with task-specific actions produces better results than either alone. The 7-layer prompt structure supports ReAct by placing reasoning instructions (Layer 1 role identity, Layer 6 anti-patterns) alongside action instructions (Layer 4 task context, Layer 5 tools).
+**ReAct: Reasoning + Acting** [Yao et al. 2022]. Interleaving reasoning traces with task-specific actions produces better results than either alone. The 9-layer prompt structure supports ReAct by placing reasoning instructions (Layer 1 role identity, Layer 6 anti-patterns) alongside action instructions (Layer 4 task context, Layer 5 tools).
 
 **Reflexion** [Shinn et al. 2023]. Verbal reinforcement learning: agents reflect on failures and use reflections to improve. Gate errors and iteration memory in Layer 4 are the Reflexion mechanism — they inject structured reflections from prior attempts into the next attempt's context.
 
@@ -642,7 +669,7 @@ test_compression_floor_respected:
 
 | Aspect | Status |
 |--------|--------|
-| 7-layer builder | **Implemented** |
+| 9-layer builder | **Implemented** |
 | Cache alignment markers | **Implemented** |
 | Affect guidance (arousal, pleasure) | **Implemented** |
 | Role-specific budgets | **Implemented** |

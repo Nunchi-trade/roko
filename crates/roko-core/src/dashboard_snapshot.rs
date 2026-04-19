@@ -806,7 +806,7 @@ impl DashboardSnapshot {
         let state =
             read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
         let task_trackers = read_task_trackers(&state_dir.join("task-trackers.json"))?;
-        let signal_gates = read_signal_gates(&roko_dir.join("signals.jsonl"))?;
+        let signal_gates = read_signal_gates(&roko_dir.join("engrams.jsonl"))?;
         let event_entries = read_event_entries(&state_dir.join("events.json"))?;
         let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
         let cfactor_trend = read_cfactor_trend(&learn_dir.join("c-factor.jsonl"))?;
@@ -2275,7 +2275,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            roko_dir.join("signals.jsonl"),
+            roko_dir.join("engrams.jsonl"),
             format!(
                 "{}\n",
                 serde_json::json!({

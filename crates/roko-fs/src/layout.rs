@@ -162,9 +162,18 @@ impl RokoLayout {
 
     // ── per-entity paths ─────────────────────────────────────────────────
 
-    /// `.roko/signals.jsonl` — the main signal log.
+    /// `.roko/engrams.jsonl` — the main engram log.
     #[must_use]
-    pub fn signals_path(&self) -> PathBuf {
+    pub fn engrams_path(&self) -> PathBuf {
+        self.root.join("engrams.jsonl")
+    }
+
+    /// Legacy path for the engram log (pre-rename).
+    ///
+    /// Use [`Self::engrams_path`] for new code. This helper exists so
+    /// callers can check for the old file and migrate it.
+    #[must_use]
+    pub fn engrams_path_legacy(&self) -> PathBuf {
         self.root.join("signals.jsonl")
     }
 

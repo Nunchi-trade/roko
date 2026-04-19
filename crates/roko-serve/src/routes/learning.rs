@@ -1191,7 +1191,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn gates_history_collection_is_served_under_api_grouping() -> Result<(), Box<dyn Error>> {
         let (dir, state) = test_state()?;
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         let signals_parent = signals
             .parent()
             .ok_or_else(|| anyhow!("signals path should have a parent directory"))?;

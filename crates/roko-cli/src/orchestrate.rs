@@ -1980,11 +1980,11 @@ struct SelectedModelExperiment {
     model_slug: String,
 }
 
-/// Background checker that tails `.roko/signals.jsonl` and periodically
+/// Background checker that tails `.roko/engrams.jsonl` and periodically
 /// runs the conductor against the most recent signals.
 struct WatcherRunner {
     conductor: Arc<Conductor>,
-    signals_path: PathBuf,
+    engrams_path: PathBuf,
     efficiency_path: PathBuf,
     budget_usd: Option<f64>,
     cancel: TokioCancellationToken,
@@ -2014,7 +2014,7 @@ impl WatcherRunner {
             tokio::select! {
                 _ = self.cancel.cancelled() => break,
                 _ = interval.tick() => {
-                    match load_recent_signals(&self.signals_path, WATCHER_SIGNAL_TAIL).await {
+                    match load_recent_signals(&self.engrams_path, WATCHER_SIGNAL_TAIL).await {
                         Ok(recent_signals) => {
                             let mut signals = recent_signals;
                             if let Ok(cost_signals) = load_efficiency_cost_signals(
@@ -2042,14 +2042,14 @@ impl WatcherRunner {
                                     );
                                     self.cancel.cancel();
                                 }
-                                if let Some(root) = self.signals_path.parent() {
+                                if let Some(root) = self.engrams_path.parent() {
                                     match FileSubstrate::open(root).await {
                                         Ok(substrate) => {
                                             for signal in alert_signals {
                                                 if let Err(e) = substrate.put(signal).await {
                                                     tracing::error!(
                                                         "[conductor] watcher runner failed to persist alert to {}: {e}",
-                                                        self.signals_path.display()
+                                                        self.engrams_path.display()
                                                     );
                                                 }
                                             }
@@ -2067,7 +2067,7 @@ impl WatcherRunner {
                         Err(e) => {
                             tracing::error!(
                                 "[conductor] watcher runner failed to read {}: {e}",
-                                self.signals_path.display()
+                                self.engrams_path.display()
                             );
                         }
                     }
@@ -5075,7 +5075,7 @@ impl PlanRunner {
 
     /// Flush log-like runtime artifacts so resume sees the latest state.
     async fn flush_logs(&self) -> Result<()> {
-        sync_file_if_present(&self.workdir.join(".roko").join("signals.jsonl"))?;
+        sync_file_if_present(&self.workdir.join(".roko").join("engrams.jsonl"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("episodes.jsonl"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.log"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.err"))?;
@@ -6910,7 +6910,7 @@ impl PlanRunner {
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),
-            signals_path: self.workdir.join(".roko").join("signals.jsonl"),
+            engrams_path: self.workdir.join(".roko").join("engrams.jsonl"),
             efficiency_path: self.learning.paths().efficiency_jsonl.clone(),
             budget_usd: self.executor.config().budget_usd,
             cancel: watcher_cancel.clone(),
@@ -12740,6 +12740,7 @@ impl PlanRunner {
 
         let role_key = format!("{role:?}");
         let section_effectiveness = self.learning.section_effectiveness_snapshot();
+        let code_ctx = code_context_for_task(&self.workdir, task);
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
             system_prompt
         } else {
@@ -12757,6 +12758,7 @@ impl PlanRunner {
                 &relevant_playbooks,
                 context_window_tokens,
                 Some(&section_effectiveness),
+                code_ctx,
             )?
         };
         let role_section = PromptSection::new("role", &role_instruction)
@@ -15139,8 +15141,8 @@ impl PlanRunner {
             ContextAssembler::new(Arc::new(self.knowledge_store.clone()), episode_store)
                 .with_affect_state(Some(affect_state))
                 .with_max_context_tokens(neuro_budget);
-        let signals_path = self.workdir.join(".roko").join("signals.jsonl");
-        let mut chunks = assembler.gather(&self.workdir, &task_input, plan_id, &signals_path);
+        let engrams_path = self.workdir.join(".roko").join("engrams.jsonl");
+        let mut chunks = assembler.gather(&self.workdir, &task_input, plan_id, &engrams_path);
         chunks.retain(|chunk| {
             matches!(
                 chunk.source,
@@ -15792,6 +15794,7 @@ fn build_system_prompt_with_context_validated(
     relevant_playbooks: &[Playbook],
     context_window_tokens: usize,
     section_effectiveness: Option<&SectionEffectivenessRegistry>,
+    code_context: Vec<String>,
 ) -> Result<String> {
     let mut task_context = TaskContext::new(task)
         .with_plan_id(plan_id)
@@ -15809,6 +15812,7 @@ fn build_system_prompt_with_context_validated(
             extra_conventions: task_dispatch_conventions(task_def),
             relevant_skills: relevant_skills.to_vec(),
             relevant_playbooks: relevant_playbooks.to_vec(),
+            code_context,
             ..PromptBuildOptions::default()
         },
         context_window_tokens,
@@ -15856,6 +15860,101 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
     } else {
         Some(format!("## Relevant Context\n\n{content}"))
     }
+}
+
+/// Extract code-intelligence context chunks for a task description.
+///
+/// Builds a `WorkspaceIndex` from the workspace root, extracts keywords from
+/// the task description, runs a hybrid search, and formats results as context
+/// strings suitable for domain-context injection. Returns an empty vec if the
+/// index cannot be built or yields no results.
+fn code_context_for_task(workdir: &Path, task_description: &str) -> Vec<String> {
+    const MAX_RESULTS: usize = 15;
+    const MAX_TOKENS: usize = 3000;
+    const TOKENS_PER_RESULT: usize = 200;
+
+    let index = match roko_index::WorkspaceIndex::load(workdir) {
+        Ok(idx) => idx,
+        Err(err) => {
+            tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
+            return Vec::new();
+        }
+    };
+
+    let keywords = extract_task_keywords(task_description);
+    if keywords.is_empty() {
+        return Vec::new();
+    }
+
+    let query_text = keywords.join(" ");
+    let strategy = roko_index::SearchStrategy::Hybrid {
+        keyword: Some(roko_index::KeywordQuery {
+            text: query_text,
+            scope: roko_index::SearchScope::Both,
+            case_sensitive: false,
+            whole_word: false,
+        }),
+        structural: None,
+        hdc: None,
+    };
+
+    let results = index.search(strategy, MAX_RESULTS);
+    if results.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut total_tokens = 0;
+    for result in &results {
+        let chunk = format!(
+            "- `{}` ({:?}) in `{}` line {} (score: {:.3})",
+            result.symbol.id.symbol_name,
+            result.symbol.id.kind,
+            result.symbol.id.file_path,
+            result.symbol.line,
+            result.score,
+        );
+        let est = estimate_tokens(&chunk);
+        if total_tokens + est > MAX_TOKENS {
+            break;
+        }
+        total_tokens += est.min(TOKENS_PER_RESULT);
+        chunks.push(chunk);
+    }
+
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
+    vec![format!(
+        "### Relevant Code Symbols\n\n{}",
+        chunks.join("\n")
+    )]
+}
+
+/// Extract meaningful keywords from a task description for code search.
+fn extract_task_keywords(description: &str) -> Vec<String> {
+    static STOP_WORDS: &[&str] = &[
+        "the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "was",
+        "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would",
+        "could", "should", "may", "might", "shall", "can", "need", "must", "it", "its", "this",
+        "that", "these", "those", "with", "from", "by", "as", "into", "not", "no", "if", "then",
+        "else", "when", "where", "which", "who", "what", "how", "all", "each", "every", "both",
+        "few", "more", "most", "other", "some", "such", "only", "own", "same", "so", "than",
+        "too", "very", "just", "but", "also", "about", "above", "after", "before", "between",
+        "through", "during", "up", "down", "out", "over", "under", "again", "further",
+        "implement", "add", "create", "make", "use", "update", "fix", "change", "ensure",
+    ];
+
+    description
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|w| w.len() >= 3)
+        .map(|w| w.to_lowercase())
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .take(10)
+        .collect()
 }
 
 fn adjust_priority_from_section_learning(
@@ -16218,8 +16317,7 @@ impl PlanRunner {
                     "Do not invent file contents, dependencies, or task requirements that are not present in the plan context.".to_string(),
                     "Do not skip read_files: if a task declares context files, they must be reflected in the enrichment summary.".to_string(),
                 ],
-                relevant_skills: Vec::new(),
-                relevant_playbooks: Vec::new(),
+                ..PromptBuildOptions::default()
             },
         )
     }

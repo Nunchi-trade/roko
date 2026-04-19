@@ -355,13 +355,13 @@ pub struct DashboardData {
     adaptive_thresholds: Option<AdaptiveThresholds>,
     /// Last observed gate-thresholds file metadata.
     gate_thresholds_stamp: FileStamp,
-    /// Most recent signals from `.roko/signals.jsonl`.
+    /// Most recent signals from `.roko/engrams.jsonl`.
     pub recent_signals: Vec<SignalSummary>,
     /// Cached signal-derived gate results when executor state does not provide them.
     signal_gate_results: Vec<GateResultSummary>,
     /// Parsed gate-related signals for the gate-results page.
     gate_signal_summaries: Vec<GateSignalSummary>,
-    /// Incremental cursor over `.roko/signals.jsonl`.
+    /// Incremental cursor over `.roko/engrams.jsonl`.
     signal_cursor: SignalCursor,
     /// Snapshot of the currently executing plan for the Plan Execution page.
     pub current_plan_execution: Option<PlanExecutionSnapshot>,
@@ -407,7 +407,7 @@ impl DashboardData {
         let roko_dir = root.join(".roko");
         let learn_dir = roko_dir.join("learn");
         let state_path = roko_dir.join("state").join("executor.json");
-        let signals_path = roko_dir.join("signals.jsonl");
+        let signals_path = roko_dir.join("engrams.jsonl");
         let episodes_path = resolve_episodes_path(&root);
         let efficiency_path = learn_dir.join(EFFICIENCY_FILE);
         let experiments_path = learn_dir.join(EXPERIMENTS_FILE);
@@ -3002,7 +3002,7 @@ pub struct DashboardSnapshot {
     adaptive_thresholds: Option<AdaptiveThresholds>,
     /// Gate-results page data derived from signals and thresholds.
     gate_results_page: GateResultsPageData,
-    /// Most recent signals from `.roko/signals.jsonl`.
+    /// Most recent signals from `.roko/engrams.jsonl`.
     recent_signals: Vec<SignalSummary>,
     /// Cascade router snapshot from `.roko/learn/cascade-router.json` (raw JSON).
     cascade_snapshot: Option<CascadeSnapshotData>,
@@ -3112,7 +3112,7 @@ impl DashboardSnapshot {
         let learn_dir = root.join(LEARN_DIR);
         let episodes_path = resolve_episodes_path(&root);
         let task_metrics_path = memory_dir.join(TASK_METRICS_FILE);
-        let signals_path = root.join(".roko").join("signals.jsonl");
+        let signals_path = root.join(".roko").join("engrams.jsonl");
 
         let episodes_logger = EpisodeLogger::new(&episodes_path);
         let episodes = EpisodeLogger::read_all_lossy(episodes_logger.path())
@@ -3564,7 +3564,7 @@ impl DashboardSnapshot {
         let mut out = page_header(page);
         let _ = writeln!(
             out,
-            "source: {}/signals.jsonl",
+            "source: {}/engrams.jsonl",
             self.root.join(".roko").display()
         );
         let _ = writeln!(
@@ -3997,7 +3997,7 @@ impl DashboardSnapshot {
     }
 
     fn render_log_view_page(&self, page: &PageScaffold) -> Option<String> {
-        let signals_path = self.root.join(".roko").join("signals.jsonl");
+        let signals_path = self.root.join(".roko").join("engrams.jsonl");
         let episodes_path = resolve_episodes_path(&self.root);
 
         let signals_exist = signals_path.exists();
@@ -4065,7 +4065,7 @@ impl DashboardSnapshot {
         let mut out = page_header(page);
         let _ = writeln!(
             out,
-            "source: {}/signals.jsonl",
+            "source: {}/engrams.jsonl",
             self.root.join(".roko").display()
         );
         let _ = writeln!(out, "window: last {} signals", signals.len());
@@ -4938,7 +4938,7 @@ mod tests {
             }),
         ];
         write_jsonl(
-            &roko_dir.join("signals.jsonl"),
+            &roko_dir.join("engrams.jsonl"),
             &signals
                 .into_iter()
                 .map(|signal| serde_json::to_string(&signal).expect("signal json"))
@@ -5174,7 +5174,7 @@ mod tests {
             }),
         ];
         write_jsonl(
-            &roko_dir.join("signals.jsonl"),
+            &roko_dir.join("engrams.jsonl"),
             &signals
                 .into_iter()
                 .map(|signal| serde_json::to_string(&signal).expect("signal json"))
@@ -5760,7 +5760,7 @@ tier = "focused"
             })],
         );
         write_jsonl(
-            &roko_dir.join("signals.jsonl"),
+            &roko_dir.join("engrams.jsonl"),
             &[serde_json::json!({
                 "id": "sig-1",
                 "kind": "conductor:alert:warning",
@@ -5797,14 +5797,14 @@ tier = "focused"
             serde_json::to_string(&sample_episode("agent-b", "task-b", false, 0.8, 240))
                 .expect("episode json");
 
-        append_raw(&roko_dir.join("signals.jsonl"), &appended_signal);
+        append_raw(&roko_dir.join("engrams.jsonl"), &appended_signal);
         append_raw(&memory_dir.join(EPISODES_FILE), &appended_episode);
 
         data.tick().expect("partial tick should succeed");
         assert_eq!(data.recent_signals.len(), 1);
         assert_eq!(data.episodes().len(), 1);
 
-        append_raw(&roko_dir.join("signals.jsonl"), "\n");
+        append_raw(&roko_dir.join("engrams.jsonl"), "\n");
         append_raw(&memory_dir.join(EPISODES_FILE), "\n");
         write_json(
             &state_dir.join("events.json"),
@@ -5842,7 +5842,7 @@ tier = "focused"
         fs::create_dir_all(&memory_dir).expect("memory dir");
 
         write_jsonl(
-            &roko_dir.join("signals.jsonl"),
+            &roko_dir.join("engrams.jsonl"),
             &[
                 serde_json::json!({
                     "id": "sig-1",
@@ -5873,7 +5873,7 @@ tier = "focused"
         assert_eq!(data.episodes().len(), 2);
 
         write_jsonl(
-            &roko_dir.join("signals.jsonl"),
+            &roko_dir.join("engrams.jsonl"),
             &[serde_json::json!({
                 "id": "sig-reset",
                 "kind": "conductor:alert:error",

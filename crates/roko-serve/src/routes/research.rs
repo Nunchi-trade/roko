@@ -382,7 +382,7 @@ fn build_analyze_prompt(workdir: &FsPath, context: &str) -> String {
     let _ = writeln!(prompt, "Workspace: {}", workdir.display());
     let _ = writeln!(
         prompt,
-        "Analyze .roko/memory/episodes.jsonl and .roko/signals.jsonl, then write the results to {}.",
+        "Analyze .roko/memory/episodes.jsonl and .roko/engrams.jsonl, then write the results to {}.",
         analysis_path.display()
     );
     let _ = writeln!(
@@ -506,7 +506,7 @@ async fn read_analysis_context(state: &AppState) -> Result<String, ApiError> {
         ));
     }
 
-    let signals_path = state.workdir.join(".roko").join("signals.jsonl");
+    let signals_path = state.workdir.join(".roko").join("engrams.jsonl");
     if signals_path.is_file() {
         let content = tokio::fs::read_to_string(&signals_path)
             .await
@@ -769,7 +769,7 @@ mod tests {
             .await
             .expect("write episodes");
 
-        let signals_path = dir.path().join(".roko").join("signals.jsonl");
+        let signals_path = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .await
             .expect("signals dir");

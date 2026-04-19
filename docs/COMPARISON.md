@@ -21,7 +21,7 @@ machinery to improve themselves over time.
 | **Architecture model** | Cognitive (1 noun + 6 traits) | DAG/chain | Role-based crews | Single agent + ACI | Loop-based |
 | **Universal data type** | Engram (content-addressed, decaying, scored) | Varies per chain | Messages | Observations | Messages |
 | **Content addressing** | BLAKE3 hash on every datum | No | No | No | No |
-| **Verification pipeline** | 11 gates, 6-rung pipeline, adaptive thresholds | Optional callbacks | No built-in | SWE-bench evaluation | No built-in |
+| **Verification pipeline** | 14 gates, 7-rung pipeline, adaptive thresholds | Optional callbacks | No built-in | SWE-bench evaluation | No built-in |
 | **Knowledge management** | 6 types × 4 tiers, HDC similarity, decay | Vector store (external) | No built-in | No built-in | No built-in |
 | **Affect/emotion model** | PAD vectors, 6 behavioral states, somatic markers | No | No | No | No |
 | **Offline learning** | NREM replay, REM imagination, hypnagogia | No | No | No | No |
@@ -70,7 +70,7 @@ experience into validated knowledge — something no other agent framework does.
 
 ### 5. Self-Verification at Every Step
 
-Roko's 6-rung gate pipeline (syntax → compile → test → lint → diff → semantic) verifies
+Roko's 7-rung gate pipeline (syntax → compile → test → lint → diff → semantic → integration) verifies
 every agent output before it enters the knowledge base. Adaptive thresholds (EMA per rung)
 learn expected pass rates and flag anomalies. Gate verdicts are themselves Engrams that
 re-enter the cognitive loop — "verification as cognition."

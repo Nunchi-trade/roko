@@ -5554,11 +5554,25 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool) -> Result<()> {
         .await
         .with_context(|| format!("create {}", roko_dir.display()))?;
 
-    let signals_path = roko_dir.join("signals.jsonl");
-    if !signals_path.exists() {
-        tokio::fs::write(&signals_path, b"")
-            .await
-            .with_context(|| format!("create {}", signals_path.display()))?;
+    let engrams_path = roko_dir.join("engrams.jsonl");
+    if !engrams_path.exists() {
+        // Migrate from legacy name if present.
+        let legacy = roko_dir.join("signals.jsonl");
+        if legacy.exists() {
+            tokio::fs::rename(&legacy, &engrams_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "migrate {} -> {}",
+                        legacy.display(),
+                        engrams_path.display()
+                    )
+                })?;
+        } else {
+            tokio::fs::write(&engrams_path, b"")
+                .await
+                .with_context(|| format!("create {}", engrams_path.display()))?;
+        }
     }
 
     let config_path = target.join("roko.toml");

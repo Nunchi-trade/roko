@@ -142,7 +142,7 @@ async fn model_efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Val
 
 /// `GET /api/metrics/gate_rate` — passed / total per gate with a trend delta.
 async fn gate_rate(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     Ok(Json(build_gate_rate_response(&entries)))
 }
@@ -156,7 +156,7 @@ async fn experiments_metric(State(state): State<Arc<AppState>>) -> Result<Json<V
 
 /// `GET /api/metrics/feedback_latency` — median hours from action to first feedback signal.
 async fn feedback_latency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     Ok(Json(build_feedback_latency_response(&entries)))
 }
@@ -198,9 +198,9 @@ async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
     Ok(Json(Value::Array(capped)))
 }
 
-/// `GET /api/gates/summary` — aggregate gate verdicts from `.roko/signals.jsonl`.
+/// `GET /api/gates/summary` — aggregate gate verdicts from `.roko/engrams.jsonl`.
 async fn gate_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let mut summary = summarize_gate_entries(&entries);
     if let Some(obj) = summary.as_object_mut() {
@@ -222,7 +222,7 @@ async fn gates_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GateHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let gate_filter = query.gate.as_deref();
     let limit = query.limit.unwrap_or(100).min(MAX_JSONL_RESULTS);
@@ -244,7 +244,7 @@ async fn gate_history(
     State(state): State<Arc<AppState>>,
     Path(gate_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let mut history: Vec<Value> = entries
         .into_iter()
@@ -302,7 +302,7 @@ async fn signals(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SignalQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let cap = q.limit.unwrap_or(MAX_JSONL_RESULTS).min(MAX_JSONL_RESULTS);
     let limited: Vec<Value> = entries
@@ -1810,7 +1810,7 @@ mod tests {
     #[tokio::test]
     async fn gates_history_collection_is_mounted_under_api_grouping() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
@@ -1874,7 +1874,7 @@ mod tests {
     #[tokio::test]
     async fn gate_summary_includes_rung_breakdown_under_api_grouping() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
@@ -2210,7 +2210,7 @@ mod tests {
     #[tokio::test]
     async fn gate_history_returns_500_for_invalid_jsonl() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
@@ -2228,7 +2228,7 @@ mod tests {
     #[tokio::test]
     async fn signals_returns_500_for_invalid_jsonl() {
         let (dir, state) = test_state();
-        let signals_path = dir.path().join(".roko").join("signals.jsonl");
+        let signals_path = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .await
             .expect("create signals dir");

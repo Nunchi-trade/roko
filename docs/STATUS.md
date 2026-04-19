@@ -63,7 +63,7 @@ These components form the working self-hosting loop: `roko prd` → `roko plan r
 | Plan DAG executor + parallel scheduling | `roko-orchestrator` | 158 | `roko plan run` |
 | 5 LLM backends + CascadeRouter + MCP | `roko-agent` | 346 | `roko run` |
 | 6-layer SystemPromptBuilder + 9 templates | `roko-compose` | 23 | — (used by orchestrator) |
-| 11 gates + 6-rung pipeline + adaptive thresholds | `roko-gate` | 200 | — (used by orchestrator) |
+| 14 gates + 7-rung pipeline + adaptive thresholds | `roko-gate` | 200 | — (used by orchestrator) |
 | JSONL FileSubstrate + GC | `roko-fs` | 37 | — (storage layer) |
 | Episodes + playbooks + bandits + experiments | `roko-learn` | 101 | — (feedback loops) |
 | 19 built-in tools (file, shell, search, MCP) | `roko-std` | 96 | — (tool dispatch) |
@@ -142,7 +142,7 @@ Selected crate counts below are the legacy per-crate figures retained in this st
 | `roko-std` | 96 | L1 Framework |
 | `roko-chain` | 52 | L1 Framework |
 | `roko-cli` | 38 | L4 Application |
-| `roko-fs` | 37 | L3 Harness |
+| `roko-fs` | 37 | L0 Runtime |
 | `roko-compose` | 23 | L2 Scaffold |
 | **Workspace total** | **3,761** | |
 

@@ -34,5 +34,6 @@ pub use workspace::{
     AssembledContext, CallGraph, CallGraphDirection, CallGraphEdge, CodeIndex, CodeSlice,
     ContextOverlay, EmbeddingQuery, FileAst, HdcQuery, ImplementationMatch, IndexStats,
     KeywordQuery, PrivacyConfig, ReferenceKind, ReferenceMatch, SearchResult, SearchScope,
-    StructuralQuery, SymbolContext, SymbolInfo, WorkspaceIndex, WorkspaceMap, WorkspaceMapEntry,
+    SearchStrategy, StructuralQuery, SymbolContext, SymbolInfo, WorkspaceIndex, WorkspaceMap,
+    WorkspaceMapEntry,
 };

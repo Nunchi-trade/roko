@@ -51,27 +51,8 @@ impl HeartbeatSpeed {
     }
 }
 
-/// Cognitive inference tier selected for a heartbeat tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InferenceTier {
-    /// Deterministic probes and playbook rules only; no LLM call.
-    T0,
-    /// Fast model with reduced context for triage.
-    T1,
-    /// Full model with complete context for deep deliberation.
-    T2,
-}
-
-impl From<InferenceTier> for u8 {
-    fn from(value: InferenceTier) -> Self {
-        match value {
-            InferenceTier::T0 => 0,
-            InferenceTier::T1 => 1,
-            InferenceTier::T2 => 2,
-        }
-    }
-}
+/// Re-exported from [`roko_primitives::tier::InferenceTier`].
+pub use roko_primitives::tier::InferenceTier;
 
 /// Environmental regime used by the adaptive clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -111,6 +92,9 @@ impl From<Regime> for u8 {
 }
 
 /// PAD affect vector used by tier gating and attention allocation.
+///
+/// This is an `f32` variant distinct from [`roko_core::affect::PadVector`] (`f64`).
+/// The heartbeat module uses `f32` for compact atomic storage in the cognitive clock.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PadVector {
     /// Pleasure axis in `[-1.0, 1.0]`.

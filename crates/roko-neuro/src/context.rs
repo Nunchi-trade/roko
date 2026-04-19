@@ -270,7 +270,7 @@ impl ContextAssembler {
         workdir: impl AsRef<Path>,
         task: &TaskInput,
         plan_id: &str,
-        signals_path: impl AsRef<Path>,
+        engrams_path: impl AsRef<Path>,
     ) -> Vec<ContextChunk> {
         let task_text = task_query_text(task);
         let workdir = workdir.as_ref();
@@ -279,7 +279,7 @@ impl ContextAssembler {
         chunks.extend(self.gather_knowledge(&task_text));
         chunks.extend(self.gather_episodes(task, plan_id, &task_text));
         chunks.extend(self.gather_read_files(workdir, task));
-        chunks.extend(self.gather_recent_signals(plan_id, signals_path.as_ref()));
+        chunks.extend(self.gather_recent_engrams(plan_id, engrams_path.as_ref()));
 
         apply_somatic_bias(&mut chunks, self.affect_state);
         self.rank(&task_text, &mut chunks);
@@ -609,8 +609,8 @@ impl ContextAssembler {
         chunks
     }
 
-    fn gather_recent_signals(&self, plan_id: &str, signals_path: &Path) -> Vec<ContextChunk> {
-        let signals = read_jsonl_lossy::<Engram>(signals_path);
+    fn gather_recent_engrams(&self, plan_id: &str, engrams_path: &Path) -> Vec<ContextChunk> {
+        let signals = read_jsonl_lossy::<Engram>(engrams_path);
 
         let mut recent: Vec<Engram> = signals
             .into_iter()
@@ -1781,7 +1781,7 @@ mod tests {
         )
         .expect("write episodes");
 
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         let signals: Vec<_> = (0..12)
@@ -1866,7 +1866,7 @@ mod tests {
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::write(&signals_path, "").expect("write empty signals");
 
         let assembler = ContextAssembler::new(knowledge_store, episode_store).with_affect_state(
@@ -1977,7 +1977,7 @@ mod tests {
             depends_on: vec![],
             max_loc: None,
         };
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");
@@ -2187,7 +2187,7 @@ mod tests {
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");
@@ -2282,7 +2282,7 @@ mod tests {
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");

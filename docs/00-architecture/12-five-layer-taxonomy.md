@@ -144,7 +144,7 @@ together without conflict.
 **Purpose**: Verification, monitoring, interventions, evaluation.
 
 **Key Crates**:
-- `roko-gate` — 11+ verification gates, 6-rung pipeline, adaptive thresholds
+- `roko-gate` — 14 verification gates, 7-rung pipeline, adaptive thresholds
 - `roko-fs` — JSONL substrate persistence, garbage collection, file layout
 
 **What Lives Here**:
@@ -284,7 +284,7 @@ small, keep impl crates independent, and let coordination flow through the fabri
 | **Framework (L1)** | `roko-agent` | Built (346 tests) | LLM backends, tool dispatch, MCP client |
 | **Scaffold (L2)** | `roko-compose` | Built (23 tests) | Current prompt assembly crate; target split is `roko-compose-core` + `roko-templates` |
 | **Harness (L3)** | `roko-gate` | Built (200 tests) | Verification pipeline (11+ gates) |
-| **Harness (L3)** | `roko-fs` | Built (37 tests) | JSONL substrate persistence |
+| **Runtime (L0)** | `roko-fs` | Built (37 tests) | JSONL substrate persistence |
 | **Orchestration (L4)** | `roko-orchestrator` | Built (158 tests) | Plan DAG, parallel executor, worktrees |
 | **Orchestration (L4)** | `roko-conductor` | Built | Reactive watchers, circuit breakers |
 | **Cognitive** | `roko-learn` | Built (101 tests) | Episodes, playbooks, skills, bandits |
