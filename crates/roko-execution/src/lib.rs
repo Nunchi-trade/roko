@@ -17,7 +17,8 @@ pub use order_book::ManagedOrderBook;
 pub use order_types::{BracketOrder, ConditionalOrder, ManagedOrder, PeggedOrder};
 pub use parent_order::{ExecutionAlgo, ParentOrder};
 pub use portfolio_risk::{
-    PortfolioRiskConfig, PortfolioRiskManager, PortfolioRiskState, CORRELATION_GROUPS,
+    PortfolioRiskConfig, PortfolioRiskManager, PortfolioRiskState, PositionSummary,
+    CORRELATION_GROUPS,
 };
 pub use routing::{AloStats, OrderRouter};
 pub use twap::{ChildSlice, TwapExecutor};

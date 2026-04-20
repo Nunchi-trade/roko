@@ -15,6 +15,6 @@ mod config;
 mod engine;
 mod state;
 
-pub use config::{ApexConfig, ApexPreset, APEX_PRESETS};
+pub use config::{apex_presets, ApexConfig, ApexPreset, APEX_PRESETS};
 pub use engine::ApexEngine;
 pub use state::{ApexSlot, ApexState, ApexStateStore};
