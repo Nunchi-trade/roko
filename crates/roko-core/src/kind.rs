@@ -148,6 +148,85 @@ impl Kind {
         }
     }
 
+    /// Create a compound kind from multiple constituent kinds.
+    ///
+    /// Compound kinds represent signals that carry multiple semantics
+    /// simultaneously (e.g., a gate verdict that is also a metric reading).
+    ///
+    /// ```rust
+    /// use roko_core::Kind;
+    /// let k = Kind::compound(&[Kind::GateVerdict, Kind::Metric]);
+    /// assert!(k.contains(&Kind::GateVerdict));
+    /// assert!(k.contains(&Kind::Metric));
+    /// ```
+    #[must_use]
+    pub fn compound(parts: &[Kind]) -> Self {
+        Self::Compound(parts.to_vec())
+    }
+
+    /// Check if this kind matches another, including compound containment.
+    ///
+    /// - For non-compound kinds: exact equality.
+    /// - For compound kinds: returns true if `other` is any constituent.
+    /// - Compound-to-compound: true if all parts of `other` are in `self`.
+    ///
+    /// ```rust
+    /// use roko_core::Kind;
+    /// let compound = Kind::compound(&[Kind::GateVerdict, Kind::Metric]);
+    /// assert!(compound.matches(&Kind::GateVerdict));  // constituent match
+    /// assert!(!compound.matches(&Kind::Task));         // not a constituent
+    /// assert!(Kind::Task.matches(&Kind::Task));        // exact match
+    /// ```
+    #[must_use]
+    pub fn matches(&self, other: &Kind) -> bool {
+        if self == other {
+            return true;
+        }
+        match (self, other) {
+            (Self::Compound(parts), Self::Compound(other_parts)) => {
+                // All parts of `other` must be in `self`.
+                other_parts.iter().all(|op| parts.contains(op))
+            }
+            (Self::Compound(parts), _) => parts.contains(other),
+            (_, Self::Compound(other_parts)) => other_parts.contains(self),
+            _ => false,
+        }
+    }
+
+    /// Check if a compound kind contains a specific constituent.
+    ///
+    /// Returns false for non-compound kinds (use `matches` for general matching).
+    #[must_use]
+    pub fn contains(&self, part: &Kind) -> bool {
+        match self {
+            Self::Compound(parts) => parts.contains(part),
+            _ => self == part,
+        }
+    }
+
+    /// Number of constituents in a compound kind (1 for non-compound).
+    #[must_use]
+    pub fn arity(&self) -> usize {
+        match self {
+            Self::Compound(parts) => parts.len(),
+            _ => 1,
+        }
+    }
+
+    /// Iterator over constituent kinds (yields self for non-compound).
+    pub fn constituents(&self) -> impl Iterator<Item = &Kind> {
+        match self {
+            Self::Compound(parts) => parts.iter(),
+            _ => std::slice::from_ref(self).iter(),
+        }
+    }
+
+    /// Whether this is a compound kind.
+    #[must_use]
+    pub fn is_compound(&self) -> bool {
+        matches!(self, Self::Compound(_))
+    }
+
     /// Canonical identity key used when hashing or serializing nested kinds.
     #[must_use]
     pub fn identity_key(&self) -> Cow<'_, str> {
@@ -200,6 +279,54 @@ mod tests {
     #[test]
     fn display_matches_as_str() {
         assert_eq!(format!("{}", Kind::Task), "task");
+    }
+
+    #[test]
+    fn compound_factory() {
+        let k = Kind::compound(&[Kind::GateVerdict, Kind::Metric]);
+        assert!(k.is_compound());
+        assert_eq!(k.arity(), 2);
+    }
+
+    #[test]
+    fn compound_contains() {
+        let k = Kind::compound(&[Kind::Task, Kind::PromptSection, Kind::Metric]);
+        assert!(k.contains(&Kind::Task));
+        assert!(k.contains(&Kind::Metric));
+        assert!(!k.contains(&Kind::Episode));
+    }
+
+    #[test]
+    fn compound_matches_constituent() {
+        let k = Kind::compound(&[Kind::GateVerdict, Kind::Metric]);
+        assert!(k.matches(&Kind::GateVerdict));
+        assert!(k.matches(&Kind::Metric));
+        assert!(!k.matches(&Kind::Task));
+    }
+
+    #[test]
+    fn non_compound_matches_exact() {
+        assert!(Kind::Task.matches(&Kind::Task));
+        assert!(!Kind::Task.matches(&Kind::Plan));
+    }
+
+    #[test]
+    fn compound_matches_subset() {
+        let big = Kind::compound(&[Kind::Task, Kind::Metric, Kind::Episode]);
+        let small = Kind::compound(&[Kind::Task, Kind::Metric]);
+        assert!(big.matches(&small)); // big contains all of small
+        assert!(!small.matches(&big)); // small doesn't contain Episode
+    }
+
+    #[test]
+    fn constituents_iterator() {
+        let k = Kind::compound(&[Kind::Task, Kind::Plan]);
+        let parts: Vec<_> = k.constituents().collect();
+        assert_eq!(parts, vec![&Kind::Task, &Kind::Plan]);
+
+        // Non-compound yields self.
+        let simple: Vec<_> = Kind::Task.constituents().collect();
+        assert_eq!(simple, vec![&Kind::Task]);
     }
 
     #[test]

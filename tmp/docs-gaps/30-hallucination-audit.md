@@ -833,8 +833,12 @@ be good ideas that need spec updates, or they may be accidental additions.
   - Doc: docs/00-architecture/05-provenance-and-attestation.md
   - Code: crates/roko-core/src/provenance.rs
 
-- [ ] **P1-43: Kind::Compound helpers not implemented** — Variant exists but compound(), matches(), and proper as_str() are missing. Doc describes full compositional system.
-  - Doc: docs/00-architecture/19-compositional-kinds.md
+- [x] **P1-43: Kind::Compound helpers not implemented** — FIXED: Added full compositional API:
+  - `Kind::compound(&[Kind])` — factory method
+  - `matches(other)` — checks constituent containment (compound→simple, compound→compound subset)
+  - `contains(part)` — direct containment check
+  - `arity()`, `constituents()`, `is_compound()` helpers
+  - 6 new tests for factory, containment, matching, subset, iteration
 
 - [ ] **P1-44: Demurrage config section entirely absent from code** — Doc 20-configuration-schema.md describes [demurrage] with 9 parameters. Not in RokoConfig.
 
