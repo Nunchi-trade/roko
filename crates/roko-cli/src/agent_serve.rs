@@ -155,12 +155,21 @@ impl AgentServeRuntimeConfig {
     fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {
         let workdir = std::env::current_dir().context("read current working directory")?;
         let config = load_roko_config(&workdir)?;
-        if config.agent.command.is_none() {
-            return Ok(None);
-        }
 
         let model = config.agent.default_model.trim();
         if model.is_empty() {
+            return Ok(None);
+        }
+
+        // A dispatcher can be built if either:
+        //   (a) the default model resolves in the provider registry
+        //       (e.g. `[providers.lmstudio] kind = "openai_compat"` +
+        //       `[models.qwen] provider = "lmstudio"`), or
+        //   (b) a legacy subprocess command is configured (e.g. `command = "claude"`).
+        // Without either, there is no backend to call.
+        let has_provider_backing = config.effective_models().contains_key(model);
+        let has_legacy_command = config.agent.command.is_some();
+        if !has_provider_backing && !has_legacy_command {
             return Ok(None);
         }
 
