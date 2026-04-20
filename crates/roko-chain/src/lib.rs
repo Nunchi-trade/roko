@@ -29,6 +29,8 @@ pub mod observer;
 pub mod phase2;
 /// Reputation Registry with 7-domain EMA scoring (CHAIN-03).
 pub mod reputation_registry;
+/// TraceRank: PageRank-style reputation propagation over payment edges (P1-02).
+pub mod trace_rank;
 /// Chain domain DeFi tool definitions (10 core tools).
 pub mod tools;
 pub mod triage;

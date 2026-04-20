@@ -387,9 +387,15 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-02: TraceRank (graph-based reputation from payment edges)
 
-- [ ] **Spec** (`bardo-backup/tmp/agent-chain-new/05-token-economics.md`): Reputation should incorporate graph-based signals from payment flows (who paid whom, how much, what quality resulted). TraceRank is the agent-chain equivalent of PageRank applied to payment edges.
-- **Code**: No TraceRank, no payment-edge graph, no graph-based reputation computation. `crates/roko-chain/src/reputation_registry.rs` uses only direct EMA scoring.
-- **Fix**: Implement `TraceRank` struct with payment graph construction and iterative reputation propagation.
+- [x] **Spec** (`bardo-backup/tmp/agent-chain-new/05-token-economics.md`): Graph-based reputation from payment flows.
+- **FIXED**: Implemented `roko_chain::trace_rank` module:
+  - `TraceRank` engine with configurable damping, convergence threshold, lookback window
+  - `PaymentEdge` type: from/to/amount/quality/block with quality-weighted edges
+  - Power iteration (PageRank algorithm) with teleportation for dangling nodes
+  - `blend_reputation(ema, trace_rank)` for combining direct + graph signals
+  - `normalized_rank()` for [0,1] scaling
+  - Dust payment filtering, lookback window, convergence detection
+  - 9 tests: empty graph, quality weighting, transitive propagation, cycle convergence, blending
 
 ### P1-03: Trust tiers (spec has different trust terminology)
 
