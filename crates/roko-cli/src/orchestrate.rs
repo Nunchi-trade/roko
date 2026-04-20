@@ -3128,6 +3128,9 @@ pub struct PlanRunner {
     curriculum_scheduler: CurriculumScheduler,
     /// Multi-agent pool for warm-pool and concurrency-limited agent lifecycle (AGT-07).
     agent_pool: MultiAgentPool,
+    /// CLI override for maximum retry attempts per task. When set, overrides
+    /// both per-task `max_retries` and config `escalation.max_retries`.
+    max_retries_override: Option<u32>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4691,6 +4694,7 @@ impl PlanRunner {
             pheromone_gate_failures: HashMap::new(),
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
+            max_retries_override: None,
         })
     }
 
@@ -4848,6 +4852,7 @@ impl PlanRunner {
             pheromone_gate_failures: HashMap::new(),
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
+            max_retries_override: None,
         })
     }
 
@@ -5007,6 +5012,7 @@ impl PlanRunner {
             pheromone_gate_failures: HashMap::new(),
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
+            max_retries_override: None,
         })
     }
 
@@ -5072,6 +5078,12 @@ impl PlanRunner {
     /// context into per-agent launches.
     pub fn set_claude_resume_session(&mut self, session_id: Option<String>) {
         self.claude_resume_session = normalize_resume_session(session_id);
+    }
+
+    /// Set a global max-retries override from the CLI `--max-retries` flag.
+    /// When set, this takes precedence over per-task and config values.
+    pub fn set_max_retries_override(&mut self, max_retries: u32) {
+        self.max_retries_override = Some(max_retries);
     }
 
     /// Attach a server event bus sender for HTTP API event streaming.
@@ -8821,7 +8833,14 @@ impl PlanRunner {
 
         let wt_id = format!("{plan_id}-{task_id}");
         let started = std::time::Instant::now();
-        let max_retries = 2u32;
+        // Resolve max retries: CLI override > per-task value > config escalation > default 2.
+        let max_retries = self.max_retries_override.unwrap_or_else(|| {
+            task_def
+                .as_ref()
+                .map(|td| td.max_retries)
+                .filter(|&r| r > 0)
+                .unwrap_or_else(|| self.config.agent.escalation.max_retries.min(5))
+        });
         let max_dispatches = max_retries + 1;
         let mut succeeded = false;
         let mut budget_aborted = false;
@@ -8859,6 +8878,7 @@ impl PlanRunner {
                     &started,
                     "",
                     None,
+                    0,
                 )
                 .await;
                 self.apply_event_and_emit(
@@ -8924,6 +8944,7 @@ impl PlanRunner {
                             &started,
                             &dispatch.backend_id,
                             Some(&result),
+                            retry_iteration,
                         )
                         .await;
                         self.apply_event_and_emit(
@@ -9061,16 +9082,16 @@ impl PlanRunner {
 
                     match action {
                         RetryConductorAction::Continue => {
-                            retry_prompt_override = (retry_model != base_retry_model).then(|| {
-                                self.build_conductor_retry_prompt(
-                                    plan_id,
-                                    task_id,
-                                    task_def.as_ref(),
-                                    &failure_context,
-                                    failure_gate.as_deref(),
-                                    None,
-                                )
-                            });
+                            // Always include failure context in the retry prompt so
+                            // the agent knows what went wrong on the previous attempt.
+                            retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                                plan_id,
+                                task_id,
+                                task_def.as_ref(),
+                                &failure_context,
+                                failure_gate.as_deref(),
+                                None,
+                            ));
                             retry_iteration = retry_iteration.saturating_add(1);
                             pending_feedback = Some((state, action));
                         }
@@ -9124,6 +9145,7 @@ impl PlanRunner {
                 &started,
                 "",
                 None,
+                total_dispatches.saturating_sub(1),
             )
             .await;
             let plan_revision_outcome = self
@@ -9180,7 +9202,7 @@ impl PlanRunner {
                 tracing::error!(
                     "[orchestrate] task budget exhausted before dispatch for {plan_id}/{tid}: {e}"
                 );
-                self.record_task_failure(plan_id, tid, None, None, &e, &started, "", None)
+                self.record_task_failure(plan_id, tid, None, None, &e, &started, "", None, 0)
                     .await;
                 continue;
             }
@@ -9190,7 +9212,7 @@ impl PlanRunner {
                     tracing::error!(
                         "[orchestrate] task worktree acquisition failed for {plan_id}/{tid}: {e}"
                     );
-                    self.record_task_failure(plan_id, tid, None, None, &e, &started, "", None)
+                    self.record_task_failure(plan_id, tid, None, None, &e, &started, "", None, 0)
                         .await;
                 }
             }
@@ -9399,6 +9421,7 @@ impl PlanRunner {
                         &started,
                         &task_result.backend_id,
                         Some(&task_result.result),
+                        0,
                     )
                     .await;
                     any_fatal = true;
@@ -9420,6 +9443,7 @@ impl PlanRunner {
                         &started,
                         &task_result.backend_id,
                         Some(&task_result.result),
+                        0,
                     )
                     .await;
                     any_fatal = true;
@@ -9458,6 +9482,7 @@ impl PlanRunner {
                     &started,
                     &task_result.backend_id,
                     Some(&task_result.result),
+                    0,
                 )
                 .await;
                 any_fatal = true;
@@ -11825,6 +11850,7 @@ impl PlanRunner {
         started: &std::time::Instant,
         backend_id: &str,
         result: Option<&AgentResult>,
+        retry_count: u32,
     ) {
         let wall_ms = result
             .map(|r| r.usage.wall_ms)
@@ -11861,6 +11887,12 @@ impl PlanRunner {
             }
         }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
+        if retry_count > 0 {
+            ep.extra.insert(
+                "retry_count".to_string(),
+                serde_json::Value::Number(retry_count.into()),
+            );
+        }
         self.stamp_episode_affect(
             &mut ep,
             "task_failure",

@@ -476,6 +476,14 @@ enum PluginCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// Remove an installed plugin by name.
+    Remove {
+        /// Name of the plugin to remove.
+        name: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
     /// Audit installed plugins and report capabilities.
     Audit {
         /// Working directory (default: cwd).
@@ -683,6 +691,9 @@ enum PlanCmd {
         /// Launch the connected approval TUI while the plan runs.
         #[arg(long)]
         approval: bool,
+        /// Maximum retry attempts per task (overrides per-task and config values).
+        #[arg(long)]
+        max_retries: Option<u32>,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -1557,6 +1568,7 @@ async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
     let workdir = match &cmd {
         PluginCmd::List { workdir } => workdir.clone(),
         PluginCmd::Install { workdir, .. } => workdir.clone(),
+        PluginCmd::Remove { workdir, .. } => workdir.clone(),
         PluginCmd::Audit { workdir } => workdir.clone(),
     }
     .unwrap_or_else(|| resolve_workdir(cli));
@@ -1693,6 +1705,17 @@ async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
                 manifest.tools.len(),
                 manifest.triggers.len(),
             );
+            Ok(EXIT_SUCCESS)
+        }
+        PluginCmd::Remove { name, .. } => {
+            let install_dir = workdir.join(".roko").join("plugins").join(&name);
+            if !install_dir.exists() {
+                eprintln!("error: plugin `{name}` is not installed");
+                eprintln!("  expected at: {}", install_dir.display());
+                return Ok(EXIT_SYSTEM_ERROR);
+            }
+            std::fs::remove_dir_all(&install_dir)?;
+            println!("removed plugin `{name}` from {}", install_dir.display());
             Ok(EXIT_SUCCESS)
         }
         PluginCmd::Audit { .. } => {
@@ -3933,6 +3956,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             workdir,
             resume_plan,
             approval,
+            max_retries,
         } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
@@ -3998,6 +4022,9 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             };
             runner.set_claude_resume_session(cli.resume.clone());
             runner.set_state_hub(state_hub.sender());
+            if let Some(retries) = max_retries {
+                runner.set_max_retries_override(retries);
+            }
 
             if approval {
                 if !std::io::stdout().is_terminal() {
