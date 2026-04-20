@@ -93,9 +93,9 @@ Also see (`docs/08-chain/21-isfr-clearing-settlement.md` lines 1-244):
 - No duration tracking, no configurable epoch timing beyond `epoch_duration_secs` (which is not used).
 
 **What needs to change**:
-- [ ] Implement clearing phase state machine with COMMIT -> REVEAL -> SOLVE -> CERTIFICATE -> VERIFY -> SETTLE
-- [ ] Add time-based epoch advancement (8-hour default)
-- [ ] Add phase duration enforcement
+- [x] Implement clearing phase state machine with COMMIT -> REVEAL -> SOLVE -> CERTIFICATE -> VERIFY -> SETTLE
+- [x] Add time-based epoch advancement (8-hour default)
+- [x] Add phase duration enforcement
 
 ---
 

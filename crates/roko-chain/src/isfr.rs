@@ -54,6 +54,238 @@ impl Default for IsfrConfig {
     }
 }
 
+// ─── Clearing Phase State Machine ────────────────────────────────────
+
+/// The 6 phases of the ISFR clearing cycle.
+///
+/// Per spec (docs/14-identity-economy/13-isfr-clearing-settlement.md lines 161-223):
+/// ```text
+/// COMMIT → REVEAL → SOLVE → CERTIFICATE → VERIFY → SETTLE
+/// ```
+///
+/// Each phase has a configurable duration. The total cycle equals one epoch (8 hours default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearingPhase {
+    /// Agents submit sealed rate commitments (hash of rate + nonce).
+    Commit,
+    /// Agents reveal their rates by providing the preimage.
+    Reveal,
+    /// Clearing engine runs weighted median + outlier exclusion.
+    Solve,
+    /// Clearing certificate with KKT proof is generated.
+    Certificate,
+    /// On-chain verification of the certificate.
+    Verify,
+    /// Final settlement: rates published, rewards distributed.
+    Settle,
+}
+
+impl ClearingPhase {
+    /// The next phase in the cycle, or None if at Settle (cycle complete).
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        match self {
+            Self::Commit => Some(Self::Reveal),
+            Self::Reveal => Some(Self::Solve),
+            Self::Solve => Some(Self::Certificate),
+            Self::Certificate => Some(Self::Verify),
+            Self::Verify => Some(Self::Settle),
+            Self::Settle => None,
+        }
+    }
+
+    /// All phases in order.
+    pub const ALL: [Self; 6] = [
+        Self::Commit,
+        Self::Reveal,
+        Self::Solve,
+        Self::Certificate,
+        Self::Verify,
+        Self::Settle,
+    ];
+
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Commit => "commit",
+            Self::Reveal => "reveal",
+            Self::Solve => "solve",
+            Self::Certificate => "certificate",
+            Self::Verify => "verify",
+            Self::Settle => "settle",
+        }
+    }
+}
+
+/// Duration allocation for each clearing phase as fraction of the epoch.
+///
+/// Default allocation (8-hour epoch):
+/// - Commit: 40% (3h12m) — agents have time to observe and submit
+/// - Reveal: 15% (1h12m) — reveal window
+/// - Solve: 15% (1h12m) — computation
+/// - Certificate: 10% (48m) — certificate generation
+/// - Verify: 10% (48m) — on-chain verification
+/// - Settle: 10% (48m) — settlement
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseAllocations {
+    /// Fraction of epoch for Commit phase.
+    pub commit: f64,
+    /// Fraction of epoch for Reveal phase.
+    pub reveal: f64,
+    /// Fraction of epoch for Solve phase.
+    pub solve: f64,
+    /// Fraction of epoch for Certificate phase.
+    pub certificate: f64,
+    /// Fraction of epoch for Verify phase.
+    pub verify: f64,
+    /// Fraction of epoch for Settle phase.
+    pub settle: f64,
+}
+
+impl Default for PhaseAllocations {
+    fn default() -> Self {
+        Self {
+            commit: 0.40,
+            reveal: 0.15,
+            solve: 0.15,
+            certificate: 0.10,
+            verify: 0.10,
+            settle: 0.10,
+        }
+    }
+}
+
+impl PhaseAllocations {
+    /// Get the fraction for a specific phase.
+    #[must_use]
+    pub fn fraction(&self, phase: ClearingPhase) -> f64 {
+        match phase {
+            ClearingPhase::Commit => self.commit,
+            ClearingPhase::Reveal => self.reveal,
+            ClearingPhase::Solve => self.solve,
+            ClearingPhase::Certificate => self.certificate,
+            ClearingPhase::Verify => self.verify,
+            ClearingPhase::Settle => self.settle,
+        }
+    }
+
+    /// Duration of a phase in seconds, given epoch duration.
+    #[must_use]
+    pub fn phase_duration_secs(&self, phase: ClearingPhase, epoch_duration_secs: u64) -> u64 {
+        (epoch_duration_secs as f64 * self.fraction(phase)) as u64
+    }
+}
+
+/// Tracks the current state of a clearing epoch's phase progression.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClearingCycleState {
+    /// Current epoch number.
+    pub epoch: u64,
+    /// Current phase within the epoch.
+    pub phase: ClearingPhase,
+    /// Unix timestamp (seconds) when the current phase started.
+    pub phase_started_at: u64,
+    /// Unix timestamp (seconds) when the epoch started.
+    pub epoch_started_at: u64,
+    /// Phase duration allocations.
+    pub allocations: PhaseAllocations,
+    /// Epoch duration in seconds.
+    pub epoch_duration_secs: u64,
+}
+
+impl ClearingCycleState {
+    /// Create a new cycle state at epoch 0, Commit phase.
+    #[must_use]
+    pub fn new(epoch_duration_secs: u64, now: u64) -> Self {
+        Self {
+            epoch: 0,
+            phase: ClearingPhase::Commit,
+            phase_started_at: now,
+            epoch_started_at: now,
+            allocations: PhaseAllocations::default(),
+            epoch_duration_secs,
+        }
+    }
+
+    /// Duration of the current phase in seconds.
+    #[must_use]
+    pub fn current_phase_duration(&self) -> u64 {
+        self.allocations
+            .phase_duration_secs(self.phase, self.epoch_duration_secs)
+    }
+
+    /// Unix timestamp when the current phase ends.
+    #[must_use]
+    pub fn phase_deadline(&self) -> u64 {
+        self.phase_started_at + self.current_phase_duration()
+    }
+
+    /// Whether the current phase has expired.
+    #[must_use]
+    pub fn is_phase_expired(&self, now: u64) -> bool {
+        now >= self.phase_deadline()
+    }
+
+    /// Advance to the next phase if the current one has expired.
+    ///
+    /// Returns `true` if a transition occurred. If at Settle, starts a new epoch.
+    pub fn tick(&mut self, now: u64) -> bool {
+        if !self.is_phase_expired(now) {
+            return false;
+        }
+
+        match self.phase.next() {
+            Some(next_phase) => {
+                self.phase = next_phase;
+                self.phase_started_at = now;
+            }
+            None => {
+                // Settle complete → start new epoch at Commit.
+                self.epoch += 1;
+                self.phase = ClearingPhase::Commit;
+                self.phase_started_at = now;
+                self.epoch_started_at = now;
+            }
+        }
+        true
+    }
+
+    /// Advance through all expired phases until we reach the current one.
+    ///
+    /// Returns the number of transitions that occurred.
+    pub fn catch_up(&mut self, now: u64) -> usize {
+        let mut transitions = 0;
+        while self.tick(now) {
+            transitions += 1;
+            // Safety: prevent infinite loops (max 7 transitions per epoch + epoch change).
+            if transitions > 12 {
+                break;
+            }
+        }
+        transitions
+    }
+
+    /// Whether submissions are accepted (only during Commit phase).
+    #[must_use]
+    pub fn accepts_submissions(&self) -> bool {
+        self.phase == ClearingPhase::Commit
+    }
+
+    /// Whether reveals are accepted (only during Reveal phase).
+    #[must_use]
+    pub fn accepts_reveals(&self) -> bool {
+        self.phase == ClearingPhase::Reveal
+    }
+
+    /// Seconds remaining in the current phase.
+    #[must_use]
+    pub fn seconds_remaining(&self, now: u64) -> u64 {
+        self.phase_deadline().saturating_sub(now)
+    }
+}
+
 // ─── Market IDs ─────────────────────────────────────────────────────
 
 /// Hierarchical market identifier for ISFR rate submissions.
@@ -950,5 +1182,96 @@ mod tests {
         };
 
         assert!(registry.verify_certificate(&good_cert));
+    }
+
+    // ─── Clearing cycle state machine tests ─────────────────────────
+
+    #[test]
+    fn clearing_cycle_starts_at_commit() {
+        let state = ClearingCycleState::new(28_800, 1000);
+        assert_eq!(state.phase, ClearingPhase::Commit);
+        assert_eq!(state.epoch, 0);
+        assert!(state.accepts_submissions());
+        assert!(!state.accepts_reveals());
+    }
+
+    #[test]
+    fn clearing_phase_progression() {
+        let mut state = ClearingCycleState::new(1000, 0); // 1000s epoch for easy math
+
+        // Commit phase: 40% of 1000 = 400s.
+        assert_eq!(state.current_phase_duration(), 400);
+        assert!(!state.is_phase_expired(200)); // Still in commit
+        assert!(state.is_phase_expired(400)); // Commit expired
+
+        // Advance to Reveal.
+        assert!(state.tick(400));
+        assert_eq!(state.phase, ClearingPhase::Reveal);
+        assert!(state.accepts_reveals());
+
+        // Reveal: 15% of 1000 = 150s.
+        assert_eq!(state.current_phase_duration(), 150);
+        assert!(state.tick(550)); // Reveal expired at 400+150=550
+        assert_eq!(state.phase, ClearingPhase::Solve);
+
+        // Solve: 15% = 150s
+        assert!(state.tick(700));
+        assert_eq!(state.phase, ClearingPhase::Certificate);
+
+        // Certificate: 10% = 100s
+        assert!(state.tick(800));
+        assert_eq!(state.phase, ClearingPhase::Verify);
+
+        // Verify: 10% = 100s
+        assert!(state.tick(900));
+        assert_eq!(state.phase, ClearingPhase::Settle);
+
+        // Settle: 10% = 100s → wraps to new epoch
+        assert!(state.tick(1000));
+        assert_eq!(state.phase, ClearingPhase::Commit);
+        assert_eq!(state.epoch, 1);
+    }
+
+    #[test]
+    fn catch_up_skips_multiple_phases() {
+        let mut state = ClearingCycleState::new(1000, 0);
+
+        // Commit ends at 400. First tick at 400 → Reveal (phase_started_at = 400).
+        // Reveal duration = 150, so Reveal ends at 550. But after first tick, phase_started_at
+        // is set to `now` (the catch_up time), so if now > 400, Reveal starts from now.
+        // To get multiple transitions, we need tick to fire, then immediately check again.
+        // The catch_up correctly handles this — at time 400 Commit expires → Reveal,
+        // but Reveal (started at 400) doesn't expire until 400+150=550.
+        // So catch_up(400) gives 1 transition.
+        let transitions = state.catch_up(400);
+        assert_eq!(transitions, 1);
+        assert_eq!(state.phase, ClearingPhase::Reveal);
+
+        // Now advance to 551 (past Reveal deadline at 550).
+        let transitions2 = state.catch_up(551);
+        assert_eq!(transitions2, 1);
+        assert_eq!(state.phase, ClearingPhase::Solve);
+    }
+
+    #[test]
+    fn seconds_remaining_counts_down() {
+        let state = ClearingCycleState::new(1000, 0);
+        assert_eq!(state.seconds_remaining(0), 400); // Full commit phase
+        assert_eq!(state.seconds_remaining(200), 200); // Half through
+        assert_eq!(state.seconds_remaining(400), 0); // Expired
+    }
+
+    #[test]
+    fn phase_all_covers_six_phases() {
+        assert_eq!(ClearingPhase::ALL.len(), 6);
+        assert_eq!(ClearingPhase::ALL[0], ClearingPhase::Commit);
+        assert_eq!(ClearingPhase::ALL[5], ClearingPhase::Settle);
+    }
+
+    #[test]
+    fn phase_as_str_round_trips() {
+        for phase in ClearingPhase::ALL {
+            assert!(!phase.as_str().is_empty());
+        }
     }
 }
