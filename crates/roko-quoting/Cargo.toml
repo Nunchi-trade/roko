@@ -11,7 +11,9 @@ description = "Wave-based quoting engine ported from offchainservices-agent's qu
 workspace = true
 
 [dependencies]
+roko-strategy = { path = "../roko-strategy" }
 serde = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
