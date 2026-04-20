@@ -828,11 +828,9 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Documentation Misalignments
 
-- [ ] **P1-41: Score doc says extended axes "not yet implemented" but they ARE implemented** — Doc 03-score-7-axis-appraisal.md is stale; code has all 7 axes with soft-damping formula.
+- [x] **P1-41: Score doc says extended axes "not yet implemented" but they ARE implemented** — FIXED: Updated doc to say "Implemented". Code has full 7-axis Score struct with soft-damping formula.
 
-- [ ] **P1-42: Taint enum variants don't match doc** — Doc says ExternalFetch/ThirdPartyPlugin/LegacyImport. Code has LlmHallucination/ToolFailure/UserFlagged/StaleData.
-  - Doc: docs/00-architecture/05-provenance-and-attestation.md
-  - Code: crates/roko-core/src/provenance.rs
+- [x] **P1-42: Taint enum variants don't match doc** — FIXED: Updated doc to show canonical Taint variants (Clean, LlmHallucination, ToolFailure, UserFlagged, StaleData, UnverifiedSource, Propagated, UserInput, Custom).
 
 - [x] **P1-43: Kind::Compound helpers not implemented** — FIXED: Added full compositional API:
   - `Kind::compound(&[Kind])` — factory method
@@ -945,9 +943,9 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### From roko/docs deep dive
 
-- [ ] **P1-66: Validation tiers doc claims "Built" but tier progression logic missing** — docs/06-neuro/02-four-validation-tiers.md line 6 says "Implementation: Built" but tier enum on KnowledgeEntry, tier multiplier logic, and promotion/demotion are not wired. Should say "Scaffold".
+- [x] **P1-66: Validation tiers doc claims "Built" but tier progression logic missing** — VERIFIED: Doc is accurate. KnowledgeTier enum, multiplier() method, promotion logic (2 confirmations → Working, 3 contexts → Consolidated), CONFIRMATION_BOOST = 1.5, and effective_half_life_days() are all implemented and tested.
 
-- [ ] **P1-67: Several docs correctly mark features as "Deferred"** — Reputation system, passport tiers, ISFR clearing all correctly marked deferred in their respective docs. No hallucination, but the code has some types that LOOK implemented when they're actually stubs.
+- [x] **P1-67: Several docs correctly mark features as "Deferred"** — VERIFIED: All "Deferred" annotations are accurate. Chain, identity/economy, wallet, web portal, MEV protection, knowledge futures market correctly marked as Phase 2+.
 
 ---
 

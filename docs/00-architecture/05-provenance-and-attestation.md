@@ -108,12 +108,17 @@ The older binary taint flag is too coarse for the safety spine described in REF3
 architecture-level taint model is typed:
 
 ```rust
+#[non_exhaustive]
 enum Taint {
-    None,
-    UserInput,
-    ExternalFetch(Source),
-    ThirdPartyPlugin(PluginId),
-    LegacyImport,
+    Clean,
+    LlmHallucination { detail: String },
+    ToolFailure { detail: String },
+    UserFlagged { detail: String },
+    StaleData { threshold_ms: i64 },
+    UnverifiedSource { detail: String },
+    Propagated { detail: String, inherited_from: Option<ContentHash> },
+    UserInput { detail: String },
+    Custom(String),
 }
 ```
 
@@ -121,11 +126,15 @@ enum Taint {
 
 | Variant | Meaning |
 |---|---|
-| `None` | No known taint source; record may still require normal verification |
+| `Clean` | No taint — data is from a trusted, verified source |
+| `LlmHallucination` | LLM-generated content that may contain hallucinated facts |
+| `ToolFailure` | A tool call failed or returned suspect data |
+| `UserFlagged` | A human operator explicitly flagged this data |
+| `StaleData` | Data has exceeded its freshness window |
+| `UnverifiedSource` | Data came from an unverified external source (API, webhook, chain) |
+| `Propagated` | Taint was inherited from an upstream tainted signal (tracks `inherited_from` hash) |
 | `UserInput` | User-provided prompt, paste, file upload, or inline instruction |
-| `ExternalFetch(Source)` | Data fetched from HTTP, API, chain RPC, or another remote system |
-| `ThirdPartyPlugin(PluginId)` | Output produced by a plugin or extension outside the trusted kernel |
-| `LegacyImport` | Data imported from another deployment or historical archive |
+| `Custom` | Application-specific taint reason not covered by other variants |
 
 ### 4.1 Propagation Rules
 

@@ -138,10 +138,10 @@ snapshot at emission time; the Provenance's trust field is the current trust lev
 
 ---
 
-## 3. The Three Extended Axes (Specified, Not Yet Implemented)
+## 3. The Three Extended Axes (Implemented)
 
-Three additional axes are specified for the full 7-axis appraisal. These are not yet present
-in the current Score struct but are planned for implementation.
+Three additional axes complete the full 7-axis appraisal. These are present in the current
+Score struct (`roko-core/src/score.rs`) with `#[serde(default)]` for backward compatibility.
 
 ### 3.1 Precision — [0, 1]
 
@@ -611,11 +611,10 @@ evidence from different sources:
 
 ## Current Status and Gaps
 
-- **Implemented**: 4-axis Score struct with NEUTRAL/ZERO constants, effective() formula,
-  Mul/Add arithmetic, clamping, `from_confidence()` helper. All tested in `roko-core`.
-- **Missing**: Extended axes (precision, salience, coherence) — specified but not yet in
-  the Score struct.
-- **Missing**: Extended effective formula incorporating the three new axes.
+- **Implemented**: 7-axis Score struct with NEUTRAL/ZERO constants, `effective()` formula
+  (6-factor with soft-damping for salience and coherence), `new_extended()` constructor,
+  Mul/Add arithmetic across all 7 axes, clamping, `from_confidence()` helper, serde defaults
+  for backward compatibility. All tested in `roko-core`.
 
 ---
 
