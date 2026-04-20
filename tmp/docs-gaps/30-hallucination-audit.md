@@ -676,11 +676,11 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Learning (MEDIUM)
 
-- [ ] **P1-18: Cost guardrails not enforced in CascadeRouter::select()**
-  - Cost table exists but 80%/95%/100% budget guardrails not checked during routing
+- [x] **P1-18: Cost guardrails not enforced in CascadeRouter::select()**
+  - VERIFIED: BudgetGuardrail wired at orchestrate.rs:12926. Checks task/session/plan limits, routes to cheaper model at 80%, blocks at 100%.
 
-- [ ] **P1-19: Provider health circuit breaker not filtering candidates**
-  - Module exists but not called from CascadeRouter before scoring
+- [x] **P1-19: Provider health circuit breaker not filtering candidates**
+  - VERIFIED: `healthy_model_slugs()` calls `provider_health.filter_arms_or_best()` at orchestrate.rs:12780-12784 before model selection.
 
 - [ ] **P1-20: Pareto frontier refresh interval not enforced**
   - Spec says recompute every 50 observations, no interval constant found
@@ -694,9 +694,8 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Agents (MEDIUM - stale docs)
 
-- [ ] **P1-22: LlmBackend implementations described as "missing" but exist**
-  - Spec says OpenAI/Cursor backends are missing
-  - They have been implemented since spec was written
+- [x] **P1-22: LlmBackend implementations described as "missing" but exist**
+  - VERIFIED: OpenAI-compat, Cursor, Codex, Gemini, Ollama, Perplexity all implemented. Audit note is stale.
 
 - [ ] **P1-23: ExecutorAction has 3 undocumented variants**
   - ApplyDagMutation, StartSpeculativeExecution, CancelSpeculativeExecution not in spec
