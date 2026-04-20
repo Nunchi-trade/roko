@@ -7815,12 +7815,16 @@ primary_region = "iad"
 dockerfile = "Dockerfile"
 
 [http_service]
-internal_port = 3000
+internal_port = 6677
 force_https = true
+auto_stop_machines = true
+auto_start_machines = true
+min_machines_running = 0
 
 [[http_service.checks]]
 interval = "30s"
 timeout = "5s"
+grace_period = "10s"
 path = "/api/health"
 method = "GET"
 

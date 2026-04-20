@@ -21,10 +21,19 @@ pub mod hdc;
 pub mod pad;
 /// Robust statistics: trimmed mean, MAD, Hodges-Lehmann estimator (TA-10).
 pub mod robust_stats;
+/// Riemannian geometry: metric tensors, Christoffel symbols, geodesics,
+/// Ricci curvature, and Frechet means for execution cost manifolds (TA-06).
+pub mod manifold;
+/// Cellular sheaves for oracle consistency checking: coboundary operators,
+/// sheaf Laplacian, inconsistency scores, and outlier identification (TA-13).
+pub mod sheaf;
 /// Topological Data Analysis: persistence diagrams, Takens embedding,
 /// persistence landscapes (TA-09).
 pub mod tda;
 pub mod tier;
+/// Tropical (max-plus) algebra: `TropicalF64`, polynomials, tropical attention,
+/// and adversarial distance computation (TA-14).
+pub mod tropical;
 
 pub use hdc::{
     BundleAccumulator, DecayingBundleAccumulator, HDC_BITS, HDC_BYTES, HdcVector, ItemMemory,

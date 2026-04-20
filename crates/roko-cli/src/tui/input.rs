@@ -199,6 +199,9 @@ pub enum TuiAction {
 
     // -- tab navigation --
     SwitchTab(Tab),
+    /// Switch to a sub-view within the current tab region (UI-04).
+    /// The index is 0-based (number key `1` -> index 0, etc.).
+    SwitchSubView(usize),
 
     // -- plan list navigation --
     SelectPlanUp,
@@ -548,6 +551,15 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
+    }
+
+    // Number keys 1-9 switch sub-views within the current tab (UI-04).
+    // Only when no modifiers are held (plain digit press).
+    if key.modifiers.is_empty() {
+        if let KeyCode::Char(c @ '1'..='9') = key.code {
+            let index = (c as usize) - ('1' as usize); // 0-based
+            return Some(TuiAction::SwitchSubView(index));
+        }
     }
 
     match key.code {

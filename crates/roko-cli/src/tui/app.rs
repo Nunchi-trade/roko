@@ -1638,6 +1638,26 @@ impl App {
             TuiAction::MouseScrollUp { .. } => self.scroll_focused(-3),
             TuiAction::MouseScrollDown { .. } => self.scroll_focused(3),
             TuiAction::Refresh => self.refresh_snapshot(),
+            TuiAction::SwitchSubView(idx) => {
+                // UI-04: switch sub-view within the current tab region.
+                // Map the sub-view index to the appropriate TuiState field
+                // based on which tab is active. The sub_tab in ViewState
+                // is derived from these fields via current_view_state().
+                let max = views::SubView::for_tab(self.tui_state.active_tab).len();
+                if idx < max {
+                    match self.tui_state.active_tab {
+                        Tab::Plans => self.tui_state.plan_detail_tab = idx,
+                        Tab::Agents => self.tui_state.selected_agent_tab = idx,
+                        _ => {
+                            // For tabs without a dedicated sub-tab field,
+                            // we store the selection in plan_detail_tab as
+                            // a generic sub-view index (it will be picked up
+                            // by current_view_state).
+                            self.tui_state.plan_detail_tab = idx;
+                        }
+                    }
+                }
+            }
             TuiAction::None => {}
         }
 

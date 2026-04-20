@@ -9,10 +9,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use roko_core::config::hot_reload;
 use roko_core::config::schema::RokoConfig;
 use roko_core::config::{LoadConfigError, load_config};
 
 use crate::error::ApiError;
+use crate::events::ServerEvent;
 use crate::extract::ApiJson;
 use crate::state::AppState;
 
@@ -93,15 +95,91 @@ fn map_load_config_error(err: LoadConfigError) -> ApiError {
 
 /// Reload `roko.toml` from disk into the live state and return validation warnings.
 ///
+/// Uses the hot-reload diff engine: sections classified as hot-reloadable
+/// (`[budget]`, `[tools]`, `[learning]`, `[gates]`, etc.) are applied
+/// immediately. Non-hot-reloadable sections (`[agent]`, `[providers]`,
+/// `[models]`) log a warning suggesting a restart.
+///
+/// A `ConfigReloaded` event is published on the server event bus so
+/// dashboards and SSE clients can react to config changes.
+///
 /// # Errors
 ///
 /// Returns [`LoadConfigError::Read`] when `roko.toml` cannot be read and
 /// [`LoadConfigError::Parse`] when the file contents are not valid config.
 pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConfigError> {
     let new_config = load_config(&state.workdir)?;
-    let warnings = validate_references(&new_config);
+    let mut warnings = validate_references(&new_config);
+
+    // Compute diff and apply only hot-reloadable sections.
+    let old_config = state.load_roko_config();
+    let changes = hot_reload::config_diff(&old_config, &new_config);
+
+    if changes.is_empty() {
+        return Ok(warnings);
+    }
+
+    let mut current = old_config.as_ref().clone();
+    let result = hot_reload::apply_hot_reload(&mut current, &new_config, &changes);
+
+    // For non-hot-reloadable changes, we still store the full new config
+    // so a subsequent restart picks up the new values. But we surface
+    // the restart-required warning.
+    for change in &result.needs_restart {
+        warnings.push(format!(
+            "{}: {} (requires restart)",
+            change.summary,
+            change.section.is_hot_reloadable(),
+        ));
+    }
+
+    // Store the fully merged config (hot-reloaded + pending restart sections).
     state.store_roko_config(new_config);
+
+    // Emit config-changed event for dashboard visibility.
+    let applied_count = result.applied.len();
+    let restart_count = result.needs_restart.len();
+    if applied_count > 0 || restart_count > 0 {
+        state.event_bus.publish(ServerEvent::ConfigReloaded {
+            applied_sections: result
+                .applied
+                .iter()
+                .map(|c| c.summary.clone())
+                .collect(),
+            restart_required: result
+                .needs_restart
+                .iter()
+                .map(|c| c.summary.clone())
+                .collect(),
+        });
+    }
+
     Ok(warnings)
+}
+
+/// Reload STRATEGY.md from disk and return the parsed strategy document.
+///
+/// Returns `None` if the file does not exist or cannot be read.
+pub fn reload_strategy_from_disk(
+    state: &AppState,
+) -> Option<hot_reload::StrategyDocument> {
+    let strategy_path = state.workdir.join("STRATEGY.md");
+    let content = std::fs::read_to_string(&strategy_path).ok()?;
+    let doc = hot_reload::parse_strategy_md(&content);
+
+    tracing::info!(
+        goals = doc.goals.len(),
+        tactics = doc.tactics.len(),
+        risk_bounds = doc.risk_bounds.len(),
+        "STRATEGY.md reloaded"
+    );
+
+    state.event_bus.publish(ServerEvent::StrategyReloaded {
+        goals_count: doc.goals.len(),
+        tactics_count: doc.tactics.len(),
+    });
+
+    Some(doc)
 }
 
 fn validate_references(config: &RokoConfig) -> Vec<String> {

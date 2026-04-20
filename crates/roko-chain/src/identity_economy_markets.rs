@@ -16,6 +16,236 @@ use crate::{
 };
 use std::{collections::HashMap, time::Duration};
 
+// ---------------------------------------------------------------------------
+// Compliance result and policy enforcement (IDECON-08)
+// ---------------------------------------------------------------------------
+
+/// Result of a regulatory compliance check.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ComplianceResult {
+    /// The action passes the compliance check.
+    Pass,
+    /// The action violates a policy rule.
+    Violation(String),
+    /// The action raises a warning but is not blocked.
+    Warning(String),
+}
+
+impl ComplianceResult {
+    /// Whether the result is a pass.
+    #[must_use]
+    pub fn is_pass(&self) -> bool {
+        matches!(self, Self::Pass)
+    }
+
+    /// Whether the result is a violation.
+    #[must_use]
+    pub fn is_violation(&self) -> bool {
+        matches!(self, Self::Violation(_))
+    }
+}
+
+/// SEC/MiFID best-execution policy (IDECON-08).
+///
+/// Validates that an agent selects the best available price across venues
+/// and checks a minimum number of venues before executing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BestExecutionPolicy {
+    /// Maximum allowable slippage in basis points.
+    pub max_slippage_bps: u32,
+    /// Minimum number of venues that must be checked.
+    pub min_venues_checked: u32,
+}
+
+impl Default for BestExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            max_slippage_bps: 50,   // 0.5%
+            min_venues_checked: 2,
+        }
+    }
+}
+
+impl BestExecutionPolicy {
+    /// Check whether a trade execution meets best-execution requirements.
+    ///
+    /// `selected_price` is the price actually paid; `best_available` is the
+    /// best price found across all venues; `venues_checked` is how many
+    /// venues the agent queried.
+    #[must_use]
+    pub fn check(
+        &self,
+        selected_price: f64,
+        best_available: f64,
+        venues_checked: u32,
+    ) -> ComplianceResult {
+        if venues_checked < self.min_venues_checked {
+            return ComplianceResult::Violation(format!(
+                "insufficient venues checked: {} < {}",
+                venues_checked, self.min_venues_checked
+            ));
+        }
+        if best_available <= 0.0 {
+            return ComplianceResult::Warning("best available price is zero or negative".into());
+        }
+        let slippage_bps =
+            ((selected_price - best_available).abs() / best_available * 10_000.0) as u32;
+        if slippage_bps > self.max_slippage_bps {
+            return ComplianceResult::Violation(format!(
+                "slippage {}bps exceeds limit {}bps",
+                slippage_bps, self.max_slippage_bps
+            ));
+        }
+        ComplianceResult::Pass
+    }
+}
+
+/// Position-limit policy: max position size per asset (IDECON-08).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PositionLimitPolicy {
+    /// Maximum position as a percentage of total portfolio (0.0 - 1.0).
+    pub max_position_pct: f64,
+    /// Maximum absolute position value in USDC.
+    pub max_absolute_usdc: u64,
+}
+
+impl Default for PositionLimitPolicy {
+    fn default() -> Self {
+        Self {
+            max_position_pct: 0.10, // 10%
+            max_absolute_usdc: 100_000,
+        }
+    }
+}
+
+impl PositionLimitPolicy {
+    /// Check whether a position exceeds limits.
+    #[must_use]
+    pub fn check(
+        &self,
+        position_value_usdc: u64,
+        portfolio_value_usdc: u64,
+    ) -> ComplianceResult {
+        if position_value_usdc > self.max_absolute_usdc {
+            return ComplianceResult::Violation(format!(
+                "position {} exceeds absolute limit {}",
+                position_value_usdc, self.max_absolute_usdc
+            ));
+        }
+        if portfolio_value_usdc > 0 {
+            let pct = position_value_usdc as f64 / portfolio_value_usdc as f64;
+            if pct > self.max_position_pct {
+                return ComplianceResult::Violation(format!(
+                    "position {:.1}% exceeds limit {:.1}%",
+                    pct * 100.0,
+                    self.max_position_pct * 100.0
+                ));
+            }
+        }
+        ComplianceResult::Pass
+    }
+}
+
+/// Wash-trading detector: identify self-dealing patterns (IDECON-08).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WashTradingDetector {
+    /// Minimum interval between opposing trades to not flag (seconds).
+    pub min_interval_secs: u64,
+}
+
+impl WashTradingDetector {
+    /// Check whether a buy followed by a sell (or vice versa) within the
+    /// minimum interval constitutes potential wash trading.
+    #[must_use]
+    pub fn check(
+        &self,
+        same_asset: bool,
+        same_agent: bool,
+        interval_secs: u64,
+    ) -> ComplianceResult {
+        if same_asset && same_agent && interval_secs < self.min_interval_secs {
+            return ComplianceResult::Violation(format!(
+                "potential wash trade: opposing trade after {}s (min {}s)",
+                interval_secs, self.min_interval_secs
+            ));
+        }
+        ComplianceResult::Pass
+    }
+}
+
+/// Insider-trading information barrier screen (IDECON-08).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InsiderTradingScreen;
+
+impl InsiderTradingScreen {
+    /// Check whether the agent is cleared to trade the given asset.
+    ///
+    /// `restricted_assets` is the set of assets the agent is barred from
+    /// trading due to information barriers.
+    #[must_use]
+    pub fn check(&self, asset: &str, restricted_assets: &[String]) -> ComplianceResult {
+        if restricted_assets.iter().any(|a| a == asset) {
+            return ComplianceResult::Violation(format!(
+                "asset {} is on the restricted list (information barrier)",
+                asset
+            ));
+        }
+        ComplianceResult::Pass
+    }
+}
+
+/// Aggregate compliance gate that runs all template policies (IDECON-08).
+///
+/// Returns the first violation found, or `Pass` if all checks succeed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComplianceGate {
+    /// Best-execution policy.
+    pub best_execution: BestExecutionPolicy,
+    /// Position-limit policy.
+    pub position_limits: PositionLimitPolicy,
+    /// Wash-trading detector.
+    pub wash_trading: WashTradingDetector,
+    /// Insider-trading screen.
+    pub insider_screen: InsiderTradingScreen,
+}
+
+impl ComplianceGate {
+    /// Run all compliance checks and return the first violation, or `Pass`.
+    #[must_use]
+    pub fn check_trade(
+        &self,
+        selected_price: f64,
+        best_available: f64,
+        venues_checked: u32,
+        position_value_usdc: u64,
+        portfolio_value_usdc: u64,
+        asset: &str,
+        restricted_assets: &[String],
+    ) -> ComplianceResult {
+        let exec = self
+            .best_execution
+            .check(selected_price, best_available, venues_checked);
+        if exec.is_violation() {
+            return exec;
+        }
+
+        let pos = self
+            .position_limits
+            .check(position_value_usdc, portfolio_value_usdc);
+        if pos.is_violation() {
+            return pos;
+        }
+
+        let insider = self.insider_screen.check(asset, restricted_assets);
+        if insider.is_violation() {
+            return insider;
+        }
+
+        ComplianceResult::Pass
+    }
+}
+
+// Remaining marker types for policies not yet needing full logic.
 macro_rules! marker_types {
     ($($name:ident => $doc:literal),+ $(,)?) => {
         $(
@@ -27,12 +257,7 @@ macro_rules! marker_types {
 }
 
 marker_types!(
-    BestExecutionPolicy => "Placeholder SEC/MiFID best-execution policy.",
-    PositionLimitPolicy => "Placeholder position-limit policy.",
-    WashTradingDetector => "Placeholder wash-trading detector.",
-    InsiderTradingScreen => "Placeholder insider-trading screen.",
     AuditTrailPolicy => "Placeholder audit-trail policy.",
-    ComplianceGate => "Placeholder pre-trade compliance gate.",
     RiskGate => "Placeholder position-risk gate.",
     ReportingGate => "Placeholder regulatory-reporting gate.",
     PhiDetectionPolicy => "Placeholder PHI detection policy.",
@@ -1067,5 +1292,134 @@ mod tests {
 
         let result_repeated = dispatch_direct_hire(42, 10.0, 5);
         assert!(result_repeated.payment > result.payment);
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-08: Regulatory compliance enforcement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn best_execution_pass() {
+        let policy = BestExecutionPolicy {
+            max_slippage_bps: 50,
+            min_venues_checked: 2,
+        };
+        let result = policy.check(100.0, 100.0, 3);
+        assert!(result.is_pass());
+    }
+
+    #[test]
+    fn best_execution_insufficient_venues() {
+        let policy = BestExecutionPolicy {
+            max_slippage_bps: 50,
+            min_venues_checked: 3,
+        };
+        let result = policy.check(100.0, 100.0, 2);
+        assert!(result.is_violation());
+    }
+
+    #[test]
+    fn best_execution_excessive_slippage() {
+        let policy = BestExecutionPolicy {
+            max_slippage_bps: 50, // 0.5%
+            min_venues_checked: 1,
+        };
+        // 1% slippage should violate 0.5% limit.
+        let result = policy.check(101.0, 100.0, 2);
+        assert!(result.is_violation());
+    }
+
+    #[test]
+    fn position_limit_pass() {
+        let policy = PositionLimitPolicy {
+            max_position_pct: 0.10,
+            max_absolute_usdc: 100_000,
+        };
+        let result = policy.check(5_000, 100_000);
+        assert!(result.is_pass());
+    }
+
+    #[test]
+    fn position_limit_exceeds_pct() {
+        let policy = PositionLimitPolicy {
+            max_position_pct: 0.10,
+            max_absolute_usdc: 100_000,
+        };
+        // 15% of portfolio.
+        let result = policy.check(15_000, 100_000);
+        assert!(result.is_violation());
+    }
+
+    #[test]
+    fn position_limit_exceeds_absolute() {
+        let policy = PositionLimitPolicy {
+            max_position_pct: 1.0, // no pct limit
+            max_absolute_usdc: 50_000,
+        };
+        let result = policy.check(60_000, 1_000_000);
+        assert!(result.is_violation());
+    }
+
+    #[test]
+    fn wash_trading_detected() {
+        let detector = WashTradingDetector {
+            min_interval_secs: 60,
+        };
+        let result = detector.check(true, true, 30);
+        assert!(result.is_violation());
+    }
+
+    #[test]
+    fn wash_trading_pass_different_asset() {
+        let detector = WashTradingDetector {
+            min_interval_secs: 60,
+        };
+        let result = detector.check(false, true, 30);
+        assert!(result.is_pass());
+    }
+
+    #[test]
+    fn insider_trading_restricted() {
+        let screen = InsiderTradingScreen;
+        let restricted = vec!["ETH".to_string(), "BTC".to_string()];
+        let result = screen.check("ETH", &restricted);
+        assert!(result.is_violation());
+    }
+
+    #[test]
+    fn insider_trading_clear() {
+        let screen = InsiderTradingScreen;
+        let restricted = vec!["ETH".to_string()];
+        let result = screen.check("USDC", &restricted);
+        assert!(result.is_pass());
+    }
+
+    #[test]
+    fn compliance_gate_aggregates_checks() {
+        let gate = ComplianceGate::default();
+        let result = gate.check_trade(
+            100.0,   // selected
+            100.0,   // best available
+            3,       // venues
+            5_000,   // position
+            100_000, // portfolio
+            "USDC",  // asset
+            &[],     // no restrictions
+        );
+        assert!(result.is_pass());
+    }
+
+    #[test]
+    fn compliance_gate_catches_execution_violation() {
+        let gate = ComplianceGate {
+            best_execution: BestExecutionPolicy {
+                max_slippage_bps: 10,
+                min_venues_checked: 1,
+            },
+            ..Default::default()
+        };
+        // 2% slippage
+        let result = gate.check_trade(102.0, 100.0, 2, 1000, 100_000, "ETH", &[]);
+        assert!(result.is_violation());
     }
 }

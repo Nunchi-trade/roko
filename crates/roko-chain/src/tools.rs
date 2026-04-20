@@ -18,10 +18,10 @@ use roko_core::tool::{
 };
 use std::sync::LazyLock;
 
-/// Number of chain domain tools.
-pub const CHAIN_TOOL_COUNT: usize = 10;
+/// Number of chain domain tools (10 core + 4 wallet management).
+pub const CHAIN_TOOL_COUNT: usize = 14;
 
-/// All 10 chain domain tool definitions.
+/// All 14 chain domain tool definitions.
 pub static CHAIN_DOMAIN_TOOLS: LazyLock<[ToolDef; CHAIN_TOOL_COUNT]> = LazyLock::new(|| {
     [
         balance_tool_def(),
@@ -34,10 +34,15 @@ pub static CHAIN_DOMAIN_TOOLS: LazyLock<[ToolDef; CHAIN_TOOL_COUNT]> = LazyLock:
         get_position_tool_def(),
         simulate_tx_tool_def(),
         gas_estimate_tool_def(),
+        // TOOL-09: Wallet management tools
+        wallet_create_tool_def(),
+        wallet_list_tool_def(),
+        wallet_info_tool_def(),
+        wallet_export_address_tool_def(),
     ]
 });
 
-/// Canonical names of the 10 chain domain tools.
+/// Canonical names of the 14 chain domain tools.
 pub const CHAIN_TOOL_NAMES: [&str; CHAIN_TOOL_COUNT] = [
     "chain.balance",
     "chain.transfer",
@@ -49,6 +54,10 @@ pub const CHAIN_TOOL_NAMES: [&str; CHAIN_TOOL_COUNT] = [
     "chain.get_position",
     "chain.simulate_tx",
     "chain.gas_estimate",
+    "chain.wallet_create",
+    "chain.wallet_list",
+    "chain.wallet_info",
+    "chain.wallet_export_address",
 ];
 
 // ──────────────────────────── Layer 1: Chain Primitives ──────────────────────
@@ -471,6 +480,129 @@ fn get_position_tool_def() -> ToolDef {
     }
 }
 
+// ──────────────────────────── TOOL-09: Wallet Management ─────���───────────────
+
+/// `chain.wallet_create` -- create a new wallet (key pair).
+fn wallet_create_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.wallet_create".into(),
+        description: "Create a new wallet with a fresh key pair. Returns the wallet \
+            address and a wallet ID for subsequent operations. The private key is \
+            stored in the agent's local keystore and never exposed."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Human-readable label for the wallet (e.g. 'trading', 'treasury')."
+                },
+                "network": {
+                    "type": "string",
+                    "description": "Target network (e.g. 'ethereum', 'base', 'arbitrum'). Default: 'ethereum'."
+                }
+            },
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 30_000,
+        concurrency: ToolConcurrency::Serial,
+        idempotent: false,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
+/// `chain.wallet_list` -- list all wallets managed by this agent.
+fn wallet_list_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.wallet_list".into(),
+        description: "List all wallets in the agent's local keystore. Returns \
+            wallet IDs, labels, addresses, and networks. Does not expose \
+            private keys."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "network": {
+                    "type": "string",
+                    "description": "Filter by network. Omit to list all wallets."
+                }
+            },
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 10_000,
+        concurrency: ToolConcurrency::Parallel,
+        idempotent: true,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
+/// `chain.wallet_info` -- get details about a specific wallet.
+fn wallet_info_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.wallet_info".into(),
+        description: "Get detailed information about a wallet: address, label, \
+            network, native balance, and recent transaction count. Does not \
+            expose private keys."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "wallet_id": {
+                    "type": "string",
+                    "description": "Wallet identifier returned by wallet_create or wallet_list."
+                },
+                "address": {
+                    "type": "string",
+                    "description": "Wallet address (0x-prefixed hex). Alternative to wallet_id."
+                }
+            },
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 30_000,
+        concurrency: ToolConcurrency::Parallel,
+        idempotent: true,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
+/// `chain.wallet_export_address` -- export a wallet's public address.
+fn wallet_export_address_tool_def() -> ToolDef {
+    ToolDef {
+        name: "chain.wallet_export_address".into(),
+        description: "Export a wallet's public address for sharing with other \
+            agents or services. Only the address is exported; private keys \
+            remain in the local keystore."
+            .into(),
+        parameters: ToolSchema::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "wallet_id": {
+                    "type": "string",
+                    "description": "Wallet identifier to export the address for."
+                }
+            },
+            "required": ["wallet_id"],
+            "additionalProperties": false
+        })),
+        category: ToolCategory::Network,
+        permission: ToolPermission::networked(),
+        timeout_ms: 10_000,
+        concurrency: ToolConcurrency::Parallel,
+        idempotent: true,
+        source: ToolSource::Builtin,
+        metadata: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +689,54 @@ mod tests {
             assert_eq!(back.name, tool.name);
             assert_eq!(back.category, tool.category);
         }
+    }
+
+    // TOOL-09: Wallet management tools
+
+    #[test]
+    fn wallet_tools_present() {
+        let wallet_names = [
+            "chain.wallet_create",
+            "chain.wallet_list",
+            "chain.wallet_info",
+            "chain.wallet_export_address",
+        ];
+        for name in wallet_names {
+            assert!(
+                CHAIN_DOMAIN_TOOLS.iter().any(|t| t.name == name),
+                "missing wallet tool: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn wallet_create_is_serial() {
+        let tool = CHAIN_DOMAIN_TOOLS
+            .iter()
+            .find(|t| t.name == "chain.wallet_create")
+            .expect("wallet_create tool");
+        assert_eq!(tool.concurrency, ToolConcurrency::Serial);
+        assert!(!tool.idempotent);
+    }
+
+    #[test]
+    fn wallet_list_is_idempotent() {
+        let tool = CHAIN_DOMAIN_TOOLS
+            .iter()
+            .find(|t| t.name == "chain.wallet_list")
+            .expect("wallet_list tool");
+        assert!(tool.idempotent);
+        assert_eq!(tool.concurrency, ToolConcurrency::Parallel);
+    }
+
+    #[test]
+    fn wallet_export_requires_wallet_id() {
+        let tool = CHAIN_DOMAIN_TOOLS
+            .iter()
+            .find(|t| t.name == "chain.wallet_export_address")
+            .expect("wallet_export tool");
+        let schema = tool.parameters.as_value();
+        let required = schema["required"].as_array().expect("required array");
+        assert!(required.contains(&serde_json::json!("wallet_id")));
     }
 }

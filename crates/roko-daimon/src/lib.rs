@@ -39,8 +39,16 @@ use std::collections::{HashMap, HashSet};
 /// Emergent goal structures -- goals that emerge from behavior patterns.
 pub mod goals;
 mod phase2_stubs;
+/// Somatic TA integration: somatic marker bias for oracle predictions,
+/// IIT Phi metric, and PID synergy detection (TA-11).
+pub mod somatic_ta;
 
 pub use self::goals::{GoalNode, GoalSeed, GoalStatus, GoalTree};
+pub use self::somatic_ta::{
+    IitPhiMetric, MutualInfoMatrix, SomaticOracleContext, SomaticRetrieval,
+    SomaticRetrievalConfig, SubsystemActivity,
+    apply_somatic_confidence_bias, detect_synergy, somatic_confidence_bias,
+};
 pub use self::phase2_stubs::{
     AffectBehaviorModulation, AffectBehaviorStrategy, AffectOctant, AffectWeightedQuery, AgentId,
     BehavioralStateThresholds, BehavioralStateTracker, BorrowedAffect, ContagionEvent,

@@ -1456,6 +1456,244 @@ async fn flush_file(path: PathBuf) -> Result<()> {
     }
 }
 
+// ─── DEPLOY-11: Multi-repo daemon coordination ──────────────────────────────
+
+/// Per-repository subscription managed by the daemon (DEPLOY-11).
+///
+/// Each repo has its own `.roko/` state directory, agent budget, and
+/// scheduling priority. The daemon's [`SubscriptionManager`] coordinates
+/// them under a shared agent concurrency limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoSubscription {
+    /// Unique subscription identifier (e.g. `"repo-0"`).
+    pub id: String,
+    /// Absolute path to the repository root.
+    pub repo_path: PathBuf,
+    /// Repository-local `.roko/` directory (derived from `repo_path`).
+    pub state_dir: PathBuf,
+    /// Whether the subscription is currently active.
+    pub enabled: bool,
+    /// Per-repo USD budget limit (0 = unlimited).
+    pub budget_limit_usd: f64,
+    /// USD spent so far in the current billing period.
+    pub budget_spent_usd: f64,
+    /// Current number of active agents for this repo.
+    pub active_agents: usize,
+    /// Scheduling priority (higher = more urgent; recent changes bump this).
+    pub priority: u32,
+    /// Trigger configuration from `roko.toml`.
+    pub trigger: String,
+    /// Agent template name.
+    pub template: String,
+}
+
+impl RepoSubscription {
+    /// Create a subscription for a repository.
+    #[must_use]
+    pub fn new(id: String, repo_path: PathBuf, template: String, trigger: String) -> Self {
+        let state_dir = repo_path.join(".roko");
+        Self {
+            id,
+            repo_path,
+            state_dir,
+            enabled: true,
+            budget_limit_usd: 0.0,
+            budget_spent_usd: 0.0,
+            active_agents: 0,
+            priority: 0,
+            trigger,
+            template,
+        }
+    }
+
+    /// Whether the subscription has remaining budget (or unlimited).
+    #[must_use]
+    pub fn has_budget(&self) -> bool {
+        self.budget_limit_usd <= 0.0 || self.budget_spent_usd < self.budget_limit_usd
+    }
+
+    /// Record spending against this repo's budget.
+    pub fn record_spend(&mut self, amount_usd: f64) {
+        self.budget_spent_usd += amount_usd;
+    }
+}
+
+/// Manages N repository subscriptions under a shared agent limit (DEPLOY-11).
+///
+/// The daemon creates one `SubscriptionManager` on startup, loads repos
+/// from the `[[subscriptions]]` config, and distributes agent slots using
+/// priority-based scheduling.
+#[derive(Debug, Clone)]
+pub struct SubscriptionManager {
+    /// All registered repository subscriptions.
+    pub repos: Vec<RepoSubscription>,
+    /// Maximum total agents across all repos.
+    pub max_total_agents: usize,
+    /// Current total active agents.
+    pub total_active_agents: usize,
+}
+
+impl Default for SubscriptionManager {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            max_total_agents: 8,
+            total_active_agents: 0,
+        }
+    }
+}
+
+impl SubscriptionManager {
+    /// Create a manager with the given agent concurrency limit.
+    #[must_use]
+    pub fn new(max_total_agents: usize) -> Self {
+        Self {
+            repos: Vec::new(),
+            max_total_agents,
+            total_active_agents: 0,
+        }
+    }
+
+    /// Load subscriptions from the config's `[[subscriptions]]` entries.
+    ///
+    /// Each subscription that has a `path` field in its trigger_config
+    /// becomes a repo subscription. Subscriptions without paths are
+    /// skipped (they belong to the primary repo).
+    pub fn load_from_config(
+        &mut self,
+        subscriptions: &[roko_core::config::schema::SubscriptionConfig],
+        primary_workdir: &Path,
+    ) {
+        self.repos.clear();
+        for (i, sub) in subscriptions.iter().enumerate() {
+            let repo_path = if let Some(ref trigger_cfg) = sub.trigger_config {
+                match trigger_cfg {
+                    roko_core::config::SubscriptionTrigger::FileWatch { paths, .. } => {
+                        // If the watch path looks absolute, derive repo from it.
+                        paths
+                            .first()
+                            .and_then(|p| {
+                                let path = PathBuf::from(p);
+                                if path.is_absolute() {
+                                    path.parent().map(|p| p.to_path_buf())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| primary_workdir.to_path_buf())
+                    }
+                    _ => primary_workdir.to_path_buf(),
+                }
+            } else {
+                primary_workdir.to_path_buf()
+            };
+
+            let id = format!("sub-{i}");
+            self.repos.push(RepoSubscription::new(
+                id,
+                repo_path,
+                sub.template.clone(),
+                sub.trigger.clone(),
+            ));
+        }
+    }
+
+    /// Whether we can schedule another agent (global limit not reached).
+    #[must_use]
+    pub fn can_schedule(&self) -> bool {
+        self.total_active_agents < self.max_total_agents
+    }
+
+    /// Try to allocate an agent slot for the given repo.
+    ///
+    /// Returns `true` if the slot was granted.
+    pub fn allocate_agent(&mut self, repo_id: &str) -> bool {
+        if !self.can_schedule() {
+            return false;
+        }
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            if !repo.enabled || !repo.has_budget() {
+                return false;
+            }
+            repo.active_agents += 1;
+            self.total_active_agents += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Release an agent slot for the given repo.
+    pub fn release_agent(&mut self, repo_id: &str) {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.active_agents = repo.active_agents.saturating_sub(1);
+            self.total_active_agents = self.total_active_agents.saturating_sub(1);
+        }
+    }
+
+    /// Return the next repo that should receive an agent slot, based on
+    /// priority. Repos with higher priority and fewer active agents are
+    /// preferred.
+    #[must_use]
+    pub fn next_schedulable(&self) -> Option<&RepoSubscription> {
+        self.repos
+            .iter()
+            .filter(|r| r.enabled && r.has_budget())
+            .max_by_key(|r| {
+                // Higher priority wins; tie-break by fewer active agents.
+                (r.priority, usize::MAX - r.active_agents)
+            })
+    }
+
+    /// Pause a subscription by ID.
+    pub fn pause(&mut self, repo_id: &str) -> Result<()> {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.enabled = false;
+            Ok(())
+        } else {
+            Err(anyhow!("subscription not found: {repo_id}"))
+        }
+    }
+
+    /// Resume a subscription by ID.
+    pub fn resume(&mut self, repo_id: &str) -> Result<()> {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.enabled = true;
+            Ok(())
+        } else {
+            Err(anyhow!("subscription not found: {repo_id}"))
+        }
+    }
+
+    /// Bump the priority of a repo (e.g. when recent changes detected).
+    pub fn bump_priority(&mut self, repo_id: &str, amount: u32) {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.priority = repo.priority.saturating_add(amount);
+        }
+    }
+
+    /// Return summaries of all subscriptions.
+    #[must_use]
+    pub fn summaries(&self) -> Vec<SubscriptionSummary> {
+        self.repos
+            .iter()
+            .map(|r| SubscriptionSummary {
+                id: r.id.clone(),
+                template: r.template.clone(),
+                trigger: r.trigger.clone(),
+                enabled: r.enabled,
+                concurrency_limit: self.max_total_agents,
+            })
+            .collect()
+    }
+
+    /// Number of registered repos.
+    #[must_use]
+    pub fn repo_count(&self) -> usize {
+        self.repos.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,5 +1896,129 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         let parsed: SubscriptionSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(summary, parsed);
+    }
+
+    // ─── DEPLOY-11: SubscriptionManager tests ───────────────────────────
+
+    #[test]
+    fn subscription_manager_default_limit() {
+        let mgr = SubscriptionManager::default();
+        assert_eq!(mgr.max_total_agents, 8);
+        assert!(mgr.can_schedule());
+    }
+
+    #[test]
+    fn subscription_manager_allocate_and_release() {
+        let mut mgr = SubscriptionManager::new(2);
+        mgr.repos.push(RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/repo/a"),
+            "template".into(),
+            "watch".into(),
+        ));
+        mgr.repos.push(RepoSubscription::new(
+            "r2".into(),
+            PathBuf::from("/repo/b"),
+            "template".into(),
+            "cron".into(),
+        ));
+
+        assert!(mgr.allocate_agent("r1"));
+        assert!(mgr.allocate_agent("r2"));
+        assert!(!mgr.allocate_agent("r1"), "limit of 2 reached");
+        assert_eq!(mgr.total_active_agents, 2);
+
+        mgr.release_agent("r1");
+        assert_eq!(mgr.total_active_agents, 1);
+        assert!(mgr.allocate_agent("r1"));
+    }
+
+    #[test]
+    fn subscription_manager_budget_enforcement() {
+        let mut mgr = SubscriptionManager::new(10);
+        let mut sub = RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/repo"),
+            "t".into(),
+            "watch".into(),
+        );
+        sub.budget_limit_usd = 10.0;
+        sub.budget_spent_usd = 9.5;
+        mgr.repos.push(sub);
+
+        assert!(mgr.allocate_agent("r1"), "still under budget");
+        mgr.release_agent("r1");
+
+        mgr.repos[0].budget_spent_usd = 10.0;
+        assert!(!mgr.allocate_agent("r1"), "budget exhausted");
+    }
+
+    #[test]
+    fn subscription_manager_pause_resume() {
+        let mut mgr = SubscriptionManager::new(10);
+        mgr.repos.push(RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/repo"),
+            "t".into(),
+            "watch".into(),
+        ));
+
+        mgr.pause("r1").unwrap();
+        assert!(!mgr.repos[0].enabled);
+        assert!(!mgr.allocate_agent("r1"), "paused repo should not allocate");
+
+        mgr.resume("r1").unwrap();
+        assert!(mgr.repos[0].enabled);
+        assert!(mgr.allocate_agent("r1"));
+    }
+
+    #[test]
+    fn subscription_manager_priority_scheduling() {
+        let mut mgr = SubscriptionManager::new(10);
+        let mut sub1 = RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/a"),
+            "t".into(),
+            "w".into(),
+        );
+        sub1.priority = 5;
+        let mut sub2 = RepoSubscription::new(
+            "r2".into(),
+            PathBuf::from("/b"),
+            "t".into(),
+            "w".into(),
+        );
+        sub2.priority = 10;
+        mgr.repos.push(sub1);
+        mgr.repos.push(sub2);
+
+        let next = mgr.next_schedulable().unwrap();
+        assert_eq!(next.id, "r2", "higher priority should be scheduled first");
+    }
+
+    #[test]
+    fn subscription_manager_summaries() {
+        let mut mgr = SubscriptionManager::new(4);
+        mgr.repos.push(RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/a"),
+            "template-a".into(),
+            "cron".into(),
+        ));
+        let summaries = mgr.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "r1");
+        assert_eq!(summaries[0].template, "template-a");
+    }
+
+    #[test]
+    fn repo_subscription_state_dir_derived() {
+        let sub = RepoSubscription::new(
+            "x".into(),
+            PathBuf::from("/home/user/project"),
+            "t".into(),
+            "w".into(),
+        );
+        assert_eq!(sub.state_dir, PathBuf::from("/home/user/project/.roko"));
     }
 }

@@ -50,6 +50,7 @@
     clippy::unwrap_or_default
 )]
 
+pub mod config_watcher;
 pub mod deploy;
 pub mod dispatch;
 pub mod dreams;
@@ -59,6 +60,7 @@ pub mod events;
 pub mod extract;
 pub mod feedback;
 pub mod fswatcher;
+pub mod integrations;
 pub mod openapi;
 pub mod plan_types;
 pub mod routes;
@@ -194,6 +196,7 @@ impl ServerBuilder {
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
+        let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
@@ -264,6 +267,7 @@ pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
 /// Axum server exits with an error.
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
     let roko_config = state.load_roko_config().as_ref().clone();
+    let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
     let router = routes::build_router(

@@ -6,9 +6,10 @@
 
 mod agents;
 mod aggregator;
-mod config;
+pub(crate) mod config;
 mod deployments;
 mod diagnosis;
+mod integrations;
 mod learning;
 mod middleware;
 mod plans;
@@ -58,6 +59,7 @@ pub fn build_router(
         .merge(config::routes())
         .merge(deployments::routes())
         .merge(diagnosis::routes())
+        .merge(integrations::routes())
         .merge(projections::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
