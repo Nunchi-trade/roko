@@ -15,6 +15,7 @@ roko-core = { path = "../roko-core" }
 roko-conductor = { path = "../roko-conductor" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
