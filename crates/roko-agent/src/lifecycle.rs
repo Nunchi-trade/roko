@@ -1825,6 +1825,344 @@ pub enum ConfigDrift {
     },
 }
 
+// ─── Budget tracking ─────────────────────────────────────────────────────
+
+/// Runtime budget status after checking accumulated costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetStatus {
+    /// Spending is within normal limits.
+    Ok,
+    /// Spending has crossed the warning threshold.
+    Warning,
+    /// Spending has crossed the critical threshold.
+    Critical,
+    /// Daily or lifetime budget is fully exhausted.
+    Exhausted,
+}
+
+/// Runtime budget tracker that accumulates per-turn costs and enforces limits.
+///
+/// Call [`BudgetTracker::record_turn`] after each LLM invocation and
+/// [`BudgetTracker::check`] before the next one to determine whether the
+/// agent should degrade, pause, or stop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetTracker {
+    /// Budget configuration (thresholds and degradation mode).
+    pub config: BudgetConfig,
+    /// Total inference cost accumulated today.
+    pub daily_cost_usd: f64,
+    /// Total inference cost accumulated over the agent's lifetime.
+    pub lifetime_cost_usd: f64,
+    /// Current date string (`YYYY-MM-DD`) for daily rollover detection.
+    pub current_date: String,
+    /// Total turns recorded.
+    pub total_turns: u64,
+    /// Turns suppressed by T0 zero-LLM probes.
+    pub t0_suppressed_turns: u64,
+}
+
+impl BudgetTracker {
+    /// Create a new budget tracker from configuration.
+    pub fn new(config: BudgetConfig) -> Self {
+        Self {
+            config,
+            daily_cost_usd: 0.0,
+            lifetime_cost_usd: 0.0,
+            current_date: today_str(),
+            total_turns: 0,
+            t0_suppressed_turns: 0,
+        }
+    }
+
+    /// Record a completed turn's cost.
+    pub fn record_turn(&mut self, cost: &TurnCostRecord) {
+        let today = today_str();
+        if today != self.current_date {
+            self.daily_cost_usd = 0.0;
+            self.current_date = today;
+        }
+        self.daily_cost_usd += cost.estimated_cost_usd;
+        self.lifetime_cost_usd += cost.estimated_cost_usd;
+        self.total_turns += 1;
+        if cost.t0_suppressed {
+            self.t0_suppressed_turns += 1;
+        }
+    }
+
+    /// Check the current budget status.
+    pub fn check(&self) -> BudgetStatus {
+        let daily_fraction = if self.config.max_daily_inference_usd > 0.0 {
+            self.daily_cost_usd / self.config.max_daily_inference_usd
+        } else {
+            0.0
+        };
+
+        // Check lifetime cap if set.
+        if let Some(max_total) = self.config.max_total_usd {
+            if max_total > 0.0 && self.lifetime_cost_usd >= max_total {
+                return BudgetStatus::Exhausted;
+            }
+        }
+
+        if daily_fraction >= 1.0 {
+            BudgetStatus::Exhausted
+        } else if daily_fraction >= self.config.critical_at {
+            BudgetStatus::Critical
+        } else if daily_fraction >= self.config.warning_at {
+            BudgetStatus::Warning
+        } else {
+            BudgetStatus::Ok
+        }
+    }
+
+    /// Return the degradation mode configured for this budget.
+    pub fn degradation_mode(&self) -> BudgetDegradationMode {
+        self.config.degradation
+    }
+
+    /// Remaining daily budget in USD.
+    pub fn remaining_daily_usd(&self) -> f64 {
+        (self.config.max_daily_inference_usd - self.daily_cost_usd).max(0.0)
+    }
+
+    /// Daily utilization as a fraction (0.0 to 1.0+).
+    pub fn daily_utilization(&self) -> f64 {
+        if self.config.max_daily_inference_usd > 0.0 {
+            self.daily_cost_usd / self.config.max_daily_inference_usd
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Degradation action recommended when budget is constrained.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradationAction {
+    /// Downgrade model tier (e.g., Opus -> Sonnet -> Haiku).
+    DowngradeModel,
+    /// Reduce context window budget.
+    ReduceContext,
+    /// Increase T0 threshold (fewer LLM calls).
+    IncreaseT0Threshold,
+    /// Pause non-essential tasks.
+    PauseNonEssential,
+    /// Notify the operator.
+    NotifyOperator,
+    /// Hard stop all processing.
+    HardStop,
+}
+
+/// Compute the cascade of degradation actions for a given budget status.
+pub fn degradation_cascade(status: BudgetStatus, mode: BudgetDegradationMode) -> Vec<DegradationAction> {
+    match mode {
+        BudgetDegradationMode::NotifyOnly => match status {
+            BudgetStatus::Ok => vec![],
+            _ => vec![DegradationAction::NotifyOperator],
+        },
+        BudgetDegradationMode::Pause => match status {
+            BudgetStatus::Ok => vec![],
+            BudgetStatus::Warning => vec![DegradationAction::NotifyOperator],
+            BudgetStatus::Critical => vec![
+                DegradationAction::PauseNonEssential,
+                DegradationAction::NotifyOperator,
+            ],
+            BudgetStatus::Exhausted => vec![
+                DegradationAction::HardStop,
+                DegradationAction::NotifyOperator,
+            ],
+        },
+        BudgetDegradationMode::Cascade => match status {
+            BudgetStatus::Ok => vec![],
+            BudgetStatus::Warning => vec![
+                DegradationAction::DowngradeModel,
+                DegradationAction::ReduceContext,
+            ],
+            BudgetStatus::Critical => vec![
+                DegradationAction::DowngradeModel,
+                DegradationAction::ReduceContext,
+                DegradationAction::IncreaseT0Threshold,
+                DegradationAction::PauseNonEssential,
+                DegradationAction::NotifyOperator,
+            ],
+            BudgetStatus::Exhausted => vec![
+                DegradationAction::HardStop,
+                DegradationAction::NotifyOperator,
+            ],
+        },
+    }
+}
+
+// ─── Successor creation ──────────────────────────────────────────────────
+
+/// Successor creation mode controlling what the new agent inherits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuccessorMode {
+    /// New agent inherits nothing: fresh Neuro, fresh Daimon, new ID.
+    Clean,
+    /// New agent inherits parent's prompt, tool profile, and strategy but
+    /// gets fresh Neuro (no knowledge transfer).
+    SameStrategy,
+    /// New agent inherits everything transferable via backup/restore with
+    /// 0.85^generation confidence decay.
+    FullLineage,
+}
+
+/// Create a successor manifest from a parent manifest.
+///
+/// The returned manifest has:
+/// - Incremented `generation`
+/// - `lineage_id` set (inherits parent's or uses parent's name as root)
+/// - `SuccessorConfig` with default exploration boost
+/// - Fields inherited based on `mode`:
+///   - `Clean`: only lineage metadata preserved
+///   - `SameStrategy`: prompt + tool_profile + strategy_md copied
+///   - `FullLineage`: all transferable fields copied (knowledge transfer
+///     via backup/restore is handled by the caller)
+pub fn create_successor(
+    parent: &AgentExtendedManifest,
+    mode: SuccessorMode,
+    new_name: Option<String>,
+) -> AgentExtendedManifest {
+    let lineage_id = parent
+        .lineage_id
+        .clone()
+        .or_else(|| parent.name.clone())
+        .or_else(|| Some("root".to_string()));
+
+    let generation = parent.generation + 1;
+
+    match mode {
+        SuccessorMode::Clean => {
+            let core = AgentCoreManifest::new("Describe what this agent should do");
+            let mut manifest = AgentExtendedManifest::new(core);
+            manifest.name = new_name;
+            manifest.lineage_id = lineage_id;
+            manifest.generation = generation;
+            manifest.successor = Some(SuccessorConfig::default());
+            resolve_manifest(manifest)
+        }
+        SuccessorMode::SameStrategy => {
+            let core = AgentCoreManifest {
+                prompt: parent.core.prompt.clone(),
+                mode: parent.core.mode,
+                domain: parent.core.domain.clone(),
+                schema_version: parent.core.schema_version,
+            };
+            let mut manifest = AgentExtendedManifest::new(core);
+            manifest.name = new_name;
+            manifest.lineage_id = lineage_id;
+            manifest.generation = generation;
+            manifest.strategy_md = parent.strategy_md.clone();
+            manifest.tool_profile = parent.tool_profile.clone();
+            manifest.template_id = parent.template_id.clone();
+            manifest.successor = Some(SuccessorConfig::default());
+            resolve_manifest(manifest)
+        }
+        SuccessorMode::FullLineage => {
+            let core = AgentCoreManifest {
+                prompt: parent.core.prompt.clone(),
+                mode: parent.core.mode,
+                domain: parent.core.domain.clone(),
+                schema_version: parent.core.schema_version,
+            };
+            let mut manifest = AgentExtendedManifest::new(core);
+            manifest.name = new_name;
+            manifest.lineage_id = lineage_id;
+            manifest.generation = generation;
+            manifest.strategy_md = parent.strategy_md.clone();
+            manifest.model_routing = parent.model_routing.clone();
+            manifest.neuro = parent.neuro.clone();
+            manifest.mesh = parent.mesh.clone();
+            manifest.tool_profile = parent.tool_profile.clone();
+            manifest.template_id = parent.template_id.clone();
+            manifest.inference = parent.inference.clone();
+            manifest.budget = parent.budget.clone();
+            manifest.successor = Some(SuccessorConfig::default());
+            resolve_manifest(manifest)
+        }
+    }
+}
+
+// ─── Demurrage cycle runner ──────────────────────────────────────────────
+
+/// Periodic demurrage cycle runner that tracks iteration counts and applies
+/// knowledge demurrage at configured intervals.
+///
+/// Wire this into the Theta or Delta heartbeat loop. Each call to [`DemurrageCycle::tick`]
+/// increments the iteration counter; when `validation_interval` iterations elapse,
+/// the cycle applies demurrage to all supplied Engrams and returns a report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DemurrageCycle {
+    /// Demurrage configuration.
+    pub config: DemurrageConfig,
+    /// Current iteration counter.
+    pub iteration: u64,
+    /// Iteration at which the last demurrage pass ran.
+    pub last_demurrage_at: u64,
+    /// Cumulative entries archived across all cycles.
+    pub total_archived: u64,
+    /// Cumulative confidence lost across all cycles.
+    pub total_confidence_lost: f64,
+}
+
+impl DemurrageCycle {
+    /// Create a new demurrage cycle from configuration.
+    pub fn new(config: DemurrageConfig) -> Self {
+        Self {
+            config,
+            iteration: 0,
+            last_demurrage_at: 0,
+            total_archived: 0,
+            total_confidence_lost: 0.0,
+        }
+    }
+
+    /// Advance the iteration counter and, if a validation interval has elapsed,
+    /// apply demurrage to all supplied Engrams.
+    ///
+    /// Returns `Some(report)` when demurrage was applied, `None` otherwise.
+    pub fn tick(&mut self, engrams: &[BackupEngram]) -> Option<(Vec<BackupEngram>, DemurrageReport)> {
+        self.iteration += 1;
+
+        if self.config.validation_interval == 0 {
+            return None;
+        }
+
+        let intervals_since_last =
+            (self.iteration - self.last_demurrage_at) / self.config.validation_interval;
+        if intervals_since_last == 0 {
+            return None;
+        }
+
+        let (updated, report) = apply_demurrage_to_all(engrams, &self.config, self.iteration);
+        self.last_demurrage_at = self.iteration;
+        self.total_archived += u64::from(report.entries_archived);
+        self.total_confidence_lost += report.total_confidence_lost;
+        Some((updated, report))
+    }
+
+    /// Check whether the next tick will trigger a demurrage pass.
+    pub fn next_demurrage_in(&self) -> u64 {
+        if self.config.validation_interval == 0 {
+            return u64::MAX;
+        }
+        let elapsed = self.iteration - self.last_demurrage_at;
+        self.config.validation_interval.saturating_sub(elapsed)
+    }
+
+    /// Return true if demurrage is due on the next tick.
+    pub fn is_due(&self) -> bool {
+        self.next_demurrage_in() <= 1
+    }
+}
+
+fn today_str() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
 fn now_secs() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default()
 }
@@ -1905,5 +2243,196 @@ mod tests {
             validate_config_change(&current, &proposed),
             Err(LifecycleConfigError::RequiresRestart("neuro.path"))
         ));
+    }
+
+    // ─── BudgetTracker tests ─────────────────────────────────────────────
+
+    fn sample_turn_cost(cost_usd: f64) -> TurnCostRecord {
+        TurnCostRecord {
+            turn_id: "turn-1".into(),
+            model: "claude-haiku-4-5".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            estimated_cost_usd: cost_usd,
+            cognitive_tier: CognitiveTier::Gamma,
+            t0_suppressed: false,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn budget_tracker_ok_within_limits() {
+        let mut tracker = BudgetTracker::new(BudgetConfig::default());
+        tracker.record_turn(&sample_turn_cost(1.0));
+        assert_eq!(tracker.check(), BudgetStatus::Ok);
+    }
+
+    #[test]
+    fn budget_tracker_warning_at_threshold() {
+        let mut tracker = BudgetTracker::new(BudgetConfig {
+            max_daily_inference_usd: 10.0,
+            warning_at: 0.7,
+            ..BudgetConfig::default()
+        });
+        tracker.record_turn(&sample_turn_cost(7.5));
+        assert_eq!(tracker.check(), BudgetStatus::Warning);
+    }
+
+    #[test]
+    fn budget_tracker_critical_at_threshold() {
+        let mut tracker = BudgetTracker::new(BudgetConfig {
+            max_daily_inference_usd: 10.0,
+            critical_at: 0.9,
+            ..BudgetConfig::default()
+        });
+        tracker.record_turn(&sample_turn_cost(9.5));
+        assert_eq!(tracker.check(), BudgetStatus::Critical);
+    }
+
+    #[test]
+    fn budget_tracker_exhausted_at_limit() {
+        let mut tracker = BudgetTracker::new(BudgetConfig {
+            max_daily_inference_usd: 10.0,
+            ..BudgetConfig::default()
+        });
+        tracker.record_turn(&sample_turn_cost(10.0));
+        assert_eq!(tracker.check(), BudgetStatus::Exhausted);
+    }
+
+    #[test]
+    fn budget_tracker_lifetime_cap() {
+        let mut tracker = BudgetTracker::new(BudgetConfig {
+            max_daily_inference_usd: 100.0,
+            max_total_usd: Some(5.0),
+            ..BudgetConfig::default()
+        });
+        tracker.record_turn(&sample_turn_cost(6.0));
+        assert_eq!(tracker.check(), BudgetStatus::Exhausted);
+    }
+
+    #[test]
+    fn degradation_cascade_steps_for_cascade_mode() {
+        let actions = degradation_cascade(BudgetStatus::Warning, BudgetDegradationMode::Cascade);
+        assert!(actions.contains(&DegradationAction::DowngradeModel));
+        assert!(actions.contains(&DegradationAction::ReduceContext));
+
+        let actions = degradation_cascade(BudgetStatus::Exhausted, BudgetDegradationMode::Cascade);
+        assert!(actions.contains(&DegradationAction::HardStop));
+    }
+
+    #[test]
+    fn degradation_cascade_notify_only_mode() {
+        let actions = degradation_cascade(BudgetStatus::Critical, BudgetDegradationMode::NotifyOnly);
+        assert_eq!(actions, vec![DegradationAction::NotifyOperator]);
+    }
+
+    // ─── Successor tests ─────────────────────────────────────────────────
+
+    fn sample_parent_manifest() -> AgentExtendedManifest {
+        let core = AgentCoreManifest {
+            prompt: "I am a coding agent that implements features".into(),
+            mode: DeploymentMode::SelfHosted,
+            domain: Some(DomainPlugin::Coding(CodingConfig {
+                workspace_path: "/workspace".into(),
+                language: Some("rust".into()),
+            })),
+            schema_version: 1,
+        };
+        let mut manifest = AgentExtendedManifest::new(core);
+        manifest.name = Some("parent-agent".into());
+        manifest.strategy_md = Some("Focus on code quality".into());
+        manifest.tool_profile = Some("implementer".into());
+        manifest
+    }
+
+    #[test]
+    fn successor_clean_inherits_nothing() {
+        let parent = sample_parent_manifest();
+        let child = create_successor(&parent, SuccessorMode::Clean, Some("child".into()));
+        assert_eq!(child.generation, 1);
+        assert_eq!(child.lineage_id, Some("parent-agent".into()));
+        assert_ne!(child.core.prompt, parent.core.prompt);
+        assert!(child.strategy_md.is_none());
+    }
+
+    #[test]
+    fn successor_same_strategy_inherits_prompt_and_profile() {
+        let parent = sample_parent_manifest();
+        let child = create_successor(&parent, SuccessorMode::SameStrategy, Some("child".into()));
+        assert_eq!(child.generation, 1);
+        assert_eq!(child.core.prompt, parent.core.prompt);
+        assert_eq!(child.strategy_md, parent.strategy_md);
+        assert_eq!(child.tool_profile, parent.tool_profile);
+    }
+
+    #[test]
+    fn successor_full_lineage_inherits_everything() {
+        let parent = sample_parent_manifest();
+        let child = create_successor(&parent, SuccessorMode::FullLineage, Some("child".into()));
+        assert_eq!(child.generation, 1);
+        assert_eq!(child.core.prompt, parent.core.prompt);
+        assert_eq!(child.strategy_md, parent.strategy_md);
+        assert_eq!(child.core.domain, parent.core.domain);
+        assert!(child.successor.is_some());
+    }
+
+    #[test]
+    fn successor_lineage_chains_across_generations() {
+        let parent = sample_parent_manifest();
+        let child = create_successor(&parent, SuccessorMode::FullLineage, Some("child".into()));
+        let grandchild = create_successor(&child, SuccessorMode::FullLineage, Some("grandchild".into()));
+        assert_eq!(grandchild.generation, 2);
+        assert_eq!(grandchild.lineage_id, Some("parent-agent".into()));
+    }
+
+    // ─── DemurrageCycle tests ────────────────────────────────────────────
+
+    #[test]
+    fn demurrage_cycle_fires_at_interval() {
+        let config = DemurrageConfig {
+            validation_interval: 5,
+            ..DemurrageConfig::default()
+        };
+        let engrams = vec![sample_engram(0.5)];
+        let mut cycle = DemurrageCycle::new(config);
+
+        for _ in 0..4 {
+            assert!(cycle.tick(&engrams).is_none());
+        }
+        let result = cycle.tick(&engrams);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn demurrage_cycle_accumulates_stats() {
+        let config = DemurrageConfig {
+            validation_interval: 1,
+            decay_per_interval: 0.5,
+            archive_threshold: 0.1,
+            ..DemurrageConfig::default()
+        };
+        let engrams = vec![sample_engram(0.2)];
+        let mut cycle = DemurrageCycle::new(config);
+
+        let (updated, _report) = cycle.tick(&engrams).unwrap();
+        assert!(cycle.total_confidence_lost > 0.0);
+        // With 0.5 decay and 0.2 confidence, the engram should be archived.
+        assert_eq!(updated[0].tier, KnowledgeTier::Archived);
+        assert_eq!(cycle.total_archived, 1);
+    }
+
+    #[test]
+    fn demurrage_cycle_next_due_reports_correctly() {
+        let config = DemurrageConfig {
+            validation_interval: 10,
+            ..DemurrageConfig::default()
+        };
+        let mut cycle = DemurrageCycle::new(config);
+        assert_eq!(cycle.next_demurrage_in(), 10);
+        for _ in 0..7 {
+            cycle.tick(&[]);
+        }
+        assert_eq!(cycle.next_demurrage_in(), 3);
     }
 }

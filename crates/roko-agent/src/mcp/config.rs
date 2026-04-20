@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::safety::capabilities::PluginTier;
+
 /// Configuration for a single MCP server.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
@@ -30,6 +32,13 @@ pub struct McpServerConfig {
     /// Optional bearer token or environment placeholder for HTTP auth.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Trust tier for this MCP server (1-5). Defaults to `Sandboxed` (tier 2).
+    ///
+    /// Lower tiers are denied secrets and network egress. See
+    /// [`PluginTier`](crate::safety::capabilities::PluginTier) for the
+    /// full capability matrix.
+    #[serde(default)]
+    pub tier: PluginTier,
 }
 
 /// MCP server transport kind.
@@ -206,6 +215,7 @@ mod tests {
                 env: HashMap::new(),
                 endpoint: None,
                 auth_token: None,
+                tier: PluginTier::default(),
             }],
         };
         let config_path = tmp.path().join(".mcp.json");
@@ -234,6 +244,7 @@ mod tests {
                 env: HashMap::new(),
                 endpoint: None,
                 auth_token: None,
+                tier: PluginTier::default(),
             }],
         };
         let config_path = tmp.path().join(".mcp.json");

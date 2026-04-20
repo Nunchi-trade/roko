@@ -225,6 +225,16 @@ impl RokoLayout {
         self.memory_dir().join("episodes.jsonl")
     }
 
+    /// `.roko/custody.jsonl` — append-only custody audit chain.
+    ///
+    /// Each line is a JSON-serialized [`Custody`] record capturing who
+    /// did what, with what authorization, under what taint, and which
+    /// gates passed.
+    #[must_use]
+    pub fn custody_log(&self) -> PathBuf {
+        self.root.join("custody.jsonl")
+    }
+
     /// `.roko/memory/playbook.toml` — the active playbook.
     #[must_use]
     pub fn playbook_path(&self) -> PathBuf {

@@ -124,6 +124,19 @@ impl OperationalConfidenceTracker {
 
         product.powf(1.0 / self.dimensions.len() as f64)
     }
+
+    /// Aggregate mean across all tracked dimensions.
+    ///
+    /// Returns `0.0` if no dimensions are registered. This is used as the
+    /// win-rate input to the Kelly criterion formula.
+    #[must_use]
+    pub fn aggregate_mean(&self) -> f64 {
+        if self.dimensions.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.dimensions.values().map(|d| d.mean()).sum();
+        sum / self.dimensions.len() as f64
+    }
 }
 
 impl Default for OperationalConfidenceTracker {
@@ -132,15 +145,61 @@ impl Default for OperationalConfidenceTracker {
     }
 }
 
+/// Kelly criterion fraction for position sizing.
+///
+/// Computes `f* = (p * b - q) / b` where:
+/// - `p` = win rate (gate pass rate)
+/// - `q` = 1 - p (failure rate)
+/// - `b` = payoff ratio (value of success / cost of failure)
+///
+/// The result is clamped to `[0.0, 1.0]`. A negative Kelly fraction
+/// (edge is negative) returns `0.0` — the agent should not bet at all.
+///
+/// # Examples
+///
+/// ```
+/// use roko_agent::safety::risk::kelly_fraction;
+/// // 60% win rate, 2:1 payoff ratio
+/// let f = kelly_fraction(0.6, 2.0);
+/// assert!((f - 0.4).abs() < 1e-10);
+/// ```
+#[must_use]
+pub fn kelly_fraction(win_rate: f64, payoff_ratio: f64) -> f64 {
+    if payoff_ratio <= 0.0 {
+        return 0.0;
+    }
+    let p = win_rate.clamp(0.0, 1.0);
+    let q = 1.0 - p;
+    let fraction = (p * payoff_ratio - q) / payoff_ratio;
+    fraction.clamp(0.0, 1.0)
+}
+
 /// Sigmoid confidence multiplier used for adaptive budget sizing.
+///
+/// Uses a blend of the Kelly criterion (when a meaningful payoff ratio
+/// exists) and a sigmoid baseline. The Kelly fraction modulates the
+/// upper bound, preventing overallocation when confidence is high but
+/// payoff is poor. Falls back to a conservative sigmoid when no win
+/// history is available.
 #[must_use]
 pub fn confidence_multiplier(confidence: f64) -> f64 {
     let clamped = confidence.clamp(0.0, 1.0);
+    // Sigmoid baseline provides a smooth 0.1..0.5 range.
     let sigmoid = 1.0 / (1.0 + (-10.0 * (clamped - 0.5)).exp());
-    0.1 + 0.4 * sigmoid
+    let baseline = 0.1 + 0.4 * sigmoid;
+    // Apply Kelly fraction as an upper bound when we have meaningful confidence.
+    // Default payoff ratio of 2:1 (typical for dev tasks: success value > failure cost).
+    let kelly = kelly_fraction(clamped, 2.0);
+    // Blend: the effective multiplier is the minimum of Kelly and sigmoid,
+    // ensuring we never exceed what the Kelly criterion would allow.
+    baseline.min(kelly.max(0.1))
 }
 
 /// Compute an effective operating limit under confidence and context.
+///
+/// Incorporates the Kelly criterion to scale limits based on win rate
+/// (confidence) and risk factors. The formula ensures limits shrink under
+/// repeated gate failures and recover after successes.
 #[must_use]
 pub fn effective_limit(
     hard_shield_limit: f64,
@@ -149,7 +208,10 @@ pub fn effective_limit(
     task_complexity: f64,
     domain_risk: f64,
 ) -> f64 {
-    let base_multiplier = 0.2 + 0.8 * confidence.clamp(0.0, 1.0);
+    let clamped_confidence = confidence.clamp(0.0, 1.0);
+    // Kelly-informed base: scales with win rate against a 2:1 payoff.
+    let kelly = kelly_fraction(clamped_confidence, 2.0);
+    let base_multiplier = 0.2 + 0.8 * kelly.max(clamped_confidence * 0.5);
     let failure_factor = 1.0 - (failure_rate.clamp(0.0, 1.0) * 0.5).min(0.8);
     let complexity_factor = 1.0 - (task_complexity.clamp(0.0, 1.0) * 0.3).min(0.6);
     let risk_factor = 1.0 - (domain_risk.clamp(0.0, 1.0) * 0.4).min(0.7);
@@ -514,5 +576,78 @@ mod tests {
     fn irreversibility_scores_rm_as_high_risk() {
         let args = serde_json::json!({ "command": "rm -rf tmp" });
         assert_eq!(irreversibility_score("bash", &args), 0.8);
+    }
+
+    // ─── Kelly criterion tests ───────────────────────────────────────
+
+    #[test]
+    fn kelly_fraction_basic_formula() {
+        // f* = (0.6 * 2.0 - 0.4) / 2.0 = (1.2 - 0.4) / 2.0 = 0.4
+        let f = kelly_fraction(0.6, 2.0);
+        assert!((f - 0.4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn kelly_fraction_negative_edge_returns_zero() {
+        // f* = (0.2 * 1.0 - 0.8) / 1.0 = -0.6 -> clamped to 0.0
+        let f = kelly_fraction(0.2, 1.0);
+        assert_eq!(f, 0.0);
+    }
+
+    #[test]
+    fn kelly_fraction_perfect_win_rate() {
+        let f = kelly_fraction(1.0, 2.0);
+        assert!((f - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn kelly_fraction_zero_payoff_returns_zero() {
+        let f = kelly_fraction(0.8, 0.0);
+        assert_eq!(f, 0.0);
+    }
+
+    #[test]
+    fn kelly_fraction_even_odds() {
+        // f* = (0.5 * 2.0 - 0.5) / 2.0 = 0.5 / 2.0 = 0.25
+        let f = kelly_fraction(0.5, 2.0);
+        assert!((f - 0.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn aggregate_mean_empty_returns_zero() {
+        let tracker = OperationalConfidenceTracker::new();
+        assert_eq!(tracker.aggregate_mean(), 0.0);
+    }
+
+    #[test]
+    fn aggregate_mean_computes_average() {
+        let mut tracker = OperationalConfidenceTracker::new();
+        tracker.register_dimension("a");
+        tracker.register_dimension("b");
+        // Both start with pessimistic prior (alpha=1, beta=3) -> mean = 0.25
+        let mean = tracker.aggregate_mean();
+        assert!((mean - 0.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn effective_limit_shrinks_under_failures() {
+        // High confidence, no failures
+        let high = effective_limit(100.0, 0.9, 0.0, 0.5, 0.3);
+        // Low confidence, high failure rate
+        let low = effective_limit(100.0, 0.2, 0.8, 0.5, 0.3);
+        assert!(
+            high > low,
+            "high confidence limit ({high}) should exceed low confidence limit ({low})"
+        );
+    }
+
+    #[test]
+    fn confidence_multiplier_grows_with_confidence() {
+        let low = confidence_multiplier(0.1);
+        let high = confidence_multiplier(0.9);
+        assert!(
+            high > low,
+            "high confidence multiplier ({high}) should exceed low ({low})"
+        );
     }
 }

@@ -53,6 +53,12 @@ pub enum LoadConfigError {
 ///
 /// Missing files fall back to `RokoConfig::default()` so callers can start a
 /// daemon in an uninitialized workspace.
+///
+/// After parsing, two secret-resolution passes run automatically:
+///   1. `${VAR}` interpolation — expands environment variable references in
+///      provider config strings.
+///   2. `*_file` resolution — reads secrets from file paths in `extra_headers`
+///      whose keys end with `_file`.
 pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
     let path = workdir.join("roko.toml");
     if !path.exists() {
@@ -63,8 +69,15 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
         path: path.clone(),
         source,
     })?;
-    toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-        path: path.clone(),
-        source,
-    })
+    let mut config: RokoConfig =
+        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+
+    // Secret resolution passes.
+    config.interpolate_env_vars();
+    config.resolve_file_secrets();
+
+    Ok(config)
 }

@@ -32,6 +32,7 @@ use roko_core::{AgentRole, PlanPhase};
 
 pub mod action;
 pub mod plan_state;
+pub mod priority_ceiling;
 pub mod recovery;
 pub mod reorder;
 pub mod snapshot;
@@ -39,6 +40,9 @@ pub mod state_machine;
 
 pub use action::ExecutorAction;
 pub use plan_state::{GateResult, PlanState};
+pub use priority_ceiling::{
+    EffectivePriorityTracker, PlanResourceInfo, PriorityCeiling, ResourceId,
+};
 pub use reorder::{priority_reorder, reorder_queue};
 pub use snapshot::{
     CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorSnapshot, PersistedCircuitBreakerFailureRecord,

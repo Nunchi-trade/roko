@@ -198,6 +198,7 @@ enum Command {
         cloud: bool,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
+    #[command(visible_alias = "do")]
     Run {
         /// The user prompt text.
         prompt: String,
@@ -215,6 +216,7 @@ enum Command {
         cfactor: bool,
     },
     /// Walk the lineage DAG rooted at a signal hash and print it.
+    #[command(visible_alias = "inspect")]
     Replay {
         /// Engram hash (64 hex chars) to walk.
         hash: String,
@@ -333,6 +335,7 @@ enum Command {
         cmd: DaemonCmd,
     },
     /// Launch the dashboard TUI, with text fallback for non-interactive use.
+    #[command(visible_alias = "watch")]
     Dashboard {
         /// Specific dashboard page slug to render.
         #[arg(long)]
@@ -369,6 +372,28 @@ enum Command {
     Index {
         #[command(subcommand)]
         cmd: IndexCmd,
+    },
+    /// Tune adaptive thresholds and model routing parameters.
+    Tune {
+        /// Subsystem to tune: gates, routing, budget.
+        #[arg(default_value = "gates")]
+        subsystem: String,
+        /// Display current values without modifying.
+        #[arg(long)]
+        dry_run: bool,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show learning subsystem state: cascade router, experiments, efficiency.
+    #[command(visible_alias = "ask")]
+    Learn {
+        /// What to show: router, experiments, efficiency, episodes, all.
+        #[arg(default_value = "all")]
+        what: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
 }
 
@@ -1130,6 +1155,18 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Index { cmd } => cmd_index(cli, cmd),
+        Command::Tune {
+            subsystem,
+            dry_run,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_tune(&wd, &subsystem, dry_run).await
+        }
+        Command::Learn { what, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_learn(&wd, &what).await
+        }
     }
 }
 
@@ -6278,6 +6315,125 @@ fn parse_symbol_kind(s: &str) -> Result<roko_core::language::SymbolKind> {
         "impl" => Ok(SymbolKind::Impl),
         other => bail!("unknown symbol kind: {other} (expected function, struct, enum, trait, const, type, module, impl)"),
     }
+}
+
+// ── Tune command ──────────────────────────────────────────────────────
+
+/// `roko tune [subsystem]` — display and optionally adjust adaptive thresholds.
+async fn cmd_tune(workdir: &std::path::Path, subsystem: &str, dry_run: bool) -> Result<i32> {
+    match subsystem {
+        "gates" => {
+            let path = workdir.join(".roko/learn/gate-thresholds.json");
+            if path.exists() {
+                let content = std::fs::read_to_string(&path)?;
+                let thresholds: serde_json::Value = serde_json::from_str(&content)?;
+                println!("Gate adaptive thresholds ({}):", path.display());
+                println!("{}", serde_json::to_string_pretty(&thresholds)?);
+            } else {
+                println!("No gate thresholds found at {}.", path.display());
+                println!("Run some plans first to generate adaptive thresholds.");
+            }
+        }
+        "routing" => {
+            let path = workdir.join(".roko/learn/cascade-router.json");
+            if path.exists() {
+                let content = std::fs::read_to_string(&path)?;
+                let router: serde_json::Value = serde_json::from_str(&content)?;
+                println!("Cascade router state ({}):", path.display());
+                println!("{}", serde_json::to_string_pretty(&router)?);
+            } else {
+                println!("No cascade router state found at {}.", path.display());
+            }
+        }
+        "budget" => {
+            let path = workdir.join(".roko/learn/efficiency.jsonl");
+            if path.exists() {
+                let content = std::fs::read_to_string(&path)?;
+                let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+                println!("Efficiency log: {} entries at {}", count, path.display());
+            } else {
+                println!("No efficiency log found at {}.", path.display());
+            }
+        }
+        other => {
+            eprintln!("Unknown subsystem '{other}'. Available: gates, routing, budget");
+            return Ok(1);
+        }
+    }
+    if dry_run {
+        println!("(dry-run: no changes applied)");
+    }
+    Ok(EXIT_SUCCESS)
+}
+
+// ── Learn command ─────────────────────────────────────────────────────
+
+/// `roko learn [what]` — display learning subsystem state.
+async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i32> {
+    let show_all = what == "all";
+
+    if show_all || what == "router" {
+        let path = workdir.join(".roko/learn/cascade-router.json");
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let val: serde_json::Value = serde_json::from_str(&content)?;
+            let models = val
+                .get("model_slugs")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            println!("Cascade router: {} models configured", models);
+        } else {
+            println!("Cascade router: not initialized");
+        }
+    }
+
+    if show_all || what == "experiments" {
+        let path = workdir.join(".roko/learn/experiments.json");
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let val: serde_json::Value = serde_json::from_str(&content)?;
+            let exps = val
+                .get("experiments")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            println!("Prompt experiments: {} defined", exps);
+        } else {
+            println!("Prompt experiments: none");
+        }
+    }
+
+    if show_all || what == "efficiency" {
+        let path = workdir.join(".roko/learn/efficiency.jsonl");
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+            println!("Efficiency log: {} events", count);
+        } else {
+            println!("Efficiency log: empty");
+        }
+    }
+
+    if show_all || what == "episodes" {
+        let path = workdir.join(".roko/episodes.jsonl");
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+            println!("Episodes: {} recorded", count);
+        } else {
+            println!("Episodes: none");
+        }
+    }
+
+    if !show_all && !["router", "experiments", "efficiency", "episodes"].contains(&what) {
+        eprintln!(
+            "Unknown learning area '{what}'. Available: router, experiments, efficiency, episodes, all"
+        );
+        return Ok(1);
+    }
+
+    Ok(EXIT_SUCCESS)
 }
 
 fn print_completions(shell: CompletionShell) {

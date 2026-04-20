@@ -31,13 +31,16 @@ pub mod bash;
 pub mod capabilities;
 pub mod contract;
 pub mod git;
+pub mod hallucination;
 pub mod hooks;
 pub mod network;
 pub mod path;
 pub mod provenance;
 pub mod rate_limit;
+pub mod result_filter;
 pub mod risk;
 pub mod scrub;
+pub mod temporal;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -60,13 +63,20 @@ use self::scrub::ScrubPolicy;
 
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
 pub use authz::{AuthorizationEvidence, AuthorizationSource, AuthzDecision, EscalationTarget};
-pub use capabilities::{AgentWarrant, Capability, CapabilityError, check_capability, delegate};
+pub use capabilities::{
+    AgentWarrant, Capability, CapabilityError, PluginTier, check_capability, check_plugin_tier,
+    delegate,
+};
+pub use hallucination::HallucinationDetector;
 pub use hooks::{DataSink, HookDecision, SafetyAuditRecord, SafetyHook, TaintLabel, TaintedString};
-pub use provenance::{AttestationLevel, Custody, Taint};
+pub use provenance::{AttestationLevel, Custody, CustodyLogger, Taint};
+pub use result_filter::ResultFilter;
 pub use risk::{
     BetaDistribution, BudgetDimension, OperationalConfidenceTracker, SafetyBudget,
     SafetyBudgetTracker, confidence_multiplier, effective_limit, irreversibility_score,
+    kelly_fraction,
 };
+pub use temporal::{LtlProperty, MonitorState, TemporalMonitor, Violation};
 
 // ─── Tool-name constants used to match calls to policies ──────────────────
 
@@ -118,6 +128,13 @@ pub struct SafetyLayer {
     role_tools: HashMap<String, ToolWhitelist>,
     /// Role overrides keyed by both section name and any explicit role alias.
     role_overrides: HashMap<String, RoleOverride>,
+    /// Optional temporal logic monitor for safety/liveness properties.
+    ///
+    /// When present, `check_pre_execution` evaluates all registered
+    /// `Never`/`Always`/`Eventually` properties on each tool call.
+    /// Protected by `Arc<Mutex<_>>` for interior mutability (the monitor
+    /// maintains per-property state).
+    pub temporal_monitor: Option<Arc<Mutex<TemporalMonitor>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -159,6 +176,7 @@ impl SafetyLayer {
             warrant: None,
             role_tools: HashMap::new(),
             role_overrides: HashMap::new(),
+            temporal_monitor: None,
         }
     }
 
@@ -206,6 +224,17 @@ impl SafetyLayer {
     #[must_use]
     pub fn with_shared_safety_budget(mut self, budget: Arc<Mutex<SafetyBudgetTracker>>) -> Self {
         self.safety_budget = Some(budget);
+        self
+    }
+
+    /// Attach a temporal logic monitor for safety/liveness property checking.
+    ///
+    /// When attached, every call to `check_pre_execution` evaluates the
+    /// monitor's registered `Never`, `Always`, and `Eventually` properties.
+    /// Violations cause `ToolError::PermissionDenied`.
+    #[must_use]
+    pub fn with_temporal_monitor(mut self, monitor: TemporalMonitor) -> Self {
+        self.temporal_monitor = Some(Arc::new(Mutex::new(monitor)));
         self
     }
 
@@ -289,13 +318,37 @@ impl SafetyLayer {
             }
         }
 
+        // 7. Temporal logic monitor (Never/Always/Eventually properties).
+        if let Some(ref monitor) = self.temporal_monitor {
+            let mut monitor = monitor.lock();
+            monitor.check_as_tool_error(call)?;
+        }
+
         Ok(())
     }
 
     /// Evaluate a tool call through the safety layer and return a unified
     /// authorization decision.
+    ///
+    /// When active taint is present (e.g. `Taint::ExternalFetch` or
+    /// `Taint::ThirdPartyPlugin`), network tools and file-write tools
+    /// escalate to `AllowWithConfirm` instead of immediate `Allow`. This
+    /// prevents tainted data from flowing to high-risk destinations
+    /// without explicit operator confirmation.
     #[must_use]
     pub fn authorize_call(&self, call: &ToolCall, ctx: &ToolContext) -> AuthzDecision {
+        self.authorize_call_with_taint(call, ctx, None)
+    }
+
+    /// Like [`authorize_call`](Self::authorize_call), but accepts an
+    /// explicit taint label for the current context.
+    #[must_use]
+    pub fn authorize_call_with_taint(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext,
+        taint: Option<&Taint>,
+    ) -> AuthzDecision {
         let mut evidence = vec![AuthorizationEvidence::role_grant(format!(
             "role `{}` is active for tool `{}`",
             self.role, call.name
@@ -317,6 +370,46 @@ impl SafetyLayer {
             return AuthzDecision::Deny {
                 reason: err.to_string(),
             };
+        }
+
+        // Taint enforcement: if the context carries active taint, escalate
+        // network and file-write operations to AllowWithConfirm.
+        if let Some(active_taint) = taint.filter(|t| t.is_active()) {
+            let name = call.name.as_str();
+            let taint_desc = format!("{active_taint:?}");
+
+            if NETWORK_TOOLS.contains(&name) {
+                return AuthzDecision::AllowWithConfirm {
+                    prompt: format!(
+                        "tool `{name}` attempts network egress under taint {taint_desc}. Allow?"
+                    ),
+                    evidence,
+                };
+            }
+
+            // File writes under taint require confirmation.
+            let is_write_tool = matches!(
+                name,
+                "write_file" | "edit_file" | "multi_edit" | "apply_patch" | "notebook_edit"
+            );
+            if is_write_tool {
+                return AuthzDecision::AllowWithConfirm {
+                    prompt: format!(
+                        "tool `{name}` attempts file write under taint {taint_desc}. Allow?"
+                    ),
+                    evidence,
+                };
+            }
+
+            // Bash commands under taint are high-risk.
+            if BASH_TOOLS.contains(&name) {
+                return AuthzDecision::AllowWithConfirm {
+                    prompt: format!(
+                        "tool `{name}` attempts shell execution under taint {taint_desc}. Allow?"
+                    ),
+                    evidence,
+                };
+            }
         }
 
         AuthzDecision::Allow { evidence }
@@ -888,6 +981,84 @@ mod tests {
         assert!(matches!(decision, AuthzDecision::Deny { .. }));
     }
 
+    // ─── Taint enforcement tests ─────────────────────────────────────
+
+    #[test]
+    fn taint_escalates_network_to_allow_with_confirm() {
+        let layer = SafetyLayer::with_defaults();
+        let ctx = ToolContext::testing("/tmp/worktree");
+        let call = ToolCall::new(
+            "test-id",
+            "web_fetch",
+            serde_json::json!({ "url": "https://safe.example.com" }),
+        );
+        let taint = Taint::ExternalFetch("untrusted-source".into());
+        let decision = layer.authorize_call_with_taint(&call, &ctx, Some(&taint));
+        assert!(
+            matches!(decision, AuthzDecision::AllowWithConfirm { .. }),
+            "expected AllowWithConfirm, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn taint_escalates_file_write_to_allow_with_confirm() {
+        // Use a real temp dir so PathPolicy doesn't reject the path.
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().to_path_buf();
+        let file_path = worktree.join("x.txt");
+        let ctx = ToolContext::testing(&worktree);
+        let layer = SafetyLayer::with_defaults();
+        let call = ToolCall::new(
+            "test-id",
+            "write_file",
+            serde_json::json!({ "file_path": file_path.to_str().unwrap(), "content": "hi" }),
+        );
+        let taint = Taint::ThirdPartyPlugin("plugin-x".into());
+        let decision = layer.authorize_call_with_taint(&call, &ctx, Some(&taint));
+        assert!(
+            matches!(decision, AuthzDecision::AllowWithConfirm { .. }),
+            "expected AllowWithConfirm, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn taint_escalates_bash_to_allow_with_confirm() {
+        let layer = SafetyLayer::with_defaults();
+        let ctx = test_ctx();
+        let call = bash_call("echo hi");
+        let taint = Taint::UserInput;
+        let decision = layer.authorize_call_with_taint(&call, &ctx, Some(&taint));
+        assert!(
+            matches!(decision, AuthzDecision::AllowWithConfirm { .. }),
+            "expected AllowWithConfirm for bash under taint, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn no_taint_means_normal_allow() {
+        let layer = SafetyLayer::with_defaults();
+        let ctx = test_ctx();
+        let call = bash_call("echo hi");
+        let decision = layer.authorize_call_with_taint(&call, &ctx, None);
+        assert!(
+            matches!(decision, AuthzDecision::Allow { .. }),
+            "expected Allow, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn inactive_taint_means_normal_allow() {
+        let layer = SafetyLayer::with_defaults();
+        let ctx = test_ctx();
+        let call = bash_call("echo hi");
+        let taint = Taint::None;
+        let decision = layer.authorize_call_with_taint(&call, &ctx, Some(&taint));
+        assert!(
+            matches!(decision, AuthzDecision::Allow { .. }),
+            "expected Allow for inactive taint, got {decision:?}"
+        );
+    }
+
     #[test]
     fn safety_budget_blocks_after_limit_is_spent() {
         let layer = SafetyLayer::with_defaults().with_safety_budget(SafetyBudgetTracker::new(
@@ -909,5 +1080,29 @@ mod tests {
             "sk-ant-api03-abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234-AAAAAA",
         );
         assert!(!cleaned.contains("sk-ant-api03"));
+    }
+
+    // ─── Temporal monitor integration ────────────────────────────────
+
+    #[test]
+    fn temporal_monitor_blocks_never_pattern_in_safety_layer() {
+        let monitor = TemporalMonitor::with_properties(vec![LtlProperty::Never {
+            pattern: "force-push main".into(),
+            description: "never force-push main".into(),
+        }]);
+        let layer = SafetyLayer::with_defaults().with_temporal_monitor(monitor);
+        let ctx = test_ctx();
+
+        // Safe command passes.
+        let call = bash_call("git push origin feature");
+        assert!(layer.check_pre_execution(&call, &ctx).is_ok());
+
+        // Dangerous command is blocked by temporal monitor.
+        let call = bash_call("git push --force-push main");
+        let result = layer.check_pre_execution(&call, &ctx);
+        assert!(result.is_err(), "expected temporal violation");
+        if let Err(ToolError::PermissionDenied(msg)) = result {
+            assert!(msg.contains("temporal property violation"));
+        }
     }
 }

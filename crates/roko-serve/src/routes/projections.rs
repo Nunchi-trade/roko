@@ -182,6 +182,18 @@ fn projection_state_value(
                 .collect::<Vec<_>>(),
             "stats": snapshot.stats,
         }),
+        "recent_episodes" => json!({
+            "items": snapshot
+                .episodes
+                .iter()
+                .filter(|ep| episode_matches_filter(ep, query.filter.as_deref()))
+                .take(query.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "stats": {
+                "episodes_total": snapshot.stats.episodes_total,
+            },
+        }),
         _ => return Err(ApiError::not_found(format!("unknown projection '{name}'"))),
     };
 
@@ -236,6 +248,12 @@ fn projection_accepts_event(name: &str, query: &ProjectionQuery, event: &Dashboa
                 | DashboardEvent::PlanCompleted { .. }
                 | DashboardEvent::PhaseTransition { .. }
         ),
+        "recent_episodes" => match event {
+            DashboardEvent::EpisodeRecorded { role, .. } => {
+                episode_role_matches_filter(role, query.filter.as_deref())
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -271,6 +289,29 @@ fn plan_matches_filter(plan_id: &str, filter: Option<&str>) -> bool {
 
 fn agent_matches_filter(agent_id: &str, filter: Option<&str>) -> bool {
     filter.is_none_or(|value| value.strip_prefix("agent:").unwrap_or(value).trim() == agent_id)
+}
+
+fn episode_matches_filter(
+    episode: &roko_core::dashboard_snapshot::EpisodeSummary,
+    filter: Option<&str>,
+) -> bool {
+    filter.is_none_or(|value| {
+        if let Some(role) = value.strip_prefix("role:") {
+            return episode.role == role.trim();
+        }
+        if let Some(agent_id) = value.strip_prefix("agent:") {
+            return episode.agent_id == agent_id.trim();
+        }
+        true
+    })
+}
+
+fn episode_role_matches_filter(role: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|value| {
+        value
+            .strip_prefix("role:")
+            .is_none_or(|r| r.trim() == role)
+    })
 }
 
 #[cfg(test)]

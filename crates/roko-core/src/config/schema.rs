@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::agent::{AgentBackend, ProviderKind};
 use crate::temperament::Temperament;
 use crate::tool::{ToolFormat, profile_for_model};
+use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
@@ -842,6 +843,81 @@ impl RokoConfig {
         self.apply_env(&|key| std::env::var(key).ok());
     }
 
+    /// Interpolate `${VAR}` patterns in string values of this config.
+    ///
+    /// Any occurrence of `${SOME_VAR}` is replaced with the contents of the
+    /// environment variable `SOME_VAR`. Missing variables expand to the empty
+    /// string. This runs after TOML parsing so that secrets can be injected
+    /// from the environment without being hardcoded in `roko.toml`:
+    ///
+    /// ```toml
+    /// [providers.anthropic]
+    /// api_key_env = "${ANTHROPIC_API_KEY}"
+    /// ```
+    pub fn interpolate_env_vars(&mut self) {
+        Self::interpolate_env_vars_with(&mut self.providers, &|key| std::env::var(key).ok());
+    }
+
+    /// Interpolate `${VAR}` patterns in provider config strings using a custom
+    /// environment resolver (testable).
+    fn interpolate_env_vars_with(
+        providers: &mut HashMap<String, ProviderConfig>,
+        env_fn: &dyn Fn(&str) -> Option<String>,
+    ) {
+        for provider in providers.values_mut() {
+            if let Some(ref mut url) = provider.base_url {
+                *url = interpolate_vars(url, env_fn);
+            }
+            if let Some(ref mut key_env) = provider.api_key_env {
+                *key_env = interpolate_vars(key_env, env_fn);
+            }
+            if let Some(ref mut cmd) = provider.command {
+                *cmd = interpolate_vars(cmd, env_fn);
+            }
+            if let Some(ref headers) = provider.extra_headers {
+                let mut resolved = HashMap::with_capacity(headers.len());
+                for (k, v) in headers {
+                    resolved.insert(k.clone(), interpolate_vars(v, env_fn));
+                }
+                provider.extra_headers = Some(resolved);
+            }
+        }
+    }
+
+    /// Resolve `*_file` secret references in provider configs.
+    ///
+    /// Any `ProviderConfig` whose `api_key_env` field ends with `_file` has its
+    /// value treated as a file path: the file contents (trimmed) become the
+    /// resolved secret. This is the standard Docker/K8s secret mounting pattern:
+    ///
+    /// ```toml
+    /// [providers.anthropic]
+    /// api_key_env = "/run/secrets/anthropic_key"
+    /// ```
+    ///
+    /// Note: for the `_file` pattern to work, the config must use a dedicated
+    /// `api_key_file` field or the `api_key_env` field must point to a path.
+    /// This method checks `extra_headers` for any key ending in `_file` as well.
+    pub fn resolve_file_secrets(&mut self) {
+        for provider in self.providers.values_mut() {
+            // Check extra_headers for _file references.
+            if let Some(ref headers) = provider.extra_headers {
+                let mut resolved = HashMap::with_capacity(headers.len());
+                for (key, value) in headers {
+                    if key.ends_with("_file") {
+                        let base_key = key.trim_end_matches("_file").to_string();
+                        if let Ok(content) = std::fs::read_to_string(value.trim()) {
+                            resolved.insert(base_key, content.trim().to_string());
+                        }
+                    } else {
+                        resolved.insert(key.clone(), value.clone());
+                    }
+                }
+                provider.extra_headers = Some(resolved);
+            }
+        }
+    }
+
     /// Generate an example config string showing every field with doc comments.
     #[must_use]
     pub fn example_toml() -> String {
@@ -989,6 +1065,22 @@ fn parse_bool_env(s: &str) -> bool {
         s.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Expand `${VAR_NAME}` placeholders in a string using the given resolver.
+///
+/// Missing variables expand to the empty string, matching shell behavior for
+/// `${UNSET:-}`. The regex matches `${A_Z09_UPPER_SNAKE}` identifiers only.
+fn interpolate_vars(value: &str, env_fn: &dyn Fn(&str) -> Option<String>) -> String {
+    // Fast path: no `${` means no expansion needed.
+    if !value.contains("${") {
+        return value.to_string();
+    }
+    let re = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid regex");
+    re.replace_all(value, |caps: &regex::Captures| {
+        env_fn(&caps[1]).unwrap_or_default()
+    })
+    .into_owned()
 }
 
 fn find_similar<'a>(needle: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
@@ -5026,5 +5118,98 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         assert!(!parse_bool_env("no"));
         assert!(!parse_bool_env("off"));
         assert!(!parse_bool_env(""));
+    }
+
+    #[test]
+    fn interpolate_vars_expands_env_references() {
+        let env_fn = |key: &str| -> Option<String> {
+            match key {
+                "API_KEY" => Some("sk-secret-123".to_string()),
+                "BASE_URL" => Some("https://api.example.com".to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            interpolate_vars("${API_KEY}", &env_fn),
+            "sk-secret-123"
+        );
+        assert_eq!(
+            interpolate_vars("Bearer ${API_KEY}", &env_fn),
+            "Bearer sk-secret-123"
+        );
+        assert_eq!(
+            interpolate_vars("${BASE_URL}/v1", &env_fn),
+            "https://api.example.com/v1"
+        );
+        // Missing var expands to empty string.
+        assert_eq!(interpolate_vars("${MISSING_VAR}", &env_fn), "");
+        // No ${} means no change.
+        assert_eq!(interpolate_vars("plain text", &env_fn), "plain text");
+    }
+
+    #[test]
+    fn interpolate_env_vars_with_resolves_provider_strings() {
+        let env_fn = |key: &str| -> Option<String> {
+            match key {
+                "MY_KEY" => Some("resolved-key".to_string()),
+                "MY_URL" => Some("https://resolved.example.com".to_string()),
+                _ => None,
+            }
+        };
+        let mut providers = HashMap::new();
+        providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("${MY_URL}/v1".to_string()),
+                api_key_env: Some("${MY_KEY}".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        RokoConfig::interpolate_env_vars_with(&mut providers, &env_fn);
+        let p = &providers["test"];
+        assert_eq!(p.base_url.as_deref(), Some("https://resolved.example.com/v1"));
+        assert_eq!(p.api_key_env.as_deref(), Some("resolved-key"));
+    }
+
+    #[test]
+    fn resolve_file_secrets_reads_from_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret_path = dir.path().join("api_key");
+        std::fs::write(&secret_path, "  file-secret-value  \n").expect("write secret");
+
+        let mut config = RokoConfig::default();
+        let mut headers = HashMap::new();
+        headers.insert(
+            "authorization_file".to_string(),
+            secret_path.display().to_string(),
+        );
+        config.providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: None,
+                api_key_env: None,
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: Some(headers),
+                max_concurrent: None,
+            },
+        );
+        config.resolve_file_secrets();
+        let p = &config.providers["test"];
+        let resolved = p.extra_headers.as_ref().expect("headers");
+        // The `_file` key is resolved to its base key.
+        assert_eq!(resolved.get("authorization").map(String::as_str), Some("file-secret-value"));
+        assert!(!resolved.contains_key("authorization_file"));
     }
 }

@@ -23,6 +23,7 @@ pub mod merge_queue;
 pub mod plan_discovery;
 pub mod post_merge;
 pub mod progress;
+pub mod repair;
 pub mod replan;
 pub mod safety;
 pub mod worktree;
@@ -42,9 +43,10 @@ pub use dag::{
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
-    CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorAction, ExecutorConfig, ExecutorEvent,
-    ExecutorSnapshot, GateResult, ParallelExecutor, PersistedCircuitBreakerFailureRecord,
-    PersistedCircuitBreakerState, PlanState, PlanStateMachine, ResourceBudget, ResourceUsage,
+    CURRENT_SCHEMA_VERSION, DeltaSnapshot, EffectivePriorityTracker, ExecutorAction,
+    ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
+    PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanResourceInfo,
+    PlanState, PlanStateMachine, PriorityCeiling, ResourceBudget, ResourceId, ResourceUsage,
     SnapshotConfig, SnapshotIntegrityError, SnapshotVerifier, SpeculativeExecution,
     TransitionError, current_schema_version,
 };
@@ -57,5 +59,9 @@ pub use post_merge::{PostMergeCheck, PostMergeResult, PostMergeRunner};
 pub use progress::{
     ErrorEvent, ProgressError, ProgressTracker, ValidationError as EnrichmentValidationError,
     publish_error, validate_enrichment,
+};
+pub use repair::{
+    FailureContext, RepairAction, RepairConfig, RepairDecision, RepairEngine, RepairLevel,
+    StabilityMetric,
 };
 pub use replan::{ReplanResult, ReplanStrategy};

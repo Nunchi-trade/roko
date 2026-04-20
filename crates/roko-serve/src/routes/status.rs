@@ -36,6 +36,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/metrics/feedback_latency", get(feedback_latency))
         .route("/metrics/velocity", get(velocity))
         .route("/metrics/coverage", get(coverage))
+        .route("/metrics/prometheus", get(prometheus_metrics))
         .route("/dashboard", get(dashboard))
         .route("/gates/summary", get(gate_summary))
         .route("/gates/history", get(gates_history))
@@ -175,6 +176,71 @@ async fn velocity(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
 async fn coverage(State(state): State<Arc<AppState>>) -> Json<Value> {
     let backlog = state.event_bus.replay_from(0);
     Json(build_coverage_response(&backlog))
+}
+
+/// `GET /api/metrics/prometheus` — Prometheus text exposition format.
+///
+/// Exposes key counters, gauges, and summaries in the standard Prometheus text
+/// format so that a Prometheus scraper can pull metrics directly from roko-serve.
+///
+/// Metric names follow the `roko_` prefix convention:
+///   - `roko_gate_pass_total` / `roko_gate_fail_total` (counters)
+///   - `roko_agents_active` (gauge)
+///   - `roko_plans_active` / `roko_plans_completed` / `roko_plans_failed` (counters)
+///   - `roko_tasks_active` / `roko_tasks_completed` / `roko_tasks_failed` (counters)
+///   - `roko_errors_total` (counter)
+///   - `roko_episodes_total` (counter)
+///   - `roko_uptime_seconds` (gauge)
+async fn prometheus_metrics(
+    State(state): State<Arc<AppState>>,
+) -> (axum::http::StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+    let snapshot = state.state_hub.current_snapshot();
+    let s = &snapshot.stats;
+    let uptime = state.started_at.elapsed().as_secs();
+    let active_agents = state.supervisor.count().await;
+    let active_plans = state.active_plans.read().await.len();
+
+    // Episode count from JSONL file (best-effort).
+    let episodes_path = state.layout.episodes_path();
+    let episode_count = tokio::fs::read_to_string(&episodes_path)
+        .await
+        .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+
+    let mut out = String::with_capacity(2048);
+
+    // Helper macro for Prometheus lines.
+    macro_rules! prom {
+        (counter, $name:expr, $help:expr, $val:expr) => {{
+            out.push_str(&format!("# HELP {} {}\n", $name, $help));
+            out.push_str(&format!("# TYPE {} counter\n", $name));
+            out.push_str(&format!("{} {}\n", $name, $val));
+        }};
+        (gauge, $name:expr, $help:expr, $val:expr) => {{
+            out.push_str(&format!("# HELP {} {}\n", $name, $help));
+            out.push_str(&format!("# TYPE {} gauge\n", $name));
+            out.push_str(&format!("{} {}\n", $name, $val));
+        }};
+    }
+
+    prom!(gauge, "roko_uptime_seconds", "Seconds since roko-serve started", uptime);
+    prom!(gauge, "roko_agents_active", "Number of currently active agents", active_agents);
+    prom!(gauge, "roko_plans_active", "Number of currently executing plans", active_plans);
+    prom!(counter, "roko_plans_completed_total", "Total plans completed successfully", s.plans_completed);
+    prom!(counter, "roko_plans_failed_total", "Total plans that failed", s.plans_failed);
+    prom!(counter, "roko_tasks_completed_total", "Total tasks completed", s.tasks_completed);
+    prom!(counter, "roko_tasks_failed_total", "Total tasks that failed", s.tasks_failed);
+    prom!(gauge, "roko_tasks_active", "Number of currently executing tasks", s.tasks_active);
+    prom!(counter, "roko_gate_pass_total", "Total gate checks that passed", s.gates_passed);
+    prom!(counter, "roko_gate_fail_total", "Total gate checks that failed", s.gates_failed);
+    prom!(counter, "roko_errors_total", "Total error events recorded", s.errors_total);
+    prom!(counter, "roko_episodes_total", "Total episodes recorded", episode_count);
+
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        out,
+    )
 }
 
 /// `GET /api/dashboard` — dashboard scaffold as JSON.
