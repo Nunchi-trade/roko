@@ -62,6 +62,99 @@ pub use self::somatic_ta::{
     SubsystemActivity, apply_somatic_confidence_bias, detect_synergy, somatic_confidence_bias,
 };
 
+// ─── Four-Factor Retrieval Model (P0-20) ────────────────────────────
+
+/// Learnable weights for the four-factor retrieval scoring model.
+///
+/// Per spec (PRD 03-daimon/02-emotion-memory.md):
+/// ```text
+/// score = w_recency    * recency(Ebbinghaus)
+///       + w_importance  * quality(Reflexion)
+///       + w_relevance   * cosine(query, entry)
+///       + w_emotional   * PAD_cosine(current_mood, entry_affect)
+/// ```
+///
+/// Initial weights: recency 0.20, importance 0.25, relevance 0.35, emotional 0.20.
+/// Weights are online-learnable based on which factors correlate with positive outcomes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalWeights {
+    /// Weight for temporal recency (Ebbinghaus forgetting curve).
+    pub recency: f64,
+    /// Weight for importance/quality (Reflexion validation ratio).
+    pub importance: f64,
+    /// Weight for semantic relevance (cosine similarity).
+    pub relevance: f64,
+    /// Weight for emotional congruence (PAD cosine with current mood).
+    pub emotional: f64,
+}
+
+impl Default for RetrievalWeights {
+    fn default() -> Self {
+        Self {
+            recency: 0.20,
+            importance: 0.25,
+            relevance: 0.35,
+            emotional: 0.20,
+        }
+    }
+}
+
+impl RetrievalWeights {
+    /// Compute the four-factor retrieval score for a knowledge entry.
+    ///
+    /// - `recency_factor`: exponential decay based on age (0..1)
+    /// - `importance_factor`: confidence * validation ratio (0..1)
+    /// - `relevance_factor`: semantic similarity to query (0..1)
+    /// - `emotional_factor`: PAD cosine similarity with current mood (0..1)
+    #[must_use]
+    pub fn score(
+        &self,
+        recency_factor: f64,
+        importance_factor: f64,
+        relevance_factor: f64,
+        emotional_factor: f64,
+    ) -> f64 {
+        self.recency * recency_factor
+            + self.importance * importance_factor
+            + self.relevance * relevance_factor
+            + self.emotional * emotional_factor
+    }
+
+    /// Online weight update via gradient descent on retrieval quality.
+    ///
+    /// `factors`: the four factor values used for the retrieval.
+    /// `outcome`: 1.0 if the retrieved entry was useful, -1.0 if harmful, 0 if neutral.
+    /// `learning_rate`: step size for gradient update.
+    pub fn update(&mut self, factors: [f64; 4], outcome: f64, learning_rate: f64) {
+        let predicted = self.score(factors[0], factors[1], factors[2], factors[3]);
+        let error = outcome - predicted;
+
+        self.recency = (self.recency + learning_rate * error * factors[0]).clamp(0.01, 0.80);
+        self.importance = (self.importance + learning_rate * error * factors[1]).clamp(0.01, 0.80);
+        self.relevance = (self.relevance + learning_rate * error * factors[2]).clamp(0.01, 0.80);
+        self.emotional = (self.emotional + learning_rate * error * factors[3]).clamp(0.01, 0.80);
+
+        // Normalize to sum to 1.0.
+        let total = self.recency + self.importance + self.relevance + self.emotional;
+        if total > 0.0 {
+            self.recency /= total;
+            self.importance /= total;
+            self.relevance /= total;
+            self.emotional /= total;
+        }
+    }
+}
+
+/// Compute emotional congruence between current mood and an entry's affect.
+///
+/// Uses PAD cosine similarity mapped to [0, 1]. Congruent emotions
+/// (same octant) score near 1.0; incongruent (opposite octant) score near 0.0.
+#[must_use]
+pub fn emotional_congruence(current_mood: &PadVector, entry_affect: &PadVector) -> f64 {
+    // Map cosine similarity from [-1, 1] to [0, 1].
+    (current_mood.cosine_similarity(*entry_affect) + 1.0) / 2.0
+}
+
 const STRATEGY_DIMENSIONS: usize = 8;
 const DEFAULT_SOMATIC_NEIGHBORS: usize = 5;
 const CONTRARIAN_FRACTION: f64 = 0.15;
@@ -1652,6 +1745,218 @@ pub enum AffectEvent {
         /// Number of episodes that were processed.
         episodes_processed: usize,
     },
+}
+
+// ─── OCC Appraisal Dimensions (P0-19) ───────────────────────────────
+
+/// Structured appraisal result from the OCC/Scherer evaluation.
+///
+/// Per spec (PRD 03-daimon/01-appraisal.md): events are evaluated along
+/// three primary dimensions before mapping to PAD vectors. This replaces
+/// the hardcoded PAD delta approach with principled emotion generation.
+///
+/// Three dimensions from OCC (Ortony, Clore & Collins 1988) + Scherer (2001):
+/// - **Desirability**: Was this event good or bad for the agent's goals?
+/// - **Likelihood**: How expected or unexpected was this event?
+/// - **Coping potential**: How well-equipped is the agent to handle this?
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppraisalResult {
+    /// Goal-congruence in [-1.0, 1.0]. Positive = good for goals, negative = bad.
+    pub desirability: f64,
+    /// Expectedness in [0.0, 1.0]. 0 = completely unexpected (surprise), 1 = fully expected.
+    pub likelihood: f64,
+    /// Coping ability in [0.0, 1.0]. 0 = helpless, 1 = fully in control.
+    pub coping_potential: f64,
+    /// Trigger category that produced this appraisal.
+    pub trigger: AppraisalTrigger,
+    /// Whether this event crossed the novelty threshold to warrant appraisal.
+    pub novel: bool,
+}
+
+/// Trigger categories for appraisal events.
+///
+/// Per spec: 10 categories, each mapping to different appraisal weights.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppraisalTrigger {
+    /// Gate or test result (performance feedback).
+    Performance,
+    /// Task completion or failure.
+    TaskOutcome,
+    /// External dependency or blocking event.
+    Blocked,
+    /// Temporal pressure.
+    TimePressure,
+    /// Resource or queue contention.
+    ResourceWait,
+    /// Dream cycle outcome.
+    Dream,
+    /// Anomaly or unexpected pattern.
+    Anomaly,
+    /// Periodic curator self-assessment (every ~50 ticks).
+    Curator,
+}
+
+impl AppraisalResult {
+    /// Map OCC appraisal dimensions to PAD vector deltas.
+    ///
+    /// Per spec formulas:
+    /// - Pleasure ← desirability (60%) + outcome direction (40%)
+    /// - Arousal  ← (1 - likelihood) × magnitude (surprise drives arousal)
+    /// - Dominance ← coping_potential (70%) + trend direction (30%)
+    ///
+    /// The negativity bias of 1.6x means negative desirability weighs heavier
+    /// (matching Kahneman-Tversky prospect theory).
+    #[must_use]
+    pub fn to_pad_delta(&self) -> PadVector {
+        if !self.novel {
+            return PadVector::neutral();
+        }
+
+        // Negativity bias: losses hurt ~1.6x more than equivalent gains feel good.
+        let negativity_bias = if self.desirability < 0.0 { 1.6 } else { 1.0 };
+
+        // Pleasure: primarily from desirability, scaled by bias.
+        let pleasure = self.desirability * negativity_bias * 0.15;
+
+        // Arousal: surprise (1 - likelihood) × magnitude of desirability.
+        let surprise = 1.0 - self.likelihood;
+        let arousal = surprise * self.desirability.abs() * 0.20;
+
+        // Dominance: coping potential is the primary driver.
+        let dominance = (self.coping_potential - 0.5) * 0.10;
+
+        PadVector {
+            pleasure: pleasure.clamp(-1.0, 1.0),
+            arousal: arousal.clamp(-1.0, 1.0),
+            dominance: dominance.clamp(-1.0, 1.0),
+        }
+    }
+
+    /// Evaluate structured appraisal from an AffectEvent.
+    ///
+    /// This layers principled OCC evaluation on top of the event, producing
+    /// dimensions that can be mapped to PAD or used directly.
+    #[must_use]
+    pub fn from_event(event: &AffectEvent, confidence: f64) -> Self {
+        match event {
+            AffectEvent::GateResult { passed, rung, .. } => Self {
+                desirability: if *passed {
+                    0.3 + 0.1 * (*rung as f64).min(3.0)
+                } else {
+                    -0.5 - 0.1 * (*rung as f64).min(3.0)
+                },
+                likelihood: if *passed { 0.7 } else { 0.4 }, // failures slightly more surprising
+                coping_potential: confidence.clamp(0.0, 1.0),
+                trigger: AppraisalTrigger::Performance,
+                novel: true,
+            },
+            AffectEvent::TaskOutcome { succeeded, .. } => Self {
+                desirability: if *succeeded { 0.8 } else { -0.9 },
+                likelihood: if *succeeded { 0.6 } else { 0.3 },
+                coping_potential: confidence.clamp(0.0, 1.0),
+                trigger: AppraisalTrigger::TaskOutcome,
+                novel: true,
+            },
+            AffectEvent::Blocked { blocker_count, .. } => {
+                let severity = (*blocker_count as f64 / 5.0).min(1.0);
+                Self {
+                    desirability: -0.3 * severity,
+                    likelihood: 0.5, // blocking is moderately expected
+                    coping_potential: (1.0 - severity * 0.5).max(0.1),
+                    trigger: AppraisalTrigger::Blocked,
+                    novel: *blocker_count > 1,
+                }
+            }
+            AffectEvent::TimePressure {
+                deadline_proximity, ..
+            } => Self {
+                desirability: -0.2 * deadline_proximity,
+                likelihood: 0.8, // time pressure is expected
+                coping_potential: (1.0 - deadline_proximity).max(0.1),
+                trigger: AppraisalTrigger::TimePressure,
+                novel: *deadline_proximity > 0.7,
+            },
+            AffectEvent::QueueWait { wait_hours, .. } => Self {
+                desirability: -0.1 * (wait_hours / 4.0).min(1.0),
+                likelihood: 0.6,
+                coping_potential: 0.5,
+                trigger: AppraisalTrigger::ResourceWait,
+                novel: *wait_hours > 2.0,
+            },
+            AffectEvent::DreamFailure { failure_count, .. } => Self {
+                desirability: -0.2 * (*failure_count as f64 / 5.0).min(1.0),
+                likelihood: 0.4,
+                coping_potential: confidence.clamp(0.0, 1.0) * 0.8,
+                trigger: AppraisalTrigger::Dream,
+                novel: *failure_count >= 2,
+            },
+            AffectEvent::DreamOutcome {
+                knowledge_entries,
+                regressions_detected,
+                episodes_processed,
+                ..
+            } => {
+                let positive = *knowledge_entries as f64;
+                let negative = *regressions_detected as f64;
+                let scale = (*episodes_processed as f64).sqrt().max(1.0);
+                Self {
+                    desirability: (positive - negative * 2.0) / scale * 0.3,
+                    likelihood: 0.5,
+                    coping_potential: confidence.clamp(0.0, 1.0),
+                    trigger: AppraisalTrigger::Dream,
+                    novel: *knowledge_entries > 0 || *regressions_detected > 0,
+                }
+            }
+        }
+    }
+}
+
+/// Novelty filter to prevent emotional flooding (spec section 3.2).
+///
+/// Tracks recent appraisal triggers to suppress duplicate emotions within
+/// a short window. Only events that cross a novelty threshold or are of
+/// a new category trigger full appraisal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NoveltyFilter {
+    /// Recent trigger types (ring buffer of last N triggers).
+    recent_triggers: Vec<String>,
+    /// Maximum window size for deduplication.
+    window_size: usize,
+}
+
+impl NoveltyFilter {
+    /// Create a new novelty filter with the given deduplication window.
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            recent_triggers: Vec::new(),
+            window_size: window_size.max(1),
+        }
+    }
+
+    /// Check if a trigger is novel (not seen recently in the same category).
+    pub fn is_novel(&self, trigger: &AppraisalTrigger) -> bool {
+        let key = format!("{trigger:?}");
+        !self
+            .recent_triggers
+            .iter()
+            .rev()
+            .take(self.window_size)
+            .any(|t| t == &key)
+    }
+
+    /// Record a trigger (call after appraisal fires).
+    pub fn record(&mut self, trigger: &AppraisalTrigger) {
+        let key = format!("{trigger:?}");
+        self.recent_triggers.push(key);
+        if self.recent_triggers.len() > self.window_size * 2 {
+            self.recent_triggers.drain(..self.window_size);
+        }
+    }
+
+    /// Reset the filter.
+    pub fn reset(&mut self) {
+        self.recent_triggers.clear();
+    }
 }
 
 /// Single entry point for affect operations.

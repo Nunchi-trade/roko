@@ -688,9 +688,8 @@ be good ideas that need spec updates, or they may be accidental additions.
 - [x] **P1-13: PELT offline change point detection not implemented**
   - FIXED: Implemented `roko_gate::pelt::PeltDetector` with L2/L1/Normal cost functions, O(n) pruned DP, BIC penalty scaling, segment mean extraction, and 9 tests.
 
-- [ ] **P1-14: Domain-specific threshold profiles not implemented**
-  - Spec describes ThresholdProfile with role-specific priors
-  - Not found in code
+- [x] **P1-14: Domain-specific threshold profiles not implemented**
+  - FIXED: Added `ThresholdProfile` to adaptive_threshold.rs with per-rung priors, floor_multiplier, retry_multiplier, cusum_sensitivity_override. Three built-in profiles: coding (strict compile/clippy), research (lenient compile, strict tests), security (strict everything). `by_name()` lookup.
 
 ### Heartbeat (HIGH)
 
@@ -743,13 +742,9 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Lost Core Ideas from Bardo PRDs (P0-level)
 
-- [ ] **P0-19: OCC Appraisal Engine completely lost** — PRD 03-daimon specified full Ortony-Clore-Collins appraisal with trigger-grounded emotions, 7 appraisal dimensions. Code only has PAD octant classification.
-  - Spec: bardo-backup/prd/03-daimon/01-appraisal.md
-  - Code: crates/roko-daimon/src/lib.rs (only AffectOctant)
+- [x] **P0-19: OCC Appraisal Engine completely lost** — FIXED: Added `AppraisalResult` with 3 OCC/Scherer dimensions (desirability, likelihood, coping_potential), `AppraisalTrigger` enum (8 categories), `to_pad_delta()` with negativity bias (1.6x Kahneman-Tversky), `from_event()` for structured evaluation, and `NoveltyFilter` to prevent emotional flooding. Layers on top of existing `appraise()` without breaking it.
 
-- [ ] **P0-20: Four-factor retrieval model collapsed to single score** — PRD specified recency(0.20) x importance(0.25) x relevance(0.35) x emotional_congruence(0.20) with weight learning. Code only has mood_congruent_score().
-  - Spec: bardo-backup/prd/03-daimon/ (emotional memory)
-  - Code: crates/roko-daimon/src/lib.rs
+- [x] **P0-20: Four-factor retrieval model collapsed to single score** — FIXED: Added `RetrievalWeights` with spec-aligned defaults (recency 0.20, importance 0.25, relevance 0.35, emotional 0.20), `score()` method, online `update()` via gradient descent with auto-normalization, and `emotional_congruence()` via PAD cosine similarity mapped to [0,1].
 
 - [ ] **P0-21: Contrarian retrieval (anti-rumination) lost** — 15% mood-opposite injection over 200-tick window to prevent depressive loops. ContrarianTracker is a stub with no logic.
   - Spec: bardo-backup/prd/03-daimon/

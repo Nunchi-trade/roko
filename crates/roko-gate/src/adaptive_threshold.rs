@@ -64,6 +64,105 @@ const DEFAULT_CUSUM_SENSITIVITY: f64 = 0.25;
 /// CUSUM signals a shift when the accumulator exceeds this value.
 const DEFAULT_CUSUM_THRESHOLD: f64 = 4.0;
 
+/// Domain-specific threshold profile with role-specific priors (P1-14).
+///
+/// Different agent domains (coding, research, security, etc.) have different
+/// baseline expectations for gate pass rates. A research agent may tolerate
+/// higher failure rates on compile gates but demand stricter test coverage.
+///
+/// Profiles override the default neutral priors with domain-informed values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdProfile {
+    /// Profile name (e.g., "coding", "research", "security").
+    pub name: String,
+    /// Prior pass rate for each rung (overrides default 0.5 neutral).
+    /// Key = rung number, Value = expected pass rate [0.0, 1.0].
+    pub rung_priors: HashMap<u32, f64>,
+    /// Floor multiplier: how much to tighten/relax the floor threshold.
+    /// > 1.0 = stricter floors, < 1.0 = more lenient floors.
+    pub floor_multiplier: f64,
+    /// Maximum retries multiplier for this domain.
+    pub retry_multiplier: f64,
+    /// CUSUM sensitivity override (None = use default).
+    pub cusum_sensitivity_override: Option<f64>,
+}
+
+impl ThresholdProfile {
+    /// Coding domain: strict compile/clippy, moderate test tolerance.
+    #[must_use]
+    pub fn coding() -> Self {
+        let mut priors = HashMap::new();
+        priors.insert(0, 0.90); // compile: should almost always pass
+        priors.insert(1, 0.80); // clippy: usually passes
+        priors.insert(2, 0.65); // test: moderate expectation
+        priors.insert(3, 0.50); // diff review: neutral
+        Self {
+            name: "coding".into(),
+            rung_priors: priors,
+            floor_multiplier: 1.0,
+            retry_multiplier: 1.0,
+            cusum_sensitivity_override: None,
+        }
+    }
+
+    /// Research domain: lenient compile, strict correctness.
+    #[must_use]
+    pub fn research() -> Self {
+        let mut priors = HashMap::new();
+        priors.insert(0, 0.70); // compile: may experiment
+        priors.insert(1, 0.60); // clippy: flexible
+        priors.insert(2, 0.85); // test: must be correct
+        priors.insert(3, 0.40); // diff: exploratory
+        Self {
+            name: "research".into(),
+            rung_priors: priors,
+            floor_multiplier: 0.8,
+            retry_multiplier: 1.5, // more retries for research
+            cusum_sensitivity_override: Some(0.30),
+        }
+    }
+
+    /// Security domain: strict everything, few retries.
+    #[must_use]
+    pub fn security() -> Self {
+        let mut priors = HashMap::new();
+        priors.insert(0, 0.95); // compile: must pass
+        priors.insert(1, 0.90); // clippy: strict
+        priors.insert(2, 0.90); // test: strict
+        priors.insert(3, 0.80); // diff: careful review
+        Self {
+            name: "security".into(),
+            rung_priors: priors,
+            floor_multiplier: 1.3,                  // stricter floors
+            retry_multiplier: 0.7,                  // fewer retries
+            cusum_sensitivity_override: Some(0.15), // more sensitive to shifts
+        }
+    }
+
+    /// Get the prior for a specific rung, falling back to 0.5 neutral.
+    #[must_use]
+    pub fn prior_for_rung(&self, rung: u32) -> f64 {
+        self.rung_priors.get(&rung).copied().unwrap_or(0.5)
+    }
+
+    /// Look up a profile by name.
+    #[must_use]
+    pub fn by_name(name: &str) -> Self {
+        match name {
+            "coding" => Self::coding(),
+            "research" => Self::research(),
+            "security" => Self::security(),
+            _ => Self {
+                name: name.into(),
+                rung_priors: HashMap::new(),
+                floor_multiplier: 1.0,
+                retry_multiplier: 1.0,
+                cusum_sensitivity_override: None,
+            },
+        }
+    }
+}
+
 /// Adaptive gate thresholds: per-rung EMA of pass rates with floor/ceiling bounds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveThresholds {
