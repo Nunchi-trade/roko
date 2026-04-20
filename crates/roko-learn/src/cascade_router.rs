@@ -42,7 +42,7 @@ use crate::costs_db::CostTable;
 use crate::latency::LatencyTracker;
 use crate::model_experiment::ModelExperimentStore;
 use crate::model_router::{
-    COLD_START_THRESHOLD, CandidateArmScore, LinUCBRouter, RoutingContext,
+    COLD_START_THRESHOLD, CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext,
     compute_routing_reward_v2,
 };
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
@@ -2992,6 +2992,60 @@ impl CascadeRouter {
         frontier.dedup();
         frontier
     }
+
+    /// Feed prediction residuals back into the router after task completion.
+    ///
+    /// This implements the TA-15 feedback loop: after a prediction is resolved,
+    /// the residual (predicted - actual) is used to update the routing model.
+    ///
+    /// - `model_slug`: the model that was routed to
+    /// - `predicted_success`: the predicted success probability at routing time
+    /// - `actual_success`: whether the task actually passed gates
+    /// - `residual`: `predicted_success - actual_outcome` (positive = overconfident)
+    ///
+    /// The method updates both the confidence-stage statistics and the LinUCB
+    /// bandit so that future routing decisions incorporate the prediction error.
+    pub fn feedback(
+        &self,
+        model_slug: &str,
+        predicted_success: f64,
+        actual_success: bool,
+        residual: f64,
+    ) {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return;
+        };
+
+        // Compute a reward modulated by prediction accuracy.
+        // A perfectly calibrated prediction (residual near 0) gets a bonus;
+        // a miscalibrated prediction (large |residual|) gets a penalty.
+        let calibration_bonus = 1.0 - residual.abs().min(1.0);
+        let base_reward = if actual_success { 1.0 } else { 0.0 };
+        let adjusted_reward = (base_reward * 0.7 + calibration_bonus * 0.3).clamp(0.0, 1.0);
+
+        // Use observe_internal which updates both confidence stats and LinUCB
+        // in a single pass (avoids double-counting).
+        let context_vec = vec![0.0; CONTEXT_DIM];
+        self.observe_internal(&context_vec, model_idx, adjusted_reward, actual_success, None, None);
+
+        // Check for stage transition after accumulating new evidence.
+        self.check_stage_transition();
+    }
+
+    /// Feed prediction residuals from a calibration tracker summary.
+    ///
+    /// Convenience method that extracts the relevant fields from a prediction
+    /// record and calls `feedback()`.
+    pub fn feedback_from_prediction(
+        &self,
+        model_slug: &str,
+        predicted_success: f64,
+        actual_success: bool,
+    ) {
+        let actual_value = if actual_success { 1.0 } else { 0.0 };
+        let residual = predicted_success - actual_value;
+        self.feedback(model_slug, predicted_success, actual_success, residual);
+    }
 }
 
 fn pareto_adjusted_alpha(base_alpha: f64, slug: &str, frontier: &[String]) -> f64 {
@@ -4904,5 +4958,46 @@ mod tests {
         let mut ctx = default_ctx();
         ctx.role = AgentRole::Implementer;
         assert_eq!(cascade.route(&ctx).primary.slug, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn feedback_updates_confidence_stats() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let initial_obs = cascade.total_observations();
+
+        cascade.feedback("claude-sonnet-4-5", 0.8, true, -0.2);
+        cascade.feedback("claude-sonnet-4-5", 0.8, false, 0.8);
+
+        // Confidence stats should be updated.
+        let stats = cascade.confidence_stats.lock();
+        let model_stats = stats.get("claude-sonnet-4-5").unwrap();
+        assert_eq!(model_stats.trials, 2);
+        assert_eq!(model_stats.successes, 1);
+    }
+
+    #[test]
+    fn feedback_from_prediction_computes_residual() {
+        let cascade = CascadeRouter::new(test_slugs());
+
+        cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, true);
+        cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, false);
+
+        let stats = cascade.confidence_stats.lock();
+        let model_stats = stats.get("claude-haiku-3-5").unwrap();
+        assert_eq!(model_stats.trials, 2);
+        assert_eq!(model_stats.successes, 1);
+    }
+
+    #[test]
+    fn feedback_with_unknown_model_is_noop() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let obs_before = cascade.total_observations();
+
+        // Should not panic, just silently skip.
+        cascade.feedback("unknown-model-xyz", 0.5, true, -0.5);
+
+        // No observations should have been recorded in confidence stats.
+        let stats = cascade.confidence_stats.lock();
+        assert!(!stats.contains_key("unknown-model-xyz"));
     }
 }

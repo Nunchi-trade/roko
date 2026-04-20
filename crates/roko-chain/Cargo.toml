@@ -20,6 +20,7 @@ alloy-backend = ["dep:alloy", "dep:alloy-primitives", "dep:reqwest"]
 [dependencies]
 roko-core = { path = "../roko-core" }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

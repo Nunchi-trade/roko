@@ -7,4 +7,5 @@
 pub mod chain;
 pub mod coding;
 pub mod research;
+pub mod selector;
 pub mod witness;

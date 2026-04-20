@@ -88,6 +88,7 @@ use roko_gate::{
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
+use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
 use roko_learn::cfactor::{CFactor, detect_cfactor_regression};
 use roko_learn::conductor::{
@@ -3076,6 +3077,8 @@ pub struct PlanRunner {
     pheromone_field: Vec<Pheromone>,
     /// Per-gate failure counts for pattern pheromone detection.
     pheromone_gate_failures: HashMap<String, u32>,
+    /// Curriculum scheduler for difficulty-based task ordering (LEARN-12).
+    curriculum_scheduler: CurriculumScheduler,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4443,6 +4446,7 @@ impl PlanRunner {
                 .map(PerplexitySearchClient::new),
             pheromone_field: Vec::new(),
             pheromone_gate_failures: HashMap::new(),
+            curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
         })
     }
 
@@ -4595,6 +4599,7 @@ impl PlanRunner {
                 .map(PerplexitySearchClient::new),
             pheromone_field: Vec::new(),
             pheromone_gate_failures: HashMap::new(),
+            curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
         })
     }
 
@@ -4749,6 +4754,7 @@ impl PlanRunner {
                 .map(PerplexitySearchClient::new),
             pheromone_field: Vec::new(),
             pheromone_gate_failures: HashMap::new(),
+            curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
         })
     }
 
@@ -8215,6 +8221,56 @@ impl PlanRunner {
                 })
                 .unwrap_or_default()
         };
+
+        // LEARN-12: Curriculum-based difficulty ordering within each dependency level.
+        // Convert ready TaskDefs into roko_core Tasks for the scheduler, reorder by
+        // difficulty, then map back to IDs. This preserves dependency constraints
+        // (only ready tasks are reordered) while adding difficulty optimization.
+        let ready: Vec<String> = {
+            if let Some(tracker) = self.task_trackers.get(plan_id) {
+                let task_pairs: Vec<(String, roko_core::task::Task)> = ready
+                    .iter()
+                    .filter_map(|task_id| {
+                        tracker
+                            .tasks_file
+                            .tasks
+                            .iter()
+                            .find(|t| t.id == *task_id)
+                            .map(|td| {
+                                let mut task = roko_core::task::Task::new(&td.id, &td.title);
+                                task.files = td.files.clone();
+                                task.depends_on = td.depends_on.clone();
+                                task.estimated_minutes = Some(
+                                    (td.timeout_secs / 60).clamp(1, 600) as u32,
+                                );
+                                task.complexity_band = Some(match td.tier.as_str() {
+                                    "mechanical" => roko_core::task::TaskComplexityBand::Fast,
+                                    "focused" => roko_core::task::TaskComplexityBand::Standard,
+                                    "integrative" | "architectural" => {
+                                        roko_core::task::TaskComplexityBand::Complex
+                                    }
+                                    _ => roko_core::task::TaskComplexityBand::Standard,
+                                });
+                                (td.id.clone(), task)
+                            })
+                    })
+                    .collect();
+
+                // Only reorder if there are multiple ready tasks.
+                if task_pairs.len() > 1 {
+                    let tasks_only: Vec<roko_core::task::Task> =
+                        task_pairs.iter().map(|(_, t)| t.clone()).collect();
+                    let ordered = self.curriculum_scheduler.schedule(&tasks_only);
+                    // Rebuild the ID list in curriculum order.
+                    ordered.iter().map(|t| t.id.clone()).collect()
+                } else {
+                    task_pairs.into_iter().map(|(id, _)| id).collect()
+                }
+            } else {
+                ready
+            }
+        };
+
         let behavioral_state = self.daimon.query().behavioral_state;
         let ready = prioritize_ready_tasks_with_behavior(
             ready,
@@ -9889,6 +9945,26 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.mark_completed(task_id);
             tracker.last_impl_output_hash = Some(result.output.id);
+
+            // LEARN-12: Feed task outcome to curriculum difficulty model.
+            if let Some(td) = tracker.tasks_file.tasks.iter().find(|t| t.id == task_id) {
+                let mut task = roko_core::task::Task::new(&td.id, &td.title);
+                task.files = td.files.clone();
+                task.depends_on = td.depends_on.clone();
+                task.estimated_minutes =
+                    Some((td.timeout_secs / 60).clamp(1, 600) as u32);
+                task.complexity_band = Some(match td.tier.as_str() {
+                    "mechanical" => roko_core::task::TaskComplexityBand::Fast,
+                    "focused" => roko_core::task::TaskComplexityBand::Standard,
+                    "integrative" | "architectural" => {
+                        roko_core::task::TaskComplexityBand::Complex
+                    }
+                    _ => roko_core::task::TaskComplexityBand::Standard,
+                });
+                self.curriculum_scheduler
+                    .difficulty_model
+                    .observe(&task, result.success);
+            }
         }
 
         self.emit_execution_event(
@@ -13372,6 +13448,38 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("persist prompt: {e}"))?;
 
+        // ── AGT-01: Pre-dispatch safety check ──────────────────────
+        if let Err(violation) = self.safety_layer.pre_dispatch_check(
+            plan_id,
+            task,
+            &resolved_dispatch_role_label,
+            &exec_dir,
+        ) {
+            tracing::error!(
+                plan_id,
+                task,
+                violation_type = %violation.violation_type,
+                "pre-dispatch safety check blocked dispatch: {}",
+                violation.message,
+            );
+            self.emit_conductor_signal(
+                Kind::Custom("safety-violation".into()),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task_id": task,
+                    "violation_type": violation.violation_type.to_string(),
+                    "message": violation.message,
+                    "severity": "block",
+                    "phase": "pre_dispatch",
+                }),
+            );
+            self.release_task_mcp_servers(&mcp_lease).await;
+            return Err(anyhow!(
+                "pre-dispatch safety violation: {}",
+                violation.message
+            ));
+        }
+
         // ── Run the agent with per-task model selection ─────────────
         let ctx = ctx
             .with_attr("task_id", task)
@@ -13707,6 +13815,46 @@ impl PlanRunner {
             )
         };
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
+
+        // ── AGT-01: Post-dispatch safety check ─────────────────────
+        let post_changed_files = self
+            .git_changed_files(&exec_dir)
+            .await
+            .unwrap_or_default();
+        let agent_output_text = result
+            .output
+            .body
+            .as_text()
+            .unwrap_or_default()
+            .to_string();
+        let safety_violations = self.safety_layer.post_dispatch_check(
+            plan_id,
+            task,
+            &resolved_dispatch_role_label,
+            &agent_output_text,
+            &post_changed_files,
+        );
+        for violation in &safety_violations {
+            tracing::warn!(
+                plan_id,
+                task,
+                violation_type = %violation.violation_type,
+                severity = ?violation.severity,
+                "post-dispatch safety violation: {}",
+                violation.message,
+            );
+            self.emit_conductor_signal(
+                Kind::Custom("safety-violation".into()),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "task_id": task,
+                    "violation_type": violation.violation_type.to_string(),
+                    "message": violation.message,
+                    "severity": format!("{:?}", violation.severity),
+                    "phase": "post_dispatch",
+                }),
+            );
+        }
 
         self.record_turn_learning_feedback(&prompt, &selected_model, &result);
         if let (Some(store), Some(record)) = (&routing_log_store, routing_log_record.as_ref()) {

@@ -84,7 +84,72 @@ pub use risk::{
 pub use temporal::{LtlProperty, MonitorState, TemporalMonitor, Violation};
 pub use witness::{IntegrityViolation, VertexKind, WitnessDag, WitnessLogger, WitnessVertex};
 
-// ─── Tool-name constants used to match calls to policies ──────────────────
+// ─── Orchestrator-level safety violation types (AGT-01) ────────────────────
+
+/// A safety violation detected during pre- or post-dispatch checks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SafetyViolation {
+    /// Plan that triggered the violation.
+    pub plan_id: String,
+    /// Task within the plan.
+    pub task_id: String,
+    /// Kind of violation detected.
+    pub violation_type: ViolationType,
+    /// Human-readable description.
+    pub message: String,
+    /// Whether this should block execution or just warn.
+    pub severity: ViolationSeverity,
+}
+
+impl std::fmt::Display for SafetyViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{:?}] {}/{}: {} ({})",
+            self.severity, self.plan_id, self.task_id, self.message, self.violation_type
+        )
+    }
+}
+
+/// Classification of safety violations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationType {
+    /// Agent modified files outside the worktree.
+    PathEscape,
+    /// Agent output contained secrets.
+    SecretLeak,
+    /// Agent contract was violated.
+    ContractViolation,
+    /// Safety budget was exhausted.
+    BudgetExhausted,
+    /// Forbidden tool was invoked.
+    ForbiddenTool,
+}
+
+impl std::fmt::Display for ViolationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PathEscape => write!(f, "path_escape"),
+            Self::SecretLeak => write!(f, "secret_leak"),
+            Self::ContractViolation => write!(f, "contract_violation"),
+            Self::BudgetExhausted => write!(f, "budget_exhausted"),
+            Self::ForbiddenTool => write!(f, "forbidden_tool"),
+        }
+    }
+}
+
+/// Severity level for a safety violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationSeverity {
+    /// Execution should be blocked.
+    Block,
+    /// Log a warning but allow execution to proceed.
+    Warn,
+}
+
+// ─── Tool-name constants used to match calls to policies ─��─────────────��──
 
 const BASH_TOOLS: &[&str] = &["bash", "run_tests"];
 const NETWORK_TOOLS: &[&str] = &["web_fetch", "web_search"];
@@ -534,6 +599,175 @@ impl SafetyLayer {
     #[must_use]
     pub fn scrub_text(&self, content: &str) -> String {
         scrub::scrub_secrets(content, &self.scrub_policy)
+    }
+
+    // ─── Orchestrator-level pre/post dispatch checks (AGT-01) ──────────
+
+    /// Pre-dispatch safety check run before any agent execution path.
+    ///
+    /// Validates the task specification against the active safety policies:
+    /// - Role authorization: does the role permit this kind of task?
+    /// - Contract invariants: does the agent contract allow this dispatch?
+    /// - Budget limits: is the safety budget still available?
+    ///
+    /// Returns a [`SafetyViolation`] if the dispatch should be blocked.
+    pub fn pre_dispatch_check(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        role: &str,
+        exec_dir: &std::path::Path,
+    ) -> Result<(), SafetyViolation> {
+        // 1. Verify the execution directory is within allowed bounds.
+        if self.path_policy.prevent_escapes {
+            let canonical = exec_dir
+                .canonicalize()
+                .unwrap_or_else(|_| exec_dir.to_path_buf());
+            // Check that the exec dir is not a symlink escape or suspicious path.
+            if canonical.to_string_lossy().contains("..") {
+                return Err(SafetyViolation {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.to_string(),
+                    violation_type: ViolationType::PathEscape,
+                    message: format!(
+                        "execution directory `{}` contains path traversal",
+                        exec_dir.display()
+                    ),
+                    severity: ViolationSeverity::Block,
+                });
+            }
+        }
+
+        // 2. Check contract-level invariants for the role.
+        for inv in &self.contract.invariants {
+            match inv {
+                Invariant::MaxTokensPerTurn(max_tokens) if *max_tokens == 0 => {
+                    return Err(SafetyViolation {
+                        plan_id: plan_id.to_string(),
+                        task_id: task_id.to_string(),
+                        violation_type: ViolationType::ContractViolation,
+                        message: format!(
+                            "role `{role}` has zero token budget; dispatch blocked"
+                        ),
+                        severity: ViolationSeverity::Block,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Check safety budget availability.
+        if let Some(ref budget) = self.safety_budget {
+            let tracker = budget.lock();
+            if tracker.is_exhausted() {
+                return Err(SafetyViolation {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.to_string(),
+                    violation_type: ViolationType::BudgetExhausted,
+                    message: format!(
+                        "safety budget exhausted for role `{role}`"
+                    ),
+                    severity: ViolationSeverity::Block,
+                });
+            }
+        }
+
+        tracing::debug!(
+            plan_id,
+            task_id,
+            role,
+            "safety pre-dispatch check passed"
+        );
+        Ok(())
+    }
+
+    /// Post-dispatch safety check run after any agent execution path completes.
+    ///
+    /// Validates the agent output:
+    /// - Secret scrubbing: ensures no secrets leaked in the output.
+    /// - Output size limits: flags unusually large outputs.
+    /// - Contract recovery rules: checks if recovery actions are needed.
+    ///
+    /// Returns a list of [`SafetyViolation`]s found (may be empty).
+    pub fn post_dispatch_check(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        role: &str,
+        agent_output: &str,
+        changed_files: &[String],
+    ) -> Vec<SafetyViolation> {
+        let mut violations = Vec::new();
+
+        // 1. Check for secret leaks in agent output.
+        let scrubbed = scrub::scrub_secrets(agent_output, &self.scrub_policy);
+        if scrubbed != agent_output {
+            violations.push(SafetyViolation {
+                plan_id: plan_id.to_string(),
+                task_id: task_id.to_string(),
+                violation_type: ViolationType::SecretLeak,
+                message: "agent output contains secrets that were scrubbed".to_string(),
+                severity: ViolationSeverity::Warn,
+            });
+        }
+
+        // 2. Check for path escapes in changed files.
+        if self.path_policy.prevent_escapes {
+            for file in changed_files {
+                if file.contains("..") || file.starts_with('/') {
+                    violations.push(SafetyViolation {
+                        plan_id: plan_id.to_string(),
+                        task_id: task_id.to_string(),
+                        violation_type: ViolationType::PathEscape,
+                        message: format!(
+                            "agent modified file outside worktree: {file}"
+                        ),
+                        severity: ViolationSeverity::Warn,
+                    });
+                }
+            }
+        }
+
+        // 3. Check governance limits on changed files.
+        for rule in &self.contract.governance {
+            if let GovernanceRule::ForbiddenTools(tools) = rule {
+                // If "write_file" or "edit_file" is forbidden but files were changed,
+                // flag a violation.
+                if (tools.contains(&"write_file".to_string())
+                    || tools.contains(&"edit_file".to_string()))
+                    && !changed_files.is_empty()
+                {
+                    violations.push(SafetyViolation {
+                        plan_id: plan_id.to_string(),
+                        task_id: task_id.to_string(),
+                        violation_type: ViolationType::ContractViolation,
+                        message: format!(
+                            "role `{role}` forbids file writes but {} files were changed",
+                            changed_files.len()
+                        ),
+                        severity: ViolationSeverity::Warn,
+                    });
+                }
+            }
+        }
+
+        if violations.is_empty() {
+            tracing::debug!(
+                plan_id,
+                task_id,
+                role,
+                "safety post-dispatch check passed"
+            );
+        } else {
+            tracing::warn!(
+                plan_id,
+                task_id,
+                role,
+                violation_count = violations.len(),
+                "safety post-dispatch check found violations"
+            );
+        }
+        violations
     }
 
     /// Summarize the active safety constraints as anti-pattern strings suitable
@@ -1110,5 +1344,83 @@ mod tests {
         if let Err(ToolError::PermissionDenied(msg)) = result {
             assert!(msg.contains("temporal property violation"));
         }
+    }
+
+    // ─── AGT-01: Pre/post dispatch check tests ─────────────────────
+
+    #[test]
+    fn pre_dispatch_check_passes_for_normal_dir() {
+        let layer = SafetyLayer::with_defaults();
+        let tmp = tempfile::tempdir().unwrap();
+        let result = layer.pre_dispatch_check("plan-1", "task-1", "implementer", tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pre_dispatch_check_blocks_exhausted_budget() {
+        let budget = SafetyBudgetTracker::new(risk::SafetyBudget {
+            footprint_limit: 0,
+            ..risk::SafetyBudget::default()
+        });
+        let layer = SafetyLayer::with_defaults().with_safety_budget(budget);
+        let tmp = tempfile::tempdir().unwrap();
+        let result = layer.pre_dispatch_check("plan-1", "task-1", "implementer", tmp.path());
+        assert!(result.is_err());
+        if let Err(violation) = result {
+            assert_eq!(violation.violation_type, ViolationType::BudgetExhausted);
+        }
+    }
+
+    #[test]
+    fn post_dispatch_check_detects_secret_leak() {
+        let layer = SafetyLayer::with_defaults();
+        let api_key = format!(
+            "sk-ant-api03-{}",
+            "A".repeat(80)
+        );
+        let output = format!("found key: {api_key}");
+        let violations = layer.post_dispatch_check(
+            "plan-1",
+            "task-1",
+            "implementer",
+            &output,
+            &[],
+        );
+        assert!(!violations.is_empty());
+        assert!(violations
+            .iter()
+            .any(|v| v.violation_type == ViolationType::SecretLeak));
+    }
+
+    #[test]
+    fn post_dispatch_check_passes_clean_output() {
+        let layer = SafetyLayer::with_defaults();
+        let violations = layer.post_dispatch_check(
+            "plan-1",
+            "task-1",
+            "implementer",
+            "all tests pass",
+            &["src/lib.rs".to_string()],
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn post_dispatch_check_detects_forbidden_file_writes() {
+        let mut layer = SafetyLayer::with_defaults();
+        layer.contract.governance.push(
+            GovernanceRule::ForbiddenTools(vec!["write_file".to_string()])
+        );
+        let violations = layer.post_dispatch_check(
+            "plan-1",
+            "task-1",
+            "reviewer",
+            "reviewed code",
+            &["src/lib.rs".to_string()],
+        );
+        assert!(!violations.is_empty());
+        assert!(violations
+            .iter()
+            .any(|v| v.violation_type == ViolationType::ContractViolation));
     }
 }

@@ -196,6 +196,9 @@ enum Command {
         /// Generate cloud-ready defaults for deployment.
         #[arg(long)]
         cloud: bool,
+        /// Project profile to use (e.g. rust, typescript, go, python, general).
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
     #[command(visible_alias = "do")]
@@ -354,6 +357,12 @@ enum Command {
         /// Override the working directory (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Use high-contrast color scheme for accessibility (WCAG 2.1 AA).
+        #[arg(long)]
+        high_contrast: bool,
+        /// Disable animations for reduced-motion accessibility.
+        #[arg(long)]
+        reduced_motion: bool,
     },
     /// Start the HTTP API server.
     Serve {
@@ -399,6 +408,14 @@ enum Command {
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+    },
+    /// Explain a roko concept with progressive disclosure (3 depth levels).
+    Explain {
+        /// Topic to explain (e.g. gates, routing, cognitive, neuro, daimon, dreams, engram, cfactor).
+        topic: String,
+        /// Disclosure depth: 1 = summary, 2 = how it works, 3 = internals.
+        #[arg(long, default_value_t = 1)]
+        depth: u8,
     },
 }
 
@@ -1097,8 +1114,12 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
 
 async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
     match command {
-        Command::Init { path, cloud } => {
-            cmd_init(path, cloud).await?;
+        Command::Init {
+            path,
+            cloud,
+            profile,
+        } => {
+            cmd_init(path, cloud, profile).await?;
             Ok(EXIT_SUCCESS)
         }
         Command::Run { prompt, workdir } => cmd_run(cli, workdir, prompt).await,
@@ -1186,7 +1207,22 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             list_pages,
             text,
             workdir,
-        } => cmd_dashboard(cli, workdir, page, list_pages, text, None).await,
+            high_contrast,
+            reduced_motion,
+        } => {
+            // Set env vars so theme and effects config pick them up.
+            // SAFETY: Single-threaded at startup before tokio runtime spawns;
+            // no concurrent reads of these variables.
+            #[allow(unsafe_code)]
+            if high_contrast {
+                unsafe { std::env::set_var("ROKO_HIGH_CONTRAST", "1") };
+            }
+            #[allow(unsafe_code)]
+            if reduced_motion {
+                unsafe { std::env::set_var("ROKO_REDUCED_MOTION", "1") };
+            }
+            cmd_dashboard(cli, workdir, page, list_pages, text, None).await
+        }
         Command::Serve {
             bind,
             port,
@@ -1215,6 +1251,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Learn { what, workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             cmd_learn(&wd, &what).await
+        }
+        Command::Explain { topic, depth } => {
+            cmd_explain(&topic, depth);
+            Ok(EXIT_SUCCESS)
         }
     }
 }
@@ -1269,6 +1309,30 @@ async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
 // -----------------------------------------------------------------------
 // Mode handlers
 // -----------------------------------------------------------------------
+
+fn cmd_explain(topic: &str, depth: u8) {
+    use roko_cli::explain;
+    let depth = depth.clamp(1, 3);
+    if topic == "topics" || topic == "list" {
+        println!("available topics:");
+        for name in explain::topic_names() {
+            let entry = explain::find_topic(name).unwrap();
+            println!("  {:<12} {}", name, entry.title);
+        }
+        return;
+    }
+    match explain::find_topic(topic) {
+        Some(entry) => print!("{}", explain::render_topic(entry, depth)),
+        None => {
+            eprintln!("unknown topic: {topic}");
+            eprintln!(
+                "available topics: {}",
+                explain::topic_names().join(", ")
+            );
+            eprintln!("run `roko explain topics` to see all topics with descriptions");
+        }
+    }
+}
 
 fn cmd_repl(cli: &Cli) -> Result<i32> {
     let session_id = cli
@@ -5684,7 +5748,42 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
 // Make list_md_files public so main.rs can use it for draft list
 // (it's already pub in prd.rs)
 
-async fn cmd_init(path: Option<PathBuf>, cloud: bool) -> Result<()> {
+/// Auto-detect the project domain from file patterns in the target directory.
+fn detect_project_domain(target: &Path) -> &'static str {
+    if target.join("Cargo.toml").exists() {
+        "rust"
+    } else if target.join("package.json").exists() {
+        "typescript"
+    } else if target.join("go.mod").exists() {
+        "go"
+    } else if target.join("requirements.txt").exists()
+        || target.join("pyproject.toml").exists()
+        || target.join("setup.py").exists()
+    {
+        "python"
+    } else if target.join("Gemfile").exists() {
+        "ruby"
+    } else if target.join("pom.xml").exists() || target.join("build.gradle").exists() {
+        "java"
+    } else {
+        "general"
+    }
+}
+
+/// Gate configuration hint based on domain profile.
+fn domain_gate_hint(domain: &str) -> &'static str {
+    match domain {
+        "rust" => "compile (cargo check), test (cargo test), clippy (cargo clippy)",
+        "typescript" => "compile (tsc --noEmit), test (npm test), lint (eslint)",
+        "go" => "compile (go build), test (go test), lint (golangci-lint)",
+        "python" => "test (pytest), lint (ruff), typecheck (mypy)",
+        "ruby" => "test (rspec), lint (rubocop)",
+        "java" => "compile (mvn compile), test (mvn test)",
+        _ => "compile, test, lint (configure in roko.toml)",
+    }
+}
+
+async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option<String>) -> Result<()> {
     let target = path.unwrap_or_else(|| PathBuf::from("."));
     tokio::fs::create_dir_all(&target)
         .await
@@ -5715,6 +5814,13 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool) -> Result<()> {
         }
     }
 
+    // Domain detection: use --profile if given, otherwise auto-detect.
+    let domain = if let Some(ref p) = profile {
+        p.as_str()
+    } else {
+        detect_project_domain(&target)
+    };
+
     let config_path = target.join("roko.toml");
     if config_path.exists() {
         println!(
@@ -5730,10 +5836,27 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool) -> Result<()> {
     }
 
     println!("initialized roko workspace at {}", target.display());
+    println!("detected project domain: {domain}");
+    println!("suggested gates: {}", domain_gate_hint(domain));
     println!(
         "agent command set to \"claude\". \
          Edit roko.toml [agent] command to use a different agent CLI."
     );
+
+    // Check for interrupted session from a previous run.
+    let snapshot = roko_dir.join("state").join("executor.json");
+    if snapshot.is_file() {
+        println!();
+        println!(
+            "interrupted session found: {}",
+            snapshot.display()
+        );
+        println!(
+            "resume with: roko plan run plans/ --resume {}",
+            snapshot.display()
+        );
+    }
+
     Ok(())
 }
 
@@ -7206,9 +7329,10 @@ mod tests {
     fn cli_parses_init_subcommand() {
         let cli = Cli::try_parse_from(["roko", "init", "/tmp/project"]).unwrap();
         match cli.command {
-            Some(Command::Init { path, cloud }) => {
+            Some(Command::Init { path, cloud, profile }) => {
                 assert_eq!(path, Some(PathBuf::from("/tmp/project")));
                 assert!(!cloud);
+                assert!(profile.is_none());
             }
             other => panic!("expected init command, got {other:?}"),
         }

@@ -388,6 +388,35 @@ pub enum UniquenessType {
     GovernanceVouch,
 }
 
+/// Passport lifecycle states (IDECON-02).
+///
+/// State machine: `Minting -> Active -> Suspended -> Revoked`.
+/// Only forward transitions are allowed; once `Revoked` the passport is
+/// permanently disabled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PassportState {
+    /// Passport is being created and is not yet usable.
+    Minting,
+    /// Passport is fully active and operational.
+    Active,
+    /// Passport is temporarily suspended.
+    Suspended {
+        /// Human-readable suspension reason.
+        reason: String,
+    },
+    /// Passport is permanently revoked.
+    Revoked {
+        /// Human-readable revocation reason.
+        reason: String,
+    },
+}
+
+impl Default for PassportState {
+    fn default() -> Self {
+        Self::Minting
+    }
+}
+
 /// Exact Korai passport stub described in the identity docs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KoraiPassport {
@@ -413,6 +442,81 @@ pub struct KoraiPassport {
     pub registered_block: u64,
     /// URI of the Agent Card metadata.
     pub agent_card_uri: String,
+    /// Lifecycle state of the passport.
+    pub state: PassportState,
+}
+
+impl KoraiPassport {
+    /// Transition from `Minting` to `Active`.
+    ///
+    /// Returns an error if the passport is not in the `Minting` state.
+    pub fn activate(&mut self) -> Result<(), &'static str> {
+        match &self.state {
+            PassportState::Minting => {
+                self.state = PassportState::Active;
+                Ok(())
+            }
+            _ => Err("can only activate from Minting state"),
+        }
+    }
+
+    /// Transition from `Active` to `Suspended`.
+    ///
+    /// Returns an error if the passport is not in the `Active` state.
+    pub fn suspend(&mut self, reason: &str) -> Result<(), &'static str> {
+        match &self.state {
+            PassportState::Active => {
+                self.state = PassportState::Suspended {
+                    reason: reason.to_string(),
+                };
+                Ok(())
+            }
+            _ => Err("can only suspend from Active state"),
+        }
+    }
+
+    /// Transition from `Suspended` back to `Active`.
+    ///
+    /// Returns an error if the passport is not in the `Suspended` state.
+    pub fn reinstate(&mut self) -> Result<(), &'static str> {
+        match &self.state {
+            PassportState::Suspended { .. } => {
+                self.state = PassportState::Active;
+                Ok(())
+            }
+            _ => Err("can only reinstate from Suspended state"),
+        }
+    }
+
+    /// Transition to `Revoked` from any non-revoked state.
+    ///
+    /// Revocation is permanent and cannot be undone (soul recovery mints
+    /// a new passport instead).
+    pub fn revoke(&mut self, reason: &str) -> Result<(), &'static str> {
+        match &self.state {
+            PassportState::Revoked { .. } => Err("passport already revoked"),
+            _ => {
+                self.state = PassportState::Revoked {
+                    reason: reason.to_string(),
+                };
+                Ok(())
+            }
+        }
+    }
+
+    /// Verify a system prompt against the committed hash.
+    ///
+    /// Computes `BLAKE3(prompt)` and compares to `self.system_prompt_hash`.
+    /// At agent startup, a mismatch should block execution.
+    pub fn verify_system_prompt(&self, prompt: &str) -> bool {
+        let hash = blake3::hash(prompt.as_bytes());
+        *hash.as_bytes() == self.system_prompt_hash
+    }
+
+    /// Returns `true` if the passport is in a usable state (`Active`).
+    pub fn is_active(&self) -> bool {
+        matches!(self.state, PassportState::Active)
+    }
 }
 
 /// Per-domain reputation track carried by a [`KoraiPassport`].
@@ -769,6 +873,40 @@ pub struct ReputationSimOutput {
     pub collusion_detection_rate: f64,
 }
 
+/// Four-stage ingestion pipeline for marketplace listings (IDECON-04).
+///
+/// `Quarantine -> Consensus -> Sandbox -> Active`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListingStage {
+    /// Listing submitted; metadata validated, held for minimum 24h.
+    Quarantine {
+        /// Timestamp when the listing was submitted.
+        submitted_at: u64,
+    },
+    /// Two+ independent validators must approve before advancement.
+    Consensus {
+        /// Approvals collected.
+        approvals: u32,
+        /// Rejections collected.
+        rejections: u32,
+    },
+    /// Trial purchase with 100% refund guarantee; effectiveness tracked.
+    Sandbox {
+        /// Timestamp when the sandbox period started.
+        trial_start: u64,
+        /// Refunds issued during the sandbox period.
+        refunds: u32,
+    },
+    /// Full marketplace listing with dynamic pricing active.
+    Active,
+}
+
+impl Default for ListingStage {
+    fn default() -> Self {
+        Self::Quarantine { submitted_at: 0 }
+    }
+}
+
 /// Marketplace listing published to the bazaar index.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MarketplaceListing {
@@ -798,6 +936,75 @@ pub struct MarketplaceListing {
     pub listed_at: u64,
     /// Seller reputation snapshot.
     pub reputation_snapshot: f64,
+    /// Current ingestion stage (IDECON-04).
+    pub stage: ListingStage,
+}
+
+impl MarketplaceListing {
+    /// Advance the listing to the next ingestion stage.
+    ///
+    /// Enforces the pipeline rules:
+    /// - `Quarantine -> Consensus`: requires 24h (86400s) elapsed since submission.
+    /// - `Consensus -> Sandbox`: requires `approvals >= 2 && approvals > rejections`.
+    /// - `Sandbox -> Active`: always allowed (immediate).
+    /// - `Active` is terminal.
+    pub fn advance_stage(&mut self, now_secs: u64) -> Result<(), &'static str> {
+        match &self.stage {
+            ListingStage::Quarantine { submitted_at } => {
+                if now_secs.saturating_sub(*submitted_at) < 86_400 {
+                    return Err("quarantine requires 24h minimum");
+                }
+                self.stage = ListingStage::Consensus {
+                    approvals: 0,
+                    rejections: 0,
+                };
+                Ok(())
+            }
+            ListingStage::Consensus {
+                approvals,
+                rejections,
+            } => {
+                if *approvals < 2 {
+                    return Err("consensus requires at least 2 approvals");
+                }
+                if approvals <= rejections {
+                    return Err("consensus requires approvals > rejections");
+                }
+                self.stage = ListingStage::Sandbox {
+                    trial_start: now_secs,
+                    refunds: 0,
+                };
+                Ok(())
+            }
+            ListingStage::Sandbox { .. } => {
+                self.stage = ListingStage::Active;
+                Ok(())
+            }
+            ListingStage::Active => Err("listing is already active"),
+        }
+    }
+
+    /// Record an approval vote during the Consensus stage.
+    pub fn record_approval(&mut self) -> Result<(), &'static str> {
+        match &mut self.stage {
+            ListingStage::Consensus { approvals, .. } => {
+                *approvals += 1;
+                Ok(())
+            }
+            _ => Err("approvals can only be recorded in Consensus stage"),
+        }
+    }
+
+    /// Record a rejection vote during the Consensus stage.
+    pub fn record_rejection(&mut self) -> Result<(), &'static str> {
+        match &mut self.stage {
+            ListingStage::Consensus { rejections, .. } => {
+                *rejections += 1;
+                Ok(())
+            }
+            _ => Err("rejections can only be recorded in Consensus stage"),
+        }
+    }
 }
 
 /// Listing payload formats supported by the bazaar.
@@ -862,6 +1069,31 @@ pub struct DynamicPricingEngine {
     pub price_floor: u64,
     /// Seller-defined price ceiling.
     pub price_ceiling: u64,
+}
+
+impl DynamicPricingEngine {
+    /// Compute the dynamic price for a listing (IDECON-04).
+    ///
+    /// `P(t) = base_price * rep_mult(seller_rep) * e^(-decay_lambda * hours) * demand_mult`
+    ///
+    /// where `rep_mult(R) = 0.1 + 2.9 * R^1.7` and
+    /// `demand_mult = 1.0 + demand_sensitivity * (recent_purchases / avg_purchases - 1.0)`.
+    ///
+    /// The result is clamped to `[price_floor, price_ceiling]`.
+    pub fn compute_price(
+        &self,
+        hours_since_listing: f64,
+        seller_reputation: f64,
+        recent_purchases: f64,
+        avg_purchases: f64,
+    ) -> u64 {
+        let rep_mult = 0.1 + 2.9 * seller_reputation.clamp(0.0, 1.0).powf(1.7);
+        let decay = (-self.decay_lambda * hours_since_listing).exp();
+        let demand_mult =
+            1.0 + self.demand_sensitivity * (recent_purchases / avg_purchases.max(1.0) - 1.0);
+        let price = self.base_price as f64 * rep_mult * decay * demand_mult;
+        (price.round() as u64).clamp(self.price_floor, self.price_ceiling)
+    }
 }
 
 /// Dutch-auction sale mode for premium listings.
@@ -1306,5 +1538,233 @@ mod tests {
         let rings = detect_collusion_rings(&clusters);
         assert_eq!(rings.len(), 1);
         assert!(rings[0].members.contains(&10));
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-02: Passport lifecycle
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn passport_default_is_minting() {
+        let p = KoraiPassport::default();
+        assert_eq!(p.state, PassportState::Minting);
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn passport_activate_from_minting() {
+        let mut p = KoraiPassport::default();
+        assert!(p.activate().is_ok());
+        assert_eq!(p.state, PassportState::Active);
+        assert!(p.is_active());
+    }
+
+    #[test]
+    fn passport_activate_from_active_fails() {
+        let mut p = KoraiPassport::default();
+        p.activate().unwrap();
+        assert!(p.activate().is_err());
+    }
+
+    #[test]
+    fn passport_suspend_from_active() {
+        let mut p = KoraiPassport::default();
+        p.activate().unwrap();
+        assert!(p.suspend("policy violation").is_ok());
+        assert_eq!(
+            p.state,
+            PassportState::Suspended {
+                reason: "policy violation".to_string()
+            }
+        );
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn passport_suspend_from_minting_fails() {
+        let mut p = KoraiPassport::default();
+        assert!(p.suspend("bad").is_err());
+    }
+
+    #[test]
+    fn passport_reinstate_from_suspended() {
+        let mut p = KoraiPassport::default();
+        p.activate().unwrap();
+        p.suspend("test").unwrap();
+        assert!(p.reinstate().is_ok());
+        assert!(p.is_active());
+    }
+
+    #[test]
+    fn passport_revoke_from_any_non_revoked() {
+        let mut p = KoraiPassport::default();
+        p.activate().unwrap();
+        assert!(p.revoke("fraud").is_ok());
+        assert_eq!(
+            p.state,
+            PassportState::Revoked {
+                reason: "fraud".to_string()
+            }
+        );
+        // Cannot revoke again.
+        assert!(p.revoke("double revoke").is_err());
+    }
+
+    #[test]
+    fn passport_verify_system_prompt() {
+        let prompt = "You are a helpful agent.";
+        let hash = blake3::hash(prompt.as_bytes());
+        let mut p = KoraiPassport::default();
+        p.system_prompt_hash = *hash.as_bytes();
+        assert!(p.verify_system_prompt(prompt));
+        assert!(!p.verify_system_prompt("You are a malicious agent."));
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-04: Marketplace staging + dynamic pricing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn listing_default_is_quarantine() {
+        let l = MarketplaceListing::default();
+        assert!(matches!(l.stage, ListingStage::Quarantine { .. }));
+    }
+
+    #[test]
+    fn listing_advance_quarantine_requires_24h() {
+        let mut l = MarketplaceListing {
+            stage: ListingStage::Quarantine { submitted_at: 1000 },
+            ..Default::default()
+        };
+        // Too early — only 100s elapsed.
+        assert!(l.advance_stage(1100).is_err());
+        // Exactly 24h later.
+        assert!(l.advance_stage(1000 + 86_400).is_ok());
+        assert!(matches!(l.stage, ListingStage::Consensus { .. }));
+    }
+
+    #[test]
+    fn listing_advance_consensus_requires_approvals() {
+        let mut l = MarketplaceListing {
+            stage: ListingStage::Consensus {
+                approvals: 1,
+                rejections: 0,
+            },
+            ..Default::default()
+        };
+        // Only 1 approval — need 2.
+        assert!(l.advance_stage(0).is_err());
+
+        l.stage = ListingStage::Consensus {
+            approvals: 2,
+            rejections: 0,
+        };
+        assert!(l.advance_stage(0).is_ok());
+        assert!(matches!(l.stage, ListingStage::Sandbox { .. }));
+    }
+
+    #[test]
+    fn listing_advance_consensus_majority_required() {
+        let mut l = MarketplaceListing {
+            stage: ListingStage::Consensus {
+                approvals: 2,
+                rejections: 3,
+            },
+            ..Default::default()
+        };
+        assert!(l.advance_stage(0).is_err());
+    }
+
+    #[test]
+    fn listing_advance_sandbox_to_active() {
+        let mut l = MarketplaceListing {
+            stage: ListingStage::Sandbox {
+                trial_start: 0,
+                refunds: 0,
+            },
+            ..Default::default()
+        };
+        assert!(l.advance_stage(0).is_ok());
+        assert_eq!(l.stage, ListingStage::Active);
+    }
+
+    #[test]
+    fn listing_active_is_terminal() {
+        let mut l = MarketplaceListing {
+            stage: ListingStage::Active,
+            ..Default::default()
+        };
+        assert!(l.advance_stage(0).is_err());
+    }
+
+    #[test]
+    fn listing_record_approval_and_rejection() {
+        let mut l = MarketplaceListing {
+            stage: ListingStage::Consensus {
+                approvals: 0,
+                rejections: 0,
+            },
+            ..Default::default()
+        };
+        l.record_approval().unwrap();
+        l.record_approval().unwrap();
+        l.record_rejection().unwrap();
+
+        if let ListingStage::Consensus {
+            approvals,
+            rejections,
+        } = l.stage
+        {
+            assert_eq!(approvals, 2);
+            assert_eq!(rejections, 1);
+        } else {
+            panic!("expected Consensus stage");
+        }
+    }
+
+    #[test]
+    fn dynamic_pricing_basic() {
+        let engine = DynamicPricingEngine {
+            base_price: 1000,
+            decay_lambda: 0.01,
+            regime_multiplier: 1.0,
+            demand_sensitivity: 0.5,
+            competition_sensitivity: 0.0,
+            price_floor: 100,
+            price_ceiling: 5000,
+        };
+        let price = engine.compute_price(0.0, 1.0, 10.0, 10.0);
+        // At t=0, rep=1.0: rep_mult=3.0, decay=1.0, demand=1.0 -> 3000
+        assert_eq!(price, 3000);
+    }
+
+    #[test]
+    fn dynamic_pricing_clamped_to_floor() {
+        let engine = DynamicPricingEngine {
+            base_price: 100,
+            decay_lambda: 1.0,
+            demand_sensitivity: 0.0,
+            price_floor: 50,
+            price_ceiling: 5000,
+            ..Default::default()
+        };
+        // After many hours, decay drives price to ~0 but floor clamps it.
+        let price = engine.compute_price(100.0, 0.0, 1.0, 1.0);
+        assert_eq!(price, 50);
+    }
+
+    #[test]
+    fn dynamic_pricing_clamped_to_ceiling() {
+        let engine = DynamicPricingEngine {
+            base_price: 10_000,
+            decay_lambda: 0.0,
+            demand_sensitivity: 2.0,
+            price_floor: 100,
+            price_ceiling: 5000,
+            ..Default::default()
+        };
+        // High demand + high rep drives price above ceiling.
+        let price = engine.compute_price(0.0, 1.0, 100.0, 1.0);
+        assert_eq!(price, 5000);
     }
 }

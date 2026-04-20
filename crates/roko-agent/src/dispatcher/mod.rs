@@ -42,6 +42,7 @@ use crate::safety::SafetyLayer;
 pub mod alert;
 pub mod cancel;
 pub mod emit_metric;
+pub mod hook_chain;
 pub mod parallel;
 pub mod result_cache;
 pub mod timeout;
@@ -86,6 +87,11 @@ pub struct ToolDispatcher {
     safety: Option<SafetyLayer>,
     /// Optional tool result cache for deterministic tools (AGT-10).
     tool_cache: Option<std::sync::Mutex<result_cache::ToolResultCache>>,
+    /// Optional sequential safety hook chain (TOOL-02).
+    ///
+    /// When present, each tool call passes through every hook in order
+    /// before the handler executes. Rejections short-circuit the chain.
+    hook_chain: Option<hook_chain::SafetyHookChain>,
 }
 
 impl ToolDispatcher {
@@ -99,6 +105,7 @@ impl ToolDispatcher {
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
             safety: None,
             tool_cache: None,
+            hook_chain: None,
         }
     }
 
@@ -121,6 +128,25 @@ impl ToolDispatcher {
     #[must_use]
     pub const fn safety(&self) -> Option<&SafetyLayer> {
         self.safety.as_ref()
+    }
+
+    /// Attach a sequential safety hook chain (TOOL-02).
+    ///
+    /// When attached, every dispatched tool call passes through each hook
+    /// in order before the handler executes. The first rejection
+    /// short-circuits the chain and returns `ToolError::PermissionDenied`.
+    ///
+    /// Audit records from each hook decision are emitted as Engram signals.
+    #[must_use]
+    pub fn with_hook_chain(mut self, chain: hook_chain::SafetyHookChain) -> Self {
+        self.hook_chain = Some(chain);
+        self
+    }
+
+    /// Returns the hook chain, if one is attached.
+    #[must_use]
+    pub const fn hook_chain(&self) -> Option<&hook_chain::SafetyHookChain> {
+        self.hook_chain.as_ref()
     }
 
     /// Enable cross-turn tool result caching for deterministic tools (AGT-10).
@@ -284,6 +310,52 @@ impl ToolDispatcher {
                 );
                 Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
                 return ToolResult::err(e);
+            }
+        }
+        // 3c. Safety hook chain — if a chain is attached, run each hook
+        //     sequentially. The first rejection short-circuits. Audit records
+        //     are emitted for every hook decision.
+        if let Some(ref chain) = self.hook_chain {
+            match chain.evaluate(&def, call.arguments.clone(), ctx).await {
+                Ok((_params, audit_records)) => {
+                    for record in &audit_records {
+                        Self::emit_audit(
+                            ctx,
+                            &call,
+                            "hook_chain",
+                            match &record.decision {
+                                crate::safety::hooks::HookDecision::Allow => "allow",
+                                crate::safety::hooks::HookDecision::AllowModified(_) => "modified",
+                                crate::safety::hooks::HookDecision::Reject(_) => "rejected",
+                            },
+                            &json!({
+                                "hook": record.hook_name,
+                                "decision": format!("{:?}", record.decision),
+                            }),
+                        );
+                    }
+                }
+                Err((err, audit_records)) => {
+                    for record in &audit_records {
+                        Self::emit_audit(
+                            ctx,
+                            &call,
+                            "hook_chain",
+                            match &record.decision {
+                                crate::safety::hooks::HookDecision::Allow => "allow",
+                                crate::safety::hooks::HookDecision::AllowModified(_) => "modified",
+                                crate::safety::hooks::HookDecision::Reject(_) => "rejected",
+                            },
+                            &json!({
+                                "hook": record.hook_name,
+                                "decision": format!("{:?}", record.decision),
+                                "reason": record.reason.as_deref().unwrap_or(""),
+                            }),
+                        );
+                    }
+                    Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+                    return ToolResult::err(err);
+                }
             }
         }
         // 4. Resolve handler.
@@ -539,6 +611,7 @@ impl std::fmt::Debug for ToolDispatcher {
             .field("registry", &"Arc<dyn ToolRegistry>")
             .field("resolver", &"Arc<dyn HandlerResolver>")
             .field("safety", &self.safety.is_some())
+            .field("hook_chain", &self.hook_chain)
             .finish()
     }
 }

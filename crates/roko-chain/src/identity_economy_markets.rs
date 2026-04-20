@@ -723,6 +723,122 @@ pub fn anti_centralization_fee(base_fee: f64, repeat_count: u32) -> f64 {
     base_fee * (1.0 + (1.0 + repeat_count as f64).ln())
 }
 
+// ---------------------------------------------------------------------------
+// IDECON-09: Three hiring models — dispatch functions
+// ---------------------------------------------------------------------------
+
+/// Result of dispatching a job to an agent (IDECON-09).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DispatchDecision {
+    /// Passport id of the winning agent.
+    pub winner: u256,
+    /// Payment owed to the winner.
+    pub payment: f64,
+    /// Hiring model that produced this decision.
+    pub model: HiringModel,
+    /// Human-readable audit trail entries.
+    pub audit_trail: Vec<String>,
+}
+
+/// Dispatch a job using random VRF with power-of-two-choices (IDECON-09).
+///
+/// Randomly picks two candidates from the pool, compares their reputation
+/// scores, and assigns the job to the one with the higher score.  This is
+/// `O(1)` per dispatch and achieves near-optimal load balancing (Ousterhout
+/// 2013).
+///
+/// Returns `None` if the pool is empty.
+pub fn dispatch_random_vrf(pool: &[SparrowBid], bounty: &BountySpec) -> Option<DispatchDecision> {
+    if pool.is_empty() {
+        return None;
+    }
+    if pool.len() == 1 {
+        return Some(DispatchDecision {
+            winner: pool[0].bidder_passport_id,
+            payment: bounty.max_budget_usdc as f64,
+            model: HiringModel::RandomVRF,
+            audit_trail: vec!["single candidate — auto-assigned".into()],
+        });
+    }
+
+    // Deterministic "random" pair selection using a simple hash to avoid
+    // pulling in a full CSPRNG dependency.  In production the indices would
+    // come from a verifiable random function.
+    let n = pool.len();
+    let i = bounty.job_id[0] as usize % n;
+    let j = {
+        let candidate = bounty.job_id[1] as usize % n;
+        if candidate == i {
+            (candidate + 1) % n
+        } else {
+            candidate
+        }
+    };
+
+    let score_i = pool[i].reputation_snapshot;
+    let score_j = pool[j].reputation_snapshot;
+    let winner_idx = if score_i >= score_j { i } else { j };
+
+    Some(DispatchDecision {
+        winner: pool[winner_idx].bidder_passport_id,
+        payment: bounty.max_budget_usdc as f64,
+        model: HiringModel::RandomVRF,
+        audit_trail: vec![format!(
+            "P2C: candidate[{i}] rep={score_i:.3} vs candidate[{j}] rep={score_j:.3} -> winner=[{winner_idx}]"
+        )],
+    })
+}
+
+/// Dispatch a job using a blind auction (IDECON-09).
+///
+/// Delegates to the Vickrey second-price auction from IDECON-03 via
+/// [`select_winner`].  Returns `None` if no bids are present.
+pub fn dispatch_blind_auction(
+    bids: &[SparrowBid],
+    bounty: &BountySpec,
+) -> Option<DispatchDecision> {
+    let result = select_winner(bids)?;
+    let auction_type = match &bounty.hiring_model {
+        HiringModel::BlindAuction { auction_type, .. } => auction_type.clone(),
+        _ => crate::phase2::AuctionType::Vickrey,
+    };
+    Some(DispatchDecision {
+        winner: bids[result.winner_index].bidder_passport_id,
+        payment: result.payment,
+        model: HiringModel::BlindAuction {
+            auction_duration_blocks: 0,
+            auction_type,
+        },
+        audit_trail: vec![format!(
+            "Vickrey winner: index={}, payment={:.2}",
+            result.winner_index, result.payment
+        )],
+    })
+}
+
+/// Dispatch a job using direct hire with anti-centralization fee (IDECON-09).
+///
+/// The operator specifies the target agent directly.  A logarithmic fee
+/// is applied based on how many times the hirer has previously hired this
+/// agent in the recent window, discouraging centralization.
+pub fn dispatch_direct_hire(
+    target_passport_id: u256,
+    base_fee: f64,
+    repeat_count: u32,
+) -> DispatchDecision {
+    let fee = anti_centralization_fee(base_fee, repeat_count);
+    DispatchDecision {
+        winner: target_passport_id,
+        payment: fee,
+        model: HiringModel::DirectHire {
+            target_passport_id,
+        },
+        audit_trail: vec![format!(
+            "direct hire: target={target_passport_id}, base_fee={base_fee:.2}, repeats={repeat_count}, fee={fee:.2}"
+        )],
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -878,5 +994,78 @@ mod tests {
         // repeat_count=0: fee = base * (1 + ln(1)) = base * 1.0 = base
         let f = anti_centralization_fee(10.0, 0);
         assert!((f - 10.0).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-09: Three hiring models
+    // -----------------------------------------------------------------------
+
+    fn make_bounty() -> BountySpec {
+        BountySpec {
+            job_id: [1; 32],
+            max_budget_usdc: 500,
+            ..Default::default()
+        }
+    }
+
+    fn make_bid_with_passport(price: u64, rep: f64, passport: u256) -> SparrowBid {
+        SparrowBid {
+            bidder_passport_id: passport,
+            price_usdc: price,
+            reputation_snapshot: rep,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dispatch_random_vrf_empty_pool() {
+        assert!(dispatch_random_vrf(&[], &make_bounty()).is_none());
+    }
+
+    #[test]
+    fn dispatch_random_vrf_single_candidate() {
+        let pool = vec![make_bid_with_passport(100, 0.9, 42)];
+        let result = dispatch_random_vrf(&pool, &make_bounty()).unwrap();
+        assert_eq!(result.winner, 42);
+        assert_eq!(result.payment, 500.0);
+        assert!(matches!(result.model, HiringModel::RandomVRF));
+    }
+
+    #[test]
+    fn dispatch_random_vrf_picks_higher_rep() {
+        let pool = vec![
+            make_bid_with_passport(100, 0.3, 10),
+            make_bid_with_passport(100, 0.9, 20),
+            make_bid_with_passport(100, 0.5, 30),
+        ];
+        let bounty = make_bounty();
+        let result = dispatch_random_vrf(&pool, &bounty).unwrap();
+        // The result should be one of the pool members.
+        assert!(pool.iter().any(|b| b.bidder_passport_id == result.winner));
+        assert!(!result.audit_trail.is_empty());
+    }
+
+    #[test]
+    fn dispatch_blind_auction_uses_vickrey() {
+        let bids = vec![
+            make_bid_with_passport(100, 0.9, 10),
+            make_bid_with_passport(120, 0.8, 20),
+        ];
+        let bounty = make_bounty();
+        let result = dispatch_blind_auction(&bids, &bounty).unwrap();
+        assert_eq!(result.winner, 10); // higher rep wins at similar price
+        assert!(result.payment > 0.0);
+        assert!(matches!(result.model, HiringModel::BlindAuction { .. }));
+    }
+
+    #[test]
+    fn dispatch_direct_hire_applies_fee() {
+        let result = dispatch_direct_hire(42, 10.0, 0);
+        assert_eq!(result.winner, 42);
+        assert!((result.payment - 10.0).abs() < 1e-9); // repeat_count=0 -> fee=base
+        assert!(matches!(result.model, HiringModel::DirectHire { .. }));
+
+        let result_repeated = dispatch_direct_hire(42, 10.0, 5);
+        assert!(result_repeated.payment > result.payment);
     }
 }

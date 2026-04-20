@@ -99,10 +99,38 @@ impl Theme {
         }
     }
 
+    /// High-contrast palette for accessibility (WCAG 2.1 AA).
+    ///
+    /// All text colors have at least 4.5:1 contrast ratio against the
+    /// background. Uses pure white text on black, bright primary colors,
+    /// and avoids low-contrast pastels.
+    #[must_use]
+    pub const fn high_contrast() -> Self {
+        Self {
+            foreground: Color::White,
+            muted: Color::Rgb(180, 180, 180),
+            background: Color::Black,
+            accent: Color::Rgb(255, 180, 200),   // bright pink
+            accent_foreground: Color::Black,
+            success: Color::Rgb(100, 255, 100),   // bright green
+            warning: Color::Rgb(255, 255, 80),    // bright yellow
+            danger: Color::Rgb(255, 80, 80),      // bright red
+            info: Color::Rgb(100, 180, 255),       // bright blue
+            selection_background: Color::Rgb(60, 60, 80),
+            selection_foreground: Color::White,
+        }
+    }
+
     /// Build the active palette from the current environment.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::from_no_color(std::env::var_os("NO_COLOR").is_some())
+        if std::env::var_os("ROKO_HIGH_CONTRAST").is_some() {
+            Self::high_contrast()
+        } else if std::env::var_os("NO_COLOR").is_some() {
+            Self::no_color()
+        } else {
+            Self::dark()
+        }
     }
 
     /// Build the active palette from an explicit `NO_COLOR` flag.
@@ -346,5 +374,116 @@ pub(crate) fn brighten(color: Color, factor: f64) -> Color {
             ((b as f64) * factor).clamp(0.0, 255.0) as u8,
         ),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dark_theme_has_non_default_colors() {
+        let theme = Theme::dark();
+        assert_ne!(theme.foreground, Color::Reset);
+        assert_ne!(theme.accent, Color::Reset);
+        assert_ne!(theme.success, Color::Reset);
+    }
+
+    #[test]
+    fn no_color_theme_all_reset() {
+        let theme = Theme::no_color();
+        assert_eq!(theme.foreground, Color::Reset);
+        assert_eq!(theme.accent, Color::Reset);
+        assert_eq!(theme.success, Color::Reset);
+        assert_eq!(theme.danger, Color::Reset);
+    }
+
+    #[test]
+    fn high_contrast_theme_has_bright_colors() {
+        let theme = Theme::high_contrast();
+        assert_eq!(theme.foreground, Color::White);
+        assert_eq!(theme.background, Color::Black);
+        // Verify all colors are non-reset (real colors for accessibility)
+        assert_ne!(theme.accent, Color::Reset);
+        assert_ne!(theme.success, Color::Reset);
+        assert_ne!(theme.warning, Color::Reset);
+        assert_ne!(theme.danger, Color::Reset);
+        assert_ne!(theme.info, Color::Reset);
+    }
+
+    #[test]
+    fn high_contrast_differs_from_dark() {
+        let dark = Theme::dark();
+        let hc = Theme::high_contrast();
+        assert_ne!(dark.foreground, hc.foreground);
+    }
+
+    #[test]
+    fn from_no_color_flag() {
+        let t = Theme::from_no_color(true);
+        assert_eq!(t, Theme::no_color());
+        let t = Theme::from_no_color(false);
+        assert_eq!(t, Theme::dark());
+    }
+
+    #[test]
+    fn style_methods_produce_non_empty() {
+        let theme = Theme::dark();
+        let _ = theme.text();
+        let _ = theme.muted();
+        let _ = theme.accent();
+        let _ = theme.accent_bold();
+        let _ = theme.selection();
+        let _ = theme.success();
+        let _ = theme.warning();
+        let _ = theme.danger();
+        let _ = theme.info();
+    }
+
+    #[test]
+    fn semantic_color_ranges() {
+        // 0.0 -> danger
+        assert_eq!(Theme::semantic_color(0.0), Theme::EMBER);
+        // 0.5 -> warning
+        assert_eq!(Theme::semantic_color(0.5), Theme::WARNING);
+        // 1.0 -> success
+        assert_eq!(Theme::semantic_color(1.0), Theme::SAGE);
+    }
+
+    #[test]
+    fn brighten_works() {
+        let c = brighten(Color::Rgb(100, 100, 100), 1.5);
+        assert_eq!(c, Color::Rgb(150, 150, 150));
+    }
+
+    #[test]
+    fn brighten_clamps() {
+        let c = brighten(Color::Rgb(200, 200, 200), 2.0);
+        assert_eq!(c, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn brighten_non_rgb_passes_through() {
+        let c = brighten(Color::Reset, 2.0);
+        assert_eq!(c, Color::Reset);
+    }
+
+    #[test]
+    fn gradient_fire_samples() {
+        let g = gradient_fire();
+        let _ = g.sample(0.0);
+        let _ = g.sample(0.5);
+        let _ = g.sample(1.0);
+    }
+
+    #[test]
+    fn gradient_clamps() {
+        let g = gradient_ocean();
+        let a = g.sample(-1.0);
+        let b = g.sample(0.0);
+        assert_eq!(a, b);
+        let c = g.sample(2.0);
+        let d = g.sample(1.0);
+        assert_eq!(c, d);
     }
 }

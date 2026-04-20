@@ -464,6 +464,20 @@ impl SafetyBudgetTracker {
         }
         result
     }
+
+    /// Returns `true` if the safety budget is fully exhausted (any dimension).
+    ///
+    /// Used by the orchestrator-level pre-dispatch check (AGT-01) to block
+    /// dispatch before an agent even starts.
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        let usage = &self.usage;
+        let budget = &self.budget;
+        usage.irreversibility_consumed >= budget.irreversibility_limit
+            || usage.files_touched.len() >= budget.blast_radius_file_limit
+            || usage.footprint_count >= budget.footprint_limit
+            || usage.cost_consumed_usd >= budget.cost_limit_usd
+    }
 }
 
 impl Default for SafetyBudgetTracker {

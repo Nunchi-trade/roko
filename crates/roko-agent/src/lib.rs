@@ -120,7 +120,8 @@ pub use provider::{
 pub use rate_limit::ProviderRateLimiter;
 pub use safety::{
     AgentWarrant, Capability, CapabilityError, DataSink, HookDecision, SafetyAuditRecord,
-    SafetyHook, SafetyLayer, TaintLabel, TaintedString, check_capability, delegate,
+    SafetyHook, SafetyLayer, SafetyViolation, TaintLabel, TaintedString, ViolationSeverity,
+    ViolationType, check_capability, delegate,
 };
 pub use streaming::{StreamAccumulator, StreamChunk};
 pub use task_runner::{

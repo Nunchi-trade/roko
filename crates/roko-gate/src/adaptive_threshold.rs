@@ -3,6 +3,7 @@
 //! Uses exponential moving averages (EMA) per gate rung to track pass rates
 //! and suggest retry budgets and skip decisions.
 
+use roko_core::Temperament;
 use roko_core::config::AgentThresholds;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -340,6 +341,66 @@ impl AdaptiveThresholds {
             self.cusum_sensitivity = relaxed;
         }
     }
+
+    // ─── Temperament-aware adjustments (AGT-06) ────────────────────
+
+    /// Adjust the suggested retry count for a rung based on temperament.
+    ///
+    /// - **Conservative**: fewer retries (floor at 1, ceiling at 3)
+    /// - **Balanced**: no adjustment (default behavior)
+    /// - **Aggressive**: more retries allowed (floor at 2, ceiling at 5)
+    /// - **Exploratory**: same as Aggressive
+    pub fn suggested_max_retries_for_temperament(
+        &self,
+        rung: u32,
+        temperament: Temperament,
+    ) -> u32 {
+        let base = self.suggested_max_retries(rung);
+        match temperament {
+            Temperament::Conservative => base.min(3).max(1),
+            Temperament::Balanced => base,
+            Temperament::Aggressive | Temperament::Exploratory => base.min(5).max(2),
+        }
+    }
+
+    /// Return the effective pass-rate threshold for a rung under a given
+    /// temperament.
+    ///
+    /// - **Conservative**: raises the threshold by 10% (stricter gates)
+    /// - **Balanced**: returns the raw EMA threshold
+    /// - **Aggressive**: lowers the threshold by 15% (more permissive)
+    /// - **Exploratory**: lowers the threshold by 10%
+    pub fn threshold_for_temperament(&self, rung: u32, temperament: Temperament) -> f64 {
+        let base = self.threshold_for(rung);
+        let adjusted = match temperament {
+            Temperament::Conservative => base * 1.10,
+            Temperament::Balanced => base,
+            Temperament::Aggressive => base * 0.85,
+            Temperament::Exploratory => base * 0.90,
+        };
+        adjusted.clamp(0.0, 1.0)
+    }
+
+    /// Advisory: should this rung be skipped under a given temperament?
+    ///
+    /// - **Conservative**: never skip (always run all rungs)
+    /// - **Balanced**: use the default streak-based skip logic
+    /// - **Aggressive**: skip more aggressively (lower streak threshold)
+    /// - **Exploratory**: use the default streak-based skip logic
+    pub fn should_skip_rung_for_temperament(
+        &self,
+        rung: u32,
+        temperament: Temperament,
+    ) -> bool {
+        match temperament {
+            Temperament::Conservative => false,
+            Temperament::Balanced | Temperament::Exploratory => self.should_skip_rung(rung),
+            Temperament::Aggressive => self
+                .rungs
+                .get(&rung)
+                .is_some_and(|s| s.consecutive_passes >= SKIP_STREAK_THRESHOLD / 2),
+        }
+    }
 }
 
 impl Default for AdaptiveThresholds {
@@ -497,5 +558,72 @@ mod tests {
             gate_pass_rate_floor: Some(0.10),
         };
         assert!(at.override_for_role("implementer", Some(&lenient), 1) >= at.threshold_for(1));
+    }
+
+    // ─── Temperament tests (AGT-06) ────────────────────────────────
+
+    #[test]
+    fn conservative_temperament_fewer_retries() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(1, false); // Low pass rate = more retries
+        }
+        let base = at.suggested_max_retries(1);
+        let conservative = at.suggested_max_retries_for_temperament(1, Temperament::Conservative);
+        assert!(conservative <= 3, "conservative should cap at 3, got {conservative}");
+        assert!(conservative <= base, "conservative should be <= base {base}");
+    }
+
+    #[test]
+    fn aggressive_temperament_more_retries() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(1, true); // High pass rate = fewer retries
+        }
+        let base = at.suggested_max_retries(1);
+        let aggressive = at.suggested_max_retries_for_temperament(1, Temperament::Aggressive);
+        assert!(aggressive >= 2, "aggressive should floor at 2, got {aggressive}");
+        assert!(aggressive >= base, "aggressive should be >= base {base}");
+    }
+
+    #[test]
+    fn conservative_temperament_stricter_threshold() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(1, true);
+        }
+        let base = at.threshold_for(1);
+        let conservative = at.threshold_for_temperament(1, Temperament::Conservative);
+        assert!(
+            conservative >= base,
+            "conservative threshold {conservative} should be >= base {base}"
+        );
+    }
+
+    #[test]
+    fn aggressive_temperament_relaxed_threshold() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..10 {
+            at.update(1, true);
+        }
+        let base = at.threshold_for(1);
+        let aggressive = at.threshold_for_temperament(1, Temperament::Aggressive);
+        assert!(
+            aggressive <= base,
+            "aggressive threshold {aggressive} should be <= base {base}"
+        );
+    }
+
+    #[test]
+    fn conservative_never_skips_rung() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..100 {
+            at.update(1, true);
+        }
+        assert!(at.should_skip_rung(1), "base should suggest skipping after 100 passes");
+        assert!(
+            !at.should_skip_rung_for_temperament(1, Temperament::Conservative),
+            "conservative should never skip"
+        );
     }
 }

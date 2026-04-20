@@ -79,6 +79,8 @@ pub struct SystemPromptBuilder {
     anti_patterns: Vec<String>,
     /// Layer 8: Affect guidance — current emotional tone and focus.
     affect_state: Option<PadState>,
+    /// Optional temperament dial for role-behavior tuning (AGT-06).
+    temperament: Option<roko_core::Temperament>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
     /// Optional token budget enforced by [`build_with_counter`](Self::build_with_counter).
@@ -139,6 +141,7 @@ impl SystemPromptBuilder {
             tool_hints: None,
             anti_patterns: Vec::new(),
             affect_state: None,
+            temperament: None,
             cache_markers: false,
             token_budget: None,
             budget_profile: None,
@@ -233,6 +236,20 @@ impl SystemPromptBuilder {
     #[must_use]
     pub const fn with_affect_state(mut self, affect_state: Option<PadState>) -> Self {
         self.affect_state = affect_state;
+        self
+    }
+
+    /// Set the temperament dial for role-behavior tuning (AGT-06).
+    ///
+    /// When set, temperament guidance is injected into the role identity
+    /// layer to steer the agent's behavior:
+    /// - **Conservative**: careful, thorough, prefer safe approaches
+    /// - **Balanced**: no additional guidance (default)
+    /// - **Aggressive**: decisive, efficient, prefer speed
+    /// - **Exploratory**: creative, try alternative approaches
+    #[must_use]
+    pub const fn with_temperament(mut self, temperament: roko_core::Temperament) -> Self {
+        self.temperament = Some(temperament);
         self
     }
 
@@ -366,9 +383,19 @@ impl SystemPromptBuilder {
     pub fn build_sections(&self) -> Vec<PromptSection> {
         let mut sections = Vec::with_capacity(10);
 
-        // Layer 1: Role Identity
+        // Layer 1: Role Identity (with optional temperament guidance)
+        let role_content = if let Some(temperament) = self.temperament {
+            let guidance = temperament_guidance(temperament);
+            if guidance.is_empty() {
+                self.role_identity.clone()
+            } else {
+                format!("{}\n\n{guidance}", self.role_identity)
+            }
+        } else {
+            self.role_identity.clone()
+        };
         if let Some(section) = self.apply_budget_profile(
-            PromptSection::new("role_identity", &self.role_identity)
+            PromptSection::new("role_identity", &role_content)
                 .with_priority(self.effective_priority("role_identity", SectionPriority::Critical))
                 .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
@@ -916,6 +943,33 @@ fn render_playbook(playbook: &Playbook) -> String {
 struct RenderedSection {
     section: PromptSection,
     rendered: String,
+}
+
+/// Generate temperament-specific guidance text for the role identity layer.
+///
+/// Returns an empty string for `Balanced` (no additional guidance needed).
+fn temperament_guidance(temperament: roko_core::Temperament) -> &'static str {
+    match temperament {
+        roko_core::Temperament::Conservative => {
+            "Execution temperament: CONSERVATIVE. Favor safe, well-tested approaches. \
+             Prefer proven patterns over novel solutions. Double-check assumptions before \
+             acting. Minimize blast radius of changes. Ask for clarification when uncertain \
+             rather than guessing."
+        }
+        roko_core::Temperament::Balanced => "",
+        roko_core::Temperament::Aggressive => {
+            "Execution temperament: AGGRESSIVE. Favor speed and decisiveness. Make bold \
+             changes when the path is clear. Skip optional verification when confident. \
+             Prefer direct solutions over elaborate abstractions. Act quickly on high-confidence \
+             decisions."
+        }
+        roko_core::Temperament::Exploratory => {
+            "Execution temperament: EXPLORATORY. Try alternative approaches when the obvious \
+             path is unclear. Experiment with novel patterns. Consider multiple solutions \
+             before committing. Document discoveries and trade-offs. Prefer learning over \
+             certainty."
+        }
+    }
 }
 
 fn sort_sections(sections: &mut [PromptSection]) {

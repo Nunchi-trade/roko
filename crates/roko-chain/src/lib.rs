@@ -9,11 +9,15 @@
 //! mirage-rs, can be adapted behind the same traits, but no dedicated mirage
 //! backend ships here today.
 
+/// Agent Registry with soulbound ERC-721 passports (CHAIN-02).
+pub mod agent_registry;
 #[cfg(feature = "alloy-backend")]
 pub mod alloy_impl;
 pub mod client;
 pub mod futures_market;
 pub mod gate;
+/// KORAI token with lazy demurrage (CHAIN-01).
+pub mod korai_token;
 pub mod heartbeat_ext;
 pub mod identity_economy_identity;
 pub mod identity_economy_markets;
@@ -21,12 +25,15 @@ pub mod isfr;
 pub mod mock;
 pub mod observer;
 pub mod phase2;
+/// Reputation Registry with 7-domain EMA scoring (CHAIN-03).
+pub mod reputation_registry;
 pub mod triage;
 pub mod types;
 pub mod validation_registry;
 pub mod wallet;
 pub mod witness;
 
+pub use agent_registry::AgentRegistry;
 pub use client::ChainClient;
 pub use gate::{
     MockTxSimulator, SimulationOutcome, TxSimGate, TxSimGateConfig, TxSimulator, WalletCheck,
@@ -38,9 +45,11 @@ pub use heartbeat_ext::{
     PolicyViolation, SimulateResult, SleepwalkerConfig, ValidateResult, ViolationSeverity,
 };
 pub use isfr::{IsfrConfig, IsfrRegistry};
+pub use korai_token::{KoraiToken, KoraiTokenConfig};
 pub use mock::{MockChainClient, MockChainWallet, paired_mocks};
 pub use observer::{AddressFilter, BlockObserver, BlockObserverConfig, BlockTracker, ObservedEvent};
 pub use phase2::*;
+pub use reputation_registry::ReputationRegistry;
 pub use triage::{
     EventEnrichment, MidasRScorer, TriageAction, TriageConfig, TriagePipeline, TriageResult,
 };
