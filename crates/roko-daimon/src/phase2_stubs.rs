@@ -80,16 +80,30 @@ pub fn pad_cosine_similarity(a: &PadVector, b: &PadVector) -> f64 {
 }
 
 /// Rich behavioral-policy settings derived from affect state.
+///
+/// Five modulation channels per spec:
+/// 1. `exploration_rate` — how eagerly to try novel strategies [0..1]
+/// 2. `risk_tolerance` — willingness to accept uncertain outcomes [0..1]
+/// 3. `model_tier_escalation` — pressure to use stronger/more expensive models
+/// 4. `probe_sensitivity` — how eagerly to sample new strategy regions [0..1]
+/// 5. `sharing_threshold` — willingness to share knowledge with peers [0..1]
+///    (lower = shares freely, higher = hoards knowledge)
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AffectBehaviorModulation {
     /// Primary dispatch strategy to favor.
     pub strategy: AffectBehaviorStrategy,
-    /// Exploration rate in `[0.0, 1.0]`.
+    /// Exploration rate in `[0.0, 1.0]`. Higher = more novel strategies tried.
     pub exploration_rate: f64,
+    /// Risk tolerance in `[0.0, 1.0]`. Higher = accept more uncertain outcomes.
+    pub risk_tolerance: f64,
     /// Whether to prefer proven playbooks over novel paths.
     pub prefer_proven_playbooks: bool,
-    /// Additional tier escalation pressure.
+    /// Additional tier escalation pressure (0 = no escalation).
     pub model_tier_escalation: u8,
+    /// Probe sensitivity in `[0.0, 1.0]`. Higher = sample new strategy regions more eagerly.
+    pub probe_sensitivity: f64,
+    /// Sharing threshold in `[0.0, 1.0]`. Lower = shares knowledge freely, higher = hoards.
+    pub sharing_threshold: f64,
     /// Extra retry budget granted by this modulation.
     pub extra_retries: u32,
     /// Whether to trigger dream or replay maintenance.
@@ -100,13 +114,18 @@ pub struct AffectBehaviorModulation {
 
 impl AffectBehaviorModulation {
     /// Baseline balanced modulation profile.
+    ///
+    /// Moderate on all channels — neither aggressive nor conservative.
     #[must_use]
     pub const fn balanced() -> Self {
         Self {
             strategy: DispatchStrategy::Balanced,
             exploration_rate: 0.20,
+            risk_tolerance: 0.40,
             prefer_proven_playbooks: true,
             model_tier_escalation: 0,
+            probe_sensitivity: 0.30,
+            sharing_threshold: 0.40,
             extra_retries: 0,
             trigger_dream_cycles: false,
             run_maintenance_tasks: false,
@@ -114,13 +133,18 @@ impl AffectBehaviorModulation {
     }
 
     /// Conservative profile for anxious or negative conditions.
+    ///
+    /// Low exploration, low risk, hoards knowledge (high sharing_threshold).
     #[must_use]
     pub const fn anxious() -> Self {
         Self {
             strategy: DispatchStrategy::Conservative,
             exploration_rate: 0.05,
+            risk_tolerance: 0.15,
             prefer_proven_playbooks: true,
             model_tier_escalation: 0,
+            probe_sensitivity: 0.10,
+            sharing_threshold: 0.75, // Hoards knowledge when anxious
             extra_retries: 0,
             trigger_dream_cycles: false,
             run_maintenance_tasks: false,
@@ -128,13 +152,18 @@ impl AffectBehaviorModulation {
     }
 
     /// Escalating profile for frustrated but still forceful conditions.
+    ///
+    /// Moderate risk, escalates model tier, retries aggressively.
     #[must_use]
     pub const fn angry() -> Self {
         Self {
             strategy: DispatchStrategy::Escalating,
             exploration_rate: 0.10,
+            risk_tolerance: 0.60,
             prefer_proven_playbooks: true,
             model_tier_escalation: 1,
+            probe_sensitivity: 0.20,
+            sharing_threshold: 0.50,
             extra_retries: 2,
             trigger_dream_cycles: false,
             run_maintenance_tasks: false,
@@ -142,13 +171,18 @@ impl AffectBehaviorModulation {
     }
 
     /// Exploratory profile for high-confidence conditions.
+    ///
+    /// High exploration, high risk tolerance, shares freely, probes eagerly.
     #[must_use]
     pub const fn confident() -> Self {
         Self {
             strategy: DispatchStrategy::Exploratory,
             exploration_rate: 0.35,
+            risk_tolerance: 0.70,
             prefer_proven_playbooks: false,
             model_tier_escalation: 0,
+            probe_sensitivity: 0.60,
+            sharing_threshold: 0.20, // Shares knowledge freely when confident
             extra_retries: 0,
             trigger_dream_cycles: false,
             run_maintenance_tasks: false,
@@ -156,13 +190,18 @@ impl AffectBehaviorModulation {
     }
 
     /// Proactive maintenance profile for idle or low-pressure conditions.
+    ///
+    /// Moderate exploration, triggers dreams, runs maintenance, shares moderately.
     #[must_use]
     pub const fn bored() -> Self {
         Self {
             strategy: DispatchStrategy::Proactive,
             exploration_rate: 0.15,
+            risk_tolerance: 0.30,
             prefer_proven_playbooks: true,
             model_tier_escalation: 0,
+            probe_sensitivity: 0.40,
+            sharing_threshold: 0.35,
             extra_retries: 0,
             trigger_dream_cycles: true,
             run_maintenance_tasks: true,

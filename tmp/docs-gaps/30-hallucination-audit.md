@@ -756,9 +756,7 @@ be good ideas that need spec updates, or they may be accidental additions.
   - Spec: bardo-backup/prd/03-daimon/
   - Code: crates/roko-daimon/src/phase2_stubs.rs (empty struct)
 
-- [ ] **P0-22: Emotional consolidation bias lost** — McGaugh 2004: high-arousal episodes get 1.3x consolidation priority. Not implemented anywhere.
-  - Spec: bardo-backup/prd/04-memory/
-  - Code: not found in roko-dreams
+- [x] **P0-22: Emotional consolidation bias lost** — FIXED: `emotional_consolidation_boost()` now implements McGaugh 2004 arousal-based priority: `boost *= 1.0 + arousal * 0.30` (up to 1.3x at max arousal). High-arousal episodes are consolidated with higher priority.
 
 - [ ] **P0-23: Life review pipeline lost** — Butler 1963: retrieve top-20 emotional memories, detect turning points (PAD distance 0.5), classify narrative arc (Redemptive/Contaminating/Progressive/Tragic/Stable per McAdams). Completely absent.
   - Spec: bardo-backup/prd/03-daimon/ (mortality section)
@@ -780,9 +778,9 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 - [ ] **P1-28: Emotional death testament lost** — Death knowledge should carry emotional context, turning points, narrative arc. Current death protocol is basic.
 
-- [ ] **P1-29: Emotional diversity as quality signal lost** — Shannon entropy of emotions across supporting episodes as supplementary quality marker. Not computed.
+- [x] **P1-29: Emotional diversity as quality signal lost** — FIXED: Added `EmotionalProvenance::compute_diversity(tags)` using normalized Shannon entropy of coarse emotion labels. Also added `from_tags(tags)` factory for building provenance from multiple episode tags. Diversity feeds into `emotional_consolidation_boost()` as a 15% weight.
 
-- [ ] **P1-30: Only 2 of 5 behavioral modulation channels wired** — Spec says 5 channels (exploration temp, risk tolerance, tier escalation, probe sensitivity, sharing threshold). Code only has exploration_rate and model_tier_escalation.
+- [x] **P1-30: Only 2 of 5 behavioral modulation channels wired** — FIXED: Added `risk_tolerance`, `probe_sensitivity`, `sharing_threshold` to `AffectBehaviorModulation`. All 5 channels now set per-octant: anxious hoards (sharing=0.75), confident shares freely (sharing=0.20), angry has high risk tolerance (0.60), etc.
 
 - [ ] **P1-31: Only 2 of 4 dream replay modes functional** — Random and Consequence work. Causal (follow failure chains) and Hypothetical (counterfactuals) are stubs.
 
@@ -925,7 +923,7 @@ be good ideas that need spec updates, or they may be accidental additions.
   - Difficulty weighting: `category_variance × novelty × tightness`
   - 8 tests covering buffer wrapping, stats, bias removal, interval widening, difficulty scaling
 
-- [ ] **P0-34: Knowledge entry utility scoring from prediction accuracy missing** — Spec requires: for each resolved prediction, entries in context pack receive utility increment/decrement based on whether residual is within/outside predicted interval. Not implemented. Knowledge curation is popularity-based (confirmations), not effectiveness-based (did entries help agents succeed?).
+- [x] **P0-34: Knowledge entry utility scoring from prediction accuracy missing** — FIXED: Added `score_prediction_utility(context_entry_ids, prediction_accurate, accuracy_score)` to `KnowledgeStore`. Accurate predictions bump `confidence_weight` by +0.05 × accuracy; inaccurate predictions decay by -0.03 × (1 - accuracy). Also adjusts demurrage balance. Shifts curation from popularity-based to effectiveness-based.
 
 - [ ] **P1-58: No catalytic score tracking for autocatalytic knowledge networks** — Spec (agent-chain-new/13-exponential-growth.md) requires tracking how many new entries each entry enabled. When avg catalytic score > 1.5, network becomes self-sustaining. Not implemented.
 

@@ -1051,6 +1051,65 @@ impl KnowledgeStore {
         Ok(found)
     }
 
+    /// Score knowledge entries by prediction utility (P0-34).
+    ///
+    /// When a prediction resolves, entries that were in the context pack should
+    /// receive utility increments (if the prediction was accurate) or decrements
+    /// (if inaccurate). This shifts curation from popularity-based (confirmations)
+    /// to effectiveness-based (did these entries help agents succeed?).
+    ///
+    /// `context_entry_ids`: IDs of entries that were in the context pack when
+    ///   the prediction was made.
+    /// `prediction_accurate`: whether the prediction residual was within the
+    ///   predicted interval.
+    /// `accuracy_score`: scalar accuracy in [0.0, 1.0] (higher = better prediction).
+    ///
+    /// Returns the number of entries updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn score_prediction_utility(
+        &self,
+        context_entry_ids: &[String],
+        prediction_accurate: bool,
+        accuracy_score: f64,
+    ) -> Result<usize> {
+        if context_entry_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut updated = 0;
+
+        // Utility delta: positive for accurate predictions, negative for inaccurate.
+        // Scaled by accuracy_score so barely-accurate predictions give small bumps.
+        let delta = if prediction_accurate {
+            0.05 * accuracy_score.clamp(0.0, 1.0)
+        } else {
+            -0.03 * (1.0 - accuracy_score.clamp(0.0, 1.0))
+        };
+
+        for entry in &mut entries {
+            if context_entry_ids.contains(&entry.id) {
+                // Apply utility delta to confidence weight (not raw confidence).
+                // This preserves the original confidence while adjusting the
+                // retrieval priority based on demonstrated usefulness.
+                entry.confidence_weight = (entry.confidence_weight + delta).clamp(0.05, 2.0);
+
+                // Also bump/decay balance (the demurrage system's currency).
+                entry.balance = (entry.balance + delta * 2.0).clamp(0.0, 5.0);
+                updated += 1;
+            }
+        }
+
+        if updated > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(updated)
+    }
+
     /// NEURO-11: Thaw a frozen entry, restoring a starter balance.
     ///
     /// Returns `true` if the entry was found, was frozen, and was thawed.

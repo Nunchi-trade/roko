@@ -239,6 +239,79 @@ impl EmotionalProvenance {
         };
         format!("{valence}_{arousal}")
     }
+
+    /// Compute emotional diversity from a set of emotional tags (P1-29).
+    ///
+    /// Uses normalized Shannon entropy of coarse emotion labels.
+    /// Returns 0.0 for 0-1 tags, up to 1.0 for maximum diversity.
+    ///
+    /// This is used as a supplementary quality signal: knowledge validated
+    /// under diverse emotional conditions is more likely to be robust.
+    #[must_use]
+    pub fn compute_diversity(tags: &[EmotionalTag]) -> f64 {
+        if tags.len() <= 1 {
+            return 0.0;
+        }
+
+        // Count occurrences of each coarse emotion label.
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for tag in tags {
+            let label = Self::coarse_emotion_label(tag.pad);
+            *counts.entry(label).or_default() += 1;
+        }
+
+        let n = tags.len() as f64;
+        let k = counts.len();
+        if k <= 1 {
+            return 0.0;
+        }
+
+        // Shannon entropy.
+        let entropy: f64 = counts
+            .values()
+            .map(|&c| {
+                let p = c as f64 / n;
+                if p > 0.0 { -p * p.ln() } else { 0.0 }
+            })
+            .sum();
+
+        // Normalize by max possible entropy (log(k)).
+        let max_entropy = (k as f64).ln();
+        if max_entropy > 0.0 {
+            (entropy / max_entropy).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Build provenance from multiple emotional tags (e.g., all source episodes).
+    ///
+    /// Computes average PAD, diversity, and discovery emotion from the set.
+    #[must_use]
+    pub fn from_tags(tags: &[EmotionalTag]) -> Self {
+        if tags.is_empty() {
+            return Self {
+                average_pad: PadVector::neutral(),
+                discovery_emotion: "neutral_mid_arousal".to_string(),
+                validation_arc: None,
+                emotional_diversity: 0.0,
+            };
+        }
+
+        let n = tags.len() as f64;
+        let avg_pad = PadVector {
+            pleasure: tags.iter().map(|t| f64::from(t.pad.pleasure)).sum::<f64>() / n,
+            arousal: tags.iter().map(|t| f64::from(t.pad.arousal)).sum::<f64>() / n,
+            dominance: tags.iter().map(|t| f64::from(t.pad.dominance)).sum::<f64>() / n,
+        };
+
+        Self {
+            discovery_emotion: Self::coarse_emotion_label(tags[0].pad),
+            average_pad: avg_pad,
+            validation_arc: None,
+            emotional_diversity: Self::compute_diversity(tags),
+        }
+    }
 }
 
 /// A durable unit of knowledge used for retrieval and memory.
@@ -414,15 +487,38 @@ impl KnowledgeEntry {
 
     /// Consolidation multiplier derived from emotional provenance.
     ///
-    /// Entries that were validated across varied emotional states and
-    /// resolved through a redemptive or progressive arc are retained
-    /// slightly more aggressively.
+    /// Implements three affect-based consolidation biases:
+    ///
+    /// 1. **Arousal priority** (McGaugh 2004, P0-22): high-arousal episodes
+    ///    get up to 1.3x consolidation priority. The arousal signal from the
+    ///    emotional tag's PAD vector or mood snapshot drives this.
+    ///
+    /// 2. **Emotional diversity** (P1-29): entries validated across varied
+    ///    emotional states (high Shannon entropy) are retained more aggressively.
+    ///    Diversity signals broader applicability of the knowledge.
+    ///
+    /// 3. **Narrative arc**: redemptive/progressive arcs get slight boosts,
+    ///    contaminating arcs are slightly penalized.
     #[must_use]
     pub fn emotional_consolidation_boost(&self) -> f64 {
         let mut boost = 1.0;
 
+        // McGaugh 2004 arousal-based consolidation priority (P0-22).
+        // High-arousal episodes are more memorable and should be consolidated
+        // with higher priority. Max boost: 1.3x at arousal = 1.0.
+        if let Some(tag) = self.emotional_tag.as_ref() {
+            let arousal = f64::from(tag.pad.arousal).abs().clamp(0.0, 1.0);
+            boost *= 1.0 + arousal * 0.30; // 1.0x at calm, 1.3x at max arousal
+        }
+
         if let Some(provenance) = self.emotional_provenance.as_ref() {
+            // Emotional diversity boost (P1-29).
+            // Shannon entropy of emotions across supporting episodes as quality signal.
+            // High diversity (close to 1.0) means knowledge was validated under
+            // varied emotional conditions → more robust.
             boost *= 1.0 + provenance.emotional_diversity.clamp(0.0, 1.0) * 0.15;
+
+            // Narrative arc weighting.
             boost *= match provenance.validation_arc {
                 Some(ValidationArc::Redemptive) => 1.06,
                 Some(ValidationArc::Progressive) => 1.04,
@@ -431,6 +527,8 @@ impl KnowledgeEntry {
             };
         }
 
+        // Intensity boost (smaller than arousal — intensity is the subjective
+        // salience, arousal is the physiological activation).
         if let Some(tag) = self.emotional_tag.as_ref() {
             boost *= 1.0 + f64::from(tag.intensity).clamp(0.0, 1.0) * 0.05;
         }
