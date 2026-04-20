@@ -1,0 +1,32 @@
+[package]
+name = "roko-venue"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VenueAdapter trait + concrete HL / Nunchi implementations. Ports the Python VenueAdapter ABC from offchainservices-agent. See plans/P08-trading-surface.md."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the HyperliquidVenue impl that talks to HL via the hyperliquid-rust-sdk.
+hl-backend = ["dep:hyperliquid_rust_sdk"]
+# Enables the NunchiVenue impl that talks to contracts-core's on-chain Orderbook.
+nunchi-backend = ["roko-chain/alloy-backend"]
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+roko-chain = { path = "../roko-chain" }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = { workspace = true }
+hyperliquid_rust_sdk = { version = "0.6", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
