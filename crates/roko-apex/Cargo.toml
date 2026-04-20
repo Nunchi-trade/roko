@@ -14,6 +14,7 @@ workspace = true
 roko-strategy = { path = "../roko-strategy" }
 roko-venue = { path = "../roko-venue" }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

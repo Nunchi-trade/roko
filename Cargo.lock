@@ -6760,6 +6760,7 @@ dependencies = [
  "roko-strategy",
  "roko-venue",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -6987,10 +6988,13 @@ dependencies = [
 name = "roko-execution"
 version = "0.1.0"
 dependencies = [
+ "rand 0.8.5",
+ "roko-strategy",
  "roko-venue",
  "serde",
  "tokio",
  "tracing",
+ "uuid 1.23.0",
 ]
 
 [[package]]
@@ -7234,6 +7238,8 @@ dependencies = [
 name = "roko-quoting"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "roko-strategy",
  "serde",
  "tokio",
  "tracing",
@@ -7247,6 +7253,7 @@ dependencies = [
  "roko-conductor",
  "roko-core",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -7369,6 +7376,7 @@ dependencies = [
  "roko-strategy",
  "roko-venue",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
