@@ -55,7 +55,10 @@ impl TurnConductor {
 
         Some(ConductorDecision::restart(
             "turn-conductor",
-            &format!("stuck: {:?} (confidence {:.2})", signal.kind, signal.confidence),
+            &format!(
+                "stuck: {:?} (confidence {:.2})",
+                signal.kind, signal.confidence
+            ),
         ))
     }
 
@@ -152,8 +155,7 @@ impl PlanConductor {
 
         // Budget pressure: if remaining budget is low, recommend adjustments.
         if self.plan_budget_remaining < 1.0 && self.plan_budget_remaining > 0.0 {
-            self.l2_adjustments
-                .insert("cost-overrun".to_string(), 0.5);
+            self.l2_adjustments.insert("cost-overrun".to_string(), 0.5);
         }
 
         ConductorDecision::cont()
@@ -171,8 +173,7 @@ impl PlanConductor {
         // If more than half of completed tasks had failures, lower thresholds.
         let total = self.task_decisions.len();
         if total >= 3 {
-            let failure_rate =
-                self.task_failure_count as f64 / total as f64;
+            let failure_rate = self.task_failure_count as f64 / total as f64;
             if failure_rate > 0.5 {
                 // Lower quality watcher thresholds by 30%.
                 adjustments

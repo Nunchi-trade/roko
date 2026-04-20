@@ -242,7 +242,10 @@ fn tier_rank_for_slug(slug: &str) -> u8 {
         || slug.contains("haiku")
     {
         0
-    } else if slug.contains("opus") || slug.contains("premium") || slug.contains("gemini-3.1-pro-preview") {
+    } else if slug.contains("opus")
+        || slug.contains("premium")
+        || slug.contains("gemini-3.1-pro-preview")
+    {
         2
     } else {
         1

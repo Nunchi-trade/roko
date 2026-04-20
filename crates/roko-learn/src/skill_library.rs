@@ -1900,7 +1900,9 @@ pub fn evolve_skills(
                 skill.first_seen = Some(Utc::now());
                 skill.recompute_confidence();
 
-                updates.push(SkillUpdate::Add { skill: Box::new(skill) });
+                updates.push(SkillUpdate::Add {
+                    skill: Box::new(skill),
+                });
             }
 
             // Update confidence for matching existing skills.
@@ -1925,11 +1927,8 @@ pub fn evolve_skills(
 
             for gate in &failed_gates {
                 let tool_seq = episode_tool_sequence(episode);
-                let anti_pattern = format!(
-                    "AVOID: {} failed after {}",
-                    gate,
-                    tool_seq.join(" -> "),
-                );
+                let anti_pattern =
+                    format!("AVOID: {} failed after {}", gate, tool_seq.join(" -> "),);
                 let name = format!(
                     "anti_{}_{}_{}",
                     sanitize_component(gate),
@@ -1958,9 +1957,7 @@ pub fn evolve_skills(
 
     // Flag skills for retirement if confidence is too low.
     for skill in existing_skills {
-        if skill.confidence < RETIRE_THRESHOLD
-            && skill.validations + skill.failures >= 5
-        {
+        if skill.confidence < RETIRE_THRESHOLD && skill.validations + skill.failures >= 5 {
             updates.push(SkillUpdate::Retire {
                 skill_name: skill.name.clone(),
                 reason: format!(

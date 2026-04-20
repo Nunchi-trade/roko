@@ -337,7 +337,12 @@ mod tests {
         // the threshold becomes 1.3, so 1.1 <= 1.3 -> stops.
         let factor = calibration_to_foraging_factor(0.8, 0.5);
         assert!(factor > 1.0);
-        assert!(should_stop_searching_calibrated(1.1, 0.2, 0.85, Some(factor)));
+        assert!(should_stop_searching_calibrated(
+            1.1,
+            0.2,
+            0.85,
+            Some(factor)
+        ));
     }
 
     #[test]
@@ -347,7 +352,12 @@ mod tests {
         // the threshold becomes 0.7, so 0.9 > 0.7 -> does NOT stop.
         let factor = calibration_to_foraging_factor(0.2, 0.5);
         assert!(factor < 1.0);
-        assert!(!should_stop_searching_calibrated(0.9, 0.2, 0.85, Some(factor)));
+        assert!(!should_stop_searching_calibrated(
+            0.9,
+            0.2,
+            0.85,
+            Some(factor)
+        ));
     }
 
     #[test]

@@ -326,15 +326,15 @@ impl PlaybookRules {
             let b_healthy = b.3 >= 0.1;
             b_healthy
                 .cmp(&a_healthy)
-                .then_with(|| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
                 .then_with(|| cmp_opt_dt_desc(a.2, b.2))
         });
 
-        let selected_ids: Vec<String> =
-            order.into_iter().map(|(id, _, _, _)| id).take(limit).collect();
+        let selected_ids: Vec<String> = order
+            .into_iter()
+            .map(|(id, _, _, _)| id)
+            .take(limit)
+            .collect();
 
         // Acquire write lock to stamp last_applied and collect clones.
         let mut guard = self.rules.write();

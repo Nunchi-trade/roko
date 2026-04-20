@@ -414,10 +414,7 @@ impl OneirographyPipeline {
         let discoveries = if causal_discoveries.is_empty() {
             String::new()
         } else {
-            format!(
-                " Key discoveries: {}.",
-                causal_discoveries.join("; ")
-            )
+            format!(" Key discoveries: {}.", causal_discoveries.join("; "))
         };
 
         format!(

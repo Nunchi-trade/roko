@@ -236,9 +236,7 @@ impl EffectivePriorityTracker {
     /// Whether the plan currently holds any resources.
     #[must_use]
     pub fn is_holding(&self, plan_id: &str) -> bool {
-        self.held
-            .get(plan_id)
-            .is_some_and(|held| !held.is_empty())
+        self.held.get(plan_id).is_some_and(|held| !held.is_empty())
     }
 
     /// List resources currently held by a plan.
@@ -253,7 +251,11 @@ impl EffectivePriorityTracker {
     ///
     /// Plans with equal effective priority retain their original order
     /// (stable sort).
-    pub fn sort_by_effective_priority(&self, plan_ids: &mut [String], base_priorities: &HashMap<String, u32>) {
+    pub fn sort_by_effective_priority(
+        &self,
+        plan_ids: &mut [String],
+        base_priorities: &HashMap<String, u32>,
+    ) {
         plan_ids.sort_by(|a, b| {
             let pa = self.effective_priority(a, base_priorities.get(a).copied().unwrap_or(0));
             let pb = self.effective_priority(b, base_priorities.get(b).copied().unwrap_or(0));
@@ -423,10 +425,7 @@ mod tests {
             "worktree:wt-42"
         );
         assert_eq!(ResourceId::AgentSlot.to_string(), "agent_slot");
-        assert_eq!(
-            ResourceId::Custom("gpu".into()).to_string(),
-            "custom:gpu"
-        );
+        assert_eq!(ResourceId::Custom("gpu".into()).to_string(), "custom:gpu");
     }
 
     #[test]
@@ -434,10 +433,7 @@ mod tests {
         let ceiling = PriorityCeiling::compute(&sample_plans());
         let json = serde_json::to_string(&ceiling).unwrap();
         let restored: PriorityCeiling = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            restored.ceiling(&ResourceId::MergeQueueSlot),
-            Some(100)
-        );
+        assert_eq!(restored.ceiling(&ResourceId::MergeQueueSlot), Some(100));
         assert_eq!(restored.len(), ceiling.len());
     }
 }

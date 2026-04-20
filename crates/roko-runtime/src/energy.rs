@@ -258,7 +258,8 @@ impl EnergyPool {
             return;
         }
 
-        let amount = (self.capacity * self.replenish_rate * elapsed_hours).min(self.capacity - self.balance);
+        let amount =
+            (self.capacity * self.replenish_rate * elapsed_hours).min(self.capacity - self.balance);
         if amount > 0.0 {
             self.balance += amount;
             self.total_replenished += amount;

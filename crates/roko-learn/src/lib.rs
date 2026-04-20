@@ -62,12 +62,12 @@
     clippy::use_self
 )]
 
+/// Active inference helpers for tier routing support.
+pub mod active_inference;
 /// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
 pub mod adas;
 /// HDC-based adversarial signal detection with attack prototype library (TA-10).
 pub mod adversarial;
-/// Active inference helpers for tier routing support.
-pub mod active_inference;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
 pub mod anomaly;
@@ -79,6 +79,8 @@ pub mod baseline;
 pub mod bayesian_confidence;
 /// Budget tracking and enforcement guardrails for routing decisions.
 pub mod budget;
+/// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
+pub mod calibration_policy;
 pub mod cascade_router;
 /// Causal microstructure discovery: Granger causality, PC algorithm,
 /// and formal causal DAG construction from time series data (TA-08).
@@ -90,21 +92,19 @@ pub mod context_pack_cache;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
-/// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
-pub mod calibration_policy;
 /// Curriculum ordering helpers for task scheduling.
 pub mod curriculum;
 pub mod drift;
 pub mod efficiency;
 pub mod episode_logger;
-/// Forensic replay API for debugging failed tasks (GATE-07).
-pub mod forensic_replay;
 /// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
 pub mod error_enrichment;
 /// Event subscriber that fans runtime events into learning subsystems.
 pub mod event_subscriber;
 /// Unified learning events emitted by routing, evaluation, and runtime feedback.
 pub mod events;
+/// Forensic replay API for debugging failed tasks (GATE-07).
+pub mod forensic_replay;
 pub mod hdc_clustering;
 /// HDC fingerprint helpers for episode memory.
 pub mod hdc_fingerprint;
@@ -128,11 +128,11 @@ pub mod quality_judge;
 pub mod regression;
 /// Typed reinforcement signal categories for the learning pipeline (AS-11).
 pub mod reinforce_kind;
+/// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
+pub mod research_pipeline;
 /// Evolutionary resonant pattern organisms with Lotka-Volterra dynamics,
 /// Price equation tracking, and HDC genomes (TA-09).
 pub mod resonant_patterns;
-/// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
-pub mod research_pipeline;
 /// Lookahead and calibration shells around the shipped cascade router.
 pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.

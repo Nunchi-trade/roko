@@ -83,10 +83,13 @@ impl VerdictPublisher {
                 summary.gate, summary.passed, summary.score
             ))
         });
-        let seq = self
-            .seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pulse = Pulse::new(seq, Topic::new("gate.verdict.emitted"), Kind::GateVerdict, body);
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pulse = Pulse::new(
+            seq,
+            Topic::new("gate.verdict.emitted"),
+            Kind::GateVerdict,
+            body,
+        );
         (self.callback)(pulse);
     }
 
@@ -101,10 +104,7 @@ impl VerdictPublisher {
 impl std::fmt::Debug for VerdictPublisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VerdictPublisher")
-            .field(
-                "seq",
-                &self.seq.load(std::sync::atomic::Ordering::Relaxed),
-            )
+            .field("seq", &self.seq.load(std::sync::atomic::Ordering::Relaxed))
             .finish()
     }
 }
@@ -174,8 +174,7 @@ mod tests {
 
     #[test]
     fn summary_captures_verdict_fields() {
-        let verdict = Verdict::fail("test", "3 tests failed")
-            .with_duration(500);
+        let verdict = Verdict::fail("test", "3 tests failed").with_duration(500);
         let summary = VerdictSummary::from_verdict(&verdict, Some(2));
         assert_eq!(summary.gate, "test");
         assert!(!summary.passed);

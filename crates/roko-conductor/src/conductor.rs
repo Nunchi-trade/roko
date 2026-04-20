@@ -371,14 +371,11 @@ impl Conductor {
 fn extract_provider(stream: &[Engram]) -> Option<String> {
     stream.iter().rev().find_map(|s| {
         s.tag("provider").map(str::to_owned).or_else(|| {
-            s.body
-                .as_json::<serde_json::Value>()
-                .ok()
-                .and_then(|json| {
-                    json.get("provider")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned)
-                })
+            s.body.as_json::<serde_json::Value>().ok().and_then(|json| {
+                json.get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
         })
     })
 }

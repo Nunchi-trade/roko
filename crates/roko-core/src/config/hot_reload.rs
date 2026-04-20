@@ -123,8 +123,10 @@ pub fn config_diff(old: &RokoConfig, new: &RokoConfig) -> Vec<ConfigChange> {
             section: ConfigSection::Budget,
             summary: format!(
                 "budget: plan ${:.2} -> ${:.2}, turn ${:.2} -> ${:.2}",
-                old.budget.max_plan_usd, new.budget.max_plan_usd,
-                old.budget.max_turn_usd, new.budget.max_turn_usd,
+                old.budget.max_plan_usd,
+                new.budget.max_plan_usd,
+                old.budget.max_turn_usd,
+                new.budget.max_turn_usd,
             ),
         });
     }
@@ -148,8 +150,10 @@ pub fn config_diff(old: &RokoConfig, new: &RokoConfig) -> Vec<ConfigChange> {
             section: ConfigSection::Demurrage,
             summary: format!(
                 "demurrage: rate_per_hour {:.4} -> {:.4}, min_balance {:.3} -> {:.3}",
-                old.demurrage.rate_per_hour, new.demurrage.rate_per_hour,
-                old.demurrage.min_balance, new.demurrage.min_balance,
+                old.demurrage.rate_per_hour,
+                new.demurrage.rate_per_hour,
+                old.demurrage.min_balance,
+                new.demurrage.min_balance,
             ),
         });
     }
@@ -300,7 +304,10 @@ pub fn parse_strategy_md(content: &str) -> StrategyDocument {
                 Some("goals")
             } else if header_lower.contains("tactic") || header_lower.contains("approach") {
                 Some("tactics")
-            } else if header_lower.contains("risk") || header_lower.contains("bound") || header_lower.contains("constraint") {
+            } else if header_lower.contains("risk")
+                || header_lower.contains("bound")
+                || header_lower.contains("constraint")
+            {
                 Some("risk_bounds")
             } else {
                 None
@@ -309,7 +316,10 @@ pub fn parse_strategy_md(content: &str) -> StrategyDocument {
         }
 
         // Extract bullet items.
-        if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
             if !item.is_empty() {
                 match current_section {
                     Some("goals") => doc.goals.push(item.to_string()),

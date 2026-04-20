@@ -74,9 +74,7 @@ impl VerdictAwareScorer {
     /// Severity ordering: compile error (1.0) > test failure (0.8) >
     /// lint warning (0.5) > pass (0.1).
     fn severity_factor(&self, signal: &Engram) -> f32 {
-        let gate_name = signal
-            .tag("gate")
-            .unwrap_or("");
+        let gate_name = signal.tag("gate").unwrap_or("");
 
         let passed = signal
             .tag("verdict_passed")
@@ -269,12 +267,7 @@ impl VerdictHistory {
     /// Returns 0.5 if the model has >2 consecutive compile failures.
     /// Returns 0.25 if the model has >5 consecutive compile failures.
     #[must_use]
-    pub fn reward_penalty(
-        &self,
-        model_slug: &str,
-        task_type: &str,
-        target_crate: &str,
-    ) -> f64 {
+    pub fn reward_penalty(&self, model_slug: &str, task_type: &str, target_crate: &str) -> f64 {
         let streak = self.compile_failure_streak(model_slug, task_type, target_crate);
         match streak {
             0..=2 => 1.0,
@@ -340,8 +333,7 @@ mod tests {
             .body(Body::empty())
             .build();
         e.created_at_ms = now - age_ms;
-        e.tags
-            .insert("gate".to_string(), gate.to_string());
+        e.tags.insert("gate".to_string(), gate.to_string());
         e.tags
             .insert("verdict_passed".to_string(), passed.to_string());
         e
@@ -512,10 +504,7 @@ mod tests {
             history.compile_failure_streak("model-a", "fix", "roko-gate"),
             1
         );
-        assert_eq!(
-            history.reward_penalty("model-a", "fix", "roko-gate"),
-            1.0
-        );
+        assert_eq!(history.reward_penalty("model-a", "fix", "roko-gate"), 1.0);
     }
 
     #[test]

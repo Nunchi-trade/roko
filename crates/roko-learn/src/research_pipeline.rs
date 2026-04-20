@@ -10,8 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::heuristics::{
-    Claim, ClaimId, Heuristic, Paper, PaperId, ReplicationLedger,
-    ReplicationStatus,
+    Claim, ClaimId, Heuristic, Paper, PaperId, ReplicationLedger, ReplicationStatus,
 };
 
 /// Outcome of a single replication trial.
@@ -151,8 +150,8 @@ impl ResearchPipeline {
 
             // Update status based on accumulated evidence.
             if let Some(claim) = self.claims.get(&claim_id) {
-                let rate = claim.calibration.confirmations as f64
-                    / claim.calibration.trials.max(1) as f64;
+                let rate =
+                    claim.calibration.confirmations as f64 / claim.calibration.trials.max(1) as f64;
                 ledger.status = if rate >= 0.7 {
                     ReplicationStatus::Replicated
                 } else if rate <= 0.3 {
@@ -164,10 +163,7 @@ impl ResearchPipeline {
         }
 
         // Store the trial.
-        self.trials
-            .entry(claim_id)
-            .or_default()
-            .push(trial);
+        self.trials.entry(claim_id).or_default().push(trial);
     }
 
     /// Check if a claim is eligible for promotion to a heuristic.
@@ -196,13 +192,14 @@ impl ResearchPipeline {
         let paper = self.papers.get(&claim.paper)?;
 
         let heuristic_id = format!("research:{}", claim.id);
-        let description = format!(
-            "[{}] {}: {}",
-            paper.title, claim.id, claim.hypothesis
-        );
+        let description = format!("[{}] {}: {}", paper.title, claim.id, claim.hypothesis);
 
-        let mut heuristic =
-            Heuristic::new(&heuristic_id, description, claim.context.clone(), claim.falsifier.clone());
+        let mut heuristic = Heuristic::new(
+            &heuristic_id,
+            description,
+            claim.context.clone(),
+            claim.falsifier.clone(),
+        );
         heuristic.calibration = claim.calibration.clone();
 
         Some(heuristic)
@@ -271,7 +268,7 @@ macro_rules! claim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::heuristics::{Predicate, PaperProvenance};
+    use crate::heuristics::{PaperProvenance, Predicate};
     use roko_core::project::Language;
 
     fn sample_paper() -> Paper {
@@ -301,7 +298,14 @@ mod tests {
         let claim_id = pipeline.register_claim(sample_claim());
         assert_eq!(claim_id, Some("claim-001".to_string()));
         assert!(pipeline.claims.contains_key("claim-001"));
-        assert!(pipeline.papers.get("paper-001").unwrap().claims.contains(&"claim-001".to_string()));
+        assert!(
+            pipeline
+                .papers
+                .get("paper-001")
+                .unwrap()
+                .claims
+                .contains(&"claim-001".to_string())
+        );
     }
 
     #[test]

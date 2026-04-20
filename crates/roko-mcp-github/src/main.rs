@@ -1770,8 +1770,9 @@ fn comment_on_issue(
         )));
     }
 
-    serde_json::from_str(&body)
-        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub comment response: {err}")))
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub comment response: {err}"))
+    })
 }
 
 fn close_issue(client: &Client, args: &CloseIssueArguments) -> Result<Value, JsonRpcError> {
@@ -1840,8 +1841,9 @@ fn add_labels_to_issue(
         )));
     }
 
-    let labels: Vec<GithubLabel> = serde_json::from_str(&body)
-        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub labels response: {err}")))?;
+    let labels: Vec<GithubLabel> = serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub labels response: {err}"))
+    })?;
     Ok(labels.into_iter().map(|l| l.name).collect())
 }
 
@@ -1927,8 +1929,9 @@ fn list_commits(client: &Client, args: &ListCommitsArguments) -> Result<Vec<Valu
         )));
     }
 
-    let commits: Vec<Value> = serde_json::from_str(&body)
-        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub commits response: {err}")))?;
+    let commits: Vec<Value> = serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub commits response: {err}"))
+    })?;
     Ok(commits
         .into_iter()
         .map(|c| {

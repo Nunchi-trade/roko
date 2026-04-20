@@ -224,9 +224,8 @@ pub fn load_manifest(path: &Path) -> Result<PluginManifestFile> {
 ///
 /// Returns an error if the TOML is invalid or doesn't match the schema.
 pub fn parse_manifest(content: &str) -> Result<PluginManifestFile> {
-    let manifest: PluginManifestFile = toml::from_str(content).map_err(|e| {
-        RokoError::config(format!("failed to parse plugin manifest: {e}"))
-    })?;
+    let manifest: PluginManifestFile = toml::from_str(content)
+        .map_err(|e| RokoError::config(format!("failed to parse plugin manifest: {e}")))?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -428,20 +427,33 @@ version = "0.1.0"
         let manifest = parse_manifest(FULL_MANIFEST).unwrap();
         assert_eq!(manifest.plugin.name, "code-review");
         assert_eq!(manifest.plugin.version, "1.0.0");
-        assert_eq!(manifest.plugin.description.as_deref(), Some("Automated code review plugin"));
+        assert_eq!(
+            manifest.plugin.description.as_deref(),
+            Some("Automated code review plugin")
+        );
         assert_eq!(manifest.plugin.author.as_deref(), Some("Test Author"));
 
         // Prompts
         assert_eq!(manifest.prompts.len(), 2);
         assert_eq!(manifest.prompts[0].name, "pr-review");
         assert_eq!(manifest.prompts[0].role.as_deref(), Some("reviewer"));
-        assert!(manifest.prompts[0].template.contains("Review the following PR"));
+        assert!(
+            manifest.prompts[0]
+                .template
+                .contains("Review the following PR")
+        );
 
         // Profiles
         assert_eq!(manifest.profiles.len(), 2);
         assert_eq!(manifest.profiles[0].name, "read-only");
-        assert_eq!(manifest.profiles[0].allowed_tools, vec!["read_file", "grep", "glob"]);
-        assert_eq!(manifest.profiles[0].denied_tools, vec!["bash", "write_file"]);
+        assert_eq!(
+            manifest.profiles[0].allowed_tools,
+            vec!["read_file", "grep", "glob"]
+        );
+        assert_eq!(
+            manifest.profiles[0].denied_tools,
+            vec!["bash", "write_file"]
+        );
 
         // Tools
         assert_eq!(manifest.tools.len(), 2);
@@ -450,9 +462,15 @@ version = "0.1.0"
 
         // Triggers
         assert_eq!(manifest.triggers.len(), 3);
-        assert!(matches!(&manifest.triggers[0], TriggerDef::Cron { expression, .. } if expression == "0 */5 * * * *"));
-        assert!(matches!(&manifest.triggers[1], TriggerDef::FileWatch { paths, .. } if paths.len() == 2));
-        assert!(matches!(&manifest.triggers[2], TriggerDef::Webhook { path, .. } if path == "/hooks/code-review"));
+        assert!(
+            matches!(&manifest.triggers[0], TriggerDef::Cron { expression, .. } if expression == "0 */5 * * * *")
+        );
+        assert!(
+            matches!(&manifest.triggers[1], TriggerDef::FileWatch { paths, .. } if paths.len() == 2)
+        );
+        assert!(
+            matches!(&manifest.triggers[2], TriggerDef::Webhook { path, .. } if path == "/hooks/code-review")
+        );
 
         // Dependencies
         assert_eq!(manifest.dependencies.len(), 1);

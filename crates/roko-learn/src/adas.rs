@@ -34,7 +34,11 @@ pub struct AdasCandidate {
 
 impl AdasCandidate {
     /// Create a new seed candidate.
-    pub fn new(id: impl Into<String>, model: impl Into<String>, prompt_variant: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        model: impl Into<String>,
+        prompt_variant: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             model: model.into(),
@@ -136,7 +140,11 @@ impl AdasOptimizer {
     #[must_use]
     pub fn select_elites(&self) -> Vec<&AdasCandidate> {
         let mut sorted: Vec<&AdasCandidate> = self.population.iter().collect();
-        sorted.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.fitness
+                .partial_cmp(&a.fitness)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         sorted.truncate(self.elite_count);
         sorted
     }
@@ -177,7 +185,8 @@ impl AdasOptimizer {
     {
         self.generation += 1;
 
-        let elites: Vec<AdasCandidate> = self.select_elites().iter().map(|e| (*e).clone()).collect();
+        let elites: Vec<AdasCandidate> =
+            self.select_elites().iter().map(|e| (*e).clone()).collect();
         let mut new_children = Vec::new();
 
         for parent in &elites {
@@ -216,7 +225,11 @@ impl AdasOptimizer {
 
     /// Record a mutation and update amplification weights.
     fn record_mutation(&mut self, description: &str, fitness_delta: f64) {
-        if let Some(record) = self.mutation_history.iter_mut().find(|r| r.description == description) {
+        if let Some(record) = self
+            .mutation_history
+            .iter_mut()
+            .find(|r| r.description == description)
+        {
             record.applications += 1;
             record.cumulative_delta += fitness_delta;
             record.fitness_delta = record.cumulative_delta / record.applications as f64;
@@ -255,7 +268,9 @@ impl AdasOptimizer {
         }
 
         self.population.sort_by(|a, b| {
-            b.fitness.partial_cmp(&a.fitness).unwrap_or(std::cmp::Ordering::Equal)
+            b.fitness
+                .partial_cmp(&a.fitness)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         self.population.truncate(self.max_population);
     }
@@ -263,9 +278,11 @@ impl AdasOptimizer {
     /// Best candidate in the current population.
     #[must_use]
     pub fn best(&self) -> Option<&AdasCandidate> {
-        self.population
-            .iter()
-            .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap_or(std::cmp::Ordering::Equal))
+        self.population.iter().max_by(|a, b| {
+            a.fitness
+                .partial_cmp(&b.fitness)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Current population size.
@@ -325,10 +342,10 @@ mod tests {
 
     #[test]
     fn adas_amplification() {
-        let seeds = vec![
-            AdasCandidate::new("s0", "model", "v1").with_param("lr", 0.01),
-        ];
-        let mut opt = AdasOptimizer::new(seeds).with_max_population(10).with_elite_count(1);
+        let seeds = vec![AdasCandidate::new("s0", "model", "v1").with_param("lr", 0.01)];
+        let mut opt = AdasOptimizer::new(seeds)
+            .with_max_population(10)
+            .with_elite_count(1);
         opt.record_evaluation("s0", 0.5);
 
         // Run a few generations.

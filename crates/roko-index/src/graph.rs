@@ -16,9 +16,8 @@ static CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(").expect("call regex"));
 
 /// Matches `PascalCase` identifiers that likely refer to types.
-static TYPE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Z][A-Za-z0-9_]*)\b").expect("type ref regex")
-});
+static TYPE_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b([A-Z][A-Za-z0-9_]*)\b").expect("type ref regex"));
 
 // ─── Edge kinds ─────────────────────────────────────────────────────────
 
@@ -231,7 +230,11 @@ impl SymbolGraph {
                 .or_default()
                 .push((edge.from_id.clone(), edge.kind.clone()));
         }
-        Self { nodes, forward, reverse }
+        Self {
+            nodes,
+            forward,
+            reverse,
+        }
     }
 
     /// Serialize the graph to an rkyv archive and write it to `path`.
@@ -451,8 +454,7 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
                     .take(end_line.saturating_sub(start_line).saturating_add(1))
                 {
                     for capture in TYPE_REF_RE.captures_iter(line) {
-                        let candidate =
-                            capture.get(1).map(|m| m.as_str()).unwrap_or_default();
+                        let candidate = capture.get(1).map(|m| m.as_str()).unwrap_or_default();
                         if candidate.is_empty() {
                             continue;
                         }
@@ -493,10 +495,7 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
             ) {
                 // This is a container — set as current parent.
                 current_parent = Some(SymbolId::from_symbol(sym, &file.path));
-            } else if matches!(
-                sym.kind,
-                SymbolKind::Struct | SymbolKind::Enum
-            ) {
+            } else if matches!(sym.kind, SymbolKind::Struct | SymbolKind::Enum) {
                 // Top-level type resets the containment scope.
                 current_parent = None;
             } else if sym.kind == SymbolKind::Function {
@@ -1367,8 +1366,7 @@ mod tests {
         let graph = build_graph(&files);
         let seed_a = SymbolId::new("a.rs", "A", SymbolKind::Function);
         let seed_b = SymbolId::new("b.rs", "B", SymbolKind::Function);
-        let ranks =
-            personalized_pagerank(&graph, &[seed_a.clone(), seed_b.clone()], 0.85, 30);
+        let ranks = personalized_pagerank(&graph, &[seed_a.clone(), seed_b.clone()], 0.85, 30);
 
         let a_rank = ranks.get(&seed_a).copied().unwrap_or(0.0);
         let b_rank = ranks.get(&seed_b).copied().unwrap_or(0.0);
@@ -1389,9 +1387,11 @@ mod tests {
     fn personalized_pagerank_empty_seeds_still_runs() {
         // Empty seeds = no teleport to any node. All nodes should get 0 or
         // near-zero rank except from random walk itself.
-        let files = vec![
-            make_file("a.rs", vec![sym("A", SymbolKind::Function)], vec![]),
-        ];
+        let files = vec![make_file(
+            "a.rs",
+            vec![sym("A", SymbolKind::Function)],
+            vec![],
+        )];
         let graph = build_graph(&files);
         let ranks = personalized_pagerank(&graph, &[], 0.85, 10);
         // Should still return results (all near-zero since no teleport).

@@ -110,12 +110,12 @@ impl Theme {
             foreground: Color::White,
             muted: Color::Rgb(180, 180, 180),
             background: Color::Black,
-            accent: Color::Rgb(255, 180, 200),   // bright pink
+            accent: Color::Rgb(255, 180, 200), // bright pink
             accent_foreground: Color::Black,
-            success: Color::Rgb(100, 255, 100),   // bright green
-            warning: Color::Rgb(255, 255, 80),    // bright yellow
-            danger: Color::Rgb(255, 80, 80),      // bright red
-            info: Color::Rgb(100, 180, 255),       // bright blue
+            success: Color::Rgb(100, 255, 100), // bright green
+            warning: Color::Rgb(255, 255, 80),  // bright yellow
+            danger: Color::Rgb(255, 80, 80),    // bright red
+            info: Color::Rgb(100, 180, 255),    // bright blue
             selection_background: Color::Rgb(60, 60, 80),
             selection_foreground: Color::White,
         }

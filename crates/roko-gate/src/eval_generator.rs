@@ -107,7 +107,11 @@ impl EvalGenerator {
                     .replace("{files}", &files_str);
 
                 Evaluation {
-                    name: format!("gen_{}_{}", template.name.replace('-', "_"), sanitize(task_title)),
+                    name: format!(
+                        "gen_{}_{}",
+                        template.name.replace('-', "_"),
+                        sanitize(task_title)
+                    ),
                     gate_type: template.gate_type.clone(),
                     strategy: template.strategy.clone(),
                     test_source,
@@ -144,7 +148,13 @@ impl EvalGenerator {
 fn sanitize(title: &str) -> String {
     title
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string()

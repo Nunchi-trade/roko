@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::phase2::{
-    AgentPaymentChannel, ChannelParty, ChannelState, DisputeLevel, DisputeOutcome,
-    DisputeResolution, u256, Address,
+    Address, AgentPaymentChannel, ChannelParty, ChannelState, DisputeLevel, DisputeOutcome,
+    DisputeResolution, u256,
 };
 
 // ---------------------------------------------------------------------------
@@ -291,9 +291,7 @@ impl X402Manager {
         }
 
         // Check timestamp validity
-        if self.current_timestamp < auth.valid_after
-            || self.current_timestamp > auth.valid_before
-        {
+        if self.current_timestamp < auth.valid_after || self.current_timestamp > auth.valid_before {
             return VerificationStatus::Expired;
         }
 
@@ -360,10 +358,7 @@ impl X402Manager {
     ///
     /// Returns an error if the channel doesn't exist, is not open, the nonce
     /// is not increasing, or the balances don't sum to the total deposit.
-    pub fn update_channel(
-        &mut self,
-        proof: &BalanceProof,
-    ) -> Result<(), X402Error> {
+    pub fn update_channel(&mut self, proof: &BalanceProof) -> Result<(), X402Error> {
         let channel = self
             .channels
             .get_mut(&proof.channel_id)
@@ -402,10 +397,7 @@ impl X402Manager {
     /// # Errors
     ///
     /// Returns an error if the channel doesn't exist or is not open.
-    pub fn request_close(
-        &mut self,
-        channel_id: &[u8; 32],
-    ) -> Result<u64, X402Error> {
+    pub fn request_close(&mut self, channel_id: &[u8; 32]) -> Result<u64, X402Error> {
         let channel = self
             .channels
             .get_mut(channel_id)
@@ -637,7 +629,10 @@ mod tests {
             s: [0u8; 32],
         };
 
-        assert_eq!(mgr.verify_authorization(&request, &auth), VerificationStatus::Valid);
+        assert_eq!(
+            mgr.verify_authorization(&request, &auth),
+            VerificationStatus::Valid
+        );
     }
 
     #[test]
@@ -759,7 +754,10 @@ mod tests {
         };
 
         // First verification: valid
-        assert_eq!(mgr.verify_authorization(&request, &auth), VerificationStatus::Valid);
+        assert_eq!(
+            mgr.verify_authorization(&request, &auth),
+            VerificationStatus::Valid
+        );
 
         // Record the nonce
         mgr.record_nonce(&auth.from, auth.nonce);

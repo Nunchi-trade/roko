@@ -1974,7 +1974,10 @@ pub enum DegradationAction {
 }
 
 /// Compute the cascade of degradation actions for a given budget status.
-pub fn degradation_cascade(status: BudgetStatus, mode: BudgetDegradationMode) -> Vec<DegradationAction> {
+pub fn degradation_cascade(
+    status: BudgetStatus,
+    mode: BudgetDegradationMode,
+) -> Vec<DegradationAction> {
     match mode {
         BudgetDegradationMode::NotifyOnly => match status {
             BudgetStatus::Ok => vec![],
@@ -2143,7 +2146,10 @@ impl DemurrageCycle {
     /// apply demurrage to all supplied Engrams.
     ///
     /// Returns `Some(report)` when demurrage was applied, `None` otherwise.
-    pub fn tick(&mut self, engrams: &[BackupEngram]) -> Option<(Vec<BackupEngram>, DemurrageReport)> {
+    pub fn tick(
+        &mut self,
+        engrams: &[BackupEngram],
+    ) -> Option<(Vec<BackupEngram>, DemurrageReport)> {
         self.iteration += 1;
 
         if self.config.validation_interval == 0 {
@@ -2342,7 +2348,8 @@ mod tests {
 
     #[test]
     fn degradation_cascade_notify_only_mode() {
-        let actions = degradation_cascade(BudgetStatus::Critical, BudgetDegradationMode::NotifyOnly);
+        let actions =
+            degradation_cascade(BudgetStatus::Critical, BudgetDegradationMode::NotifyOnly);
         assert_eq!(actions, vec![DegradationAction::NotifyOperator]);
     }
 
@@ -2400,7 +2407,11 @@ mod tests {
     fn successor_lineage_chains_across_generations() {
         let parent = sample_parent_manifest();
         let child = create_successor(&parent, SuccessorMode::FullLineage, Some("child".into()));
-        let grandchild = create_successor(&child, SuccessorMode::FullLineage, Some("grandchild".into()));
+        let grandchild = create_successor(
+            &child,
+            SuccessorMode::FullLineage,
+            Some("grandchild".into()),
+        );
         assert_eq!(grandchild.generation, 2);
         assert_eq!(grandchild.lineage_id, Some("parent-agent".into()));
     }
@@ -2483,7 +2494,10 @@ mod tests {
         };
         let manifest = AgentExtendedManifest::new(core);
         let result = provision_full(manifest, "local-slot-1");
-        assert!(matches!(result, Err(ProvisioningError::InvalidPromptLength)));
+        assert!(matches!(
+            result,
+            Err(ProvisioningError::InvalidPromptLength)
+        ));
     }
 
     #[test]

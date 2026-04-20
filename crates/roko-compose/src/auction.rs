@@ -388,11 +388,8 @@ pub fn vcg_allocate(
     let pareto = is_pareto_optimal(&included_allocs, &excluded_allocs, remaining);
     let welfare_loss: f64 = excluded.iter().map(|e| e.adjusted_bid).sum();
 
-    let highest_payment_sections: Vec<_> = payments
-        .iter()
-        .filter(|(_, p)| *p > 0.0)
-        .cloned()
-        .collect();
+    let highest_payment_sections: Vec<_> =
+        payments.iter().filter(|(_, p)| *p > 0.0).cloned().collect();
     let displaced_sections: Vec<_> = excluded
         .iter()
         .map(|b| (b.section_name.clone(), b.adjusted_bid))
@@ -467,8 +464,14 @@ mod tests {
     #[test]
     fn affect_modulation_from_pad() {
         let modulation = AffectModulation::from_pad(0.5, 0.8);
-        assert!(modulation.urgency_multiplier > 1.0, "high arousal => high urgency");
-        assert!(modulation.affect_weight > 0.0, "positive pleasure => positive affect weight");
+        assert!(
+            modulation.urgency_multiplier > 1.0,
+            "high arousal => high urgency"
+        );
+        assert!(
+            modulation.affect_weight > 0.0,
+            "positive pleasure => positive affect weight"
+        );
     }
 
     #[test]
@@ -477,7 +480,10 @@ mod tests {
         let base = 1.0;
         let positive_entry = modulation.adjust_bid(base, 0.8);
         let negative_entry = modulation.adjust_bid(base, -0.8);
-        assert!(positive_entry > negative_entry, "positive pleasure should prefer positive valence");
+        assert!(
+            positive_entry > negative_entry,
+            "positive pleasure should prefer positive valence"
+        );
     }
 
     #[test]
@@ -510,7 +516,11 @@ mod tests {
         ];
 
         let allocation = vcg_allocate(bids, 800, &AffectModulation::default());
-        assert_eq!(allocation.winners.len(), 2, "should fit 2 of 3 bids in 800 tokens");
+        assert_eq!(
+            allocation.winners.len(),
+            2,
+            "should fit 2 of 3 bids in 800 tokens"
+        );
         assert_eq!(allocation.excluded.len(), 1);
         assert!(allocation.total_tokens_used <= 800);
         assert!(allocation.budget_utilization > 0.0);

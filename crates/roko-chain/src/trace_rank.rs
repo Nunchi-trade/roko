@@ -182,7 +182,8 @@ impl TraceRank {
             }
         }
         let n = nodes.len();
-        let node_index: HashMap<u256, usize> = nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let node_index: HashMap<u256, usize> =
+            nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
         // Build adjacency: out_edges[from_idx] = vec of (to_idx, weight).
         let mut out_edges: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -222,7 +223,8 @@ impl TraceRank {
                     }
                 } else {
                     for &(to_idx, weight) in &out_edges[from_idx] {
-                        let contribution = damping * ranks[from_idx] * weight / out_weights[from_idx];
+                        let contribution =
+                            damping * ranks[from_idx] * weight / out_weights[from_idx];
                         new_ranks[to_idx] += contribution;
                     }
                 }
@@ -318,7 +320,10 @@ mod tests {
         // Agent 2 (receiver) should have higher rank than agent 1 (payer).
         let rank_1 = result.ranks[&1];
         let rank_2 = result.ranks[&2];
-        assert!(rank_2 > rank_1, "receiver should rank higher: {rank_1} vs {rank_2}");
+        assert!(
+            rank_2 > rank_1,
+            "receiver should rank higher: {rank_1} vs {rank_2}"
+        );
     }
 
     #[test]
@@ -355,10 +360,18 @@ mod tests {
         // Chain: 1 -> 2 -> 3 (trust flows transitively).
         let mut tr = TraceRank::new();
         tr.record_payment(PaymentEdge {
-            from: 1, to: 2, amount: 100.0, quality: 0.9, block: 1,
+            from: 1,
+            to: 2,
+            amount: 100.0,
+            quality: 0.9,
+            block: 1,
         });
         tr.record_payment(PaymentEdge {
-            from: 2, to: 3, amount: 80.0, quality: 0.85, block: 2,
+            from: 2,
+            to: 3,
+            amount: 80.0,
+            quality: 0.85,
+            block: 2,
         });
 
         let result = tr.compute();
@@ -372,13 +385,25 @@ mod tests {
         // Circular payments: 1 -> 2 -> 3 -> 1.
         let mut tr = TraceRank::new();
         tr.record_payment(PaymentEdge {
-            from: 1, to: 2, amount: 100.0, quality: 0.9, block: 1,
+            from: 1,
+            to: 2,
+            amount: 100.0,
+            quality: 0.9,
+            block: 1,
         });
         tr.record_payment(PaymentEdge {
-            from: 2, to: 3, amount: 100.0, quality: 0.9, block: 2,
+            from: 2,
+            to: 3,
+            amount: 100.0,
+            quality: 0.9,
+            block: 2,
         });
         tr.record_payment(PaymentEdge {
-            from: 3, to: 1, amount: 100.0, quality: 0.9, block: 3,
+            from: 3,
+            to: 1,
+            amount: 100.0,
+            quality: 0.9,
+            block: 3,
         });
 
         let result = tr.compute();
@@ -411,10 +436,18 @@ mod tests {
     fn normalized_rank_scales_to_unit() {
         let mut tr = TraceRank::new();
         tr.record_payment(PaymentEdge {
-            from: 1, to: 2, amount: 100.0, quality: 0.9, block: 1,
+            from: 1,
+            to: 2,
+            amount: 100.0,
+            quality: 0.9,
+            block: 1,
         });
         tr.record_payment(PaymentEdge {
-            from: 1, to: 3, amount: 50.0, quality: 0.5, block: 2,
+            from: 1,
+            to: 3,
+            amount: 50.0,
+            quality: 0.5,
+            block: 2,
         });
 
         let result = tr.compute();
@@ -433,7 +466,11 @@ mod tests {
         });
 
         tr.record_payment(PaymentEdge {
-            from: 1, to: 2, amount: 0.001, quality: 1.0, block: 1, // weight = 0.001 < 1.0
+            from: 1,
+            to: 2,
+            amount: 0.001,
+            quality: 1.0,
+            block: 1, // weight = 0.001 < 1.0
         });
 
         assert_eq!(tr.edge_count(), 0, "dust payment should be filtered");
@@ -447,10 +484,18 @@ mod tests {
         });
 
         tr.record_payment(PaymentEdge {
-            from: 1, to: 2, amount: 100.0, quality: 0.9, block: 50,  // old
+            from: 1,
+            to: 2,
+            amount: 100.0,
+            quality: 0.9,
+            block: 50, // old
         });
         tr.record_payment(PaymentEdge {
-            from: 3, to: 4, amount: 100.0, quality: 0.9, block: 180, // recent
+            from: 3,
+            to: 4,
+            amount: 100.0,
+            quality: 0.9,
+            block: 180, // recent
         });
 
         let result = tr.compute();

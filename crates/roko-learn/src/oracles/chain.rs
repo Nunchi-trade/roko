@@ -5,9 +5,9 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    ChainMetric, ChainQueryPayload, Context, Engram, Oracle, OracleDomain,
-    OracleQuery, PredictedValue, Prediction, PredictionAccuracy, PredictionInterval,
-    PredictionProvenance, QueryPayload,
+    ChainMetric, ChainQueryPayload, Context, Engram, Oracle, OracleDomain, OracleQuery,
+    PredictedValue, Prediction, PredictionAccuracy, PredictionInterval, PredictionProvenance,
+    QueryPayload,
 };
 use std::collections::VecDeque;
 
@@ -328,8 +328,11 @@ impl Oracle for ChainOracle {
                 let predicted = current * (1.0 + weighted_signal * 0.02);
                 PredictedValue::Numeric(predicted)
             }
-            ChainMetric::Gas | ChainMetric::Volatility | ChainMetric::LiquidityDepth
-            | ChainMetric::MevOpportunity | ChainMetric::ProtocolHealth
+            ChainMetric::Gas
+            | ChainMetric::Volatility
+            | ChainMetric::LiquidityDepth
+            | ChainMetric::MevOpportunity
+            | ChainMetric::ProtocolHealth
             | ChainMetric::FundingRate => PredictedValue::Probability(probability),
             _ => PredictedValue::Probability(probability),
         };
@@ -458,7 +461,10 @@ mod tests {
             prices.push(119.0 - i as f64 * 2.0);
         }
         let result = rsi(&prices, 14).unwrap();
-        assert!(result < 60.0, "Mixed trend RSI should be moderate, got {result}");
+        assert!(
+            result < 60.0,
+            "Mixed trend RSI should be moderate, got {result}"
+        );
     }
 
     #[test]

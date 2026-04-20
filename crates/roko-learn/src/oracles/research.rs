@@ -70,9 +70,7 @@ impl ResearchOracle {
     fn estimate_reliability(&self, source_id: &str) -> f64 {
         let reliability = self.source_reliability.read();
         match reliability.get(source_id) {
-            Some(scores) if !scores.is_empty() => {
-                scores.iter().sum::<f64>() / scores.len() as f64
-            }
+            Some(scores) if !scores.is_empty() => scores.iter().sum::<f64>() / scores.len() as f64,
             _ => 0.6, // Default moderate reliability.
         }
     }
@@ -98,8 +96,8 @@ impl ResearchOracle {
             return (0.2, 0.15);
         }
 
-        let contradiction_rate = history.iter().filter(|r| r.had_contradictions).count() as f64
-            / history.len() as f64;
+        let contradiction_rate =
+            history.iter().filter(|r| r.had_contradictions).count() as f64 / history.len() as f64;
         let confidence = (history.len() as f64 / 15.0).min(0.75);
 
         (contradiction_rate, confidence)

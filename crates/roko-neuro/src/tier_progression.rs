@@ -588,9 +588,7 @@ impl TierProgression {
         // Fingerprint each insight by hashing its summary text for HDC seeding.
         let vectors: Vec<roko_primitives::HdcVector> = qualified
             .iter()
-            .map(|insight| {
-                roko_primitives::HdcVector::from_seed(insight.summary().as_bytes())
-            })
+            .map(|insight| roko_primitives::HdcVector::from_seed(insight.summary().as_bytes()))
             .collect();
 
         // Determine cluster count: at most qualified.len()/2, at least 1.
@@ -1708,21 +1706,45 @@ mod tests {
         progression.replay_heuristics(&mut report, &episodes);
 
         // h-success should have 2 trials (both supporting).
-        let h_success = report.heuristics.iter().find(|h| h.id == "h-success").unwrap();
+        let h_success = report
+            .heuristics
+            .iter()
+            .find(|h| h.id == "h-success")
+            .unwrap();
         assert!(h_success.trials >= 2);
         assert_eq!(h_success.violations, 0);
         assert!(!h_success.receipts.is_empty());
-        assert!(h_success.receipts.iter().all(|r| r.action == CalibrationAction::Confirm));
+        assert!(
+            h_success
+                .receipts
+                .iter()
+                .all(|r| r.action == CalibrationAction::Confirm)
+        );
 
         // h-failure should have 2 trials (both contradicting), and generate a falsifier.
-        let h_failure = report.heuristics.iter().find(|h| h.id == "h-failure").unwrap();
+        let h_failure = report
+            .heuristics
+            .iter()
+            .find(|h| h.id == "h-failure")
+            .unwrap();
         assert!(h_failure.trials >= 2);
         assert!(h_failure.violations >= 2);
-        assert!(h_failure.receipts.iter().any(|r| r.action == CalibrationAction::Violate));
+        assert!(
+            h_failure
+                .receipts
+                .iter()
+                .any(|r| r.action == CalibrationAction::Violate)
+        );
 
         // Falsifier should be emitted for the contradicted heuristic.
-        assert!(!report.falsifiers.is_empty(), "should have falsifier records");
-        let falsifier = report.falsifiers.iter().find(|f| f.heuristic_id == "h-failure");
+        assert!(
+            !report.falsifiers.is_empty(),
+            "should have falsifier records"
+        );
+        let falsifier = report
+            .falsifiers
+            .iter()
+            .find(|f| f.heuristic_id == "h-failure");
         assert!(falsifier.is_some(), "should have falsifier for h-failure");
         let f = falsifier.unwrap();
         assert!(!f.contradicting_episodes.is_empty());

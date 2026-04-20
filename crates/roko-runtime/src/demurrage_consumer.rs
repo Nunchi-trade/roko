@@ -376,8 +376,8 @@ mod tests {
             domain_multipliers: HashMap::new(),
         });
         let entries = vec![
-            make_entry("low", 0.12, "general"),  // 0.12 - 0.05 = 0.07 < 0.1 -> archived
-            make_entry("high", 0.8, "general"),   // 0.8 - 0.05 = 0.75 > 0.1 -> not archived
+            make_entry("low", 0.12, "general"), // 0.12 - 0.05 = 0.07 < 0.1 -> archived
+            make_entry("high", 0.8, "general"), // 0.8 - 0.05 = 0.75 > 0.1 -> not archived
         ];
 
         let (_, event) = consumer.tick(&entries).unwrap();

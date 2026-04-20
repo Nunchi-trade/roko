@@ -520,7 +520,11 @@ impl IntensiveMode {
     #[must_use]
     pub fn check_activation(&self, unreplayed_count: usize, default_max: usize) -> Option<usize> {
         if unreplayed_count >= self.backlog_high_water {
-            Some(default_max.saturating_mul(self.replay_multiplier as usize).max(default_max))
+            Some(
+                default_max
+                    .saturating_mul(self.replay_multiplier as usize)
+                    .max(default_max),
+            )
         } else {
             None
         }
@@ -824,9 +828,12 @@ impl DreamRunner {
         report.intensive_mode_active = intensive_active;
 
         // Check whether to deactivate intensive mode.
-        if intensive_active && self.controls.intensive.should_deactivate(
-            unreplayed_count.saturating_sub(report.processed_episodes),
-        ) {
+        if intensive_active
+            && self
+                .controls
+                .intensive
+                .should_deactivate(unreplayed_count.saturating_sub(report.processed_episodes))
+        {
             self.controls.intensive.active = false;
         }
 
@@ -840,10 +847,7 @@ impl DreamRunner {
     fn persist_journal_entry(&self, report: &DreamReport) {
         let mut journal = DreamJournal::standard(&self.workdir);
         let entry = DreamJournalEntry {
-            cycle_id: format!(
-                "dream-{}",
-                report.started_at.timestamp_millis()
-            ),
+            cycle_id: format!("dream-{}", report.started_at.timestamp_millis()),
             agent_id: self.config.agent.command.clone(),
             cycle_start: report.started_at,
             cycle_end: report.completed_at,

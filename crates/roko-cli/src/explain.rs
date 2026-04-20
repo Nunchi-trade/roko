@@ -237,10 +237,7 @@ pub fn render_topic(topic: &TopicEntry, depth: u8) -> String {
     }
 
     if depth < 3 {
-        out.push_str(&format!(
-            "\n(use --depth {} for more detail)\n",
-            depth + 1
-        ));
+        out.push_str(&format!("\n(use --depth {} for more detail)\n", depth + 1));
     }
 
     out
@@ -291,7 +288,14 @@ mod tests {
     #[test]
     fn required_topics_present() {
         let required = [
-            "gates", "routing", "cognitive", "neuro", "daimon", "dreams", "engram", "cfactor",
+            "gates",
+            "routing",
+            "cognitive",
+            "neuro",
+            "daimon",
+            "dreams",
+            "engram",
+            "cfactor",
         ];
         for name in &required {
             assert!(find_topic(name).is_some(), "missing required topic: {name}");

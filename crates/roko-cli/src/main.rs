@@ -1437,20 +1437,18 @@ async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
 
             if all_plugins.is_empty() {
                 println!("no plugins found");
-                println!("  search paths: {}, {}", plugins_dir.display(), roko_plugins.display());
+                println!(
+                    "  search paths: {}, {}",
+                    plugins_dir.display(),
+                    roko_plugins.display()
+                );
                 println!("  install a plugin with: roko plugin install <path>");
             } else {
                 println!("installed plugins ({}):", all_plugins.len());
                 for plugin in &all_plugins {
                     let m = &plugin.manifest.plugin;
-                    let desc = m
-                        .description
-                        .as_deref()
-                        .unwrap_or("no description");
-                    println!(
-                        "  {} v{} — {}",
-                        m.name, m.version, desc
-                    );
+                    let desc = m.description.as_deref().unwrap_or("no description");
+                    println!("  {} v{} — {}", m.name, m.version, desc);
                     if !plugin.manifest.prompts.is_empty() {
                         println!(
                             "    prompts: {}",
@@ -1590,7 +1588,14 @@ async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
                     if !m.tools.is_empty() {
                         tiers.push(format!("T3:tools({})", m.tools.len()));
                     }
-                    println!("    capabilities: {}", if tiers.is_empty() { "none".to_string() } else { tiers.join(", ") });
+                    println!(
+                        "    capabilities: {}",
+                        if tiers.is_empty() {
+                            "none".to_string()
+                        } else {
+                            tiers.join(", ")
+                        }
+                    );
 
                     // Tools with their commands (security audit)
                     for tool in &m.tools {
@@ -1649,10 +1654,7 @@ fn cmd_explain(topic: &str, depth: u8) {
         Some(entry) => print!("{}", explain::render_topic(entry, depth)),
         None => {
             eprintln!("unknown topic: {topic}");
-            eprintln!(
-                "available topics: {}",
-                explain::topic_names().join(", ")
-            );
+            eprintln!("available topics: {}", explain::topic_names().join(", "));
             eprintln!("run `roko explain topics` to see all topics with descriptions");
         }
     }
@@ -5290,11 +5292,8 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
                 "source_path": report.live.knowledge,
             });
             let manifest_path = destination.join("manifest.json");
-            std::fs::write(
-                &manifest_path,
-                serde_json::to_string_pretty(&manifest)?,
-            )
-            .with_context(|| format!("write manifest to {}", manifest_path.display()))?;
+            std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
+                .with_context(|| format!("write manifest to {}", manifest_path.display()))?;
             println!("  manifest: {}", manifest_path.display());
 
             Ok(EXIT_SUCCESS)
@@ -5318,7 +5317,12 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
             });
 
             let report = restore_neuro_store(
-                &wd, &source, force, generation, min_confidence, type_filters.as_deref(),
+                &wd,
+                &source,
+                force,
+                generation,
+                min_confidence,
+                type_filters.as_deref(),
             )?;
 
             let confidence_decay = 0.85_f64.powi(generation as i32);
@@ -5366,10 +5370,7 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
             let store = KnowledgeStore::for_workdir(&wd);
 
             // Load the version vector from persistent state (or create empty).
-            let vv_path = wd
-                .join(".roko")
-                .join("neuro")
-                .join("version-vectors.json");
+            let vv_path = wd.join(".roko").join("neuro").join("version-vectors.json");
             let mut version_vectors: HashMap<String, u64> = if vv_path.exists() {
                 let text = std::fs::read_to_string(&vv_path)
                     .with_context(|| format!("read version vectors from {}", vv_path.display()))?;
@@ -5379,9 +5380,9 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
             };
 
             let peer_seq = version_vectors.get(&peer).copied().unwrap_or(0);
-            let entries = store.read_all().with_context(|| {
-                format!("read knowledge store from {}", store.path().display())
-            })?;
+            let entries = store
+                .read_all()
+                .with_context(|| format!("read knowledge store from {}", store.path().display()))?;
 
             let should_send = direction == "send" || direction == "both";
             let should_receive = direction == "receive" || direction == "both";
@@ -5457,10 +5458,7 @@ async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
             if let Some(parent) = vv_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(
-                &vv_path,
-                serde_json::to_string_pretty(&version_vectors)?,
-            )?;
+            std::fs::write(&vv_path, serde_json::to_string_pretty(&version_vectors)?)?;
 
             if cli.json {
                 let payload = serde_json::json!({
@@ -5519,17 +5517,24 @@ fn backup_neuro_store(
     if let Some(n) = top_n {
         // Genomic bottleneck: export only the top N entries by confidence.
         let store = KnowledgeStore::for_workdir(workdir);
-        let mut entries = store.read_all().with_context(|| {
-            format!("read knowledge store from {}", store.path().display())
-        })?;
+        let mut entries = store
+            .read_all()
+            .with_context(|| format!("read knowledge store from {}", store.path().display()))?;
         // Sort by confidence descending.
-        entries.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         entries.truncate(n);
 
         // Write entries to the snapshot location using export.
         let filter = roko_neuro::knowledge_store::ExportFilter::default();
         ensure_neuro_directory(
-            snapshot.knowledge.parent().ok_or_else(|| anyhow!("resolve backup directory"))?,
+            snapshot
+                .knowledge
+                .parent()
+                .ok_or_else(|| anyhow!("resolve backup directory"))?,
             "backup",
         )?;
 
@@ -5596,9 +5601,9 @@ fn restore_neuro_store(
 
     // Read the source backup entries.
     let source_store = KnowledgeStore::new(snapshot.knowledge.clone());
-    let source_entries = source_store.read_all().with_context(|| {
-        format!("read backup entries from {}", snapshot.knowledge.display())
-    })?;
+    let source_entries = source_store
+        .read_all()
+        .with_context(|| format!("read backup entries from {}", snapshot.knowledge.display()))?;
 
     let total_source = source_entries.len();
 
@@ -6458,11 +6463,7 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option<String>) -
             tokio::fs::rename(&legacy, &engrams_path)
                 .await
                 .with_context(|| {
-                    format!(
-                        "migrate {} -> {}",
-                        legacy.display(),
-                        engrams_path.display()
-                    )
+                    format!("migrate {} -> {}", legacy.display(), engrams_path.display())
                 })?;
         } else {
             tokio::fs::write(&engrams_path, b"")
@@ -6504,10 +6505,7 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option<String>) -
     let snapshot = roko_dir.join("state").join("executor.json");
     if snapshot.is_file() {
         println!();
-        println!(
-            "interrupted session found: {}",
-            snapshot.display()
-        );
+        println!("interrupted session found: {}", snapshot.display());
         println!(
             "resume with: roko plan run plans/ --resume {}",
             snapshot.display()
@@ -7070,7 +7068,9 @@ fn cmd_index(cli: &Cli, cmd: IndexCmd) -> Result<i32> {
                     }),
                     hdc: None,
                 },
-                other => bail!("unknown search strategy: {other} (expected keyword, structural, or hybrid)"),
+                other => bail!(
+                    "unknown search strategy: {other} (expected keyword, structural, or hybrid)"
+                ),
             };
 
             let results = idx.search(search_strategy, limit);
@@ -7142,7 +7142,9 @@ fn parse_symbol_kind(s: &str) -> Result<roko_core::language::SymbolKind> {
         "type" => Ok(SymbolKind::Type),
         "module" | "mod" => Ok(SymbolKind::Module),
         "impl" => Ok(SymbolKind::Impl),
-        other => bail!("unknown symbol kind: {other} (expected function, struct, enum, trait, const, type, module, impl)"),
+        other => bail!(
+            "unknown symbol kind: {other} (expected function, struct, enum, trait, const, type, module, impl)"
+        ),
     }
 }
 
@@ -7433,17 +7435,13 @@ fn print_fish_completions(
     // Nested subcommand completions.
     for (parent, children) in subcommands {
         for child in children {
-            println!(
-                "complete -c roko -f -n '__fish_seen_subcommand_from {parent}' -a '{child}'"
-            );
+            println!("complete -c roko -f -n '__fish_seen_subcommand_from {parent}' -a '{child}'");
         }
     }
     // Dynamic completions.
     for (parent, items) in dynamic {
         for item in items {
-            println!(
-                "complete -c roko -f -n '__fish_seen_subcommand_from {parent}' -a '{item}'"
-            );
+            println!("complete -c roko -f -n '__fish_seen_subcommand_from {parent}' -a '{item}'");
         }
     }
 }
@@ -8119,7 +8117,11 @@ mod tests {
     fn cli_parses_init_subcommand() {
         let cli = Cli::try_parse_from(["roko", "init", "/tmp/project"]).unwrap();
         match cli.command {
-            Some(Command::Init { path, cloud, profile }) => {
+            Some(Command::Init {
+                path,
+                cloud,
+                profile,
+            }) => {
                 assert_eq!(path, Some(PathBuf::from("/tmp/project")));
                 assert!(!cloud);
                 assert!(profile.is_none());
@@ -9231,10 +9233,12 @@ mod tests {
         std::fs::write(neuro_dir.join(NEURO_CONFIRMATIONS_FILE), b"stale\n").unwrap();
         std::fs::write(backup_dir.path().join(NEURO_KNOWLEDGE_FILE), b"new\n").unwrap();
 
-        let err = restore_neuro_store(workdir.path(), backup_dir.path(), false, 1, None, None).unwrap_err();
+        let err = restore_neuro_store(workdir.path(), backup_dir.path(), false, 1, None, None)
+            .unwrap_err();
         assert!(err.to_string().contains("Re-run with --force"));
 
-        let report = restore_neuro_store(workdir.path(), backup_dir.path(), true, 1, None, None).unwrap();
+        let report =
+            restore_neuro_store(workdir.path(), backup_dir.path(), true, 1, None, None).unwrap();
         assert_eq!(std::fs::read(report.live.knowledge).unwrap(), b"new\n");
         assert!(!report.live.confirmations.exists());
         assert!(!report.confirmations_present);

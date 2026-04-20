@@ -481,24 +481,15 @@ mod tests {
     fn taint_enum_variants_have_correct_categories() {
         assert_eq!(Taint::Clean.category(), "clean");
         assert_eq!(
-            Taint::LlmHallucination {
-                detail: "x".into()
-            }
-            .category(),
+            Taint::LlmHallucination { detail: "x".into() }.category(),
             "llm_hallucination"
         );
         assert_eq!(
-            Taint::ToolFailure {
-                detail: "x".into()
-            }
-            .category(),
+            Taint::ToolFailure { detail: "x".into() }.category(),
             "tool_failure"
         );
         assert_eq!(
-            Taint::UserFlagged {
-                detail: "x".into()
-            }
-            .category(),
+            Taint::UserFlagged { detail: "x".into() }.category(),
             "user_flagged"
         );
         assert_eq!(
@@ -506,16 +497,10 @@ mod tests {
             "stale_data"
         );
         assert_eq!(
-            Taint::UnverifiedSource {
-                detail: "x".into()
-            }
-            .category(),
+            Taint::UnverifiedSource { detail: "x".into() }.category(),
             "unverified_source"
         );
-        assert_eq!(
-            Taint::Custom("x".into()).category(),
-            "custom"
-        );
+        assert_eq!(Taint::Custom("x".into()).category(), "custom");
     }
 
     #[test]
@@ -541,8 +526,8 @@ mod tests {
 
     #[test]
     fn with_taint_info_sets_both_fields() {
-        let p = Provenance::trusted("gateway")
-            .with_taint_info(TaintInfo::external("webhook payload"));
+        let p =
+            Provenance::trusted("gateway").with_taint_info(TaintInfo::external("webhook payload"));
         assert!(p.is_tainted());
         assert!(matches!(p.taint, Taint::UnverifiedSource { .. }));
         assert!(p.taint_info.is_some());

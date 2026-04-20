@@ -314,11 +314,7 @@ impl CalibrationTracker {
     /// For a reliability diagram: x-axis = predicted, y-axis = observed.
     /// Diagonal means perfectly calibrated.
     #[must_use]
-    pub fn reliability_bins(
-        &self,
-        model: &str,
-        category: &str,
-    ) -> Vec<ReliabilityBin> {
+    pub fn reliability_bins(&self, model: &str, category: &str) -> Vec<ReliabilityBin> {
         let Some(residuals) = self
             .residuals
             .get(&(model.to_string(), category.to_string()))
@@ -703,8 +699,6 @@ mod tests {
         for _ in 0..50 {
             tracker.record_residual("model-a", "impl", 0.15);
         }
-        assert!(
-            (tracker.arithmetic_corrector("model-a", "impl") - 0.15).abs() < 1e-10
-        );
+        assert!((tracker.arithmetic_corrector("model-a", "impl") - 0.15).abs() < 1e-10);
     }
 }

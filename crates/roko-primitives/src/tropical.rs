@@ -288,7 +288,10 @@ impl TropicalMatrix {
     /// of self with a column of rhs.
     #[must_use]
     pub fn mul(&self, rhs: &TropicalMatrix) -> TropicalMatrix {
-        assert_eq!(self.cols, rhs.rows, "dimension mismatch for tropical matmul");
+        assert_eq!(
+            self.cols, rhs.rows,
+            "dimension mismatch for tropical matmul"
+        );
         let mut result = TropicalMatrix::zeros(self.rows, rhs.cols);
         for i in 0..self.rows {
             for j in 0..rhs.cols {
@@ -504,10 +507,7 @@ mod tests {
         // At x = 0: max(2, 5) = 5
         // At x = 4: max(6, 1) = 6
         // At x = 1.5: max(3.5, 3.5) = 3.5 (intersection)
-        let poly = TropicalPolynomial::from_affine(&[
-            (2.0, vec![1]),
-            (5.0, vec![-1]),
-        ]);
+        let poly = TropicalPolynomial::from_affine(&[(2.0, vec![1]), (5.0, vec![-1])]);
 
         let at_0 = poly.evaluate(&[TropicalF64(0.0)]);
         assert_eq!(at_0.0, 5.0);
@@ -522,10 +522,7 @@ mod tests {
     #[test]
     fn polynomial_2d_evaluation() {
         // p(x, y) = max(1 + 2x + 0y, 3 + 0x + 1y)
-        let poly = TropicalPolynomial::from_affine(&[
-            (1.0, vec![2, 0]),
-            (3.0, vec![0, 1]),
-        ]);
+        let poly = TropicalPolynomial::from_affine(&[(1.0, vec![2, 0]), (3.0, vec![0, 1])]);
 
         // At (1, 1): max(1 + 2*1, 3 + 1*1) = max(3, 4) = 4
         let result = poly.evaluate(&[TropicalF64(1.0), TropicalF64(1.0)]);
@@ -539,8 +536,8 @@ mod tests {
     #[test]
     fn polynomial_active_term() {
         let poly = TropicalPolynomial::from_affine(&[
-            (2.0, vec![1]),   // 2 + x
-            (5.0, vec![-1]),  // 5 - x
+            (2.0, vec![1]),  // 2 + x
+            (5.0, vec![-1]), // 5 - x
         ]);
 
         // At x = 0: 2 vs 5 -> term 1
@@ -652,10 +649,7 @@ mod tests {
     fn adversarial_distance_measures_gap() {
         // p(x) = max(2 + x, 5 - x)
         // At x = 0: scores are 2 and 5, gap = 3, distance = 1.5
-        let poly = TropicalPolynomial::from_affine(&[
-            (2.0, vec![1]),
-            (5.0, vec![-1]),
-        ]);
+        let poly = TropicalPolynomial::from_affine(&[(2.0, vec![1]), (5.0, vec![-1])]);
 
         let dist = adversarial_distance(&poly, &[TropicalF64(0.0)]);
         assert_eq!(dist, Some(1.5));
@@ -664,13 +658,13 @@ mod tests {
     #[test]
     fn adversarial_distance_at_boundary() {
         // p(x) = max(2 + x, 5 - x), intersection at x = 1.5
-        let poly = TropicalPolynomial::from_affine(&[
-            (2.0, vec![1]),
-            (5.0, vec![-1]),
-        ]);
+        let poly = TropicalPolynomial::from_affine(&[(2.0, vec![1]), (5.0, vec![-1])]);
 
         let dist = adversarial_distance(&poly, &[TropicalF64(1.5)]);
-        assert!(dist.unwrap().abs() < 1e-10, "distance at boundary should be 0");
+        assert!(
+            dist.unwrap().abs() < 1e-10,
+            "distance at boundary should be 0"
+        );
     }
 
     #[test]

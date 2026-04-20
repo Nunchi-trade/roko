@@ -47,7 +47,9 @@ pub mod runner;
 pub mod staging;
 pub mod threat;
 
-pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport, PhaseBudgetSummary, StagingBufferStats};
+pub use cycle::{
+    AgentDispatcher, DreamCycle, DreamCycleReport, PhaseBudgetSummary, StagingBufferStats,
+};
 pub use hypnagogia::{
     DaliInterrupt, ExecutiveLoosener, HomuncularObserver, HypnagogiaEngine, ThalamicGate,
 };
@@ -55,18 +57,18 @@ pub use imagination::{
     CausalModel, CounterfactualQuery, ImaginationMode, ImaginationOutcome, counterfactual_episode,
     imagine, synthesize_hypotheses,
 };
+pub use rehearsal::{RehearsalOutcome, RehearsalReport, rehearse_threats};
 pub use replay::{
     DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, MattarDawConfig, ReplayUtility,
     compute_replay_utility, select_replay_episodes, select_replay_episodes_with_affect,
 };
-pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use runner::{
     BusPulseTriggerConfig, DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine,
     DreamHeartbeatPolicy, DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner,
     DreamRuntimeControls, DreamSchedulePolicy, DreamTrigger, Episode, Insight, IntensiveMode,
     build_dream_review_dispatcher,
 };
-pub use rehearsal::{RehearsalOutcome, RehearsalReport, rehearse_threats};
+pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use threat::{ThreatScenario, enumerate_threats, threat_warning_entries};
 
 /// Stable subsystem identifiers still surfaced by the dreams crate.

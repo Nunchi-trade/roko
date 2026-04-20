@@ -374,8 +374,7 @@ impl FourFactorScorer {
         let recency = recency_raw.clamp(0.0, 1.0);
 
         // Factor 2: Importance = confidence * tier multiplier
-        let importance =
-            (entry.confidence * entry.tier.multiplier() as f64).clamp(0.0, 1.0);
+        let importance = (entry.confidence * entry.tier.multiplier() as f64).clamp(0.0, 1.0);
 
         // Factor 3: Relevance
         let relevance = keyword_relevance.clamp(0.0, 1.0);
@@ -2478,8 +2477,8 @@ mod tests {
                     distinct_contexts: Vec::new(),
 
                     deprecated: false,
-                balance: 1.0,
-                frozen: false,
+                    balance: 1.0,
+                    frozen: false,
                 })
                 .expect("add anti-knowledge");
         }
@@ -2589,8 +2588,8 @@ mod tests {
                     distinct_contexts: Vec::new(),
 
                     deprecated: false,
-                balance: 1.0,
-                frozen: false,
+                    balance: 1.0,
+                    frozen: false,
                 })
                 .expect("add heuristic");
         }
@@ -2886,7 +2885,10 @@ mod tests {
 
         let score_high = scorer.score(&high_relevance, 0.5, 0.9, &pad);
         let score_low = scorer.score(&low_relevance, 0.5, 0.1, &pad);
-        assert!(score_high > score_low, "higher relevance should produce higher score");
+        assert!(
+            score_high > score_low,
+            "higher relevance should produce higher score"
+        );
     }
 
     #[test]

@@ -53,9 +53,7 @@ impl PulseBus {
         self.inner
             .replay_from(after_seq)
             .into_iter()
-            .filter(|env| {
-                filter.map_or(true, |f| f.matches(&env.payload.topic))
-            })
+            .filter(|env| filter.is_none_or(|f| f.matches(&env.payload.topic)))
             .map(|env| env.payload)
             .collect()
     }
@@ -125,9 +123,24 @@ mod tests {
     fn publish_and_replay() {
         let bus = PulseBus::new(16);
 
-        let p1 = Pulse::new(0, Topic::new("gate.compile"), Kind::GateVerdict, Body::text("ok"));
-        let p2 = Pulse::new(0, Topic::new("agent.turn"), Kind::Episode, Body::text("turn 1"));
-        let p3 = Pulse::new(0, Topic::new("gate.test"), Kind::GateVerdict, Body::text("fail"));
+        let p1 = Pulse::new(
+            0,
+            Topic::new("gate.compile"),
+            Kind::GateVerdict,
+            Body::text("ok"),
+        );
+        let p2 = Pulse::new(
+            0,
+            Topic::new("agent.turn"),
+            Kind::Episode,
+            Body::text("turn 1"),
+        );
+        let p3 = Pulse::new(
+            0,
+            Topic::new("gate.test"),
+            Kind::GateVerdict,
+            Body::text("fail"),
+        );
 
         bus.publish(p1).unwrap();
         bus.publish(p2).unwrap();
@@ -150,8 +163,18 @@ mod tests {
         let bus = PulseBus::new(16);
         let mut rx = bus.subscribe(TopicFilter::Prefix("gate.".into())).unwrap();
 
-        let p1 = Pulse::new(0, Topic::new("agent.turn"), Kind::Episode, Body::text("turn"));
-        let p2 = Pulse::new(0, Topic::new("gate.compile"), Kind::GateVerdict, Body::text("ok"));
+        let p1 = Pulse::new(
+            0,
+            Topic::new("agent.turn"),
+            Kind::Episode,
+            Body::text("turn"),
+        );
+        let p2 = Pulse::new(
+            0,
+            Topic::new("gate.compile"),
+            Kind::GateVerdict,
+            Body::text("ok"),
+        );
         bus.publish(p1).unwrap();
         bus.publish(p2).unwrap();
 
@@ -165,8 +188,15 @@ mod tests {
         let bus = PulseBus::new(16);
         let mut rx = bus.subscribe(TopicFilter::All).unwrap();
 
-        bus.publish(Pulse::new(0, Topic::new("a"), Kind::Task, Body::text("1"))).unwrap();
-        bus.publish(Pulse::new(0, Topic::new("b"), Kind::Metric, Body::text("2"))).unwrap();
+        bus.publish(Pulse::new(0, Topic::new("a"), Kind::Task, Body::text("1")))
+            .unwrap();
+        bus.publish(Pulse::new(
+            0,
+            Topic::new("b"),
+            Kind::Metric,
+            Body::text("2"),
+        ))
+        .unwrap();
 
         let first = rx.recv().await.unwrap();
         let second = rx.recv().await.unwrap();

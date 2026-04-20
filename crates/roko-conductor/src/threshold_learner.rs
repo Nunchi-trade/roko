@@ -209,7 +209,10 @@ impl ThresholdLearner {
     /// Total observations across all watchers.
     #[must_use]
     pub fn total_observations(&self) -> u64 {
-        self.watcher_thresholds.values().map(|t| t.observations).sum()
+        self.watcher_thresholds
+            .values()
+            .map(|t| t.observations)
+            .sum()
     }
 
     /// Per-watcher effectiveness rate (effective / total).

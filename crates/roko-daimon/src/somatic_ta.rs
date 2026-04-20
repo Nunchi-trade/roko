@@ -132,7 +132,10 @@ pub fn somatic_confidence_bias(valence: f64, intensity: f64) -> f64 {
 /// - `base_confidence`: the oracle's raw confidence in `[0.0, 1.0]`.
 /// - `somatic_ctx`: the pre-computed somatic context.
 #[must_use]
-pub fn apply_somatic_confidence_bias(base_confidence: f64, somatic_ctx: &SomaticOracleContext) -> f64 {
+pub fn apply_somatic_confidence_bias(
+    base_confidence: f64,
+    somatic_ctx: &SomaticOracleContext,
+) -> f64 {
     if !somatic_ctx.is_actionable {
         return base_confidence;
     }
@@ -229,7 +232,11 @@ impl MutualInfoMatrix {
     /// Converts Pearson correlation `r` to mutual information via the
     /// Gaussian approximation: `I(X;Y) = -0.5 * ln(1 - r^2)`.
     pub fn from_correlations(n: usize, correlations: &[f64]) -> Self {
-        assert_eq!(correlations.len(), n * n, "correlation matrix size mismatch");
+        assert_eq!(
+            correlations.len(),
+            n * n,
+            "correlation matrix size mismatch"
+        );
         let data: Vec<f64> = correlations
             .iter()
             .map(|&r| {
@@ -338,11 +345,7 @@ impl IitPhiMetric {
 
             // Normalized: Phi_cut = MI(A;B) / min(H(A), H(B)).
             let min_h = h_a.min(h_b);
-            let phi_cut = if min_h > 1e-15 {
-                mi_cross / min_h
-            } else {
-                0.0
-            };
+            let phi_cut = if min_h > 1e-15 { mi_cross / min_h } else { 0.0 };
 
             num_bipartitions += 1;
 
@@ -353,7 +356,11 @@ impl IitPhiMetric {
         }
 
         Self {
-            phi: if min_phi.is_finite() { min_phi.max(0.0) } else { 0.0 },
+            phi: if min_phi.is_finite() {
+                min_phi.max(0.0)
+            } else {
+                0.0
+            },
             num_subsystems: n,
             num_bipartitions,
             mib_mask,

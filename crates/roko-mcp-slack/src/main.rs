@@ -552,9 +552,10 @@ fn handle_slack_lookup_user(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_slack_get_channel_history(arguments: Value) -> Result<Value, JsonRpcError> {
-    let args: SlackGetChannelHistoryArguments = serde_json::from_value(arguments).map_err(|err| {
-        JsonRpcError::invalid_params(format!("invalid slack.get_channel_history args: {err}"))
-    })?;
+    let args: SlackGetChannelHistoryArguments =
+        serde_json::from_value(arguments).map_err(|err| {
+            JsonRpcError::invalid_params(format!("invalid slack.get_channel_history args: {err}"))
+        })?;
 
     let client = SlackClient::from_env()?;
     let messages = client.get_channel_history(

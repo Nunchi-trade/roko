@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::phase2::{u256, WorkProof};
+use crate::phase2::{WorkProof, u256};
 
 /// Configuration for the validation registry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,10 +176,11 @@ impl ValidationRegistry {
         job_hashes
             .iter()
             .flat_map(|h| {
-                self.records
-                    .get(h)
-                    .into_iter()
-                    .flat_map(|records| records.iter().filter(|r| r.proof.passport_id == passport_id))
+                self.records.get(h).into_iter().flat_map(|records| {
+                    records
+                        .iter()
+                        .filter(|r| r.proof.passport_id == passport_id)
+                })
             })
             .collect()
     }

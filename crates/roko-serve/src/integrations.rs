@@ -235,14 +235,8 @@ fn builtin_integrations() -> Vec<ServiceIntegration> {
                 ],
             }),
             execution: Some(ExecutionDescriptor {
-                trigger_patterns: vec![
-                    "github:*".into(),
-                    "prd:plan:approved".into(),
-                ],
-                default_templates: vec![
-                    "pr-review".into(),
-                    "code-implementer".into(),
-                ],
+                trigger_patterns: vec!["github:*".into(), "prd:plan:approved".into()],
+                default_templates: vec!["pr-review".into(), "code-implementer".into()],
             }),
             mcp_adapter: Some(McpAdapterDescriptor {
                 server: "roko-mcp-github".into(),
@@ -258,10 +252,7 @@ fn builtin_integrations() -> Vec<ServiceIntegration> {
                 transport: ReceptionTransport::Webhook,
                 endpoint: "/webhooks/slack".into(),
                 hmac_verified: true,
-                signal_kinds: vec![
-                    "slack:message".into(),
-                    "slack:reaction".into(),
-                ],
+                signal_kinds: vec!["slack:message".into(), "slack:reaction".into()],
             }),
             execution: Some(ExecutionDescriptor {
                 trigger_patterns: vec!["slack:*".into()],

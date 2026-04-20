@@ -81,8 +81,7 @@ impl CusumDetector {
         // Upper CUSUM: detects upward shift.
         self.cumsum_upper = (self.cumsum_upper + observation - self.target - self.drift_k).max(0.0);
         // Lower CUSUM: detects downward shift.
-        self.cumsum_lower =
-            (self.cumsum_lower + self.target - observation - self.drift_k).max(0.0);
+        self.cumsum_lower = (self.cumsum_lower + self.target - observation - self.drift_k).max(0.0);
 
         if self.cumsum_upper > self.threshold_h {
             self.cumsum_upper = 0.0; // Reset after alarm.
@@ -188,8 +187,7 @@ impl EwmaControlChart {
         self.observations += 1;
         self.ewma = self.lambda * observation + (1.0 - self.lambda) * self.ewma;
 
-        let limit_factor =
-            self.sigma * (self.lambda / (2.0 - self.lambda)).sqrt();
+        let limit_factor = self.sigma * (self.lambda / (2.0 - self.lambda)).sqrt();
         let ucl = self.target + self.control_limit_l * limit_factor;
         let lcl = self.target - self.control_limit_l * limit_factor;
         let warning_ucl = self.target + (self.control_limit_l * 2.0 / 3.0) * limit_factor;
@@ -213,16 +211,14 @@ impl EwmaControlChart {
     /// Upper control limit.
     #[must_use]
     pub fn ucl(&self) -> f64 {
-        let limit_factor =
-            self.sigma * (self.lambda / (2.0 - self.lambda)).sqrt();
+        let limit_factor = self.sigma * (self.lambda / (2.0 - self.lambda)).sqrt();
         self.target + self.control_limit_l * limit_factor
     }
 
     /// Lower control limit.
     #[must_use]
     pub fn lcl(&self) -> f64 {
-        let limit_factor =
-            self.sigma * (self.lambda / (2.0 - self.lambda)).sqrt();
+        let limit_factor = self.sigma * (self.lambda / (2.0 - self.lambda)).sqrt();
         self.target - self.control_limit_l * limit_factor
     }
 
@@ -289,12 +285,7 @@ impl BocpdDetector {
     /// - `prior_mean`: expected observation mean
     /// - `prior_var`: expected observation variance
     #[must_use]
-    pub fn new(
-        hazard_rate: f64,
-        change_threshold: f64,
-        prior_mean: f64,
-        prior_var: f64,
-    ) -> Self {
+    pub fn new(hazard_rate: f64, change_threshold: f64, prior_mean: f64, prior_var: f64) -> Self {
         Self {
             hazard_rate: hazard_rate.clamp(0.001, 0.5),
             change_threshold: change_threshold.clamp(0.0, 1.0),
@@ -410,13 +401,7 @@ impl BocpdDetector {
     }
 
     /// Gaussian predictive probability using conjugate prior.
-    fn gaussian_predictive(
-        &self,
-        count: usize,
-        sum: f64,
-        sum_sq: f64,
-        observation: f64,
-    ) -> f64 {
+    fn gaussian_predictive(&self, count: usize, sum: f64, sum_sq: f64, observation: f64) -> f64 {
         let n = count as f64;
         let mean = if n > 0.0 {
             (self.prior_var * sum + self.prior_mean) / (n * self.prior_var + 1.0)
@@ -657,7 +642,10 @@ mod tests {
         }
         // Under a perfectly stable process, ideally no changes.
         // (Allow at most 1 spurious detection from initial transient.)
-        assert!(change_count <= 1, "got {change_count} changes under stable process");
+        assert!(
+            change_count <= 1,
+            "got {change_count} changes under stable process"
+        );
     }
 
     #[test]

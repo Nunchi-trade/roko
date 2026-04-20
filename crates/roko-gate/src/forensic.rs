@@ -201,11 +201,7 @@ impl ForensicReplayBuilder {
             .get(task_id)
             .ok_or_else(|| ForensicError::TaskNotFound(task_id.to_string()))?;
 
-        let verdicts = self
-            .task_verdicts
-            .get(task_id)
-            .cloned()
-            .unwrap_or_default();
+        let verdicts = self.task_verdicts.get(task_id).cloned().unwrap_or_default();
 
         let agent_model = self
             .task_models
@@ -255,10 +251,7 @@ impl ForensicReplayBuilder {
 
     /// Verify the hash chain integrity for all artifacts in a causal chain.
     #[must_use]
-    pub fn verify_chain_integrity(
-        chain: &CausalChain,
-        artifact_store: &ArtifactStore,
-    ) -> bool {
+    pub fn verify_chain_integrity(chain: &CausalChain, artifact_store: &ArtifactStore) -> bool {
         for artifact in &chain.artifacts {
             match artifact_store.retrieve(&artifact.hash) {
                 Some(content) => {
@@ -339,7 +332,9 @@ mod tests {
         );
 
         let chain = builder.replay_task("task-2", &store).unwrap();
-        assert!(ForensicReplayBuilder::verify_chain_integrity(&chain, &store));
+        assert!(ForensicReplayBuilder::verify_chain_integrity(
+            &chain, &store
+        ));
     }
 
     #[test]

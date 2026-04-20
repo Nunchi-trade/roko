@@ -282,12 +282,12 @@ impl GoalTree {
     /// All active goals sorted by priority (highest first).
     #[must_use]
     pub fn active_goals(&self) -> Vec<&GoalNode> {
-        let mut goals: Vec<&GoalNode> = self
-            .nodes
-            .values()
-            .filter(|n| n.is_active())
-            .collect();
-        goals.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
+        let mut goals: Vec<&GoalNode> = self.nodes.values().filter(|n| n.is_active()).collect();
+        goals.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         goals
     }
 

@@ -653,7 +653,11 @@ pub mod crps {
         let n = samples.len() as f64;
 
         // Term 1: mean absolute difference from observation.
-        let term1: f64 = samples.iter().map(|&x| (x - observation).abs()).sum::<f64>() / n;
+        let term1: f64 = samples
+            .iter()
+            .map(|&x| (x - observation).abs())
+            .sum::<f64>()
+            / n;
 
         // Term 2: mean pairwise absolute difference (spread penalty).
         let mut term2 = 0.0;
@@ -713,8 +717,7 @@ pub mod crps {
         let t = 1.0 / (1.0 + 0.3275911 * x);
         let poly = t
             * (0.254829592
-                + t * (-0.284496736
-                    + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+                + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
 
         sign * (1.0 - poly * (-x * x).exp())
     }
@@ -727,14 +730,20 @@ pub mod crps {
         fn gaussian_crps_perfect_prediction() {
             // Point prediction at the observation → CRPS approaches 0.
             let score = gaussian(10.0, 0.001, 10.0);
-            assert!(score < 0.001, "perfect Gaussian prediction should have CRPS near 0, got {score}");
+            assert!(
+                score < 0.001,
+                "perfect Gaussian prediction should have CRPS near 0, got {score}"
+            );
         }
 
         #[test]
         fn gaussian_crps_increases_with_error() {
             let close = gaussian(10.0, 1.0, 10.5);
             let far = gaussian(10.0, 1.0, 15.0);
-            assert!(far > close, "CRPS should increase with distance: close={close}, far={far}");
+            assert!(
+                far > close,
+                "CRPS should increase with distance: close={close}, far={far}"
+            );
         }
 
         #[test]
@@ -742,7 +751,10 @@ pub mod crps {
             // Same observation, wider distribution = worse CRPS.
             let narrow = gaussian(10.0, 0.5, 10.0);
             let wide = gaussian(10.0, 5.0, 10.0);
-            assert!(wide > narrow, "wider distribution should have worse CRPS: narrow={narrow}, wide={wide}");
+            assert!(
+                wide > narrow,
+                "wider distribution should have worse CRPS: narrow={narrow}, wide={wide}"
+            );
         }
 
         #[test]
@@ -750,7 +762,10 @@ pub mod crps {
             // All samples at the observation.
             let samples = vec![5.0, 5.0, 5.0, 5.0];
             let score = empirical(&samples, 5.0);
-            assert!(score.abs() < 1e-10, "perfect empirical forecast should have CRPS=0, got {score}");
+            assert!(
+                score.abs() < 1e-10,
+                "perfect empirical forecast should have CRPS=0, got {score}"
+            );
         }
 
         #[test]
@@ -760,27 +775,39 @@ pub mod crps {
             let spread = vec![5.0, 8.0, 12.0, 15.0];
             let s1 = empirical(&concentrated, 10.0);
             let s2 = empirical(&spread, 10.0);
-            assert!(s2 > s1, "spread forecast should score worse: concentrated={s1}, spread={s2}");
+            assert!(
+                s2 > s1,
+                "spread forecast should score worse: concentrated={s1}, spread={s2}"
+            );
         }
 
         #[test]
         fn uniform_crps_observation_at_center() {
             let score = uniform(0.0, 10.0, 5.0);
             // For U(0,10) with y=5 (center): CRPS = 10 * (0.25 - 0.5 + 1/3) = 10 * 0.0833 = 0.833
-            assert!((score - 0.8333).abs() < 0.01, "uniform center CRPS should be ~0.833, got {score}");
+            assert!(
+                (score - 0.8333).abs() < 0.01,
+                "uniform center CRPS should be ~0.833, got {score}"
+            );
         }
 
         #[test]
         fn uniform_crps_observation_outside() {
             let score = uniform(0.0, 10.0, 15.0);
             // Outside: (15-10) + 10/3 = 5 + 3.33 = 8.33
-            assert!((score - 8.333).abs() < 0.01, "uniform outside CRPS should be ~8.33, got {score}");
+            assert!(
+                (score - 8.333).abs() < 0.01,
+                "uniform outside CRPS should be ~8.33, got {score}"
+            );
         }
 
         #[test]
         fn degenerate_gaussian_equals_mae() {
             let score = gaussian(10.0, 0.0, 13.0);
-            assert!((score - 3.0).abs() < 1e-10, "degenerate Gaussian CRPS should equal MAE=3.0, got {score}");
+            assert!(
+                (score - 3.0).abs() < 1e-10,
+                "degenerate Gaussian CRPS should equal MAE=3.0, got {score}"
+            );
         }
     }
 }

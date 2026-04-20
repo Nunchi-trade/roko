@@ -575,16 +575,13 @@ pub fn auto_plan_template() -> AgentTemplate {
             "Read the PRD at {{prd_path}} and generate an implementation plan. ",
             "Break the work into concrete, testable tasks with clear acceptance criteria. ",
             "Order tasks by dependency. Estimate complexity per task.",
-        ).into(),
+        )
+        .into(),
         max_turns: 10,
         output_format: TemplateOutputFormat::Toml,
         mcp_servers: vec![],
         allowed_tools: vec![],
-        denied_tools: vec![
-            "write_file".into(),
-            "edit_file".into(),
-            "bash".into(),
-        ],
+        denied_tools: vec!["write_file".into(), "edit_file".into(), "bash".into()],
         experiment: None,
     }
 }
@@ -615,7 +612,8 @@ pub fn gate_fixer_template() -> AgentTemplate {
 pub fn doc_lifecycle_template() -> AgentTemplate {
     AgentTemplate {
         name: "doc-lifecycle".into(),
-        description: "Transforms meeting notes or rough ideas into structured PRD documents.".into(),
+        description: "Transforms meeting notes or rough ideas into structured PRD documents."
+            .into(),
         model: "sonnet".into(),
         role: "scribe".into(),
         system_prompt: concat!(
@@ -623,7 +621,8 @@ pub fn doc_lifecycle_template() -> AgentTemplate {
             "Transform the following notes into a structured PRD document:\n{{notes}}\n\n",
             "Include: problem statement, proposed solution, acceptance criteria, ",
             "non-goals, and open questions. Use clear, concise language.",
-        ).into(),
+        )
+        .into(),
         max_turns: 10,
         output_format: TemplateOutputFormat::Markdown,
         mcp_servers: vec![],
@@ -645,7 +644,8 @@ pub fn slack_notify_template() -> AgentTemplate {
             "Post a concise deployment summary to the {{channel}} Slack channel. ",
             "Include: service name, version, environment, status, and any notable changes. ",
             "Keep messages under 200 words.",
-        ).into(),
+        )
+        .into(),
         max_turns: 3,
         output_format: TemplateOutputFormat::None,
         mcp_servers: vec!["slack".into()],
@@ -920,10 +920,8 @@ mcp_servers = ["github", "missing-server"]
     fn builtin_templates_pass_validation() {
         // Provide a set of "configured" MCP servers so templates requiring
         // MCP servers (pr-review, slack-notify) don't fail validation.
-        let configured: HashSet<String> = ["github", "slack"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let configured: HashSet<String> =
+            ["github", "slack"].iter().map(|s| s.to_string()).collect();
         for template in builtin_templates() {
             let result = template.validate(Some(&template.name), Some(&configured));
             assert!(
@@ -937,11 +935,7 @@ mcp_servers = ["github", "missing-server"]
 
     #[test]
     fn builtin_templates_count() {
-        assert_eq!(
-            builtin_templates().len(),
-            6,
-            "expected 6 builtin templates"
-        );
+        assert_eq!(builtin_templates().len(), 6, "expected 6 builtin templates");
     }
 
     #[test]

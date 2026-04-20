@@ -83,13 +83,9 @@ impl StepOutcomeHistory {
     /// Get the success rate for a step (0.0..1.0), or None if no observations.
     #[must_use]
     pub fn success_rate(&self, step: EnrichStep) -> Option<f64> {
-        self.records.get(&step).map(|&(s, t)| {
-            if t == 0 {
-                0.0
-            } else {
-                s as f64 / t as f64
-            }
-        })
+        self.records
+            .get(&step)
+            .map(|&(s, t)| if t == 0 { 0.0 } else { s as f64 / t as f64 })
     }
 }
 
@@ -831,7 +827,9 @@ mod tests {
 
         let outcome = pipeline.run_step(EnrichStep::Prd, "test-plan").await;
         match outcome {
-            StepOutcome::Generated { step, llm_calls, .. } => {
+            StepOutcome::Generated {
+                step, llm_calls, ..
+            } => {
                 assert_eq!(step, EnrichStep::Prd);
                 assert_eq!(llm_calls, 0); // Prd is non-LLM
             }
@@ -868,7 +866,9 @@ mod tests {
         let outcome = pipeline.run_step(EnrichStep::Verify, "test-plan").await;
 
         match outcome {
-            StepOutcome::Generated { step, llm_calls, .. } => {
+            StepOutcome::Generated {
+                step, llm_calls, ..
+            } => {
                 assert_eq!(step, EnrichStep::Verify);
                 assert_eq!(llm_calls, 2); // 1 original + 1 repair
             }
@@ -996,7 +996,9 @@ mod tests {
         // Prd is a non-LLM step.
         let outcome = pipeline.run_step(EnrichStep::Prd, "test-plan").await;
         match outcome {
-            StepOutcome::Generated { llm_calls, cost, .. } => {
+            StepOutcome::Generated {
+                llm_calls, cost, ..
+            } => {
                 assert_eq!(llm_calls, 0);
                 // COMP-09: verify cost is populated.
                 assert!(cost.elapsed_ms < 5000, "should be fast");
@@ -1020,7 +1022,9 @@ mod tests {
         let outcome = pipeline.run_step(EnrichStep::Decompose, "test-plan").await;
 
         match outcome {
-            StepOutcome::Generated { llm_calls, cost, .. } => {
+            StepOutcome::Generated {
+                llm_calls, cost, ..
+            } => {
                 assert_eq!(llm_calls, 1);
                 // COMP-09: verify cost tracking includes output tokens.
                 assert!(cost.output_tokens > 0, "should have output tokens");

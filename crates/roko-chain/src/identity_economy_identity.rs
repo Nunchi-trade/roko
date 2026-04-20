@@ -305,8 +305,7 @@ pub fn detect_collusion_rings(clusters: &[SybilCluster]) -> Vec<&SybilCluster> {
     clusters
         .iter()
         .filter(|c| {
-            c.internal_edge_density > 0.5
-                && (c.external_edge_count as usize) < c.members.len() * 2
+            c.internal_edge_density > 0.5 && (c.external_edge_count as usize) < c.members.len() * 2
         })
         .collect()
 }
@@ -564,8 +563,7 @@ impl ReputationTrack {
     /// 30-day half-life. `now_secs` and `last_updated_secs` are wall-clock
     /// seconds.
     pub fn decayed_score(&self, now_secs: u64, last_updated_secs: u64) -> f64 {
-        let days_since =
-            now_secs.saturating_sub(last_updated_secs) as f64 / 86_400.0;
+        let days_since = now_secs.saturating_sub(last_updated_secs) as f64 / 86_400.0;
         // 30-day half-life: decay factor = exp(-ln2 * days / 30)
         let decay = (-0.693_147_18 * days_since / 30.0).exp();
         let s = self.score_f64();
@@ -1320,15 +1318,15 @@ impl X402Client {
             let after = &json[pos + needle.len()..];
             let after = after.trim_start().strip_prefix(':')?;
             let after = after.trim_start();
-            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            let end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
             after[..end].parse().ok()
         }
 
         Ok(PaymentChallenge {
             amount: extract_u64(trimmed, "amount").unwrap_or(0),
-            recipient: extract_str(trimmed, "recipient")
-                .unwrap_or("")
-                .to_string(),
+            recipient: extract_str(trimmed, "recipient").unwrap_or("").to_string(),
             token: extract_str(trimmed, "token").unwrap_or("").to_string(),
             network: extract_str(trimmed, "network")
                 .unwrap_or("base")
@@ -1413,11 +1411,7 @@ impl X402Client {
     /// In production, step 4 would be replaced by an actual HTTP retry
     /// and on-chain verification. Here it returns the signed auth for
     /// the caller to attach to the retry request.
-    pub fn pay(
-        &mut self,
-        challenge: &PaymentChallenge,
-        now_secs: u64,
-    ) -> X402PaymentResult {
+    pub fn pay(&mut self, challenge: &PaymentChallenge, now_secs: u64) -> X402PaymentResult {
         if challenge.is_expired(now_secs) {
             return X402PaymentResult::Expired;
         }
@@ -1731,11 +1725,7 @@ mod tests {
         };
         let graph = InteractionGraph {
             nodes: vec![1, 2, 3],
-            edges: vec![
-                (1, 2, 1.0),
-                (2, 3, 1.0),
-                (3, 1, 1.0),
-            ],
+            edges: vec![(1, 2, 1.0), (2, 3, 1.0), (3, 1, 1.0)],
         };
         let scores = ppr.compute(&graph);
         assert!(scores[&1] > scores[&2]);

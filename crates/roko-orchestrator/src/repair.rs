@@ -566,11 +566,15 @@ fn build_retry_context(ctx: &FailureContext) -> String {
     }
 
     if ctx.is_compile_error {
-        parts.push("The code did not compile. Fix all compilation errors before proceeding.".into());
+        parts
+            .push("The code did not compile. Fix all compilation errors before proceeding.".into());
     }
 
     if ctx.is_test_failure {
-        parts.push("Tests failed. Ensure all existing tests pass and add tests for new functionality.".into());
+        parts.push(
+            "Tests failed. Ensure all existing tests pass and add tests for new functionality."
+                .into(),
+        );
     }
 
     if ctx.is_timeout {
@@ -859,10 +863,19 @@ mod tests {
     #[test]
     fn repair_level_labels_and_costs() {
         assert_eq!(RepairLevel::TaskRetry.label(), "task_retry");
-        assert_eq!(RepairLevel::SubgraphReplacement.label(), "subgraph_replacement");
+        assert_eq!(
+            RepairLevel::SubgraphReplacement.label(),
+            "subgraph_replacement"
+        );
         assert_eq!(RepairLevel::FullReplan.label(), "full_replan");
-        assert!(RepairLevel::TaskRetry.relative_cost() < RepairLevel::SubgraphReplacement.relative_cost());
-        assert!(RepairLevel::SubgraphReplacement.relative_cost() < RepairLevel::FullReplan.relative_cost());
+        assert!(
+            RepairLevel::TaskRetry.relative_cost()
+                < RepairLevel::SubgraphReplacement.relative_cost()
+        );
+        assert!(
+            RepairLevel::SubgraphReplacement.relative_cost()
+                < RepairLevel::FullReplan.relative_cost()
+        );
     }
 
     #[test]

@@ -193,7 +193,11 @@ async fn coverage(State(state): State<Arc<AppState>>) -> Json<Value> {
 ///   - `roko_uptime_seconds` (gauge)
 async fn prometheus_metrics(
     State(state): State<Arc<AppState>>,
-) -> (axum::http::StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
     let snapshot = state.state_hub.current_snapshot();
     let s = &snapshot.stats;
     let uptime = state.started_at.elapsed().as_secs();
@@ -223,22 +227,85 @@ async fn prometheus_metrics(
         }};
     }
 
-    prom!(gauge, "roko_uptime_seconds", "Seconds since roko-serve started", uptime);
-    prom!(gauge, "roko_agents_active", "Number of currently active agents", active_agents);
-    prom!(gauge, "roko_plans_active", "Number of currently executing plans", active_plans);
-    prom!(counter, "roko_plans_completed_total", "Total plans completed successfully", s.plans_completed);
-    prom!(counter, "roko_plans_failed_total", "Total plans that failed", s.plans_failed);
-    prom!(counter, "roko_tasks_completed_total", "Total tasks completed", s.tasks_completed);
-    prom!(counter, "roko_tasks_failed_total", "Total tasks that failed", s.tasks_failed);
-    prom!(gauge, "roko_tasks_active", "Number of currently executing tasks", s.tasks_active);
-    prom!(counter, "roko_gate_pass_total", "Total gate checks that passed", s.gates_passed);
-    prom!(counter, "roko_gate_fail_total", "Total gate checks that failed", s.gates_failed);
-    prom!(counter, "roko_errors_total", "Total error events recorded", s.errors_total);
-    prom!(counter, "roko_episodes_total", "Total episodes recorded", episode_count);
+    prom!(
+        gauge,
+        "roko_uptime_seconds",
+        "Seconds since roko-serve started",
+        uptime
+    );
+    prom!(
+        gauge,
+        "roko_agents_active",
+        "Number of currently active agents",
+        active_agents
+    );
+    prom!(
+        gauge,
+        "roko_plans_active",
+        "Number of currently executing plans",
+        active_plans
+    );
+    prom!(
+        counter,
+        "roko_plans_completed_total",
+        "Total plans completed successfully",
+        s.plans_completed
+    );
+    prom!(
+        counter,
+        "roko_plans_failed_total",
+        "Total plans that failed",
+        s.plans_failed
+    );
+    prom!(
+        counter,
+        "roko_tasks_completed_total",
+        "Total tasks completed",
+        s.tasks_completed
+    );
+    prom!(
+        counter,
+        "roko_tasks_failed_total",
+        "Total tasks that failed",
+        s.tasks_failed
+    );
+    prom!(
+        gauge,
+        "roko_tasks_active",
+        "Number of currently executing tasks",
+        s.tasks_active
+    );
+    prom!(
+        counter,
+        "roko_gate_pass_total",
+        "Total gate checks that passed",
+        s.gates_passed
+    );
+    prom!(
+        counter,
+        "roko_gate_fail_total",
+        "Total gate checks that failed",
+        s.gates_failed
+    );
+    prom!(
+        counter,
+        "roko_errors_total",
+        "Total error events recorded",
+        s.errors_total
+    );
+    prom!(
+        counter,
+        "roko_episodes_total",
+        "Total episodes recorded",
+        episode_count
+    );
 
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         out,
     )
 }

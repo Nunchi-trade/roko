@@ -536,8 +536,7 @@ impl UnifiedTaskDag {
         // first (qualified "plan:task"), then match any node whose task
         // portion matches (bare "task" name).
         let mut needed: HashSet<GlobalTaskId> = HashSet::new();
-        let mut queue: std::collections::VecDeque<GlobalTaskId> =
-            std::collections::VecDeque::new();
+        let mut queue: std::collections::VecDeque<GlobalTaskId> = std::collections::VecDeque::new();
 
         for target in targets {
             if let Some(gid) = GlobalTaskId::parse(target) {
@@ -699,8 +698,7 @@ impl UnifiedTaskDag {
                 // Rewire: dependents of the chain tail must now depend on the
                 // chain head instead of the removed tail node.
                 let tail = chain.last().unwrap();
-                let tail_dependents: Vec<_> =
-                    self.dependents_of(tail).iter().cloned().collect();
+                let tail_dependents: Vec<_> = self.dependents_of(tail).iter().cloned().collect();
                 for dep_id in tail_dependents {
                     if let Some(dep_task) = self.tasks.get_mut(&dep_id) {
                         // depends_on strings may be bare task names ("t3") or
@@ -1092,14 +1090,9 @@ impl UnifiedTaskDag {
             // Count cut edges (all edges are cross-partition).
             for part in &mut result {
                 for task in &part.tasks {
-                    let cuts = self
-                        .edges
-                        .get(task)
-                        .map_or(0, |deps| {
-                            deps.iter()
-                                .filter(|dep| !part.tasks.contains(dep))
-                                .count()
-                        });
+                    let cuts = self.edges.get(task).map_or(0, |deps| {
+                        deps.iter().filter(|dep| !part.tasks.contains(dep)).count()
+                    });
                     part.cut_edges += cuts;
                 }
             }
@@ -1108,7 +1101,9 @@ impl UnifiedTaskDag {
 
         // Assign each node a partition using topological-order round-robin
         // weighted by estimated work to balance load.
-        let topo = self.topological_sort().unwrap_or_else(|_| self.nodes.clone());
+        let topo = self
+            .topological_sort()
+            .unwrap_or_else(|_| self.nodes.clone());
         let mut assignment: HashMap<GlobalTaskId, usize> = HashMap::new();
         let mut partition_work = vec![0.0_f64; k];
 
@@ -1129,10 +1124,7 @@ impl UnifiedTaskDag {
 
             let chosen = dep_partition
                 .filter(|&dep_p| {
-                    let min_work = partition_work
-                        .iter()
-                        .copied()
-                        .fold(f64::INFINITY, f64::min);
+                    let min_work = partition_work.iter().copied().fold(f64::INFINITY, f64::min);
                     partition_work[dep_p] <= min_work * 1.5 + 1.0
                 })
                 .unwrap_or_else(|| lightest_partition(&partition_work));
@@ -2365,8 +2357,7 @@ mod tests {
         ])
         .unwrap();
         let parts = dag.partition(2);
-        let mut all_tasks: Vec<GlobalTaskId> =
-            parts.iter().flat_map(|p| p.tasks.clone()).collect();
+        let mut all_tasks: Vec<GlobalTaskId> = parts.iter().flat_map(|p| p.tasks.clone()).collect();
         all_tasks.sort();
         let mut expected = dag.nodes().to_vec();
         expected.sort();

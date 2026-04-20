@@ -57,7 +57,11 @@ impl TaskFeatures {
 
     /// Create features from component strings.
     #[must_use]
-    pub fn new(role: impl Into<String>, complexity: impl Into<String>, domain: impl Into<String>) -> Self {
+    pub fn new(
+        role: impl Into<String>,
+        complexity: impl Into<String>,
+        domain: impl Into<String>,
+    ) -> Self {
         Self {
             role: role.into(),
             complexity: complexity.into(),
@@ -159,9 +163,8 @@ impl BudgetPredictor {
             if partial_matches.is_empty() {
                 self.fallback_tokens
             } else {
-                let avg_tokens: f64 =
-                    partial_matches.iter().map(|o| o.ema_tokens).sum::<f64>()
-                        / partial_matches.len() as f64;
+                let avg_tokens: f64 = partial_matches.iter().map(|o| o.ema_tokens).sum::<f64>()
+                    / partial_matches.len() as f64;
                 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
                 let predicted = (avg_tokens * 1.2) as u64;
                 predicted.max(1000)
@@ -316,12 +319,7 @@ impl SectionInfluence {
     /// `included_sections` is the set of section names that were present
     /// in the prompt. `all_sections` is the set of all known section names.
     /// `success` indicates whether the task succeeded.
-    pub fn record(
-        &mut self,
-        included_sections: &[String],
-        all_sections: &[String],
-        success: bool,
-    ) {
+    pub fn record(&mut self, included_sections: &[String], all_sections: &[String], success: bool) {
         let included_set: std::collections::HashSet<&String> = included_sections.iter().collect();
 
         for section in all_sections {

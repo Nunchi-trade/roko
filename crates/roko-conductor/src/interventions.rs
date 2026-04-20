@@ -247,9 +247,7 @@ impl InterventionPolicy for BanditPolicy {
 
         // Map bandit action to a ConductorDecision.
         let bandit_decision = match bandit_action {
-            ConductorAction::Continue | ConductorAction::InjectHint(_) => {
-                ConductorDecision::cont()
-            }
+            ConductorAction::Continue | ConductorAction::InjectHint(_) => ConductorDecision::cont(),
             ConductorAction::SwitchModel => {
                 // SwitchModel is a soft intervention -- continue but signal escalation.
                 ConductorDecision::cont()

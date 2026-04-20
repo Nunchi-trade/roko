@@ -182,19 +182,13 @@ impl CausalGraph {
     /// Find all direct effects of a given cause variable.
     #[must_use]
     pub fn effects_of(&self, cause: &str) -> Vec<&CausalEdge> {
-        self.edges
-            .iter()
-            .filter(|e| e.cause == cause)
-            .collect()
+        self.edges.iter().filter(|e| e.cause == cause).collect()
     }
 
     /// Find all direct causes of a given effect variable.
     #[must_use]
     pub fn causes_of(&self, effect: &str) -> Vec<&CausalEdge> {
-        self.edges
-            .iter()
-            .filter(|e| e.effect == effect)
-            .collect()
+        self.edges.iter().filter(|e| e.effect == effect).collect()
     }
 
     /// Propagate an intervention through the graph, returning affected

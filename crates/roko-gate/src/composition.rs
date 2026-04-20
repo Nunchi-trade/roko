@@ -114,13 +114,26 @@ impl Gate for ParallelGate {
         if failed.is_empty() {
             Verdict::pass(&self.name)
                 .with_score(min_score)
-                .with_detail(format!("ParallelGate: {}/{} passed\n{detail}", verdicts.len(), verdicts.len()))
+                .with_detail(format!(
+                    "ParallelGate: {}/{} passed\n{detail}",
+                    verdicts.len(),
+                    verdicts.len()
+                ))
                 .with_duration(elapsed)
         } else {
-            let reason = format!("{} of {} gates failed: {}", failed.len(), verdicts.len(), failed.join(", "));
+            let reason = format!(
+                "{} of {} gates failed: {}",
+                failed.len(),
+                verdicts.len(),
+                failed.join(", ")
+            );
             Verdict::fail(&self.name, reason)
                 .with_score(min_score)
-                .with_detail(format!("ParallelGate: {}/{} passed\n{detail}", verdicts.len() - failed.len(), verdicts.len()))
+                .with_detail(format!(
+                    "ParallelGate: {}/{} passed\n{detail}",
+                    verdicts.len() - failed.len(),
+                    verdicts.len()
+                ))
                 .with_duration(elapsed)
         }
     }
@@ -277,11 +290,7 @@ pub struct FallbackGate {
 impl FallbackGate {
     /// Create a fallback gate with the given primary and fallback.
     #[must_use]
-    pub fn new(
-        name: impl Into<String>,
-        primary: Box<dyn Gate>,
-        fallback: Box<dyn Gate>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, primary: Box<dyn Gate>, fallback: Box<dyn Gate>) -> Self {
         Self {
             primary,
             fallback,
@@ -308,8 +317,7 @@ impl Gate for FallbackGate {
         // Try primary first.
         let primary_verdict = self.primary.verify(signal, ctx).await;
         if primary_verdict.passed {
-            return primary_verdict
-                .with_duration(elapsed_ms(started));
+            return primary_verdict.with_duration(elapsed_ms(started));
         }
 
         // Primary failed — try fallback.

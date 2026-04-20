@@ -485,10 +485,7 @@ impl KnowledgeEntry {
     /// `freshness(t) = balance(t) * ebbinghaus_weight(age, type_half_life, tier_multiplier)`
     #[must_use]
     pub fn freshness(&self, now: DateTime<Utc>) -> f64 {
-        let age_hours = now
-            .signed_duration_since(self.created_at)
-            .num_seconds() as f64
-            / 3600.0;
+        let age_hours = now.signed_duration_since(self.created_at).num_seconds() as f64 / 3600.0;
         if age_hours <= 0.0 {
             return self.balance;
         }
@@ -885,11 +882,7 @@ pub fn hdc_cluster(entries: &[KnowledgeEntry], k: usize) -> Vec<HdcCluster> {
     // Extract valid HDC vectors; entries without vectors get mapped to cluster 0.
     let vectors: Vec<Option<&[u8]>> = entries
         .iter()
-        .map(|e| {
-            e.hdc_vector
-                .as_deref()
-                .filter(|v| v.len() == HDC_BYTES)
-        })
+        .map(|e| e.hdc_vector.as_deref().filter(|v| v.len() == HDC_BYTES))
         .collect();
 
     // Count entries with valid vectors.
@@ -953,13 +946,7 @@ pub fn hdc_cluster(entries: &[KnowledgeEntry], k: usize) -> Vec<HdcCluster> {
             let members: Vec<&[u8]> = assignments
                 .iter()
                 .zip(vectors.iter())
-                .filter_map(|(&a, v)| {
-                    if a == c {
-                        v.as_deref()
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|(&a, v)| if a == c { v.as_deref() } else { None })
                 .collect();
 
             if members.is_empty() {
@@ -1083,7 +1070,11 @@ pub fn thaw_entry(entry: &mut KnowledgeEntry) -> bool {
 /// Check if a knowledge entry is frozen (in cold storage).
 #[must_use]
 pub fn is_frozen(entry: &KnowledgeEntry) -> bool {
-    entry.deprecated && entry.tags.iter().any(|t| t.starts_with("__frozen_confidence:"))
+    entry.deprecated
+        && entry
+            .tags
+            .iter()
+            .any(|t| t.starts_with("__frozen_confidence:"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,11 +1202,11 @@ pub use knowledge_store::{
     KnowledgeConfirmationRecord, KnowledgeQueryBreakdown, KnowledgeQueryHit,
     KnowledgeSimilarityHit, KnowledgeStats, KnowledgeStore, QUERY_SCORE_FLOOR,
 };
+#[cfg(feature = "hdc")]
+pub use knowledge_store::{MemoryHit, MemoryIndex};
 pub use temporal::{
     AllenRelation, KnowledgeEpoch, TemporalIndex, TemporalInterval, TemporalRelation,
 };
-#[cfg(feature = "hdc")]
-pub use knowledge_store::{MemoryHit, MemoryIndex};
 
 #[cfg(test)]
 mod tests {
@@ -1291,9 +1282,7 @@ mod tests {
     #[test]
     fn new_knowledge_kinds_have_expected_defaults() {
         // Warning half-life: 1/24 day = 1 hour (was 7 days, fixed per spec).
-        assert!(
-            (KnowledgeKind::Warning.default_half_life_days() - 1.0 / 24.0).abs() < 1e-9
-        );
+        assert!((KnowledgeKind::Warning.default_half_life_days() - 1.0 / 24.0).abs() < 1e-9);
         assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 60.0);
         assert_eq!(
             KnowledgeKind::StrategyFragment.default_half_life_days(),

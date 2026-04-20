@@ -307,11 +307,7 @@ fn episode_matches_filter(
 }
 
 fn episode_role_matches_filter(role: &str, filter: Option<&str>) -> bool {
-    filter.is_none_or(|value| {
-        value
-            .strip_prefix("role:")
-            .is_none_or(|r| r.trim() == role)
-    })
+    filter.is_none_or(|value| value.strip_prefix("role:").is_none_or(|r| r.trim() == role))
 }
 
 #[cfg(test)]

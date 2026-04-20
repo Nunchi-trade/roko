@@ -246,9 +246,21 @@ impl Witness for CodingWitness {
     fn observe(&self) -> Vec<Observation> {
         let metrics = self.metrics.read();
         vec![
-            Observation::new(OracleDomain::Coding, "build_time_trend", metrics.build_time_secs),
-            Observation::new(OracleDomain::Coding, "test_pass_rate", metrics.test_pass_rate),
-            Observation::new(OracleDomain::Coding, "complexity_delta", metrics.complexity_delta),
+            Observation::new(
+                OracleDomain::Coding,
+                "build_time_trend",
+                metrics.build_time_secs,
+            ),
+            Observation::new(
+                OracleDomain::Coding,
+                "test_pass_rate",
+                metrics.test_pass_rate,
+            ),
+            Observation::new(
+                OracleDomain::Coding,
+                "complexity_delta",
+                metrics.complexity_delta,
+            ),
             Observation::new(
                 OracleDomain::Coding,
                 "dependency_freshness",
@@ -270,8 +282,7 @@ impl Witness for CodingWitness {
         let mut escalation = false;
 
         for obs in observations {
-            let signal_stats =
-                Self::get_or_insert_stats(&mut stats, &obs.name, self.z_threshold);
+            let signal_stats = Self::get_or_insert_stats(&mut stats, &obs.name, self.z_threshold);
             let z_score = signal_stats.update(obs.value);
             let anomaly_level = signal_stats.classify(z_score);
 
@@ -431,10 +442,7 @@ impl WitnessVerifier {
                 return WitnessVerdict::AdjustAndAccept {
                     original,
                     corrected,
-                    reason: format!(
-                        "corrected bias {:.3} in {}/{}",
-                        bias, model_id, domain_str
-                    ),
+                    reason: format!("corrected bias {:.3} in {}/{}", bias, model_id, domain_str),
                 };
             }
         }
@@ -544,7 +552,10 @@ mod tests {
                 ..
             } => {
                 assert!((original - 0.7).abs() < 0.01);
-                assert!(corrected < original, "corrected should be less than original");
+                assert!(
+                    corrected < original,
+                    "corrected should be less than original"
+                );
             }
             _ => panic!("Expected AdjustAndAccept, got {verdict:?}"),
         }
@@ -606,7 +617,11 @@ mod tests {
             file_coupling_count: 3.0,
         });
         let observations = witness.observe();
-        assert_eq!(observations.len(), 6, "CodingWitness should produce 6 observations");
+        assert_eq!(
+            observations.len(),
+            6,
+            "CodingWitness should produce 6 observations"
+        );
         assert_eq!(observations[0].name, "build_time_trend");
         assert_eq!(observations[1].name, "test_pass_rate");
     }
@@ -666,7 +681,10 @@ mod tests {
         });
         let observations = witness.observe();
         let result = witness.triage(&observations);
-        assert!(result.escalation_triggered, "10x build time should trigger escalation");
+        assert!(
+            result.escalation_triggered,
+            "10x build time should trigger escalation"
+        );
         assert!(result.anomaly_fraction > 0.0);
     }
 
@@ -679,8 +697,8 @@ mod tests {
 
     #[test]
     fn observation_with_tag() {
-        let obs = Observation::new(OracleDomain::Coding, "build_time", 25.0)
-            .with_tag("source", "ci");
+        let obs =
+            Observation::new(OracleDomain::Coding, "build_time", 25.0).with_tag("source", "ci");
         assert_eq!(obs.tags.get("source").unwrap(), "ci");
     }
 }

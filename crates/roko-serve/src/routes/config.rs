@@ -141,11 +141,7 @@ pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConf
     let restart_count = result.needs_restart.len();
     if applied_count > 0 || restart_count > 0 {
         state.event_bus.publish(ServerEvent::ConfigReloaded {
-            applied_sections: result
-                .applied
-                .iter()
-                .map(|c| c.summary.clone())
-                .collect(),
+            applied_sections: result.applied.iter().map(|c| c.summary.clone()).collect(),
             restart_required: result
                 .needs_restart
                 .iter()
@@ -160,9 +156,7 @@ pub fn reload_config_from_disk(state: &AppState) -> Result<Vec<String>, LoadConf
 /// Reload STRATEGY.md from disk and return the parsed strategy document.
 ///
 /// Returns `None` if the file does not exist or cannot be read.
-pub fn reload_strategy_from_disk(
-    state: &AppState,
-) -> Option<hot_reload::StrategyDocument> {
+pub fn reload_strategy_from_disk(state: &AppState) -> Option<hot_reload::StrategyDocument> {
     let strategy_path = state.workdir.join("STRATEGY.md");
     let content = std::fs::read_to_string(&strategy_path).ok()?;
     let doc = hot_reload::parse_strategy_md(&content);

@@ -18,12 +18,12 @@
 /// pattern store, and cross-domain resonance detection (TA-05).
 pub mod codebook;
 pub mod hdc;
-pub mod pad;
-/// Robust statistics: trimmed mean, MAD, Hodges-Lehmann estimator (TA-10).
-pub mod robust_stats;
 /// Riemannian geometry: metric tensors, Christoffel symbols, geodesics,
 /// Ricci curvature, and Frechet means for execution cost manifolds (TA-06).
 pub mod manifold;
+pub mod pad;
+/// Robust statistics: trimmed mean, MAD, Hodges-Lehmann estimator (TA-10).
+pub mod robust_stats;
 /// Cellular sheaves for oracle consistency checking: coboundary operators,
 /// sheaf Laplacian, inconsistency scores, and outlier identification (TA-13).
 pub mod sheaf;
@@ -35,12 +35,12 @@ pub mod tier;
 /// and adversarial distance computation (TA-14).
 pub mod tropical;
 
+pub use codebook::{
+    Codebook, CodingCodebook, PatternStore, RESONANCE_THRESHOLD, ResonanceResult, StoredPattern,
+    detect_cross_domain_resonance, role_bind, unbind,
+};
 pub use hdc::{
     BundleAccumulator, DecayingBundleAccumulator, HDC_BITS, HDC_BYTES, HdcVector, ItemMemory,
-};
-pub use codebook::{
-    Codebook, CodingCodebook, PatternStore, ResonanceResult, StoredPattern,
-    RESONANCE_THRESHOLD, detect_cross_domain_resonance, role_bind, unbind,
 };
 pub use pad::PadVector;
 pub use tier::{InferenceTier, T2_VITALITY_THRESHOLD, TierError, TierRouter};

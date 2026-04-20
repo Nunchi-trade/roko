@@ -1072,8 +1072,7 @@ fn parse_ipc_request(raw: &str) -> Result<DaemonCmd, String> {
     let trimmed = raw.trim();
     // Try JSON first.
     if trimmed.starts_with('{') {
-        return serde_json::from_str(trimmed)
-            .map_err(|e| format!("invalid JSON command: {e}"));
+        return serde_json::from_str(trimmed).map_err(|e| format!("invalid JSON command: {e}"));
     }
     // Legacy plain-text fallback.
     match trimmed.to_ascii_lowercase().as_str() {
@@ -1178,7 +1177,9 @@ async fn dispatch_daemon_cmd(
             } else {
                 DaemonResponse::failure(
                     "reload",
-                    reload.error.unwrap_or_else(|| "daemon reload failed".into()),
+                    reload
+                        .error
+                        .unwrap_or_else(|| "daemon reload failed".into()),
                 )
             }
         }
@@ -1200,40 +1201,36 @@ async fn dispatch_daemon_cmd(
                 serde_json::to_value(&subs).unwrap_or_default(),
             )
         }
-        DaemonCmd::PauseSubscription { id } => {
-            match state.subscriptions.get_by_id(&id) {
-                Some(mut sub) => {
-                    sub.enabled = false;
-                    let _ = state.subscriptions.update_by_id(&id, sub);
-                    info!(subscription_id = %id, "subscription paused via IPC");
-                    DaemonResponse::success_with_data(
-                        "pause_subscription",
-                        json!({ "id": id, "enabled": false }),
-                    )
-                }
-                None => DaemonResponse::failure(
+        DaemonCmd::PauseSubscription { id } => match state.subscriptions.get_by_id(&id) {
+            Some(mut sub) => {
+                sub.enabled = false;
+                let _ = state.subscriptions.update_by_id(&id, sub);
+                info!(subscription_id = %id, "subscription paused via IPC");
+                DaemonResponse::success_with_data(
                     "pause_subscription",
-                    format!("subscription not found: {id}"),
-                ),
+                    json!({ "id": id, "enabled": false }),
+                )
             }
-        }
-        DaemonCmd::ResumeSubscription { id } => {
-            match state.subscriptions.get_by_id(&id) {
-                Some(mut sub) => {
-                    sub.enabled = true;
-                    let _ = state.subscriptions.update_by_id(&id, sub);
-                    info!(subscription_id = %id, "subscription resumed via IPC");
-                    DaemonResponse::success_with_data(
-                        "resume_subscription",
-                        json!({ "id": id, "enabled": true }),
-                    )
-                }
-                None => DaemonResponse::failure(
+            None => DaemonResponse::failure(
+                "pause_subscription",
+                format!("subscription not found: {id}"),
+            ),
+        },
+        DaemonCmd::ResumeSubscription { id } => match state.subscriptions.get_by_id(&id) {
+            Some(mut sub) => {
+                sub.enabled = true;
+                let _ = state.subscriptions.update_by_id(&id, sub);
+                info!(subscription_id = %id, "subscription resumed via IPC");
+                DaemonResponse::success_with_data(
                     "resume_subscription",
-                    format!("subscription not found: {id}"),
-                ),
+                    json!({ "id": id, "enabled": true }),
+                )
             }
-        }
+            None => DaemonResponse::failure(
+                "resume_subscription",
+                format!("subscription not found: {id}"),
+            ),
+        },
     }
 }
 
@@ -1830,8 +1827,7 @@ mod tests {
 
     #[test]
     fn parse_ipc_json_pause_subscription() {
-        let cmd =
-            parse_ipc_request(r#"{"cmd":"pause_subscription","id":"config-0"}"#).unwrap();
+        let cmd = parse_ipc_request(r#"{"cmd":"pause_subscription","id":"config-0"}"#).unwrap();
         assert_eq!(
             cmd,
             DaemonCmd::PauseSubscription {
@@ -1842,8 +1838,7 @@ mod tests {
 
     #[test]
     fn parse_ipc_json_resume_subscription() {
-        let cmd =
-            parse_ipc_request(r#"{"cmd":"resume_subscription","id":"config-1"}"#).unwrap();
+        let cmd = parse_ipc_request(r#"{"cmd":"resume_subscription","id":"config-1"}"#).unwrap();
         assert_eq!(
             cmd,
             DaemonCmd::ResumeSubscription {
@@ -1975,19 +1970,11 @@ mod tests {
     #[test]
     fn subscription_manager_priority_scheduling() {
         let mut mgr = SubscriptionManager::new(10);
-        let mut sub1 = RepoSubscription::new(
-            "r1".into(),
-            PathBuf::from("/a"),
-            "t".into(),
-            "w".into(),
-        );
+        let mut sub1 =
+            RepoSubscription::new("r1".into(), PathBuf::from("/a"), "t".into(), "w".into());
         sub1.priority = 5;
-        let mut sub2 = RepoSubscription::new(
-            "r2".into(),
-            PathBuf::from("/b"),
-            "t".into(),
-            "w".into(),
-        );
+        let mut sub2 =
+            RepoSubscription::new("r2".into(), PathBuf::from("/b"), "t".into(), "w".into());
         sub2.priority = 10;
         mgr.repos.push(sub1);
         mgr.repos.push(sub2);

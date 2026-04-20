@@ -306,9 +306,7 @@ mod tests {
 
     #[test]
     fn allow_decision_resolves_immediately() {
-        let decision = AuthzDecision::Allow {
-            evidence: vec![],
-        };
+        let decision = AuthzDecision::Allow { evidence: vec![] };
         let (result, outcome) = decision.resolve_with_channel(&DenyAllChannel);
         assert!(result.is_ok());
         assert!(outcome.is_none());
@@ -377,9 +375,7 @@ mod tests {
 
     #[test]
     fn into_tool_result_backwards_compat() {
-        let allow = AuthzDecision::Allow {
-            evidence: vec![],
-        };
+        let allow = AuthzDecision::Allow { evidence: vec![] };
         assert!(allow.into_tool_result().is_ok());
 
         let deny = AuthzDecision::Deny {

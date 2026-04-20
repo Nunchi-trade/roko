@@ -342,8 +342,7 @@ impl RoleToolProfile {
                         entry.1 += 1;
                     }
                     // Approximate token cost per tool call.
-                    let per_tool_tokens =
-                        ep.tokens_used / tool_names.len().max(1) as u64;
+                    let per_tool_tokens = ep.tokens_used / tool_names.len().max(1) as u64;
                     entry.2 += per_tool_tokens;
                 }
 
@@ -359,10 +358,7 @@ impl RoleToolProfile {
                 .map(|(name, (uses, successes, tokens))| {
                     let _episodes_with_tool = eps
                         .iter()
-                        .filter(|ep| {
-                            extract_tool_names(&ep.external_actions)
-                                .contains(name)
-                        })
+                        .filter(|ep| extract_tool_names(&ep.external_actions).contains(name))
                         .count();
                     ToolUsageProfile {
                         tool_name: name.clone(),
@@ -373,11 +369,7 @@ impl RoleToolProfile {
                             0.0
                         },
                         calls_per_episode: *uses as f64 / total_episodes,
-                        contribution_to_success: compute_contribution(
-                            name,
-                            eps,
-                            base_pass_rate,
-                        ),
+                        contribution_to_success: compute_contribution(name, eps, base_pass_rate),
                         tokens_consumed: *tokens,
                     }
                 })
@@ -483,9 +475,7 @@ fn compute_contribution(
 ) -> f64 {
     let with_tool: Vec<_> = episodes
         .iter()
-        .filter(|ep| {
-            extract_tool_names(&ep.external_actions).contains(&tool_name.to_string())
-        })
+        .filter(|ep| extract_tool_names(&ep.external_actions).contains(&tool_name.to_string()))
         .collect();
 
     if with_tool.is_empty() {
@@ -631,7 +621,12 @@ mod tests {
         assert!(model.skill_for(&easy_cat) > model.skill_for(&hard_cat));
     }
 
-    fn make_episode(role: &str, category: &str, success: bool, tools: &[&str]) -> crate::episode_logger::Episode {
+    fn make_episode(
+        role: &str,
+        category: &str,
+        success: bool,
+        tools: &[&str],
+    ) -> crate::episode_logger::Episode {
         let mut ep = crate::episode_logger::Episode::new("agent-1", "task-1");
         ep.agent_template = role.to_string();
         ep.trigger_kind = category.to_string();
@@ -668,9 +663,7 @@ mod tests {
 
     #[test]
     fn from_episodes_respects_min_episodes() {
-        let episodes = vec![
-            make_episode("implementer", "task", true, &["Read"]),
-        ];
+        let episodes = vec![make_episode("implementer", "task", true, &["Read"])];
 
         // With min_episodes=2, single-episode groups are skipped.
         let profiles = RoleToolProfile::from_episodes(&episodes, 2);
@@ -684,12 +677,14 @@ mod tests {
     #[test]
     fn from_episodes_format_hints_produces_output() {
         let episodes: Vec<_> = (0..10)
-            .map(|i| make_episode(
-                "implementer",
-                "task",
-                i < 8, // 80% pass rate
-                &["Read", "Edit", "Bash"],
-            ))
+            .map(|i| {
+                make_episode(
+                    "implementer",
+                    "task",
+                    i < 8, // 80% pass rate
+                    &["Read", "Edit", "Bash"],
+                )
+            })
             .collect();
 
         let profiles = RoleToolProfile::from_episodes(&episodes, 3);

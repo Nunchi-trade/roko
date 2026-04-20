@@ -45,7 +45,9 @@ fn bench_content_hash_large(c: &mut Criterion) {
 
 fn bench_engram_content_hash(c: &mut Criterion) {
     let engram = Engram::builder(Kind::Task)
-        .body(Body::text("implement the login feature with OAuth2 support"))
+        .body(Body::text(
+            "implement the login feature with OAuth2 support",
+        ))
         .score(Score::new(0.9, 0.5, 1.0, 1.5))
         .created_at_ms(1_000_000)
         .tag("plan_id", "plan-42")

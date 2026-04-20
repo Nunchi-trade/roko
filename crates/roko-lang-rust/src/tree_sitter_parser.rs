@@ -269,11 +269,7 @@ fn collect_symbols(node: tree_sitter::Node<'_>, source: &str, symbols: &mut Vec<
     }
 }
 
-fn collect_impl_methods(
-    body: tree_sitter::Node<'_>,
-    source: &str,
-    symbols: &mut Vec<Symbol>,
-) {
+fn collect_impl_methods(body: tree_sitter::Node<'_>, source: &str, symbols: &mut Vec<Symbol>) {
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
         if child.kind() == "function_item" {
@@ -322,7 +318,11 @@ pub fn helper() -> i32 {
 }
 "#;
         let symbols = provider.extract_symbols(source);
-        assert!(symbols.len() >= 2, "expected at least 2 symbols, got {}", symbols.len());
+        assert!(
+            symbols.len() >= 2,
+            "expected at least 2 symbols, got {}",
+            symbols.len()
+        );
 
         let main_fn = symbols.iter().find(|s| s.name == "main").expect("main");
         assert_eq!(main_fn.kind, SymbolKind::Function);
@@ -375,7 +375,9 @@ impl Display for Foo {
 "#;
         let symbols = provider.extract_symbols(source);
 
-        let impl_foo = symbols.iter().find(|s| s.name == "Foo" && s.kind == SymbolKind::Impl);
+        let impl_foo = symbols
+            .iter()
+            .find(|s| s.name == "Foo" && s.kind == SymbolKind::Impl);
         assert!(impl_foo.is_some(), "should find impl Foo");
 
         let impl_display = symbols
@@ -430,11 +432,17 @@ type Result<T> = std::result::Result<T, MyError>;
 "#;
         let symbols = provider.extract_symbols(source);
 
-        let my_trait = symbols.iter().find(|s| s.name == "MyTrait").expect("MyTrait");
+        let my_trait = symbols
+            .iter()
+            .find(|s| s.name == "MyTrait")
+            .expect("MyTrait");
         assert_eq!(my_trait.kind, SymbolKind::Trait);
         assert_eq!(my_trait.visibility, Visibility::Public);
 
-        let max_size = symbols.iter().find(|s| s.name == "MAX_SIZE").expect("MAX_SIZE");
+        let max_size = symbols
+            .iter()
+            .find(|s| s.name == "MAX_SIZE")
+            .expect("MAX_SIZE");
         assert_eq!(max_size.kind, SymbolKind::Const);
     }
 

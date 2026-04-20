@@ -578,10 +578,7 @@ pub fn detect_dissonance(a: &Heuristic, b: &Heuristic) -> Option<DissonanceRepor
         return None;
     }
 
-    let situation_hash = format!(
-        "sim={:.3}:{}+{}",
-        similarity, a.id, b.id
-    );
+    let situation_hash = format!("sim={:.3}:{}+{}", similarity, a.id, b.id);
 
     Some(DissonanceReport {
         dissonance: Dissonance::new(
@@ -715,11 +712,7 @@ mod tests {
         let heuristics: Vec<Heuristic> = (0..6)
             .map(|i| {
                 let fp = HdcVector::from_seed(format!("seed-{i}").as_bytes());
-                make_heuristic_with_fp(
-                    &format!("h{i}"),
-                    fp,
-                    Predicate::LanguageIs(Language::Rust),
-                )
+                make_heuristic_with_fp(&format!("h{i}"), fp, Predicate::LanguageIs(Language::Rust))
             })
             .collect();
 
@@ -738,11 +731,7 @@ mod tests {
         // Same fingerprint = identical bits = similarity 1.0 => high overlap.
         let fp = HdcVector::from_seed(b"shared-fp");
         let a = make_heuristic_with_fp("h1", fp, Predicate::LanguageIs(Language::Rust));
-        let b = make_heuristic_with_fp(
-            "h2",
-            fp,
-            Predicate::GateRecentlyFailed("compile".into()),
-        );
+        let b = make_heuristic_with_fp("h2", fp, Predicate::GateRecentlyFailed("compile".into()));
 
         let report = detect_dissonance(&a, &b);
         assert!(report.is_some());

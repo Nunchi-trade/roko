@@ -205,9 +205,12 @@ mod red_team {
         let ctx = tool_ctx(tmp.path());
 
         // Attempt to read files outside the worktree.
-        let tc = call("bash", serde_json::json!({
-            "command": "cat /etc/hostname"
-        }));
+        let tc = call(
+            "bash",
+            serde_json::json!({
+                "command": "cat /etc/hostname"
+            }),
+        );
         let _result = handler.execute(tc, &ctx).await;
         // The bash handler may allow this (it runs in the worktree directory),
         // but we verify it doesn't panic.
@@ -218,9 +221,12 @@ mod red_team {
         let tmp = tempfile::tempdir().unwrap();
         let handler = handler_for("bash").unwrap();
         let ctx = tool_ctx(tmp.path());
-        let tc = call("bash", serde_json::json!({
-            "command": ""
-        }));
+        let tc = call(
+            "bash",
+            serde_json::json!({
+                "command": ""
+            }),
+        );
         let result = handler.execute(tc, &ctx).await;
         // Should return an error, not panic.
         match result {
@@ -234,9 +240,12 @@ mod red_team {
         let tmp = tempfile::tempdir().unwrap();
         let handler = handler_for("bash").unwrap();
         let ctx = tool_ctx(tmp.path());
-        let tc = call("bash", serde_json::json!({
-            "command": "echo \x00hello"
-        }));
+        let tc = call(
+            "bash",
+            serde_json::json!({
+                "command": "echo \x00hello"
+            }),
+        );
         let _result = handler.execute(tc, &ctx).await;
         // Verify no panic.
     }
@@ -247,9 +256,12 @@ mod red_team {
         let handler = handler_for("bash").unwrap();
         let ctx = tool_ctx(tmp.path());
         let long_cmd = format!("echo {}", "A".repeat(50_000));
-        let tc = call("bash", serde_json::json!({
-            "command": long_cmd
-        }));
+        let tc = call(
+            "bash",
+            serde_json::json!({
+                "command": long_cmd
+            }),
+        );
         let _result = handler.execute(tc, &ctx).await;
         // Should handle gracefully.
     }
@@ -380,10 +392,16 @@ mod eval_fixtures {
             (builtin::read_file::NAME, &["read", "contents", "file"]),
             (builtin::write_file::NAME, &["write", "new file", "create"]),
             (builtin::edit_file::NAME, &["replace", "edit", "change"]),
-            (builtin::grep::NAME, &["search", "find", "occurrences", "grep"]),
+            (
+                builtin::grep::NAME,
+                &["search", "find", "occurrences", "grep"],
+            ),
             (builtin::glob::NAME, &["find", "files", "glob"]),
             (builtin::bash::NAME, &["run", "execute", "cargo", "command"]),
-            (builtin::web_search::NAME, &["search", "web", "documentation"]),
+            (
+                builtin::web_search::NAME,
+                &["search", "web", "documentation"],
+            ),
             (builtin::web_fetch::NAME, &["fetch", "url", "download"]),
         ];
 

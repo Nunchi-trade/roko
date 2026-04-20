@@ -213,11 +213,7 @@ impl SelfHealingState {
 
     fn enter_cooldown(&mut self, watcher: &str, ticks: u64) {
         // Replace existing cooldown if present.
-        if let Some(entry) = self
-            .cooldowns
-            .iter_mut()
-            .find(|(name, _)| name == watcher)
-        {
+        if let Some(entry) = self.cooldowns.iter_mut().find(|(name, _)| name == watcher) {
             entry.1 = ticks;
         } else {
             self.cooldowns.push((watcher.to_string(), ticks));

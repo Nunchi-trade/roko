@@ -150,9 +150,7 @@ impl TemporalMonitor {
         let states = properties
             .iter()
             .map(|prop| match prop {
-                LtlProperty::Never { .. } | LtlProperty::Always { .. } => {
-                    MonitorState::Satisfied
-                }
+                LtlProperty::Never { .. } | LtlProperty::Always { .. } => MonitorState::Satisfied,
                 LtlProperty::Eventually { .. } => MonitorState::Pending { since_turn: 0 },
             })
             .collect();
@@ -197,11 +195,20 @@ impl TemporalMonitor {
                 } => {
                     if matches_pattern(call, pattern) {
                         let detail = if description.is_empty() {
-                            format!("Never property violated: pattern `{pattern}` matched tool call `{}`", call.name)
+                            format!(
+                                "Never property violated: pattern `{pattern}` matched tool call `{}`",
+                                call.name
+                            )
                         } else {
-                            format!("Never: {description} (pattern `{pattern}` matched `{}`)", call.name)
+                            format!(
+                                "Never: {description} (pattern `{pattern}` matched `{}`)",
+                                call.name
+                            )
                         };
-                        self.states[i] = MonitorState::Violated { turn, detail: detail.clone() };
+                        self.states[i] = MonitorState::Violated {
+                            turn,
+                            detail: detail.clone(),
+                        };
                         violations.push(Violation {
                             property_index: i,
                             property: property.clone(),
@@ -226,11 +233,10 @@ impl TemporalMonitor {
                         } else {
                             format!("Always: {description} (not satisfied by `{}`)", call.name)
                         };
-                        self.states[i] =
-                            MonitorState::Violated {
-                                turn,
-                                detail: detail.clone(),
-                            };
+                        self.states[i] = MonitorState::Violated {
+                            turn,
+                            detail: detail.clone(),
+                        };
                         violations.push(Violation {
                             property_index: i,
                             property: property.clone(),
@@ -333,11 +339,7 @@ fn matches_pattern(call: &ToolCall, pattern: &str) -> bool {
     }
 
     // Command argument contains pattern (for bash/exec tools).
-    if let Some(command) = call
-        .arguments
-        .get("command")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(command) = call.arguments.get("command").and_then(|v| v.as_str()) {
         let lower_command = command.to_ascii_lowercase();
         let lower_pattern = pattern.to_ascii_lowercase();
         if lower_command.contains(&lower_pattern) {

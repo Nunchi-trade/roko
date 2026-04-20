@@ -44,20 +44,19 @@ mod phase2_stubs;
 pub mod somatic_ta;
 
 pub use self::goals::{GoalNode, GoalSeed, GoalStatus, GoalTree};
-pub use self::somatic_ta::{
-    IitPhiMetric, MutualInfoMatrix, SomaticOracleContext, SomaticRetrieval,
-    SomaticRetrievalConfig, SubsystemActivity,
-    apply_somatic_confidence_bias, detect_synergy, somatic_confidence_bias,
-};
 pub use self::phase2_stubs::{
     AffectBehaviorModulation, AffectBehaviorStrategy, AffectOctant, AffectWeightedQuery, AgentId,
     BehavioralStateThresholds, BehavioralStateTracker, BorrowedAffect, ContagionEvent,
-    ContagionTrigger, ContrarianConfig, ContrarianTracker, CrateConfidence,
-    CrateFatigueSuggestion, DimensionDef, DimensionSource, DimensionWeights, DomainRegistration,
-    EfficiencyEvent, EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector,
-    ResourcePressure, ScoredEntry, SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper,
-    TierBias, TierThresholds, ValidationArc, adjusted_thresholds, contagion,
-    contagion_susceptibility, fatigue_response, pad_cosine_similarity,
+    ContagionTrigger, ContrarianConfig, ContrarianTracker, CrateConfidence, CrateFatigueSuggestion,
+    DimensionDef, DimensionSource, DimensionWeights, DomainRegistration, EfficiencyEvent,
+    EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector, ResourcePressure,
+    ScoredEntry, SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper, TierBias,
+    TierThresholds, ValidationArc, adjusted_thresholds, contagion, contagion_susceptibility,
+    fatigue_response, pad_cosine_similarity,
+};
+pub use self::somatic_ta::{
+    IitPhiMetric, MutualInfoMatrix, SomaticOracleContext, SomaticRetrieval, SomaticRetrievalConfig,
+    SubsystemActivity, apply_somatic_confidence_bias, detect_synergy, somatic_confidence_bias,
 };
 
 const STRATEGY_DIMENSIONS: usize = 8;
@@ -1987,7 +1986,8 @@ impl AffectEngine for DaimonState {
                 let dominance = (positive * 0.02 - negative * 0.03).clamp(-0.15, 0.10) * scale;
                 // Confidence: net positive -> boost, net negative -> drop.
                 let confidence = (positive * 0.02 - negative * 0.05).clamp(-0.20, 0.10) * scale;
-                self.state.apply_delta(pleasure, arousal, dominance, confidence, now);
+                self.state
+                    .apply_delta(pleasure, arousal, dominance, confidence, now);
             }
         }
 
@@ -2421,14 +2421,30 @@ impl BehavioralStrategy {
     #[must_use]
     pub const fn guidance(self) -> &'static str {
         match self {
-            Self::Exuberant => "Explore aggressively. Try novel approaches and accept higher risk for potential breakthroughs.",
-            Self::Dependent => "Seek guidance from existing patterns. Follow proven playbooks and ask for clarification when uncertain.",
-            Self::Relaxed => "Consolidate recent gains. Exploit known-good patterns rather than exploring new territory.",
-            Self::Docile => "Make minimal changes. Accept current state and avoid unnecessary intervention.",
-            Self::Hostile => "Apply forceful correction. Escalate model tier, increase retries, and push through blockers.",
-            Self::Anxious => "Proceed cautiously. Add extra validation, prefer conservative strategies, and verify assumptions.",
-            Self::Disdainful => "Be selective. Focus only on high-value tasks and skip marginal work items.",
-            Self::Bored => "Run background maintenance. Trigger dream cycles, consolidate knowledge, and clean up technical debt.",
+            Self::Exuberant => {
+                "Explore aggressively. Try novel approaches and accept higher risk for potential breakthroughs."
+            }
+            Self::Dependent => {
+                "Seek guidance from existing patterns. Follow proven playbooks and ask for clarification when uncertain."
+            }
+            Self::Relaxed => {
+                "Consolidate recent gains. Exploit known-good patterns rather than exploring new territory."
+            }
+            Self::Docile => {
+                "Make minimal changes. Accept current state and avoid unnecessary intervention."
+            }
+            Self::Hostile => {
+                "Apply forceful correction. Escalate model tier, increase retries, and push through blockers."
+            }
+            Self::Anxious => {
+                "Proceed cautiously. Add extra validation, prefer conservative strategies, and verify assumptions."
+            }
+            Self::Disdainful => {
+                "Be selective. Focus only on high-value tasks and skip marginal work items."
+            }
+            Self::Bored => {
+                "Run background maintenance. Trigger dream cycles, consolidate knowledge, and clean up technical debt."
+            }
         }
     }
 
@@ -3303,12 +3319,8 @@ mod tests {
         let positive_entry = PadVector::new(0.7, 0.2, 0.4);
         let negative_entry = PadVector::new(-0.8, -0.3, -0.5);
 
-        let score_match = mood_congruent_score(
-            &positive_entry, now, &positive_mood, 0.8, now,
-        );
-        let score_mismatch = mood_congruent_score(
-            &negative_entry, now, &positive_mood, 0.8, now,
-        );
+        let score_match = mood_congruent_score(&positive_entry, now, &positive_mood, 0.8, now);
+        let score_mismatch = mood_congruent_score(&negative_entry, now, &positive_mood, 0.8, now);
 
         assert!(score_match > score_mismatch);
     }

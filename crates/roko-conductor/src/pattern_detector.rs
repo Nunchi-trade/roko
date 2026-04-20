@@ -162,9 +162,24 @@ impl PatternDetector {
 
         // Sequence: ghost_turn -> iteration_loop -> stuck_pattern (progressive degradation).
         if self.history.len() >= 3 {
-            let has_ghost_recent = self.consecutive_fires.get("ghost-turn").copied().unwrap_or(0) > 0;
-            let has_iter_recent = self.consecutive_fires.get("iteration-loop").copied().unwrap_or(0) > 0;
-            let has_stuck_recent = self.consecutive_fires.get("stuck-pattern").copied().unwrap_or(0) > 0;
+            let has_ghost_recent = self
+                .consecutive_fires
+                .get("ghost-turn")
+                .copied()
+                .unwrap_or(0)
+                > 0;
+            let has_iter_recent = self
+                .consecutive_fires
+                .get("iteration-loop")
+                .copied()
+                .unwrap_or(0)
+                > 0;
+            let has_stuck_recent = self
+                .consecutive_fires
+                .get("stuck-pattern")
+                .copied()
+                .unwrap_or(0)
+                > 0;
             if has_ghost_recent && has_iter_recent && has_stuck_recent {
                 patterns.push(CompoundPattern {
                     pattern_name: "progressive_degradation".to_string(),
@@ -184,11 +199,7 @@ impl PatternDetector {
     /// Check if a watcher has fired N consecutive times (hysteresis gate).
     #[must_use]
     pub fn passes_hysteresis(&self, watcher: &str, n: usize) -> bool {
-        self.consecutive_fires
-            .get(watcher)
-            .copied()
-            .unwrap_or(0)
-            >= n
+        self.consecutive_fires.get(watcher).copied().unwrap_or(0) >= n
     }
 
     /// Check if a watcher passes the default hysteresis window.
@@ -200,10 +211,7 @@ impl PatternDetector {
     /// Get the consecutive fire count for a watcher.
     #[must_use]
     pub fn consecutive_count(&self, watcher: &str) -> usize {
-        self.consecutive_fires
-            .get(watcher)
-            .copied()
-            .unwrap_or(0)
+        self.consecutive_fires.get(watcher).copied().unwrap_or(0)
     }
 
     /// Clear all state.
@@ -243,9 +251,11 @@ mod tests {
     fn resource_family_two_watchers_triggers_pattern() {
         let mut pd = PatternDetector::default();
         let patterns = pd.record(&[warning("cost-overrun"), warning("time-overrun")]);
-        assert!(patterns
-            .iter()
-            .any(|p| p.pattern_name == "resource_exhaustion"));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.pattern_name == "resource_exhaustion")
+        );
     }
 
     #[test]
@@ -256,9 +266,11 @@ mod tests {
             warning("time-overrun"),
             warning("context-window-pressure"),
         ]);
-        assert!(patterns
-            .iter()
-            .any(|p| p.pattern_name == "total_resource_exhaustion"));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.pattern_name == "total_resource_exhaustion")
+        );
     }
 
     #[test]
@@ -290,11 +302,15 @@ mod tests {
     #[test]
     fn quality_family_pattern() {
         let mut pd = PatternDetector::default();
-        let patterns =
-            pd.record(&[warning("compile-fail-repeat"), warning("test-failure-budget")]);
-        assert!(patterns
-            .iter()
-            .any(|p| p.pattern_name == "quality_degradation"));
+        let patterns = pd.record(&[
+            warning("compile-fail-repeat"),
+            warning("test-failure-budget"),
+        ]);
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.pattern_name == "quality_degradation")
+        );
     }
 
     #[test]

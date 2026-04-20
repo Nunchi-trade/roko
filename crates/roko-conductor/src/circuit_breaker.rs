@@ -84,10 +84,8 @@ impl HoltForecaster {
             self.trend = 0.0;
         } else {
             let prev_level = self.level;
-            self.level =
-                self.alpha * observation + (1.0 - self.alpha) * (self.level + self.trend);
-            self.trend =
-                self.beta * (self.level - prev_level) + (1.0 - self.beta) * self.trend;
+            self.level = self.alpha * observation + (1.0 - self.alpha) * (self.level + self.trend);
+            self.trend = self.beta * (self.level - prev_level) + (1.0 - self.beta) * self.trend;
         }
         self.observations += 1;
     }
@@ -315,9 +313,11 @@ impl CircuitBreaker {
     #[must_use]
     pub fn is_tripped(&self, plan_id: &str) -> bool {
         // Count-based trip (always checked).
-        if self.records
+        if self
+            .records
             .get(plan_id)
-            .is_some_and(|r| r.count >= self.max_failures) {
+            .is_some_and(|r| r.count >= self.max_failures)
+        {
             return true;
         }
 
@@ -690,7 +690,9 @@ mod tests {
     fn predictive_breaker_record_success_updates_forecaster() {
         let cb = CircuitBreaker::new(10).with_predictive(0.5);
         cb.record_success("plan-1");
-        let f = cb.get_forecaster("plan-1").expect("forecaster should exist");
+        let f = cb
+            .get_forecaster("plan-1")
+            .expect("forecaster should exist");
         assert_eq!(f.observation_count(), 1);
         assert!((f.level - 0.0).abs() < f64::EPSILON);
     }

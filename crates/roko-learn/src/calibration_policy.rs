@@ -86,9 +86,7 @@ impl CalibrationPolicy {
     /// Returns a correction if one is triggered by this event.
     pub fn process_event(&mut self, event: &AgentEvent) -> Option<CalibrationCorrection> {
         match event {
-            AgentEvent::TurnStarted {
-                task_id, model, ..
-            } => {
+            AgentEvent::TurnStarted { task_id, model, .. } => {
                 // Register a pending prediction. Use a default predicted
                 // probability since the actual routing confidence is not
                 // carried on TurnStarted. The calibration tracker only
@@ -97,7 +95,7 @@ impl CalibrationPolicy {
                     task_id.clone(),
                     PendingPrediction {
                         model: model.clone(),
-                        category: String::new(), // filled on completion
+                        category: String::new(),     // filled on completion
                         predicted_success_prob: 0.7, // prior
                     },
                 );

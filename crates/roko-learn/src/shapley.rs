@@ -113,14 +113,15 @@ pub fn shapley_exact<F>(n: usize, v: F) -> Vec<f64>
 where
     F: Fn(Coalition) -> f64,
 {
-    assert!(n <= 20, "exact Shapley requires n <= 20; use shapley_monte_carlo for larger groups");
+    assert!(
+        n <= 20,
+        "exact Shapley requires n <= 20; use shapley_monte_carlo for larger groups"
+    );
 
     let mut values = vec![0.0; n];
 
     // Precompute factorial lookup (small n, just use f64).
-    let factorial = |k: u32| -> f64 {
-        (1..=k).map(|i| i as f64).product::<f64>().max(1.0)
-    };
+    let factorial = |k: u32| -> f64 { (1..=k).map(|i| i as f64).product::<f64>().max(1.0) };
 
     let n_factorial = factorial(n as u32);
 
@@ -203,7 +204,11 @@ where
 ///
 /// This is the high-level API that wraps `shapley_exact` or `shapley_monte_carlo`
 /// based on group size, and returns named attributions sorted by value.
-pub fn shapley_attribution<F>(agent_ids: &[String], v: F, samples: Option<usize>) -> Vec<ShapleyAttribution>
+pub fn shapley_attribution<F>(
+    agent_ids: &[String],
+    v: F,
+    samples: Option<usize>,
+) -> Vec<ShapleyAttribution>
 where
     F: Fn(Coalition) -> f64,
 {
@@ -238,7 +243,11 @@ where
         .collect();
 
     // Sort by Shapley value descending.
-    attributions.sort_by(|a, b| b.shapley_value.partial_cmp(&a.shapley_value).unwrap_or(std::cmp::Ordering::Equal));
+    attributions.sort_by(|a, b| {
+        b.shapley_value
+            .partial_cmp(&a.shapley_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     attributions
 }
 
@@ -304,8 +313,12 @@ mod tests {
         // Two agents, each contributes 5 alone, together they get 10 (no synergy).
         let values = shapley_exact(2, |c| {
             let mut v = 0.0;
-            if c.contains(0) { v += 5.0; }
-            if c.contains(1) { v += 5.0; }
+            if c.contains(0) {
+                v += 5.0;
+            }
+            if c.contains(1) {
+                v += 5.0;
+            }
             v
         });
         assert!((values[0] - 5.0).abs() < 1e-10);
@@ -317,12 +330,20 @@ mod tests {
         // Agent 2 contributes nothing.
         let values = shapley_exact(3, |c| {
             let mut v = 0.0;
-            if c.contains(0) { v += 4.0; }
-            if c.contains(1) { v += 3.0; }
+            if c.contains(0) {
+                v += 4.0;
+            }
+            if c.contains(1) {
+                v += 3.0;
+            }
             // Agent 2 adds nothing.
             v
         });
-        assert!((values[2]).abs() < 1e-10, "null agent should get 0, got {}", values[2]);
+        assert!(
+            (values[2]).abs() < 1e-10,
+            "null agent should get 0, got {}",
+            values[2]
+        );
     }
 
     #[test]
@@ -330,10 +351,18 @@ mod tests {
         // Sum of Shapley values = v(grand) - v(empty).
         let v = |c: Coalition| -> f64 {
             let mut val = 0.0;
-            if c.contains(0) { val += 3.0; }
-            if c.contains(1) { val += 2.0; }
-            if c.contains(2) { val += 1.0; }
-            if c.contains(0) && c.contains(1) { val += 2.0; }
+            if c.contains(0) {
+                val += 3.0;
+            }
+            if c.contains(1) {
+                val += 2.0;
+            }
+            if c.contains(2) {
+                val += 1.0;
+            }
+            if c.contains(0) && c.contains(1) {
+                val += 2.0;
+            }
             val
         };
 
@@ -352,7 +381,11 @@ mod tests {
         // Agent 0 alone: 0, Agent 1 alone: 0, together: 10.
         // Each should get 5.0 (symmetric synergy).
         let values = shapley_exact(2, |c| {
-            if c.contains(0) && c.contains(1) { 10.0 } else { 0.0 }
+            if c.contains(0) && c.contains(1) {
+                10.0
+            } else {
+                0.0
+            }
         });
         assert!((values[0] - 5.0).abs() < 1e-10);
         assert!((values[1] - 5.0).abs() < 1e-10);
@@ -362,11 +395,18 @@ mod tests {
     fn essential_agent_gets_full_credit() {
         // Only the grand coalition has value (all agents essential).
         let values = shapley_exact(3, |c| {
-            if c.contains(0) && c.contains(1) && c.contains(2) { 12.0 } else { 0.0 }
+            if c.contains(0) && c.contains(1) && c.contains(2) {
+                12.0
+            } else {
+                0.0
+            }
         });
         // Each gets 12/3 = 4.0 (symmetric essential agents).
         for &v in &values {
-            assert!((v - 4.0).abs() < 1e-10, "essential agent should get 4.0, got {v}");
+            assert!(
+                (v - 4.0).abs() < 1e-10,
+                "essential agent should get 4.0, got {v}"
+            );
         }
     }
 
@@ -374,10 +414,18 @@ mod tests {
     fn monte_carlo_approximates_exact() {
         let v = |c: Coalition| -> f64 {
             let mut val = 0.0;
-            if c.contains(0) { val += 4.0; }
-            if c.contains(1) { val += 3.0; }
-            if c.contains(2) { val += 1.0; }
-            if c.contains(0) && c.contains(1) { val += 2.0; }
+            if c.contains(0) {
+                val += 4.0;
+            }
+            if c.contains(1) {
+                val += 3.0;
+            }
+            if c.contains(2) {
+                val += 1.0;
+            }
+            if c.contains(0) && c.contains(1) {
+                val += 2.0;
+            }
             val
         };
 
@@ -388,7 +436,8 @@ mod tests {
             assert!(
                 (exact[i] - mc[i]).abs() < 0.1,
                 "MC should approximate exact: agent {i}: exact={}, mc={}",
-                exact[i], mc[i]
+                exact[i],
+                mc[i]
             );
         }
     }
@@ -396,13 +445,23 @@ mod tests {
     #[test]
     fn attribution_sorts_by_value() {
         let agents = vec!["a".into(), "b".into(), "c".into()];
-        let attrs = shapley_attribution(&agents, |c| {
-            let mut v = 0.0;
-            if c.contains(0) { v += 1.0; }
-            if c.contains(1) { v += 5.0; }
-            if c.contains(2) { v += 3.0; }
-            v
-        }, None);
+        let attrs = shapley_attribution(
+            &agents,
+            |c| {
+                let mut v = 0.0;
+                if c.contains(0) {
+                    v += 1.0;
+                }
+                if c.contains(1) {
+                    v += 5.0;
+                }
+                if c.contains(2) {
+                    v += 3.0;
+                }
+                v
+            },
+            None,
+        );
 
         assert_eq!(attrs[0].agent_id, "b"); // highest
         assert_eq!(attrs[1].agent_id, "c");
@@ -412,13 +471,23 @@ mod tests {
     #[test]
     fn shares_sum_to_one() {
         let agents = vec!["x".into(), "y".into(), "z".into()];
-        let attrs = shapley_attribution(&agents, |c| {
-            let mut v = 0.0;
-            if c.contains(0) { v += 2.0; }
-            if c.contains(1) { v += 3.0; }
-            if c.contains(2) { v += 5.0; }
-            v
-        }, None);
+        let attrs = shapley_attribution(
+            &agents,
+            |c| {
+                let mut v = 0.0;
+                if c.contains(0) {
+                    v += 2.0;
+                }
+                if c.contains(1) {
+                    v += 3.0;
+                }
+                if c.contains(2) {
+                    v += 5.0;
+                }
+                v
+            },
+            None,
+        );
 
         let total_share: f64 = attrs.iter().map(|a| a.share).sum();
         assert!(

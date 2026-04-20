@@ -18,12 +18,22 @@ pub fn cmd_custody_list(workdir: &Path, limit: Option<usize>) -> Result<()> {
         .map_err(|e| anyhow!("failed to read custody log: {e}"))?;
 
     if records.is_empty() {
-        eprintln!("No custody records found at {}", layout.custody_log().display());
+        eprintln!(
+            "No custody records found at {}",
+            layout.custody_log().display()
+        );
         return Ok(());
     }
 
     let display_records: Vec<&Custody> = if let Some(limit) = limit {
-        records.iter().rev().take(limit).collect::<Vec<_>>().into_iter().rev().collect()
+        records
+            .iter()
+            .rev()
+            .take(limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     } else {
         records.iter().collect()
     };
@@ -83,7 +93,10 @@ pub fn cmd_custody_show(workdir: &Path, index: usize) -> Result<()> {
         .map_err(|e| anyhow!("failed to read custody log: {e}"))?;
 
     if records.is_empty() {
-        eprintln!("No custody records found at {}", layout.custody_log().display());
+        eprintln!(
+            "No custody records found at {}",
+            layout.custody_log().display()
+        );
         std::process::exit(1);
     }
 
@@ -95,7 +108,11 @@ pub fn cmd_custody_show(workdir: &Path, index: usize) -> Result<()> {
     println!("{}", "=".repeat(50));
     println!("Action:      {}", record.action);
     println!("Principal:   {}", record.principal);
-    println!("When:        {} ({})", chrono_format(record.when), record.when);
+    println!(
+        "When:        {} ({})",
+        chrono_format(record.when),
+        record.when
+    );
     println!(
         "Taint:       {}",
         record
@@ -232,10 +249,7 @@ pub fn cmd_custody_verify(workdir: &Path) -> Result<()> {
         for v in &violations {
             println!("  - {v}");
         }
-        Err(anyhow!(
-            "{} integrity violation(s) found",
-            violations.len()
-        ))
+        Err(anyhow!("{} integrity violation(s) found", violations.len()))
     }
 }
 
@@ -260,9 +274,7 @@ fn chrono_format(millis: i64) -> String {
             let secs = day_secs % 60;
             // Approximate year/month/day from days since epoch.
             // Good enough for display; not calendar-accurate for leap seconds.
-            format!(
-                "epoch+{days}d {hours:02}:{mins:02}:{secs:02}",
-            )
+            format!("epoch+{days}d {hours:02}:{mins:02}:{secs:02}",)
         }
         None => format!("{millis}ms"),
     }
@@ -295,10 +307,7 @@ mod tests {
             .log(&Custody::new("write_file", "agent-1", 1000, vec![]))
             .unwrap();
         logger
-            .log(
-                &Custody::new("bash", "agent-2", 2000, vec![])
-                    .with_taint(Taint::UserInput),
-            )
+            .log(&Custody::new("bash", "agent-2", 2000, vec![]).with_taint(Taint::UserInput))
             .unwrap();
 
         assert!(cmd_custody_list(tmp.path(), None).is_ok());
@@ -324,9 +333,7 @@ mod tests {
     fn show_out_of_range_fails() {
         let tmp = TempDir::new().unwrap();
         let logger = setup_custody_log(&tmp);
-        logger
-            .log(&Custody::new("test", "p", 100, vec![]))
-            .unwrap();
+        logger.log(&Custody::new("test", "p", 100, vec![])).unwrap();
 
         assert!(cmd_custody_show(tmp.path(), 99).is_err());
     }

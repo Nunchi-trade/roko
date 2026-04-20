@@ -93,7 +93,9 @@ impl SafetyHook for SpendingLimiter {
         _ctx: &ToolContext,
     ) -> Result<HookDecision, ToolError> {
         let guard = self.budget.lock().map_err(|e| {
-            ToolError::Other(format!("SpendingLimiter: failed to lock budget tracker: {e}"))
+            ToolError::Other(format!(
+                "SpendingLimiter: failed to lock budget tracker: {e}"
+            ))
         })?;
 
         let status = guard.check();
@@ -144,7 +146,12 @@ mod tests {
     }
 
     fn test_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "test tool", ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "test tool",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     fn make_budget(max_daily: f64) -> Arc<std::sync::Mutex<BudgetTracker>> {
@@ -175,7 +182,10 @@ mod tests {
         let limiter = SpendingLimiter::new(budget);
         let tool = test_tool("read_file");
         let params = serde_json::json!({});
-        let result = limiter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = limiter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 
@@ -186,7 +196,10 @@ mod tests {
         let limiter = SpendingLimiter::new(budget);
         let tool = test_tool("bash");
         let params = serde_json::json!({});
-        let result = limiter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = limiter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -197,7 +210,10 @@ mod tests {
         let limiter = SpendingLimiter::new(budget);
         let tool = test_tool("read_file");
         let params = serde_json::json!({});
-        let result = limiter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = limiter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 
@@ -208,7 +224,10 @@ mod tests {
         let limiter = SpendingLimiter::new(budget).reject_on_critical(true);
         let tool = test_tool("read_file");
         let params = serde_json::json!({});
-        let result = limiter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = limiter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -222,7 +241,10 @@ mod tests {
         }]);
         let tool = test_tool("expensive_tool");
         let params = serde_json::json!({});
-        let result = limiter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = limiter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -236,7 +258,10 @@ mod tests {
         }]);
         let tool = test_tool("cheap_tool");
         let params = serde_json::json!({});
-        let result = limiter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = limiter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 }

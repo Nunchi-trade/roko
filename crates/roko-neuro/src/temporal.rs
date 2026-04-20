@@ -82,9 +82,7 @@ impl KnowledgeEpoch {
     pub fn to_interval(&self) -> TemporalInterval {
         TemporalInterval {
             start: self.start.timestamp_millis(),
-            end: self
-                .end
-                .map_or(i64::MAX, |e| e.timestamp_millis()),
+            end: self.end.map_or(i64::MAX, |e| e.timestamp_millis()),
         }
     }
 }
@@ -306,7 +304,11 @@ pub struct TemporalRelation {
 impl TemporalRelation {
     /// Create a new temporal relation.
     #[must_use]
-    pub fn new(source: impl Into<String>, target: impl Into<String>, relation: AllenRelation) -> Self {
+    pub fn new(
+        source: impl Into<String>,
+        target: impl Into<String>,
+        relation: AllenRelation,
+    ) -> Self {
         Self {
             source: source.into(),
             target: target.into(),
@@ -374,7 +376,8 @@ impl TemporalIndex {
         let src_iv = self.entries.get(source)?;
         let tgt_iv = self.entries.get(target)?;
         let relation = src_iv.allen_relation(tgt_iv);
-        self.relations.push(TemporalRelation::new(source, target, relation));
+        self.relations
+            .push(TemporalRelation::new(source, target, relation));
         Some(relation)
     }
 
@@ -404,7 +407,9 @@ impl TemporalIndex {
     /// Find the epoch containing the given timestamp.
     #[must_use]
     pub fn epoch_at(&self, timestamp: i64) -> Option<&KnowledgeEpoch> {
-        self.epochs.values().find(|e| e.to_interval().contains(timestamp))
+        self.epochs
+            .values()
+            .find(|e| e.to_interval().contains(timestamp))
     }
 
     /// Return all cached temporal relations.
@@ -467,7 +472,10 @@ mod tests {
 
     #[test]
     fn allen_overlapped_by() {
-        assert_eq!(iv(3, 8).allen_relation(&iv(1, 5)), AllenRelation::OverlappedBy);
+        assert_eq!(
+            iv(3, 8).allen_relation(&iv(1, 5)),
+            AllenRelation::OverlappedBy
+        );
     }
 
     #[test]
@@ -497,7 +505,10 @@ mod tests {
 
     #[test]
     fn allen_finished_by() {
-        assert_eq!(iv(1, 8).allen_relation(&iv(3, 8)), AllenRelation::FinishedBy);
+        assert_eq!(
+            iv(1, 8).allen_relation(&iv(3, 8)),
+            AllenRelation::FinishedBy
+        );
     }
 
     #[test]
@@ -557,8 +568,8 @@ mod tests {
 
     #[test]
     fn temporal_relation_inverse() {
-        let rel = TemporalRelation::new("a", "b", AllenRelation::Before)
-            .with_annotation("supersedes");
+        let rel =
+            TemporalRelation::new("a", "b", AllenRelation::Before).with_annotation("supersedes");
         let inv = rel.inverse();
         assert_eq!(inv.source, "b");
         assert_eq!(inv.target, "a");
@@ -648,8 +659,8 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_temporal_relation() {
-        let tr = TemporalRelation::new("a", "b", AllenRelation::Contains)
-            .with_annotation("extends");
+        let tr =
+            TemporalRelation::new("a", "b", AllenRelation::Contains).with_annotation("extends");
         let json = serde_json::to_string(&tr).unwrap();
         let back: TemporalRelation = serde_json::from_str(&json).unwrap();
         assert_eq!(tr, back);

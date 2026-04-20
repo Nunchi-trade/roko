@@ -395,7 +395,10 @@ impl Marketplace {
     ///
     /// Returns an error if the job doesn't exist or isn't Assigned.
     pub fn start_work(&mut self, job_id: &[u8; 32]) -> Result<(), MarketplaceError> {
-        let job = self.jobs.get_mut(job_id).ok_or(MarketplaceError::NotFound)?;
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or(MarketplaceError::NotFound)?;
         if job.state != JobState::Assigned {
             return Err(MarketplaceError::InvalidState {
                 expected: "Assigned".to_string(),
@@ -417,7 +420,10 @@ impl Marketplace {
         result_hash: [u8; 32],
         quality_score: f64,
     ) -> Result<(), MarketplaceError> {
-        let job = self.jobs.get_mut(job_id).ok_or(MarketplaceError::NotFound)?;
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or(MarketplaceError::NotFound)?;
         if job.state != JobState::InProgress {
             return Err(MarketplaceError::InvalidState {
                 expected: "InProgress".to_string(),
@@ -532,7 +538,10 @@ impl Marketplace {
         challenger: u256,
         challenger_bond: u256,
     ) -> Result<(), MarketplaceError> {
-        let job = self.jobs.get_mut(job_id).ok_or(MarketplaceError::NotFound)?;
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or(MarketplaceError::NotFound)?;
         if job.state != JobState::Submitted {
             return Err(MarketplaceError::InvalidState {
                 expected: "Submitted".to_string(),
@@ -683,7 +692,10 @@ impl Marketplace {
         winner: u256,
         payment: f64,
     ) -> Result<AssignmentResult, MarketplaceError> {
-        let job = self.jobs.get_mut(job_id).ok_or(MarketplaceError::NotFound)?;
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or(MarketplaceError::NotFound)?;
         job.state = JobState::Assigned;
         job.assigned_agent = Some(winner);
         job.payment = Some(payment);
@@ -881,7 +893,10 @@ mod tests {
         ];
 
         let result = market.assign_random_vrf(&posting.job_id, &pool).unwrap();
-        assert!(pool.iter().any(|b| b.bidder_passport_id == result.agent_passport_id));
+        assert!(
+            pool.iter()
+                .any(|b| b.bidder_passport_id == result.agent_passport_id)
+        );
         assert!(matches!(result.hiring_model, HiringModel::RandomVRF));
 
         let job = market.get_job(&posting.job_id).unwrap();
@@ -1005,9 +1020,7 @@ mod tests {
             .unwrap();
 
         // Open dispute at BondEscalation round 1
-        market
-            .open_dispute(&posting.job_id, 99, 500)
-            .unwrap();
+        market.open_dispute(&posting.job_id, 99, 500).unwrap();
         let dispute = market.get_dispute(&posting.job_id).unwrap();
         assert!(matches!(
             dispute.current_level,
@@ -1042,9 +1055,7 @@ mod tests {
         market
             .submit_result(&posting.job_id, [2; 32], 0.85)
             .unwrap();
-        market
-            .open_dispute(&posting.job_id, 99, 500)
-            .unwrap();
+        market.open_dispute(&posting.job_id, 99, 500).unwrap();
 
         // Resolve in agent's favor
         let settlement = market
@@ -1067,9 +1078,7 @@ mod tests {
         market
             .submit_result(&posting.job_id, [2; 32], 0.85)
             .unwrap();
-        market
-            .open_dispute(&posting.job_id, 99, 500)
-            .unwrap();
+        market.open_dispute(&posting.job_id, 99, 500).unwrap();
 
         // Resolve in challenger's favor
         let settlement = market

@@ -65,9 +65,9 @@ pub mod context;
 pub mod dashboard_snapshot;
 pub mod datum;
 pub mod decay;
+pub mod demurrage;
 /// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
 pub mod domain_profile;
-pub mod demurrage;
 pub mod engram;
 pub mod error;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
@@ -86,9 +86,9 @@ pub mod phase;
 pub mod polyglot;
 pub mod prediction;
 pub mod project;
+pub mod provenance;
 pub mod pulse;
 pub mod pulse_bus;
-pub mod provenance;
 pub mod query;
 pub mod score;
 pub mod secrets;
@@ -102,17 +102,20 @@ pub mod traits;
 pub mod verdict;
 
 pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
-pub use arbitration::{
-    ArbitrationConfig, ArbitrationOutcome, Arbitrator, Subsystem, SubsystemGuidance,
-};
 pub use agent::{
     AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, TaskRequirements,
     ToolPermissions, TurnBudget, score_model_for_task, select_model_for_task,
     select_model_for_task_with_bonus,
 };
+pub use arbitration::{
+    ArbitrationConfig, ArbitrationOutcome, Arbitrator, Subsystem, SubsystemGuidance,
+};
 pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey};
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};
+pub use bus_backends::{
+    BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
+};
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
@@ -164,15 +167,14 @@ pub use provenance::{
     Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
 };
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
-pub use bus_backends::{BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus};
 pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
 pub use score::Score;
 pub use signal_kinds::*;
 pub use task::{
-    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight, TaskDomain,
-    TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
+    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
+    TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
 };
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
@@ -181,6 +183,9 @@ pub use dashboard_snapshot::{
     AgentTopology, AgentTopologyEdge, AgentTopologyNode, DashboardEvent, DashboardSnapshot,
     DiagnosisSeverity, DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
     TrendBucket, TrendBuckets,
+};
+pub use namespace::{
+    Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
 };
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use temperament::Temperament;
@@ -194,7 +199,4 @@ pub use tool::{
     compute_reward, galileo_tsq, profile_for_model,
 };
 pub use traits::{Bus, ColdSubstrate, Composer, Gate, Policy, Router, Scorer, Substrate};
-pub use namespace::{
-    Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
-};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

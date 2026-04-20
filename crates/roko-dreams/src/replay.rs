@@ -78,11 +78,7 @@ impl ReplayUtility {
     /// (more to learn), clean passes have low gain.
     fn compute_gain(episode: &Episode) -> f64 {
         let gate_total = episode.gate_verdicts.len().max(1) as f64;
-        let fail_count = episode
-            .gate_verdicts
-            .iter()
-            .filter(|v| !v.passed)
-            .count() as f64;
+        let fail_count = episode.gate_verdicts.iter().filter(|v| !v.passed).count() as f64;
         // Prediction error: how surprising was the outcome?
         let error_rate = fail_count / gate_total;
         let surprise = if episode.success {

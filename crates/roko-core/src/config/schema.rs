@@ -441,16 +441,8 @@ impl RokoConfig {
     fn write_example_demurrage(out: &mut String, cfg: &Self) {
         let _ = writeln!(out, "# -- Knowledge demurrage --");
         let _ = writeln!(out, "[demurrage]");
-        let _ = writeln!(
-            out,
-            "rate_per_hour = {}",
-            cfg.demurrage.rate_per_hour
-        );
-        let _ = writeln!(
-            out,
-            "min_balance = {}\n",
-            cfg.demurrage.min_balance
-        );
+        let _ = writeln!(out, "rate_per_hour = {}", cfg.demurrage.rate_per_hour);
+        let _ = writeln!(out, "min_balance = {}\n", cfg.demurrage.min_balance);
     }
 
     fn write_example_attention(out: &mut String, cfg: &Self) {
@@ -466,11 +458,7 @@ impl RokoConfig {
             "utilization_target = {}",
             cfg.attention.utilization_target
         );
-        let _ = writeln!(
-            out,
-            "auction_enabled = {}",
-            cfg.attention.auction_enabled
-        );
+        let _ = writeln!(out, "auction_enabled = {}", cfg.attention.auction_enabled);
         let _ = writeln!(
             out,
             "task_reserve_tokens = {}\n",
@@ -486,17 +474,9 @@ impl RokoConfig {
             "quarantine_threshold = {}",
             cfg.immune.quarantine_threshold
         );
-        let _ = writeln!(
-            out,
-            "max_quarantined = {}",
-            cfg.immune.max_quarantined
-        );
+        let _ = writeln!(out, "max_quarantined = {}", cfg.immune.max_quarantined);
         let _ = writeln!(out, "auto_reject = {}", cfg.immune.auto_reject);
-        let _ = writeln!(
-            out,
-            "taint_levels = {:?}\n",
-            cfg.immune.taint_levels
-        );
+        let _ = writeln!(out, "taint_levels = {:?}\n", cfg.immune.taint_levels);
     }
 
     fn write_example_temporal(out: &mut String, cfg: &Self) {
@@ -515,37 +495,21 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- Goal hierarchy --");
         let _ = writeln!(out, "[goals]");
         let _ = writeln!(out, "max_active = {}", cfg.goals.max_active);
-        let _ = writeln!(
-            out,
-            "correctness_weight = {}",
-            cfg.goals.correctness_weight
-        );
+        let _ = writeln!(out, "correctness_weight = {}", cfg.goals.correctness_weight);
         let _ = writeln!(
             out,
             "completion_threshold = {}",
             cfg.goals.completion_threshold
         );
-        let _ = writeln!(
-            out,
-            "prune_threshold = {}\n",
-            cfg.goals.prune_threshold
-        );
+        let _ = writeln!(out, "prune_threshold = {}\n", cfg.goals.prune_threshold);
     }
 
     fn write_example_energy(out: &mut String, cfg: &Self) {
         let _ = writeln!(out, "# -- Compute budget / energy --");
         let _ = writeln!(out, "[energy]");
         let _ = writeln!(out, "pool_usd = {}", cfg.energy.pool_usd);
-        let _ = writeln!(
-            out,
-            "per_task_cap_usd = {}",
-            cfg.energy.per_task_cap_usd
-        );
-        let _ = writeln!(
-            out,
-            "metabolism_rate = {}\n",
-            cfg.energy.metabolism_rate
-        );
+        let _ = writeln!(out, "per_task_cap_usd = {}", cfg.energy.per_task_cap_usd);
+        let _ = writeln!(out, "metabolism_rate = {}\n", cfg.energy.metabolism_rate);
     }
 
     fn write_example_tui_and_server(out: &mut String, cfg: &Self) {
@@ -1091,11 +1055,7 @@ impl fmt::Display for ConfigChangeReport {
             if !self.hot_reloaded.is_empty() {
                 write!(f, "; ")?;
             }
-            write!(
-                f,
-                "requires restart: {}",
-                self.requires_restart.join(", ")
-            )?;
+            write!(f, "requires restart: {}", self.requires_restart.join(", "))?;
         }
         for w in &self.warnings {
             write!(f, "\n  warning: {w}")?;
@@ -1380,13 +1340,8 @@ impl ToolsConfig {
     /// Compute the effective tool set for a given domain.
     ///
     /// The result is: `(base_tools + extra_tools + global_allow) - excluded_tools - global_deny`.
-    pub fn effective_tools_for_domain(
-        &self,
-        domain: &str,
-        base_tools: &[String],
-    ) -> Vec<String> {
-        let mut tools: std::collections::HashSet<String> =
-            base_tools.iter().cloned().collect();
+    pub fn effective_tools_for_domain(&self, domain: &str, base_tools: &[String]) -> Vec<String> {
+        let mut tools: std::collections::HashSet<String> = base_tools.iter().cloned().collect();
 
         // Add global allows.
         for tool in &self.allow {
@@ -2929,11 +2884,7 @@ const fn default_immune_max_quarantined() -> usize {
 }
 
 fn default_immune_taint_levels() -> Vec<String> {
-    vec![
-        "low".to_string(),
-        "medium".to_string(),
-        "high".to_string(),
-    ]
+    vec!["low".to_string(), "medium".to_string(), "high".to_string()]
 }
 
 impl Default for ImmuneConfig {
@@ -5576,10 +5527,7 @@ threshold = "BLOCK_LOW_AND_ABOVE"
                 _ => None,
             }
         };
-        assert_eq!(
-            interpolate_vars("${API_KEY}", &env_fn),
-            "sk-secret-123"
-        );
+        assert_eq!(interpolate_vars("${API_KEY}", &env_fn), "sk-secret-123");
         assert_eq!(
             interpolate_vars("Bearer ${API_KEY}", &env_fn),
             "Bearer sk-secret-123"
@@ -5621,7 +5569,10 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         );
         RokoConfig::interpolate_env_vars_with(&mut providers, &env_fn);
         let p = &providers["test"];
-        assert_eq!(p.base_url.as_deref(), Some("https://resolved.example.com/v1"));
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://resolved.example.com/v1")
+        );
         assert_eq!(p.api_key_env.as_deref(), Some("resolved-key"));
     }
 
@@ -5656,7 +5607,10 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         let p = &config.providers["test"];
         let resolved = p.extra_headers.as_ref().expect("headers");
         // The `_file` key is resolved to its base key.
-        assert_eq!(resolved.get("authorization").map(String::as_str), Some("file-secret-value"));
+        assert_eq!(
+            resolved.get("authorization").map(String::as_str),
+            Some("file-secret-value")
+        );
         assert!(!resolved.contains_key("authorization_file"));
     }
 

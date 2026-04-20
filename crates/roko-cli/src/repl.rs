@@ -223,13 +223,11 @@ impl ReplMode {
                 "status" => ReplCommand::SlashStatus,
                 "run" | "do" => ReplCommand::SlashRun(args_str.to_string()),
                 "research" => ReplCommand::SlashResearch(args_str.to_string()),
-                "learn" | "ask" => {
-                    ReplCommand::SlashLearn(if args_str.is_empty() {
-                        "all".to_string()
-                    } else {
-                        args_str.to_string()
-                    })
-                }
+                "learn" | "ask" => ReplCommand::SlashLearn(if args_str.is_empty() {
+                    "all".to_string()
+                } else {
+                    args_str.to_string()
+                }),
                 "tune" => ReplCommand::SlashTune(if args_str.is_empty() {
                     "gates".to_string()
                 } else {
@@ -302,7 +300,10 @@ impl ReplMode {
                     writeln!(writer, "  :quit, :q, :exit     exit the REPL")?;
                     writeln!(writer)?;
                     writeln!(writer, "slash commands:")?;
-                    writeln!(writer, "  /plan [args]         plan management (list, show, run)")?;
+                    writeln!(
+                        writer,
+                        "  /plan [args]         plan management (list, show, run)"
+                    )?;
                     writeln!(writer, "  /explain <topic>     progressive topic help")?;
                     writeln!(writer, "  /replay <hash>       walk signal DAG by hash")?;
                     writeln!(writer, "  /run <prompt>        run a one-shot prompt")?;
@@ -363,7 +364,10 @@ impl ReplMode {
                 }
                 ReplCommand::SlashPlan(args) => {
                     if args.is_empty() {
-                        writeln!(writer, "[/plan] hint: use `roko plan list` or `roko plan run <dir>`")?;
+                        writeln!(
+                            writer,
+                            "[/plan] hint: use `roko plan list` or `roko plan run <dir>`"
+                        )?;
                         if !self.workspace.recent_plans.is_empty() {
                             writeln!(
                                 writer,
@@ -615,8 +619,7 @@ mod tests {
         let input = "first prompt\nsecond prompt\n";
         let mut reader = io::Cursor::new(input);
         let mut output = Vec::new();
-        let mut repl =
-            ReplMode::new_with_workspace("eof-test".into(), WorkspaceContext::default());
+        let mut repl = ReplMode::new_with_workspace("eof-test".into(), WorkspaceContext::default());
 
         let commands = repl.run(&mut reader, &mut output).unwrap();
 
@@ -666,10 +669,7 @@ mod tests {
         let commands = repl.run(&mut reader, &mut output).unwrap();
 
         assert_eq!(commands.len(), 2);
-        assert_eq!(
-            commands[0],
-            ReplCommand::SlashExplain("gates".to_string())
-        );
+        assert_eq!(commands[0], ReplCommand::SlashExplain("gates".to_string()));
         let out_str = String::from_utf8(output).unwrap();
         assert!(out_str.contains("Gate Pipeline"));
     }

@@ -8,9 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::phase2::{
-    DemandDeposit, DemandPool, FutureState, KnowledgeFuture, KnowledgeSpec, u256,
-};
+use crate::phase2::{DemandDeposit, DemandPool, FutureState, KnowledgeFuture, KnowledgeSpec, u256};
 
 /// Configuration for the knowledge futures market.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,10 +159,7 @@ impl FuturesMarket {
         quality_score: f64,
         hdc_similarity: Option<f64>,
     ) -> Result<(), FuturesError> {
-        let future = self
-            .futures
-            .get(future_id)
-            .ok_or(FuturesError::NotFound)?;
+        let future = self.futures.get(future_id).ok_or(FuturesError::NotFound)?;
 
         if future.state != FutureState::Submitted {
             return Err(FuturesError::InvalidState {
@@ -199,10 +194,7 @@ impl FuturesMarket {
             .ok_or(FuturesError::NoSubmission)?
             .clone();
 
-        let future = self
-            .futures
-            .get(future_id)
-            .ok_or(FuturesError::NotFound)?;
+        let future = self.futures.get(future_id).ok_or(FuturesError::NotFound)?;
 
         // Quality check
         let min_quality = if future.specification.min_quality > 0.0 {
@@ -249,10 +241,7 @@ impl FuturesMarket {
     ///
     /// Returns an error if the future doesn't exist or deadline hasn't passed.
     pub fn expire(&mut self, future_id: &[u8; 32]) -> Result<ExpirationResult, FuturesError> {
-        let future = self
-            .futures
-            .get(future_id)
-            .ok_or(FuturesError::NotFound)?;
+        let future = self.futures.get(future_id).ok_or(FuturesError::NotFound)?;
 
         if self.current_block < future.deadline_block {
             return Err(FuturesError::DeadlineNotReached {
@@ -280,12 +269,7 @@ impl FuturesMarket {
     }
 
     /// Deposit demand into a pool for a knowledge specification.
-    pub fn deposit_demand(
-        &mut self,
-        spec: KnowledgeSpec,
-        depositor: u256,
-        amount: u256,
-    ) -> String {
+    pub fn deposit_demand(&mut self, spec: KnowledgeSpec, depositor: u256, amount: u256) -> String {
         let pool_key = format!("{}:{}", spec.domain, spec.topic);
         let pool = self
             .demand_pools

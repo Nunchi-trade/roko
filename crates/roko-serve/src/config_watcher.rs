@@ -113,9 +113,10 @@ pub fn start_config_watcher(state: Arc<AppState>) -> JoinHandle<()> {
 fn file_mtime(path: &PathBuf) -> Duration {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        }))
+        .and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        })
         .unwrap_or(Duration::ZERO)
 }
 

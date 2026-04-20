@@ -724,16 +724,9 @@ impl KnowledgeStore {
     ///
     /// Returns an error if the store cannot be read or the output cannot be
     /// written.
-    pub fn export(
-        &self,
-        output: &Path,
-        filter: &ExportFilter,
-    ) -> Result<usize> {
+    pub fn export(&self, output: &Path, filter: &ExportFilter) -> Result<usize> {
         let entries = self.read_all()?;
-        let filtered: Vec<_> = entries
-            .into_iter()
-            .filter(|e| filter.matches(e))
-            .collect();
+        let filtered: Vec<_> = entries.into_iter().filter(|e| filter.matches(e)).collect();
         let count = filtered.len();
 
         if let Some(parent) = output.parent() {
@@ -781,11 +774,7 @@ impl KnowledgeStore {
     ///
     /// Returns an error if the file cannot be read, has an unsupported
     /// version, or entries cannot be ingested.
-    pub fn import(
-        &self,
-        input: &Path,
-        options: &ImportOptions,
-    ) -> Result<usize> {
+    pub fn import(&self, input: &Path, options: &ImportOptions) -> Result<usize> {
         let file = File::open(input)
             .with_context(|| format!("open import file at {}", input.display()))?;
         let reader = BufReader::new(file);
@@ -951,7 +940,10 @@ impl KnowledgeStore {
                 entry.frozen = false;
                 entry.balance = 1.0; // Fresh balance
                 entry.confirmation_count += 1;
-                if !entry.source_episodes.contains(&confirming_episode.to_string()) {
+                if !entry
+                    .source_episodes
+                    .contains(&confirming_episode.to_string())
+                {
                     entry.source_episodes.push(confirming_episode.to_string());
                 }
                 entry.created_at = Utc::now(); // Reset age for decay calculation
@@ -1020,10 +1012,8 @@ impl KnowledgeStore {
         let mut entries = self.read_all()?;
         let mut taxed = 0usize;
         for entry in &mut entries {
-            let elapsed_hours = now
-                .signed_duration_since(entry.created_at)
-                .num_seconds() as f64
-                / 3600.0;
+            let elapsed_hours =
+                now.signed_duration_since(entry.created_at).num_seconds() as f64 / 3600.0;
             if elapsed_hours > 0.0 && entry.balance > 0.0 {
                 entry.apply_demurrage(elapsed_hours);
                 taxed += 1;
@@ -3315,11 +3305,7 @@ mod tests {
             entry_count: 0,
             source_path: "test".to_owned(),
         };
-        std::fs::write(
-            &bad_backup,
-            serde_json::to_string(&header).unwrap() + "\n",
-        )
-        .unwrap();
+        std::fs::write(&bad_backup, serde_json::to_string(&header).unwrap() + "\n").unwrap();
 
         let result = store.import(&bad_backup, &ImportOptions::default());
         assert!(result.is_err());
@@ -3501,7 +3487,10 @@ mod tests {
         };
         let before = e.balance;
         e.reinforce(crate::ReinforcementSignal::Retrieved, 0.0);
-        assert!(e.balance > before, "balance should increase after reinforcement");
+        assert!(
+            e.balance > before,
+            "balance should increase after reinforcement"
+        );
 
         // Novelty amplifies the bump.
         let mid = e.balance;
@@ -3570,7 +3559,11 @@ mod tests {
             crate::ReinforcementSignal::Surprised,
             crate::ReinforcementSignal::AgentQuoted,
         ] {
-            assert!(signal.base_value() > 0.0, "{:?} must have positive base_value", signal);
+            assert!(
+                signal.base_value() > 0.0,
+                "{:?} must have positive base_value",
+                signal
+            );
         }
     }
 
@@ -3590,7 +3583,9 @@ mod tests {
         e.balance = 0.5;
         store.add(e).unwrap();
 
-        let found = store.reinforce_entry("reinforce-me", crate::ReinforcementSignal::Gated, 0.2).unwrap();
+        let found = store
+            .reinforce_entry("reinforce-me", crate::ReinforcementSignal::Gated, 0.2)
+            .unwrap();
         assert!(found);
 
         let entries = store.read_all().unwrap();
@@ -3657,10 +3652,17 @@ mod tests {
         store.add(e).unwrap();
 
         let results = store.query("testing", 10).unwrap();
-        assert!(results.is_empty(), "frozen entries should not appear in hot queries");
+        assert!(
+            results.is_empty(),
+            "frozen entries should not appear in hot queries"
+        );
 
         let cold = store.query_cold(10).unwrap();
-        assert_eq!(cold.len(), 1, "frozen entries should appear in cold queries");
+        assert_eq!(
+            cold.len(),
+            1,
+            "frozen entries should appear in cold queries"
+        );
         assert_eq!(cold[0].id, "frozen-entry");
     }
 
@@ -3707,7 +3709,10 @@ mod tests {
         store.add(frozen).unwrap();
 
         let removed = store.gc_with_freeze(0.05).unwrap();
-        assert_eq!(removed, 1, "already-frozen entry below threshold should be permanently removed");
+        assert_eq!(
+            removed, 1,
+            "already-frozen entry below threshold should be permanently removed"
+        );
     }
 
     #[test]

@@ -79,7 +79,10 @@ impl RestrictionMap {
         let edge_dim = indices.len();
         let mut data = vec![0.0; edge_dim * vertex_dim];
         for (row, &col) in indices.iter().enumerate() {
-            assert!(col < vertex_dim, "index {col} out of bounds for dim {vertex_dim}");
+            assert!(
+                col < vertex_dim,
+                "index {col} out of bounds for dim {vertex_dim}"
+            );
             data[row * vertex_dim + col] = 1.0;
         }
         Self {
@@ -756,7 +759,10 @@ mod tests {
         // Inconsistent: B's risk disagrees.
         preds.insert(1, vec![10.0, 0.0]); // risk disagrees
         let score = sheaf.inconsistency_score(&preds).unwrap();
-        assert!(score > 0.01, "projected inconsistency should be positive: {score}");
+        assert!(
+            score > 0.01,
+            "projected inconsistency should be positive: {score}"
+        );
     }
 
     #[test]

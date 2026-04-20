@@ -1033,9 +1033,9 @@ fn hdc_dedup_candidates(
     let mut kept_fingerprints = Vec::with_capacity(candidates.len());
 
     for (candidate, fingerprint) in candidates.into_iter().zip(fingerprints) {
-        let is_duplicate = kept_fingerprints.iter().any(|accepted: &HdcVector| {
-            f64::from(fingerprint.similarity(accepted)) > threshold
-        });
+        let is_duplicate = kept_fingerprints
+            .iter()
+            .any(|accepted: &HdcVector| f64::from(fingerprint.similarity(accepted)) > threshold);
 
         if !is_duplicate {
             kept_fingerprints.push(fingerprint);

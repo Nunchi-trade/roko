@@ -41,12 +41,7 @@ fn arb_pulse() -> impl Strategy<Value = Pulse> {
 }
 
 fn arb_score() -> impl Strategy<Value = Score> {
-    (
-        0.0f32..=1.0,
-        0.0f32..=1.0,
-        0.0f32..=100.0,
-        0.0f32..=100.0,
-    )
+    (0.0f32..=1.0, 0.0f32..=1.0, 0.0f32..=100.0, 0.0f32..=100.0)
         .prop_map(|(c, n, u, r)| Score::new(c, n, u, r))
 }
 

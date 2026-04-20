@@ -60,7 +60,7 @@ pub struct BestExecutionPolicy {
 impl Default for BestExecutionPolicy {
     fn default() -> Self {
         Self {
-            max_slippage_bps: 50,   // 0.5%
+            max_slippage_bps: 50, // 0.5%
             min_venues_checked: 2,
         }
     }
@@ -121,11 +121,7 @@ impl Default for PositionLimitPolicy {
 impl PositionLimitPolicy {
     /// Check whether a position exceeds limits.
     #[must_use]
-    pub fn check(
-        &self,
-        position_value_usdc: u64,
-        portfolio_value_usdc: u64,
-    ) -> ComplianceResult {
+    pub fn check(&self, position_value_usdc: u64, portfolio_value_usdc: u64) -> ComplianceResult {
         if position_value_usdc > self.max_absolute_usdc {
             return ComplianceResult::Violation(format!(
                 "position {} exceeds absolute limit {}",
@@ -1055,9 +1051,7 @@ pub fn dispatch_direct_hire(
     DispatchDecision {
         winner: target_passport_id,
         payment: fee,
-        model: HiringModel::DirectHire {
-            target_passport_id,
-        },
+        model: HiringModel::DirectHire { target_passport_id },
         audit_trail: vec![format!(
             "direct hire: target={target_passport_id}, base_fee={base_fee:.2}, repeats={repeat_count}, fee={fee:.2}"
         )],
@@ -1133,7 +1127,10 @@ mod tests {
         let initial = mm.price_deliver();
         let refund = mm.sell(Outcome::Deliver, 10.0);
         assert!(refund > 0.0, "selling should produce refund");
-        assert!(mm.price_deliver() < initial, "selling should decrease price");
+        assert!(
+            mm.price_deliver() < initial,
+            "selling should decrease price"
+        );
     }
 
     #[test]
@@ -1146,7 +1143,10 @@ mod tests {
         };
         let cost = mm.buy(Outcome::Deliver, 5.0);
         let refund = mm.sell(Outcome::Deliver, 5.0);
-        assert!((cost - refund).abs() < 1e-9, "round-trip should be cost-neutral");
+        assert!(
+            (cost - refund).abs() < 1e-9,
+            "round-trip should be cost-neutral"
+        );
     }
 
     #[test]
@@ -1189,7 +1189,10 @@ mod tests {
             make_bid(100, 0.5), // score = 100 * (1 + 0.5) = 150
         ];
         let result = select_winner(&bids).unwrap();
-        assert_eq!(result.winner_index, 0, "higher rep should win at same price");
+        assert_eq!(
+            result.winner_index, 0,
+            "higher rep should win at same price"
+        );
     }
 
     #[test]

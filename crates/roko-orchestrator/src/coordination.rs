@@ -1382,7 +1382,7 @@ mod tests {
     #[test]
     fn morphogenetic_update_preserves_positive_concentrations() {
         let params = MorphogeneticParams {
-            beta: 10.0,        // very strong inhibition
+            beta: 10.0, // very strong inhibition
             sigma_noise: 0.0,
             ..Default::default()
         };
@@ -1423,16 +1423,22 @@ mod tests {
 
         // At very high concentration, response approaches 1.
         let h_high = hill_response(100.0, 0.5, 2.0);
-        assert!(h_high > 0.999, "H(100, 0.5, 2) should be ~1.0, got {h_high}");
+        assert!(
+            h_high > 0.999,
+            "H(100, 0.5, 2) should be ~1.0, got {h_high}"
+        );
 
         // Higher n -> steeper curve.
         let h_n1 = hill_response(0.3, 0.5, 1.0);
         let h_n4 = hill_response(0.3, 0.5, 4.0);
-        assert!(h_n1 > h_n4, "lower n should give higher response at sub-threshold: {h_n1} > {h_n4}");
+        assert!(
+            h_n1 > h_n4,
+            "lower n should give higher response at sub-threshold: {h_n1} > {h_n4}"
+        );
 
         // Edge cases.
         assert_eq!(hill_response(1.0, 0.0, 2.0), 0.0); // k=0
-        assert_eq!(hill_response(1.0, 1.0, 0.0), 0.0);  // n=0
+        assert_eq!(hill_response(1.0, 1.0, 0.0), 0.0); // n=0
     }
 
     // ----- COORD-07: Alpha pheromone paradox fix -----
@@ -1495,17 +1501,35 @@ mod tests {
 
         // 3 confirmations from 1 agent — fails min_agents.
         let same_agent = vec![
-            Confirmation { agent: "a1".into(), gate_passed: true },
-            Confirmation { agent: "a1".into(), gate_passed: true },
-            Confirmation { agent: "a1".into(), gate_passed: true },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: true,
+            },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: true,
+            },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: true,
+            },
         ];
         assert!(!gate.is_satisfied(&same_agent));
 
         // 3 confirmations from 2 agents — passes.
         let diverse = vec![
-            Confirmation { agent: "a1".into(), gate_passed: true },
-            Confirmation { agent: "a2".into(), gate_passed: true },
-            Confirmation { agent: "a1".into(), gate_passed: false },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: true,
+            },
+            Confirmation {
+                agent: "a2".into(),
+                gate_passed: true,
+            },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: false,
+            },
         ];
         assert!(gate.is_satisfied(&diverse));
     }
@@ -1519,14 +1543,26 @@ mod tests {
         };
 
         let no_pass = vec![
-            Confirmation { agent: "a1".into(), gate_passed: false },
-            Confirmation { agent: "a2".into(), gate_passed: false },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: false,
+            },
+            Confirmation {
+                agent: "a2".into(),
+                gate_passed: false,
+            },
         ];
         assert!(!gate.is_satisfied(&no_pass));
 
         let with_pass = vec![
-            Confirmation { agent: "a1".into(), gate_passed: true },
-            Confirmation { agent: "a2".into(), gate_passed: true },
+            Confirmation {
+                agent: "a1".into(),
+                gate_passed: true,
+            },
+            Confirmation {
+                agent: "a2".into(),
+                gate_passed: true,
+            },
         ];
         assert!(gate.is_satisfied(&with_pass));
     }
@@ -1738,7 +1774,9 @@ mod tests {
         let subnet = SubnetId::new("collective-a".to_owned(), "verifiers").unwrap();
         let mut membership = SubnetMembership::new(
             subnet,
-            AccessModel::Role { required_role: "verifier".to_owned() },
+            AccessModel::Role {
+                required_role: "verifier".to_owned(),
+            },
         );
 
         // Wrong role: rejected.
@@ -1798,8 +1836,13 @@ mod tests {
     fn access_model_round_trips_through_serde() {
         for model in [
             AccessModel::Invite,
-            AccessModel::Role { required_role: "verifier".to_owned() },
-            AccessModel::Reputation { domain: "test".to_owned(), min_score: 0.5 },
+            AccessModel::Role {
+                required_role: "verifier".to_owned(),
+            },
+            AccessModel::Reputation {
+                domain: "test".to_owned(),
+                min_score: 0.5,
+            },
         ] {
             let json = serde_json::to_string(&model).unwrap();
             let decoded: AccessModel = serde_json::from_str(&json).unwrap();
@@ -1814,7 +1857,10 @@ mod tests {
         let a = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let b = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let sim = cosine_similarity(&a, &b);
-        assert!((sim - 1.0).abs() < 1e-10, "identical should be 1.0, got {sim}");
+        assert!(
+            (sim - 1.0).abs() < 1e-10,
+            "identical should be 1.0, got {sim}"
+        );
     }
 
     #[test]
@@ -1829,7 +1875,10 @@ mod tests {
     fn cosine_similarity_uniform_vectors_are_identical() {
         let uniform = [1.0 / 8.0; STRATEGY_DIMS];
         let sim = cosine_similarity(&uniform, &uniform);
-        assert!((sim - 1.0).abs() < 1e-10, "uniform vs uniform = 1.0, got {sim}");
+        assert!(
+            (sim - 1.0).abs() < 1e-10,
+            "uniform vs uniform = 1.0, got {sim}"
+        );
     }
 
     #[test]
@@ -1837,7 +1886,10 @@ mod tests {
         let zero = [0.0; STRATEGY_DIMS];
         let some = [0.5; STRATEGY_DIMS];
         let sim = cosine_similarity(&zero, &some);
-        assert!((sim - 0.0).abs() < 1e-10, "zero vector should give 0.0, got {sim}");
+        assert!(
+            (sim - 0.0).abs() < 1e-10,
+            "zero vector should give 0.0, got {sim}"
+        );
     }
 
     #[test]
@@ -1865,7 +1917,10 @@ mod tests {
             ("agent-b".to_owned(), state_b),
         ];
         let conflicts = niche_conflicts(&agents, 0.9);
-        assert!(conflicts.is_empty(), "specialized agents should not conflict");
+        assert!(
+            conflicts.is_empty(),
+            "specialized agents should not conflict"
+        );
     }
 
     #[test]

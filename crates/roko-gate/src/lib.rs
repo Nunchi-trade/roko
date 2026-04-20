@@ -56,9 +56,9 @@ pub mod adaptive_threshold;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
+pub mod compile;
 /// Standalone gate combinators: ParallelGate, VotingGate, FallbackGate (GATE-04).
 pub mod composition;
-pub mod compile;
 pub mod diff_gate;
 pub mod env_builder;
 pub mod eval_generator;
@@ -100,21 +100,23 @@ pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
-pub use forensic::{ArtifactMetadata, CausalChain, ForensicError, ForensicReplayBuilder, TurnRecord};
-pub use hotelling::{HotellingDetector, JointAnomalyResult};
+pub use forensic::{
+    ArtifactMetadata, CausalChain, ForensicError, ForensicReplayBuilder, TurnRecord,
+};
 pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
 pub use generated::{GateError, GateGenerator, GeneratedCheck};
+pub use hotelling::{HotellingDetector, JointAnomalyResult};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
 pub use process_reward::{
     AggregateMethod, ProcessRewardModel, ReasoningStep, StepVerdict, TurnSnapshot,
 };
 pub use ratchet::GateRatchet;
-pub use spc::{
-    BocpdDetector, ChangePoint, ControlStatus, CusumDetector, CusumShift,
-    EwmaControlChart, SpcAlert, SpcDetector,
-};
 pub use rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung};
 pub use rung_selector::{PlanComplexity, Rung, RungCaps, is_selected, select_rungs};
 pub use shell::ShellGate;
+pub use spc::{
+    BocpdDetector, ChangePoint, ControlStatus, CusumDetector, CusumShift, EwmaControlChart,
+    SpcAlert, SpcDetector,
+};
 pub use test_gate::{TestGate, parse_test_counts};
 pub use verdict_publisher::VerdictPublisher;

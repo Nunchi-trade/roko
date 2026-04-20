@@ -216,10 +216,7 @@ impl ViewState {
     #[must_use]
     pub fn active_sub_view(&self, tab: Tab) -> SubView {
         let views = SubView::for_tab(tab);
-        views
-            .get(self.sub_tab)
-            .copied()
-            .unwrap_or(views[0])
+        views.get(self.sub_tab).copied().unwrap_or(views[0])
     }
 }
 

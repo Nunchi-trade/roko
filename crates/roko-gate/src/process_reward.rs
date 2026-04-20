@@ -170,13 +170,8 @@ impl ProcessRewardModel {
 
         let step_scores: Vec<f64> = steps.iter().map(|s| score_step(s)).collect();
         let aggregate_score = match self.aggregate {
-            AggregateMethod::Min => step_scores
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, f64::min),
-            AggregateMethod::Mean => {
-                step_scores.iter().sum::<f64>() / step_scores.len() as f64
-            }
+            AggregateMethod::Min => step_scores.iter().copied().fold(f64::INFINITY, f64::min),
+            AggregateMethod::Mean => step_scores.iter().sum::<f64>() / step_scores.len() as f64,
             AggregateMethod::Weighted => {
                 let n = step_scores.len() as f64;
                 let total_weight = n * (n + 1.0) / 2.0;
@@ -221,7 +216,13 @@ impl ProcessRewardModel {
         }
         let first_rung = self.history.first().map_or(0, |s| s.rung);
         let last_rung = self.history.last().map_or(0, |s| s.rung);
-        let max_rung = self.history.iter().map(|s| s.rung).max().unwrap_or(1).max(1);
+        let max_rung = self
+            .history
+            .iter()
+            .map(|s| s.rung)
+            .max()
+            .unwrap_or(1)
+            .max(1);
 
         // Normalize progression against the highest rung seen.
         let delta = last_rung as f64 - first_rung as f64;

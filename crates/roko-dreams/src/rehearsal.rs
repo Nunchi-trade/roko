@@ -142,10 +142,7 @@ fn outcome_to_episode(outcome: &RehearsalOutcome, threat: &ThreatScenario) -> Ep
     episode.completed_at = outcome.rehearsed_at;
 
     if !outcome.recovery_succeeded {
-        episode.failure_reason = Some(format!(
-            "rehearsal failed: {}",
-            outcome.recovery_path
-        ));
+        episode.failure_reason = Some(format!("rehearsal failed: {}", outcome.recovery_path));
     }
 
     // Add a synthetic gate verdict representing the rehearsal assessment.
@@ -235,8 +232,14 @@ mod tests {
         let r1 = rehearse_threats(&episodes, None, now);
         let r2 = rehearse_threats(&episodes, None, now);
         assert_eq!(
-            r1.generated_episodes.iter().map(|e| &e.id).collect::<Vec<_>>(),
-            r2.generated_episodes.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            r1.generated_episodes
+                .iter()
+                .map(|e| &e.id)
+                .collect::<Vec<_>>(),
+            r2.generated_episodes
+                .iter()
+                .map(|e| &e.id)
+                .collect::<Vec<_>>(),
         );
     }
 }

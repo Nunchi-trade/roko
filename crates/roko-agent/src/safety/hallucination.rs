@@ -167,7 +167,12 @@ mod tests {
     }
 
     fn test_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "test tool", ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "test tool",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     #[tokio::test]
@@ -175,7 +180,10 @@ mod tests {
         let detector = HallucinationDetector::with_known_tools(["read_file", "write_file"]);
         let tool = test_tool("read_file");
         let params = serde_json::json!({ "file_path": "/tmp/test.rs" });
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 
@@ -184,7 +192,10 @@ mod tests {
         let detector = HallucinationDetector::with_known_tools(["read_file"]);
         let tool = test_tool("hallucinated_tool");
         let params = serde_json::json!({});
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -193,7 +204,10 @@ mod tests {
         let detector = HallucinationDetector::permissive();
         let tool = test_tool("read_file");
         let params = serde_json::json!({ "file_path": "" });
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -202,7 +216,10 @@ mod tests {
         let detector = HallucinationDetector::permissive();
         let tool = test_tool("read_file");
         let params = serde_json::json!({ "file_path": "/tmp/\0bad" });
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -211,7 +228,10 @@ mod tests {
         let detector = HallucinationDetector::permissive();
         let tool = test_tool("read_file");
         let params = serde_json::json!({ "file_path": "/tmp/test.rs", "offset": -1 });
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -220,7 +240,10 @@ mod tests {
         let detector = HallucinationDetector::permissive();
         let tool = test_tool("bash");
         let params = serde_json::json!({ "command": "" });
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -229,7 +252,10 @@ mod tests {
         let detector = HallucinationDetector::permissive();
         let tool = test_tool("anything_goes");
         let params = serde_json::json!({});
-        let result = detector.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = detector
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 }

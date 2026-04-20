@@ -382,11 +382,13 @@ mod tests {
         assert!(result.simulate.passed);
         assert!(!result.validate.passed);
         assert!(!result.act_allowed);
-        assert!(result
-            .validate
-            .violations
-            .iter()
-            .any(|v| v.constraint == "max_open_positions"));
+        assert!(
+            result
+                .validate
+                .violations
+                .iter()
+                .any(|v| v.constraint == "max_open_positions")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

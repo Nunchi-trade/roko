@@ -365,7 +365,12 @@ impl ComposedGatePipeline {
     }
 
     /// Run gates collecting all verdicts (no short-circuit).
-    async fn run_parallel(&self, indices: &[usize], signal: &Engram, ctx: &Context) -> Vec<Verdict> {
+    async fn run_parallel(
+        &self,
+        indices: &[usize],
+        signal: &Engram,
+        ctx: &Context,
+    ) -> Vec<Verdict> {
         let mut verdicts = Vec::with_capacity(indices.len());
         for &idx in indices {
             if let Some(gate) = self.gates.get(idx) {

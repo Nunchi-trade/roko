@@ -355,7 +355,12 @@ impl ToolDispatcher {
                             }),
                         );
                     }
-                    Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+                    Self::emit_terminal_audit(
+                        ctx,
+                        &call,
+                        &ToolResult::err(err.clone()),
+                        timeout_ms,
+                    );
                     return ToolResult::err(err);
                 }
             }

@@ -1106,11 +1106,7 @@ const CONTAGION_AROUSAL_CAP: f64 = 0.3;
 /// Susceptibility decays with agent maturity (`tick_count`). Arousal deltas
 /// are capped at 0.3 to prevent runaway cascades.
 #[must_use]
-pub fn contagion(
-    my_affect: &PadVector,
-    peer_affects: &[PadVector],
-    tick_count: u64,
-) -> PadVector {
+pub fn contagion(my_affect: &PadVector, peer_affects: &[PadVector], tick_count: u64) -> PadVector {
     if peer_affects.is_empty() {
         return *my_affect;
     }

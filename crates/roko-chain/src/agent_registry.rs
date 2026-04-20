@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::phase2::{u256, AgentPassport, PassportTier, Hash, Address};
+use crate::phase2::{Address, AgentPassport, PassportTier, u256};
 
 /// Seconds in 24 hours (timelock duration for prompt updates).
 const PROMPT_UPDATE_TIMELOCK_SECS: u64 = 24 * 3600;
@@ -271,7 +271,7 @@ impl AgentRegistry {
             .ok_or(RegistryError::PassportNotFound(passport_id))?;
 
         let new_tier = tier_from_stake(stake);
-        passport.tier = new_tier.clone();
+        passport.tier = new_tier;
         Ok(new_tier)
     }
 
@@ -497,7 +497,13 @@ mod tests {
     fn mint_creates_passport() {
         let mut registry = AgentRegistry::new(ADMIN);
         let id = registry
-            .mint(ADMIN, owner(), CAP_INFERENCE | CAP_RAG, sample_prompt_hash(), 30_000)
+            .mint(
+                ADMIN,
+                owner(),
+                CAP_INFERENCE | CAP_RAG,
+                sample_prompt_hash(),
+                30_000,
+            )
             .unwrap();
 
         let passport = registry.get_passport(id).unwrap();
@@ -536,12 +542,16 @@ mod tests {
             .unwrap();
 
         // Try to execute immediately -- should fail.
-        let err = registry.execute_prompt_update(id, &owner(), now).unwrap_err();
+        let err = registry
+            .execute_prompt_update(id, &owner(), now)
+            .unwrap_err();
         assert!(matches!(err, RegistryError::TimelockNotElapsed { .. }));
 
         // Execute after 24h.
         let after_24h = now + PROMPT_UPDATE_TIMELOCK_SECS;
-        let penalty = registry.execute_prompt_update(id, &owner(), after_24h).unwrap();
+        let penalty = registry
+            .execute_prompt_update(id, &owner(), after_24h)
+            .unwrap();
         assert_eq!(penalty, 0.0);
 
         // Verify the hash was updated.
@@ -558,7 +568,9 @@ mod tests {
         // Make 4 changes (1 under limit, then 3 more to exceed).
         for i in 0..4u8 {
             let hash = [i; 32];
-            registry.submit_prompt_update(id, &owner(), hash, now).unwrap();
+            registry
+                .submit_prompt_update(id, &owner(), hash, now)
+                .unwrap();
             now += PROMPT_UPDATE_TIMELOCK_SECS;
             let penalty = registry.execute_prompt_update(id, &owner(), now).unwrap();
 
@@ -747,7 +759,7 @@ mod tests {
             total_jobs: 200,
             avg_reputation: 0.3, // below Worker min
             stake: 10_000,
-            days_below_min: 15,  // within grace period
+            days_below_min: 15, // within grace period
             ..Default::default()
         };
 

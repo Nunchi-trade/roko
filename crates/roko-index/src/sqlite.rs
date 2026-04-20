@@ -286,7 +286,11 @@ fn file_mtime_ns(path: &Path) -> i64 {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map_or(0, |d| {
             let ns = d.as_nanos();
-            if ns > i64::MAX as u128 { i64::MAX } else { ns as i64 }
+            if ns > i64::MAX as u128 {
+                i64::MAX
+            } else {
+                ns as i64
+            }
         })
 }
 

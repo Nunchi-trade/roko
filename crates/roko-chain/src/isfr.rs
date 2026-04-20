@@ -20,9 +20,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::phase2::{
-    Allocation, ClearingCertificate, FactClaim, FactValue, u256,
-};
+use crate::phase2::{Allocation, ClearingCertificate, FactClaim, FactValue, u256};
 
 // ─── Configuration ──────────────────────────────────────────────────
 
@@ -203,7 +201,8 @@ impl IsfrRegistry {
 
     /// Set the reputation score for a passport.
     pub fn set_reputation(&mut self, passport_id: u256, score: f64) {
-        self.reputation_scores.insert(passport_id, score.clamp(0.0, 1.0));
+        self.reputation_scores
+            .insert(passport_id, score.clamp(0.0, 1.0));
     }
 
     /// Mark a passport as quarantined (ineligible for submissions).
@@ -228,7 +227,8 @@ impl IsfrRegistry {
         }
 
         // Check minimum reputation.
-        let rep = self.reputation_scores
+        let rep = self
+            .reputation_scores
             .get(&submission.submitter_passport_id)
             .copied()
             .unwrap_or(0.0);
@@ -289,17 +289,23 @@ impl IsfrRegistry {
     /// 2. Exclude submissions > 3-sigma from the initial median.
     /// 3. Recompute weighted median on filtered set.
     #[must_use]
-    pub fn aggregate(&self, market_id: &MarketId, epoch: u64, clearing_block: u64) -> Option<IsfrAggregate> {
+    pub fn aggregate(
+        &self,
+        market_id: &MarketId,
+        epoch: u64,
+        clearing_block: u64,
+    ) -> Option<IsfrAggregate> {
         let submissions = self.submissions.get(&(epoch, market_id.clone()))?;
         if submissions.len() < self.config.min_submissions_for_clearing {
             return None;
         }
 
         // Build weighted entries: weight = confidence * reputation_multiplier.
-        let mut weighted: Vec<(f64, f64)> = submissions
+        let weighted: Vec<(f64, f64)> = submissions
             .iter()
             .filter_map(|s| {
-                let rep = self.reputation_scores
+                let rep = self
+                    .reputation_scores
                     .get(&s.submitter_passport_id)
                     .copied()
                     .unwrap_or(0.5);
@@ -333,7 +339,11 @@ impl IsfrRegistry {
         let excluded_count = total_before - filtered.len();
 
         // Step 3: Recompute weighted median on filtered set.
-        let final_entries = if filtered.is_empty() { &weighted } else { &filtered };
+        let final_entries = if filtered.is_empty() {
+            &weighted
+        } else {
+            &filtered
+        };
         let median_rate = weighted_median(final_entries);
         let final_std = weighted_std_deviation(final_entries, median_rate);
 
@@ -374,7 +384,8 @@ impl IsfrRegistry {
     #[must_use]
     pub fn clear_epoch(&self, epoch: u64, clearing_block: u64) -> Option<ClearingCertificate> {
         // Collect all submissions across all markets for this epoch.
-        let all_submissions: Vec<&IsfrSubmission> = self.submissions
+        let all_submissions: Vec<&IsfrSubmission> = self
+            .submissions
             .iter()
             .filter(|((e, _), _)| *e == epoch)
             .flat_map(|(_, subs)| subs.iter())
@@ -389,7 +400,8 @@ impl IsfrRegistry {
             .iter()
             .enumerate()
             .map(|(i, sub)| {
-                let rep = self.reputation_scores
+                let rep = self
+                    .reputation_scores
                     .get(&sub.submitter_passport_id)
                     .copied()
                     .unwrap_or(0.5);
@@ -412,7 +424,8 @@ impl IsfrRegistry {
         let consensus_value = weighted_median(&entries);
 
         // Compute KKT-like residual (stationarity check using median deviation).
-        let kkt_residual = weighted.iter()
+        let kkt_residual = weighted
+            .iter()
             .map(|c| c.weight * (consensus_value - c.value))
             .sum::<f64>()
             .abs();
@@ -521,7 +534,13 @@ fn weighted_std_deviation(entries: &[(f64, f64)], center: f64) -> f64 {
 fn fact_value_to_f64(value: &FactValue) -> f64 {
     match value {
         FactValue::Numeric(v) => *v,
-        FactValue::Boolean(b) => if *b { 1.0 } else { 0.0 },
+        FactValue::Boolean(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
         FactValue::Score(s) => *s,
         FactValue::Price(p) => *p as f64,
     }
@@ -550,38 +569,51 @@ mod tests {
 
         let market = MarketId::new("knowledge/defi");
 
-        assert_eq!(registry.submit(IsfrSubmission {
-            market_id: market.clone(),
-            rate: 0.05,
-            components: vec![0.03, 0.02],
-            confidence: 0.9,
-            submitter_passport_id: 1,
-            submitted_at_block: 100,
-        }), SubmitterStatus::Eligible);
+        assert_eq!(
+            registry.submit(IsfrSubmission {
+                market_id: market.clone(),
+                rate: 0.05,
+                components: vec![0.03, 0.02],
+                confidence: 0.9,
+                submitter_passport_id: 1,
+                submitted_at_block: 100,
+            }),
+            SubmitterStatus::Eligible
+        );
 
-        assert_eq!(registry.submit(IsfrSubmission {
-            market_id: market.clone(),
-            rate: 0.06,
-            components: vec![0.04, 0.02],
-            confidence: 0.85,
-            submitter_passport_id: 2,
-            submitted_at_block: 100,
-        }), SubmitterStatus::Eligible);
+        assert_eq!(
+            registry.submit(IsfrSubmission {
+                market_id: market.clone(),
+                rate: 0.06,
+                components: vec![0.04, 0.02],
+                confidence: 0.85,
+                submitter_passport_id: 2,
+                submitted_at_block: 100,
+            }),
+            SubmitterStatus::Eligible
+        );
 
-        assert_eq!(registry.submit(IsfrSubmission {
-            market_id: market.clone(),
-            rate: 0.055,
-            components: vec![0.035, 0.02],
-            confidence: 0.8,
-            submitter_passport_id: 3,
-            submitted_at_block: 100,
-        }), SubmitterStatus::Eligible);
+        assert_eq!(
+            registry.submit(IsfrSubmission {
+                market_id: market.clone(),
+                rate: 0.055,
+                components: vec![0.035, 0.02],
+                confidence: 0.8,
+                submitter_passport_id: 3,
+                submitted_at_block: 100,
+            }),
+            SubmitterStatus::Eligible
+        );
 
         let agg = registry.aggregate(&market, 0, 500).unwrap();
         assert_eq!(agg.submission_count, 3);
         assert_eq!(agg.excluded_count, 0);
         // Median should be around 0.055 (middle value).
-        assert!((agg.median_rate - 0.055).abs() < 0.02, "median_rate = {}", agg.median_rate);
+        assert!(
+            (agg.median_rate - 0.055).abs() < 0.02,
+            "median_rate = {}",
+            agg.median_rate
+        );
     }
 
     #[test]
@@ -671,31 +703,47 @@ mod tests {
         for id in 1..=4 {
             registry.set_reputation(id, 0.8);
             let key = (0, market.clone());
-            registry.submissions.entry(key).or_default().push(IsfrSubmission {
-                market_id: market.clone(),
-                rate: 0.05 + (id as f64 - 2.5) * 0.005,
-                components: vec![],
-                confidence: 0.9,
-                submitter_passport_id: id,
-                submitted_at_block: 100,
-            });
+            registry
+                .submissions
+                .entry(key)
+                .or_default()
+                .push(IsfrSubmission {
+                    market_id: market.clone(),
+                    rate: 0.05 + (id as f64 - 2.5) * 0.005,
+                    components: vec![],
+                    confidence: 0.9,
+                    submitter_passport_id: id,
+                    submitted_at_block: 100,
+                });
         }
 
         // Add outlier.
         registry.set_reputation(5, 0.8);
         let key = (0, market.clone());
-        registry.submissions.entry(key).or_default().push(IsfrSubmission {
-            market_id: market.clone(),
-            rate: 0.90,
-            components: vec![],
-            confidence: 0.9,
-            submitter_passport_id: 5,
-            submitted_at_block: 100,
-        });
+        registry
+            .submissions
+            .entry(key)
+            .or_default()
+            .push(IsfrSubmission {
+                market_id: market.clone(),
+                rate: 0.90,
+                components: vec![],
+                confidence: 0.9,
+                submitter_passport_id: 5,
+                submitted_at_block: 100,
+            });
 
         let agg = registry.aggregate(&market, 0, 500).unwrap();
-        assert!(agg.excluded_count >= 1, "outlier should be excluded, got {}", agg.excluded_count);
-        assert!(agg.median_rate < 0.1, "median should not be pulled by outlier, got {}", agg.median_rate);
+        assert!(
+            agg.excluded_count >= 1,
+            "outlier should be excluded, got {}",
+            agg.excluded_count
+        );
+        assert!(
+            agg.median_rate < 0.1,
+            "median should not be pulled by outlier, got {}",
+            agg.median_rate
+        );
     }
 
     #[test]
@@ -710,7 +758,10 @@ mod tests {
         // Value 10 has weight 9, value 20 has weight 1.
         let entries = vec![(10.0, 9.0), (20.0, 1.0)];
         let median = weighted_median(&entries);
-        assert!((median - 10.0).abs() < 0.01, "expected 10.0 (heavy weight), got {median}");
+        assert!(
+            (median - 10.0).abs() < 0.01,
+            "expected 10.0 (heavy weight), got {median}"
+        );
     }
 
     #[test]
@@ -818,8 +869,8 @@ mod tests {
     #[test]
     fn higher_reputation_has_more_influence() {
         let mut registry = IsfrRegistry::new(IsfrConfig::default());
-        registry.set_reputation(1, 1.0);  // High reputation
-        registry.set_reputation(2, 0.1);  // Low reputation
+        registry.set_reputation(1, 1.0); // High reputation
+        registry.set_reputation(2, 0.1); // Low reputation
 
         registry.submit_claim(numeric_claim(1, 10.0, 0.9));
         registry.submit_claim(numeric_claim(2, 100.0, 0.9));

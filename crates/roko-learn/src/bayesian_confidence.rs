@@ -124,7 +124,10 @@ impl BayesianConfidenceUpdater {
         };
         let mean = self.confidence();
         let sd = self.std_dev();
-        ((mean - z * sd).clamp(0.0, 1.0), (mean + z * sd).clamp(0.0, 1.0))
+        (
+            (mean - z * sd).clamp(0.0, 1.0),
+            (mean + z * sd).clamp(0.0, 1.0),
+        )
     }
 
     /// Update with a single binary observation.

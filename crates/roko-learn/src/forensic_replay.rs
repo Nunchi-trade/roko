@@ -133,7 +133,11 @@ impl ForensicReplay {
             }
 
             // Agent completion event.
-            let status = if episode.success { "success" } else { "failure" };
+            let status = if episode.success {
+                "success"
+            } else {
+                "failure"
+            };
             timeline.push(TimestampedEvent::new(
                 episode.completed_at,
                 format!("agent_{status}"),
@@ -228,7 +232,10 @@ impl ForensicReplay {
         }
 
         if !self.failed_gate_names().is_empty() {
-            lines.push(format!("Failed gates: {}", self.failed_gate_names().join(", ")));
+            lines.push(format!(
+                "Failed gates: {}",
+                self.failed_gate_names().join(", ")
+            ));
         }
 
         lines.join("\n")

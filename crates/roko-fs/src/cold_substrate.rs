@@ -91,8 +91,8 @@ impl ArchiveColdSubstrate {
             return Ok(HashMap::new());
         }
         let data = fs::read_to_string(&path).await?;
-        let index: HashMap<ContentHash, ColdIndexEntry> = serde_json::from_str(&data)
-            .map_err(|e| RokoError::body_decode(e))?;
+        let index: HashMap<ContentHash, ColdIndexEntry> =
+            serde_json::from_str(&data).map_err(|e| RokoError::body_decode(e))?;
         Ok(index)
     }
 
@@ -101,8 +101,7 @@ impl ArchiveColdSubstrate {
         let path = Self::index_path(&self.root);
         let data = {
             let idx = self.index.read();
-            serde_json::to_string_pretty(&*idx)
-                .map_err(|e| RokoError::body_encode(e))?
+            serde_json::to_string_pretty(&*idx).map_err(|e| RokoError::body_encode(e))?
         };
         fs::write(&path, data.as_bytes()).await?;
         Ok(())
@@ -125,8 +124,7 @@ impl ArchiveColdSubstrate {
 
         let offset = file.metadata().await?.len();
 
-        let mut line = serde_json::to_string(engram)
-            .map_err(|e| RokoError::body_encode(e))?;
+        let mut line = serde_json::to_string(engram).map_err(|e| RokoError::body_encode(e))?;
         line.push('\n');
         file.write_all(line.as_bytes()).await?;
         file.flush().await?;
@@ -166,8 +164,8 @@ impl ArchiveColdSubstrate {
             return Ok(None);
         }
 
-        let engram: Engram = serde_json::from_str(line.trim())
-            .map_err(|e| RokoError::body_decode(e))?;
+        let engram: Engram =
+            serde_json::from_str(line.trim()).map_err(|e| RokoError::body_decode(e))?;
         Ok(Some(engram))
     }
 
@@ -356,7 +354,9 @@ mod tests {
     #[tokio::test]
     async fn archive_and_thaw() {
         let tmp = tempfile::tempdir().unwrap();
-        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold")).await.unwrap();
+        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold"))
+            .await
+            .unwrap();
 
         let engram = test_engram("gate.compile");
         let hash = cold.archive(engram.clone()).await.unwrap();
@@ -372,13 +372,11 @@ mod tests {
     #[tokio::test]
     async fn archive_batch_multiple() {
         let tmp = tempfile::tempdir().unwrap();
-        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold")).await.unwrap();
+        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold"))
+            .await
+            .unwrap();
 
-        let engrams = vec![
-            test_engram("a"),
-            test_engram("b"),
-            test_engram("c"),
-        ];
+        let engrams = vec![test_engram("a"), test_engram("b"), test_engram("c")];
 
         let count = cold.archive_batch(engrams).await.unwrap();
         assert_eq!(count, 3);
@@ -388,7 +386,9 @@ mod tests {
     #[tokio::test]
     async fn thaw_nonexistent_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold")).await.unwrap();
+        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold"))
+            .await
+            .unwrap();
         let fake_hash = ContentHash::of(b"nonexistent");
         assert!(cold.thaw(&fake_hash).await.unwrap().is_none());
     }
@@ -396,7 +396,9 @@ mod tests {
     #[tokio::test]
     async fn purge_removes_entries() {
         let tmp = tempfile::tempdir().unwrap();
-        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold")).await.unwrap();
+        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold"))
+            .await
+            .unwrap();
 
         let engram = test_engram("old.data");
         let hash = cold.archive(engram).await.unwrap();
@@ -412,7 +414,9 @@ mod tests {
     #[tokio::test]
     async fn storage_bytes_positive() {
         let tmp = tempfile::tempdir().unwrap();
-        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold")).await.unwrap();
+        let cold = ArchiveColdSubstrate::open(tmp.path().join("cold"))
+            .await
+            .unwrap();
 
         cold.archive(test_engram("x")).await.unwrap();
         let bytes = cold.storage_bytes().await.unwrap();

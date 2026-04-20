@@ -69,24 +69,26 @@ use self::capabilities::{exec_capability_from_command, network_capability_from_u
 pub use allowlist::AllowlistGuard;
 pub use authz::{
     ApproveAllChannel, AuthorizationEvidence, AuthorizationSource, AuthzDecision,
-    ConfirmationChannel, ConfirmationOutcome, ConfirmationSource, DenyAllChannel,
-    EscalationTarget, LogAndDenyChannel,
+    ConfirmationChannel, ConfirmationOutcome, ConfirmationSource, DenyAllChannel, EscalationTarget,
+    LogAndDenyChannel,
 };
 pub use capabilities::{
     AgentWarrant, Capability, CapabilityError, PluginTier, check_capability, check_plugin_tier,
     delegate,
 };
-pub use data_llm::{DataLlmAuditEntry, DataLlmDecision, DataLlmRouter, SanitizeResult, sanitize_input};
+pub use data_llm::{
+    DataLlmAuditEntry, DataLlmDecision, DataLlmRouter, SanitizeResult, sanitize_input,
+};
 pub use hallucination::HallucinationDetector;
 pub use hooks::{DataSink, HookDecision, SafetyAuditRecord, SafetyHook, TaintLabel, TaintedString};
 pub use provenance::{AttestationLevel, Custody, CustodyLogger, Taint};
 pub use result_filter::ResultFilter;
-pub use spending::{SpendingLimiter, ToolCostEstimate};
 pub use risk::{
     BetaDistribution, BudgetDimension, OperationalConfidenceTracker, SafetyBudget,
     SafetyBudgetTracker, confidence_multiplier, effective_limit, irreversibility_score,
     kelly_fraction,
 };
+pub use spending::{SpendingLimiter, ToolCostEstimate};
 pub use temporal::{LtlProperty, MonitorState, TemporalMonitor, Violation};
 pub use witness::{IntegrityViolation, VertexKind, WitnessDag, WitnessLogger, WitnessVertex};
 
@@ -652,9 +654,7 @@ impl SafetyLayer {
                         plan_id: plan_id.to_string(),
                         task_id: task_id.to_string(),
                         violation_type: ViolationType::ContractViolation,
-                        message: format!(
-                            "role `{role}` has zero token budget; dispatch blocked"
-                        ),
+                        message: format!("role `{role}` has zero token budget; dispatch blocked"),
                         severity: ViolationSeverity::Block,
                     });
                 }
@@ -670,20 +670,13 @@ impl SafetyLayer {
                     plan_id: plan_id.to_string(),
                     task_id: task_id.to_string(),
                     violation_type: ViolationType::BudgetExhausted,
-                    message: format!(
-                        "safety budget exhausted for role `{role}`"
-                    ),
+                    message: format!("safety budget exhausted for role `{role}`"),
                     severity: ViolationSeverity::Block,
                 });
             }
         }
 
-        tracing::debug!(
-            plan_id,
-            task_id,
-            role,
-            "safety pre-dispatch check passed"
-        );
+        tracing::debug!(plan_id, task_id, role, "safety pre-dispatch check passed");
         Ok(())
     }
 
@@ -725,9 +718,7 @@ impl SafetyLayer {
                         plan_id: plan_id.to_string(),
                         task_id: task_id.to_string(),
                         violation_type: ViolationType::PathEscape,
-                        message: format!(
-                            "agent modified file outside worktree: {file}"
-                        ),
+                        message: format!("agent modified file outside worktree: {file}"),
                         severity: ViolationSeverity::Warn,
                     });
                 }
@@ -758,12 +749,7 @@ impl SafetyLayer {
         }
 
         if violations.is_empty() {
-            tracing::debug!(
-                plan_id,
-                task_id,
-                role,
-                "safety post-dispatch check passed"
-            );
+            tracing::debug!(plan_id, task_id, role, "safety post-dispatch check passed");
         } else {
             tracing::warn!(
                 plan_id,
@@ -864,8 +850,7 @@ impl SafetyLayer {
 
         // Path policy → anti-patterns.
         if self.path_policy.prevent_escapes {
-            patterns
-                .push("Never read or write files outside the designated worktree root.".into());
+            patterns.push("Never read or write files outside the designated worktree root.".into());
         }
 
         patterns
@@ -1380,22 +1365,15 @@ mod tests {
     #[test]
     fn post_dispatch_check_detects_secret_leak() {
         let layer = SafetyLayer::with_defaults();
-        let api_key = format!(
-            "sk-ant-api03-{}",
-            "A".repeat(80)
-        );
+        let api_key = format!("sk-ant-api03-{}", "A".repeat(80));
         let output = format!("found key: {api_key}");
-        let violations = layer.post_dispatch_check(
-            "plan-1",
-            "task-1",
-            "implementer",
-            &output,
-            &[],
-        );
+        let violations = layer.post_dispatch_check("plan-1", "task-1", "implementer", &output, &[]);
         assert!(!violations.is_empty());
-        assert!(violations
-            .iter()
-            .any(|v| v.violation_type == ViolationType::SecretLeak));
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.violation_type == ViolationType::SecretLeak)
+        );
     }
 
     #[test]
@@ -1414,9 +1392,12 @@ mod tests {
     #[test]
     fn post_dispatch_check_detects_forbidden_file_writes() {
         let mut layer = SafetyLayer::with_defaults();
-        layer.contract.governance.push(
-            GovernanceRule::ForbiddenTools(vec!["write_file".to_string()])
-        );
+        layer
+            .contract
+            .governance
+            .push(GovernanceRule::ForbiddenTools(vec![
+                "write_file".to_string(),
+            ]));
         let violations = layer.post_dispatch_check(
             "plan-1",
             "task-1",
@@ -1425,8 +1406,10 @@ mod tests {
             &["src/lib.rs".to_string()],
         );
         assert!(!violations.is_empty());
-        assert!(violations
-            .iter()
-            .any(|v| v.violation_type == ViolationType::ContractViolation));
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.violation_type == ViolationType::ContractViolation)
+        );
     }
 }

@@ -194,10 +194,7 @@ impl TaintTracker {
                             .provenance
                             .taint
                             .detail()
-                            .unwrap_or(&format!(
-                                "signal author {}",
-                                signal.provenance.author
-                            ))
+                            .unwrap_or(&format!("signal author {}", signal.provenance.author))
                             .to_string(),
                     )
                 },

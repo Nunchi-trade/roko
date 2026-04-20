@@ -209,10 +209,19 @@ mod tests {
 
     #[test]
     fn domain_profile_aliases() {
-        assert_eq!(DomainProfile::from_label("code"), Some(DomainProfile::Coding));
-        assert_eq!(DomainProfile::from_label("defi"), Some(DomainProfile::Chain));
+        assert_eq!(
+            DomainProfile::from_label("code"),
+            Some(DomainProfile::Coding)
+        );
+        assert_eq!(
+            DomainProfile::from_label("defi"),
+            Some(DomainProfile::Chain)
+        );
         assert_eq!(DomainProfile::from_label("sre"), Some(DomainProfile::Ops));
-        assert_eq!(DomainProfile::from_label("docs"), Some(DomainProfile::Writing));
+        assert_eq!(
+            DomainProfile::from_label("docs"),
+            Some(DomainProfile::Writing)
+        );
         assert_eq!(DomainProfile::from_label("ml"), Some(DomainProfile::DataMl));
         assert!(DomainProfile::from_label("unknown").is_none());
     }
@@ -220,8 +229,14 @@ mod tests {
     #[test]
     fn typed_context_defaults() {
         let ctx = TypedContext::new(DomainProfile::Coding);
-        assert_eq!(ctx.effective_gate_rungs(), vec!["compile", "test", "clippy", "diff_review"]);
-        assert!(ctx.effective_tool_categories().contains(&"exec".to_string()));
+        assert_eq!(
+            ctx.effective_gate_rungs(),
+            vec!["compile", "test", "clippy", "diff_review"]
+        );
+        assert!(
+            ctx.effective_tool_categories()
+                .contains(&"exec".to_string())
+        );
         assert!((ctx.effective_context_fraction() - 0.6).abs() < f64::EPSILON);
     }
 

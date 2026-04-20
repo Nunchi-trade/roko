@@ -66,7 +66,8 @@ impl PersistenceDiagram {
 
     /// Add a persistence point.
     pub fn add(&mut self, birth: f64, death: f64, dimension: usize) {
-        self.points.push(PersistencePoint::new(birth, death, dimension));
+        self.points
+            .push(PersistencePoint::new(birth, death, dimension));
     }
 
     /// Get all points of a given homological dimension.
@@ -103,9 +104,7 @@ impl PersistenceDiagram {
                 if used[j] || q.dimension != p.dimension {
                     continue;
                 }
-                let dist = (p.birth - q.birth)
-                    .abs()
-                    .max((p.death - q.death).abs());
+                let dist = (p.birth - q.birth).abs().max((p.death - q.death).abs());
                 if dist < best_dist {
                     best_dist = dist;
                     best_idx = Some(j);
@@ -299,10 +298,8 @@ pub fn vietoris_rips(points: &[Vec<f64>], max_dim: usize) -> PersistenceDiagram 
             if ri == rj {
                 // Already connected — this edge creates a cycle.
                 // Check if there's a common neighbor (triangle).
-                let common_neighbors: Vec<usize> = adjacency[i]
-                    .intersection(&adjacency[j])
-                    .copied()
-                    .collect();
+                let common_neighbors: Vec<usize> =
+                    adjacency[i].intersection(&adjacency[j]).copied().collect();
 
                 if !common_neighbors.is_empty() {
                     // Triangle found: birth = distance, death when triangle fills.
@@ -348,10 +345,7 @@ pub fn persistence_landscape(
     }
 
     // Determine parameter range.
-    let min_birth = points
-        .iter()
-        .map(|p| p.birth)
-        .fold(f64::INFINITY, f64::min);
+    let min_birth = points.iter().map(|p| p.birth).fold(f64::INFINITY, f64::min);
     let max_death = points
         .iter()
         .map(|p| p.death)
@@ -474,7 +468,10 @@ mod tests {
 
         let diagram = vietoris_rips(&points, 0);
         // Should detect two clusters merging at a large distance.
-        assert!(diagram.max_persistence() > 5.0, "should detect cluster separation");
+        assert!(
+            diagram.max_persistence() > 5.0,
+            "should detect cluster separation"
+        );
     }
 
     #[test]
@@ -541,7 +538,10 @@ mod tests {
         d1.add(0.5, 2.0, 0);
 
         let d = d1.bottleneck_distance(&d1);
-        assert!(d < 0.01, "identical diagrams should have ~0 distance, got {d}");
+        assert!(
+            d < 0.01,
+            "identical diagrams should have ~0 distance, got {d}"
+        );
     }
 
     #[test]
@@ -564,7 +564,10 @@ mod tests {
         assert!(!embedded.is_empty());
 
         let diagram = vietoris_rips(&embedded, 1);
-        assert!(!diagram.points.is_empty(), "sinusoidal data should have topological features");
+        assert!(
+            !diagram.points.is_empty(),
+            "sinusoidal data should have topological features"
+        );
 
         let landscape = persistence_landscape(&diagram, 0, 50);
         assert_eq!(landscape.len(), 50);

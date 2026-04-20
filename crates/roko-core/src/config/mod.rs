@@ -24,9 +24,9 @@ pub use schema::{
     CURRENT_SCHEMA_VERSION, ConductorConfig, DemurrageConfig, EnergyConfig, GatesConfig,
     GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig, PrdConfig, ProjectConfig,
     RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
-    RoutingRewardWeightsConfig, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig,
-    ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig,
-    SubscriptionTrigger, TemporalConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
+    RoutingRewardWeightsConfig, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig,
+    ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, SubscriptionTrigger, TemporalConfig,
+    TuiConfig, WatcherConfig, WatcherPathConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.

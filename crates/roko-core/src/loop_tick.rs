@@ -152,7 +152,15 @@ pub async fn loop_tick(
     ctx: &Context,
 ) -> Result<TickOutcome> {
     loop_tick_with_config(
-        substrate, scorer, router, composer, gate, policy, query, budget, ctx,
+        substrate,
+        scorer,
+        router,
+        composer,
+        gate,
+        policy,
+        query,
+        budget,
+        ctx,
         &TickConfig::default(),
     )
     .await

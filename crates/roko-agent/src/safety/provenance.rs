@@ -289,8 +289,7 @@ mod tests {
         let logger = CustodyLogger::new(&log_path);
 
         let c1 = Custody::new("bash", "agent-1", 100, vec![]);
-        let c2 = Custody::new("write_file", "agent-2", 200, vec![])
-            .with_taint(Taint::UserInput);
+        let c2 = Custody::new("write_file", "agent-2", 200, vec![]).with_taint(Taint::UserInput);
 
         logger.log(&c1).unwrap();
         logger.log(&c2).unwrap();

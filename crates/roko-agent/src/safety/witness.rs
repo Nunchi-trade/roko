@@ -208,10 +208,7 @@ impl WitnessDag {
                 if !self.vertices.contains_key(parent_id) {
                     violations.push(IntegrityViolation {
                         vertex_id: *id,
-                        detail: format!(
-                            "dangling parent reference: {}",
-                            parent_id.short()
-                        ),
+                        detail: format!("dangling parent reference: {}", parent_id.short()),
                     });
                 }
             }
@@ -223,10 +220,7 @@ impl WitnessDag {
     /// Return all vertices of a given kind.
     #[must_use]
     pub fn vertices_of_kind(&self, kind: VertexKind) -> Vec<&WitnessVertex> {
-        self.vertices
-            .values()
-            .filter(|v| v.kind == kind)
-            .collect()
+        self.vertices.values().filter(|v| v.kind == kind).collect()
     }
 
     /// Return all vertices for a given agent.

@@ -119,13 +119,11 @@ impl OracleSelector {
         }
 
         // Thompson Sampling: sample from each arm's posterior, pick highest.
-        candidates
-            .into_iter()
-            .max_by(|a, b| {
-                a.sample()
-                    .partial_cmp(&b.sample())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        candidates.into_iter().max_by(|a, b| {
+            a.sample()
+                .partial_cmp(&b.sample())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Select deterministically using mean posterior (for testing/logging).
@@ -249,11 +247,7 @@ fn sample_beta<R: Rng + ?Sized>(alpha: f64, beta: f64, rng: &mut R) -> f64 {
     let x = sample_gamma(alpha.max(f64::MIN_POSITIVE), rng);
     let y = sample_gamma(beta.max(f64::MIN_POSITIVE), rng);
     let total = x + y;
-    if total < f64::EPSILON {
-        0.5
-    } else {
-        x / total
-    }
+    if total < f64::EPSILON { 0.5 } else { x / total }
 }
 
 /// Sample from Gamma(shape, 1) using Marsaglia-Tsang method.

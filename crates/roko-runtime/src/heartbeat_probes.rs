@@ -1484,8 +1484,7 @@ mod tests {
         let mut registry = StatefulProbeRegistry::new(10, 2.0);
         registry.register(Box::new(BuildHealthProbe::new()));
 
-        let normal_state = EngineState::new()
-            .with_last_build_result(BuildResult::Success);
+        let normal_state = EngineState::new().with_last_build_result(BuildResult::Success);
 
         // Push several normal evaluations to establish a baseline
         for _ in 0..8 {
@@ -1495,8 +1494,7 @@ mod tests {
         }
 
         // Now push an abnormal state (build failure)
-        let bad_state = EngineState::new()
-            .with_last_build_result(BuildResult::Failure);
+        let bad_state = EngineState::new().with_last_build_result(BuildResult::Failure);
         let results = registry.evaluate_all(&bad_state);
         assert_eq!(results.results.len(), 1);
         // After 8 normal values, a sudden spike should be anomalous
@@ -1537,6 +1535,9 @@ mod tests {
             .with_last_build_result(BuildResult::Failure)
             .with_test_pass_count_delta(-5);
         let results = registry.evaluate_all(&bad);
-        assert!(results.anomaly_count() >= 1, "should detect at least one anomaly");
+        assert!(
+            results.anomaly_count() >= 1,
+            "should detect at least one anomaly"
+        );
     }
 }

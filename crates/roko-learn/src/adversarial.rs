@@ -66,13 +66,13 @@ impl AttackType {
             | Self::FlashLoan
             | Self::GovernanceAttack => AttackDomain::Chain,
 
-            Self::PromptInjection
-            | Self::PathTraversal
-            | Self::DependencyConfusion => AttackDomain::Coding,
+            Self::PromptInjection | Self::PathTraversal | Self::DependencyConfusion => {
+                AttackDomain::Coding
+            }
 
-            Self::ReplayAttack
-            | Self::DataPoisoning
-            | Self::ModelExtraction => AttackDomain::Universal,
+            Self::ReplayAttack | Self::DataPoisoning | Self::ModelExtraction => {
+                AttackDomain::Universal
+            }
         }
     }
 }
@@ -132,15 +132,43 @@ impl AdversarialDetector {
         let mut det = Self::new(threshold);
         let attacks: [(AttackType, &str, u64); 10] = [
             (AttackType::SandwichAttack, "chain:sandwich", 0xDEAD_0001),
-            (AttackType::OracleManipulation, "chain:oracle_manip", 0xDEAD_0002),
+            (
+                AttackType::OracleManipulation,
+                "chain:oracle_manip",
+                0xDEAD_0002,
+            ),
             (AttackType::FlashLoan, "chain:flash_loan", 0xDEAD_0003),
-            (AttackType::GovernanceAttack, "chain:governance", 0xDEAD_0004),
-            (AttackType::PromptInjection, "coding:prompt_inject", 0xDEAD_0005),
-            (AttackType::PathTraversal, "coding:path_traversal", 0xDEAD_0006),
-            (AttackType::DependencyConfusion, "coding:dep_confusion", 0xDEAD_0007),
+            (
+                AttackType::GovernanceAttack,
+                "chain:governance",
+                0xDEAD_0004,
+            ),
+            (
+                AttackType::PromptInjection,
+                "coding:prompt_inject",
+                0xDEAD_0005,
+            ),
+            (
+                AttackType::PathTraversal,
+                "coding:path_traversal",
+                0xDEAD_0006,
+            ),
+            (
+                AttackType::DependencyConfusion,
+                "coding:dep_confusion",
+                0xDEAD_0007,
+            ),
             (AttackType::ReplayAttack, "universal:replay", 0xDEAD_0008),
-            (AttackType::DataPoisoning, "universal:data_poison", 0xDEAD_0009),
-            (AttackType::ModelExtraction, "universal:model_extract", 0xDEAD_000A),
+            (
+                AttackType::DataPoisoning,
+                "universal:data_poison",
+                0xDEAD_0009,
+            ),
+            (
+                AttackType::ModelExtraction,
+                "universal:model_extract",
+                0xDEAD_000A,
+            ),
         ];
         for (attack_type, label, seed) in attacks {
             let seed_bytes = seed.to_le_bytes();
@@ -247,7 +275,10 @@ mod tests {
         // A random vector should not match any prototype.
         let random_signal = HdcVector::from_seed(b"random_cafe_babe");
         let result = det.check_signal(&random_signal);
-        assert!(result.is_none(), "random signal should not match prototypes");
+        assert!(
+            result.is_none(),
+            "random signal should not match prototypes"
+        );
     }
 
     #[test]

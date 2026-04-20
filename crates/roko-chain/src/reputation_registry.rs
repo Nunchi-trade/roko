@@ -276,7 +276,8 @@ impl AgentReputation {
 
     /// Apply a collusion dilution penalty.
     fn apply_collusion_dilution(&mut self, now: u64) {
-        self.feedback_dilutions.push(FeedbackDilution::collusion(now));
+        self.feedback_dilutions
+            .push(FeedbackDilution::collusion(now));
     }
 
     /// Compute the discipline state from current scores and slash history.
@@ -338,13 +339,7 @@ impl ReputationRegistry {
     /// `quality` is in [0.0, 1.0] where 1.0 is perfect performance.
     /// `rater_passport_id` is used to look up the rater's feedback weight
     /// (may be diluted if the rater was caught in a collusion ring).
-    pub fn submit_feedback(
-        &mut self,
-        passport_id: u256,
-        domain: &str,
-        quality: f64,
-        now: u64,
-    ) {
+    pub fn submit_feedback(&mut self, passport_id: u256, domain: &str, quality: f64, now: u64) {
         self.submit_feedback_weighted(passport_id, domain, quality, 1.0, now);
     }
 
@@ -367,7 +362,11 @@ impl ReputationRegistry {
             .entry(domain.to_string())
             .or_insert_with(|| DomainReputation::new(0.5, now));
 
-        domain_rep.update(quality.clamp(0.0, 1.0), feedback_weight.clamp(0.0, 1.0), now);
+        domain_rep.update(
+            quality.clamp(0.0, 1.0),
+            feedback_weight.clamp(0.0, 1.0),
+            now,
+        );
     }
 
     /// Get the effective (decay-adjusted) score for an agent in a domain.
@@ -380,11 +379,7 @@ impl ReputationRegistry {
     }
 
     /// Get all domain scores for an agent (decay-adjusted).
-    pub fn get_all_scores(
-        &self,
-        passport_id: u256,
-        now: u64,
-    ) -> HashMap<String, f64> {
+    pub fn get_all_scores(&self, passport_id: u256, now: u64) -> HashMap<String, f64> {
         self.records
             .get(&passport_id)
             .map(|agent| {
@@ -484,7 +479,10 @@ mod tests {
         }
 
         let score = registry.get_score(1, "coding", now + 20);
-        assert!(score > 0.7, "score should rise with high feedback, got {score}");
+        assert!(
+            score > 0.7,
+            "score should rise with high feedback, got {score}"
+        );
     }
 
     #[test]
@@ -598,7 +596,9 @@ mod tests {
     fn slash_rates_match_spec() {
         assert!((ReputationViolation::MissedDeadline.slash_rate() - (-0.01)).abs() < f64::EPSILON);
         assert!((ReputationViolation::AbandonedJob.slash_rate() - (-0.03)).abs() < f64::EPSILON);
-        assert!((ReputationViolation::QualityRejection.slash_rate() - (-0.02)).abs() < f64::EPSILON);
+        assert!(
+            (ReputationViolation::QualityRejection.slash_rate() - (-0.02)).abs() < f64::EPSILON
+        );
         assert!(
             (ReputationViolation::RepeatedQualityFailure.slash_rate() - (-0.05)).abs()
                 < f64::EPSILON
@@ -714,10 +714,7 @@ mod tests {
         registry.register_agent(1, now);
 
         registry.ban_agent(1);
-        assert_eq!(
-            registry.discipline_state(1, now),
-            DisciplineState::Banned
-        );
+        assert_eq!(registry.discipline_state(1, now), DisciplineState::Banned);
     }
 
     #[test]
@@ -746,7 +743,10 @@ mod tests {
         registry.slash(1, "coding", ReputationViolation::Plagiarism, now);
 
         let score = registry.get_score(1, "coding", now);
-        assert!(score < 0.2, "score should be below 0.2 after plagiarism slash, got {score}");
+        assert!(
+            score < 0.2,
+            "score should be below 0.2 after plagiarism slash, got {score}"
+        );
         assert_eq!(
             registry.discipline_state(1, now),
             DisciplineState::Suspended

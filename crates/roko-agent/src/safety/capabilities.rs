@@ -108,10 +108,7 @@ impl PluginTier {
 /// Check whether a plugin at the given `tier` is allowed to invoke the
 /// requested `capability`. Returns `Ok(())` on success; returns a
 /// human-readable error on denial.
-pub fn check_plugin_tier(
-    tier: PluginTier,
-    capability: &Capability,
-) -> Result<(), String> {
+pub fn check_plugin_tier(tier: PluginTier, capability: &Capability) -> Result<(), String> {
     match capability {
         Capability::Network { .. } if !tier.allows_network() => Err(format!(
             "plugin tier {:?} does not permit network access",
@@ -336,12 +333,8 @@ mod tests {
         assert!(!tier.allows_network());
         assert!(!tier.allows_secrets());
         assert!(!tier.allows_writes());
-        assert!(
-            check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_err()
-        );
-        assert!(
-            check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_err()
-        );
+        assert!(check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_err());
+        assert!(check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_err());
         assert!(check_plugin_tier(tier, &Capability::Exec("ls".into())).is_err());
         assert!(
             check_plugin_tier(
@@ -361,12 +354,8 @@ mod tests {
         assert!(!tier.allows_network());
         assert!(!tier.allows_secrets());
         assert!(!tier.allows_writes());
-        assert!(
-            check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_ok()
-        );
-        assert!(
-            check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_err()
-        );
+        assert!(check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_ok());
+        assert!(check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_err());
         assert!(check_plugin_tier(tier, &Capability::Exec("ls".into())).is_err());
     }
 
@@ -376,12 +365,8 @@ mod tests {
         assert!(tier.allows_network());
         assert!(!tier.allows_secrets());
         assert!(tier.allows_writes());
-        assert!(
-            check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_ok()
-        );
-        assert!(
-            check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_ok()
-        );
+        assert!(check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_ok());
+        assert!(check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_ok());
         assert!(check_plugin_tier(tier, &Capability::Exec("ls".into())).is_ok());
     }
 

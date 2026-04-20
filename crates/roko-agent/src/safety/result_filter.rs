@@ -19,12 +19,7 @@ use super::scrub::{ScrubPolicy, scrub_secrets};
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024;
 
 /// Tools whose output comes from external sources (network, user input).
-const EXTERNAL_OUTPUT_TOOLS: &[&str] = &[
-    "web_fetch",
-    "web_search",
-    "bash",
-    "run_tests",
-];
+const EXTERNAL_OUTPUT_TOOLS: &[&str] = &["web_fetch", "web_search", "bash", "run_tests"];
 
 /// Sanitizes tool output by stripping secrets and truncating oversized responses.
 ///
@@ -136,7 +131,12 @@ mod tests {
     }
 
     fn test_tool(name: &str) -> ToolDef {
-        ToolDef::new(name, "test tool", ToolCategory::Read, ToolPermission::read_only())
+        ToolDef::new(
+            name,
+            "test tool",
+            ToolCategory::Read,
+            ToolPermission::read_only(),
+        )
     }
 
     #[test]
@@ -188,7 +188,10 @@ mod tests {
         let tool = test_tool("bash");
         let api_key = format!("sk-ant-api03-{}", "A".repeat(80));
         let params = serde_json::json!({ "command": format!("echo {api_key}") });
-        let result = filter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = filter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert!(matches!(result, HookDecision::Reject(_)));
     }
 
@@ -197,7 +200,10 @@ mod tests {
         let filter = ResultFilter::with_defaults();
         let tool = test_tool("bash");
         let params = serde_json::json!({ "command": "echo hello" });
-        let result = filter.on_tool_call(&tool, &params, &test_ctx()).await.unwrap();
+        let result = filter
+            .on_tool_call(&tool, &params, &test_ctx())
+            .await
+            .unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 

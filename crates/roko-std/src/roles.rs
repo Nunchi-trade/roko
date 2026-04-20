@@ -487,7 +487,11 @@ mod tests {
 
     #[test]
     fn chain_domain_excludes_mutation_tools() {
-        let excluded: HashSet<&str> = CHAIN_DOMAIN_PROFILE.excluded_tools.iter().copied().collect();
+        let excluded: HashSet<&str> = CHAIN_DOMAIN_PROFILE
+            .excluded_tools
+            .iter()
+            .copied()
+            .collect();
         assert!(excluded.contains(write_file::NAME));
         assert!(excluded.contains(edit_file::NAME));
         assert!(excluded.contains(multi_edit::NAME));
@@ -495,7 +499,11 @@ mod tests {
 
     #[test]
     fn research_domain_excludes_exec_and_mutation() {
-        let excluded: HashSet<&str> = RESEARCH_DOMAIN_PROFILE.excluded_tools.iter().copied().collect();
+        let excluded: HashSet<&str> = RESEARCH_DOMAIN_PROFILE
+            .excluded_tools
+            .iter()
+            .copied()
+            .collect();
         assert!(excluded.contains(bash::NAME));
         assert!(excluded.contains(run_tests::NAME));
         assert!(excluded.contains(write_file::NAME));
@@ -526,10 +534,22 @@ mod tests {
             &ToolOverrides::default(),
         );
         // Researcher + research domain: should have read/web tools, deny mutation + exec.
-        assert!(effective.denied_tools.contains(&write_file::NAME.to_string()));
+        assert!(
+            effective
+                .denied_tools
+                .contains(&write_file::NAME.to_string())
+        );
         assert!(effective.denied_tools.contains(&bash::NAME.to_string()));
-        assert!(effective.allowed_tools.contains(&read_file::NAME.to_string()));
-        assert!(effective.allowed_tools.contains(&web_search::NAME.to_string()));
+        assert!(
+            effective
+                .allowed_tools
+                .contains(&read_file::NAME.to_string())
+        );
+        assert!(
+            effective
+                .allowed_tools
+                .contains(&web_search::NAME.to_string())
+        );
     }
 
     #[test]
@@ -572,7 +592,11 @@ mod tests {
         );
         // Only read_file and grep should be allowed.
         assert_eq!(effective.allowed_tools.len(), 2);
-        assert!(effective.allowed_tools.contains(&read_file::NAME.to_string()));
+        assert!(
+            effective
+                .allowed_tools
+                .contains(&read_file::NAME.to_string())
+        );
         assert!(effective.allowed_tools.contains(&grep::NAME.to_string()));
     }
 }

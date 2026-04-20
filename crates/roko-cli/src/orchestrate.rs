@@ -88,7 +88,6 @@ use roko_gate::{
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
-use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
 use roko_learn::cfactor::{CFactor, detect_cfactor_regression};
 use roko_learn::conductor::{
@@ -97,6 +96,7 @@ use roko_learn::conductor::{
 };
 use roko_learn::costs_db::CostRecord;
 use roko_learn::costs_log::CostsLog;
+use roko_learn::curriculum::{CurriculumMode, CurriculumScheduler};
 use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
@@ -1838,7 +1838,9 @@ fn render_enrichment_outcomes(outcomes: &[StepOutcome]) -> String {
     outcomes
         .iter()
         .map(|outcome| match outcome {
-            StepOutcome::Generated { step, llm_calls, .. } => {
+            StepOutcome::Generated {
+                step, llm_calls, ..
+            } => {
                 format!("- {step}: generated ({llm_calls} llm call(s))")
             }
             StepOutcome::Skipped { step, reason } => {
@@ -2570,10 +2572,7 @@ fn query_anti_knowledge_patterns(
     limit: usize,
 ) -> Vec<String> {
     match knowledge_store.query_kind(task_text, KnowledgeKind::AntiKnowledge, limit) {
-        Ok(entries) => entries
-            .into_iter()
-            .map(|entry| entry.content)
-            .collect(),
+        Ok(entries) => entries.into_iter().map(|entry| entry.content).collect(),
         Err(err) => {
             tracing::warn!(error = %err, "failed to query AntiKnowledge for anti-patterns");
             Vec::new()
@@ -2588,10 +2587,7 @@ fn query_anti_knowledge_patterns(
 /// -- they capture when and why agents changed state.  Recording them as
 /// knowledge enables future sessions to learn from operational history (e.g.
 /// "agent X was degraded due to budget constraints 5 times last week").
-fn record_lifecycle_knowledge(
-    knowledge_store: &KnowledgeStore,
-    transition: &LifecycleTransition,
-) {
+fn record_lifecycle_knowledge(knowledge_store: &KnowledgeStore, transition: &LifecycleTransition) {
     // Only record significant transitions -- skip routine Active/Waiting/Initiated.
     let is_significant = matches!(
         &transition.to,
@@ -2662,10 +2658,7 @@ fn record_lifecycle_knowledge(
 /// This bridges neuro (durable knowledge) with the gate verification pipeline,
 /// so that known problematic or reliably stable rungs are tuned accordingly
 /// before the plan run begins.
-fn apply_neuro_gate_hints(
-    knowledge_store: &KnowledgeStore,
-    thresholds: &mut AdaptiveThresholds,
-) {
+fn apply_neuro_gate_hints(knowledge_store: &KnowledgeStore, thresholds: &mut AdaptiveThresholds) {
     let failure_rungs = match knowledge_store.query("gate failure compile lint test", 10) {
         Ok(entries) => entries
             .into_iter()
@@ -2673,7 +2666,10 @@ fn apply_neuro_gate_hints(
                 let content_lower = entry.content.to_lowercase();
                 if content_lower.contains("compile") || content_lower.contains("rung 0") {
                     Some(0u32)
-                } else if content_lower.contains("lint") || content_lower.contains("clippy") || content_lower.contains("rung 1") {
+                } else if content_lower.contains("lint")
+                    || content_lower.contains("clippy")
+                    || content_lower.contains("rung 1")
+                {
                     Some(1)
                 } else if content_lower.contains("test fail") || content_lower.contains("rung 2") {
                     Some(2)
@@ -3270,9 +3266,7 @@ fn cascade_routing_context(
         temperament: Some(routing_config.agent.temperament_for_role(role.label())),
         previous_model: None,
         plan_context_tokens: None,
-        tier_thresholds: Some(roko_daimon::adjusted_thresholds(
-            &affect.behavioral_state,
-        )),
+        tier_thresholds: Some(roko_daimon::adjusted_thresholds(&affect.behavioral_state)),
     }
 }
 
@@ -3811,8 +3805,7 @@ where
                         // boost low-arousal (simple) tasks.
                         effective_priority *= 1.0 - arousal * 0.3;
                     }
-                    roko_core::BehavioralState::Coasting
-                    | roko_core::BehavioralState::Focused => {
+                    roko_core::BehavioralState::Coasting | roko_core::BehavioralState::Focused => {
                         // Allow complex tasks: boost high-arousal tasks.
                         effective_priority *= 1.0 + arousal * 0.2;
                     }
@@ -7222,10 +7215,7 @@ impl PlanRunner {
     /// patterns are converted into `DreamTrigger::CoordinationPattern` events
     /// and an immediate dream consolidation is triggered so the system can
     /// process and learn from the coordination issues.
-    async fn maybe_coordination_dream(
-        &mut self,
-        patterns: &[roko_conductor::CompoundPattern],
-    ) {
+    async fn maybe_coordination_dream(&mut self, patterns: &[roko_conductor::CompoundPattern]) {
         if patterns.is_empty() || !self.config.dreams.auto_dream {
             return;
         }
@@ -8146,7 +8136,9 @@ impl PlanRunner {
         let outcomes = pipeline.run_steps(plan_id, &selected_steps).await;
         for outcome in &outcomes {
             match outcome {
-                StepOutcome::Generated { step, llm_calls, .. } => tracing::info!(
+                StepOutcome::Generated {
+                    step, llm_calls, ..
+                } => tracing::info!(
                     "[orchestrate] Enriching {plan_id}: step {step} generated ({llm_calls} llm call(s))"
                 ),
                 StepOutcome::Skipped { step, reason } => tracing::info!(
@@ -8342,9 +8334,8 @@ impl PlanRunner {
                                 let mut task = roko_core::task::Task::new(&td.id, &td.title);
                                 task.files = td.files.clone();
                                 task.depends_on = td.depends_on.clone();
-                                task.estimated_minutes = Some(
-                                    (td.timeout_secs / 60).clamp(1, 600) as u32,
-                                );
+                                task.estimated_minutes =
+                                    Some((td.timeout_secs / 60).clamp(1, 600) as u32);
                                 task.complexity_band = Some(match td.tier.as_str() {
                                     "mechanical" => roko_core::task::TaskComplexityBand::Fast,
                                     "focused" => roko_core::task::TaskComplexityBand::Standard,
@@ -10053,14 +10044,11 @@ impl PlanRunner {
                 let mut task = roko_core::task::Task::new(&td.id, &td.title);
                 task.files = td.files.clone();
                 task.depends_on = td.depends_on.clone();
-                task.estimated_minutes =
-                    Some((td.timeout_secs / 60).clamp(1, 600) as u32);
+                task.estimated_minutes = Some((td.timeout_secs / 60).clamp(1, 600) as u32);
                 task.complexity_band = Some(match td.tier.as_str() {
                     "mechanical" => roko_core::task::TaskComplexityBand::Fast,
                     "focused" => roko_core::task::TaskComplexityBand::Standard,
-                    "integrative" | "architectural" => {
-                        roko_core::task::TaskComplexityBand::Complex
-                    }
+                    "integrative" | "architectural" => roko_core::task::TaskComplexityBand::Complex,
                     _ => roko_core::task::TaskComplexityBand::Standard,
                 });
                 self.curriculum_scheduler
@@ -13919,16 +13907,8 @@ impl PlanRunner {
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
 
         // ── AGT-01: Post-dispatch safety check ─────────────────────
-        let post_changed_files = self
-            .git_changed_files(&exec_dir)
-            .await
-            .unwrap_or_default();
-        let agent_output_text = result
-            .output
-            .body
-            .as_text()
-            .unwrap_or_default()
-            .to_string();
+        let post_changed_files = self.git_changed_files(&exec_dir).await.unwrap_or_default();
+        let agent_output_text = result.output.body.as_text().unwrap_or_default().to_string();
         let safety_violations = self.safety_layer.post_dispatch_check(
             plan_id,
             task,
@@ -14357,9 +14337,9 @@ impl PlanRunner {
                 }
                 Ok(o) => {
                     // SAFE-01: Scrub secrets from verify-step output.
-                    let stderr = self.safety_layer.scrub_text(
-                        &String::from_utf8_lossy(&o.stderr),
-                    );
+                    let stderr = self
+                        .safety_layer
+                        .scrub_text(&String::from_utf8_lossy(&o.stderr));
                     let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
                     tracing::error!(
                         "  ❌ [{}] {} — {}: {}",
@@ -16656,15 +16636,105 @@ fn code_context_for_task(workdir: &Path, task_description: &str) -> Vec<String> 
 /// Extract meaningful keywords from a task description for code search.
 fn extract_task_keywords(description: &str) -> Vec<String> {
     static STOP_WORDS: &[&str] = &[
-        "the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "was",
-        "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "shall", "can", "need", "must", "it", "its", "this",
-        "that", "these", "those", "with", "from", "by", "as", "into", "not", "no", "if", "then",
-        "else", "when", "where", "which", "who", "what", "how", "all", "each", "every", "both",
-        "few", "more", "most", "other", "some", "such", "only", "own", "same", "so", "than",
-        "too", "very", "just", "but", "also", "about", "above", "after", "before", "between",
-        "through", "during", "up", "down", "out", "over", "under", "again", "further",
-        "implement", "add", "create", "make", "use", "update", "fix", "change", "ensure",
+        "the",
+        "a",
+        "an",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "and",
+        "or",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "must",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "with",
+        "from",
+        "by",
+        "as",
+        "into",
+        "not",
+        "no",
+        "if",
+        "then",
+        "else",
+        "when",
+        "where",
+        "which",
+        "who",
+        "what",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "but",
+        "also",
+        "about",
+        "above",
+        "after",
+        "before",
+        "between",
+        "through",
+        "during",
+        "up",
+        "down",
+        "out",
+        "over",
+        "under",
+        "again",
+        "further",
+        "implement",
+        "add",
+        "create",
+        "make",
+        "use",
+        "update",
+        "fix",
+        "change",
+        "ensure",
     ];
 
     description

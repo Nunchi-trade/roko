@@ -158,8 +158,8 @@ impl MetricTensor {
     pub fn execution_cost() -> Self {
         Self::new(|x: &Point| {
             let slippage = 1.0 + x[0] * x[0]; // Quadratic slippage.
-            let gas = 1.0 + x[1].abs();        // Linear gas.
-            let time = 1.0 + x[2].abs();       // Linear time.
+            let gas = 1.0 + x[1].abs(); // Linear gas.
+            let time = 1.0 + x[2].abs(); // Linear time.
             let opportunity = 1.0 + x[3] * x[3]; // Quadratic opportunity.
             mat4_diag(&[slippage, gas, time, opportunity])
         })
@@ -322,12 +322,7 @@ pub fn geodesic_rk4(
 }
 
 /// Compute (dx/dt, dv/dt) for the geodesic equation.
-fn geodesic_deriv(
-    metric: &MetricTensor,
-    x: &Point,
-    v: &Point,
-    h: f64,
-) -> (Point, Point) {
+fn geodesic_deriv(metric: &MetricTensor, x: &Point, v: &Point, h: f64) -> (Point, Point) {
     let dx = *v;
     let mut dv = [0.0; DIM];
 
@@ -442,8 +437,7 @@ pub fn ricci_scalar(metric: &MetricTensor, point: &Point, h: f64) -> Option<f64>
         for k in 0..DIM {
             for i in 0..DIM {
                 for j in 0..DIM {
-                    dgamma[m][k][i][j] =
-                        (gamma_plus[k][i][j] - gamma_minus[k][i][j]) / (2.0 * h);
+                    dgamma[m][k][i][j] = (gamma_plus[k][i][j] - gamma_minus[k][i][j]) / (2.0 * h);
                 }
             }
         }
@@ -460,8 +454,7 @@ pub fn ricci_scalar(metric: &MetricTensor, point: &Point, h: f64) -> Option<f64>
                 // R^k_ikj
                 sum += dgamma[i][k][k][j] - dgamma[k][k][i][j];
                 for m in 0..DIM {
-                    sum += gamma[k][i][m] * gamma[m][k][j]
-                        - gamma[k][k][m] * gamma[m][i][j];
+                    sum += gamma[k][i][m] * gamma[m][k][j] - gamma[k][k][m] * gamma[m][i][j];
                 }
             }
             ricci[i][j] = sum;
@@ -600,10 +593,12 @@ mod tests {
 
     #[test]
     fn singular_matrix_returns_none() {
-        let m = [[1.0, 0.0, 0.0, 0.0],
-                  [0.0, 0.0, 0.0, 0.0],
-                  [0.0, 0.0, 1.0, 0.0],
-                  [0.0, 0.0, 0.0, 1.0]];
+        let m = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
         assert!(mat4_inverse(&m).is_none());
     }
 
@@ -629,8 +624,14 @@ mod tests {
         // At origin all costs are 1.0.
         assert_eq!(g_origin[0][0], 1.0);
         // Away from origin, costs increase.
-        assert!(g_far[0][0] > g_origin[0][0], "slippage should increase with amount");
-        assert!(g_far[1][1] > g_origin[1][1], "gas should increase with base fee");
+        assert!(
+            g_far[0][0] > g_origin[0][0],
+            "slippage should increase with amount"
+        );
+        assert!(
+            g_far[1][1] > g_origin[1][1],
+            "gas should increase with base fee"
+        );
     }
 
     // --- Christoffel symbols ---
@@ -761,10 +762,7 @@ mod tests {
     fn flat_metric_has_zero_ricci() {
         let metric = MetricTensor::constant_diagonal([1.0, 1.0, 1.0, 1.0]);
         let r = ricci_scalar(&metric, &[0.0; DIM], 1e-4).unwrap();
-        assert!(
-            r.abs() < 1e-4,
-            "flat metric should have R ≈ 0: {r}"
-        );
+        assert!(r.abs() < 1e-4, "flat metric should have R ≈ 0: {r}");
     }
 
     #[test]
@@ -806,10 +804,7 @@ mod tests {
     #[test]
     fn frechet_mean_on_flat_is_arithmetic() {
         let metric = MetricTensor::constant_diagonal([1.0, 1.0, 1.0, 1.0]);
-        let points = vec![
-            [0.0, 0.0, 0.0, 0.0],
-            [2.0, 4.0, 6.0, 8.0],
-        ];
+        let points = vec![[0.0, 0.0, 0.0, 0.0], [2.0, 4.0, 6.0, 8.0]];
         let (mean, _) = frechet_mean(&metric, &points, 100, 1e-8);
         // On flat space, Frechet mean = arithmetic mean.
         for i in 0..DIM {
@@ -825,10 +820,7 @@ mod tests {
     #[test]
     fn frechet_mean_symmetric_inputs() {
         let metric = MetricTensor::constant_diagonal([1.0, 1.0, 1.0, 1.0]);
-        let points = vec![
-            [-1.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0],
-        ];
+        let points = vec![[-1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
         let (mean, _) = frechet_mean(&metric, &points, 100, 1e-8);
         // Symmetric => mean is origin.
         assert!(mean[0].abs() < 1e-4, "mean[0] = {}", mean[0]);

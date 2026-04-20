@@ -908,7 +908,11 @@ mod tests {
             let result = scaffold(ty, name, dir.path());
             assert!(result.is_ok(), "scaffold failed for type: {}", ty);
             let files = result.unwrap();
-            assert!(!files.is_empty(), "scaffold produced no files for type: {}", ty);
+            assert!(
+                !files.is_empty(),
+                "scaffold produced no files for type: {}",
+                ty
+            );
         }
     }
 }

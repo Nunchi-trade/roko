@@ -140,7 +140,10 @@ mod tests {
         let high = yd.performance_multiplier();
 
         assert!(peak > low, "peak {peak} should exceed low-pressure {low}");
-        assert!(peak > high, "peak {peak} should exceed high-pressure {high}");
+        assert!(
+            peak > high,
+            "peak {peak} should exceed high-pressure {high}"
+        );
     }
 
     #[test]
@@ -161,21 +164,33 @@ mod tests {
         let mut yd = YerkesDodson::new(0.5, 0.25);
         yd.set_pressure(0.5);
         let aggr = yd.intervention_aggressiveness();
-        assert!(aggr < 0.01, "at optimal, aggressiveness should be ~0, got {aggr}");
+        assert!(
+            aggr < 0.01,
+            "at optimal, aggressiveness should be ~0, got {aggr}"
+        );
 
         yd.set_pressure(0.0);
         let aggr_low = yd.intervention_aggressiveness();
-        assert!(aggr_low > 0.5, "far from optimal, aggressiveness should be high: {aggr_low}");
+        assert!(
+            aggr_low > 0.5,
+            "far from optimal, aggressiveness should be high: {aggr_low}"
+        );
     }
 
     #[test]
     fn pressure_delta_points_toward_optimal() {
         let mut yd = YerkesDodson::new(0.5, 0.25);
         yd.set_pressure(0.2);
-        assert!(yd.pressure_delta() > 0.0, "below optimal, delta should be positive");
+        assert!(
+            yd.pressure_delta() > 0.0,
+            "below optimal, delta should be positive"
+        );
 
         yd.set_pressure(0.8);
-        assert!(yd.pressure_delta() < 0.0, "above optimal, delta should be negative");
+        assert!(
+            yd.pressure_delta() < 0.0,
+            "above optimal, delta should be negative"
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! deduplication and store-and-forward for offline agents.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
@@ -162,10 +162,7 @@ impl MeshRelay {
         peer.last_seen_ms = now_ms;
 
         // Drain store-and-forward queue.
-        inner
-            .store_forward
-            .remove(&agent_id)
-            .unwrap_or_default()
+        inner.store_forward.remove(&agent_id).unwrap_or_default()
     }
 
     /// Handle a peer disconnecting from the relay.

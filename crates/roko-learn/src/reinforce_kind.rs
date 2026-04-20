@@ -157,11 +157,7 @@ impl ReinforceKind {
     /// Convert to a numeric reward value: +1.0 for positive, -1.0 for negative.
     #[must_use]
     pub fn reward_value(&self) -> f64 {
-        if self.is_positive() {
-            1.0
-        } else {
-            -1.0
-        }
+        if self.is_positive() { 1.0 } else { -1.0 }
     }
 }
 
@@ -306,12 +302,9 @@ mod tests {
 
     #[test]
     fn signal_construction() {
-        let signal = ReinforceSignal::new(
-            ReinforceKind::GatePass { rung: 3 },
-            "task-42",
-        )
-        .with_plan("plan-1")
-        .with_agent("claude-opus-4-6");
+        let signal = ReinforceSignal::new(ReinforceKind::GatePass { rung: 3 }, "task-42")
+            .with_plan("plan-1")
+            .with_agent("claude-opus-4-6");
 
         assert_eq!(signal.task_id, "task-42");
         assert_eq!(signal.plan_id.as_deref(), Some("plan-1"));

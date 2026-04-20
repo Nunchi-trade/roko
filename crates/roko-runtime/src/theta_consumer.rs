@@ -227,17 +227,14 @@ impl ThetaConsumer {
     /// The reactive layer responds immediately to outcome valence,
     /// the learned layer adjusts based on accumulated patterns,
     /// and the stable layer barely moves.
-    fn update_affect(
-        &self,
-        cortical: &CorticalState,
-        summary: &GammaSummary,
-    ) -> AffectUpdate {
+    fn update_affect(&self, cortical: &CorticalState, summary: &GammaSummary) -> AffectUpdate {
         let pad_before = cortical.pad();
 
         // Reactive layer: respond to success rate
         let pleasure_delta = (f64::from(summary.success_rate) - 0.5) * 0.2;
         // Arousal tracks anomaly density
-        let anomaly_density = summary.recurring_anomalies.len() as f64 / f64::from(summary.tick_count.max(1));
+        let anomaly_density =
+            summary.recurring_anomalies.len() as f64 / f64::from(summary.tick_count.max(1));
         let arousal_delta = (anomaly_density - 0.1) * 0.3;
         // Dominance tracks cost efficiency
         let cost_per_tick = if summary.tick_count > 0 {
@@ -286,8 +283,7 @@ impl ThetaConsumer {
             }
         }
 
-        let drift_detected = accuracy_trend < -0.05
-            || !drifting_categories.is_empty();
+        let drift_detected = accuracy_trend < -0.05 || !drifting_categories.is_empty();
 
         CalibrationResult {
             current_accuracy,
@@ -323,7 +319,10 @@ impl ThetaConsumer {
 
     /// Whether interventions are warranted based on the most recent meta-cognition.
     pub fn has_stuck_issues(result: &MetaCognitionResult) -> bool {
-        result.issues.iter().any(|issue| matches!(issue, MetaIssue::Stuck { .. }))
+        result
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, MetaIssue::Stuck { .. }))
     }
 }
 

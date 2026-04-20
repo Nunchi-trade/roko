@@ -497,9 +497,7 @@ impl SystemPromptBuilder {
         if let Some(ref hints) = self.tool_hints {
             if let Some(section) = self.apply_budget_profile(
                 PromptSection::new("tool_hints", hints.clone())
-                    .with_priority(
-                        self.effective_priority("tool_hints", SectionPriority::Low),
-                    )
+                    .with_priority(self.effective_priority("tool_hints", SectionPriority::Low))
                     .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle),
             ) {

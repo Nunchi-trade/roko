@@ -122,7 +122,12 @@ impl MidasRScorer {
     pub fn score(&self, address: &str) -> f64 {
         let key = address.to_lowercase();
         let count = self.address_counts.get(&key).copied().unwrap_or(0) as f64;
-        let mean = self.address_means.get(&key).copied().unwrap_or(1.0).max(0.1);
+        let mean = self
+            .address_means
+            .get(&key)
+            .copied()
+            .unwrap_or(1.0)
+            .max(0.1);
         let z = (count - mean) / mean;
         // Sigmoid-like compression to [0, 1]
         1.0 - 1.0 / (1.0 + z.max(0.0))
@@ -132,7 +137,11 @@ impl MidasRScorer {
     pub fn advance_window(&mut self) {
         self.window_count += 1;
         for (addr, &count) in &self.address_counts {
-            let current_mean = self.address_means.get(addr).copied().unwrap_or(count as f64);
+            let current_mean = self
+                .address_means
+                .get(addr)
+                .copied()
+                .unwrap_or(count as f64);
             let new_mean = self.alpha * count as f64 + (1.0 - self.alpha) * current_mean;
             self.address_means.insert(addr.clone(), new_mean);
         }
@@ -344,7 +353,10 @@ mod tests {
 
         assert!(result.rule_matched);
         assert_eq!(result.rule_label, Some("KoraiToken".to_string()));
-        assert_eq!(result.enrichment.contract_label, Some("KoraiToken".to_string()));
+        assert_eq!(
+            result.enrichment.contract_label,
+            Some("KoraiToken".to_string())
+        );
     }
 
     #[test]
@@ -433,10 +445,7 @@ mod tests {
         let config = TriageConfig::default();
         let mut pipeline = TriagePipeline::new(config);
 
-        let events = vec![
-            test_event("0xa", "0xt1"),
-            test_event("0xb", "0xt2"),
-        ];
+        let events = vec![test_event("0xa", "0xt1"), test_event("0xb", "0xt2")];
 
         let results = pipeline.triage_batch(events);
         assert_eq!(results.len(), 2);
@@ -473,8 +482,18 @@ mod tests {
 
         let result = pipeline.triage(test_event("0xcafe", "0xabcd"));
 
-        assert!(result.enrichment.domain_tags.contains(&"known_contract".to_string()));
-        assert!(result.enrichment.domain_tags.contains(&"known_event".to_string()));
+        assert!(
+            result
+                .enrichment
+                .domain_tags
+                .contains(&"known_contract".to_string())
+        );
+        assert!(
+            result
+                .enrichment
+                .domain_tags
+                .contains(&"known_event".to_string())
+        );
     }
 
     #[test]

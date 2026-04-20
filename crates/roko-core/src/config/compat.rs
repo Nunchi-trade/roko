@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::schema::{
-    AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
-    DemurrageConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig,
-    OneirographyConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig,
-    RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig,
-    TuiConfig, WatcherConfig, WebhooksConfig, AttentionConfig, ImmuneConfig, TemporalConfig,
-    GoalsConfig, EnergyConfig,
+    AgentConfig, AgentRoleToggles, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION,
+    ConductorConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig, GeminiConfig,
+    GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig,
+    PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride,
+    RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, TemporalConfig, ToolsConfig,
+    TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.

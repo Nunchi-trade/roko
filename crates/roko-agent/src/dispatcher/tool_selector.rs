@@ -121,16 +121,10 @@ fn read_only_tools() -> HashSet<String> {
 // ── Write tools (coding agents) ─────────────────────────────────────────
 
 fn write_tools() -> HashSet<String> {
-    [
-        "write_file",
-        "write",
-        "edit_file",
-        "edit",
-        "create_file",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect()
+    ["write_file", "write", "edit_file", "edit", "create_file"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 // ── Exec tools (agents that run commands) ───────────────────────────────
@@ -172,7 +166,10 @@ fn tools_for_role(role: AgentRole) -> HashSet<String> {
         }
 
         // Review roles: read-only + exec for running tests.
-        AgentRole::Architect | AgentRole::Auditor | AgentRole::QuickReviewer | AgentRole::Critic => {
+        AgentRole::Architect
+        | AgentRole::Auditor
+        | AgentRole::QuickReviewer
+        | AgentRole::Critic => {
             tools.extend(exec_tools());
         }
 

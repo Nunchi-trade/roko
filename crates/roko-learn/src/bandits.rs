@@ -1121,7 +1121,9 @@ impl ThompsonSampler {
             // Use the mean of the Beta distribution as a deterministic proxy.
             // For actual Thompson sampling, the caller can use `sample_arm()`.
             let sample = alpha / (alpha + beta);
-            if sample > best_sample || (sample == best_sample && best_arm.map_or(true, |b| arm.as_str() < b)) {
+            if sample > best_sample
+                || (sample == best_sample && best_arm.map_or(true, |b| arm.as_str() < b))
+            {
                 best_sample = sample;
                 best_arm = Some(arm);
             }
@@ -1957,7 +1959,10 @@ mod tests {
         let before = ts.arm_mean("a").unwrap();
         ts.reset();
         let after = ts.arm_mean("a").unwrap();
-        assert!((after - 0.5).abs() < 0.01, "after reset mean should be ~0.5, got {after}");
+        assert!(
+            (after - 0.5).abs() < 0.01,
+            "after reset mean should be ~0.5, got {after}"
+        );
         assert!(before > after);
     }
 

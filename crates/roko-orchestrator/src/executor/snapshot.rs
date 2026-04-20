@@ -197,10 +197,7 @@ impl ExecutorSnapshot {
     }
 
     /// Build a JSON object of only the fields that differ from `base`.
-    fn build_delta_changed(
-        &self,
-        base: &Self,
-    ) -> Result<serde_json::Value, serde_json::Error> {
+    fn build_delta_changed(&self, base: &Self) -> Result<serde_json::Value, serde_json::Error> {
         let mut changed_plans = serde_json::Map::new();
         for (id, state) in &self.plan_states {
             let same_as_base = base
@@ -559,10 +556,7 @@ impl SnapshotVerifier {
     /// # Errors
     ///
     /// Returns [`SnapshotIntegrityError::ChecksumMismatch`] on mismatch.
-    pub fn verify_checksum(
-        data: &[u8],
-        expected: &[u8; 32],
-    ) -> Result<(), SnapshotIntegrityError> {
+    pub fn verify_checksum(data: &[u8], expected: &[u8; 32]) -> Result<(), SnapshotIntegrityError> {
         let actual = Self::compute_hash(data);
         if actual == *expected {
             Ok(())
@@ -1044,8 +1038,7 @@ mod tests {
     #[test]
     fn delta_through_verified_envelope() {
         let mut base = ExecutorSnapshot::new(100);
-        base.plan_states
-            .insert("p1".into(), PlanState::new("p1"));
+        base.plan_states.insert("p1".into(), PlanState::new("p1"));
 
         let mut current = ExecutorSnapshot::new(200);
         current

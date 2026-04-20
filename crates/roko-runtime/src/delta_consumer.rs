@@ -219,7 +219,10 @@ impl DeltaConsumer {
     /// Check whether a delta cycle should be triggered.
     pub fn should_trigger(&self) -> Option<DeltaTrigger> {
         // Don't trigger if a cycle is already running
-        if !matches!(self.current_status, DeltaCycleStatus::Idle | DeltaCycleStatus::Completed) {
+        if !matches!(
+            self.current_status,
+            DeltaCycleStatus::Idle | DeltaCycleStatus::Completed
+        ) {
             return None;
         }
 
@@ -337,8 +340,7 @@ impl DeltaConsumer {
     /// Check whether the system is in a low-activity state suitable for dreaming.
     pub fn is_low_activity(cortical: &CorticalState) -> bool {
         let snapshot = cortical.snapshot();
-        matches!(snapshot.regime, Regime::Calm | Regime::Normal)
-            && snapshot.pad.arousal < 0.3
+        matches!(snapshot.regime, Regime::Calm | Regime::Normal) && snapshot.pad.arousal < 0.3
     }
 }
 
@@ -366,7 +368,10 @@ mod tests {
         assert!(consumer.should_trigger().is_none());
         consumer.record_episode();
         let trigger = consumer.should_trigger();
-        assert!(matches!(trigger, Some(DeltaTrigger::EpisodeThreshold { count: 3 })));
+        assert!(matches!(
+            trigger,
+            Some(DeltaTrigger::EpisodeThreshold { count: 3 })
+        ));
     }
 
     #[test]

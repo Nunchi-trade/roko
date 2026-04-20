@@ -15,11 +15,11 @@
 /// Coordination primitives derived from the coordination docs.
 pub mod coordination;
 pub mod dag;
-/// WebSocket relay for mesh-scope pheromone synchronization.
-pub mod mesh_relay;
 pub mod event_log;
 pub mod executor;
 pub mod merge_queue;
+/// WebSocket relay for mesh-scope pheromone synchronization.
+pub mod mesh_relay;
 pub mod plan_discovery;
 pub mod post_merge;
 pub mod progress;
@@ -29,17 +29,15 @@ pub mod safety;
 pub mod worktree;
 
 pub use coordination::{
-    AgentId, CohortMetrics, CohortWeights, CollectiveId, CompetitionOutcome, Confirmation,
-    CustomKindError, MorphogeneticParams, MorphogeneticState, Pheromone, PheromoneKind,
-    PheromoneScope, PromotionConfig, PromotionGate, ResponseThresholds, STRATEGY_DIMS,
-    AccessModel, ScopePromotionConfig, SpecializationIndex, SubnetId, SubnetIdError,
-    SubnetMembership, SubnetPermissions,
-    TRUST_DISCOUNT, WisdomGate, c_factor, check_promotion, check_scope_promotion, compete,
-    current_intensity, effective_confirmations, hill_response, pheromone_decay,
-    pheromone_decay_for_kind, specialization_index, trust_discounted_intensity,
+    AccessModel, AgentId, CohortMetrics, CohortWeights, CollectiveId, CompetitionOutcome,
+    Confirmation, CustomKindError, MorphogeneticParams, MorphogeneticState, Pheromone,
+    PheromoneKind, PheromoneScope, PromotionConfig, PromotionGate, ResponseThresholds,
+    STRATEGY_DIMS, ScopePromotionConfig, SpecializationIndex, SubnetId, SubnetIdError,
+    SubnetMembership, SubnetPermissions, TRUST_DISCOUNT, WisdomGate, c_factor, check_promotion,
+    check_scope_promotion, compete, current_intensity, effective_confirmations, hill_response,
+    pheromone_decay, pheromone_decay_for_kind, specialization_index, trust_discounted_intensity,
     validate_custom_kind,
 };
-pub use mesh_relay::{MeshRelay, PeerState, SeqNo, SequencedPheromone};
 pub use dag::{
     CpmAnalysis, DagConfig, DagError, DagMutation, DagMutationError, DagPartition, DagStats,
     Durability, ExecutionWave, FusionConfig, IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
@@ -54,6 +52,7 @@ pub use executor::{
     TransitionError, current_schema_version,
 };
 pub use merge_queue::{MergeQueue, MergeRequest};
+pub use mesh_relay::{MeshRelay, PeerState, SeqNo, SequencedPheromone};
 pub use plan_discovery::{
     DiscoveryError, PlanFrontmatter, PlanInfo, ValidationError, discover_plans, parse_frontmatter,
     rank_plans, validate_frontmatter,

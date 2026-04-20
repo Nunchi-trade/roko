@@ -5722,6 +5722,7 @@ dependencies = [
  "alloy",
  "alloy-primitives",
  "async-trait",
+ "blake3",
  "parking_lot",
  "reqwest 0.12.28",
  "roko-core",
@@ -5956,6 +5957,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -5989,6 +5991,8 @@ name = "roko-lang-rust"
 version = "0.1.0"
 dependencies = [
  "roko-core",
+ "tree-sitter",
+ "tree-sitter-rust",
 ]
 
 [[package]]
@@ -6139,6 +6143,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -6223,6 +6229,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "parking_lot",
+ "proptest",
  "roko-core",
  "serde",
  "serde_json",
@@ -7051,6 +7058,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7708,6 +7721,35 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "tree-sitter"
+version = "0.24.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5387dffa7ffc7d2dae12b50c6f7aab8ff79d6210147c6613561fc3d474c6f75"
+dependencies = [
+ "cc",
+ "regex",
+ "regex-syntax",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.23.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca8ccb3e3a3495c8a943f6c3fd24c3804c471fd7f4f16087623c7fa4c0068e8a"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]

@@ -229,8 +229,7 @@ impl ForensicReplay {
 
     /// Record scorer outputs (Step 3).
     pub fn with_scorer_outputs(mut self, outputs: Vec<ScoredReference>) -> Self {
-        self.lineage
-            .extend(outputs.iter().map(|o| o.hash));
+        self.lineage.extend(outputs.iter().map(|o| o.hash));
         self.scorer_outputs = outputs;
         self.step_status
             .insert(ReconstructionStep::ScorerOutputs, StepStatus::Complete);
@@ -271,14 +270,22 @@ impl ForensicReplay {
 
     /// Mark a step as partially reconstructed.
     pub fn mark_partial(&mut self, step: ReconstructionStep, missing: impl Into<String>) {
-        self.step_status
-            .insert(step, StepStatus::Partial { missing: missing.into() });
+        self.step_status.insert(
+            step,
+            StepStatus::Partial {
+                missing: missing.into(),
+            },
+        );
     }
 
     /// Mark a step as failed to reconstruct.
     pub fn mark_failed(&mut self, step: ReconstructionStep, reason: impl Into<String>) {
-        self.step_status
-            .insert(step, StepStatus::Failed { reason: reason.into() });
+        self.step_status.insert(
+            step,
+            StepStatus::Failed {
+                reason: reason.into(),
+            },
+        );
     }
 
     /// Finalize the replay by computing its content hash.
@@ -301,12 +308,9 @@ impl ForensicReplay {
             ReconstructionStep::GateVerdict,
             ReconstructionStep::PolicyDecisions,
         ];
-        required.iter().all(|step| {
-            matches!(
-                self.step_status.get(step),
-                Some(StepStatus::Complete)
-            )
-        })
+        required
+            .iter()
+            .all(|step| matches!(self.step_status.get(step), Some(StepStatus::Complete)))
     }
 
     /// Return the number of complete steps.
@@ -483,10 +487,7 @@ mod tests {
         let action_hash = ContentHash::of(b"test-action-2");
         let mut replay = ForensicReplay::new(action_hash, 1713600000000, "agent-2");
 
-        replay.mark_partial(
-            ReconstructionStep::ScorerOutputs,
-            "scorer log truncated",
-        );
+        replay.mark_partial(ReconstructionStep::ScorerOutputs, "scorer log truncated");
         replay.mark_failed(
             ReconstructionStep::RouterSelection,
             "no routing data available",
@@ -574,7 +575,9 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().agent_id, "a2");
 
-        let not_found = logger.find_by_action(&ContentHash::of(b"nonexistent")).unwrap();
+        let not_found = logger
+            .find_by_action(&ContentHash::of(b"nonexistent"))
+            .unwrap();
         assert!(not_found.is_none());
     }
 

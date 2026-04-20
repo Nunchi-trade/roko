@@ -521,9 +521,7 @@ impl CorticalState {
     ///
     /// Returns `None` for out-of-bounds category indices.
     pub fn category_accuracy(&self, category: usize) -> Option<f32> {
-        self.category_accuracies
-            .get(category)
-            .map(load_f32)
+        self.category_accuracies.get(category).map(load_f32)
     }
 
     /// Read all 16 per-category prediction accuracies.

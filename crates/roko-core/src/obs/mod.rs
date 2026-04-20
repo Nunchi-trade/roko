@@ -17,14 +17,14 @@ pub use health::{
 
 // Re-export heartbeat probe types from roko-runtime so consumers can access both
 // probe systems through roko-core.
-pub use roko_runtime::heartbeat_probes::{
-    BuildResult, EngineState, HeartbeatProbe, HeartbeatProbeRegistry, MacdSnapshot, ProbeDomain,
-    ProbeResult, ProbeResults,
-};
 pub use histograms::{Histogram, HistogramSnapshot, LLM_LATENCY_BUCKETS};
 pub use metrics::{
     Counter, Gauge, LabelSet, MetricKind, MetricRegistry, MetricSnapshot, MetricValue,
     STANDARD_METRICS, register_standard_metrics,
+};
+pub use roko_runtime::heartbeat_probes::{
+    BuildResult, EngineState, HeartbeatProbe, HeartbeatProbeRegistry, MacdSnapshot, ProbeDomain,
+    ProbeResult, ProbeResults,
 };
 pub use schema::{CanonicalMetricSchema, MetricDescriptor, MetricSchema, SCHEMA_VERSION};
 pub use scrub::{LogScrubber, REDACTED};

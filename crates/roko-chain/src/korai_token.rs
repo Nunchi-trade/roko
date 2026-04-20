@@ -213,13 +213,7 @@ impl KoraiToken {
     }
 
     /// Mint tokens to an address (earning pathway).
-    pub fn mint(
-        &mut self,
-        to: &str,
-        amount: u256,
-        pathway: EarningPathway,
-        now: u64,
-    ) {
+    pub fn mint(&mut self, to: &str, amount: u256, pathway: EarningPathway, now: u64) {
         let entry = self
             .balances
             .entry(to.to_string())
@@ -244,13 +238,7 @@ impl KoraiToken {
     /// Transfer tokens between addresses.
     ///
     /// Returns `true` on success, `false` if insufficient balance.
-    pub fn transfer(
-        &mut self,
-        from: &str,
-        to: &str,
-        amount: u256,
-        now: u64,
-    ) -> bool {
+    pub fn transfer(&mut self, from: &str, to: &str, amount: u256, now: u64) -> bool {
         // Materialise sender demurrage.
         let effective = self.balance_of(from, now);
         if effective < amount {

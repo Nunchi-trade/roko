@@ -170,10 +170,7 @@ pub fn price_equation(patterns: &[ResonantPattern]) -> (f64, f64) {
     }
 
     // Relative fitness (using population as proxy for reproductive success).
-    let w: Vec<f64> = patterns
-        .iter()
-        .map(|p| p.population / mean_pop)
-        .collect();
+    let w: Vec<f64> = patterns.iter().map(|p| p.population / mean_pop).collect();
 
     let w_bar: f64 = w.iter().sum::<f64>() / n;
 
@@ -259,9 +256,8 @@ mod tests {
     #[test]
     fn lotka_volterra_single_pattern_grows() {
         let genome = test_genome(42);
-        let mut patterns = vec![
-            ResonantPattern::new(1, genome, 0.8).with_population(10.0, 100.0, 0.5),
-        ];
+        let mut patterns =
+            vec![ResonantPattern::new(1, genome, 0.8).with_population(10.0, 100.0, 0.5)];
 
         let initial_pop = patterns[0].population;
         lotka_volterra_step(&mut patterns, 1.0);
@@ -278,9 +274,7 @@ mod tests {
         let g1 = test_genome(42);
         let g2 = test_genome(43); // Different genome -> less competition.
 
-        let mut solo = vec![
-            ResonantPattern::new(1, g1, 0.8).with_population(10.0, 100.0, 0.5),
-        ];
+        let mut solo = vec![ResonantPattern::new(1, g1, 0.8).with_population(10.0, 100.0, 0.5)];
         lotka_volterra_step(&mut solo, 1.0);
         let solo_growth = solo[0].population;
 
@@ -354,7 +348,10 @@ mod tests {
             ResonantPattern::new(2, g2, 0.1),
         ];
         let var = fitness_variance(&patterns);
-        assert!(var > 0.1, "diverse fitness should have positive variance: {var}");
+        assert!(
+            var > 0.1,
+            "diverse fitness should have positive variance: {var}"
+        );
     }
 
     #[test]

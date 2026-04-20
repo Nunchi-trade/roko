@@ -228,7 +228,12 @@ impl NeuralRewardNet {
     }
 
     /// Train the network on buffered examples via SGD.
-    pub fn train_sgd(&mut self, examples: &[(Vec<f64>, usize, f64)], learning_rate: f64, epochs: u32) {
+    pub fn train_sgd(
+        &mut self,
+        examples: &[(Vec<f64>, usize, f64)],
+        learning_rate: f64,
+        epochs: u32,
+    ) {
         for _ in 0..epochs {
             for (input, arm_idx, target) in examples {
                 let prediction = self.forward(input)[*arm_idx];
@@ -391,7 +396,9 @@ impl NeuralUCBRouter {
             .training_buffer
             .iter()
             .filter_map(|(ctx, arm, reward)| {
-                arm_to_idx.get(arm.as_str()).map(|&idx| (ctx.clone(), idx, *reward))
+                arm_to_idx
+                    .get(arm.as_str())
+                    .map(|&idx| (ctx.clone(), idx, *reward))
             })
             .collect();
 
@@ -763,7 +770,10 @@ impl DiscountedThompson {
             let model = arm.model();
             if let Some(recent) = self.recent_windows.get(model) {
                 if let Some(historical) = self.historical_windows.get(model) {
-                    if recent.len() >= 10 && historical.len() >= 10 && detect_drift(recent, historical, self.drift_threshold) {
+                    if recent.len() >= 10
+                        && historical.len() >= 10
+                        && detect_drift(recent, historical, self.drift_threshold)
+                    {
                         drifted.push(model.to_string());
                     }
                 }
@@ -824,9 +834,7 @@ pub fn detect_drift(recent: &[f64], historical: &[f64], threshold: f64) -> bool 
     const BINS: usize = 10;
     let smoothing = 1.0 / (BINS as f64);
 
-    let bin_for = |v: f64| -> usize {
-        ((v.clamp(0.0, 1.0) * BINS as f64) as usize).min(BINS - 1)
-    };
+    let bin_for = |v: f64| -> usize { ((v.clamp(0.0, 1.0) * BINS as f64) as usize).min(BINS - 1) };
 
     let mut recent_counts = [smoothing; BINS];
     let mut hist_counts = [smoothing; BINS];

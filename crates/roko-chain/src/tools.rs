@@ -626,14 +626,24 @@ mod tests {
     #[test]
     fn all_chain_tools_have_network_category() {
         for tool in CHAIN_DOMAIN_TOOLS.iter() {
-            assert_eq!(tool.category, ToolCategory::Network, "tool {} should be Network", tool.name);
+            assert_eq!(
+                tool.category,
+                ToolCategory::Network,
+                "tool {} should be Network",
+                tool.name
+            );
         }
     }
 
     #[test]
     fn read_only_tools_are_idempotent() {
-        let read_tools = ["chain.balance", "chain.gas_estimate", "chain.simulate_tx",
-                          "chain.get_pool_info", "chain.get_position"];
+        let read_tools = [
+            "chain.balance",
+            "chain.gas_estimate",
+            "chain.simulate_tx",
+            "chain.get_pool_info",
+            "chain.get_position",
+        ];
         for tool in CHAIN_DOMAIN_TOOLS.iter() {
             if read_tools.contains(&tool.name.as_str()) {
                 assert!(tool.idempotent, "tool {} should be idempotent", tool.name);
@@ -643,8 +653,13 @@ mod tests {
 
     #[test]
     fn mutating_tools_are_serial() {
-        let write_tools = ["chain.transfer", "chain.approve", "chain.swap",
-                           "chain.add_liquidity", "chain.remove_liquidity"];
+        let write_tools = [
+            "chain.transfer",
+            "chain.approve",
+            "chain.swap",
+            "chain.add_liquidity",
+            "chain.remove_liquidity",
+        ];
         for tool in CHAIN_DOMAIN_TOOLS.iter() {
             if write_tools.contains(&tool.name.as_str()) {
                 assert_eq!(
@@ -653,7 +668,11 @@ mod tests {
                     "tool {} should be Serial",
                     tool.name
                 );
-                assert!(!tool.idempotent, "tool {} should not be idempotent", tool.name);
+                assert!(
+                    !tool.idempotent,
+                    "tool {} should not be idempotent",
+                    tool.name
+                );
             }
         }
     }
@@ -669,7 +688,10 @@ mod tests {
 
     #[test]
     fn swap_tool_has_correct_required_params() {
-        let tool = CHAIN_DOMAIN_TOOLS.iter().find(|t| t.name == "chain.swap").expect("swap tool");
+        let tool = CHAIN_DOMAIN_TOOLS
+            .iter()
+            .find(|t| t.name == "chain.swap")
+            .expect("swap tool");
         let schema = tool.parameters.as_value();
         let required = schema["required"].as_array().expect("required array");
         assert_eq!(required.len(), 4);

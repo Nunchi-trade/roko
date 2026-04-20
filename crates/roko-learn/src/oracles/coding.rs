@@ -6,9 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    CodingMetric, Context, Engram, Oracle, OracleDomain, OracleQuery,
-    PredictedValue, Prediction, PredictionAccuracy, PredictionInterval, PredictionProvenance,
-    QueryPayload,
+    CodingMetric, Context, Engram, Oracle, OracleDomain, OracleQuery, PredictedValue, Prediction,
+    PredictionAccuracy, PredictionInterval, PredictionProvenance, QueryPayload,
 };
 use std::collections::VecDeque;
 
@@ -217,7 +216,10 @@ impl Oracle for CodingOracle {
                 // Estimate from test history trend.
                 let (pass_rate, conf) = self.predict_test_pass_rate();
                 let coverage_impact = (pass_rate - 0.9) * 10.0; // Scaled delta.
-                (PredictedValue::Numeric(coverage_impact.clamp(-5.0, 5.0)), conf * 0.7)
+                (
+                    PredictedValue::Numeric(coverage_impact.clamp(-5.0, 5.0)),
+                    conf * 0.7,
+                )
             }
             _ => {
                 // Unknown metric — return a neutral, low-confidence prediction.
@@ -237,11 +239,8 @@ impl Oracle for CodingOracle {
         // Attach interval for numeric predictions.
         if let PredictedValue::Numeric(v) = prediction.value {
             let spread = v.abs() * 0.2 + 1.0;
-            prediction = prediction.with_interval(PredictionInterval::new(
-                v - spread,
-                v + spread,
-                0.80,
-            ));
+            prediction =
+                prediction.with_interval(PredictionInterval::new(v - spread, v + spread, 0.80));
         }
 
         Ok(prediction)

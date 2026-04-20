@@ -683,7 +683,9 @@ mod tests {
     fn defi_causal_relationships() {
         // Simulated DeFi causal chain: TVL change -> gas price change.
         let n = 150;
-        let tvl: Vec<f64> = (0..n).map(|i| 100.0 + (i as f64 * 0.03).sin() * 20.0).collect();
+        let tvl: Vec<f64> = (0..n)
+            .map(|i| 100.0 + (i as f64 * 0.03).sin() * 20.0)
+            .collect();
         let gas: Vec<f64> = (1..=n)
             .map(|i| {
                 let tvl_change = if i > 1 { tvl[i - 1] - tvl[i - 2] } else { 0.0 };

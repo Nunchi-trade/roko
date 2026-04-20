@@ -10,8 +10,8 @@
 //! All implement the [`Bus`] trait from [`crate::traits`].
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -147,7 +147,7 @@ impl MemoryBus {
         let ring = self.ring.lock();
         ring.iter()
             .filter(|(seq, _)| *seq >= after_seq)
-            .filter(|(_, pulse)| filter.map_or(true, |f| f.matches(&pulse.topic)))
+            .filter(|(_, pulse)| filter.is_none_or(|f| f.matches(&pulse.topic)))
             .map(|(_, pulse)| pulse.clone())
             .collect()
     }

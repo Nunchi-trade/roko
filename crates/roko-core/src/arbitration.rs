@@ -402,8 +402,7 @@ mod tests {
     fn signal_value_preserved() {
         let mut arb = Arbitrator::default();
         arb.submit(
-            SubsystemGuidance::new(Subsystem::Daimon, "urgency", "high", 0.8)
-                .with_signal(0.95),
+            SubsystemGuidance::new(Subsystem::Daimon, "urgency", "high", 0.8).with_signal(0.95),
         );
         let outcomes = arb.resolve();
         assert_eq!(outcomes[0].winner.signal_value, Some(0.95));

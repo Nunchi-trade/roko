@@ -433,11 +433,7 @@ impl AdaptiveThresholds {
     /// `known_stable_rungs` lists rungs where neuro knowledge confirms
     /// consistent passing.  For those, the CUSUM sensitivity is relaxed
     /// slightly to avoid false alarms.
-    pub fn apply_neuro_hints(
-        &mut self,
-        known_failure_rungs: &[u32],
-        known_stable_rungs: &[u32],
-    ) {
+    pub fn apply_neuro_hints(&mut self, known_failure_rungs: &[u32], known_stable_rungs: &[u32]) {
         for &rung in known_failure_rungs {
             let stats = self.rungs.entry(rung).or_default();
             // For rungs with known failure patterns, bias the EMA toward caution
@@ -504,11 +500,7 @@ impl AdaptiveThresholds {
     /// - **Balanced**: use the default streak-based skip logic
     /// - **Aggressive**: skip more aggressively (lower streak threshold)
     /// - **Exploratory**: use the default streak-based skip logic
-    pub fn should_skip_rung_for_temperament(
-        &self,
-        rung: u32,
-        temperament: Temperament,
-    ) -> bool {
+    pub fn should_skip_rung_for_temperament(&self, rung: u32, temperament: Temperament) -> bool {
         match temperament {
             Temperament::Conservative => false,
             Temperament::Balanced | Temperament::Exploratory => self.should_skip_rung(rung),
@@ -691,8 +683,14 @@ mod tests {
         }
         let base = at.suggested_max_retries(1);
         let conservative = at.suggested_max_retries_for_temperament(1, Temperament::Conservative);
-        assert!(conservative <= 3, "conservative should cap at 3, got {conservative}");
-        assert!(conservative <= base, "conservative should be <= base {base}");
+        assert!(
+            conservative <= 3,
+            "conservative should cap at 3, got {conservative}"
+        );
+        assert!(
+            conservative <= base,
+            "conservative should be <= base {base}"
+        );
     }
 
     #[test]
@@ -703,7 +701,10 @@ mod tests {
         }
         let base = at.suggested_max_retries(1);
         let aggressive = at.suggested_max_retries_for_temperament(1, Temperament::Aggressive);
-        assert!(aggressive >= 2, "aggressive should floor at 2, got {aggressive}");
+        assert!(
+            aggressive >= 2,
+            "aggressive should floor at 2, got {aggressive}"
+        );
         assert!(aggressive >= base, "aggressive should be >= base {base}");
     }
 
@@ -741,7 +742,10 @@ mod tests {
         for _ in 0..100 {
             at.update(1, true);
         }
-        assert!(at.should_skip_rung(1), "base should suggest skipping after 100 passes");
+        assert!(
+            at.should_skip_rung(1),
+            "base should suggest skipping after 100 passes"
+        );
         assert!(
             !at.should_skip_rung_for_temperament(1, Temperament::Conservative),
             "conservative should never skip"
@@ -774,7 +778,10 @@ mod tests {
 
         // At least one of the three SPC detectors should have fired.
         let alerts = at.drain_spc_alerts();
-        assert!(!alerts.is_empty(), "SPC should detect major shift after 50 failures");
+        assert!(
+            !alerts.is_empty(),
+            "SPC should detect major shift after 50 failures"
+        );
         assert!(alerts.iter().all(|(rung, _)| *rung == 0));
     }
 

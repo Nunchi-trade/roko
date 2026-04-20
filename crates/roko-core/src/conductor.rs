@@ -276,10 +276,7 @@ mod tests {
     fn cognitive_signal_labels() {
         assert_eq!(CognitiveSignal::Pause.label(), "pause");
         assert_eq!(CognitiveSignal::Resume.label(), "resume");
-        assert_eq!(
-            CognitiveSignal::Escalate { to_tier: 2 }.label(),
-            "escalate"
-        );
+        assert_eq!(CognitiveSignal::Escalate { to_tier: 2 }.label(), "escalate");
         assert_eq!(
             CognitiveSignal::Shutdown {
                 reason: "done".into()

@@ -94,9 +94,7 @@ impl ContextCategory {
     fn affect_multiplier(self, pad: &PadVector) -> f64 {
         match self {
             Self::Safety => 1.0 + pad.arousal.abs() * 0.5,
-            Self::Exploration | Self::ResearchArtifacts => {
-                1.0 + (1.0 - pad.dominance) * 0.3
-            }
+            Self::Exploration | Self::ResearchArtifacts => 1.0 + (1.0 - pad.dominance) * 0.3,
             Self::IterationMemory => 1.0 + (-pad.pleasure).max(0.0) * 0.4,
             _ => 1.0,
         }
@@ -701,10 +699,8 @@ pub struct DaimonBidder;
 
 impl ContextBidder for DaimonBidder {
     fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
-        let pad_magnitude = (ctx.pad.pleasure.powi(2)
-            + ctx.pad.arousal.powi(2)
-            + ctx.pad.dominance.powi(2))
-        .sqrt();
+        let pad_magnitude =
+            (ctx.pad.pleasure.powi(2) + ctx.pad.arousal.powi(2) + ctx.pad.dominance.powi(2)).sqrt();
         // Only bid when affect state is noteworthy.
         if pad_magnitude < 0.1 {
             return Vec::new();
@@ -1051,14 +1047,7 @@ pub fn run_attention_auction_with_budget(
         })
         .collect();
 
-    AuctionRound::new(
-        tick_id,
-        chrono::Utc::now(),
-        tier,
-        budget_tokens,
-        *pad,
-        bids,
-    )
+    AuctionRound::new(tick_id, chrono::Utc::now(), tier, budget_tokens, *pad, bids)
 }
 
 // ─── POMDP heartbeat decision ──────────────────────────────────────────
@@ -1399,7 +1388,7 @@ impl Default for PomdpMatrices {
         // B: quality shift probability per tier — higher tiers are more likely to improve quality.
         let b_quality_shift = [
             // quality=Poor: P(improve by tier)
-            [0.1, 0.3, 0.6],  // T0 rarely improves, T2 often improves
+            [0.1, 0.3, 0.6], // T0 rarely improves, T2 often improves
             // quality=Fair
             [0.15, 0.35, 0.55],
             // quality=Good
@@ -1459,11 +1448,7 @@ impl FactorizedBelief {
     ///
     /// The observation is binned into [low, mid, high] error and used to
     /// weight the likelihood of each state via the A matrix.
-    pub fn update_from_observation(
-        &mut self,
-        prediction_error: f32,
-        matrices: &PomdpMatrices,
-    ) {
+    pub fn update_from_observation(&mut self, prediction_error: f32, matrices: &PomdpMatrices) {
         let obs_bin = if prediction_error < 0.2 {
             0 // low error
         } else if prediction_error < 0.5 {
@@ -1498,11 +1483,7 @@ impl FactorizedBelief {
     }
 
     /// Compute the expected free energy for a given tier.
-    fn expected_free_energy(
-        &self,
-        tier: InferenceTier,
-        matrices: &PomdpMatrices,
-    ) -> f64 {
+    fn expected_free_energy(&self, tier: InferenceTier, matrices: &PomdpMatrices) -> f64 {
         let tier_idx = match tier {
             InferenceTier::T0 => 0,
             InferenceTier::T1 => 1,
@@ -1523,7 +1504,8 @@ impl FactorizedBelief {
             let improvement_prob = matrices.b_quality_shift[quality][tier_idx];
             // After tier action, predict observations.
             let pred_obs = [
-                matrices.a[idx][0] * improvement_prob + matrices.a[idx][0] * (1.0 - improvement_prob),
+                matrices.a[idx][0] * improvement_prob
+                    + matrices.a[idx][0] * (1.0 - improvement_prob),
                 matrices.a[idx][1],
                 matrices.a[idx][2] * (1.0 - improvement_prob * 0.3),
             ];
@@ -1626,8 +1608,7 @@ fn observation_likelihoods(obs: &HeartbeatObservation) -> [f64; 5] {
     let gate_fail = if obs.gate_failure { 1.0 } else { 0.0 };
 
     // Higher error/drift/anomalies -> more likely volatile/crisis.
-    let calm_likelihood = ((1.0 - error) * (1.0 - drift) * (1.0 - gate_fail))
-        .clamp(0.01, 1.0)
+    let calm_likelihood = ((1.0 - error) * (1.0 - drift) * (1.0 - gate_fail)).clamp(0.01, 1.0)
         * (1.0 / (1.0 + anomalies));
     let normal_likelihood = (0.7 - error * 0.3).clamp(0.01, 1.0);
     let volatile_likelihood = (error * 0.5 + drift * 0.3 + anomalies * 0.1).clamp(0.01, 1.0);
@@ -2008,14 +1989,7 @@ mod tests {
         let subsystems: Vec<SubsystemId> = bidders.iter().map(|b| b.subsystem_id()).collect();
         let budget = &mut AttentionBudget::new(&subsystems);
 
-        let round = governor.assemble(
-            &bidders,
-            &ctx,
-            InferenceTier::T1,
-            0.5,
-            budget,
-            1,
-        );
+        let round = governor.assemble(&bidders, &ctx, InferenceTier::T1, 0.5, budget, 1);
 
         assert!(round.total_candidates > 0);
         assert!(round.winners > 0);
@@ -2049,7 +2023,10 @@ mod tests {
         let belief = FactorizedBelief::default();
         assert_eq!(belief.probabilities.len(), POMDP_STATE_COUNT);
         let sum: f64 = belief.probabilities.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-9, "belief should sum to 1.0, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-9,
+            "belief should sum to 1.0, got {sum}"
+        );
     }
 
     #[test]
@@ -2062,7 +2039,10 @@ mod tests {
         assert_ne!(belief.probabilities, before);
 
         let sum: f64 = belief.probabilities.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-9, "belief should remain normalized, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-9,
+            "belief should remain normalized, got {sum}"
+        );
     }
 
     #[test]

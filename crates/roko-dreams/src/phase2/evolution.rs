@@ -171,10 +171,7 @@ impl MapElitesArchive {
         match grid.get(&key) {
             Some(existing) if existing.quality >= quality => InsertResult::Rejected,
             _ => {
-                let update_count = grid
-                    .get(&key)
-                    .map(|c| c.update_count + 1)
-                    .unwrap_or(1);
+                let update_count = grid.get(&key).map(|c| c.update_count + 1).unwrap_or(1);
                 let result = if grid.contains_key(&key) {
                     InsertResult::Replaced
                 } else {
@@ -277,8 +274,7 @@ impl MapElitesArchive {
                 .enumerate()
                 .map(|(i, &d)| {
                     // Deterministic perturbation based on generation and dimension.
-                    let offset = ((generation * 7 + i * 13) % 100) as f64 / 500.0
-                        - 0.1;
+                    let offset = ((generation * 7 + i * 13) % 100) as f64 / 500.0 - 0.1;
                     (d + offset * self.mutation_rate).clamp(0.0, 1.0)
                 })
                 .collect();
@@ -362,12 +358,7 @@ mod tests {
     fn insert_into_empty_cell() {
         let archive = test_archive();
         let mut grid = HashMap::new();
-        let result = archive.insert(
-            test_strategy("s1"),
-            vec![0.5, 0.5],
-            0.8,
-            &mut grid,
-        );
+        let result = archive.insert(test_strategy("s1"), vec![0.5, 0.5], 0.8, &mut grid);
         assert_eq!(result, InsertResult::NewCell);
         assert_eq!(grid.len(), 1);
     }

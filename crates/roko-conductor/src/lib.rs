@@ -35,8 +35,12 @@
 pub mod circuit_breaker;
 pub mod conductor;
 pub mod diagnosis;
+/// Federated conductor hierarchy — L1 turn → L4 fleet (COND-05).
+pub mod federation;
 pub mod health;
 pub mod interventions;
+/// Complex event pattern detection with temporal hysteresis (COND-07).
+pub mod pattern_detector;
 /// Self-healing conductor recovery strategies (COND-06).
 pub mod self_healing;
 pub mod state_machine;
@@ -45,13 +49,11 @@ pub mod threshold_learner;
 pub mod watchers;
 /// Yerkes-Dodson pressure-performance framework (COND-04).
 pub mod yerkes_dodson;
-/// Federated conductor hierarchy — L1 turn → L4 fleet (COND-05).
-pub mod federation;
-/// Complex event pattern detection with temporal hysteresis (COND-07).
-pub mod pattern_detector;
 
 // Re-export core types for convenience.
-pub use roko_core::{CognitiveSignal, ConductorDecision, ConductorEvaluation, PhaseKind, PlanPhase};
+pub use roko_core::{
+    CognitiveSignal, ConductorDecision, ConductorEvaluation, PhaseKind, PlanPhase,
+};
 
 // Re-export primary types from this crate.
 pub use circuit_breaker::{
@@ -65,6 +67,8 @@ pub use health::{HealthCheckResult, HealthMonitor, HealthStatus, SystemSnapshot}
 pub use interventions::{
     BanditPolicy, InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy,
 };
+pub use pattern_detector::{CompoundPattern, PatternDetector, WatcherFamily};
+pub use self_healing::{HealingAction, SelfHealingPolicy, SelfHealingState};
 pub use state_machine::{PhaseTransition, phase_timeout};
 pub use stuck_detection::{
     ActivityEntry, MetaCognitionAction, MetaCognitionAssessment, MetaCognitionHook, StuckDetector,
@@ -72,5 +76,3 @@ pub use stuck_detection::{
 };
 pub use threshold_learner::{AdaptiveThreshold, InterventionOutcome, ThresholdLearner};
 pub use yerkes_dodson::YerkesDodson;
-pub use self_healing::{HealingAction, SelfHealingPolicy, SelfHealingState};
-pub use pattern_detector::{CompoundPattern, PatternDetector, WatcherFamily};

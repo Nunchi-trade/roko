@@ -278,8 +278,14 @@ impl MevDetector {
 
         for (attacker, txs) in &by_sender {
             // Need at least 2 txs from the same sender: one before and one after victim.
-            let before: Vec<&&MempoolTx> = txs.iter().filter(|t| t.position < victim.position).collect();
-            let after: Vec<&&MempoolTx> = txs.iter().filter(|t| t.position > victim.position).collect();
+            let before: Vec<&&MempoolTx> = txs
+                .iter()
+                .filter(|t| t.position < victim.position)
+                .collect();
+            let after: Vec<&&MempoolTx> = txs
+                .iter()
+                .filter(|t| t.position > victim.position)
+                .collect();
 
             if !before.is_empty() && !after.is_empty() {
                 let frontrun = before[0];
@@ -530,9 +536,7 @@ impl MevDetector {
     /// Returns `true` if any alert has warning or critical severity.
     #[must_use]
     pub fn has_warnings(alerts: &[MevAlert]) -> bool {
-        alerts
-            .iter()
-            .any(|a| a.severity >= MevSeverity::Warning)
+        alerts.iter().any(|a| a.severity >= MevSeverity::Warning)
     }
 }
 
@@ -836,7 +840,9 @@ mod tests {
         };
         let alerts = det.detect(&input);
         assert!(
-            alerts.iter().any(|a| a.pattern == MevPattern::CyclicArbitrage),
+            alerts
+                .iter()
+                .any(|a| a.pattern == MevPattern::CyclicArbitrage),
             "expected cyclic arb: {alerts:?}"
         );
     }
@@ -974,29 +980,25 @@ mod tests {
 
     #[test]
     fn has_critical_and_warnings() {
-        let alerts = vec![
-            MevAlert {
-                pattern: MevPattern::FrontRun,
-                severity: MevSeverity::Info,
-                description: "info".to_string(),
-                involved_txs: vec![],
-                estimated_profit_wei: 0,
-                sandwich: None,
-            },
-        ];
+        let alerts = vec![MevAlert {
+            pattern: MevPattern::FrontRun,
+            severity: MevSeverity::Info,
+            description: "info".to_string(),
+            involved_txs: vec![],
+            estimated_profit_wei: 0,
+            sandwich: None,
+        }];
         assert!(!MevDetector::has_critical(&alerts));
         assert!(!MevDetector::has_warnings(&alerts));
 
-        let alerts = vec![
-            MevAlert {
-                pattern: MevPattern::Sandwich,
-                severity: MevSeverity::Warning,
-                description: "warn".to_string(),
-                involved_txs: vec![],
-                estimated_profit_wei: 0,
-                sandwich: None,
-            },
-        ];
+        let alerts = vec![MevAlert {
+            pattern: MevPattern::Sandwich,
+            severity: MevSeverity::Warning,
+            description: "warn".to_string(),
+            involved_txs: vec![],
+            estimated_profit_wei: 0,
+            sandwich: None,
+        }];
         assert!(!MevDetector::has_critical(&alerts));
         assert!(MevDetector::has_warnings(&alerts));
     }

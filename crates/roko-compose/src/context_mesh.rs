@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::prompt::{AttentionBidder, PromptSection, SectionPriority, CacheLayer, Placement};
+use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 
 /// A context entry shared by one agent for consumption by others.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -146,11 +146,7 @@ impl ContextMesh {
     /// Query all entries from the mesh for a given agent, excluding self.
     ///
     /// Returns entries sorted by relevance descending, limited to `max_entries`.
-    pub fn query_all(
-        &self,
-        querying_agent: &str,
-        max_entries: usize,
-    ) -> Vec<SharedContextEntry> {
+    pub fn query_all(&self, querying_agent: &str, max_entries: usize) -> Vec<SharedContextEntry> {
         let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut results: Vec<_> = state
             .entries
@@ -188,10 +184,7 @@ impl ContextMesh {
             .map(|entry| {
                 PromptSection::new(
                     format!("mesh:{}", entry.topic),
-                    format!(
-                        "[from agent {}] {}",
-                        entry.publisher_agent, entry.content
-                    ),
+                    format!("[from agent {}] {}", entry.publisher_agent, entry.content),
                 )
                 .with_priority(SectionPriority::Normal)
                 .with_cache_layer(CacheLayer::Workspace)
@@ -216,7 +209,8 @@ impl ContextMesh {
 
         for entry in entries {
             let is_duplicate = kept.iter().any(|accepted| {
-                accepted.topic == entry.topic && content_overlap(&accepted.content, &entry.content) > 0.6
+                accepted.topic == entry.topic
+                    && content_overlap(&accepted.content, &entry.content) > 0.6
             });
             if !is_duplicate {
                 kept.push(entry);
@@ -301,7 +295,13 @@ mod tests {
     #[test]
     fn publish_and_query_round_trip() {
         let mesh = ContextMesh::new();
-        mesh.publish("agent-a", "error", "build failed: missing import", 0.9, 1000);
+        mesh.publish(
+            "agent-a",
+            "error",
+            "build failed: missing import",
+            0.9,
+            1000,
+        );
         mesh.publish("agent-b", "error", "test failure in module X", 0.7, 1001);
 
         // agent-c queries for errors, should see both.

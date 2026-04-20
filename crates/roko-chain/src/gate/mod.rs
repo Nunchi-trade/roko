@@ -36,8 +36,8 @@ pub mod tx_sim_gate;
 pub mod wallet_gate;
 
 pub use mev_gate::{
-    MevAlert, MevAnalysisInput, MevDetector, MevDetectorConfig, MevGate, MevPattern, MevSeverity,
-    MempoolTx, SandwichBundle,
+    MempoolTx, MevAlert, MevAnalysisInput, MevDetector, MevDetectorConfig, MevGate, MevPattern,
+    MevSeverity, SandwichBundle,
 };
 pub use tx_sim_gate::{
     MockTxSimulator, SimulationOutcome, TxSimGate, TxSimGateConfig, TxSimulator,

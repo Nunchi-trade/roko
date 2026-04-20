@@ -1624,21 +1624,12 @@ impl CascadeRouter {
     /// Callers should convert the conductor's `RoutingBias` into this crate's
     /// [`RoutingBias`] before calling. The bias filters deprioritized models
     /// from the candidate set and biases remaining scores.
-    pub fn route_with_bias(
-        &self,
-        ctx: &RoutingContext,
-        bias: &RoutingBias,
-    ) -> CascadeModel {
+    pub fn route_with_bias(&self, ctx: &RoutingContext, bias: &RoutingBias) -> CascadeModel {
         // Filter out deprioritized candidates.
         let candidates: Vec<String> = self
             .model_slugs
             .iter()
-            .filter(|slug| {
-                !bias
-                    .deprioritize
-                    .iter()
-                    .any(|d| slugs_match(slug, d))
-            })
+            .filter(|slug| !bias.deprioritize.iter().any(|d| slugs_match(slug, d)))
             .cloned()
             .collect();
 
@@ -3026,7 +3017,14 @@ impl CascadeRouter {
         // Use observe_internal which updates both confidence stats and LinUCB
         // in a single pass (avoids double-counting).
         let context_vec = vec![0.0; CONTEXT_DIM];
-        self.observe_internal(&context_vec, model_idx, adjusted_reward, actual_success, None, None);
+        self.observe_internal(
+            &context_vec,
+            model_idx,
+            adjusted_reward,
+            actual_success,
+            None,
+            None,
+        );
 
         // Check for stage transition after accumulating new evidence.
         self.check_stage_transition();

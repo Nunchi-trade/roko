@@ -65,9 +65,7 @@ impl AddressFilter {
     /// Check whether a log entry matches any watched address or topic.
     #[must_use]
     pub fn matches(&self, log: &LogEntry) -> bool {
-        if !self.addresses.is_empty()
-            && !self.addresses.contains(&log.address.to_lowercase())
-        {
+        if !self.addresses.is_empty() && !self.addresses.contains(&log.address.to_lowercase()) {
             return false;
         }
         if self.topics.is_empty() {
@@ -173,11 +171,7 @@ impl BlockObserver {
     /// Process a block header and its logs, returning matched events.
     ///
     /// The block is marked as processed in the tracker.
-    pub fn process_block(
-        &mut self,
-        header: &ChainHeader,
-        logs: &[LogEntry],
-    ) -> Vec<ObservedEvent> {
+    pub fn process_block(&mut self, header: &ChainHeader, logs: &[LogEntry]) -> Vec<ObservedEvent> {
         self.tracker.mark_processed(header.number);
 
         logs.iter()
@@ -206,10 +200,7 @@ impl BlockObserver {
     /// This is a synchronous batch processor: the caller supplies block
     /// headers and logs for each block in the range. The returned events
     /// are the union of all matches.
-    pub fn scan_range(
-        &mut self,
-        blocks: &[(ChainHeader, Vec<LogEntry>)],
-    ) -> Vec<ObservedEvent> {
+    pub fn scan_range(&mut self, blocks: &[(ChainHeader, Vec<LogEntry>)]) -> Vec<ObservedEvent> {
         let mut events = Vec::new();
         for (header, logs) in blocks {
             events.extend(self.process_block(header, logs));

@@ -732,8 +732,10 @@ impl DreamCycle {
             hypnagogia_entries_count,
             staging_buffer_stats,
             intensive_mode_active: false,
-            phase_budget_summary: self.phase_tracker.as_ref().map(|tracker| {
-                PhaseBudgetSummary {
+            phase_budget_summary: self
+                .phase_tracker
+                .as_ref()
+                .map(|tracker| PhaseBudgetSummary {
                     hypnagogia_usd: tracker
                         .phase_spend
                         .get("Hypnagogia")
@@ -748,8 +750,7 @@ impl DreamCycle {
                         .unwrap_or(0.0),
                     total_budget_usd: tracker.budget.total_dream_budget_usd(),
                     total_spend_usd: tracker.total_spend_usd,
-                }
-            }),
+                }),
         };
 
         let counterfactuals = build_counterfactuals(&clusters, started_at);
@@ -3309,10 +3310,7 @@ mod tests {
             "total spend should be non-negative"
         );
         // NREM should have some cost from cluster processing.
-        assert!(
-            summary.nrem_usd >= 0.0,
-            "NREM spend should be tracked"
-        );
+        assert!(summary.nrem_usd >= 0.0, "NREM spend should be tracked");
     }
 
     #[test]

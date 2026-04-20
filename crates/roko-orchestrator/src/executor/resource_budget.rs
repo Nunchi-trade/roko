@@ -186,7 +186,7 @@ impl TokenBudget {
 impl Default for TokenBudget {
     fn default() -> Self {
         Self {
-            total: 10_000_000,   // 10M tokens
+            total: 10_000_000, // 10M tokens
             spent: 0,
             per_task_default: 100_000, // 100K per task
             per_task_max: 500_000,     // 500K cap per task
@@ -540,7 +540,9 @@ mod tests {
 
         let task = TaskResourceRequest::default();
         let check = budget.can_schedule(&task);
-        assert!(matches!(check, ResourceCheck::Blocked(ref reasons) if reasons.contains(&"cost_budget".to_string())));
+        assert!(
+            matches!(check, ResourceCheck::Blocked(ref reasons) if reasons.contains(&"cost_budget".to_string()))
+        );
     }
 
     #[test]

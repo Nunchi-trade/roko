@@ -282,7 +282,10 @@ mod tests {
         cache.complete(&key, true);
 
         let status = cache.check(&key);
-        assert!(matches!(status, DedupStatus::Completed { success: true, .. }));
+        assert!(matches!(
+            status,
+            DedupStatus::Completed { success: true, .. }
+        ));
         assert_eq!(cache.dedup_count(), 1);
     }
 
@@ -360,10 +363,7 @@ mod tests {
         let status = cache.check(&key);
         assert!(matches!(
             status,
-            DedupStatus::Completed {
-                success: false,
-                ..
-            }
+            DedupStatus::Completed { success: false, .. }
         ));
     }
 }

@@ -240,7 +240,12 @@ impl QuarantineVault {
     }
 
     /// Review and update the status of a quarantined entry.
-    pub fn review(&mut self, hash: &ContentHash, status: QuarantineStatus, notes: Option<String>) -> bool {
+    pub fn review(
+        &mut self,
+        hash: &ContentHash,
+        status: QuarantineStatus,
+        notes: Option<String>,
+    ) -> bool {
         if let Some(entry) = self.entries.get_mut(hash) {
             entry.status = status;
             entry.reviewer_notes = notes;
@@ -251,7 +256,12 @@ impl QuarantineVault {
     }
 
     /// Link two quarantine entries as related incidents.
-    pub fn link_incidents(&mut self, a: ContentHash, b: ContentHash, relation: IncidentRelation) -> bool {
+    pub fn link_incidents(
+        &mut self,
+        a: ContentHash,
+        b: ContentHash,
+        relation: IncidentRelation,
+    ) -> bool {
         if !self.entries.contains_key(&a) || !self.entries.contains_key(&b) {
             return false;
         }

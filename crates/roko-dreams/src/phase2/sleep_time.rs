@@ -367,9 +367,15 @@ mod tests {
         use roko_core::agent::ModelTier;
 
         assert_eq!(DreamPhaseKind::Nrem.model_tier(), Some(ModelTier::Fast));
-        assert_eq!(DreamPhaseKind::Hypnagogia.model_tier(), Some(ModelTier::Fast));
+        assert_eq!(
+            DreamPhaseKind::Hypnagogia.model_tier(),
+            Some(ModelTier::Fast)
+        );
         assert_eq!(DreamPhaseKind::Rem.model_tier(), Some(ModelTier::Standard));
-        assert_eq!(DreamPhaseKind::Evolution.model_tier(), Some(ModelTier::Fast));
+        assert_eq!(
+            DreamPhaseKind::Evolution.model_tier(),
+            Some(ModelTier::Fast)
+        );
         assert_eq!(DreamPhaseKind::Integration.model_tier(), None);
     }
 

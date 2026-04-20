@@ -91,8 +91,8 @@ impl ParetoWeights {
 /// Cost and latency are inverted (1 - normalized) so that higher = better.
 #[must_use]
 pub fn scalarize(obs: &ModelObservation, weights: &ParetoWeights) -> f64 {
-    let total_weight = (weights.quality + weights.cost + weights.latency + weights.reliability)
-        .max(f64::EPSILON);
+    let total_weight =
+        (weights.quality + weights.cost + weights.latency + weights.reliability).max(f64::EPSILON);
 
     // Normalize cost_per_success: assume 100.0 as a reasonable max.
     let cost_normalized = 1.0 - (obs.cost_per_success / 100.0).clamp(0.0, 1.0);
@@ -421,19 +421,26 @@ mod tests {
 
         let candidates = vec![
             // High quality, high cost (negate cost so higher = cheaper).
-            ParetoSolution { values: vec![0.9, 0.3], model_id: "high-quality".into() },
+            ParetoSolution {
+                values: vec![0.9, 0.3],
+                model_id: "high-quality".into(),
+            },
             // Low quality, low cost.
-            ParetoSolution { values: vec![0.3, 0.9], model_id: "low-cost".into() },
+            ParetoSolution {
+                values: vec![0.3, 0.9],
+                model_id: "low-cost".into(),
+            },
             // Dominated: worse quality than high-quality AND worse cost than low-cost,
             // but NOT dominated by either individually since each is only better on one axis.
             // To actually be dominated we need a point that loses on ALL axes to another.
-            ParetoSolution { values: vec![0.2, 0.2], model_id: "dominated".into() },
+            ParetoSolution {
+                values: vec![0.2, 0.2],
+                model_id: "dominated".into(),
+            },
         ];
 
-        let frontier = ParetoFrontier::compute(
-            vec!["quality".into(), "neg_cost".into()],
-            &candidates,
-        );
+        let frontier =
+            ParetoFrontier::compute(vec!["quality".into(), "neg_cost".into()], &candidates);
 
         // "dominated" (0.2, 0.2) is dominated by both "high-quality" (0.9>0.2, 0.3>0.2)
         // and "low-cost" (0.3>0.2, 0.9>0.2).
