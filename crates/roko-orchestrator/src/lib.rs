@@ -32,9 +32,12 @@ pub use coordination::{
     AgentId, CohortMetrics, CohortWeights, CollectiveId, CompetitionOutcome, Confirmation,
     CustomKindError, MorphogeneticParams, MorphogeneticState, Pheromone, PheromoneKind,
     PheromoneScope, PromotionConfig, PromotionGate, ResponseThresholds, STRATEGY_DIMS,
-    SpecializationIndex, SubnetId, SubnetIdError, SubnetPermissions, WisdomGate, c_factor,
-    check_promotion, compete, current_intensity, effective_confirmations, hill_response,
-    pheromone_decay, specialization_index, validate_custom_kind,
+    AccessModel, ScopePromotionConfig, SpecializationIndex, SubnetId, SubnetIdError,
+    SubnetMembership, SubnetPermissions,
+    TRUST_DISCOUNT, WisdomGate, c_factor, check_promotion, check_scope_promotion, compete,
+    current_intensity, effective_confirmations, hill_response, pheromone_decay,
+    pheromone_decay_for_kind, specialization_index, trust_discounted_intensity,
+    validate_custom_kind,
 };
 pub use mesh_relay::{MeshRelay, PeerState, SeqNo, SequencedPheromone};
 pub use dag::{

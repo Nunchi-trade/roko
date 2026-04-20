@@ -160,6 +160,18 @@ pub struct RokoConfig {
     /// Tool profile configuration (TOOL-03).
     #[serde(default)]
     pub tools: ToolsConfig,
+
+    /// Oneirography (dream art) pipeline settings (DREAM-13).
+    ///
+    /// Disabled by default. Opt-in via `[oneirography]` section in roko.toml:
+    /// ```toml
+    /// [oneirography]
+    /// enabled = true
+    /// provider = "dall-e-3"
+    /// variants = 3
+    /// ```
+    #[serde(default)]
+    pub oneirography: OneirographyConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -203,6 +215,7 @@ impl Default for RokoConfig {
             perplexity: PerplexityConfig::default(),
             gemini: GeminiConfig::default(),
             tools: ToolsConfig::default(),
+            oneirography: OneirographyConfig::default(),
         }
     }
 }
@@ -1314,6 +1327,42 @@ pub struct ToolsConfig {
     pub profiles: HashMap<String, ToolProfileConfig>,
 }
 
+/// Configuration for the oneirography (dream art) pipeline (DREAM-13).
+///
+/// Disabled by default. Opt-in via `[oneirography]` in roko.toml:
+/// ```toml
+/// [oneirography]
+/// enabled = true
+/// provider = "dall-e-3"
+/// variants = 3
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OneirographyConfig {
+    /// Whether dream art generation is enabled (default `false`).
+    pub enabled: bool,
+    /// Image generation provider identifier (e.g., `"dall-e-3"`, `"stable-diffusion"`).
+    pub provider: String,
+    /// Number of image variants to generate per dream cycle.
+    pub variants: usize,
+    /// Base reserve price for affect-reactive auctions.
+    pub base_reserve: f64,
+    /// Base auction duration in seconds.
+    pub base_duration_seconds: u64,
+}
+
+impl Default for OneirographyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "disabled".to_string(),
+            variants: 3,
+            base_reserve: 0.01,
+            base_duration_seconds: 3600,
+        }
+    }
+}
+
 /// A single named tool profile with extra/excluded tool lists.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1815,6 +1864,16 @@ pub struct AgentConfig {
     /// Per-role overrides keyed by role label (e.g. `"implementer"`, `"architect"`).
     #[serde(default)]
     pub roles: HashMap<String, RoleOverride>,
+
+    /// Configuration for the Data LLM used in CaMeL dual-LLM isolation.
+    ///
+    /// When configured, content tagged with `Taint::ExternalFetch` or
+    /// `Taint::ThirdPartyPlugin` is routed through this model with tool
+    /// calls stripped. The Data LLM processes untrusted content and returns
+    /// schema-constrained structured output that is safe for the Control
+    /// LLM to consume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_llm: Option<DataLlmConfig>,
 }
 
 fn default_model() -> String {
@@ -1861,6 +1920,7 @@ impl Default for AgentConfig {
             tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
+            data_llm: None,
         }
     }
 }
@@ -1904,6 +1964,85 @@ pub struct RoutingOverrides {
     /// Force routing to the configured model tier when possible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_tier: Option<String>,
+}
+
+// ---- CaMeL dual-LLM configuration (SAFE-07) ────────────────────────────
+
+/// Configuration for the Data LLM in the CaMeL dual-LLM architecture.
+///
+/// The Data LLM processes untrusted external content (web fetches, plugin
+/// output, user-provided files) with tool-call capability stripped. It
+/// receives the untrusted content plus a schema for valid outputs, and
+/// returns a structured extraction that is safe for the Control LLM.
+///
+/// Three defense layers:
+/// 1. Input sanitization (strip known injection patterns)
+/// 2. Data LLM isolation (no tools, schema-constrained output)
+/// 3. Output validation (schema check + anomaly detection)
+///
+/// ```toml
+/// [agent.data_llm]
+/// model = "claude-haiku-3-5"
+/// max_tokens = 4096
+/// temperature = 0.0
+/// strip_tool_calls = true
+/// ```
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f64
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DataLlmConfig {
+    /// Model slug for the Data LLM (can be a smaller/cheaper model).
+    #[serde(default = "default_data_llm_model")]
+    pub model: String,
+
+    /// Maximum tokens the Data LLM is allowed to generate.
+    #[serde(default = "default_data_llm_max_tokens")]
+    pub max_tokens: u64,
+
+    /// Sampling temperature (0.0 for deterministic extraction).
+    #[serde(default)]
+    pub temperature: f64,
+
+    /// Whether to strip tool-call capability from the Data LLM dispatch.
+    ///
+    /// When `true` (the default), the Data LLM cannot generate tool calls
+    /// and can only produce text/JSON output.
+    #[serde(default = "default_true")]
+    pub strip_tool_calls: bool,
+
+    /// Optional JSON Schema that the Data LLM output must conform to.
+    ///
+    /// When set, the router validates the Data LLM response against this
+    /// schema before passing it to the Control LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+
+    /// Whether to sanitize the input before sending to the Data LLM.
+    ///
+    /// When `true`, known prompt injection patterns are stripped from the
+    /// untrusted content before it reaches the Data LLM.
+    #[serde(default = "default_true")]
+    pub sanitize_input: bool,
+}
+
+fn default_data_llm_model() -> String {
+    "claude-haiku-3-5".into()
+}
+
+const fn default_data_llm_max_tokens() -> u64 {
+    4096
+}
+
+impl Default for DataLlmConfig {
+    fn default() -> Self {
+        Self {
+            model: default_data_llm_model(),
+            max_tokens: default_data_llm_max_tokens(),
+            temperature: 0.0,
+            strip_tool_calls: true,
+            output_schema: None,
+            sanitize_input: true,
+        }
+    }
 }
 
 /// Per-role override under `[agent.roles.<role>]`.

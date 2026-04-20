@@ -11,10 +11,10 @@ use serde::Deserialize;
 use super::schema::{
     AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
     DemurrageConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig,
-    PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride,
-    RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig, TuiConfig,
-    WatcherConfig, WebhooksConfig, AttentionConfig, ImmuneConfig, TemporalConfig, GoalsConfig,
-    EnergyConfig,
+    OneirographyConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig,
+    RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, ToolsConfig,
+    TuiConfig, WatcherConfig, WebhooksConfig, AttentionConfig, ImmuneConfig, TemporalConfig,
+    GoalsConfig, EnergyConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -131,6 +131,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         goals: GoalsConfig::default(),
         energy: EnergyConfig::default(),
         tools: ToolsConfig::default(),
+        oneirography: OneirographyConfig::default(),
     }
 }
 
@@ -188,6 +189,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         tier_models: d.tier_models,
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
+        data_llm: None,
     }
 }
 

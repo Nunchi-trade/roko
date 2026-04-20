@@ -91,6 +91,20 @@ authors = ["Roko <engineering@roko.dev>"]
 repository = "https://github.com/nunchi/roko"
 homepage = "https://github.com/nunchi/roko"
 
+# cargo-dist configuration for prebuilt binary releases.
+# Targets: macOS ARM + Intel, Linux x86_64 glibc + musl.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.1"
+ci = "github"
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+install-path = "CARGO_HOME"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }

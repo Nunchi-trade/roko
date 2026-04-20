@@ -6620,10 +6620,12 @@ async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i32> {
 
 fn print_completions(shell: CompletionShell) {
     let words = completion_words();
+    let subcommand_map = nested_subcommand_words();
+    let dynamic = dynamic_completion_words();
     match shell {
-        CompletionShell::Bash => print_bash_completions(&words),
-        CompletionShell::Zsh => print_zsh_completions(&words),
-        CompletionShell::Fish => print_fish_completions(&words),
+        CompletionShell::Bash => print_bash_completions(&words, &subcommand_map, &dynamic),
+        CompletionShell::Zsh => print_zsh_completions(&words, &subcommand_map, &dynamic),
+        CompletionShell::Fish => print_fish_completions(&words, &subcommand_map, &dynamic),
     }
 }
 
@@ -6639,36 +6641,163 @@ fn completion_words() -> Vec<String> {
     words
 }
 
-fn print_bash_completions(words: &[String]) {
-    let words = words.join(" ");
-    println!(
-        r#"# roko bash completions
-_roko()
-{{
-    local cur="${{COMP_WORDS[COMP_CWORD]}}"
-    COMPREPLY=( $(compgen -W "{words}" -- "$cur") )
-}}
-complete -F _roko roko"#
-    );
+/// Collect nested subcommand names for each top-level command.
+fn nested_subcommand_words() -> Vec<(String, Vec<String>)> {
+    let mut command = Cli::command();
+    command.build();
+    let mut result = Vec::new();
+    for sub in command.get_subcommands() {
+        let name = sub.get_name().to_string();
+        let nested: Vec<String> = sub
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .collect();
+        if !nested.is_empty() {
+            result.push((name, nested));
+        }
+    }
+    result
 }
 
-fn print_zsh_completions(words: &[String]) {
-    let words = words.join(" ");
-    println!(
-        r#"#compdef roko
-_roko() {{
-  local -a commands
-  commands=({words})
-  _describe 'roko command' commands
-}}
-_roko "$@""#
-    );
+/// Scan the filesystem for dynamic completion words (plan names, PRD slugs).
+fn dynamic_completion_words() -> Vec<(String, Vec<String>)> {
+    let mut result = Vec::new();
+
+    // Scan plans/ directory for plan names.
+    if let Ok(entries) = std::fs::read_dir("plans") {
+        let plans: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir() || e.path().extension().is_some_and(|x| x == "toml"))
+            .filter_map(|e| {
+                e.path()
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
+            .collect();
+        if !plans.is_empty() {
+            result.push(("plan".to_string(), plans));
+        }
+    }
+
+    // Scan .roko/prd/ directory for PRD slugs.
+    if let Ok(entries) = std::fs::read_dir(".roko/prd") {
+        let prds: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                e.path()
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
+            .collect();
+        if !prds.is_empty() {
+            result.push(("prd".to_string(), prds));
+        }
+    }
+
+    result
 }
 
-fn print_fish_completions(words: &[String]) {
-    println!("# roko fish completions");
+fn print_bash_completions(
+    words: &[String],
+    subcommands: &[(String, Vec<String>)],
+    dynamic: &[(String, Vec<String>)],
+) {
+    let top_words = words.join(" ");
+    println!(r#"# roko bash completions (DEPLOY-06: dynamic + nested)"#);
+    println!(r#"_roko()"#);
+    println!(r#"{{"#);
+    println!(r#"    local cur="${{COMP_WORDS[COMP_CWORD]}}""#);
+    println!(r#"    local prev="${{COMP_WORDS[COMP_CWORD-1]}}""#);
+    println!();
+    // Nested subcommand completions.
+    println!(r#"    case "$prev" in"#);
+    for (parent, children) in subcommands {
+        let child_words = children.join(" ");
+        println!(r#"        {parent})"#);
+        println!(r#"            COMPREPLY=( $(compgen -W "{child_words}" -- "$cur") )"#);
+        println!(r#"            return 0"#);
+        println!(r#"            ;;"#);
+    }
+    // Dynamic completions for plan/prd subcommands.
+    for (parent, items) in dynamic {
+        let item_words = items.join(" ");
+        // Add dynamic words to existing subcommand completions.
+        println!(r#"        {parent})"#);
+        println!(r#"            COMPREPLY=( $(compgen -W "{item_words}" -- "$cur") )"#);
+        println!(r#"            return 0"#);
+        println!(r#"            ;;"#);
+    }
+    println!(r#"    esac"#);
+    println!();
+    // Top-level completions.
+    println!(r#"    COMPREPLY=( $(compgen -W "{top_words}" -- "$cur") )"#);
+    println!(r#"}}"#);
+    println!(r#"complete -F _roko roko"#);
+}
+
+fn print_zsh_completions(
+    words: &[String],
+    subcommands: &[(String, Vec<String>)],
+    dynamic: &[(String, Vec<String>)],
+) {
+    println!(r#"#compdef roko"#);
+    println!(r#"# roko zsh completions (DEPLOY-06: dynamic + nested)"#);
+    println!(r#"_roko() {{"#);
+    println!(r#"  local -a commands"#);
+    let top_words = words.join(" ");
+    println!(r#"  commands=({top_words})"#);
+    println!();
+    println!(r#"  if (( CURRENT == 2 )); then"#);
+    println!(r#"    _describe 'roko command' commands"#);
+    println!(r#"  elif (( CURRENT == 3 )); then"#);
+    println!(r#"    case $words[2] in"#);
+    for (parent, children) in subcommands {
+        let child_words = children.join(" ");
+        println!(r#"      {parent})"#);
+        println!(r#"        local -a subcmds"#);
+        println!(r#"        subcmds=({child_words})"#);
+        println!(r#"        _describe '{parent} subcommand' subcmds"#);
+        println!(r#"        ;;"#);
+    }
+    for (parent, items) in dynamic {
+        let item_words = items.join(" ");
+        println!(r#"      {parent})"#);
+        println!(r#"        local -a slugs"#);
+        println!(r#"        slugs=({item_words})"#);
+        println!(r#"        _describe '{parent} item' slugs"#);
+        println!(r#"        ;;"#);
+    }
+    println!(r#"    esac"#);
+    println!(r#"  fi"#);
+    println!(r#"}}"#);
+    println!(r#"_roko "$@""#);
+}
+
+fn print_fish_completions(
+    words: &[String],
+    subcommands: &[(String, Vec<String>)],
+    dynamic: &[(String, Vec<String>)],
+) {
+    println!("# roko fish completions (DEPLOY-06: dynamic + nested)");
     for word in words {
         println!("complete -c roko -f -n '__fish_use_subcommand' -a '{word}'");
+    }
+    // Nested subcommand completions.
+    for (parent, children) in subcommands {
+        for child in children {
+            println!(
+                "complete -c roko -f -n '__fish_seen_subcommand_from {parent}' -a '{child}'"
+            );
+        }
+    }
+    // Dynamic completions.
+    for (parent, items) in dynamic {
+        for item in items {
+            println!(
+                "complete -c roko -f -n '__fish_seen_subcommand_from {parent}' -a '{item}'"
+            );
+        }
     }
 }
 

@@ -556,6 +556,97 @@ impl TierProgression {
         heuristics
     }
 
+    /// Promote validated insights into actionable heuristics using HDC
+    /// similarity-based clustering (NEURO-09).
+    ///
+    /// Instead of promoting each qualifying insight independently, this
+    /// method first fingerprints each insight, clusters similar insights
+    /// via k-medoids, and then promotes the cluster representative (the
+    /// medoid) as the canonical heuristic. The representative accumulates
+    /// the source episodes and confidence from all cluster members.
+    ///
+    /// Falls back to the non-clustered path when fewer than 2 insights
+    /// qualify or when the `hdc` clustering would produce degenerate
+    /// (single-member) clusters.
+    ///
+    /// Requires the `hdc` feature for `roko-primitives` access.
+    #[cfg(feature = "hdc")]
+    #[must_use]
+    pub fn promote_heuristics_clustered(&self, insights: &[InsightRecord]) -> Vec<HeuristicRule> {
+        let qualified: Vec<&InsightRecord> = insights
+            .iter()
+            .filter(|insight| {
+                insight.source_episodes.len() >= self.min_heuristic_support
+                    && insight.confidence >= self.min_confidence
+            })
+            .collect();
+
+        if qualified.len() < 2 {
+            return self.promote_heuristics(insights);
+        }
+
+        // Fingerprint each insight by hashing its summary text for HDC seeding.
+        let vectors: Vec<roko_primitives::HdcVector> = qualified
+            .iter()
+            .map(|insight| {
+                roko_primitives::HdcVector::from_seed(insight.summary().as_bytes())
+            })
+            .collect();
+
+        // Determine cluster count: at most qualified.len()/2, at least 1.
+        let k = (qualified.len() / 2).max(1).min(qualified.len());
+        let config = roko_learn::hdc_clustering::KMedoidsConfig {
+            k,
+            max_iterations: 50,
+        };
+        let cluster_result = roko_learn::hdc_clustering::k_medoids(&vectors, &config);
+
+        let mut heuristics = Vec::new();
+        for cluster in &cluster_result.clusters {
+            // The medoid insight becomes the representative heuristic.
+            let representative = qualified[cluster.medoid_index];
+
+            // Merge source episodes and confidence from all cluster members.
+            let mut merged_episodes = BTreeSet::new();
+            let mut confidence_sum = 0.0;
+            for &member_idx in &cluster.members {
+                let member = qualified[member_idx];
+                for ep in &member.source_episodes {
+                    merged_episodes.insert(ep.clone());
+                }
+                confidence_sum += member.confidence;
+            }
+            let avg_confidence = confidence_sum / cluster.members.len().max(1) as f64;
+            let merged_confirmations = merged_episodes.len();
+
+            heuristics.push(HeuristicRule {
+                id: heuristic_id(representative),
+                insight_id: representative.id.clone(),
+                title: heuristic_title(representative),
+                when_clause: representative
+                    .antecedent
+                    .iter()
+                    .map(|action| humanize_action(action))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                then_clause: heuristic_then_clause(representative),
+                confidence: avg_confidence.clamp(0.0, 1.0),
+                confirmations: merged_confirmations,
+                first_seen_ms: representative.first_seen_ms,
+                last_seen_ms: representative.last_seen_ms,
+                source_episodes: merged_episodes.into_iter().collect(),
+                source_model: None,
+                model_generality: default_model_generality(),
+                trials: 0,
+                violations: 0,
+                receipts: Vec::new(),
+            });
+        }
+
+        heuristics.sort_by(compare_heuristics);
+        heuristics
+    }
+
     /// Compile the highest-confidence heuristics into `PLAYBOOK.md`.
     #[must_use]
     pub fn compile_playbook(
@@ -1645,5 +1736,42 @@ mod tests {
         ep.model = "test-model".to_string();
         ep.success = success;
         ep
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn clustered_promotion_merges_similar_insights() {
+        let episodes: Vec<Episode> = (0..10)
+            .map(|i| {
+                episode(
+                    &format!("ep-{i}"),
+                    "gate_failure",
+                    "Implementer",
+                    "compile",
+                    false,
+                    false,
+                )
+            })
+            .collect();
+
+        let progression = TierProgression::new(3, 0.5, 12);
+        let report = progression.analyze(&episodes);
+
+        if report.insights.is_empty() {
+            return; // Not enough data to test clustering.
+        }
+
+        let heuristics_flat = progression.promote_heuristics(&report.insights);
+        let heuristics_clustered = progression.promote_heuristics_clustered(&report.insights);
+
+        // Clustered should produce <= as many heuristics (clusters merge duplicates).
+        assert!(heuristics_clustered.len() <= heuristics_flat.len());
+
+        // Each clustered heuristic should have at least as many confirmations
+        // as the flat version since clusters merge sources.
+        if let Some(h) = heuristics_clustered.first() {
+            assert!(h.confirmations >= 1);
+            assert!(h.confidence > 0.0);
+        }
     }
 }

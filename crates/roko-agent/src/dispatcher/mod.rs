@@ -41,6 +41,8 @@ use crate::safety::SafetyLayer;
 
 pub mod alert;
 pub mod cancel;
+/// Dispatch-level dedup cache for idempotent agent dispatch (DEPLOY-09).
+pub mod dedup_cache;
 pub mod emit_metric;
 pub mod hook_chain;
 pub mod parallel;

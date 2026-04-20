@@ -95,6 +95,27 @@ pub enum DreamPhaseKind {
     Evolution,
 }
 
+impl DreamPhaseKind {
+    /// Map each dream phase to a recommended model tier via `CascadeRouter`.
+    ///
+    /// Per the DREAM-12 spec:
+    /// - NREM uses T0 (Fast/cheap) for replay analysis
+    /// - Hypnagogia uses T0 (Fast) for fragment generation
+    /// - REM uses T1 (Standard/capable) for imagination
+    /// - Evolution uses T0 (Fast) for mutation evaluation
+    /// - Integration uses no model (pure computation) -- returns `None`
+    #[must_use]
+    pub fn model_tier(self) -> Option<roko_core::agent::ModelTier> {
+        match self {
+            Self::Nrem => Some(roko_core::agent::ModelTier::Fast),
+            Self::Hypnagogia => Some(roko_core::agent::ModelTier::Fast),
+            Self::Rem => Some(roko_core::agent::ModelTier::Standard),
+            Self::Evolution => Some(roko_core::agent::ModelTier::Fast),
+            Self::Integration => None,
+        }
+    }
+}
+
 /// Tracks spend within a dream cycle for budget enforcement (DREAM-12).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DreamBudgetTracker {
@@ -291,5 +312,78 @@ impl PrecomputedSummary {
     #[must_use]
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dream_budget_total_and_phase() {
+        let budget = DreamComputeBudget {
+            inference_daily_usd: 20.0,
+            dream_fraction: 0.15,
+            phase_allocations: PhaseAllocations::default(),
+        };
+        assert!((budget.total_dream_budget_usd() - 3.0).abs() < 1e-9);
+        assert!((budget.phase_budget_usd(DreamPhaseKind::Nrem) - 0.9).abs() < 1e-9);
+        assert!((budget.phase_budget_usd(DreamPhaseKind::Rem) - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn budget_tracker_records_spend_and_exhaustion() {
+        let budget = DreamComputeBudget {
+            inference_daily_usd: 10.0,
+            dream_fraction: 0.10,
+            phase_allocations: PhaseAllocations::default(),
+        };
+        let mut tracker = DreamBudgetTracker::new(budget);
+        assert!(!tracker.is_total_exhausted());
+
+        // NREM budget = 1.0 * 0.30 = 0.30
+        tracker.record_spend(DreamPhaseKind::Nrem, 0.25);
+        assert!(!tracker.is_phase_exhausted(DreamPhaseKind::Nrem));
+
+        tracker.record_spend(DreamPhaseKind::Nrem, 0.10);
+        assert!(tracker.is_phase_exhausted(DreamPhaseKind::Nrem));
+    }
+
+    #[test]
+    fn sleepwalker_mode_filters_urgent_signals() {
+        let dreaming = SleepwalkerMode::dreaming();
+        assert!(dreaming.is_dreaming());
+        assert!(dreaming.is_urgent("critical_error"));
+        assert!(dreaming.is_urgent("CRITICAL_ERROR"));
+        assert!(!dreaming.is_urgent("normal_task"));
+
+        let awake = SleepwalkerMode::Awake;
+        assert!(!awake.is_dreaming());
+        assert!(awake.is_urgent("anything"));
+    }
+
+    #[test]
+    fn phase_kind_model_tier_mapping() {
+        use roko_core::agent::ModelTier;
+
+        assert_eq!(DreamPhaseKind::Nrem.model_tier(), Some(ModelTier::Fast));
+        assert_eq!(DreamPhaseKind::Hypnagogia.model_tier(), Some(ModelTier::Fast));
+        assert_eq!(DreamPhaseKind::Rem.model_tier(), Some(ModelTier::Standard));
+        assert_eq!(DreamPhaseKind::Evolution.model_tier(), Some(ModelTier::Fast));
+        assert_eq!(DreamPhaseKind::Integration.model_tier(), None);
+    }
+
+    #[test]
+    fn precomputed_summary_expiry() {
+        let now = Utc::now();
+        let future = now + chrono::Duration::hours(1);
+        let past = now - chrono::Duration::hours(1);
+
+        let summary = PrecomputedSummary::new("s1", "pattern", "content", now, future);
+        assert!(!summary.is_expired(now));
+        assert!(summary.is_expired(future));
+
+        let expired = PrecomputedSummary::new("s2", "pattern", "content", past, now);
+        assert!(expired.is_expired(now));
     }
 }

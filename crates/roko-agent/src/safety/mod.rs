@@ -26,10 +26,12 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod allowlist;
 pub mod authz;
 pub mod bash;
 pub mod capabilities;
 pub mod contract;
+pub mod data_llm;
 pub mod git;
 pub mod hallucination;
 pub mod hooks;
@@ -40,6 +42,7 @@ pub mod rate_limit;
 pub mod result_filter;
 pub mod risk;
 pub mod scrub;
+pub mod spending;
 pub mod temporal;
 pub mod witness;
 
@@ -63,6 +66,7 @@ use self::risk::{BudgetCheckResult, ProposedAction};
 use self::scrub::ScrubPolicy;
 
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
+pub use allowlist::AllowlistGuard;
 pub use authz::{
     ApproveAllChannel, AuthorizationEvidence, AuthorizationSource, AuthzDecision,
     ConfirmationChannel, ConfirmationOutcome, ConfirmationSource, DenyAllChannel,
@@ -72,10 +76,12 @@ pub use capabilities::{
     AgentWarrant, Capability, CapabilityError, PluginTier, check_capability, check_plugin_tier,
     delegate,
 };
+pub use data_llm::{DataLlmAuditEntry, DataLlmDecision, DataLlmRouter, SanitizeResult, sanitize_input};
 pub use hallucination::HallucinationDetector;
 pub use hooks::{DataSink, HookDecision, SafetyAuditRecord, SafetyHook, TaintLabel, TaintedString};
 pub use provenance::{AttestationLevel, Custody, CustodyLogger, Taint};
 pub use result_filter::ResultFilter;
+pub use spending::{SpendingLimiter, ToolCostEstimate};
 pub use risk::{
     BetaDistribution, BudgetDimension, OperationalConfidenceTracker, SafetyBudget,
     SafetyBudgetTracker, confidence_multiplier, effective_limit, irreversibility_score,

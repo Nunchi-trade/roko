@@ -11,6 +11,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod compat;
+pub mod hot_reload;
 pub mod presets;
 pub mod schema;
 
@@ -21,8 +22,8 @@ pub use presets::Preset;
 pub use schema::{
     AgentBudget, AgentConfig, AgentRoleToggles, AgentThresholds, AttentionConfig, BudgetConfig,
     CURRENT_SCHEMA_VERSION, ConductorConfig, DemurrageConfig, EnergyConfig, GatesConfig,
-    GoalsConfig, ImmuneConfig, LearningConfig, PrdConfig, ProjectConfig, RewardWeights,
-    RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
+    GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig, PrdConfig, ProjectConfig,
+    RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
     RoutingRewardWeightsConfig, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig,
     ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig,
     SubscriptionTrigger, TemporalConfig, TuiConfig, WatcherConfig, WatcherPathConfig,

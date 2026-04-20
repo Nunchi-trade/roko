@@ -23,6 +23,7 @@
 
 pub mod cancel;
 pub mod delta_consumer;
+pub mod demurrage_consumer;
 pub mod event_bus;
 pub mod heartbeat;
 pub mod heartbeat_attention;

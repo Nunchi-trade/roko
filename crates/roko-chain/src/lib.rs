@@ -22,6 +22,8 @@ pub mod heartbeat_ext;
 pub mod identity_economy_identity;
 pub mod identity_economy_markets;
 pub mod isfr;
+/// Spore job marketplace with escrow and 3 hiring models (CHAIN-04).
+pub mod marketplace;
 pub mod mock;
 pub mod observer;
 pub mod phase2;
@@ -46,6 +48,10 @@ pub use heartbeat_ext::{
 };
 pub use isfr::{IsfrConfig, IsfrRegistry};
 pub use korai_token::{KoraiToken, KoraiTokenConfig};
+pub use marketplace::{
+    Marketplace, MarketplaceConfig, MarketplaceError, MarketplaceJob, JobState,
+    EscrowEntry, AssignmentResult, SettlementResult,
+};
 pub use mock::{MockChainClient, MockChainWallet, paired_mocks};
 pub use observer::{AddressFilter, BlockObserver, BlockObserverConfig, BlockTracker, ObservedEvent};
 pub use phase2::*;
@@ -63,3 +69,9 @@ pub use validation_registry::{
 };
 pub use wallet::ChainWallet;
 pub use witness::{ChainWitnessEngine, verify_on_chain, witness_on_chain};
+/// HTTP 402 micropayment protocol with state channels (CHAIN-08).
+pub mod x402;
+pub use x402::{
+    X402Config, X402Error, X402Manager, PaymentAuthorization, PaymentRequest,
+    StateChannel, ChannelLifecycle, BalanceProof, ChannelSettlement, VerificationStatus,
+};

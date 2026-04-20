@@ -380,6 +380,10 @@ pub fn current_intensity(initial_intensity: f64, half_life: Duration, elapsed: D
 }
 
 /// Compute pheromone decay from the deposition time and confirmation count.
+///
+/// For Alpha pheromones, confirmations **shorten** the effective half-life
+/// (anti-herding / Alpha paradox). For all other kinds, confirmations
+/// **extend** the half-life as usual.
 #[must_use]
 pub fn pheromone_decay(
     base_intensity: f64,
@@ -387,7 +391,29 @@ pub fn pheromone_decay(
     half_life: Duration,
     confirmations: u32,
 ) -> f64 {
-    let effective_half_life = half_life.mul_f64(f64::from(confirmations).mul_add(0.5, 1.0));
+    pheromone_decay_for_kind(base_intensity, deposited_at, half_life, confirmations, None)
+}
+
+/// Kind-aware pheromone decay.
+///
+/// When `kind` is `Some(PheromoneKind::Alpha)`, confirmations shorten the
+/// effective half-life instead of extending it, matching the Alpha paradox
+/// formula in [`Pheromone::effective_half_life`].
+#[must_use]
+pub fn pheromone_decay_for_kind(
+    base_intensity: f64,
+    deposited_at: SystemTime,
+    half_life: Duration,
+    confirmations: u32,
+    kind: Option<&PheromoneKind>,
+) -> f64 {
+    let effective_half_life = if kind.map_or(false, PheromoneKind::is_alpha) {
+        // Alpha paradox: consensus makes alpha expire faster.
+        let divisor = f64::from(confirmations).mul_add(0.1, 1.0);
+        half_life.mul_f64(1.0 / divisor)
+    } else {
+        half_life.mul_f64(f64::from(confirmations).mul_add(0.5, 1.0))
+    };
     let elapsed = SystemTime::now()
         .duration_since(deposited_at)
         .unwrap_or_default();
@@ -803,6 +829,102 @@ impl PromotionGate {
 }
 
 // ---------------------------------------------------------------------------
+// COORD-05: Scope promotion (Local -> Subnet -> Mesh -> Global)
+// ---------------------------------------------------------------------------
+
+/// Trust discount factors applied when reading pheromones from a broader scope.
+///
+/// Signals from Local scope carry full trust; broader scopes are progressively
+/// discounted because they passed through more intermediaries and may have
+/// been confirmed by agents with unknown provenance. Based on Constructal Law
+/// (Bejan 1997): fine-grained local channels carry higher-fidelity information.
+pub const TRUST_DISCOUNT: [f64; 4] = [1.0, 0.90, 0.80, 0.50];
+
+/// Confirmation thresholds for scope promotion.
+///
+/// A pheromone is promoted to the next scope level when it accumulates
+/// enough confirmations from distinct agents in the source scope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScopePromotionConfig {
+    /// Minimum confirmations for Local -> Subnet promotion.
+    pub local_to_subnet_confirmations: u32,
+    /// Minimum confirmations for Subnet -> Mesh promotion.
+    pub subnet_to_mesh_confirmations: u32,
+    /// Minimum confirmations for Mesh -> Global promotion.
+    pub mesh_to_global_confirmations: u32,
+}
+
+impl Default for ScopePromotionConfig {
+    fn default() -> Self {
+        Self {
+            local_to_subnet_confirmations: 3,
+            subnet_to_mesh_confirmations: 5,
+            mesh_to_global_confirmations: 10,
+        }
+    }
+}
+
+/// Check whether a pheromone is eligible for scope promotion.
+///
+/// Returns `Some(next_scope)` when the pheromone's confirmation count exceeds
+/// the threshold for the next scope level. Returns `None` when no promotion
+/// is warranted or the pheromone is already at Global scope.
+///
+/// Note: this only checks the confirmation count. Callers should also verify
+/// that confirmations come from distinct agents (e.g., via [`PromotionGate`]).
+#[must_use]
+pub fn check_scope_promotion(
+    pheromone: &Pheromone,
+    config: &ScopePromotionConfig,
+) -> Option<PheromoneScope> {
+    match &pheromone.scope {
+        PheromoneScope::Local(substrate) => {
+            if pheromone.confirmations >= config.local_to_subnet_confirmations {
+                // Promote to Subnet. Use the substrate as collective.
+                Some(PheromoneScope::Subnet(
+                    SubnetId::new(substrate.clone(), "auto").unwrap_or_else(|_| SubnetId {
+                        collective: substrate.clone(),
+                        name: "auto".to_owned(),
+                    }),
+                ))
+            } else {
+                None
+            }
+        }
+        PheromoneScope::Subnet(_) => {
+            if pheromone.confirmations >= config.subnet_to_mesh_confirmations {
+                Some(PheromoneScope::Mesh("default".to_owned()))
+            } else {
+                None
+            }
+        }
+        PheromoneScope::Mesh(_) => {
+            if pheromone.confirmations >= config.mesh_to_global_confirmations {
+                Some(PheromoneScope::Global)
+            } else {
+                None
+            }
+        }
+        PheromoneScope::Global => None, // Already at broadest scope.
+    }
+}
+
+/// Apply trust discounting to a pheromone's intensity based on its scope.
+///
+/// Signals from broader scopes are discounted because they traversed more
+/// intermediaries. The discount factors are:
+/// - Local: 1.0 (full trust)
+/// - Subnet: 0.90
+/// - Mesh: 0.80
+/// - Global: 0.50
+#[must_use]
+pub fn trust_discounted_intensity(pheromone: &Pheromone) -> f64 {
+    let rank = pheromone.scope.rank() as usize;
+    let discount = TRUST_DISCOUNT.get(rank).copied().unwrap_or(0.50);
+    pheromone.current_intensity() * discount
+}
+
+// ---------------------------------------------------------------------------
 // COORD-06: Niche competition
 // ---------------------------------------------------------------------------
 
@@ -966,6 +1088,128 @@ impl SubnetPermissions {
             return false;
         }
         true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// COORD-08: Access models and subnet membership
+// ---------------------------------------------------------------------------
+
+/// Access model determining how agents gain membership in a subnet.
+///
+/// Three models from club goods theory (Buchanan 1965): subnets are
+/// excludable, non-rivalrous goods whose value decreases with
+/// over-admission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "model", rename_all = "snake_case")]
+pub enum AccessModel {
+    /// Explicit invitation by an existing member.
+    Invite,
+    /// Agents with a matching role automatically join.
+    Role {
+        /// The role required for automatic membership.
+        required_role: String,
+    },
+    /// Agents with reputation above a threshold in a domain gain access.
+    Reputation {
+        /// The domain in which reputation is measured.
+        domain: String,
+        /// Minimum reputation score required for membership.
+        min_score: f64,
+    },
+}
+
+/// Membership registry for a permissioned subnet.
+///
+/// Tracks which agents belong to a subnet, the access model that governs
+/// admission, and the minimum number of distinct confirming members
+/// required for Subnet -> Mesh scope promotion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubnetMembership {
+    /// The subnet this membership controls.
+    pub subnet: SubnetId,
+    /// Current members of the subnet.
+    pub members: HashSet<AgentId>,
+    /// Access model governing admission.
+    pub access_model: AccessModel,
+    /// Minimum distinct confirming members for Subnet -> Mesh promotion.
+    pub min_distinct_confirmers: u32,
+}
+
+impl SubnetMembership {
+    /// Create a new membership with default settings.
+    #[must_use]
+    pub fn new(subnet: SubnetId, access_model: AccessModel) -> Self {
+        Self {
+            subnet,
+            members: HashSet::new(),
+            access_model,
+            min_distinct_confirmers: 2,
+        }
+    }
+
+    /// Check whether an agent can access this subnet.
+    #[must_use]
+    pub fn can_access(&self, agent_id: &str) -> bool {
+        self.members.contains(agent_id)
+    }
+
+    /// Attempt to admit an agent based on the access model.
+    ///
+    /// Returns `true` if the agent was admitted, `false` if already a member
+    /// or if the role/reputation check failed.
+    pub fn try_admit(
+        &mut self,
+        agent_id: &str,
+        agent_role: Option<&str>,
+        agent_reputation: Option<f64>,
+    ) -> bool {
+        if self.members.contains(agent_id) {
+            return false;
+        }
+        match &self.access_model {
+            AccessModel::Invite => {
+                // Invite-only: must be explicitly added via `admit()`.
+                false
+            }
+            AccessModel::Role { required_role } => {
+                if agent_role.map_or(false, |r| r == required_role) {
+                    self.members.insert(agent_id.to_owned());
+                    true
+                } else {
+                    false
+                }
+            }
+            AccessModel::Reputation { min_score, .. } => {
+                if agent_reputation.map_or(false, |r| r >= *min_score) {
+                    self.members.insert(agent_id.to_owned());
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Explicitly admit an agent (for Invite model or admin override).
+    pub fn admit(&mut self, agent_id: impl Into<AgentId>) {
+        self.members.insert(agent_id.into());
+    }
+
+    /// Check whether a pheromone can be promoted from Subnet to Mesh scope.
+    ///
+    /// Requires that the confirming agents are members of this subnet and
+    /// that at least `min_distinct_confirmers` distinct members have
+    /// confirmed the pheromone. This prevents a single agent from
+    /// promoting unvetted signals.
+    #[must_use]
+    pub fn can_promote_to_mesh(&self, confirmer_agents: &[AgentId]) -> bool {
+        let distinct: HashSet<&str> = confirmer_agents
+            .iter()
+            .filter(|a| self.members.contains(a.as_str()))
+            .map(String::as_str)
+            .collect();
+        distinct.len() as u32 >= self.min_distinct_confirmers
     }
 }
 
@@ -1287,6 +1531,104 @@ mod tests {
         assert!(gate.is_satisfied(&with_pass));
     }
 
+    // ----- COORD-05: Scope promotion (Local -> Subnet -> Mesh -> Global) -----
+
+    #[test]
+    fn scope_promotion_local_to_subnet() {
+        let config = ScopePromotionConfig::default();
+        let mut pheromone = Pheromone::new(
+            PheromoneKind::Opportunity,
+            0.9,
+            Duration::from_secs(7200),
+            "agent-a".to_owned(),
+            PheromoneScope::Local("store-a".to_owned()),
+        );
+        // Below threshold: no promotion.
+        pheromone.confirmations = 2;
+        assert!(check_scope_promotion(&pheromone, &config).is_none());
+
+        // At threshold: promotes to Subnet.
+        pheromone.confirmations = 3;
+        let promoted = check_scope_promotion(&pheromone, &config);
+        assert!(promoted.is_some());
+        assert!(matches!(promoted.unwrap(), PheromoneScope::Subnet(_)));
+    }
+
+    #[test]
+    fn scope_promotion_subnet_to_mesh() {
+        let config = ScopePromotionConfig::default();
+        let subnet = SubnetId::new("collective-a".to_owned(), "eng").unwrap();
+        let mut pheromone = Pheromone::new(
+            PheromoneKind::Pattern,
+            0.8,
+            Duration::from_secs(7200),
+            "agent-b".to_owned(),
+            PheromoneScope::Subnet(subnet),
+        );
+        pheromone.confirmations = 5;
+        let promoted = check_scope_promotion(&pheromone, &config);
+        assert!(matches!(promoted, Some(PheromoneScope::Mesh(_))));
+    }
+
+    #[test]
+    fn scope_promotion_mesh_to_global() {
+        let config = ScopePromotionConfig::default();
+        let mut pheromone = Pheromone::new(
+            PheromoneKind::Consensus,
+            0.7,
+            Duration::from_secs(7200),
+            "agent-c".to_owned(),
+            PheromoneScope::Mesh("collective-a".to_owned()),
+        );
+        pheromone.confirmations = 10;
+        let promoted = check_scope_promotion(&pheromone, &config);
+        assert_eq!(promoted, Some(PheromoneScope::Global));
+    }
+
+    #[test]
+    fn scope_promotion_global_stays_global() {
+        let config = ScopePromotionConfig::default();
+        let mut pheromone = Pheromone::new(
+            PheromoneKind::Wisdom,
+            0.9,
+            Duration::from_secs(7200),
+            "agent-d".to_owned(),
+            PheromoneScope::Global,
+        );
+        pheromone.confirmations = 100;
+        assert!(check_scope_promotion(&pheromone, &config).is_none());
+    }
+
+    #[test]
+    fn trust_discount_applies_by_scope_rank() {
+        let local = Pheromone::new(
+            PheromoneKind::Opportunity,
+            1.0,
+            Duration::from_secs(999_999_999), // very long half-life for test stability
+            "agent-a".to_owned(),
+            PheromoneScope::Local("s".to_owned()),
+        );
+        let global = Pheromone::new(
+            PheromoneKind::Opportunity,
+            1.0,
+            Duration::from_secs(999_999_999),
+            "agent-a".to_owned(),
+            PheromoneScope::Global,
+        );
+        let local_i = trust_discounted_intensity(&local);
+        let global_i = trust_discounted_intensity(&global);
+        // Local should have higher trust-discounted intensity.
+        assert!(
+            local_i > global_i,
+            "local trust should be higher: {local_i} > {global_i}"
+        );
+        // Global discount factor is 0.50.
+        assert!(
+            (global_i / local_i - 0.50).abs() < 0.01,
+            "global/local ratio should be ~0.50"
+        );
+    }
+
     // ----- COORD-06: Niche competition -----
 
     #[test]
@@ -1374,6 +1716,97 @@ mod tests {
         assert!(perms.accept_publication("agent-1", true));
     }
 
+    // ----- COORD-08: Access models + subnet membership -----
+
+    #[test]
+    fn subnet_membership_invite_model() {
+        let subnet = SubnetId::new("collective-a".to_owned(), "eng").unwrap();
+        let mut membership = SubnetMembership::new(subnet, AccessModel::Invite);
+
+        // Invite model: try_admit always fails (must use explicit admit).
+        assert!(!membership.try_admit("agent-1", None, None));
+        assert!(!membership.can_access("agent-1"));
+
+        // Explicit admit.
+        membership.admit("agent-1");
+        assert!(membership.can_access("agent-1"));
+        assert!(!membership.can_access("agent-2"));
+    }
+
+    #[test]
+    fn subnet_membership_role_model() {
+        let subnet = SubnetId::new("collective-a".to_owned(), "verifiers").unwrap();
+        let mut membership = SubnetMembership::new(
+            subnet,
+            AccessModel::Role { required_role: "verifier".to_owned() },
+        );
+
+        // Wrong role: rejected.
+        assert!(!membership.try_admit("agent-1", Some("researcher"), None));
+        assert!(!membership.can_access("agent-1"));
+
+        // Correct role: admitted.
+        assert!(membership.try_admit("agent-2", Some("verifier"), None));
+        assert!(membership.can_access("agent-2"));
+
+        // Already a member: returns false.
+        assert!(!membership.try_admit("agent-2", Some("verifier"), None));
+    }
+
+    #[test]
+    fn subnet_membership_reputation_model() {
+        let subnet = SubnetId::new("collective-a".to_owned(), "experts").unwrap();
+        let mut membership = SubnetMembership::new(
+            subnet,
+            AccessModel::Reputation {
+                domain: "testing".to_owned(),
+                min_score: 0.7,
+            },
+        );
+
+        // Below threshold.
+        assert!(!membership.try_admit("agent-1", None, Some(0.5)));
+
+        // Above threshold.
+        assert!(membership.try_admit("agent-2", None, Some(0.8)));
+        assert!(membership.can_access("agent-2"));
+    }
+
+    #[test]
+    fn subnet_membership_can_promote_to_mesh() {
+        let subnet = SubnetId::new("collective-a".to_owned(), "eng").unwrap();
+        let mut membership = SubnetMembership::new(subnet, AccessModel::Invite);
+        membership.min_distinct_confirmers = 2;
+        membership.admit("agent-1");
+        membership.admit("agent-2");
+        membership.admit("agent-3");
+
+        // Only 1 distinct member confirmed: not enough.
+        let confirmers = vec!["agent-1".to_owned()];
+        assert!(!membership.can_promote_to_mesh(&confirmers));
+
+        // 2 distinct members confirmed: sufficient.
+        let confirmers = vec!["agent-1".to_owned(), "agent-2".to_owned()];
+        assert!(membership.can_promote_to_mesh(&confirmers));
+
+        // Non-members don't count.
+        let confirmers = vec!["agent-1".to_owned(), "outsider".to_owned()];
+        assert!(!membership.can_promote_to_mesh(&confirmers));
+    }
+
+    #[test]
+    fn access_model_round_trips_through_serde() {
+        for model in [
+            AccessModel::Invite,
+            AccessModel::Role { required_role: "verifier".to_owned() },
+            AccessModel::Reputation { domain: "test".to_owned(), min_score: 0.5 },
+        ] {
+            let json = serde_json::to_string(&model).unwrap();
+            let decoded: AccessModel = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, model);
+        }
+    }
+
     // ----- COORD-06: Cosine similarity + niche conflicts -----
 
     #[test]
@@ -1451,5 +1884,53 @@ mod tests {
             let total_boost: f64 = state.collective_pheromone.iter().sum();
             assert!(total_boost > 0.0, "collective pheromone should be boosted");
         }
+    }
+
+    // ----- COORD-07: Alpha-aware pheromone_decay_for_kind -----
+
+    #[test]
+    fn pheromone_decay_for_kind_alpha_shortens_half_life() {
+        // Alpha with confirmations should decay faster than non-alpha.
+        // Use a fixed elapsed duration to avoid time-sensitivity.
+        let half_life = Duration::from_secs(3600);
+        let confirmations = 5;
+        let elapsed = Duration::from_secs(1800); // 30 minutes
+
+        // Alpha effective half-life: 3600 / (1.0 + 5*0.1) = 2400s
+        let alpha_eff = half_life.mul_f64(1.0 / f64::from(confirmations).mul_add(0.1, 1.0));
+        let alpha_intensity = current_intensity(1.0, alpha_eff, elapsed);
+
+        // Normal effective half-life: 3600 * (1.0 + 5*0.5) = 12600s
+        let normal_eff = half_life.mul_f64(f64::from(confirmations).mul_add(0.5, 1.0));
+        let normal_intensity = current_intensity(1.0, normal_eff, elapsed);
+
+        // Alpha should have decayed MORE (lower intensity) because confirmations
+        // shortened its half-life, while Opportunity extended it.
+        assert!(
+            alpha_intensity < normal_intensity,
+            "alpha should decay faster than normal: {alpha_intensity} < {normal_intensity}"
+        );
+        // Both should be non-zero at 30 minutes.
+        assert!(alpha_intensity > 0.0, "alpha should still have intensity");
+        assert!(normal_intensity > 0.0, "normal should still have intensity");
+    }
+
+    #[test]
+    fn pheromone_decay_for_kind_none_uses_standard_formula() {
+        // When kind is None, should behave identically to pheromone_decay().
+        // Use recent time so both produce measurable intensity.
+        let start = SystemTime::now() - Duration::from_secs(600); // 10 minutes ago
+        let half_life = Duration::from_secs(7200);
+        let confirmations = 2;
+
+        let with_kind = pheromone_decay_for_kind(1.0, start, half_life, confirmations, None);
+        let without_kind = pheromone_decay(1.0, start, half_life, confirmations);
+
+        assert!(
+            (with_kind - without_kind).abs() < 1e-6,
+            "None kind should match standard: {with_kind} vs {without_kind}"
+        );
+        // Should be close to 1.0 since only 10 min elapsed out of 7200s eff.
+        assert!(with_kind > 0.5, "should not have decayed much: {with_kind}");
     }
 }

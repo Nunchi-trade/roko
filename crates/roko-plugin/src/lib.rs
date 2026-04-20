@@ -12,6 +12,8 @@
     clippy::unnecessary_literal_bound
 )]
 
+pub mod manifest;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use cron::Schedule;

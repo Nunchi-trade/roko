@@ -68,6 +68,8 @@ pub mod domain_profile;
 pub mod demurrage;
 pub mod engram;
 pub mod error;
+/// Forensic replay engine for causal decision reconstruction (SAFE-12).
+pub mod forensic;
 pub mod hash;
 pub mod kind;
 pub mod language;
@@ -122,6 +124,10 @@ pub use demurrage::Demurrage;
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
+pub use forensic::{
+    ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
+    ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
+};
 pub use hash::ContentHash;
 pub use kind::Kind;
 pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};

@@ -206,6 +206,120 @@ impl MapElitesArchive {
     pub fn best_quality(grid: &std::collections::HashMap<Vec<usize>, ArchiveCell>) -> Option<f64> {
         grid.values().map(|c| c.quality).reduce(f64::max)
     }
+
+    /// QD-score: sum of quality across all occupied cells.
+    ///
+    /// Higher QD-score indicates more diverse, high-quality strategy coverage.
+    #[must_use]
+    pub fn qd_score(grid: &std::collections::HashMap<Vec<usize>, ArchiveCell>) -> f64 {
+        grid.values().map(|c| c.quality).sum()
+    }
+
+    /// Run a MAP-Elites evolution pass over an initial candidate set.
+    ///
+    /// Algorithm:
+    /// 1. Place initial candidates into the archive grid
+    /// 2. For `max_generations`: pick a random occupied cell, mutate the
+    ///    occupant's descriptors, evaluate quality, and insert if better
+    /// 3. Return all archive occupants as the evolved population
+    ///
+    /// `quality_fn` assigns a fitness to each strategy. `mutate_fn`
+    /// creates a variation of an existing strategy.
+    pub fn evolve<Q, M>(
+        &self,
+        candidates: Vec<(EvolutionaryStrategy, Vec<f64>, f64)>,
+        _config: &EvolutionaryStrategy,
+        max_generations: usize,
+        grid: &mut std::collections::HashMap<Vec<usize>, ArchiveCell>,
+        quality_fn: Q,
+        mutate_fn: M,
+    ) -> EvolutionResult
+    where
+        Q: Fn(&EvolutionaryStrategy) -> f64,
+        M: Fn(&EvolutionaryStrategy, usize) -> EvolutionaryStrategy,
+    {
+        let mut insertions = 0usize;
+        let mut replacements = 0usize;
+
+        // Phase 1: seed the archive with initial candidates.
+        for (strategy, descriptors, quality) in candidates {
+            match self.insert(strategy, descriptors, quality, grid) {
+                InsertResult::NewCell => insertions += 1,
+                InsertResult::Replaced => replacements += 1,
+                InsertResult::Rejected => {}
+            }
+        }
+
+        // Phase 2: iterative improvement.
+        for generation in 0..max_generations {
+            if grid.is_empty() {
+                break;
+            }
+
+            // Pick an occupied cell deterministically based on generation index.
+            let keys: Vec<Vec<usize>> = grid.keys().cloned().collect();
+            let pick_idx = generation % keys.len();
+            let parent_key = &keys[pick_idx];
+
+            let parent = match grid.get(parent_key) {
+                Some(cell) => cell.clone(),
+                None => continue,
+            };
+
+            // Mutate the parent strategy.
+            let child = mutate_fn(&parent.strategy, generation);
+            let child_quality = quality_fn(&child);
+
+            // Perturb the descriptors slightly for diversity.
+            let child_descriptors: Vec<f64> = parent
+                .descriptors
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| {
+                    // Deterministic perturbation based on generation and dimension.
+                    let offset = ((generation * 7 + i * 13) % 100) as f64 / 500.0
+                        - 0.1;
+                    (d + offset * self.mutation_rate).clamp(0.0, 1.0)
+                })
+                .collect();
+
+            match self.insert(child, child_descriptors, child_quality, grid) {
+                InsertResult::NewCell => insertions += 1,
+                InsertResult::Replaced => replacements += 1,
+                InsertResult::Rejected => {}
+            }
+        }
+
+        let qd_score = Self::qd_score(grid);
+        let coverage = Self::coverage(grid);
+        let best_quality = Self::best_quality(grid);
+
+        EvolutionResult {
+            qd_score,
+            coverage,
+            best_quality,
+            insertions,
+            replacements,
+            generations_run: max_generations,
+        }
+    }
+}
+
+/// Summary of a MAP-Elites evolution run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvolutionResult {
+    /// QD-score: sum of quality across all occupied cells.
+    pub qd_score: f64,
+    /// Number of occupied cells in the archive.
+    pub coverage: usize,
+    /// Best quality found across all cells.
+    pub best_quality: Option<f64>,
+    /// Number of new cells populated during evolution.
+    pub insertions: usize,
+    /// Number of cells where the occupant was replaced by a better candidate.
+    pub replacements: usize,
+    /// Number of generations executed.
+    pub generations_run: usize,
 }
 
 #[cfg(test)]
@@ -305,5 +419,74 @@ mod tests {
         archive.insert(test_strategy("s1"), vec![0.1, 0.1], 0.5, &mut grid);
         archive.insert(test_strategy("s2"), vec![0.9, 0.9], 0.95, &mut grid);
         assert_eq!(MapElitesArchive::best_quality(&grid), Some(0.95));
+    }
+
+    #[test]
+    fn qd_score_sums_quality() {
+        let archive = test_archive();
+        let mut grid = HashMap::new();
+        archive.insert(test_strategy("s1"), vec![0.1, 0.1], 0.5, &mut grid);
+        archive.insert(test_strategy("s2"), vec![0.9, 0.9], 0.3, &mut grid);
+        let qd = MapElitesArchive::qd_score(&grid);
+        assert!((qd - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn evolve_populates_archive_from_candidates() {
+        let archive = test_archive();
+        let mut grid = HashMap::new();
+        let config = test_strategy("config");
+
+        let candidates = vec![
+            (test_strategy("a"), vec![0.2, 0.3], 0.6),
+            (test_strategy("b"), vec![0.7, 0.8], 0.4),
+            (test_strategy("c"), vec![0.1, 0.9], 0.9),
+        ];
+
+        let result = archive.evolve(
+            candidates,
+            &config,
+            5,
+            &mut grid,
+            |s| {
+                // Simple quality: higher-id strategies get slightly higher scores.
+                0.5 + s.id.len() as f64 * 0.01
+            },
+            |parent, generation| EvolutionaryStrategy {
+                id: format!("{}-mut-{generation}", parent.id),
+                description: format!("mutated from {} at generation {generation}", parent.id),
+                parent_knowledge_ids: vec![parent.id.clone()],
+                descriptors: parent.descriptors.clone(),
+            },
+        );
+
+        assert!(result.qd_score > 0.0);
+        assert!(result.coverage >= 3);
+        assert!(result.best_quality.is_some());
+        assert!(result.insertions > 0);
+        assert_eq!(result.generations_run, 5);
+    }
+
+    #[test]
+    fn evolve_on_empty_candidates_returns_zero_coverage() {
+        let archive = test_archive();
+        let mut grid = HashMap::new();
+        let config = test_strategy("config");
+
+        let result = archive.evolve(
+            vec![],
+            &config,
+            10,
+            &mut grid,
+            |_| 0.5,
+            |p, idx| EvolutionaryStrategy {
+                id: format!("{}-{idx}", p.id),
+                ..p.clone()
+            },
+        );
+
+        assert_eq!(result.coverage, 0);
+        assert_eq!(result.qd_score, 0.0);
+        assert_eq!(result.best_quality, None);
     }
 }
