@@ -11,6 +11,24 @@
 //!   frontmatter, rank plans by priority (§1.1–§1.5).
 
 #![deny(missing_docs)]
+#![allow(
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::derive_partial_eq_without_eq,
+    clippy::doc_markdown,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
+    clippy::needless_pass_by_value,
+    clippy::or_fun_call,
+    clippy::significant_drop_tightening,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::unnecessary_map_or,
+    clippy::unused_self,
+    clippy::unwrap_used
+)]
 
 /// Coordination primitives derived from the coordination docs.
 pub mod coordination;

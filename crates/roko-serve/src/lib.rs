@@ -47,7 +47,8 @@
     clippy::uninlined_format_args,
     clippy::unnested_or_patterns,
     clippy::unused_async,
-    clippy::unwrap_or_default
+    clippy::unwrap_or_default,
+    clippy::io_other_error
 )]
 
 pub mod config_watcher;

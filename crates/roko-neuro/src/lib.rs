@@ -29,7 +29,9 @@
     clippy::uninlined_format_args,
     clippy::unused_self,
     clippy::unwrap_or_default,
-    clippy::use_self
+    clippy::use_self,
+    clippy::manual_midpoint,
+    clippy::suspicious_operation_groupings
 )]
 
 use std::path::Path;

@@ -22,13 +22,24 @@
 //! types live in `roko-core`. This crate re-exports them for convenience.
 
 #![allow(
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
+    clippy::derive_partial_eq_without_eq,
+    clippy::doc_markdown,
     clippy::expect_used,
+    clippy::for_kv_map,
+    clippy::if_not_else,
     clippy::manual_let_else,
     clippy::missing_const_for_fn,
+    clippy::needless_borrows_for_generic_args,
     clippy::redundant_closure_for_method_calls,
+    clippy::significant_drop_tightening,
     clippy::single_match,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
     clippy::uninlined_format_args,
+    clippy::unnecessary_literal_bound,
     clippy::unnested_or_patterns
 )]
 

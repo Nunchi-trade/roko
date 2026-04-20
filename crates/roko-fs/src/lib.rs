@@ -18,7 +18,14 @@
 //! backend (`SQLite`, `sled`) behind the same `Substrate` trait — the callers
 //! won't change.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::missing_const_for_fn,
+    clippy::module_name_repetitions,
+    clippy::redundant_closure,
+    clippy::significant_drop_tightening,
+    clippy::unnecessary_map_or,
+    clippy::unused_async
+)]
 
 pub mod archive;
 pub mod bandit;

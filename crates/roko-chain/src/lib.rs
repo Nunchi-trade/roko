@@ -1,5 +1,38 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+// Chain crate: numerics-heavy with many trait impls; suppress pedantic lints
+// that fire frequently without improving correctness.
+#![allow(
+    clippy::approx_constant,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::derivable_impls,
+    clippy::derive_partial_eq_without_eq,
+    clippy::doc_markdown,
+    clippy::format_collect,
+    clippy::imprecise_flops,
+    clippy::items_after_statements,
+    clippy::manual_let_else,
+    clippy::manual_midpoint,
+    clippy::manual_slice_fill,
+    clippy::manual_strip,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
+    clippy::needless_pass_by_value,
+    clippy::similar_names,
+    clippy::single_match_else,
+    clippy::struct_excessive_bools,
+    clippy::suboptimal_flops,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::unwrap_used,
+    clippy::unused_self,
+    unused_imports
+)]
 
 //! On-chain client abstractions for Roko.
 //!

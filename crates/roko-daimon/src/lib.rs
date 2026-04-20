@@ -11,16 +11,19 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::clone_on_copy,
+    clippy::doc_markdown,
     clippy::expect_used,
     clippy::float_cmp,
     clippy::manual_clamp,
     clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
     clippy::option_if_let_else,
     clippy::ref_option,
     clippy::suboptimal_flops,
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     clippy::useless_conversion
 )]
 

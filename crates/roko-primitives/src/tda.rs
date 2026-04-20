@@ -207,13 +207,13 @@ impl UnionFind {
         if rx == ry {
             return false; // Already connected.
         }
-        if self.rank[rx] < self.rank[ry] {
-            self.parent[rx] = ry;
-        } else if self.rank[rx] > self.rank[ry] {
-            self.parent[ry] = rx;
-        } else {
-            self.parent[ry] = rx;
-            self.rank[rx] += 1;
+        match self.rank[rx].cmp(&self.rank[ry]) {
+            std::cmp::Ordering::Less => self.parent[rx] = ry,
+            std::cmp::Ordering::Greater => self.parent[ry] = rx,
+            std::cmp::Ordering::Equal => {
+                self.parent[ry] = rx;
+                self.rank[rx] += 1;
+            }
         }
         true
     }
@@ -277,7 +277,7 @@ pub fn vietoris_rips(points: &[Vec<f64>], max_dim: usize) -> PersistenceDiagram 
 
     // The last surviving component lives forever (infinite death).
     // We represent this with death = max edge distance + epsilon.
-    let max_dist = edges.last().map(|e| e.0).unwrap_or(0.0);
+    let max_dist = edges.last().map_or(0.0, |e| e.0);
     if components == 1 {
         diagram.add(0.0, max_dist * 1.1 + 1.0, 0);
     }

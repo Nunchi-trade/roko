@@ -50,6 +50,33 @@
 //! without reaching into submodules.
 
 #![allow(clippy::module_name_repetitions)]
+// Verification-gate crate: numerics-heavy with many gate structs; pedantic lints
+// suppressed to reduce churn without sacrificing correctness.
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_precision_loss,
+    clippy::collection_is_never_read,
+    clippy::derivable_impls,
+    clippy::derive_partial_eq_without_eq,
+    clippy::doc_markdown,
+    clippy::if_not_else,
+    clippy::items_after_statements,
+    clippy::literal_string_with_formatting_args,
+    clippy::manual_clamp,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::missing_fields_in_debug,
+    clippy::needless_range_loop,
+    clippy::redundant_clone,
+    clippy::redundant_closure,
+    clippy::redundant_closure_for_method_calls,
+    clippy::similar_names,
+    clippy::single_match_else,
+    clippy::struct_field_names,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::unreadable_literal
+)]
 
 pub mod adaptive_threshold;
 

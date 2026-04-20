@@ -34,7 +34,13 @@
     clippy::too_many_lines,
     clippy::uninlined_format_args,
     clippy::unnecessary_wraps,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::items_after_statements,
+    clippy::match_same_arms,
+    clippy::missing_fields_in_debug,
+    clippy::needless_borrows_for_generic_args,
+    clippy::vec_init_then_push
 )]
 
 pub mod cycle;

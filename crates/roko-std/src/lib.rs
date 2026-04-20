@@ -11,7 +11,7 @@
 //! needs. Concrete domain impls (gates, agents, prompt composers) live in
 //! their own crates.
 
-#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::doc_markdown, clippy::module_name_repetitions)]
 
 pub mod memory;
 pub mod noop;

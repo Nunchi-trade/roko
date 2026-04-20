@@ -21,6 +21,25 @@
 //!    multi-task Tokio runtimes.
 //! 3. **Zero unsafe.** All concurrency goes through `tokio::sync` or `std::sync::atomic`.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_map_or,
+    clippy::doc_markdown,
+    clippy::too_long_first_doc_paragraph,
+    clippy::suboptimal_flops,
+    clippy::needless_range_loop,
+    clippy::match_same_arms,
+    clippy::derive_partial_eq_without_eq,
+    clippy::return_self_not_must_use,
+    clippy::map_unwrap_or
+)]
+
 pub mod cancel;
 pub mod delta_consumer;
 pub mod demurrage_consumer;

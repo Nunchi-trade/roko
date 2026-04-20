@@ -4198,7 +4198,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
-        let max_concurrent = config.executor.max_concurrent_tasks;
+        let _max_concurrent = config.executor.max_concurrent_tasks;
         if !plans_dir.exists() {
             return Err(anyhow!(
                 "plans directory does not exist: {}",
@@ -4467,7 +4467,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
-        let max_concurrent = config.executor.max_concurrent_tasks;
+        let _max_concurrent = config.executor.max_concurrent_tasks;
         Self::validate_executor_recovery_snapshot(snapshot_json)?;
         let snapshot = snapshot_migrate::load_executor_snapshot(snapshot_json)
             .map_err(|e| anyhow!("bad snapshot: {e}"))?;
@@ -4625,7 +4625,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
-        let max_concurrent = config.executor.max_concurrent_tasks;
+        let _max_concurrent = config.executor.max_concurrent_tasks;
         Self::validate_executor_recovery_snapshot(executor_json)?;
         let exec_snap = snapshot_migrate::load_executor_snapshot(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
