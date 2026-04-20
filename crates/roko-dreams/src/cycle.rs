@@ -1634,6 +1634,7 @@ impl DreamDistillationCandidate {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         })
     }
 }
@@ -1788,6 +1789,7 @@ fn playbook_knowledge_entry(
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -1861,6 +1863,7 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -2005,6 +2008,7 @@ fn generate_cross_domain_strategy_hypotheses(
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         });
     }
 
@@ -2299,6 +2303,7 @@ fn build_mistake_insight_entry(
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -2356,6 +2361,7 @@ fn review_insights_from_heuristics(
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
             }
         })
         .collect()

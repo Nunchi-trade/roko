@@ -150,6 +150,7 @@ pub fn threat_warning_entries_with_floor(
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         });
     }
     out

@@ -399,6 +399,14 @@ pub struct KnowledgeEntry {
     /// restore a starter balance.
     #[serde(default)]
     pub frozen: bool,
+    /// Catalytic score: how many new knowledge entries this entry helped create (P1-58).
+    ///
+    /// Incremented each time this entry is in the context pack during a task
+    /// that produces new knowledge. When the average catalytic score across
+    /// the store exceeds 1.5, the knowledge network is autocatalytic
+    /// (self-sustaining growth).
+    #[serde(default)]
+    pub catalytic_score: u32,
 }
 
 impl Default for KnowledgeEntry {
@@ -427,6 +435,7 @@ impl Default for KnowledgeEntry {
             deprecated: false,
             balance: default_balance(),
             frozen: false,
+            catalytic_score: 0,
         }
     }
 }

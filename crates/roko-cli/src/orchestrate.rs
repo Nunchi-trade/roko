@@ -7668,6 +7668,7 @@ impl PlanRunner {
                                 deprecated: false,
                                 balance: 1.0,
                                 frozen: false,
+                                catalytic_score: 0,
                             };
                             if let Err(e) = self.knowledge_store.add(anti_entry) {
                                 tracing::warn!(
@@ -15962,6 +15963,7 @@ fn build_success_knowledge_entry(
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -19622,6 +19624,7 @@ verify = []
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+            catalytic_score: 0,
             })
             .unwrap();
 
@@ -19657,6 +19660,7 @@ verify = []
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+            catalytic_score: 0,
             })
             .unwrap();
 
@@ -19722,6 +19726,7 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .unwrap();
 

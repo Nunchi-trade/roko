@@ -339,6 +339,7 @@ fn loosened_association(
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -393,6 +394,7 @@ fn interrupt_to_insight(
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -440,6 +442,7 @@ fn dali_insight(episode: &Episode, created_at: DateTime<Utc>) -> KnowledgeEntry 
         deprecated: false,
         balance: 1.0,
         frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -538,6 +541,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             },
             KnowledgeEntry {
                 id: "sig-2".to_string(),
@@ -566,6 +570,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             },
             KnowledgeEntry {
                 id: "sig-3".to_string(),
@@ -594,6 +599,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             },
             KnowledgeEntry {
                 id: "sig-4".to_string(),
@@ -622,6 +628,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             },
         ];
         let output = engine.run(&signals, &[], Utc::now());

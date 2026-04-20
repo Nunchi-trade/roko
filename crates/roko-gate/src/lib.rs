@@ -101,6 +101,8 @@ pub mod hotelling;
 pub mod integration_gate;
 pub mod llm_judge_gate;
 pub mod payload;
+/// PELT (Pruned Exact Linear Time) offline change point detection (P1-13).
+pub mod pelt;
 pub mod process_reward;
 pub mod property_test_gate;
 pub mod ratchet;

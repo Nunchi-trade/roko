@@ -274,6 +274,7 @@ impl DistillationCandidate {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         })
     }
 }

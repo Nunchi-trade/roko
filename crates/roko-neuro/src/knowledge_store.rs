@@ -1193,6 +1193,63 @@ impl KnowledgeStore {
         Ok(updated)
     }
 
+    /// Increment catalytic scores for entries that helped create new knowledge (P1-58).
+    ///
+    /// Call this when new knowledge entries are created after a successful task.
+    /// `catalyst_entry_ids` are the IDs of entries that were in the context pack
+    /// when the task ran.
+    ///
+    /// Returns the number of entries whose catalytic score was incremented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn increment_catalytic_scores(&self, catalyst_entry_ids: &[String]) -> Result<usize> {
+        if catalyst_entry_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut updated = 0;
+
+        for entry in &mut entries {
+            if catalyst_entry_ids.contains(&entry.id) {
+                entry.catalytic_score += 1;
+                updated += 1;
+            }
+        }
+
+        if updated > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(updated)
+    }
+
+    /// Check if the knowledge network is autocatalytic (P1-58).
+    ///
+    /// An autocatalytic network is self-sustaining: entries on average enable
+    /// more than one new entry each. The threshold is configurable (default 1.5).
+    ///
+    /// Returns `(is_autocatalytic, avg_catalytic_score, entry_count)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn is_autocatalytic(&self, threshold: f64) -> Result<(bool, f64, usize)> {
+        let entries = self.read_all()?;
+        let active: Vec<_> = entries.iter().filter(|e| !e.frozen).collect();
+
+        if active.is_empty() {
+            return Ok((false, 0.0, 0));
+        }
+
+        let total_catalytic: f64 = active.iter().map(|e| e.catalytic_score as f64).sum();
+        let avg = total_catalytic / active.len() as f64;
+
+        Ok((avg >= threshold, avg, active.len()))
+    }
+
     /// NEURO-11: Thaw a frozen entry, restoring a starter balance.
     ///
     /// Returns `true` if the entry was found, was frozen, and was thawed.

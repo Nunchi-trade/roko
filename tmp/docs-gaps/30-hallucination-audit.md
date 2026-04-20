@@ -685,9 +685,8 @@ be good ideas that need spec updates, or they may be accidental additions.
 - [x] **P1-12: CUSUM sensitivity parameter mismatch**
   - FIXED: DEFAULT_CUSUM_SENSITIVITY changed from 0.05 to 0.25 per spec.
 
-- [ ] **P1-13: PELT offline change point detection not implemented**
-  - Spec describes PeltDetector with cost functions
-  - Not found in code
+- [x] **P1-13: PELT offline change point detection not implemented**
+  - FIXED: Implemented `roko_gate::pelt::PeltDetector` with L2/L1/Normal cost functions, O(n) pruned DP, BIC penalty scaling, segment mean extraction, and 9 tests.
 
 - [ ] **P1-14: Domain-specific threshold profiles not implemented**
   - Spec describes ThresholdProfile with role-specific priors
@@ -923,7 +922,7 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 - [x] **P0-34: Knowledge entry utility scoring from prediction accuracy missing** — FIXED: Added `score_prediction_utility(context_entry_ids, prediction_accurate, accuracy_score)` to `KnowledgeStore`. Accurate predictions bump `confidence_weight` by +0.05 × accuracy; inaccurate predictions decay by -0.03 × (1 - accuracy). Also adjusts demurrage balance. Shifts curation from popularity-based to effectiveness-based.
 
-- [ ] **P1-58: No catalytic score tracking for autocatalytic knowledge networks** — Spec (agent-chain-new/13-exponential-growth.md) requires tracking how many new entries each entry enabled. When avg catalytic score > 1.5, network becomes self-sustaining. Not implemented.
+- [x] **P1-58: No catalytic score tracking for autocatalytic knowledge networks** — FIXED: Added `catalytic_score: u32` field to `KnowledgeEntry`, `increment_catalytic_scores()` on `KnowledgeStore`, and `is_autocatalytic(threshold)` returning `(bool, avg_score, count)`. Network is autocatalytic when avg score > 1.5.
 
 - [x] **P1-59: Context assembly missing four-factor composite weighting** — FIXED: Added `ContextAssemblyWeights` struct with spec-aligned defaults: HDC 40%, keyword 30%, PF utility 20%, freshness 10%. `composite()` method computes weighted score.
 

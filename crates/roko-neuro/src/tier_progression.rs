@@ -713,6 +713,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         }
     }
 }
@@ -747,6 +748,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         }
     }
 }
@@ -787,6 +789,7 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         }
     }
 }
@@ -1488,6 +1491,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
         let verdicts = vec![
             GateVerdict::new("compile", true),
@@ -1531,6 +1535,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
         let verdicts = vec![
             GateVerdict::new("compile", false),
@@ -1573,6 +1578,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         assert!(TierProgression::needs_expiry_review(&entry));
@@ -1609,6 +1615,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
         let transient = KnowledgeEntry {
             tier: KnowledgeTier::Transient,
