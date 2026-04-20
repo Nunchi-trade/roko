@@ -2128,6 +2128,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         }
     }
 
@@ -2538,6 +2539,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti knowledge");
 
@@ -2707,6 +2709,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti knowledge");
 
@@ -2765,6 +2768,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti knowledge");
 
@@ -2813,6 +2817,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add oldest");
         store
@@ -2843,6 +2848,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add middle");
         store
@@ -2873,6 +2879,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add newest");
 
@@ -3127,6 +3134,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         assert!(!entries_are_similar(&existing, &anti));
@@ -3318,6 +3326,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add tiered");
 
@@ -3360,6 +3369,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add persistent");
 
@@ -3545,6 +3555,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         // A near-identical entry that should be rejected.
@@ -3572,6 +3583,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         // An unrelated entry that should pass through.
@@ -3599,6 +3611,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         let existing = vec![anti];
@@ -3639,6 +3652,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         let new_anti = KnowledgeEntry {
@@ -3665,6 +3679,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         let existing = vec![existing_anti];

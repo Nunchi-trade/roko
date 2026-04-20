@@ -93,7 +93,77 @@ impl SqliteIndex {
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_file, from_name);
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_file, to_name);",
         )?;
+        self.create_fts_table()?;
         Ok(())
+    }
+
+    /// Create the FTS5 virtual table for full-text keyword search (CODE-06).
+    ///
+    /// Uses a standalone (non-content-sync) FTS table populated via `rebuild_fts`.
+    fn create_fts_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+                name,
+                file_path,
+                kind,
+                sym_id
+            );",
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the FTS5 index from the current symbols table.
+    ///
+    /// Should be called after bulk inserts or an incremental update.
+    pub fn rebuild_fts(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM symbols_fts;
+             INSERT INTO symbols_fts(sym_id, name, file_path, kind)
+                SELECT id, name, file_path, kind FROM symbols;",
+        )?;
+        Ok(())
+    }
+
+    /// Full-text keyword search using FTS5 (CODE-06).
+    ///
+    /// Searches symbol names and file paths using the SQLite FTS5 engine.
+    /// Returns up to 100 matching symbols sorted by FTS5 relevance rank.
+    pub fn fts_search(&self, query: &str) -> Result<Vec<SymbolInfo>> {
+        // Escape special FTS5 characters and add prefix matching.
+        let safe_query = query.replace('"', "\"\"");
+        let fts_query = format!("\"{safe_query}\"*");
+
+        let mut stmt = self.conn.prepare(
+            "SELECT s.file_path, s.name, s.kind, s.line, s.visibility
+             FROM symbols_fts fts
+             JOIN symbols s ON s.id = CAST(fts.sym_id AS INTEGER)
+             WHERE symbols_fts MATCH ?1
+             ORDER BY rank
+             LIMIT 100",
+        )?;
+
+        let rows = stmt.query_map(params![fts_query], |row| {
+            let file_path: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let kind_str: String = row.get(2)?;
+            let line: usize = row.get(3)?;
+            let vis_str: String = row.get(4)?;
+            Ok((file_path, name, kind_str, line, vis_str))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (file_path, name, kind_str, line, vis_str) = row?;
+            let kind = parse_symbol_kind(&kind_str);
+            let visibility = parse_visibility(&vis_str);
+            results.push(SymbolInfo {
+                id: SymbolId::new(file_path, name, kind),
+                visibility,
+                line,
+                language: String::new(),
+            });
+        }
+        Ok(results)
     }
 
     /// Insert or replace a symbol.
@@ -363,6 +433,35 @@ mod tests {
 
         let results = db.query_symbols("mystruct").expect("query");
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn fts_search_finds_symbols() {
+        let db = SqliteIndex::open_in_memory().expect("open in-memory db");
+
+        let sym1 = test_symbol("lib.rs", "process_request", SymbolKind::Function, 10);
+        let sym2 = test_symbol("lib.rs", "handle_response", SymbolKind::Function, 20);
+        let sym3 = test_symbol("types.rs", "RequestConfig", SymbolKind::Struct, 5);
+        db.insert_symbol(&sym1).expect("insert");
+        db.insert_symbol(&sym2).expect("insert");
+        db.insert_symbol(&sym3).expect("insert");
+        db.rebuild_fts().expect("rebuild fts");
+
+        let results = db.fts_search("request").expect("fts search");
+        assert!(!results.is_empty());
+        let names: Vec<&str> = results.iter().map(|s| s.id.symbol_name.as_str()).collect();
+        assert!(
+            names.contains(&"process_request") || names.contains(&"RequestConfig"),
+            "expected FTS to find request-related symbols, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn fts_search_empty_index() {
+        let db = SqliteIndex::open_in_memory().expect("open in-memory db");
+        db.rebuild_fts().expect("rebuild fts");
+        let results = db.fts_search("anything").expect("fts search");
+        assert!(results.is_empty());
     }
 
     #[test]

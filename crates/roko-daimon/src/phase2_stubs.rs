@@ -573,9 +573,11 @@ pub trait AffectWeightedQuery {
 /// Helper for contrarian retrieval: compute the mood-opposite PAD vector.
 ///
 /// Flips the pleasure axis while preserving arousal and dominance.
+///
 /// An anxious agent (negative pleasure) retrieves confident memories;
 /// an overconfident agent retrieves cautionary memories.
 #[must_use]
+#[allow(dead_code)]
 pub fn contrarian_pad(pad: &PadVector) -> PadVector {
     PadVector {
         pleasure: -pad.pleasure,
@@ -588,9 +590,9 @@ pub fn contrarian_pad(pad: &PadVector) -> PadVector {
 ///
 /// This is the primary integration point: call this from your retrieval path
 /// instead of directly calling `query_with_affect`.
-///
 /// If the tracker says we need more contrarian retrievals, replaces some
 /// congruent results with mood-opposite ones.
+#[allow(dead_code)]
 pub fn blend_with_contrarian<Q: AffectWeightedQuery>(
     store: &Q,
     query_embedding: &[f32],

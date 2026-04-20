@@ -428,17 +428,15 @@ impl ResidualBuffer {
         if self.values.len() < self.capacity {
             // Buffer not yet full — just append.
             self.values.push(value);
-            self.sum += value;
-            self.sum_sq += value * value;
         } else {
             // Buffer full — overwrite oldest and adjust running sums.
             let old = self.values[self.write_idx];
             self.sum -= old;
             self.sum_sq -= old * old;
             self.values[self.write_idx] = value;
-            self.sum += value;
-            self.sum_sq += value * value;
         }
+        self.sum += value;
+        self.sum_sq += value * value;
         self.write_idx = (self.write_idx + 1) % self.capacity;
         self.count += 1;
     }

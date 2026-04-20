@@ -309,7 +309,7 @@ impl EmotionalDeathTestament {
     #[must_use]
     pub fn narrative_summary(&self) -> String {
         format!(
-            "{} agent ({:.0}h lifetime, {} episodes). Arc: {} ({}). Final phase: {} ({}).",
+            "{} agent ({:.0}h lifetime, {} episodes). Arc: {:?} ({}). Final phase: {:?} ({}).",
             if self.life_review.narrative_arc == NarrativeArc::Redemptive {
                 "Resilient"
             } else if self.life_review.narrative_arc == NarrativeArc::Progressive {
@@ -319,9 +319,9 @@ impl EmotionalDeathTestament {
             },
             self.lifetime_hours,
             self.total_episodes,
-            format!("{:?}", self.life_review.narrative_arc),
+            self.life_review.narrative_arc,
             self.life_review.narrative_arc.description(),
-            format!("{:?}", self.final_phase),
+            self.final_phase,
             self.final_phase.description(),
         )
     }

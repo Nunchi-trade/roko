@@ -118,6 +118,7 @@ impl PeltDetector {
     }
 
     /// Set minimum segment length.
+    #[must_use]
     pub fn with_min_segment(mut self, min_len: usize) -> Self {
         self.min_segment_len = min_len.max(1);
         self

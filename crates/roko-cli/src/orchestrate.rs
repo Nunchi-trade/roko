@@ -83,9 +83,11 @@ use roko_gate::{
     feedback_for_agent,
     gate_pipeline::GatePipeline,
     generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate},
+    llm_judge_gate::JudgePayload,
     payload::{BuildSystem, GatePayload},
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
+    symbol_gate::{SymbolExpectation, SymbolKind, SymbolManifest, Visibility},
 };
 use roko_learn::anomaly::{Anomaly, AnomalyDetector};
 use roko_learn::budget::{BudgetAction, BudgetGuardrail};
@@ -2980,7 +2982,6 @@ pub struct PlanRunner {
     /// Skill library for reusable prompt patterns and successful task recipes.
     skill_library: SkillLibrary,
     /// Playbook store for reusable successful task sequences.
-    #[allow(dead_code)]
     playbook: PlaybookStore,
     /// Durable knowledge store queried per task for task-scoped context.
     knowledge_store: KnowledgeStore,
@@ -3324,6 +3325,65 @@ fn coding_strategy_coordinates(
         .task_coords(&observation)
 }
 
+/// DAIM-03: Compute heuristic strategy coordinates for a plan by aggregating
+/// its task definitions. This places plan-level somatic markers at a meaningful
+/// position in the landscape rather than the neutral midpoint.
+fn plan_heuristic_strategy_coords(runner: &PlanRunner, plan_id: &str) -> StrategyCoordinates {
+    let tracker = match runner.task_trackers.get(plan_id) {
+        Some(t) => t,
+        None => return StrategyCoordinates::default(),
+    };
+    let tasks = &tracker.tasks_file.tasks;
+    if tasks.is_empty() {
+        return StrategyCoordinates::default();
+    }
+
+    let task_count = tasks.len() as f64;
+    let total_files: usize = tasks.iter().map(|t| t.files.len()).sum();
+    let total_deps: usize = tasks.iter().map(|t| t.depends_on.len()).sum();
+    let total_verifications: usize = tasks.iter().map(|t| t.verify.len()).sum();
+    let avg_files = total_files as f64 / task_count;
+    let avg_deps = total_deps as f64 / task_count;
+
+    // Heuristic: complexity from task count + avg files.
+    let complexity = ((task_count / 20.0) + (avg_files / 10.0)).clamp(0.0, 1.0);
+    // Risk: more tasks and more deps = higher blast radius.
+    let risk = ((task_count / 30.0) + (avg_deps / 5.0)).clamp(0.0, 1.0);
+    // Novelty: inverse of average crate familiarity across tasks.
+    let familiarity = if tasks.is_empty() {
+        0.5
+    } else {
+        let sum: f64 = tasks
+            .iter()
+            .map(|t| runner.crate_familiarity_tracker.score_for_task(Some(t)))
+            .sum();
+        sum / task_count
+    };
+    let novelty = (1.0 - familiarity).clamp(0.0, 1.0);
+    // Confidence: from daimon affect state.
+    let affect = runner.daimon.query();
+    let confidence = affect.confidence.clamp(0.0, 1.0);
+    // Time pressure: gate failure count as a proxy.
+    let gate_failures = tracker.gate_failure_count.min(5) as f64 / 5.0;
+    // Scope: file count breadth.
+    let scope = (total_files as f64 / 50.0).clamp(0.0, 1.0);
+    // Reversibility: heuristic — more verifications = more reversible.
+    let reversibility = (total_verifications as f64 / (task_count * 3.0)).clamp(0.0, 1.0);
+    // Dependency depth: max chain length estimate.
+    let dependency_depth = (avg_deps / 4.0).clamp(0.0, 1.0);
+
+    StrategyCoordinates::new(
+        complexity,
+        risk,
+        novelty,
+        confidence,
+        gate_failures,
+        scope,
+        reversibility,
+        dependency_depth,
+    )
+}
+
 fn somatic_episode_hash(
     plan_id: &str,
     task_id: &str,
@@ -3331,6 +3391,30 @@ fn somatic_episode_hash(
     discriminator: &str,
 ) -> ContentHash {
     ContentHash::of(format!("somatic:{plan_id}:{task_id}:{outcome}:{discriminator}").as_bytes())
+}
+
+/// Extract a crate name from a plan or task ID (DAIM-08).
+///
+/// Heuristic: looks for `roko-*` prefixes, or falls back to the first
+/// dash-separated segment. Returns empty string if no crate can be inferred.
+fn extract_crate_name(plan_id: &str) -> String {
+    // Try to find a "roko-FOO" pattern in the plan id.
+    if let Some(pos) = plan_id.find("roko-") {
+        let rest = &plan_id[pos..];
+        // Take up to the first non-alphanumeric-or-dash character after "roko-".
+        let end = rest
+            .char_indices()
+            .skip(5) // skip "roko-"
+            .find(|(_, c)| !c.is_alphanumeric() && *c != '-')
+            .map_or(rest.len(), |(i, _)| i);
+        return rest[..end].to_string();
+    }
+    // Fallback: use the plan_id as-is if short enough to be a crate name.
+    if plan_id.len() <= 40 && !plan_id.contains('/') {
+        plan_id.to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn attach_episode_hdc_fingerprint(episode: &mut Episode, prompt: &str, outcome: &str) {
@@ -6937,14 +7021,19 @@ impl PlanRunner {
             // that plan success/failure influences affect state and somatic
             // markers. This closes the orchestration -> daimon feedback loop
             // for plan-level outcomes (task-level was already wired).
+            //
+            // DAIM-03: Use heuristic-derived strategy coordinates instead of
+            // neutral defaults so that plan-level somatic markers are positioned
+            // in the landscape relative to plan complexity, scope, and risk.
             for p in &plans {
                 let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
                     task_id: format!("plan:{}", p.plan_id),
                     succeeded: p.succeeded,
                 });
                 let outcome_label = if p.succeeded { "success" } else { "failure" };
+                let plan_coords = plan_heuristic_strategy_coords(self, &p.plan_id);
                 self.daimon.record_somatic_outcome(
-                    StrategyCoordinates::default(),
+                    plan_coords,
                     somatic_episode_hash(
                         &p.plan_id,
                         "plan-completion",
@@ -8509,6 +8598,17 @@ impl PlanRunner {
                 .and_then(|tracker| tracker.last_impl_task_id.clone())
                 .unwrap_or_else(|| "implementation".into());
             self.apply_event_and_emit(plan_id, &task_id, &event, "transitioned");
+
+            // DAIM-09: Apply dream depotentiation after plan completion to cool
+            // highly charged somatic markers accumulated during the run.
+            let report = self.daimon.apply_dream_depotentiation();
+            tracing::info!(
+                "[orchestrate] {plan_id}: dream depotentiation — arousal {:.3} -> {:.3}, cooled {} markers (total reduction {:.3})",
+                report.pre_arousal,
+                report.post_arousal,
+                report.cooled_markers,
+                report.total_marker_intensity_reduction,
+            );
         }
 
         // Conductor check after agent dispatch completes.
@@ -14541,6 +14641,18 @@ impl PlanRunner {
                 .observe(recorded.rung.as_index(), recorded.verdict.passed);
         }
 
+        // DAIM-08: Update crate confidence tracker from gate outcomes.
+        // Extract the crate name from the plan_id (e.g. "roko-agent-fix" -> "roko-agent").
+        let crate_name = extract_crate_name(plan_id);
+        if !crate_name.is_empty() {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            if all_passed {
+                self.daimon.record_crate_success(&crate_name, now_ms);
+            } else {
+                self.daimon.record_crate_failure(&crate_name, now_ms);
+            }
+        }
+
         // Deposit pheromones from gate verdicts (COORD-04).
         for recorded in &recorded_verdicts {
             let gate_name = &recorded.verdict.gate;
@@ -14989,6 +15101,10 @@ impl PlanRunner {
         }
         // GATE-05: attach verdict publisher for Pulse-based reentry.
         config.verdict_publisher = self.verdict_publisher.clone();
+        // GATE-06: wire source_roots for SymbolGate (rung 3).
+        if rung == 3 || rung > 6 {
+            config.source_roots = Some(vec![self.workdir.clone()]);
+        }
         config
     }
 
@@ -15001,22 +15117,84 @@ impl PlanRunner {
         let ctx = Context::now();
         // INT-16: Inject code-intelligence hints into gate inputs so that
         // symbol and LLM-judge rungs can focus on relevant symbols/files.
-        let code_intel_hints = plan_id
-            .and_then(|pid| self.task_trackers.get(pid))
-            .and_then(|tracker| {
-                let task_id = tracker.last_impl_task_id.as_deref()?;
-                tracker
-                    .tasks_file
-                    .tasks
-                    .iter()
-                    .find(|task| task.id == task_id)
-                    .and_then(|task| task.description.as_deref())
-            })
+        let tracker = plan_id.and_then(|pid| self.task_trackers.get(pid));
+        let task_def = tracker.and_then(|t| {
+            let task_id = t.last_impl_task_id.as_deref()?;
+            t.tasks_file.tasks.iter().find(|task| task.id == task_id)
+        });
+        let code_intel_hints = task_def
+            .and_then(|td| td.description.as_deref())
             .map(|desc| code_context_for_task(&self.workdir, desc))
             .unwrap_or_default();
+
+        // GATE-06: Build SymbolManifest from task context symbols for rung 3.
+        let symbol_signal = task_def
+            .and_then(|td| td.context.as_ref())
+            .filter(|task_ctx| !task_ctx.symbols.is_empty())
+            .map(|task_ctx| {
+                let plan_label = plan_id.unwrap_or("unknown");
+                let mut manifest = SymbolManifest::new(plan_label);
+                for sym in &task_ctx.symbols {
+                    // Parse "StructName" or "mod::path::StructName" into expectations.
+                    let (module_path, name) = match sym.rsplit_once("::") {
+                        Some((module, name)) => (module.to_string(), name.to_string()),
+                        None => (String::new(), sym.clone()),
+                    };
+                    manifest.expectations.push(SymbolExpectation {
+                        name,
+                        kind: SymbolKind::Struct,   // default; symbol gate tolerates kind mismatches
+                        visibility: Visibility::Pub, // default to pub
+                        module_path,
+                        signature: None,
+                    });
+                }
+                Engram::builder(Kind::Task)
+                    .body(Body::from_json(&manifest).expect("SymbolManifest serializes"))
+                    .provenance(Provenance::trusted("orchestrate"))
+                    .build()
+            });
+
+        // GATE-06: Build fact-check signal from task acceptance criteria for rung 5.
+        let fact_check_signal = task_def
+            .filter(|td| !td.acceptance.is_empty())
+            .map(|td| {
+                let claims = td.acceptance.join("\n");
+                Engram::builder(Kind::Task)
+                    .body(Body::text(&claims))
+                    .provenance(Provenance::trusted("orchestrate"))
+                    .build()
+            });
+
+        // GATE-06: Build LLM judge signal from task description + git diff for rung 6.
+        let llm_judge_signal = if task_def.is_some() {
+            let task_description = task_def
+                .and_then(|td| td.description.as_deref())
+                .unwrap_or_else(|| task_def.map_or("", |td| td.title.as_str()))
+                .to_string();
+            let diff = self.gate_diff_for_plan(plan_id).await.unwrap_or_default();
+            if !diff.is_empty() {
+                let payload = JudgePayload {
+                    task_description,
+                    diff,
+                };
+                Some(
+                    Engram::builder(Kind::Task)
+                        .body(Body::from_json(&payload).expect("JudgePayload serializes"))
+                        .provenance(Provenance::trusted("orchestrate"))
+                        .build(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let inputs = RungExecutionInputs {
             code_intel_hints,
-            ..RungExecutionInputs::default()
+            symbol_signal,
+            fact_check_signal,
+            llm_judge_signal,
         };
         if rung > 6 {
             let mut verdicts = Vec::new();
@@ -15028,6 +15206,40 @@ impl PlanRunner {
         }
         let config = self.gate_rung_config(plan_id, rung);
         run_rung(payload_sig, &ctx, rung, &inputs, &config).await
+    }
+
+    /// Collect a git diff for a plan's exec directory, used for the LLM judge gate.
+    async fn gate_diff_for_plan(&self, plan_id: Option<&str>) -> Option<String> {
+        let plan_id = plan_id?;
+        let exec_dir = self.ensure_plan_exec_dir(plan_id).await.ok()?;
+        let output = tokio::process::Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(&exec_dir)
+            .output()
+            .await
+            .ok()?;
+        if output.status.success() {
+            let diff = String::from_utf8_lossy(&output.stdout).to_string();
+            if diff.trim().is_empty() {
+                // Fall back to staged diff
+                let staged = tokio::process::Command::new("git")
+                    .args(["diff", "--cached"])
+                    .current_dir(&exec_dir)
+                    .output()
+                    .await
+                    .ok()?;
+                let staged_diff = String::from_utf8_lossy(&staged.stdout).to_string();
+                if staged_diff.trim().is_empty() {
+                    None
+                } else {
+                    Some(staged_diff)
+                }
+            } else {
+                Some(diff)
+            }
+        } else {
+            None
+        }
     }
 
     /// Run task-level verification commands declared in `tasks.toml` for a plan.

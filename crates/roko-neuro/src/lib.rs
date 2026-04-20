@@ -318,9 +318,9 @@ impl EmotionalProvenance {
 
         let n = tags.len() as f64;
         let avg_pad = PadVector {
-            pleasure: tags.iter().map(|t| f64::from(t.pad.pleasure)).sum::<f64>() / n,
-            arousal: tags.iter().map(|t| f64::from(t.pad.arousal)).sum::<f64>() / n,
-            dominance: tags.iter().map(|t| f64::from(t.pad.dominance)).sum::<f64>() / n,
+            pleasure: tags.iter().map(|t| t.pad.pleasure).sum::<f64>() / n,
+            arousal: tags.iter().map(|t| t.pad.arousal).sum::<f64>() / n,
+            dominance: tags.iter().map(|t| t.pad.dominance).sum::<f64>() / n,
         };
 
         Self {
@@ -534,7 +534,7 @@ impl KnowledgeEntry {
         // High-arousal episodes are more memorable and should be consolidated
         // with higher priority. Max boost: 1.3x at arousal = 1.0.
         if let Some(tag) = self.emotional_tag.as_ref() {
-            let arousal = f64::from(tag.pad.arousal).abs().clamp(0.0, 1.0);
+            let arousal = tag.pad.arousal.abs().clamp(0.0, 1.0);
             boost *= 1.0 + arousal * 0.30; // 1.0x at calm, 1.3x at max arousal
         }
 
@@ -1393,6 +1393,7 @@ mod tests {
             deprecated: false,
             balance: 1.0,
             frozen: false,
+            catalytic_score: 0,
         };
 
         assert_eq!(entry.effective_half_life_days(), 100.0);

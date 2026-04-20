@@ -585,6 +585,10 @@ mod tests {
             regressions_detected: Vec::new(),
             strategy_hypotheses: Vec::new(),
             performance_notes: Vec::new(),
+            hypnagogia_entries_count: 0,
+            staging_buffer_stats: None,
+            intensive_mode_active: false,
+            phase_budget_summary: None,
         };
 
         apply_dream_affect_feedback_to_engine(&mut engine, &report, &[]);
@@ -620,6 +624,10 @@ mod tests {
             regressions_detected: Vec::new(),
             strategy_hypotheses: Vec::new(),
             performance_notes: Vec::new(),
+            hypnagogia_entries_count: 0,
+            staging_buffer_stats: None,
+            intensive_mode_active: false,
+            phase_budget_summary: None,
         };
 
         apply_dream_affect_feedback_to_engine(&mut engine, &report, &[]);
@@ -663,6 +671,10 @@ mod tests {
             regressions_detected: Vec::new(),
             strategy_hypotheses: Vec::new(),
             performance_notes: Vec::new(),
+            hypnagogia_entries_count: 0,
+            staging_buffer_stats: None,
+            intensive_mode_active: false,
+            phase_budget_summary: None,
         };
         let episodes = vec![
             dreamed_episode(
@@ -728,6 +740,10 @@ mod tests {
             regressions_detected: Vec::new(),
             strategy_hypotheses: Vec::new(),
             performance_notes: Vec::new(),
+            hypnagogia_entries_count: 0,
+            staging_buffer_stats: None,
+            intensive_mode_active: false,
+            phase_budget_summary: None,
         };
         let mut first = Episode::new("Implementer", "task-a").succeeded();
         first.episode_id = "ep-3".to_string();

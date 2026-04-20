@@ -186,9 +186,10 @@ fn find_cliques(adjacency: &HashMap<u256, HashSet<u256>>, min_size: usize) -> Ve
     let mut results = Vec::new();
     let all_vertices: HashSet<u256> = adjacency.keys().copied().collect();
 
+    let mut p = all_vertices;
     bron_kerbosch(
         &HashSet::new(),
-        &mut all_vertices.clone(),
+        &mut p,
         &mut HashSet::new(),
         adjacency,
         min_size,
@@ -210,7 +211,7 @@ fn bron_kerbosch(
     if p.is_empty() && x.is_empty() {
         if r.len() >= min_size {
             let mut members: Vec<u256> = r.iter().copied().collect();
-            members.sort();
+            members.sort_unstable();
             let size = members.len();
             results.push(CollusionRing { members, size });
         }

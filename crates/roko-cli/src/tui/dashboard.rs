@@ -232,6 +232,7 @@ impl DashboardScaffold {
             PageId::ConfigView => self.snapshot.render_config_view_page(scaffold),
             PageId::ProviderHealth => self.snapshot.render_provider_health_page(scaffold),
             PageId::ModelComparison => self.snapshot.render_model_comparison_page(scaffold),
+            PageId::Dreams => self.snapshot.render_dreams_page(scaffold),
         };
         rendered.or_else(|| Some(scaffold.render_text()))
     }
@@ -4292,6 +4293,84 @@ impl DashboardSnapshot {
 
         Some(out)
     }
+
+    fn render_dreams_page(&self, page: &PageScaffold) -> Option<String> {
+        let dream_dir = self.root.join(".roko").join("dreams");
+        let journal_path = dream_dir.join("journal.jsonl");
+        let archive_path = dream_dir.join("archive.jsonl");
+        let journal_exists = journal_path.exists();
+        let archive_exists = archive_path.exists();
+
+        if !journal_exists && !archive_exists {
+            return None;
+        }
+
+        let mut out = page_header(page);
+
+        // Journal entries (most recent).
+        if journal_exists {
+            let _ = writeln!(out, "journal: {}", journal_path.display());
+            if let Ok(content) = std::fs::read_to_string(&journal_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let total = lines.len();
+                let _ = writeln!(out, "  entries: {total}");
+                let _ = writeln!(out, "  recent:");
+                for line in lines.iter().rev().take(5) {
+                    if let Ok(val) = serde_json::from_str::<Value>(line) {
+                        let cycle_id = val
+                            .get("cycle_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let phase = val
+                            .get("phase")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let summary = val
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let _ = writeln!(out, "    [{cycle_id}] {phase}: {summary}");
+                    }
+                }
+            }
+        } else {
+            let _ = writeln!(out, "journal: (no entries yet)");
+        }
+
+        let _ = writeln!(out);
+
+        // Archive entries.
+        if archive_exists {
+            let _ = writeln!(out, "archive: {}", archive_path.display());
+            if let Ok(content) = std::fs::read_to_string(&archive_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let total = lines.len();
+                let _ = writeln!(out, "  entries: {total}");
+                let _ = writeln!(out, "  recent:");
+                for line in lines.iter().rev().take(5) {
+                    if let Ok(val) = serde_json::from_str::<Value>(line) {
+                        let kind = val
+                            .get("kind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let quality = val
+                            .get("quality_score")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        let summary = val
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let _ = writeln!(out, "    [{kind}] q={quality:.2}: {summary}");
+                    }
+                }
+            }
+        } else {
+            let _ = writeln!(out, "archive: (no entries yet)");
+        }
+
+        Some(out)
+    }
 }
 
 /// Per-agent aggregated stats.
@@ -4846,7 +4925,7 @@ mod tests {
     fn scaffold_has_expected_page_count() {
         let dashboard = DashboardScaffold::new();
         let summary = dashboard.summary();
-        assert_eq!(summary.page_count, 15);
+        assert_eq!(summary.page_count, 16);
         assert!(summary.widget_count >= 20);
         assert_eq!(summary.active_page, PageId::Health);
     }
@@ -4882,7 +4961,7 @@ mod tests {
     fn overview_render_contains_active_page_and_counts() {
         let dashboard = DashboardScaffold::new();
         let rendered = dashboard.render_overview_text();
-        assert!(rendered.contains("dashboard scaffold: 15 pages"));
+        assert!(rendered.contains("dashboard scaffold: 16 pages"));
         assert!(rendered.contains("active=health"));
         assert!(rendered.contains("active page:"));
         assert!(rendered.contains("* Health [health] efficiency"));

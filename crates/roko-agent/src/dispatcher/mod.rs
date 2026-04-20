@@ -94,6 +94,11 @@ pub struct ToolDispatcher {
     /// When present, each tool call passes through every hook in order
     /// before the handler executes. Rejections short-circuit the chain.
     hook_chain: Option<hook_chain::SafetyHookChain>,
+    /// Optional profile-based tool selector (TOOL-03).
+    ///
+    /// When set, tool calls are filtered against the selector before dispatch.
+    /// Tools not allowed by the selector are rejected with `PermissionDenied`.
+    tool_selector: Option<tool_selector::ToolSelector>,
 }
 
 impl ToolDispatcher {
@@ -108,6 +113,7 @@ impl ToolDispatcher {
             safety: None,
             tool_cache: None,
             hook_chain: None,
+            tool_selector: None,
         }
     }
 
@@ -143,6 +149,22 @@ impl ToolDispatcher {
     pub fn with_hook_chain(mut self, chain: hook_chain::SafetyHookChain) -> Self {
         self.hook_chain = Some(chain);
         self
+    }
+
+    /// Attach a profile-based tool selector (TOOL-03).
+    ///
+    /// When attached, every dispatched tool call is checked against the
+    /// selector. Tools not allowed are rejected with `PermissionDenied`.
+    #[must_use]
+    pub fn with_tool_selector(mut self, selector: tool_selector::ToolSelector) -> Self {
+        self.tool_selector = Some(selector);
+        self
+    }
+
+    /// Returns the attached tool selector, if any.
+    #[must_use]
+    pub const fn tool_selector(&self) -> Option<&tool_selector::ToolSelector> {
+        self.tool_selector.as_ref()
     }
 
     /// Returns the hook chain, if one is attached.
@@ -218,6 +240,28 @@ impl ToolDispatcher {
             Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
             return ToolResult::err(err);
         };
+        // 2b. Profile-based tool selector check (TOOL-03).
+        if let Some(ref selector) = self.tool_selector {
+            if !selector.is_allowed(&call.name) {
+                let err = ToolError::PermissionDenied(format!(
+                    "tool `{}` not allowed by agent profile",
+                    call.name
+                ));
+                Self::emit_audit(
+                    ctx,
+                    &call,
+                    "tool_selector",
+                    "denied",
+                    &json!({
+                        "tool": call.name,
+                        "error": err.to_string(),
+                        "error_kind": tool_error_kind(&err),
+                    }),
+                );
+                Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+                return ToolResult::err(err);
+            }
+        }
         // 3. Apply task-level tool filters before capability checks.
         if let Some(reason) = tool_filter_block_reason(
             &call.name,

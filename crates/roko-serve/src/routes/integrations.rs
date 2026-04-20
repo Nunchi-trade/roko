@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::routing::get;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::integrations::{IntegrationRegistry, ServiceIntegration};
@@ -21,7 +21,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/integrations/{name}", get(get_integration))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct IntegrationListResponse {
     integrations: Vec<ServiceIntegration>,
     total: usize,

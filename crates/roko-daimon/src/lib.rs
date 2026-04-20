@@ -24,6 +24,7 @@
     clippy::suboptimal_flops,
     clippy::too_many_arguments,
     clippy::too_many_lines,
+    clippy::too_long_first_doc_paragraph,
     clippy::useless_conversion
 )]
 
@@ -158,7 +159,7 @@ impl RetrievalWeights {
 #[must_use]
 pub fn emotional_congruence(current_mood: &PadVector, entry_affect: &PadVector) -> f64 {
     // Map cosine similarity from [-1, 1] to [0, 1].
-    (current_mood.cosine_similarity(*entry_affect) + 1.0) / 2.0
+    f64::midpoint(current_mood.cosine_similarity(*entry_affect), 1.0)
 }
 
 const STRATEGY_DIMENSIONS: usize = 8;

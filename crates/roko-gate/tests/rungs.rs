@@ -218,6 +218,7 @@ fn test_integration_ok() {
             task_description: "Implement add".into(),
             diff: "pub fn add(a: i32, b: i32) -> i32 { a + b }".into(),
         })),
+        code_intel_hints: Vec::new(),
     };
     let generated_store: Arc<dyn ArtifactStore> = Arc::new(InMemoryArtifactStore::new());
     let config = RungExecutionConfig {
@@ -232,6 +233,7 @@ fn test_integration_ok() {
         llm_judge_min_score: Some(0.5),
         integration_test_pattern: Some("test_integration_ok".into()),
         integration_build_system: None,
+        verdict_publisher: None,
     };
 
     let ctx = Context::now();

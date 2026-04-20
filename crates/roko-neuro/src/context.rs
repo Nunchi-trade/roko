@@ -2046,6 +2046,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add knowledge");
 
@@ -2150,6 +2151,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add knowledge");
 
@@ -2209,6 +2211,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add strategy fragment");
         knowledge_store
@@ -2239,6 +2242,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti-knowledge");
         knowledge_store
@@ -2269,6 +2273,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add insight");
 
@@ -2479,6 +2484,7 @@ mod tests {
                     deprecated: false,
                     balance: 1.0,
                     frozen: false,
+                    catalytic_score: 0,
                 })
                 .expect("add anti-knowledge");
         }
@@ -2511,6 +2517,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add strategy");
 
@@ -2590,6 +2597,7 @@ mod tests {
                     deprecated: false,
                     balance: 1.0,
                     frozen: false,
+                    catalytic_score: 0,
                 })
                 .expect("add heuristic");
         }
@@ -2622,6 +2630,7 @@ mod tests {
                 deprecated: false,
                 balance: 1.0,
                 frozen: false,
+                catalytic_score: 0,
             })
             .expect("add warning");
 

@@ -226,11 +226,19 @@ enum Command {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Show forensic detail: timestamps, full hashes, metadata.
+        #[arg(long)]
+        forensic: bool,
     },
     /// Manage dream replay, report, and scheduling.
     Dream {
         #[command(subcommand)]
         cmd: DreamCmd,
+    },
+    /// Dream archive and journal inspection.
+    Dreams {
+        #[command(subcommand)]
+        cmd: DreamsCmd,
     },
     /// Manage global and project config (wizard, show, path, edit, set, set-secret).
     Config {
@@ -469,6 +477,12 @@ enum IndexCmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Drop existing index data and rebuild from source files.
+    Rebuild {
+        /// Directory to index (default: cwd / --repo).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Search the code index.
     Search {
         /// Search query text.
@@ -571,6 +585,28 @@ enum DreamCmd {
     },
     /// Show when the next dream should fire.
     Schedule {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DreamsCmd {
+    /// Display recent dream journal entries.
+    Journal {
+        /// Number of recent entries to display (default: 10).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Display recent dream archive entries.
+    Archive {
+        /// Number of recent entries to display (default: 10).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -1210,8 +1246,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             cmd_status(cli, workdir, cfactor).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Replay { hash, workdir } => cmd_replay(workdir, hash).await,
+        Command::Replay { hash, workdir, forensic } => cmd_replay(workdir, hash, forensic).await,
         Command::Dream { cmd } => cmd_dream(cli, cmd).await,
+        Command::Dreams { cmd } => cmd_dreams(cli, cmd),
         Command::Config { cmd } => {
             dispatch_config(cmd).await?;
             Ok(EXIT_SUCCESS)
@@ -6825,7 +6862,7 @@ fn format_cost_breakdown(costs: &HashMap<String, f64>, limit: usize) -> String {
         .join(", ")
 }
 
-async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
+async fn cmd_replay(workdir: Option<PathBuf>, hash: String, forensic: bool) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| PathBuf::from("."));
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
@@ -6842,10 +6879,44 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String) -> Result<i32> {
         }
         let indent = "  ".repeat(depth);
         if let Some(sig) = substrate.get(&id).await.map_err(|e| anyhow!("get: {e}"))? {
-            println!(
-                "{indent}{} {}  (author={})",
-                sig.kind, sig.id, sig.provenance.author
-            );
+            if forensic {
+                println!(
+                    "{indent}{} {}",
+                    sig.kind, sig.id,
+                );
+                println!(
+                    "{indent}  hash:      {}",
+                    sig.id,
+                );
+                println!(
+                    "{indent}  author:    {}",
+                    sig.provenance.author,
+                );
+                println!(
+                    "{indent}  created:   {}",
+                    sig.created_at_ms,
+                );
+                println!(
+                    "{indent}  lineage:   [{}]",
+                    sig.lineage.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(", "),
+                );
+                if !sig.tags.is_empty() {
+                    println!(
+                        "{indent}  tags:      {:?}",
+                        sig.tags,
+                    );
+                }
+                if let Ok(text) = sig.body.as_text() {
+                    let body_preview: String = text.chars().take(120).collect();
+                    println!("{indent}  body:      {body_preview}");
+                }
+                println!();
+            } else {
+                println!(
+                    "{indent}{} {}  (author={})",
+                    sig.kind, sig.id, sig.provenance.author
+                );
+            }
             for parent in &sig.lineage {
                 queue.push((*parent, depth + 1));
             }
@@ -6978,6 +7049,69 @@ fn build_dream_runner(cli: &Cli, workdir: &Path) -> Result<DreamRunner> {
     ))
 }
 
+fn cmd_dreams(cli: &Cli, cmd: DreamsCmd) -> Result<i32> {
+    match cmd {
+        DreamsCmd::Journal { limit, workdir } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let journal = roko_dreams::phase2::DreamJournal::standard(&workdir);
+            match journal.read_recent(limit) {
+                Ok(entries) if entries.is_empty() => {
+                    println!("no dream journal entries found");
+                }
+                Ok(entries) => {
+                    for entry in &entries {
+                        println!(
+                            "[{}] cycle={} agent={} hypotheses={}/{}/{} tokens={} {}",
+                            entry.cycle_start.format("%Y-%m-%d %H:%M"),
+                            entry.cycle_id,
+                            entry.agent_id,
+                            entry.hypotheses_generated,
+                            entry.hypotheses_staged,
+                            entry.hypotheses_promoted,
+                            entry.total_tokens,
+                            if entry.early_termination {
+                                "(early termination)"
+                            } else {
+                                ""
+                            },
+                        );
+                    }
+                    println!("\n{} entries shown (of last {})", entries.len(), limit);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("no dream journal found at {}", journal.journal_path.display());
+                }
+                Err(e) => return Err(e.into()),
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        DreamsCmd::Archive { limit, workdir } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let archive = roko_dreams::phase2::DreamArchive::standard(&workdir);
+            match archive.read_recent(limit) {
+                Ok(entries) if entries.is_empty() => {
+                    println!("no dream archive entries found");
+                }
+                Ok(entries) => {
+                    for entry in &entries {
+                        println!(
+                            "[{}] {} ({:?}) quality={:.2} -- {}",
+                            entry.archived_at.format("%Y-%m-%d %H:%M"),
+                            entry.entry_id,
+                            entry.kind,
+                            entry.quality_score,
+                            entry.summary,
+                        );
+                    }
+                    println!("\n{} entries shown (of last {})", entries.len(), limit);
+                }
+                Err(e) => return Err(e.into()),
+            }
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
 async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
         DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
@@ -7014,6 +7148,30 @@ fn cmd_index(cli: &Cli, cmd: IndexCmd) -> Result<i32> {
             let elapsed = start.elapsed();
             let stats = idx.stats();
             println!("Index built in {:.2}s", elapsed.as_secs_f64());
+            println!("  Files:   {}", stats.indexed_files);
+            println!("  Symbols: {}", stats.total_symbols);
+            println!("  Edges:   {}", stats.total_edges);
+            for (lang, count) in &stats.languages {
+                println!("  {lang}: {count} files");
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        IndexCmd::Rebuild { path } => {
+            let target = path.unwrap_or_else(|| workdir.clone());
+            // Remove the existing index database if present.
+            let db_path = target.join(".roko").join("index.db");
+            if db_path.exists() {
+                std::fs::remove_file(&db_path)
+                    .with_context(|| format!("remove old index at {}", db_path.display()))?;
+                println!("Removed old index: {}", db_path.display());
+            }
+            // Rebuild from scratch.
+            let start = Instant::now();
+            let idx = roko_index::WorkspaceIndex::load(&target)
+                .with_context(|| format!("rebuild index for {}", target.display()))?;
+            let elapsed = start.elapsed();
+            let stats = idx.stats();
+            println!("Index rebuilt in {:.2}s", elapsed.as_secs_f64());
             println!("  Files:   {}", stats.indexed_files);
             println!("  Symbols: {}", stats.total_symbols);
             println!("  Edges:   {}", stats.total_edges);

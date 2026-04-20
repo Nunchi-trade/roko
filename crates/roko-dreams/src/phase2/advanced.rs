@@ -582,6 +582,115 @@ pub enum PrincipleSeverity {
     Advisory,
 }
 
+// ── Dream Archive persistence (DREAM-07) ────────────────────────────────
+
+/// A single archived dream output (hypothesis, insight, or consolidated result).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamArchiveEntry {
+    /// Unique entry identifier.
+    pub entry_id: String,
+    /// Dream cycle that produced this entry.
+    pub cycle_id: String,
+    /// Kind of dream output.
+    pub kind: DreamArchiveKind,
+    /// Human-readable summary of the content.
+    pub summary: String,
+    /// Confidence or quality score assigned during consolidation.
+    pub quality_score: f64,
+    /// Timestamp when the entry was archived.
+    pub archived_at: DateTime<Utc>,
+    /// Optional tags for categorization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Classification of an archived dream output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DreamArchiveKind {
+    /// A hypothesis generated during REM.
+    Hypothesis,
+    /// An insight promoted through the staging buffer.
+    Insight,
+    /// A consolidated strategy or pattern.
+    Strategy,
+}
+
+/// Append-only JSONL archive for dream outputs (DREAM-07).
+///
+/// Persists promoted hypotheses, insights, and strategies to
+/// `.roko/dreams/archive.jsonl` so they survive across sessions.
+#[derive(Debug, Clone)]
+pub struct DreamArchive {
+    /// Path to the archive JSONL file.
+    pub archive_path: PathBuf,
+}
+
+impl DreamArchive {
+    /// Create an archive backed by the given path.
+    #[must_use]
+    pub fn new(archive_path: PathBuf) -> Self {
+        Self { archive_path }
+    }
+
+    /// Create an archive at the standard `.roko/dreams/archive.jsonl` path.
+    #[must_use]
+    pub fn standard(workdir: &std::path::Path) -> Self {
+        Self::new(workdir.join(".roko").join("dreams").join("archive.jsonl"))
+    }
+
+    /// Append an entry to the archive on disk.
+    ///
+    /// Creates parent directories if they do not exist.
+    pub fn append(&self, entry: &DreamArchiveEntry) -> Result<(), std::io::Error> {
+        if let Some(parent) = self.archive_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.archive_path)?;
+        let line = serde_json::to_string(entry)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        use std::io::Write;
+        writeln!(file, "{line}")?;
+        Ok(())
+    }
+
+    /// Read all archive entries from disk.
+    pub fn read_all(&self) -> Result<Vec<DreamArchiveEntry>, std::io::Error> {
+        let content = match std::fs::read_to_string(&self.archive_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<DreamArchiveEntry>(line) {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Read the most recent `n` entries from the archive.
+    pub fn read_recent(&self, n: usize) -> Result<Vec<DreamArchiveEntry>, std::io::Error> {
+        let all = self.read_all()?;
+        let start = all.len().saturating_sub(n);
+        Ok(all[start..].to_vec())
+    }
+
+    /// Number of entries currently stored in the archive.
+    pub fn entry_count(&self) -> Result<usize, std::io::Error> {
+        let all = self.read_all()?;
+        Ok(all.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,6 +989,66 @@ mod tests {
     fn dream_journal_standard_path() {
         let journal = DreamJournal::standard(std::path::Path::new("/workspace"));
         assert!(journal.journal_path.ends_with("dreams/journal.jsonl"));
+    }
+
+    #[test]
+    fn dream_archive_roundtrip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let archive = DreamArchive::new(tmp.path().join("archive.jsonl"));
+
+        let entry = DreamArchiveEntry {
+            entry_id: "arch-001".to_string(),
+            cycle_id: "cycle-1".to_string(),
+            kind: DreamArchiveKind::Hypothesis,
+            summary: "Use Arc<Mutex> for shared state".to_string(),
+            quality_score: 0.85,
+            archived_at: Utc::now(),
+            tags: vec!["concurrency".to_string()],
+        };
+
+        archive.append(&entry).unwrap();
+        let entries = archive.read_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry_id, "arch-001");
+        assert_eq!(entries[0].kind, DreamArchiveKind::Hypothesis);
+    }
+
+    #[test]
+    fn dream_archive_read_recent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let archive = DreamArchive::new(tmp.path().join("archive.jsonl"));
+
+        for i in 0..5 {
+            let entry = DreamArchiveEntry {
+                entry_id: format!("arch-{i}"),
+                cycle_id: format!("cycle-{i}"),
+                kind: DreamArchiveKind::Insight,
+                summary: format!("insight {i}"),
+                quality_score: 0.5 + i as f64 * 0.1,
+                archived_at: Utc::now(),
+                tags: Vec::new(),
+            };
+            archive.append(&entry).unwrap();
+        }
+
+        let recent = archive.read_recent(2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].entry_id, "arch-3");
+        assert_eq!(recent[1].entry_id, "arch-4");
+    }
+
+    #[test]
+    fn dream_archive_empty_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let archive = DreamArchive::new(tmp.path().join("nonexistent.jsonl"));
+        let entries = archive.read_all().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn dream_archive_standard_path() {
+        let archive = DreamArchive::standard(std::path::Path::new("/workspace"));
+        assert!(archive.archive_path.ends_with("dreams/archive.jsonl"));
     }
 
     #[test]

@@ -191,11 +191,11 @@ impl BinaryFuse8 {
     // ─── Internal hash functions ────────────────────────────────────
 
     fn mix(key: u64, seed: u64) -> u64 {
-        let mut h = key.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(seed);
+        let mut h = key.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(seed);
         h ^= h >> 30;
-        h = h.wrapping_mul(0xBF58476D1CE4E5B9);
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
         h ^= h >> 27;
-        h = h.wrapping_mul(0x94D049BB133111EB);
+        h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
         h ^= h >> 31;
         h
     }
@@ -208,9 +208,9 @@ impl BinaryFuse8 {
     }
 
     fn compute_seed(keys: &[u64]) -> u64 {
-        let mut seed = 0x517CC1B727220A95u64;
+        let mut seed = 0x517C_C1B7_2722_0A95u64;
         for &key in keys {
-            seed ^= key.wrapping_mul(0x9E3779B97F4A7C15);
+            seed ^= key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         }
         seed
     }

@@ -131,5 +131,32 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
                 ),
             ],
         ),
+        PageScaffold::new(
+            PageId::Dreams,
+            "Dreams",
+            "Dream cycle state, replay candidates, hypotheses, and archive coverage.",
+            vec![
+                WidgetScaffold::new(
+                    "dream_phase",
+                    "Dream Phase",
+                    "Current dream phase with progress indicator.",
+                ),
+                WidgetScaffold::new(
+                    "replay_candidates",
+                    "Replay Candidates",
+                    "Episodes queued for NREM replay with utility scores.",
+                ),
+                WidgetScaffold::new(
+                    "hypotheses",
+                    "Hypotheses",
+                    "Counterfactual hypotheses from REM imagination.",
+                ),
+                WidgetScaffold::new(
+                    "archive_coverage",
+                    "Archive Coverage",
+                    "MAP-Elites archive occupancy and best quality.",
+                ),
+            ],
+        ),
     ]
 }
