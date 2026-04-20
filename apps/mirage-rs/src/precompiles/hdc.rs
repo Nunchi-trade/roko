@@ -68,8 +68,9 @@ const SELECTOR_REMOVE: [u8; 4] = [0x4c, 0xb7, 0xa7, 0xa2]; // remove(bytes16)
 
 /// Persistent HDC state held by the precompile across EVM invocations.
 ///
-/// `Arc` + `RwLock` so the state can be shared across provider clones. Phase 3 moves this
-/// into `ForkState` so branches get their own COW copy.
+/// `Arc` + `RwLock` so the state can be shared across provider clones. Phase 4 may deep-clone
+/// for true COW branching; for now clones share the underlying index.
+#[derive(Debug, Default)]
 pub struct HDCState {
     /// Brute-force HDC index (id → vector + weight).
     pub index: RwLock<HdcIndex>,
@@ -80,14 +81,6 @@ impl HDCState {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
-    }
-}
-
-impl Default for HDCState {
-    fn default() -> Self {
-        Self {
-            index: RwLock::new(HdcIndex::new()),
-        }
     }
 }
 
