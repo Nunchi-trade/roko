@@ -1925,7 +1925,7 @@ impl DashboardSnapshot {
                 ),
                 format!(
                     "social sensitivity: {}",
-                    format_percent(cfactor.components.social_sensitivity)
+                    format_percent(cfactor.components.social_perceptiveness)
                 ),
             ],
         )
@@ -6792,7 +6792,7 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             cfactor.components.knowledge_integration_rate,
             cfactor.components.convergence_velocity,
             cfactor.components.turn_taking_equality,
-            cfactor.components.social_sensitivity
+            cfactor.components.social_perceptiveness
         );
         if !cfactor.agent_contributions.is_empty() {
             println!(
@@ -9017,10 +9017,10 @@ mod tests {
             first_try_rate: 0.64,
             knowledge_growth: 0.18,
             knowledge_integration_rate: 0.57,
-            task_diversity_coverage: 0.73,
+            hdc_diversity: 0.73,
             convergence_velocity: 0.66,
             turn_taking_equality: 0.74,
-            social_sensitivity: 0.68,
+            social_perceptiveness: 0.68,
         };
         cf3.computed_at = chrono::Utc::now();
 

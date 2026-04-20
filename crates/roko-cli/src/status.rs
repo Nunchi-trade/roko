@@ -101,7 +101,7 @@ impl SessionStatus {
                 cfactor.components.knowledge_integration_rate,
                 cfactor.components.convergence_velocity,
                 cfactor.components.turn_taking_equality,
-                cfactor.components.social_sensitivity
+                cfactor.components.social_perceptiveness
             ));
             if !cfactor.agent_contributions.is_empty() {
                 let top = cfactor.top_agent_contribution_lines(3).join(", ");

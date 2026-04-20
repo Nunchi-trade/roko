@@ -2078,10 +2078,10 @@ mod tests {
                 "first_try_rate": 0.20,
                 "knowledge_growth": 0.20,
                 "knowledge_integration_rate": 0.20,
-                "task_diversity_coverage": 0.20,
+                "hdc_diversity": 0.20,
                 "convergence_velocity": 0.20,
                 "turn_taking_equality": 0.20,
-                "social_sensitivity": 0.20
+                "social_perceptiveness": 0.20
             },
             "agent_contributions": [
                 {
@@ -2104,10 +2104,10 @@ mod tests {
                 "first_try_rate": 0.75,
                 "knowledge_growth": 0.30,
                 "knowledge_integration_rate": 0.25,
-                "task_diversity_coverage": 0.35,
+                "hdc_diversity": 0.35,
                 "convergence_velocity": 0.45,
                 "turn_taking_equality": 0.50,
-                "social_sensitivity": 0.65
+                "social_perceptiveness": 0.65
             },
             "agent_contributions": [
                 {

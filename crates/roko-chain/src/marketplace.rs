@@ -368,7 +368,7 @@ impl Marketplace {
         }
 
         // Direct hire restricted to Protocol/Sovereign tier
-        if agent_tier != PassportTier::Protocol && agent_tier != PassportTier::Sovereign {
+        if !agent_tier.has_privilege(PassportTier::Sovereign) {
             return Err(MarketplaceError::InsufficientTier {
                 required: PassportTier::Sovereign,
                 actual: agent_tier,
@@ -816,7 +816,7 @@ mod tests {
     fn test_posting() -> SporeJobPosting {
         SporeJobPosting {
             job_id: [1; 32],
-            domain: "code_quality".to_string(),
+            domain: "coding".to_string(),
             required_capabilities: 0b11,
             budget: 10_000,
             deadline_block: 500,

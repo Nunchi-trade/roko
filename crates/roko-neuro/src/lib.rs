@@ -60,14 +60,38 @@ fn default_balance() -> f64 {
 }
 
 /// Default half-life for insights, in days.
+///
+/// On-chain spec: ~7 days (1,512,000 blocks). Off-chain is intentionally longer
+/// because local knowledge isn't subject to demurrage and agents benefit from
+/// retaining insights until contradicted.
 pub const INSIGHT_HALF_LIFE_DAYS: f64 = 30.0;
+
 /// Default half-life for heuristics, in days.
+///
+/// On-chain spec: ~15 days (3,240,000 blocks). Off-chain is longer because
+/// behavioral strategies that work locally remain valuable longer without
+/// on-chain competition pressure.
 pub const HEURISTIC_HALF_LIFE_DAYS: f64 = 90.0;
+
 /// Default half-life for warnings, in days.
-pub const WARNING_HALF_LIFE_DAYS: f64 = 7.0;
+///
+/// On-chain spec: ~3 minutes (450 blocks). Off-chain uses 1 hour (1/24 day)
+/// to balance urgency with practical usefulness. Warnings are transient by
+/// nature but need enough persistence for the agent to act on them within
+/// a task cycle. Previously 7 days, which was far too long (warnings that
+/// persist for a week are no longer warnings -- they're constraints).
+pub const WARNING_HALF_LIFE_DAYS: f64 = 1.0 / 24.0; // 1 hour
+
 /// Default half-life for causal links, in days.
+///
+/// On-chain spec: ~15 days. Off-chain is longer (60 days) because causal
+/// models need time to be tested against varied situations before expiring.
 pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 60.0;
+
 /// Default half-life for strategy fragments, in days.
+///
+/// On-chain spec: ~15 days. Off-chain roughly matches because strategies
+/// in rapidly evolving codebases do become stale relatively quickly.
 pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 14.0;
 
 /// Semantic category for a knowledge item.
@@ -1266,7 +1290,10 @@ mod tests {
 
     #[test]
     fn new_knowledge_kinds_have_expected_defaults() {
-        assert_eq!(KnowledgeKind::Warning.default_half_life_days(), 7.0);
+        // Warning half-life: 1/24 day = 1 hour (was 7 days, fixed per spec).
+        assert!(
+            (KnowledgeKind::Warning.default_half_life_days() - 1.0 / 24.0).abs() < 1e-9
+        );
         assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 60.0);
         assert_eq!(
             KnowledgeKind::StrategyFragment.default_half_life_days(),

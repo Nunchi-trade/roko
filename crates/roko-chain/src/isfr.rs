@@ -250,7 +250,7 @@ mod tests {
             value: FactValue::Numeric(value),
             confidence,
             claimant_passport_id: passport,
-            domain: "oracle".to_string(),
+            domain: "chain".to_string(),
             submitted_at_block: 100,
         }
     }
@@ -263,7 +263,7 @@ mod tests {
             value: FactValue::Boolean(value),
             confidence,
             claimant_passport_id: passport,
-            domain: "code_quality".to_string(),
+            domain: "coding".to_string(),
             submitted_at_block: 100,
         }
     }

@@ -329,17 +329,62 @@ pub enum GossipTopic {
 }
 
 /// Passport tiers referenced throughout the chain docs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// Privilege ordering: Protocol (highest) > Sovereign > Worker > Edge (lowest).
+/// Stake thresholds: Protocol (100,000 KORAI), Sovereign (25,000), Worker (5,000), Edge (0).
+///
+/// **Note**: `Ord` is manually implemented so that higher privilege = greater value.
+/// `PassportTier::Protocol > PassportTier::Edge` is always true.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PassportTier {
-    /// Protocol tier with the strongest privileges.
+    /// Protocol tier with the strongest privileges (governance-approved, 100,000 KORAI).
     Protocol,
-    /// Sovereign tier for high-trust operators.
+    /// Sovereign tier for high-trust operators (25,000 KORAI stake).
     Sovereign,
-    /// Worker tier for normal marketplace access.
+    /// Worker tier for normal marketplace access (5,000 KORAI stake).
     #[default]
     Worker,
-    /// Edge tier for constrained participation.
+    /// Edge tier for constrained participation (no stake required).
     Edge,
+}
+
+impl PassportTier {
+    /// Numeric privilege level (higher = more privileged).
+    const fn privilege_level(self) -> u8 {
+        match self {
+            Self::Protocol => 3,
+            Self::Sovereign => 2,
+            Self::Worker => 1,
+            Self::Edge => 0,
+        }
+    }
+
+    /// Minimum KORAI stake required for this tier.
+    pub const fn min_stake(self) -> u64 {
+        match self {
+            Self::Protocol => 100_000,
+            Self::Sovereign => 25_000,
+            Self::Worker => 5_000,
+            Self::Edge => 0,
+        }
+    }
+
+    /// Whether this tier has at least the given privilege level.
+    pub const fn has_privilege(self, required: Self) -> bool {
+        self.privilege_level() >= required.privilege_level()
+    }
+}
+
+impl PartialOrd for PassportTier {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PassportTier {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.privilege_level().cmp(&other.privilege_level())
+    }
 }
 
 /// Protocol families used by the triage classifier.

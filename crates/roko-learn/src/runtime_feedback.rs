@@ -1506,7 +1506,7 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
     let mut knowledge_records = read_knowledge_records(&knowledge_path).await?;
     let confirmation_records = read_knowledge_records(&confirmations_path).await?;
     knowledge_records.extend(confirmation_records);
-    let social_sensitivity = social_sensitivity_from_attribution(
+    let social_perceptiveness = social_perceptiveness_from_attribution(
         &attribution_records,
         Duration::from_secs(7 * 24 * 60 * 60),
     );
@@ -1523,7 +1523,7 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
     Ok(compute_cfactor(
         &episodes,
         Duration::from_secs(7 * 24 * 60 * 60),
-        social_sensitivity,
+        social_perceptiveness,
         knowledge_integration_rate,
         convergence_velocity,
     ))
@@ -1552,7 +1552,7 @@ async fn read_context_attribution_records(
     Ok(out)
 }
 
-fn social_sensitivity_from_attribution(
+fn social_perceptiveness_from_attribution(
     records: &[ContextAttributionRecord],
     window: Duration,
 ) -> f64 {
@@ -2103,7 +2103,7 @@ mod tests {
     }
 
     #[test]
-    fn social_sensitivity_uses_prior_output_attributions() {
+    fn social_perceptiveness_uses_prior_output_attributions() {
         let now = Utc::now();
         let records = vec![
             ContextAttributionRecord {
@@ -2123,7 +2123,7 @@ mod tests {
             },
         ];
 
-        let score = social_sensitivity_from_attribution(&records, Duration::from_secs(60));
+        let score = social_perceptiveness_from_attribution(&records, Duration::from_secs(60));
         assert!((score - 0.5).abs() < 1e-9);
     }
 

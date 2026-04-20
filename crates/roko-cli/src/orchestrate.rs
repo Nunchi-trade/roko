@@ -333,8 +333,10 @@ async fn load_cfactor_source(workdir: &Path) -> Option<Arc<StaticCFactorSource>>
             regression_drop: regression.map_or(0.0, |entry| entry.drop_fraction),
             gate_pass_rate: current.components.gate_pass_rate,
             turn_taking_equality: current.components.turn_taking_equality,
-            social_sensitivity: current.components.social_sensitivity,
-            task_diversity_coverage: current.components.task_diversity_coverage,
+            social_perceptiveness: current.components.social_perceptiveness,
+            citation_reciprocity: 0.0, // TODO: wire from Bus citation tracker
+            delivery_rate: 0.0,        // TODO: wire from Bus delivery confirmation
+            hdc_diversity: current.components.hdc_diversity,
             episode_count: current.episode_count,
             top_positive_contributors,
             top_negative_contributors,
