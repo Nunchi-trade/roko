@@ -1,0 +1,24 @@
+[package]
+name = "roko-trading-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Glue `Agent` impl that composes roko-venue + roko-strategy + roko-custody so trading slots into the universal loop. See plans/P08-trading-surface.md."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+roko-agent = { path = "../roko-agent" }
+roko-venue = { path = "../roko-venue" }
+roko-strategy = { path = "../roko-strategy" }
+roko-custody = { path = "../roko-custody" }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

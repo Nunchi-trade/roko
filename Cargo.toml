@@ -75,6 +75,18 @@ members = [
 
     # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
     "crates/roko-index",
+
+    # Trading surface — ports agent-cli / offchainservices-agent. See
+    # plans/P08-trading-surface.md.
+    "crates/roko-venue",
+    "crates/roko-strategy",
+    "crates/roko-quoting",
+    "crates/roko-execution",
+    "crates/roko-custody",
+    "crates/roko-jobs",
+    "crates/roko-apex",
+    "crates/roko-reflect",
+    "crates/roko-trading-agent",
 ]
 default-members = [
     # Ordinary root builds target the main CLI plus the MCP servers we ship.
