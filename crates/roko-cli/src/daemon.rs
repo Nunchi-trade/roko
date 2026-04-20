@@ -33,6 +33,99 @@ pub mod launchd;
 /// Linux systemd user-service helpers for daemon installation.
 pub mod systemd;
 
+// ─── DaemonCmd IPC protocol ──────────────────────────────────────────────────
+
+/// Commands accepted over the Unix-domain-socket IPC protocol.
+///
+/// The daemon listens on `$ROKO_STATE_DIR/daemon.sock` (typically
+/// `~/.roko/daemon.sock`). Clients send a JSON-encoded `DaemonCmd` and
+/// receive a JSON-encoded [`DaemonResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum DaemonCmd {
+    /// Return daemon status: uptime, active agents, subscription count,
+    /// memory usage.
+    Status,
+    /// Graceful shutdown: flush pending, backup state, deregister.
+    Stop,
+    /// Stop then restart with config reload.
+    Restart,
+    /// Reload configuration, templates, and subscriptions without restart.
+    Reload,
+    /// Return a snapshot of all monitored subscriptions.
+    ListSubscriptions,
+    /// Temporarily pause monitoring for a subscription by ID.
+    PauseSubscription {
+        /// Subscription ID to pause.
+        id: String,
+    },
+    /// Resume a previously paused subscription.
+    ResumeSubscription {
+        /// Subscription ID to resume.
+        id: String,
+    },
+}
+
+/// Response returned over the daemon IPC socket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonResponse {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// The command that was executed.
+    pub command: String,
+    /// Optional payload (command-specific).
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+    /// Error message if `ok` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl DaemonResponse {
+    fn success(command: &str) -> Self {
+        Self {
+            ok: true,
+            command: command.to_string(),
+            data: serde_json::Value::Null,
+            error: None,
+        }
+    }
+
+    fn success_with_data(command: &str, data: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            command: command.to_string(),
+            data,
+            error: None,
+        }
+    }
+
+    fn failure(command: &str, error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            command: command.to_string(),
+            data: serde_json::Value::Null,
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// Subscription summary returned by `ListSubscriptions` and the IPC
+/// pause/resume commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionSummary {
+    /// Subscription ID.
+    pub id: String,
+    /// Agent template name.
+    pub template: String,
+    /// Trigger pattern.
+    pub trigger: String,
+    /// Whether the subscription is currently enabled.
+    pub enabled: bool,
+    /// Maximum concurrent dispatches.
+    pub concurrency_limit: usize,
+}
+
 use crate::config::RepoRegistry;
 use crate::load_layered;
 use crate::serve_runtime::RokoCliRuntime;
@@ -971,85 +1064,177 @@ async fn start_ipc_server(
     }))
 }
 
+/// Parse an IPC request as either a JSON `DaemonCmd` or a legacy plain-text
+/// command. Plain-text commands (`status`, `stop`, `reload`, `shutdown`) are
+/// still accepted for backward compatibility with existing `daemon_stop` and
+/// `daemon_status` callers.
+fn parse_ipc_request(raw: &str) -> Result<DaemonCmd, String> {
+    let trimmed = raw.trim();
+    // Try JSON first.
+    if trimmed.starts_with('{') {
+        return serde_json::from_str(trimmed)
+            .map_err(|e| format!("invalid JSON command: {e}"));
+    }
+    // Legacy plain-text fallback.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "status" => Ok(DaemonCmd::Status),
+        "stop" | "shutdown" => Ok(DaemonCmd::Stop),
+        "reload" => Ok(DaemonCmd::Reload),
+        "restart" => Ok(DaemonCmd::Restart),
+        "list_subscriptions" => Ok(DaemonCmd::ListSubscriptions),
+        other => Err(format!("unknown command: {other}")),
+    }
+}
+
 async fn handle_ipc_command(
     mut stream: UnixStream,
     state: Arc<AppState>,
     shutdown_request: CancellationToken,
 ) -> Result<()> {
-    let mut buf = vec![0u8; 1024];
+    let mut buf = vec![0u8; 4096];
     let n = stream
         .read(&mut buf)
         .await
         .context("read daemon IPC request")?;
-    let request = String::from_utf8_lossy(&buf[..n])
-        .trim()
-        .to_ascii_lowercase();
+    let raw = String::from_utf8_lossy(&buf[..n]);
 
-    if request == "status" {
-        let active_agents = state.supervisor.count().await;
-        let subscriptions = state.subscriptions.all().len();
-        let uptime_secs = state.started_at.elapsed().as_secs();
-        let response = json!({
-            "pid": std::process::id(),
-            "active_agents": active_agents,
-            "subscriptions": subscriptions,
-            "uptime_secs": uptime_secs,
-        });
-        stream.write_all(response.to_string().as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        return Ok(());
-    }
-
-    if request == "reload" {
-        let response = reload_daemon_runtime(&state).await;
-        if response.ok {
-            if response.warnings.is_empty() {
-                info!(
-                    subscriptions = response.subscriptions,
-                    templates = response.templates,
-                    loaded = response.loaded,
-                    "daemon config reloaded after IPC request"
-                );
-            } else {
-                warn!(
-                    subscriptions = response.subscriptions,
-                    templates = response.templates,
-                    loaded = response.loaded,
-                    warnings = ?response.warnings,
-                    "daemon config reloaded after IPC request with warnings"
-                );
-            }
+    let cmd = match parse_ipc_request(&raw) {
+        Ok(cmd) => cmd,
+        Err(err) => {
+            let resp = DaemonResponse::failure("unknown", &err);
+            let bytes = serde_json::to_vec(&resp).unwrap_or_default();
+            stream.write_all(&bytes).await?;
+            stream.write_all(b"\n").await?;
+            return Ok(());
         }
-        let response =
-            serde_json::to_string(&response).context("serialize daemon reload response")?;
-        stream.write_all(response.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        return Ok(());
-    }
+    };
 
-    if request == "stop" {
-        stream
-            .write_all(b"{\"ok\":true,\"command\":\"stop\"}\n")
-            .await?;
-        shutdown_request.cancel();
-        return Ok(());
-    }
-
-    if request == "shutdown" {
-        stream
-            .write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n")
-            .await?;
-        shutdown_request.cancel();
-        return Ok(());
-    }
-
-    let response = json!({
-        "ok": false,
-        "error": format!("unknown command: {request}"),
-    });
-    stream.write_all(response.to_string().as_bytes()).await?;
+    let response = dispatch_daemon_cmd(cmd, &state, &shutdown_request).await;
+    let bytes = serde_json::to_vec(&response).unwrap_or_default();
+    stream.write_all(&bytes).await?;
     stream.write_all(b"\n").await?;
     Ok(())
+}
+
+/// Execute a parsed `DaemonCmd` and produce a response.
+async fn dispatch_daemon_cmd(
+    cmd: DaemonCmd,
+    state: &AppState,
+    shutdown_request: &CancellationToken,
+) -> DaemonResponse {
+    match cmd {
+        DaemonCmd::Status => {
+            let active_agents = state.supervisor.count().await;
+            let subscriptions = state.subscriptions.all().len();
+            let uptime_secs = state.started_at.elapsed().as_secs();
+            DaemonResponse::success_with_data(
+                "status",
+                json!({
+                    "pid": std::process::id(),
+                    "active_agents": active_agents,
+                    "subscriptions": subscriptions,
+                    "uptime_secs": uptime_secs,
+                }),
+            )
+        }
+        DaemonCmd::Stop => {
+            shutdown_request.cancel();
+            DaemonResponse::success("stop")
+        }
+        DaemonCmd::Restart => {
+            // Restart is handled by the caller re-invoking daemon_start after
+            // daemon_stop completes. From the IPC perspective we trigger stop.
+            shutdown_request.cancel();
+            DaemonResponse::success("restart")
+        }
+        DaemonCmd::Reload => {
+            let reload = reload_daemon_runtime(state).await;
+            if reload.ok {
+                if reload.warnings.is_empty() {
+                    info!(
+                        subscriptions = reload.subscriptions,
+                        templates = reload.templates,
+                        loaded = reload.loaded,
+                        "daemon config reloaded after IPC request"
+                    );
+                } else {
+                    warn!(
+                        subscriptions = reload.subscriptions,
+                        templates = reload.templates,
+                        loaded = reload.loaded,
+                        warnings = ?reload.warnings,
+                        "daemon config reloaded after IPC request with warnings"
+                    );
+                }
+                DaemonResponse::success_with_data(
+                    "reload",
+                    json!({
+                        "subscriptions": reload.subscriptions,
+                        "templates": reload.templates,
+                        "loaded": reload.loaded,
+                        "warnings": reload.warnings,
+                    }),
+                )
+            } else {
+                DaemonResponse::failure(
+                    "reload",
+                    reload.error.unwrap_or_else(|| "daemon reload failed".into()),
+                )
+            }
+        }
+        DaemonCmd::ListSubscriptions => {
+            let subs: Vec<SubscriptionSummary> = state
+                .subscriptions
+                .all()
+                .iter()
+                .map(|s| SubscriptionSummary {
+                    id: s.id.clone(),
+                    template: s.template.clone(),
+                    trigger: s.trigger.clone(),
+                    enabled: s.enabled,
+                    concurrency_limit: s.concurrency_limit,
+                })
+                .collect();
+            DaemonResponse::success_with_data(
+                "list_subscriptions",
+                serde_json::to_value(&subs).unwrap_or_default(),
+            )
+        }
+        DaemonCmd::PauseSubscription { id } => {
+            match state.subscriptions.get_by_id(&id) {
+                Some(mut sub) => {
+                    sub.enabled = false;
+                    let _ = state.subscriptions.update_by_id(&id, sub);
+                    info!(subscription_id = %id, "subscription paused via IPC");
+                    DaemonResponse::success_with_data(
+                        "pause_subscription",
+                        json!({ "id": id, "enabled": false }),
+                    )
+                }
+                None => DaemonResponse::failure(
+                    "pause_subscription",
+                    format!("subscription not found: {id}"),
+                ),
+            }
+        }
+        DaemonCmd::ResumeSubscription { id } => {
+            match state.subscriptions.get_by_id(&id) {
+                Some(mut sub) => {
+                    sub.enabled = true;
+                    let _ = state.subscriptions.update_by_id(&id, sub);
+                    info!(subscription_id = %id, "subscription resumed via IPC");
+                    DaemonResponse::success_with_data(
+                        "resume_subscription",
+                        json!({ "id": id, "enabled": true }),
+                    )
+                }
+                None => DaemonResponse::failure(
+                    "resume_subscription",
+                    format!("subscription not found: {id}"),
+                ),
+            }
+        }
+    }
 }
 
 async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
@@ -1365,5 +1550,113 @@ mod tests {
         assert!(text.contains("/tmp/s1.sock"));
         assert!(text.contains("5"));
         assert!(text.contains("12345"));
+    }
+
+    // ─── DaemonCmd IPC protocol tests ────────────────────────────────────
+
+    #[test]
+    fn parse_ipc_plain_text_status() {
+        let cmd = parse_ipc_request("status").unwrap();
+        assert_eq!(cmd, DaemonCmd::Status);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_stop() {
+        let cmd = parse_ipc_request("stop").unwrap();
+        assert_eq!(cmd, DaemonCmd::Stop);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_shutdown_maps_to_stop() {
+        let cmd = parse_ipc_request("shutdown").unwrap();
+        assert_eq!(cmd, DaemonCmd::Stop);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_reload() {
+        let cmd = parse_ipc_request("reload").unwrap();
+        assert_eq!(cmd, DaemonCmd::Reload);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_list_subscriptions() {
+        let cmd = parse_ipc_request("list_subscriptions").unwrap();
+        assert_eq!(cmd, DaemonCmd::ListSubscriptions);
+    }
+
+    #[test]
+    fn parse_ipc_json_status() {
+        let cmd = parse_ipc_request(r#"{"cmd":"status"}"#).unwrap();
+        assert_eq!(cmd, DaemonCmd::Status);
+    }
+
+    #[test]
+    fn parse_ipc_json_pause_subscription() {
+        let cmd =
+            parse_ipc_request(r#"{"cmd":"pause_subscription","id":"config-0"}"#).unwrap();
+        assert_eq!(
+            cmd,
+            DaemonCmd::PauseSubscription {
+                id: "config-0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ipc_json_resume_subscription() {
+        let cmd =
+            parse_ipc_request(r#"{"cmd":"resume_subscription","id":"config-1"}"#).unwrap();
+        assert_eq!(
+            cmd,
+            DaemonCmd::ResumeSubscription {
+                id: "config-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ipc_json_list_subscriptions() {
+        let cmd = parse_ipc_request(r#"{"cmd":"list_subscriptions"}"#).unwrap();
+        assert_eq!(cmd, DaemonCmd::ListSubscriptions);
+    }
+
+    #[test]
+    fn parse_ipc_unknown_command_fails() {
+        assert!(parse_ipc_request("wiggle").is_err());
+    }
+
+    #[test]
+    fn parse_ipc_invalid_json_fails() {
+        assert!(parse_ipc_request("{bad json").is_err());
+    }
+
+    #[test]
+    fn daemon_response_success_serializes() {
+        let resp = DaemonResponse::success("stop");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"command\":\"stop\""));
+    }
+
+    #[test]
+    fn daemon_response_failure_serializes() {
+        let resp = DaemonResponse::failure("reload", "disk full");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"ok\":false"));
+        assert!(json.contains("\"error\":\"disk full\""));
+    }
+
+    #[test]
+    fn subscription_summary_roundtrip() {
+        let summary = SubscriptionSummary {
+            id: "config-0".into(),
+            template: "pr-review".into(),
+            trigger: "github.pull_request.*".into(),
+            enabled: true,
+            concurrency_limit: 3,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: SubscriptionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, parsed);
     }
 }

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
 use crate::imagination::ImaginationMode;
+use crate::phase2::advanced::{DreamJournal, DreamJournalEntry};
 use crate::replay::{DreamReplayBatch, DreamReplayPolicy, select_replay_episodes};
 
 /// Public alias for the replay input episodes.
@@ -473,6 +474,14 @@ pub struct IntensiveMode {
     /// Threat rehearsal scenario limit (0 = use default).
     #[serde(default = "default_intensive_rehearsal_limit")]
     pub rehearsal_limit: usize,
+    /// Episode backlog high-water mark: trigger intensive mode when
+    /// unreplayed episodes exceed this count (default 50).
+    #[serde(default = "default_backlog_high_water")]
+    pub backlog_high_water: usize,
+    /// Episode backlog low-water mark: exit intensive mode when
+    /// unreplayed episodes drop below this count (default 20).
+    #[serde(default = "default_backlog_low_water")]
+    pub backlog_low_water: usize,
 }
 
 impl Default for IntensiveMode {
@@ -482,7 +491,29 @@ impl Default for IntensiveMode {
             replay_multiplier: default_intensive_replay_multiplier(),
             counterfactual_depth: default_intensive_counterfactual_depth(),
             rehearsal_limit: default_intensive_rehearsal_limit(),
+            backlog_high_water: default_backlog_high_water(),
+            backlog_low_water: default_backlog_low_water(),
         }
+    }
+}
+
+impl IntensiveMode {
+    /// Check if intensive mode should activate based on episode backlog.
+    ///
+    /// Returns the adjusted `max_episodes` if intensive, otherwise `None`.
+    #[must_use]
+    pub fn check_activation(&self, unreplayed_count: usize, default_max: usize) -> Option<usize> {
+        if unreplayed_count >= self.backlog_high_water {
+            Some(default_max.saturating_mul(self.replay_multiplier as usize).max(default_max))
+        } else {
+            None
+        }
+    }
+
+    /// Check if intensive mode should deactivate.
+    #[must_use]
+    pub fn should_deactivate(&self, unreplayed_count: usize) -> bool {
+        unreplayed_count < self.backlog_low_water
     }
 }
 
@@ -726,19 +757,114 @@ impl DreamRunner {
     }
 
     async fn consolidate_async(&mut self) -> Result<DreamReport> {
-        let episodes = Arc::new(EpisodeLogger::new(
-            self.workdir.join(".roko").join("episodes.jsonl"),
-        ));
+        let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
+        let episodes = Arc::new(EpisodeLogger::new(episodes_path.clone()));
         let knowledge = Arc::new(KnowledgeStore::for_workdir(&self.workdir));
         let playbooks_root = self.workdir.join(".roko").join("learn").join("playbooks");
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
         let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
+
+        // ── DREAM-06: Check episode backlog for intensive mode ──────
+        let all_episodes = EpisodeLogger::read_all_lossy(&episodes_path)
+            .await
+            .unwrap_or_default();
+        let latest_report = self.latest_report().ok().flatten();
+        let unreplayed_count = match &latest_report {
+            Some(report) => all_episodes
+                .iter()
+                .filter(|ep| {
+                    report
+                        .processed_through
+                        .is_none_or(|cutoff| ep.timestamp > cutoff)
+                })
+                .count(),
+            None => all_episodes.len(),
+        };
+
+        let intensive_active = self
+            .controls
+            .intensive
+            .check_activation(unreplayed_count, self.controls.replay.max_episodes)
+            .is_some();
+
+        if intensive_active {
+            self.controls.intensive.active = true;
+            // Double max_episodes during intensive mode
+            self.controls.replay.max_episodes = self
+                .controls
+                .replay
+                .max_episodes
+                .saturating_mul(self.controls.intensive.replay_multiplier as usize);
+        }
+
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
         cycle.configure_threats(
             self.controls.threat_simulation,
             self.controls.threat_severity_floor,
         );
-        cycle.run_budgeted(&mut self.controls.budget).await
+        let mut report = cycle.run_budgeted(&mut self.controls.budget).await?;
+
+        // Mark intensive mode in the report.
+        report.intensive_mode_active = intensive_active;
+
+        // Check whether to deactivate intensive mode.
+        if intensive_active && self.controls.intensive.should_deactivate(
+            unreplayed_count.saturating_sub(report.processed_episodes),
+        ) {
+            self.controls.intensive.active = false;
+        }
+
+        // ── DREAM-14: Persist dream cycle report as journal entry ────
+        self.persist_journal_entry(&report);
+
+        Ok(report)
+    }
+
+    /// Append a journal entry for the completed dream cycle (DREAM-14).
+    fn persist_journal_entry(&self, report: &DreamReport) {
+        let mut journal = DreamJournal::standard(&self.workdir);
+        let entry = DreamJournalEntry {
+            cycle_id: format!(
+                "dream-{}",
+                report.started_at.timestamp_millis()
+            ),
+            agent_id: self.config.agent.command.clone(),
+            cycle_start: report.started_at,
+            cycle_end: report.completed_at,
+            trigger: DreamTrigger::Manual,
+            nrem_duration_secs: {
+                let diff = report.completed_at - report.started_at;
+                diff.num_seconds().max(0) as u64
+            },
+            rem_duration_secs: 0,
+            consolidation_duration_secs: 0,
+            hypotheses_generated: report.strategy_hypotheses.len(),
+            hypotheses_staged: report
+                .staging_buffer_stats
+                .as_ref()
+                .map(|s| s.total_entries)
+                .unwrap_or(0),
+            hypotheses_promoted: report
+                .staging_buffer_stats
+                .as_ref()
+                .map(|s| s.promoted_this_cycle)
+                .unwrap_or(0),
+            hypotheses_refuted: 0,
+            nightmares_detected: 0,
+            human_review_required: false,
+            hypothesis_diversity: 0.0,
+            total_tokens: 0,
+            early_termination: report
+                .performance_notes
+                .iter()
+                .any(|n| n.contains("budget exhausted")),
+            early_termination_reason: report
+                .performance_notes
+                .iter()
+                .find(|n| n.contains("budget exhausted"))
+                .cloned(),
+        };
+        let _ = journal.append(&entry);
     }
 }
 
@@ -920,6 +1046,14 @@ fn default_intensive_counterfactual_depth() -> usize {
 
 fn default_intensive_rehearsal_limit() -> usize {
     50
+}
+
+fn default_backlog_high_water() -> usize {
+    50
+}
+
+fn default_backlog_low_water() -> usize {
+    20
 }
 
 /// Load the latest persisted dream report from a report directory.
@@ -1169,5 +1303,86 @@ mod tests {
         assert_eq!(report.recent_episode_count, 0);
         assert!(!report.enough_recent_episodes);
         assert_eq!(report.delta_due_in_secs, None);
+    }
+
+    // ── DREAM-06 intensive mode tests ───────────────────────────────────
+
+    #[test]
+    fn intensive_mode_activates_at_high_water() {
+        let mode = IntensiveMode::default();
+        assert_eq!(mode.backlog_high_water, 50);
+        assert_eq!(mode.backlog_low_water, 20);
+
+        // Below high water: no activation.
+        assert!(mode.check_activation(30, 24).is_none());
+
+        // At high water: activates with doubled max.
+        let adjusted = mode.check_activation(50, 24);
+        assert!(adjusted.is_some());
+        assert_eq!(adjusted.unwrap(), 24 * 3); // default multiplier is 3
+    }
+
+    #[test]
+    fn intensive_mode_deactivates_at_low_water() {
+        let mode = IntensiveMode::default();
+        assert!(mode.should_deactivate(15));
+        assert!(!mode.should_deactivate(25));
+    }
+
+    #[test]
+    fn intensive_mode_serialization_roundtrip() {
+        let mode = IntensiveMode {
+            active: true,
+            replay_multiplier: 4,
+            counterfactual_depth: 10,
+            rehearsal_limit: 100,
+            backlog_high_water: 60,
+            backlog_low_water: 25,
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let deserialized: IntensiveMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.backlog_high_water, 60);
+        assert_eq!(deserialized.backlog_low_water, 25);
+        assert!(deserialized.active);
+    }
+
+    // ── DREAM-14 journal persistence tests ──────────────────────────────
+
+    #[test]
+    fn journal_entry_written_to_standard_path() {
+        let tmp = TempDir::new().unwrap();
+        let mut journal = DreamJournal::standard(tmp.path());
+        let entry = DreamJournalEntry {
+            cycle_id: "test-cycle".to_string(),
+            agent_id: "cat".to_string(),
+            cycle_start: Utc::now(),
+            cycle_end: Utc::now(),
+            trigger: DreamTrigger::Manual,
+            nrem_duration_secs: 10,
+            rem_duration_secs: 5,
+            consolidation_duration_secs: 2,
+            hypotheses_generated: 3,
+            hypotheses_staged: 2,
+            hypotheses_promoted: 1,
+            hypotheses_refuted: 0,
+            nightmares_detected: 0,
+            human_review_required: false,
+            hypothesis_diversity: 0.5,
+            total_tokens: 500,
+            early_termination: false,
+            early_termination_reason: None,
+        };
+        journal.append(&entry).unwrap();
+        let entries = journal.read_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cycle_id, "test-cycle");
+    }
+
+    #[test]
+    fn bus_pulse_trigger_config_dream_worthiness() {
+        let config = BusPulseTriggerConfig::default();
+        assert!(config.is_dream_worthy(0.8, "gate_verdict"));
+        assert!(!config.is_dream_worthy(0.5, "gate_verdict")); // below min_score
+        assert!(!config.is_dream_worthy(0.8, "unknown_kind"));
     }
 }

@@ -3686,6 +3686,7 @@ tier = "focused"
             cfactor_trend: Vec::new(),
             gate_trends: HashMap::new(),
             gate_recent_failures: Vec::new(),
+            episodes: Default::default(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),

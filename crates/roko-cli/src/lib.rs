@@ -36,6 +36,7 @@ pub mod chat;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
+pub mod custody;
 pub mod daemon;
 pub mod deployment;
 pub mod episode;

@@ -133,6 +133,13 @@ impl Agent for ToolLoopAgent {
                 output.iterations,
             ))
             .with_usage(output.total_usage),
+            StopReason::BudgetExhausted => AgentResult::fail(Self::output_signal(
+                input,
+                "Budget exhausted",
+                "budget_exhausted",
+                output.iterations,
+            ))
+            .with_usage(output.total_usage),
         }
     }
 

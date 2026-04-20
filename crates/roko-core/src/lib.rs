@@ -69,6 +69,7 @@ pub mod kind;
 pub mod language;
 pub mod loop_tick;
 pub mod metric;
+pub mod namespace;
 pub mod obs;
 pub mod operating_frequency;
 pub mod phase;
@@ -169,4 +170,7 @@ pub use tool::{
     compute_reward, galileo_tsq, profile_for_model,
 };
 pub use traits::{Bus, Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use namespace::{
+    Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
+};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

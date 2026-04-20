@@ -12,10 +12,116 @@
     clippy::unnecessary_literal_bound
 )]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Identifier for a tracked asset in the chain probe set.
 pub type AssetId = String;
+
+// ---------------------------------------------------------------------------
+// BEAT-04: Rolling statistics for real anomaly detection
+// ---------------------------------------------------------------------------
+
+/// Window size for rolling statistics.
+const DEFAULT_ROLLING_WINDOW: usize = 30;
+
+/// Default z-score threshold for anomaly detection.
+const DEFAULT_Z_THRESHOLD: f32 = 2.0;
+
+/// Per-probe rolling statistics for anomaly detection.
+///
+/// Maintains a windowed history of probe values and computes online mean and
+/// standard deviation. This enables the `ProbeResult::is_anomalous()` check
+/// to actually fire — without rolling stats, `rolling_stddev` is always 0.0
+/// and anomaly detection is inert.
+#[derive(Debug, Clone)]
+pub struct RollingStats {
+    /// Windowed history of recent values.
+    values: VecDeque<f32>,
+    /// Maximum number of values to retain.
+    window_size: usize,
+    /// Running sum for fast mean computation.
+    running_sum: f64,
+    /// Running sum of squares for fast stddev computation.
+    running_sum_sq: f64,
+    /// Z-score threshold for anomaly detection.
+    z_threshold: f32,
+}
+
+impl RollingStats {
+    /// Create rolling stats with the given window size and z-threshold.
+    pub fn new(window_size: usize, z_threshold: f32) -> Self {
+        Self {
+            values: VecDeque::with_capacity(window_size),
+            window_size: window_size.max(2),
+            running_sum: 0.0,
+            running_sum_sq: 0.0,
+            z_threshold,
+        }
+    }
+
+    /// Push a new value and return the current rolling mean and stddev.
+    pub fn push(&mut self, value: f32) -> (f32, f32) {
+        let val = f64::from(value);
+        // Evict oldest if at capacity
+        if self.values.len() >= self.window_size {
+            if let Some(old) = self.values.pop_front() {
+                let old = f64::from(old);
+                self.running_sum -= old;
+                self.running_sum_sq -= old * old;
+            }
+        }
+        self.values.push_back(value);
+        self.running_sum += val;
+        self.running_sum_sq += val * val;
+
+        let n = self.values.len() as f64;
+        let mean = self.running_sum / n;
+        let variance = if n > 1.0 {
+            (self.running_sum_sq / n - mean * mean).max(0.0)
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        (mean as f32, variance.sqrt() as f32)
+    }
+
+    /// Current rolling mean.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn mean(&self) -> f32 {
+        if self.values.is_empty() {
+            return 0.0;
+        }
+        (self.running_sum / self.values.len() as f64) as f32
+    }
+
+    /// Current rolling standard deviation.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn stddev(&self) -> f32 {
+        let n = self.values.len() as f64;
+        if n < 2.0 {
+            return 0.0;
+        }
+        let mean = self.running_sum / n;
+        let variance = (self.running_sum_sq / n - mean * mean).max(0.0);
+        variance.sqrt() as f32
+    }
+
+    /// Z-score threshold for this probe.
+    pub const fn z_threshold(&self) -> f32 {
+        self.z_threshold
+    }
+
+    /// Number of values currently in the window.
+    pub fn count(&self) -> usize {
+        self.values.len()
+    }
+}
+
+impl Default for RollingStats {
+    fn default() -> Self {
+        Self::new(DEFAULT_ROLLING_WINDOW, DEFAULT_Z_THRESHOLD)
+    }
+}
 
 /// A zero-cost cognitive probe.
 ///
@@ -609,6 +715,131 @@ impl HeartbeatProbeRegistry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BEAT-04: Stateful probe registry with rolling anomaly detection
+// ---------------------------------------------------------------------------
+
+/// A probe registry that maintains per-probe rolling statistics for real
+/// anomaly detection.
+///
+/// Unlike [`HeartbeatProbeRegistry`] which is stateless (rolling_mean = value,
+/// rolling_stddev = 0.0, so `is_anomalous()` never fires), this registry
+/// tracks a windowed history of each probe's values and computes z-score
+/// based anomaly detection.
+///
+/// Use this registry when you need anomaly counts to drive tier escalation
+/// (BEAT-10) and meta-cognition (BEAT-11).
+pub struct StatefulProbeRegistry {
+    probes: Vec<Box<dyn HeartbeatProbe>>,
+    stats: Vec<RollingStats>,
+    /// Rolling window size for all probes.
+    window_size: usize,
+    /// Z-score threshold for anomaly detection.
+    z_threshold: f32,
+}
+
+impl StatefulProbeRegistry {
+    /// Create an empty stateful registry with the given window and threshold.
+    pub fn new(window_size: usize, z_threshold: f32) -> Self {
+        Self {
+            probes: Vec::new(),
+            stats: Vec::new(),
+            window_size,
+            z_threshold,
+        }
+    }
+
+    /// Register a new probe. A fresh rolling stats tracker is created for it.
+    pub fn register(&mut self, probe: Box<dyn HeartbeatProbe>) {
+        self.probes.push(probe);
+        self.stats
+            .push(RollingStats::new(self.window_size, self.z_threshold));
+    }
+
+    /// Evaluate all probes using rolling statistics for anomaly detection.
+    ///
+    /// Each probe's value is pushed into its rolling stats window. The mean
+    /// and stddev from the window are used to populate `ProbeResult`, enabling
+    /// `is_anomalous()` to detect real z-score outliers.
+    pub fn evaluate_all(&mut self, state: &EngineState) -> ProbeResults {
+        let results: Vec<ProbeResult> = self
+            .probes
+            .iter()
+            .zip(self.stats.iter_mut())
+            .map(|(probe, stats)| {
+                let value = probe.evaluate(state);
+                let (rolling_mean, rolling_stddev) = stats.push(value);
+                ProbeResult::new(
+                    probe.name(),
+                    value,
+                    rolling_mean,
+                    rolling_stddev,
+                    stats.z_threshold(),
+                    probe.weight(),
+                    probe.domain(),
+                )
+            })
+            .collect();
+
+        let aggregate = results
+            .iter()
+            .map(|result| result.value * result.weight)
+            .sum::<f32>()
+            .min(1.0);
+
+        ProbeResults { results, aggregate }
+    }
+
+    /// Number of registered probes.
+    pub fn len(&self) -> usize {
+        self.probes.len()
+    }
+
+    /// Whether the registry contains no probes.
+    pub fn is_empty(&self) -> bool {
+        self.probes.is_empty()
+    }
+
+    /// Create a stateful registry pre-populated with all 16 default probes.
+    pub fn with_defaults() -> Self {
+        let stateless = HeartbeatProbeRegistry::with_defaults();
+        let mut registry = Self::new(DEFAULT_ROLLING_WINDOW, DEFAULT_Z_THRESHOLD);
+        // Re-register all default probes into the stateful registry.
+        // We need to recreate them since we can't move from the stateless one.
+        registry.register(Box::new(PriceDeltaProbe::new()));
+        registry.register(Box::new(TvlDeltaProbe::new()));
+        registry.register(Box::new(PositionHealthProbe::new()));
+        registry.register(Box::new(GasSpikeProbe::new()));
+        registry.register(Box::new(CreditBalanceProbe::new()));
+        registry.register(Box::new(RsiProbe::new()));
+        registry.register(Box::new(MacdProbe::new()));
+        registry.register(Box::new(CircuitBreakerProbe::new()));
+        registry.register(Box::new(BuildHealthProbe::new()));
+        registry.register(Box::new(TestRegressionProbe::new()));
+        registry.register(Box::new(ComplexityDriftProbe::new()));
+        registry.register(Box::new(DependencyRiskProbe::new()));
+        registry.register(Box::new(CoverageDeltaProbe::new()));
+        registry.register(Box::new(ErrorRateProbe::new()));
+        registry.register(Box::new(WorldModelDriftProbe::new()));
+        registry.register(Box::new(CausalConsistencyProbe::new()));
+        debug_assert_eq!(registry.len(), stateless.len());
+        registry
+    }
+
+    /// Reset all rolling statistics windows.
+    pub fn reset_stats(&mut self) {
+        for stats in &mut self.stats {
+            *stats = RollingStats::new(self.window_size, self.z_threshold);
+        }
+    }
+}
+
+impl Default for StatefulProbeRegistry {
+    fn default() -> Self {
+        Self::new(DEFAULT_ROLLING_WINDOW, DEFAULT_Z_THRESHOLD)
+    }
+}
+
 /// Detects significant price changes since the last tick.
 #[derive(Debug, Clone, Default)]
 pub struct PriceDeltaProbe {
@@ -1181,4 +1412,131 @@ fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
 
     let cosine_similarity = dot / (left_norm.sqrt() * right_norm.sqrt());
     (1.0 - cosine_similarity).clamp(0.0, 2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- RollingStats tests ----
+
+    #[test]
+    fn rolling_stats_single_value() {
+        let mut stats = RollingStats::new(10, 2.0);
+        let (mean, stddev) = stats.push(0.5);
+        assert!((mean - 0.5).abs() < f32::EPSILON);
+        assert!(stddev.abs() < f32::EPSILON); // single value -> 0 stddev
+        assert_eq!(stats.count(), 1);
+    }
+
+    #[test]
+    fn rolling_stats_mean_converges() {
+        let mut stats = RollingStats::new(10, 2.0);
+        for _ in 0..5 {
+            stats.push(0.5);
+        }
+        assert!((stats.mean() - 0.5).abs() < 1e-5);
+        assert!(stats.stddev() < 1e-5); // all same value -> ~0 stddev
+    }
+
+    #[test]
+    fn rolling_stats_window_eviction() {
+        let mut stats = RollingStats::new(3, 2.0);
+        stats.push(0.0);
+        stats.push(0.0);
+        stats.push(0.0);
+        assert_eq!(stats.count(), 3);
+        // Push a 4th value; oldest (0.0) should be evicted
+        stats.push(1.0);
+        assert_eq!(stats.count(), 3);
+        // Window is now [0.0, 0.0, 1.0], mean = 0.333...
+        assert!((stats.mean() - 1.0 / 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rolling_stats_detects_outlier() {
+        let mut stats = RollingStats::new(20, 2.0);
+        // Push a stable baseline
+        for _ in 0..20 {
+            stats.push(0.1);
+        }
+        let (mean, stddev) = stats.push(0.1);
+        // Baseline is stable: mean~0.1, stddev~0
+        assert!((mean - 0.1).abs() < 0.01);
+
+        // Now push an outlier
+        let (mean_after, stddev_after) = stats.push(0.9);
+        // The stddev should now be non-zero since we have a spike
+        assert!(stddev_after > 0.0);
+    }
+
+    // ---- StatefulProbeRegistry tests ----
+
+    #[test]
+    fn stateful_registry_has_default_probes() {
+        let registry = StatefulProbeRegistry::with_defaults();
+        assert_eq!(registry.len(), 16);
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn stateful_registry_rolling_anomaly_detection() {
+        let mut registry = StatefulProbeRegistry::new(10, 2.0);
+        registry.register(Box::new(BuildHealthProbe::new()));
+
+        let normal_state = EngineState::new()
+            .with_last_build_result(BuildResult::Success);
+
+        // Push several normal evaluations to establish a baseline
+        for _ in 0..8 {
+            let results = registry.evaluate_all(&normal_state);
+            assert_eq!(results.results.len(), 1);
+            assert!(!results.results[0].is_anomalous());
+        }
+
+        // Now push an abnormal state (build failure)
+        let bad_state = EngineState::new()
+            .with_last_build_result(BuildResult::Failure);
+        let results = registry.evaluate_all(&bad_state);
+        assert_eq!(results.results.len(), 1);
+        // After 8 normal values, a sudden spike should be anomalous
+        // (value jumps from 0.0 to 0.8, which is >> 2 stddev from mean of ~0)
+        assert!(results.results[0].is_anomalous());
+    }
+
+    #[test]
+    fn stateful_registry_reset_stats() {
+        let mut registry = StatefulProbeRegistry::with_defaults();
+        let state = EngineState::new();
+        registry.evaluate_all(&state);
+        registry.reset_stats();
+        // After reset, stats should be fresh (count = 0 for all)
+        for stats in &registry.stats {
+            assert_eq!(stats.count(), 0);
+        }
+    }
+
+    #[test]
+    fn stateful_registry_anomaly_count_grows_with_spikes() {
+        let mut registry = StatefulProbeRegistry::new(10, 2.0);
+        registry.register(Box::new(BuildHealthProbe::new()));
+        registry.register(Box::new(TestRegressionProbe::new()));
+
+        let normal = EngineState::new()
+            .with_last_build_result(BuildResult::Success)
+            .with_test_pass_count_delta(0);
+
+        // Establish baseline
+        for _ in 0..10 {
+            let results = registry.evaluate_all(&normal);
+            assert_eq!(results.anomaly_count(), 0);
+        }
+
+        // Both probes spike
+        let bad = EngineState::new()
+            .with_last_build_result(BuildResult::Failure)
+            .with_test_pass_count_delta(-5);
+        let results = registry.evaluate_all(&bad);
+        assert!(results.anomaly_count() >= 1, "should detect at least one anomaly");
+    }
 }

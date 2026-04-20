@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
 use crate::introspection::{Intervention, MetacognitiveMonitor, Turn};
+use crate::lifecycle::{BudgetStatus, BudgetTracker, CognitiveTier, TurnCostRecord};
 use crate::provider::ProviderError;
 use crate::retry::RetryPolicy;
 use crate::streaming::StreamChunk;
@@ -127,6 +128,8 @@ pub enum StopReason {
     Cancelled,
     /// The backend returned an error (API, parse, or network).
     BackendError(String),
+    /// The cost budget was exhausted (daily or lifetime limit reached).
+    BudgetExhausted,
 }
 
 /// Output from a completed [`ToolLoop::run`] or [`ToolLoop::resume`].
@@ -160,6 +163,10 @@ enum OverflowAction {
 /// Drives the `prompt -> LLM -> tool_calls -> dispatch -> results -> LLM`
 /// cycle until the LLM stops calling tools, the iteration cap is
 /// reached, the cancel token fires, or the backend errors.
+/// Shared budget guard that can be attached to a [`ToolLoop`] to enforce
+/// budget constraints before each LLM invocation.
+pub type SharedBudgetTracker = Arc<std::sync::Mutex<BudgetTracker>>;
+
 #[derive(Clone)]
 pub struct ToolLoop {
     translator: Arc<dyn Translator>,
@@ -171,6 +178,8 @@ pub struct ToolLoop {
     model_profile: Option<ModelProfile>,
     retry_policy: RetryPolicy,
     monitor: Option<MetacognitiveMonitor>,
+    /// Optional budget tracker checked before each LLM call (LIFE-03).
+    budget: Option<SharedBudgetTracker>,
 }
 
 impl ToolLoop {
@@ -191,6 +200,7 @@ impl ToolLoop {
             model_profile: None,
             retry_policy: RetryPolicy::default(),
             monitor: None,
+            budget: None,
         }
     }
 
@@ -239,6 +249,17 @@ impl ToolLoop {
     #[must_use]
     pub fn with_monitor(mut self, monitor: MetacognitiveMonitor) -> Self {
         self.monitor = Some(monitor);
+        self
+    }
+
+    /// Attach a shared budget tracker checked before each LLM call.
+    ///
+    /// When the tracker reports [`BudgetStatus::Exhausted`], the loop
+    /// terminates with [`StopReason::BudgetExhausted`]. After each
+    /// successful LLM call, the turn cost is recorded into the tracker.
+    #[must_use]
+    pub fn with_budget(mut self, budget: SharedBudgetTracker) -> Self {
+        self.budget = Some(budget);
         self
     }
 
@@ -373,6 +394,24 @@ impl ToolLoop {
                 };
             }
 
+            // LIFE-03: Budget check before each LLM invocation.
+            if let Some(ref budget) = self.budget {
+                if let Ok(guard) = budget.lock() {
+                    if guard.check() == BudgetStatus::Exhausted {
+                        let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                            .with_session(session.clone());
+                        return ToolLoopOutput {
+                            final_text: String::new(),
+                            iterations,
+                            tool_calls: all_calls,
+                            total_usage,
+                            stop_reason: StopReason::BudgetExhausted,
+                            checkpoint: Some(cp),
+                        };
+                    }
+                }
+            }
+
             // Send current conversation to the backend.
             let response = match match &event_tx {
                 Some(event_tx) => {
@@ -400,7 +439,34 @@ impl ToolLoop {
                 }
             };
             merge_session_state(&mut session, self.backend.extract_session(&response));
-            total_usage.add(&response.extract_usage());
+            let turn_usage = response.extract_usage();
+            total_usage.add(&turn_usage);
+
+            // LIFE-03: Record turn cost in budget tracker after LLM call.
+            if let Some(ref budget) = self.budget {
+                if let Ok(mut guard) = budget.lock() {
+                    let model_name = self
+                        .model_profile
+                        .as_ref()
+                        .map(|p| p.slug.clone())
+                        .unwrap_or_default();
+                    let cost_record = TurnCostRecord {
+                        turn_id: format!("turn-{iterations}"),
+                        model: model_name,
+                        input_tokens: u64::from(turn_usage.input_tokens),
+                        output_tokens: u64::from(turn_usage.output_tokens),
+                        cache_read_tokens: u64::from(turn_usage.cache_read_tokens),
+                        estimated_cost_usd: f64::from(turn_usage.cost_usd),
+                        cognitive_tier: CognitiveTier::Gamma,
+                        t0_suppressed: false,
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    };
+                    guard.record_turn(&cost_record);
+                }
+            }
 
             // Parse tool calls from the response.
             let calls = match self.translator.parse_calls(&response) {

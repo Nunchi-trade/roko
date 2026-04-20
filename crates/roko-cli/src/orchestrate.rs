@@ -5047,7 +5047,9 @@ impl PlanRunner {
             }
             RokoEvent::HeartbeatTick(_)
             | RokoEvent::HeartbeatWakeup { .. }
-            | RokoEvent::CognitiveSignal { .. } => false,
+            | RokoEvent::CognitiveSignal { .. }
+            | RokoEvent::TickBroadcast { .. }
+            | RokoEvent::ReactDecision { .. } => false,
         }
     }
 
@@ -14079,6 +14081,19 @@ impl PlanRunner {
             task_id
         );
         for step in verify_steps {
+            // SAFE-01: Enforce safety layer on verify-step subprocesses.
+            let step_args = vec!["-c".to_string(), step.command.clone()];
+            if let Err(err) = self.safety_layer.check_exec_command("sh", &step_args) {
+                tracing::warn!(
+                    "[orchestrate] safety layer blocked verify step for {task_id}: {err}"
+                );
+                return Err((
+                    task_id.to_string(),
+                    step.phase.clone(),
+                    step.command.clone(),
+                    format!("safety layer blocked: {err}"),
+                ));
+            }
             let output = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(&step.command)
@@ -14091,7 +14106,10 @@ impl PlanRunner {
                     tracing::info!("  ✅ [{}] {}", step.phase, step.command);
                 }
                 Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    // SAFE-01: Scrub secrets from verify-step output.
+                    let stderr = self.safety_layer.scrub_text(
+                        &String::from_utf8_lossy(&o.stderr),
+                    );
                     let msg = step.fail_msg.as_deref().unwrap_or("verification failed");
                     tracing::error!(
                         "  ❌ [{}] {} — {}: {}",
@@ -14104,7 +14122,7 @@ impl PlanRunner {
                         task_id.to_string(),
                         step.phase.clone(),
                         step.command.clone(),
-                        stderr.to_string(),
+                        stderr,
                     ));
                 }
                 Err(e) => {
@@ -14388,7 +14406,7 @@ impl PlanRunner {
             .worktrees
             .get(plan_id)
             .map_or_else(|| format_branch_name(plan_id), |h| h.branch);
-        git_merge_branch_into(&self.workdir, &branch_name).await
+        git_merge_branch_into(&self.workdir, &branch_name, Some(&self.safety_layer)).await
     }
 
     async fn finalize_successful_task_worktree(
@@ -14408,9 +14426,9 @@ impl PlanRunner {
             .await
             .map_err(|e| anyhow!("ensure plan worktree {plan_id}: {e}"))?;
         let commit_message = format!("task: {task_id}");
-        git_commit_all_if_needed(exec_dir, &commit_message).await?;
+        git_commit_all_if_needed(exec_dir, &commit_message, Some(&self.safety_layer)).await?;
         let task_branch = format!("roko/task/{plan_id}/{task_id}");
-        git_merge_branch_into(&plan_handle.path, &task_branch)
+        git_merge_branch_into(&plan_handle.path, &task_branch, Some(&self.safety_layer))
             .await
             .with_context(|| format!("merge task branch {task_branch} into plan {plan_id}"))?;
         self.worktrees.touch(plan_id);
@@ -15800,7 +15818,17 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed
 }
 
-async fn git_commit_all_if_needed(workspace: &Path, message: &str) -> Result<bool> {
+async fn git_commit_all_if_needed(
+    workspace: &Path,
+    message: &str,
+    safety: Option<&SafetyLayer>,
+) -> Result<bool> {
+    // SAFE-01: Enforce safety layer on git subprocess paths.
+    if let Some(layer) = safety {
+        layer
+            .check_exec_command("git", &["add".into(), "-A".into()])
+            .map_err(|e| anyhow!("safety layer blocked git add: {e}"))?;
+    }
     let add_output = tokio::process::Command::new("git")
         .args(["add", "-A"])
         .current_dir(workspace)
@@ -15831,6 +15859,12 @@ async fn git_commit_all_if_needed(workspace: &Path, message: &str) -> Result<boo
         return Err(anyhow!("git diff --cached failed: {stderr}"));
     }
 
+    // SAFE-01: Enforce safety layer on git commit subprocess.
+    if let Some(layer) = safety {
+        layer
+            .check_exec_command("git", &["commit".into(), "-m".into(), message.to_string()])
+            .map_err(|e| anyhow!("safety layer blocked git commit: {e}"))?;
+    }
     let commit_output = tokio::process::Command::new("git")
         .args(["commit", "-m", message])
         .current_dir(workspace)
@@ -15851,7 +15885,25 @@ async fn git_commit_all_if_needed(workspace: &Path, message: &str) -> Result<boo
     Ok(true)
 }
 
-async fn git_merge_branch_into(workspace: &Path, branch: &str) -> Result<()> {
+async fn git_merge_branch_into(
+    workspace: &Path,
+    branch: &str,
+    safety: Option<&SafetyLayer>,
+) -> Result<()> {
+    // SAFE-01: Enforce safety layer on git merge subprocess.
+    if let Some(layer) = safety {
+        layer
+            .check_exec_command(
+                "git",
+                &[
+                    "merge".into(),
+                    "--no-ff".into(),
+                    "--no-edit".into(),
+                    branch.to_string(),
+                ],
+            )
+            .map_err(|e| anyhow!("safety layer blocked git merge: {e}"))?;
+    }
     let output = tokio::process::Command::new("git")
         .args(["merge", "--no-ff", "--no-edit", branch])
         .current_dir(workspace)

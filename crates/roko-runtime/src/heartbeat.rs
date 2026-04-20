@@ -476,6 +476,65 @@ impl CorticalState {
     pub fn active_count(&self) -> u16 {
         self.active_count.load(Ordering::Acquire)
     }
+
+    /// Write the pending predictions count.
+    pub fn set_pending_predictions(&self, count: u32) {
+        self.pending_predictions.store(count, Ordering::Release);
+    }
+
+    /// Read the pending predictions count.
+    pub fn pending_predictions(&self) -> u32 {
+        self.pending_predictions.load(Ordering::Acquire)
+    }
+
+    /// Write the captured dream fragments count.
+    pub fn set_fragments_captured(&self, count: u32) {
+        self.fragments_captured.store(count, Ordering::Release);
+    }
+
+    /// Read the captured dream fragments count.
+    pub fn fragments_captured(&self) -> u32 {
+        self.fragments_captured.load(Ordering::Acquire)
+    }
+
+    /// Write the last tick that produced a novel prediction.
+    pub fn set_last_novel_prediction_tick(&self, tick: u64) {
+        self.last_novel_prediction_tick
+            .store(tick, Ordering::Release);
+    }
+
+    /// Read the last tick that produced a novel prediction.
+    pub fn last_novel_prediction_tick(&self) -> u64 {
+        self.last_novel_prediction_tick.load(Ordering::Acquire)
+    }
+
+    /// Write a per-category prediction accuracy.
+    ///
+    /// `category` must be in `0..16`; out-of-bounds writes are silently ignored.
+    pub fn set_category_accuracy(&self, category: usize, accuracy: f32) {
+        if let Some(slot) = self.category_accuracies.get(category) {
+            store_f32(slot, accuracy.clamp(0.0, 1.0));
+        }
+    }
+
+    /// Read a per-category prediction accuracy.
+    ///
+    /// Returns `None` for out-of-bounds category indices.
+    pub fn category_accuracy(&self, category: usize) -> Option<f32> {
+        self.category_accuracies
+            .get(category)
+            .map(load_f32)
+    }
+
+    /// Read all 16 per-category prediction accuracies.
+    pub fn category_accuracies(&self) -> [f32; 16] {
+        self.category_accuracies.each_ref().map(load_f32)
+    }
+
+    /// Write the aggregate accuracy.
+    pub fn set_aggregate_accuracy(&self, accuracy: f32) {
+        store_f32(&self.aggregate_accuracy, accuracy.clamp(0.0, 1.0));
+    }
 }
 
 impl Default for CorticalState {
@@ -765,6 +824,44 @@ impl HeartbeatPolicy {
         self.bus.emit(RokoEvent::CognitiveSignal {
             signal,
             issued_at: Utc::now(),
+        });
+    }
+
+    /// BEAT-05 BROADCAST step: publish a tick outcome onto the runtime bus
+    /// after PERSIST completes. This enables downstream consumers (dashboard,
+    /// watchers, other agents) to react to tick results without polling.
+    pub fn broadcast_tick_outcome(
+        &self,
+        tick_id: u64,
+        agent_id: impl Into<String>,
+        tier: InferenceTier,
+        passed: Option<bool>,
+        cost_usd: f64,
+    ) {
+        self.bus.emit(RokoEvent::TickBroadcast {
+            tick_id,
+            agent_id: agent_id.into(),
+            tier,
+            passed,
+            cost_usd,
+            broadcast_at: Utc::now(),
+        });
+    }
+
+    /// BEAT-05 REACT step: emit the result of a Policy.decide() call onto
+    /// the runtime bus. Called at the end of each gamma tick after PERSIST
+    /// and BROADCAST, implementing the seven-step loop's REACT phase.
+    pub fn emit_react_decision(
+        &self,
+        tick_id: u64,
+        decision: impl Into<String>,
+        signals: Vec<CognitiveSignal>,
+    ) {
+        self.bus.emit(RokoEvent::ReactDecision {
+            tick_id,
+            decision: decision.into(),
+            signals,
+            decided_at: Utc::now(),
         });
     }
 
@@ -2015,6 +2112,118 @@ pub fn select_tier_from_probes(
     gate_tier(anomaly_signal, threshold, false, *gating_config)
 }
 
+// ---------------------------------------------------------------------------
+// BEAT-10: Tier gating statistics tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks inference tier selection distribution and verifies the 80/15/5
+/// target (T0/T1/T2) over a rolling window.
+///
+/// Feed every tier decision into `record()` and query `distribution()` to
+/// verify that the dual-process gating is working as expected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TierGatingStats {
+    /// Total T0 ticks observed.
+    pub t0_count: u64,
+    /// Total T1 ticks observed.
+    pub t1_count: u64,
+    /// Total T2 ticks observed.
+    pub t2_count: u64,
+    /// Recent tier history for windowed analysis.
+    recent: VecDeque<InferenceTier>,
+    /// Window size for recent tier analysis.
+    window_size: usize,
+}
+
+impl TierGatingStats {
+    /// Create a new tier gating stats tracker.
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            t0_count: 0,
+            t1_count: 0,
+            t2_count: 0,
+            recent: VecDeque::with_capacity(window_size),
+            window_size,
+        }
+    }
+
+    /// Record a tier selection.
+    pub fn record(&mut self, tier: InferenceTier) {
+        match tier {
+            InferenceTier::T0 => self.t0_count += 1,
+            InferenceTier::T1 => self.t1_count += 1,
+            InferenceTier::T2 => self.t2_count += 1,
+        }
+        if self.recent.len() >= self.window_size {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(tier);
+    }
+
+    /// Total number of tier selections recorded.
+    pub fn total(&self) -> u64 {
+        self.t0_count + self.t1_count + self.t2_count
+    }
+
+    /// Return the tier distribution as `[t0_pct, t1_pct, t2_pct]` in `[0.0, 1.0]`.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn distribution(&self) -> [f64; 3] {
+        let total = self.total() as f64;
+        if total < 1.0 {
+            return [0.0; 3];
+        }
+        [
+            self.t0_count as f64 / total,
+            self.t1_count as f64 / total,
+            self.t2_count as f64 / total,
+        ]
+    }
+
+    /// Return the windowed tier distribution over the most recent observations.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn windowed_distribution(&self) -> [f64; 3] {
+        if self.recent.is_empty() {
+            return [0.0; 3];
+        }
+        let mut counts = [0_u64; 3];
+        for tier in &self.recent {
+            counts[usize::from(u8::from(*tier))] += 1;
+        }
+        let n = self.recent.len() as f64;
+        [
+            counts[0] as f64 / n,
+            counts[1] as f64 / n,
+            counts[2] as f64 / n,
+        ]
+    }
+
+    /// Whether the tier distribution is within the expected 80/15/5 target
+    /// (with a tolerance of +/-15 percentage points).
+    pub fn distribution_healthy(&self) -> bool {
+        if self.total() < 20 {
+            return true; // Too few samples to judge.
+        }
+        let [t0, _t1, t2] = self.distribution();
+        // T0 should be >= 60% (target 80% with tolerance)
+        // T2 should be <= 25% (target 5% with tolerance)
+        t0 >= 0.60 && t2 <= 0.25
+    }
+
+    /// Reset all counters and history.
+    pub fn reset(&mut self) {
+        self.t0_count = 0;
+        self.t1_count = 0;
+        self.t2_count = 0;
+        self.recent.clear();
+    }
+}
+
+impl Default for TierGatingStats {
+    fn default() -> Self {
+        Self::new(100)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2219,5 +2428,66 @@ mod tests {
         sched.record_theta_tick(0.01);
         sched.record_delta_tick(0.005);
         assert!((sched.total_cost() - 0.016).abs() < 1e-10);
+    }
+
+    // ----- BEAT-10: TierGatingStats -----
+
+    #[test]
+    fn tier_gating_stats_tracks_distribution() {
+        let mut stats = TierGatingStats::new(100);
+        // Simulate 80/15/5 distribution
+        for _ in 0..80 {
+            stats.record(InferenceTier::T0);
+        }
+        for _ in 0..15 {
+            stats.record(InferenceTier::T1);
+        }
+        for _ in 0..5 {
+            stats.record(InferenceTier::T2);
+        }
+        assert_eq!(stats.total(), 100);
+        let [t0, t1, t2] = stats.distribution();
+        assert!((t0 - 0.80).abs() < 0.01);
+        assert!((t1 - 0.15).abs() < 0.01);
+        assert!((t2 - 0.05).abs() < 0.01);
+        assert!(stats.distribution_healthy());
+    }
+
+    #[test]
+    fn tier_gating_stats_unhealthy_too_much_t2() {
+        let mut stats = TierGatingStats::new(100);
+        for _ in 0..40 {
+            stats.record(InferenceTier::T0);
+        }
+        for _ in 0..30 {
+            stats.record(InferenceTier::T2);
+        }
+        for _ in 0..30 {
+            stats.record(InferenceTier::T1);
+        }
+        assert!(!stats.distribution_healthy());
+    }
+
+    #[test]
+    fn tier_gating_stats_windowed_distribution() {
+        let mut stats = TierGatingStats::new(5);
+        stats.record(InferenceTier::T0);
+        stats.record(InferenceTier::T0);
+        stats.record(InferenceTier::T1);
+        stats.record(InferenceTier::T0);
+        stats.record(InferenceTier::T0);
+        let [t0, t1, _] = stats.windowed_distribution();
+        assert!((t0 - 0.80).abs() < 0.01);
+        assert!((t1 - 0.20).abs() < 0.01);
+    }
+
+    #[test]
+    fn tier_gating_stats_reset() {
+        let mut stats = TierGatingStats::new(10);
+        stats.record(InferenceTier::T0);
+        stats.record(InferenceTier::T1);
+        stats.reset();
+        assert_eq!(stats.total(), 0);
+        assert_eq!(stats.distribution(), [0.0; 3]);
     }
 }

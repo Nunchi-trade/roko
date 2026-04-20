@@ -41,6 +41,7 @@ pub mod result_filter;
 pub mod risk;
 pub mod scrub;
 pub mod temporal;
+pub mod witness;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -62,7 +63,11 @@ use self::risk::{BudgetCheckResult, ProposedAction};
 use self::scrub::ScrubPolicy;
 
 use self::capabilities::{exec_capability_from_command, network_capability_from_url};
-pub use authz::{AuthorizationEvidence, AuthorizationSource, AuthzDecision, EscalationTarget};
+pub use authz::{
+    ApproveAllChannel, AuthorizationEvidence, AuthorizationSource, AuthzDecision,
+    ConfirmationChannel, ConfirmationOutcome, ConfirmationSource, DenyAllChannel,
+    EscalationTarget, LogAndDenyChannel,
+};
 pub use capabilities::{
     AgentWarrant, Capability, CapabilityError, PluginTier, check_capability, check_plugin_tier,
     delegate,
@@ -77,6 +82,7 @@ pub use risk::{
     kelly_fraction,
 };
 pub use temporal::{LtlProperty, MonitorState, TemporalMonitor, Violation};
+pub use witness::{IntegrityViolation, VertexKind, WitnessDag, WitnessLogger, WitnessVertex};
 
 // ─── Tool-name constants used to match calls to policies ──────────────────
 

@@ -24,8 +24,8 @@ pub use schema::{
     GoalsConfig, ImmuneConfig, LearningConfig, PrdConfig, ProjectConfig, RewardWeights,
     RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
     RoutingRewardWeightsConfig, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig,
-    ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, TemporalConfig,
-    TuiConfig, WatcherConfig, WatcherPathConfig,
+    ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig,
+    SubscriptionTrigger, TemporalConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.

@@ -918,6 +918,87 @@ impl RokoConfig {
         }
     }
 
+    /// Classify a proposed configuration change into hot-reloadable fields,
+    /// fields that require restart, and fields that emit warnings.
+    ///
+    /// Returns a [`ConfigChangeReport`] indicating which sections changed and
+    /// whether the changes can be applied without a process restart.
+    ///
+    /// Hot-reloadable sections: `[budget]`, `[gates]`, `[routing]`, `[learning]`,
+    /// `[demurrage]`, `[scheduler]`, `[watcher]`, `subscriptions`.
+    ///
+    /// Restart-required sections: `[agent]` (model/backend changes), `[project]`,
+    /// `[serve]` (port changes), `providers`.
+    #[must_use]
+    pub fn classify_changes(&self, proposed: &Self) -> ConfigChangeReport {
+        let mut report = ConfigChangeReport::default();
+
+        // Hot-reloadable sections.
+        if self.budget != proposed.budget {
+            report.hot_reloaded.push("budget");
+        }
+        if self.gates != proposed.gates {
+            report.hot_reloaded.push("gates");
+        }
+        if self.routing != proposed.routing {
+            report.hot_reloaded.push("routing");
+        }
+        if self.learning != proposed.learning {
+            report.hot_reloaded.push("learning");
+        }
+        if self.demurrage != proposed.demurrage {
+            report.hot_reloaded.push("demurrage");
+        }
+        if self.scheduler != proposed.scheduler {
+            report.hot_reloaded.push("scheduler");
+        }
+        if self.watcher != proposed.watcher {
+            report.hot_reloaded.push("watcher");
+        }
+        if self.subscriptions != proposed.subscriptions {
+            report.hot_reloaded.push("subscriptions");
+        }
+        if self.conductor != proposed.conductor {
+            report.hot_reloaded.push("conductor");
+        }
+        if self.attention != proposed.attention {
+            report.hot_reloaded.push("attention");
+        }
+        if self.goals != proposed.goals {
+            report.hot_reloaded.push("goals");
+        }
+
+        // Restart-required sections.
+        if self.agent != proposed.agent {
+            report.requires_restart.push("agent");
+        }
+        if self.project != proposed.project {
+            report.requires_restart.push("project");
+        }
+        if self.serve != proposed.serve {
+            report.requires_restart.push("serve");
+        }
+        if self.providers != proposed.providers {
+            report.requires_restart.push("providers");
+        }
+        if self.models != proposed.models {
+            report.requires_restart.push("models");
+        }
+        if self.server != proposed.server {
+            report.requires_restart.push("server");
+        }
+
+        // Warnings for sensitive changes.
+        if proposed.budget.max_plan_usd > self.budget.max_plan_usd {
+            report.warnings.push(format!(
+                "budget.max_plan_usd increased from {} to {}",
+                self.budget.max_plan_usd, proposed.budget.max_plan_usd
+            ));
+        }
+
+        report
+    }
+
     /// Generate an example config string showing every field with doc comments.
     #[must_use]
     pub fn example_toml() -> String {
@@ -946,6 +1027,62 @@ impl RokoConfig {
         Self::write_example_deploy(&mut out, &cfg);
 
         out
+    }
+}
+
+/// Report produced by [`RokoConfig::classify_changes`].
+///
+/// Groups changed config sections into hot-reloadable (no restart needed) and
+/// restart-required buckets, plus optional warnings for sensitive changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigChangeReport {
+    /// Sections that changed and can be applied without restart.
+    pub hot_reloaded: Vec<&'static str>,
+    /// Sections that changed but require a process restart.
+    pub requires_restart: Vec<&'static str>,
+    /// Operator-facing warnings about sensitive changes.
+    pub warnings: Vec<String>,
+}
+
+impl ConfigChangeReport {
+    /// Whether any changes were detected at all.
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        !self.hot_reloaded.is_empty() || !self.requires_restart.is_empty()
+    }
+
+    /// Whether a restart is needed to fully apply the changes.
+    #[must_use]
+    pub fn needs_restart(&self) -> bool {
+        !self.requires_restart.is_empty()
+    }
+
+    /// Total number of changed sections.
+    #[must_use]
+    pub fn changed_count(&self) -> usize {
+        self.hot_reloaded.len() + self.requires_restart.len()
+    }
+}
+
+impl fmt::Display for ConfigChangeReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.hot_reloaded.is_empty() {
+            write!(f, "hot-reloaded: {}", self.hot_reloaded.join(", "))?;
+        }
+        if !self.requires_restart.is_empty() {
+            if !self.hot_reloaded.is_empty() {
+                write!(f, "; ")?;
+            }
+            write!(
+                f,
+                "requires restart: {}",
+                self.requires_restart.join(", ")
+            )?;
+        }
+        for w in &self.warnings {
+            write!(f, "\n  warning: {w}")?;
+        }
+        Ok(())
     }
 }
 
@@ -2818,6 +2955,13 @@ pub struct SubscriptionConfig {
     pub template: String,
     /// Engram kind glob used to match webhook signals.
     pub trigger: String,
+    /// Typed trigger configuration (cron schedule, file-watch paths, or webhook URL).
+    ///
+    /// When set, this takes precedence over the plain `trigger` string for
+    /// determining how the subscription fires. The `trigger` field is still
+    /// used for signal matching in the dispatch loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_config: Option<SubscriptionTrigger>,
     /// Optional repo / branch / path filters.
     #[serde(default, skip_serializing_if = "SubscriptionFilterConfig::is_empty")]
     pub filter: SubscriptionFilterConfig,
@@ -2827,6 +2971,10 @@ pub struct SubscriptionConfig {
     /// Minimum interval between dispatches, in seconds.
     #[serde(default)]
     pub cooldown_secs: u64,
+    /// Debounce window in milliseconds. Events arriving within this window
+    /// after the first event are coalesced into a single dispatch.
+    #[serde(default)]
+    pub debounce_ms: u64,
     /// Whether the subscription is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -2837,9 +2985,11 @@ impl Default for SubscriptionConfig {
         Self {
             template: String::new(),
             trigger: String::new(),
+            trigger_config: None,
             filter: SubscriptionFilterConfig::default(),
             concurrency_limit: default_subscription_concurrency_limit(),
             cooldown_secs: 0,
+            debounce_ms: 0,
             enabled: default_true(),
         }
     }
@@ -2847,6 +2997,50 @@ impl Default for SubscriptionConfig {
 
 fn default_subscription_concurrency_limit() -> usize {
     1
+}
+
+/// Typed trigger configuration for subscriptions.
+///
+/// Each variant corresponds to a distinct firing mechanism:
+/// - `Cron` fires on a cron schedule (e.g., `*/30 * * * *`).
+/// - `FileWatch` fires when watched paths change on disk.
+/// - `Webhook` fires when a matching webhook payload arrives.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SubscriptionTrigger {
+    /// Cron-schedule trigger.
+    Cron {
+        /// Standard cron expression (5 or 6 fields).
+        schedule: String,
+    },
+    /// File-system watch trigger.
+    FileWatch {
+        /// Directories or file globs to watch.
+        paths: Vec<String>,
+        /// File-extension filter (e.g., `["rs", "toml"]`). Empty means all.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extensions: Vec<String>,
+        /// Whether to watch recursively (default `true`).
+        #[serde(default = "default_true")]
+        recursive: bool,
+    },
+    /// Webhook trigger (matched against incoming webhook signals).
+    Webhook {
+        /// URL pattern or event type glob to match.
+        event: String,
+    },
+}
+
+impl SubscriptionTrigger {
+    /// Return the trigger type as a string label.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Cron { .. } => "cron",
+            Self::FileWatch { .. } => "file_watch",
+            Self::Webhook { .. } => "webhook",
+        }
+    }
 }
 
 /// Optional filter applied after the trigger pattern matches.
@@ -5211,5 +5405,118 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         // The `_file` key is resolved to its base key.
         assert_eq!(resolved.get("authorization").map(String::as_str), Some("file-secret-value"));
         assert!(!resolved.contains_key("authorization_file"));
+    }
+
+    // ─── ConfigChangeReport tests ─────────────────────────────────────
+
+    #[test]
+    fn classify_changes_detects_hot_reloadable_budget_change() {
+        let current = RokoConfig::default();
+        let mut proposed = current.clone();
+        proposed.budget.max_plan_usd += 5.0;
+        let report = current.classify_changes(&proposed);
+        assert!(report.has_changes());
+        assert!(!report.needs_restart());
+        assert!(report.hot_reloaded.contains(&"budget"));
+        assert!(report.requires_restart.is_empty());
+    }
+
+    #[test]
+    fn classify_changes_detects_restart_required_agent_change() {
+        let current = RokoConfig::default();
+        let mut proposed = current.clone();
+        proposed.agent.default_model = "claude-opus-4-6".into();
+        let report = current.classify_changes(&proposed);
+        assert!(report.has_changes());
+        assert!(report.needs_restart());
+        assert!(report.requires_restart.contains(&"agent"));
+    }
+
+    #[test]
+    fn classify_changes_no_changes_yields_empty_report() {
+        let config = RokoConfig::default();
+        let report = config.classify_changes(&config);
+        assert!(!report.has_changes());
+        assert_eq!(report.changed_count(), 0);
+    }
+
+    #[test]
+    fn classify_changes_emits_budget_increase_warning() {
+        let current = RokoConfig::default();
+        let mut proposed = current.clone();
+        proposed.budget.max_plan_usd = current.budget.max_plan_usd + 100.0;
+        let report = current.classify_changes(&proposed);
+        assert!(!report.warnings.is_empty());
+        assert!(report.warnings[0].contains("max_plan_usd"));
+    }
+
+    // ─── SubscriptionTrigger tests ────────────────────────────────────
+
+    #[test]
+    fn subscription_trigger_cron_roundtrip() {
+        let trigger = SubscriptionTrigger::Cron {
+            schedule: "*/30 * * * *".into(),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, parsed);
+        assert_eq!(trigger.kind(), "cron");
+    }
+
+    #[test]
+    fn subscription_trigger_file_watch_roundtrip() {
+        let trigger = SubscriptionTrigger::FileWatch {
+            paths: vec!["src/".into(), "tests/".into()],
+            extensions: vec!["rs".into()],
+            recursive: true,
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, parsed);
+        assert_eq!(trigger.kind(), "file_watch");
+    }
+
+    #[test]
+    fn subscription_trigger_webhook_roundtrip() {
+        let trigger = SubscriptionTrigger::Webhook {
+            event: "github.pull_request.*".into(),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, parsed);
+        assert_eq!(trigger.kind(), "webhook");
+    }
+
+    #[test]
+    fn subscription_config_with_trigger_config_parses() {
+        let toml_str = r#"
+            template = "pr-review"
+            trigger = "github.pull_request.*"
+            debounce_ms = 500
+            [trigger_config]
+            type = "cron"
+            schedule = "*/5 * * * *"
+        "#;
+        let config: SubscriptionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.template, "pr-review");
+        assert_eq!(config.debounce_ms, 500);
+        assert!(config.trigger_config.is_some());
+        match config.trigger_config.unwrap() {
+            SubscriptionTrigger::Cron { schedule } => {
+                assert_eq!(schedule, "*/5 * * * *");
+            }
+            _ => panic!("expected Cron trigger"),
+        }
+    }
+
+    #[test]
+    fn subscription_config_without_trigger_config_parses() {
+        let toml_str = r#"
+            template = "reviewer"
+            trigger = "github:push"
+        "#;
+        let config: SubscriptionConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.trigger_config.is_none());
+        assert_eq!(config.debounce_ms, 0);
     }
 }

@@ -645,6 +645,25 @@ impl<S> ProvisioningAgent<S> {
     }
 }
 
+/// Run the full provisioning pipeline in one shot.
+///
+/// Validates the manifest, allocates resources, initializes Neuro,
+/// configures routing, loads tools, registers with Mesh, and returns
+/// a ready-state agent. Returns `Err` if manifest validation fails.
+pub fn provision_full(
+    manifest: AgentExtendedManifest,
+    _slot: &str,
+) -> Result<ProvisioningAgent<Ready>, ProvisioningError> {
+    let agent = ProvisioningAgent::new(manifest);
+    let validated = agent.validate()?;
+    let allocated = validated.allocate_resources(_slot);
+    let neuro = allocated.init_neuro();
+    let routing = neuro.configure_routing();
+    let tools = routing.load_tools();
+    let mesh = tools.register_mesh();
+    Ok(mesh.ready())
+}
+
 /// Running agent record returned by the provisioning shell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningAgent {
@@ -2434,5 +2453,55 @@ mod tests {
             cycle.tick(&[]);
         }
         assert_eq!(cycle.next_demurrage_in(), 3);
+    }
+
+    // ─── Provisioning pipeline tests ────────────────────────────────────
+
+    #[test]
+    fn provision_full_happy_path() {
+        let core = AgentCoreManifest {
+            prompt: "I am a coding agent that does work".into(),
+            mode: DeploymentMode::SelfHosted,
+            domain: None,
+            schema_version: 1,
+        };
+        let manifest = AgentExtendedManifest::new(core);
+        let ready = provision_full(manifest, "local-slot-1").unwrap();
+        assert!(ready.state().neuro_initialized);
+        assert!(ready.state().routing_configured);
+        assert_eq!(ready.state().tool_profile, Some("standard".into()));
+        assert!(!ready.state().resources.is_empty());
+    }
+
+    #[test]
+    fn provision_full_rejects_invalid_manifest() {
+        let core = AgentCoreManifest {
+            prompt: "short".into(), // Too short
+            mode: DeploymentMode::SelfHosted,
+            domain: None,
+            schema_version: 1,
+        };
+        let manifest = AgentExtendedManifest::new(core);
+        let result = provision_full(manifest, "local-slot-1");
+        assert!(matches!(result, Err(ProvisioningError::InvalidPromptLength)));
+    }
+
+    #[test]
+    fn provision_full_type_state_prevents_skipping() {
+        // Verify that the type-state pipeline enforces stage ordering at
+        // compile time. This test exists to document the guarantee; the
+        // compiler enforces it — you cannot call `init_neuro()` on an
+        // `Unvalidated` agent.
+        let core = AgentCoreManifest::new("An agent that does research and writes reports");
+        let manifest = AgentExtendedManifest::new(core);
+        let unvalidated = ProvisioningAgent::new(manifest);
+        let validated = unvalidated.validate().unwrap();
+        let allocated = validated.allocate_resources("slot-1");
+        let neuro = allocated.init_neuro();
+        let routed = neuro.configure_routing();
+        let tools = routed.load_tools();
+        let mesh = tools.register_mesh();
+        let ready = mesh.ready();
+        assert!(ready.state().neuro_initialized);
     }
 }

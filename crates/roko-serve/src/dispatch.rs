@@ -691,9 +691,11 @@ impl Subscription {
         SubscriptionConfig {
             template: self.template.clone(),
             trigger: self.trigger.clone(),
+            trigger_config: None,
             filter: self.filter.clone(),
             concurrency_limit: self.concurrency_limit,
             cooldown_secs: self.cooldown_secs,
+            debounce_ms: 0,
             enabled: self.enabled,
         }
     }

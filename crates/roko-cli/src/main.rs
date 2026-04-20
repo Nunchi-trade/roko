@@ -240,6 +240,11 @@ enum Command {
         #[command(subcommand)]
         cmd: roko_cli::SecretsCmd,
     },
+    /// Inspect the custody audit chain (list, show, verify).
+    Custody {
+        #[command(subcommand)]
+        cmd: CustodyCmd,
+    },
     /// Manage standalone agent runtimes.
     Agent {
         #[command(subcommand)]
@@ -462,6 +467,33 @@ enum CompletionShell {
     Bash,
     Zsh,
     Fish,
+}
+
+#[derive(Debug, Subcommand)]
+enum CustodyCmd {
+    /// List recent custody records.
+    List {
+        /// Maximum number of records to display.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show full details of a custody record by index.
+    Show {
+        /// Record index (0-based).
+        index: usize,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Verify integrity of the custody chain.
+    Verify {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1083,6 +1115,23 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Secret { cmd } => {
             let workdir = resolve_workdir(cli);
             roko_cli::secrets::dispatch_secrets(&cmd, &workdir)?;
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Custody { cmd } => {
+            match cmd {
+                CustodyCmd::List { limit, workdir } => {
+                    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                    roko_cli::custody::cmd_custody_list(&wd, limit)?;
+                }
+                CustodyCmd::Show { index, workdir } => {
+                    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                    roko_cli::custody::cmd_custody_show(&wd, index)?;
+                }
+                CustodyCmd::Verify { workdir } => {
+                    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                    roko_cli::custody::cmd_custody_verify(&wd)?;
+                }
+            }
             Ok(EXIT_SUCCESS)
         }
         Command::Agent { cmd } => cmd_agent(cli, cmd).await,

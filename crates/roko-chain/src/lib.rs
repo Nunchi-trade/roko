@@ -14,6 +14,7 @@ pub mod alloy_impl;
 pub mod client;
 pub mod futures_market;
 pub mod gate;
+pub mod heartbeat_ext;
 pub mod identity_economy_identity;
 pub mod identity_economy_markets;
 pub mod isfr;
@@ -32,6 +33,10 @@ pub use gate::{
     WalletGate, WalletGateConfig,
 };
 pub use futures_market::{FuturesMarket, FuturesMarketConfig};
+pub use heartbeat_ext::{
+    ChainHeartbeatExtension, ChainPreActResult, PolicyCageConfig, PolicyCageState,
+    PolicyViolation, SimulateResult, SleepwalkerConfig, ValidateResult, ViolationSeverity,
+};
 pub use isfr::{IsfrConfig, IsfrRegistry};
 pub use mock::{MockChainClient, MockChainWallet, paired_mocks};
 pub use observer::{AddressFilter, BlockObserver, BlockObserverConfig, BlockTracker, ObservedEvent};

@@ -47,7 +47,7 @@ pub mod runner;
 pub mod staging;
 pub mod threat;
 
-pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
+pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport, PhaseBudgetSummary, StagingBufferStats};
 pub use hypnagogia::{
     DaliInterrupt, ExecutiveLoosener, HomuncularObserver, HypnagogiaEngine, ThalamicGate,
 };

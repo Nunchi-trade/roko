@@ -235,6 +235,16 @@ impl RokoLayout {
         self.root.join("custody.jsonl")
     }
 
+    /// `.roko/witness.jsonl` — append-only witness DAG log.
+    ///
+    /// Each line is a JSON-serialized `WitnessVertex` recording the
+    /// agent reasoning chain (observation, prediction, decision,
+    /// resolution, neuro entry).
+    #[must_use]
+    pub fn witness_log(&self) -> PathBuf {
+        self.root.join("witness.jsonl")
+    }
+
     /// `.roko/memory/playbook.toml` — the active playbook.
     #[must_use]
     pub fn playbook_path(&self) -> PathBuf {
@@ -443,6 +453,15 @@ mod tests {
         assert_eq!(
             layout.context_pack_cache_dir(),
             PathBuf::from("/c/.roko/cache/context-pack-cache")
+        );
+    }
+
+    #[test]
+    fn witness_log_path() {
+        let layout = RokoLayout::new("/w/.roko");
+        assert_eq!(
+            layout.witness_log(),
+            PathBuf::from("/w/.roko/witness.jsonl")
         );
     }
 
