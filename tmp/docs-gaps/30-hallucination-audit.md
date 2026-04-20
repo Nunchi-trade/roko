@@ -527,9 +527,13 @@ needed for the full vision.
 
 ### P2-10: Kalman filter smoothing
 
-- [ ] **Spec** (referenced in technical analysis for signal processing): Kalman filter for online signal smoothing in oracle predictions.
-- **Code**: No Kalman filter implementation found in `crates/`.
-- **Fix**: Implement `KalmanFilter` struct with predict/update cycle for oracle signal smoothing.
+- [x] **Spec** (referenced in technical analysis for signal processing): Kalman filter for signal smoothing.
+- **FIXED**: Implemented `roko_learn::kalman::KalmanFilter` with:
+  - Standard predict/update cycle for random-walk model
+  - Factory methods: `for_oracle_smoothing()`, `for_tracking()`
+  - Anomaly detection via normalized innovation squared
+  - Dynamic noise adjustment, batch processing, reset
+  - 9 tests: convergence, gain decrease, Q/R tradeoffs, anomaly detection
 
 ### P2-11: Collusion ring detection (EigenTrust)
 

@@ -121,6 +121,8 @@ pub mod hdc_clustering;
 pub mod hdc_fingerprint;
 /// Heuristic, worldview, and research-provenance shells for learning parity.
 pub mod heuristics;
+/// Kalman filter for online signal smoothing in oracle predictions (P2-10).
+pub mod kalman;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
