@@ -60,6 +60,8 @@ pub mod korai_token;
 /// Spore job marketplace with escrow and 3 hiring models (CHAIN-04).
 pub mod marketplace;
 pub mod mock;
+/// Nelson-Siegel yield curve model for DeFi oracle rate term structure (P2-09).
+pub mod nelson_siegel;
 pub mod observer;
 pub mod phase2;
 /// Reputation Registry with 7-domain EMA scoring (CHAIN-03).

@@ -527,9 +527,13 @@ needed for the full vision.
 
 ### P2-09: Nelson-Siegel yield curve
 
-- [ ] **Spec** (referenced in technical analysis for DeFi oracle yield curve modeling): Nelson-Siegel parametric model for PT/YT term structure.
-- **Code**: No Nelson-Siegel implementation found in `crates/`.
-- **Fix**: Implement `NelsonSiegel { beta0, beta1, beta2, tau }` yield curve model in chain oracle.
+- [x] **Spec** (referenced in technical analysis for DeFi oracle yield curve modeling): Nelson-Siegel model.
+- **FIXED**: Implemented `roko_chain::nelson_siegel::NelsonSiegel` with:
+  - 4-parameter model (beta0, beta1, beta2, tau) for yield curve term structure
+  - `rate(maturity)`, `forward_rate(maturity)`, `rate_curve(maturities)` computation
+  - `short_rate()`, `long_rate()`, `term_spread()`, `hump_maturity()` analytics
+  - `fit(observations)` — grid search + OLS least squares fitting
+  - 10 tests covering flat curves, convergence, fitting, spread calculation
 
 ### P2-10: Kalman filter smoothing
 
@@ -564,9 +568,8 @@ needed for the full vision.
 
 ### P2-13: Governance amnesty for bans
 
-- [ ] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` line 124): "Bans can be appealed through governance after 365 days."
-- **Code**: No appeal mechanism, no governance integration for ban reversal.
-- **Fix**: Add governance appeal path for banned agents.
+- [x] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` line 124): "Bans can be appealed through governance after 365 days."
+- **FIXED**: Added `ban_agent(id, now)` with timestamp tracking, `amnesty_eligible(id, now)` returning days remaining, and `governance_amnesty(id, now)` to lift bans after 365-day wait. Test covers the full lifecycle.
 
 ---
 

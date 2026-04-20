@@ -606,10 +606,48 @@ impl ReputationRegistry {
             .unwrap_or(DisciplineState::GoodStanding)
     }
 
-    /// Ban an agent (governance action).
-    pub fn ban_agent(&mut self, passport_id: u256) {
+    /// Ban an agent (governance action). Records the ban timestamp for amnesty tracking.
+    pub fn ban_agent(&mut self, passport_id: u256, now: u64) {
         if let Some(agent) = self.records.get_mut(&passport_id) {
             agent.discipline_override = Some(DisciplineState::Banned);
+            agent.recovery.state_entered_at = now;
+        }
+    }
+
+    /// Check if a banned agent is eligible for governance amnesty appeal.
+    ///
+    /// Per spec: "Bans can be appealed through governance after 365 days."
+    /// Returns the remaining days until eligible, or 0 if already eligible.
+    pub fn amnesty_eligible(&self, passport_id: u256, now: u64) -> Option<u64> {
+        let agent = self.records.get(&passport_id)?;
+        if agent.discipline_override != Some(DisciplineState::Banned) {
+            return None; // Not banned
+        }
+
+        let ban_duration = now.saturating_sub(agent.recovery.state_entered_at);
+        let required = 365 * 24 * 3600; // 365 days in seconds
+        if ban_duration >= required {
+            Some(0) // Eligible now
+        } else {
+            let remaining_secs = required - ban_duration;
+            Some(remaining_secs / (24 * 3600)) // Days remaining
+        }
+    }
+
+    /// Lift a ban via governance amnesty (requires 365-day wait).
+    ///
+    /// Returns `true` if the ban was lifted, `false` if not eligible.
+    pub fn governance_amnesty(&mut self, passport_id: u256, now: u64) -> bool {
+        if self.amnesty_eligible(passport_id, now) != Some(0) {
+            return false;
+        }
+
+        if let Some(agent) = self.records.get_mut(&passport_id) {
+            agent.discipline_override = Some(DisciplineState::GoodStanding);
+            agent.recovery.reset(now);
+            true
+        } else {
+            false
         }
     }
 
@@ -944,8 +982,30 @@ mod tests {
         let now = 1_000_000;
         registry.register_agent(1, now);
 
-        registry.ban_agent(1);
+        registry.ban_agent(1, now);
         assert_eq!(registry.discipline_state(1, now), DisciplineState::Banned);
+    }
+
+    #[test]
+    fn governance_amnesty_after_365_days() {
+        let mut registry = ReputationRegistry::new();
+        let now = 1_000_000;
+        registry.register_agent(1, now);
+        registry.ban_agent(1, now);
+
+        // Not eligible before 365 days.
+        let before = now + 300 * 24 * 3600;
+        assert!(registry.amnesty_eligible(1, before).unwrap() > 0);
+        assert!(!registry.governance_amnesty(1, before));
+
+        // Eligible after 365 days.
+        let after = now + 366 * 24 * 3600;
+        assert_eq!(registry.amnesty_eligible(1, after), Some(0));
+        assert!(registry.governance_amnesty(1, after));
+        assert_eq!(
+            registry.discipline_state(1, after),
+            DisciplineState::GoodStanding
+        );
     }
 
     #[test]
