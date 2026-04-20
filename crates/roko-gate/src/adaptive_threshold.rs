@@ -55,8 +55,10 @@ impl Default for RungStats {
 }
 
 /// Default CUSUM sensitivity parameter (slack allowance).
-/// Smaller values detect smaller shifts sooner but increase false alarms.
-const DEFAULT_CUSUM_SENSITIVITY: f64 = 0.05;
+///
+/// Per spec (docs/04-verification/06-adaptive-thresholds.md): k=0.25.
+/// This balances detection speed against false alarm rate for gate pipelines.
+const DEFAULT_CUSUM_SENSITIVITY: f64 = 0.25;
 
 /// Default CUSUM decision threshold.
 /// CUSUM signals a shift when the accumulator exceeds this value.

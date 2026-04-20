@@ -378,9 +378,12 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-01: CRPS scoring (proper scoring rule for distributions)
 
-- [ ] **Spec** (`docs/20-technical-analysis/13-predictive-foraging-and-active-inference.md`): Predictions should be evaluated using CRPS (Continuous Ranked Probability Score), a proper scoring rule for distribution forecasts. CRPS generalizes MAE to full distributions.
-- **Code**: No CRPS implementation found anywhere in `crates/`. `PredictionAccuracy` at `crates/roko-core/src/prediction.rs` uses point-estimate accuracy only.
-- **Fix**: Implement `crps_score(forecast_cdf, observation) -> f64` in `roko-core/src/prediction.rs`.
+- [x] **Spec** (`docs/20-technical-analysis/13-predictive-foraging-and-active-inference.md`): Predictions should be evaluated using CRPS.
+- **FIXED**: Implemented `prediction::crps` module in `roko-core/src/prediction.rs` with:
+  - `crps::gaussian(mean, std_dev, observation)` — closed-form for Gaussian forecasts
+  - `crps::empirical(samples, observation)` — for sample-based forecasts
+  - `crps::uniform(lower, upper, observation)` — closed-form for uniform interval forecasts
+  - 8 unit tests covering perfect predictions, error scaling, spread penalty, degenerate cases
 
 ### P1-02: TraceRank (graph-based reputation from payment edges)
 
@@ -448,15 +451,8 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-11: Adaptive alpha for reputation EMA
 
-- [ ] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` lines 58-68): Alpha adapts based on job count:
-  ```
-  0-10 jobs:   alpha = 0.30
-  11-50 jobs:  alpha = 0.15
-  51-200 jobs: alpha = 0.08
-  200+ jobs:   alpha = 0.04
-  ```
-- **Code** (`crates/roko-chain/src/reputation_registry.rs` line 29): Uses a fixed `BASE_ALPHA = 0.1` with volatility-based adaptation (`alpha = base_alpha * (1.0 + volatility)`), which is a different formula entirely.
-- **Fix**: Replace volatility-based alpha with job-count-based adaptive alpha matching spec.
+- [x] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` lines 58-68): Alpha adapts based on job count.
+- **FIXED**: Replaced volatility-based alpha with job-count-based tiers (0.30/0.15/0.08/0.04) in reputation_registry.rs.
 
 ---
 
@@ -656,10 +652,8 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Gates (HIGH)
 
-- [ ] **P1-12: CUSUM sensitivity parameter mismatch**
-  - Spec (docs/04-verification/06-adaptive-thresholds.md): k=0.25
-  - Code: DEFAULT_CUSUM_SENSITIVITY = 0.05
-  - 5x difference in detection sensitivity
+- [x] **P1-12: CUSUM sensitivity parameter mismatch**
+  - FIXED: DEFAULT_CUSUM_SENSITIVITY changed from 0.05 to 0.25 per spec.
 
 - [ ] **P1-13: PELT offline change point detection not implemented**
   - Spec describes PeltDetector with cost functions

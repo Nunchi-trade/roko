@@ -584,6 +584,207 @@ impl PredictionAccuracy {
     }
 }
 
+// ─── CRPS: Continuous Ranked Probability Score ──────────────────────
+
+/// Continuous Ranked Probability Score (CRPS) — a proper scoring rule for
+/// distribution forecasts.
+///
+/// CRPS generalizes MAE (Mean Absolute Error) to full probability distributions.
+/// It measures how well a predictive distribution matches an observation:
+/// - CRPS = 0 means the forecast CDF is a step function at the observation (perfect).
+/// - CRPS increases as the forecast distribution diverges from reality.
+///
+/// For a forecast CDF F and observation y:
+///   CRPS(F, y) = integral[-inf, +inf] (F(x) - I(x >= y))^2 dx
+///
+/// ## Usage
+///
+/// ```rust
+/// use roko_core::prediction::crps;
+///
+/// // Gaussian forecast: mean=10.0, std=2.0, actual observation=11.0
+/// let score = crps::gaussian(10.0, 2.0, 11.0);
+/// assert!(score > 0.0);
+/// assert!(score < 3.0); // Reasonable for a 0.5-sigma deviation
+/// ```
+pub mod crps {
+    /// CRPS for a Gaussian (normal) forecast distribution.
+    ///
+    /// Closed-form: `CRPS(N(mu, sigma), y) = sigma * [z*(2*Phi(z) - 1) + 2*phi(z) - 1/sqrt(pi)]`
+    /// where `z = (y - mu) / sigma`, Phi is the standard normal CDF, phi is the PDF.
+    ///
+    /// # Arguments
+    /// - `mean`: Forecast distribution mean.
+    /// - `std_dev`: Forecast distribution standard deviation (must be > 0).
+    /// - `observation`: The actual observed value.
+    ///
+    /// # Returns
+    /// The CRPS score (lower is better, 0 = perfect).
+    pub fn gaussian(mean: f64, std_dev: f64, observation: f64) -> f64 {
+        if std_dev <= 0.0 {
+            // Degenerate case: point forecast → CRPS = MAE.
+            return (observation - mean).abs();
+        }
+
+        let z = (observation - mean) / std_dev;
+        let phi_z = standard_normal_pdf(z);
+        let big_phi_z = standard_normal_cdf(z);
+
+        // Closed-form CRPS for Gaussian.
+        // 1/sqrt(pi) = 0.5641895835477563
+        std_dev * (z * (2.0 * big_phi_z - 1.0) + 2.0 * phi_z - std::f64::consts::PI.sqrt().recip())
+    }
+
+    /// CRPS for an empirical forecast distribution given as sorted samples.
+    ///
+    /// Uses the empirical CDF representation:
+    ///   CRPS = (1/n) * sum_i |x_i - y| - (1/(2*n^2)) * sum_i sum_j |x_i - x_j|
+    ///
+    /// # Arguments
+    /// - `samples`: Forecast samples (will be used as-is; caller should sort for efficiency).
+    /// - `observation`: The actual observed value.
+    ///
+    /// # Returns
+    /// The CRPS score (lower is better, 0 = perfect).
+    pub fn empirical(samples: &[f64], observation: f64) -> f64 {
+        if samples.is_empty() {
+            return f64::NAN;
+        }
+        let n = samples.len() as f64;
+
+        // Term 1: mean absolute difference from observation.
+        let term1: f64 = samples.iter().map(|&x| (x - observation).abs()).sum::<f64>() / n;
+
+        // Term 2: mean pairwise absolute difference (spread penalty).
+        let mut term2 = 0.0;
+        for i in 0..samples.len() {
+            for j in 0..samples.len() {
+                term2 += (samples[i] - samples[j]).abs();
+            }
+        }
+        term2 /= 2.0 * n * n;
+
+        term1 - term2
+    }
+
+    /// CRPS for a uniform distribution on [a, b].
+    ///
+    /// Closed-form for U(a, b):
+    ///   - If y < a: CRPS = (a - y) + (b - a)/3
+    ///   - If y > b: CRPS = (y - b) + (b - a)/3
+    ///   - If a <= y <= b: CRPS = (b - a) * [(z^2 + (1-z)^2 - 1) / 3 + z*(2*z - 1)]
+    ///     where z = (y - a) / (b - a)... simplified below.
+    pub fn uniform(lower: f64, upper: f64, observation: f64) -> f64 {
+        if upper <= lower {
+            return (observation - lower).abs();
+        }
+
+        let width = upper - lower;
+
+        if observation < lower {
+            (lower - observation) + width / 3.0
+        } else if observation > upper {
+            (observation - upper) + width / 3.0
+        } else {
+            // Inside the interval.
+            let z = (observation - lower) / width;
+            width * (z * z - z + 1.0 / 3.0)
+        }
+    }
+
+    /// Standard normal PDF: phi(z) = exp(-z^2/2) / sqrt(2*pi).
+    fn standard_normal_pdf(z: f64) -> f64 {
+        (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt()
+    }
+
+    /// Standard normal CDF using the error function approximation.
+    ///
+    /// Abramowitz & Stegun approximation 7.1.26 (max error < 1.5e-7).
+    fn standard_normal_cdf(z: f64) -> f64 {
+        0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
+    }
+
+    /// Error function approximation (Horner form).
+    fn erf(x: f64) -> f64 {
+        let sign = x.signum();
+        let x = x.abs();
+
+        // Abramowitz & Stegun coefficients.
+        let t = 1.0 / (1.0 + 0.3275911 * x);
+        let poly = t
+            * (0.254829592
+                + t * (-0.284496736
+                    + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+
+        sign * (1.0 - poly * (-x * x).exp())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn gaussian_crps_perfect_prediction() {
+            // Point prediction at the observation → CRPS approaches 0.
+            let score = gaussian(10.0, 0.001, 10.0);
+            assert!(score < 0.001, "perfect Gaussian prediction should have CRPS near 0, got {score}");
+        }
+
+        #[test]
+        fn gaussian_crps_increases_with_error() {
+            let close = gaussian(10.0, 1.0, 10.5);
+            let far = gaussian(10.0, 1.0, 15.0);
+            assert!(far > close, "CRPS should increase with distance: close={close}, far={far}");
+        }
+
+        #[test]
+        fn gaussian_crps_increases_with_uncertainty() {
+            // Same observation, wider distribution = worse CRPS.
+            let narrow = gaussian(10.0, 0.5, 10.0);
+            let wide = gaussian(10.0, 5.0, 10.0);
+            assert!(wide > narrow, "wider distribution should have worse CRPS: narrow={narrow}, wide={wide}");
+        }
+
+        #[test]
+        fn empirical_crps_perfect_sample() {
+            // All samples at the observation.
+            let samples = vec![5.0, 5.0, 5.0, 5.0];
+            let score = empirical(&samples, 5.0);
+            assert!(score.abs() < 1e-10, "perfect empirical forecast should have CRPS=0, got {score}");
+        }
+
+        #[test]
+        fn empirical_crps_spread_penalty() {
+            // Samples spread around observation.
+            let concentrated = vec![9.9, 10.0, 10.0, 10.1];
+            let spread = vec![5.0, 8.0, 12.0, 15.0];
+            let s1 = empirical(&concentrated, 10.0);
+            let s2 = empirical(&spread, 10.0);
+            assert!(s2 > s1, "spread forecast should score worse: concentrated={s1}, spread={s2}");
+        }
+
+        #[test]
+        fn uniform_crps_observation_at_center() {
+            let score = uniform(0.0, 10.0, 5.0);
+            // For U(0,10) with y=5 (center): CRPS = 10 * (0.25 - 0.5 + 1/3) = 10 * 0.0833 = 0.833
+            assert!((score - 0.8333).abs() < 0.01, "uniform center CRPS should be ~0.833, got {score}");
+        }
+
+        #[test]
+        fn uniform_crps_observation_outside() {
+            let score = uniform(0.0, 10.0, 15.0);
+            // Outside: (15-10) + 10/3 = 5 + 3.33 = 8.33
+            assert!((score - 8.333).abs() < 0.01, "uniform outside CRPS should be ~8.33, got {score}");
+        }
+
+        #[test]
+        fn degenerate_gaussian_equals_mae() {
+            let score = gaussian(10.0, 0.0, 13.0);
+            assert!((score - 3.0).abs() < 1e-10, "degenerate Gaussian CRPS should equal MAE=3.0, got {score}");
+        }
+    }
+}
+
 /// Resolution state of a prediction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PredictionOutcome {
