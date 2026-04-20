@@ -475,6 +475,84 @@ pub fn build_graph(files: &[SourceFile]) -> SymbolGraph {
         }
     }
 
+    // Phase 6: infer Contains edges from scope nesting.
+    // Functions/methods that appear between an impl/mod/trait symbol and the
+    // next symbol at the same scope level are considered "contained" by that
+    // parent. Heuristic: symbols sorted by line number; impl/mod/trait symbols
+    // "contain" subsequent function symbols until the next non-function symbol
+    // of the same or higher kind.
+    for file in files {
+        let mut symbols = file.symbols.iter().collect::<Vec<_>>();
+        symbols.sort_by_key(|sym| sym.line);
+
+        let mut current_parent: Option<SymbolId> = None;
+        for sym in &symbols {
+            if matches!(
+                sym.kind,
+                SymbolKind::Impl | SymbolKind::Module | SymbolKind::Trait
+            ) {
+                // This is a container — set as current parent.
+                current_parent = Some(SymbolId::from_symbol(sym, &file.path));
+            } else if matches!(
+                sym.kind,
+                SymbolKind::Struct | SymbolKind::Enum
+            ) {
+                // Top-level type resets the containment scope.
+                current_parent = None;
+            } else if sym.kind == SymbolKind::Function {
+                // Function after a container: emit Contains edge.
+                if let Some(ref parent_id) = current_parent {
+                    let child_id = SymbolId::from_symbol(sym, &file.path);
+                    if *parent_id != child_id {
+                        add_edge(
+                            &mut forward,
+                            &mut reverse,
+                            &mut seen_edges,
+                            parent_id.clone(),
+                            child_id,
+                            EdgeKind::Contains,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 7: infer Implements edges from `impl Trait for Type` symbols.
+    // The Rust parser produces Impl symbols named "Trait for Type". We split
+    // on " for " to resolve both the trait and the type, then emit edges:
+    //   Type --Implements--> Trait
+    for file in files {
+        for sym in &file.symbols {
+            if sym.kind != SymbolKind::Impl {
+                continue;
+            }
+            // Check for "Trait for Type" pattern.
+            if let Some(for_pos) = sym.name.find(" for ") {
+                let trait_name = &sym.name[..for_pos];
+                let type_name = &sym.name[for_pos + 5..];
+
+                // Resolve the trait and type to existing SymbolIds.
+                let trait_ids = name_to_ids.get(trait_name).cloned().unwrap_or_default();
+                let type_ids = name_to_ids.get(type_name).cloned().unwrap_or_default();
+
+                for type_id in &type_ids {
+                    for trait_id in &trait_ids {
+                        // Type implements Trait: edge from type to trait.
+                        add_edge(
+                            &mut forward,
+                            &mut reverse,
+                            &mut seen_edges,
+                            type_id.clone(),
+                            trait_id.clone(),
+                            EdgeKind::Implements,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     SymbolGraph {
         nodes,
         forward,
@@ -615,6 +693,85 @@ pub fn weighted_pagerank(
     rank
 }
 
+/// Compute Personalized PageRank (PPR) biased toward a set of seed nodes.
+///
+/// Instead of uniform teleport (`(1-d)/N` to all nodes), teleport probability
+/// is concentrated on the seed nodes:
+/// ```text
+/// rank_new[j] = (1-d) * seed_weight[j]
+///             + d * sum(rank[i] * edge_weight(i,j) / out_weight[i])
+/// ```
+/// where `seed_weight[j] = 1.0 / |seeds|` if `j` is a seed, else `0.0`.
+///
+/// Uses edge weights from [`edge_weight`] (same as [`weighted_pagerank`]).
+/// Surfaces task-relevant symbols that might have low global importance but are
+/// critical for the current context window.
+#[allow(clippy::cast_precision_loss)]
+pub fn personalized_pagerank(
+    graph: &SymbolGraph,
+    seed_nodes: &[SymbolId],
+    damping: f64,
+    iterations: u32,
+) -> HashMap<SymbolId, f64> {
+    let all_nodes: Vec<&SymbolId> = graph.nodes.iter().collect();
+    let n = all_nodes.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+
+    // Build the seed set for O(1) lookup.
+    let seed_set: HashSet<&SymbolId> = seed_nodes.iter().collect();
+    let seed_count = seed_set.len().max(1) as f64;
+
+    // Pre-compute weighted out-degree for each node.
+    let weighted_out: HashMap<&SymbolId, f64> = all_nodes
+        .iter()
+        .map(|&id| {
+            let w = graph
+                .forward
+                .get(id)
+                .map(|edges| edges.iter().map(|(_, kind)| edge_weight(kind)).sum::<f64>())
+                .unwrap_or(0.0)
+                .max(f64::MIN_POSITIVE);
+            (id, w)
+        })
+        .collect();
+
+    let n_f = n as f64;
+    let mut rank: HashMap<SymbolId, f64> = all_nodes
+        .iter()
+        .map(|id| ((*id).clone(), 1.0 / n_f))
+        .collect();
+
+    for _ in 0..iterations {
+        let mut new_rank: HashMap<SymbolId, f64> = HashMap::with_capacity(n);
+
+        for &node in &all_nodes {
+            // Personalized teleport: only seeds get teleport probability.
+            let teleport = if seed_set.contains(node) {
+                (1.0 - damping) / seed_count
+            } else {
+                0.0
+            };
+
+            let mut incoming_sum = 0.0_f64;
+            if let Some(inbound) = graph.reverse.get(node) {
+                for (src, kind) in inbound {
+                    let src_rank = rank.get(src).copied().unwrap_or(0.0);
+                    let w = edge_weight(kind);
+                    let out_w = weighted_out.get(src).copied().unwrap_or(1.0);
+                    incoming_sum += src_rank * w / out_w;
+                }
+            }
+            new_rank.insert(node.clone(), damping.mul_add(incoming_sum, teleport));
+        }
+
+        rank = new_rank;
+    }
+
+    rank
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,6 +878,188 @@ mod tests {
         let callees = graph.neighbors_by_kind(&main_id, EdgeKind::Calls);
         assert!(!callees.is_empty());
         assert!(callees.iter().any(|callee| callee.symbol_name == "helper"));
+    }
+
+    #[test]
+    fn contains_edges_for_impl_block() {
+        // impl Foo contains methods bar and baz.
+        let files = vec![make_file(
+            "a.rs",
+            vec![
+                Symbol {
+                    name: "Foo".into(),
+                    kind: SymbolKind::Impl,
+                    visibility: Visibility::Private,
+                    line: 1,
+                },
+                Symbol {
+                    name: "bar".into(),
+                    kind: SymbolKind::Function,
+                    visibility: Visibility::Public,
+                    line: 2,
+                },
+                Symbol {
+                    name: "baz".into(),
+                    kind: SymbolKind::Function,
+                    visibility: Visibility::Public,
+                    line: 5,
+                },
+            ],
+            vec![],
+        )];
+        let graph = build_graph(&files);
+        let impl_id = SymbolId::new("a.rs", "Foo", SymbolKind::Impl);
+        let contained = graph.neighbors_by_kind(&impl_id, EdgeKind::Contains);
+        assert_eq!(
+            contained.len(),
+            2,
+            "impl Foo should contain 2 functions, got {:?}",
+            contained
+        );
+        assert!(contained.iter().any(|c| c.symbol_name == "bar"));
+        assert!(contained.iter().any(|c| c.symbol_name == "baz"));
+    }
+
+    #[test]
+    fn contains_edges_for_module() {
+        // mod tests contains a function.
+        let files = vec![make_file(
+            "a.rs",
+            vec![
+                Symbol {
+                    name: "tests".into(),
+                    kind: SymbolKind::Module,
+                    visibility: Visibility::Private,
+                    line: 1,
+                },
+                sym("it_works", SymbolKind::Function),
+            ],
+            vec![],
+        )];
+        let graph = build_graph(&files);
+        let mod_id = SymbolId::new("a.rs", "tests", SymbolKind::Module);
+        let contained = graph.neighbors_by_kind(&mod_id, EdgeKind::Contains);
+        assert!(
+            contained.iter().any(|c| c.symbol_name == "it_works"),
+            "module should contain its function"
+        );
+    }
+
+    #[test]
+    fn implements_edges_for_trait_impl() {
+        // `impl Display for Foo` should create Foo --Implements--> Display.
+        let files = vec![make_file(
+            "a.rs",
+            vec![
+                Symbol {
+                    name: "Display".into(),
+                    kind: SymbolKind::Trait,
+                    visibility: Visibility::Public,
+                    line: 1,
+                },
+                Symbol {
+                    name: "Foo".into(),
+                    kind: SymbolKind::Struct,
+                    visibility: Visibility::Public,
+                    line: 5,
+                },
+                Symbol {
+                    name: "Display for Foo".into(),
+                    kind: SymbolKind::Impl,
+                    visibility: Visibility::Private,
+                    line: 10,
+                },
+            ],
+            vec![],
+        )];
+        let graph = build_graph(&files);
+
+        // Foo should have an Implements edge to Display.
+        let foo_id = SymbolId::new("a.rs", "Foo", SymbolKind::Struct);
+        let impls = graph.neighbors_by_kind(&foo_id, EdgeKind::Implements);
+        assert!(
+            impls.iter().any(|i| i.symbol_name == "Display"),
+            "Foo should implement Display, but got: {:?}",
+            impls
+        );
+
+        // Reverse: Display should have Foo as a reverse Implements neighbor.
+        let display_id = SymbolId::new("a.rs", "Display", SymbolKind::Trait);
+        let rev = graph.reverse_neighbors_by_kind(&display_id, EdgeKind::Implements);
+        assert!(
+            rev.iter().any(|r| r.symbol_name == "Foo"),
+            "Display should be implemented by Foo"
+        );
+    }
+
+    #[test]
+    fn implements_edges_across_files() {
+        // Trait in one file, struct + impl in another.
+        let files = vec![
+            make_file(
+                "trait.rs",
+                vec![Symbol {
+                    name: "Serializable".into(),
+                    kind: SymbolKind::Trait,
+                    visibility: Visibility::Public,
+                    line: 1,
+                }],
+                vec![],
+            ),
+            make_file(
+                "model.rs",
+                vec![
+                    Symbol {
+                        name: "Config".into(),
+                        kind: SymbolKind::Struct,
+                        visibility: Visibility::Public,
+                        line: 1,
+                    },
+                    Symbol {
+                        name: "Serializable for Config".into(),
+                        kind: SymbolKind::Impl,
+                        visibility: Visibility::Private,
+                        line: 5,
+                    },
+                ],
+                vec![],
+            ),
+        ];
+        let graph = build_graph(&files);
+
+        let config_id = SymbolId::new("model.rs", "Config", SymbolKind::Struct);
+        let impls = graph.neighbors_by_kind(&config_id, EdgeKind::Implements);
+        assert!(
+            impls.iter().any(|i| i.symbol_name == "Serializable"),
+            "Config should implement Serializable across files"
+        );
+    }
+
+    #[test]
+    fn edge_count_by_kind_works() {
+        let files = vec![make_file(
+            "a.rs",
+            vec![
+                Symbol {
+                    name: "Foo".into(),
+                    kind: SymbolKind::Impl,
+                    visibility: Visibility::Private,
+                    line: 1,
+                },
+                Symbol {
+                    name: "bar".into(),
+                    kind: SymbolKind::Function,
+                    visibility: Visibility::Public,
+                    line: 2,
+                },
+            ],
+            vec![],
+        )];
+        let graph = build_graph(&files);
+        assert!(
+            graph.edge_count_by_kind(EdgeKind::Contains) > 0,
+            "should have at least one Contains edge"
+        );
     }
 
     #[test]
@@ -913,5 +1252,149 @@ mod tests {
             (max - min).abs() < 0.01,
             "Cycle nodes should have near-equal ranks, max={max} min={min}"
         );
+    }
+
+    // ── Personalized PageRank tests (CODE-07) ───────────────────────
+
+    #[test]
+    fn personalized_pagerank_empty() {
+        let graph = build_graph(&[]);
+        let ranks = personalized_pagerank(&graph, &[], 0.85, 10);
+        assert!(ranks.is_empty());
+    }
+
+    #[test]
+    fn personalized_pagerank_seed_gets_higher_rank() {
+        // Star topology: A, B, C all import Hub.
+        // PPR seeded on A should give A higher rank than B or C.
+        let files = vec![
+            make_file("hub.rs", vec![sym("Hub", SymbolKind::Struct)], vec![]),
+            make_file(
+                "a.rs",
+                vec![sym("A", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "b.rs",
+                vec![sym("B", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "c.rs",
+                vec![sym("C", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+        ];
+        let graph = build_graph(&files);
+        let seed = SymbolId::new("a.rs", "A", SymbolKind::Function);
+        let ranks = personalized_pagerank(&graph, &[seed.clone()], 0.85, 30);
+
+        let a_rank = ranks.get(&seed).copied().unwrap_or(0.0);
+        let b_id = SymbolId::new("b.rs", "B", SymbolKind::Function);
+        let b_rank = ranks.get(&b_id).copied().unwrap_or(0.0);
+        let c_id = SymbolId::new("c.rs", "C", SymbolKind::Function);
+        let c_rank = ranks.get(&c_id).copied().unwrap_or(0.0);
+
+        assert!(
+            a_rank > b_rank,
+            "Seed A ({a_rank}) should rank higher than non-seed B ({b_rank})"
+        );
+        assert!(
+            a_rank > c_rank,
+            "Seed A ({a_rank}) should rank higher than non-seed C ({c_rank})"
+        );
+    }
+
+    #[test]
+    fn personalized_pagerank_hub_still_high_when_seeded() {
+        // Even with PPR seeded on A, Hub (with 3 inbound edges) should still
+        // rank highly because it receives rank from all nodes.
+        let files = vec![
+            make_file("hub.rs", vec![sym("Hub", SymbolKind::Struct)], vec![]),
+            make_file(
+                "a.rs",
+                vec![sym("A", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "b.rs",
+                vec![sym("B", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "c.rs",
+                vec![sym("C", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+        ];
+        let graph = build_graph(&files);
+        let seed = SymbolId::new("a.rs", "A", SymbolKind::Function);
+        let ranks = personalized_pagerank(&graph, &[seed], 0.85, 30);
+
+        let hub_id = SymbolId::new("hub.rs", "Hub", SymbolKind::Struct);
+        let hub_rank = ranks.get(&hub_id).copied().unwrap_or(0.0);
+        let b_id = SymbolId::new("b.rs", "B", SymbolKind::Function);
+        let b_rank = ranks.get(&b_id).copied().unwrap_or(0.0);
+
+        // Hub should still outrank non-seed leaf B because of link structure.
+        assert!(
+            hub_rank > b_rank,
+            "Hub ({hub_rank}) should outrank non-seed B ({b_rank})"
+        );
+    }
+
+    #[test]
+    fn personalized_pagerank_multiple_seeds() {
+        // Seeds A and B should both rank higher than non-seed C.
+        let files = vec![
+            make_file("hub.rs", vec![sym("Hub", SymbolKind::Struct)], vec![]),
+            make_file(
+                "a.rs",
+                vec![sym("A", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "b.rs",
+                vec![sym("B", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+            make_file(
+                "c.rs",
+                vec![sym("C", SymbolKind::Function)],
+                vec![imp("hub::Hub")],
+            ),
+        ];
+        let graph = build_graph(&files);
+        let seed_a = SymbolId::new("a.rs", "A", SymbolKind::Function);
+        let seed_b = SymbolId::new("b.rs", "B", SymbolKind::Function);
+        let ranks =
+            personalized_pagerank(&graph, &[seed_a.clone(), seed_b.clone()], 0.85, 30);
+
+        let a_rank = ranks.get(&seed_a).copied().unwrap_or(0.0);
+        let b_rank = ranks.get(&seed_b).copied().unwrap_or(0.0);
+        let c_id = SymbolId::new("c.rs", "C", SymbolKind::Function);
+        let c_rank = ranks.get(&c_id).copied().unwrap_or(0.0);
+
+        assert!(
+            a_rank > c_rank,
+            "Seed A ({a_rank}) should rank higher than C ({c_rank})"
+        );
+        assert!(
+            b_rank > c_rank,
+            "Seed B ({b_rank}) should rank higher than C ({c_rank})"
+        );
+    }
+
+    #[test]
+    fn personalized_pagerank_empty_seeds_still_runs() {
+        // Empty seeds = no teleport to any node. All nodes should get 0 or
+        // near-zero rank except from random walk itself.
+        let files = vec![
+            make_file("a.rs", vec![sym("A", SymbolKind::Function)], vec![]),
+        ];
+        let graph = build_graph(&files);
+        let ranks = personalized_pagerank(&graph, &[], 0.85, 10);
+        // Should still return results (all near-zero since no teleport).
+        assert_eq!(ranks.len(), 1);
     }
 }

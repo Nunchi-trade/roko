@@ -6,10 +6,11 @@
 //! stream, collects their outputs, and merges them via the
 //! [`InterventionPolicy`](crate::interventions::InterventionPolicy).
 
-use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState, ProactiveTripSignal};
 use crate::interventions::{
     InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy, outputs_to_signals,
 };
+use crate::pattern_detector::PatternDetector;
 use crate::threshold_learner::{InterventionOutcome, ThresholdLearner};
 use crate::watchers::{
     CompileFailRepeatWatcher, ContextWindowPressureWatcher, CostOverrunWatcher, GhostTurnWatcher,
@@ -68,6 +69,8 @@ pub struct Conductor {
     provider_health: Option<Arc<ProviderHealthTracker>>,
     /// Adaptive threshold learner (COND-03).
     threshold_learner: Mutex<ThresholdLearner>,
+    /// CEP-inspired compound pattern detector (COND-07).
+    pattern_detector: Mutex<PatternDetector>,
 }
 
 impl std::fmt::Debug for Conductor {
@@ -109,6 +112,7 @@ impl Conductor {
             routing_bias: Mutex::new(RoutingBias::default()),
             provider_health: None,
             threshold_learner: Mutex::new(ThresholdLearner::new()),
+            pattern_detector: Mutex::new(PatternDetector::default()),
         }
     }
 
@@ -131,6 +135,7 @@ impl Conductor {
             routing_bias: Mutex::new(RoutingBias::default()),
             provider_health: None,
             threshold_learner: Mutex::new(ThresholdLearner::new()),
+            pattern_detector: Mutex::new(PatternDetector::default()),
         }
     }
 
@@ -207,11 +212,18 @@ impl Conductor {
     ///
     /// Like [`evaluate`](Self::evaluate) but also derives [`CognitiveSignal`]s
     /// from the watcher outputs, providing richer feedback to the orchestrator.
+    ///
+    /// Integrates:
+    /// - COND-07: Pattern detector for compound pattern escalation
+    /// - COND-08: Proactive circuit breaker warnings from Holt forecaster
+    /// - COND-09: Provider health escalation signals
     #[must_use]
     pub fn evaluate_full(&self, stream: &[Engram], ctx: &Context) -> ConductorEvaluation {
-        // Check circuit breaker first.
-        if let Some(plan_id) = extract_plan_id(stream) {
-            if self.circuit_breaker.is_tripped(&plan_id) {
+        let plan_id = extract_plan_id(stream);
+
+        // Check circuit breaker first (count-based + predictive).
+        if let Some(ref pid) = plan_id {
+            if self.circuit_breaker.is_tripped(pid) {
                 self.update_routing_bias(stream, &[]);
                 return ConductorDecision::fail(
                     "circuit-breaker",
@@ -230,6 +242,67 @@ impl Conductor {
         // Derive cognitive signals from watcher outputs.
         let mut signals = derive_cognitive_signals(&watcher_outputs);
 
+        // COND-07: Feed watcher outputs to pattern detector for compound patterns.
+        let compound_patterns = self.pattern_detector.lock().record(&watcher_outputs);
+        for pattern in &compound_patterns {
+            tracing::info!(
+                pattern = %pattern.pattern_name,
+                watchers = ?pattern.contributing_watchers,
+                severity = ?pattern.escalated_severity,
+                "compound pattern detected"
+            );
+            // Compound patterns emit richer signals based on the pattern type.
+            match pattern.pattern_name.as_str() {
+                "resource_exhaustion" | "total_resource_exhaustion" => {
+                    signals.push(CognitiveSignal::Cooldown { factor: 2.0 });
+                    signals.push(CognitiveSignal::Reprioritize {
+                        reason: format!(
+                            "compound pattern: {} ({})",
+                            pattern.pattern_name,
+                            pattern.contributing_watchers.join(", ")
+                        ),
+                    });
+                }
+                "quality_degradation" => {
+                    signals.push(CognitiveSignal::Escalate { to_tier: 3 });
+                }
+                "progress_stall" | "progressive_degradation" => {
+                    signals.push(CognitiveSignal::Explore {
+                        budget_multiplier: 2.0,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // COND-08: Proactive circuit breaker warnings.
+        if let Some(ref pid) = plan_id {
+            if let Some(signal) = self.circuit_breaker.check_proactive(pid) {
+                match signal {
+                    ProactiveTripSignal::Warning { forecast_h3, .. } => {
+                        tracing::warn!(
+                            plan_id = pid.as_str(),
+                            forecast_h3,
+                            "circuit breaker trending toward trip"
+                        );
+                        signals.push(CognitiveSignal::Cooldown { factor: 1.5 });
+                    }
+                    ProactiveTripSignal::ProactiveTrip { forecast_h1, .. } => {
+                        tracing::warn!(
+                            plan_id = pid.as_str(),
+                            forecast_h1,
+                            "circuit breaker proactively tripping"
+                        );
+                        signals.push(CognitiveSignal::Shutdown {
+                            reason: format!(
+                                "proactive circuit break: forecast error rate {forecast_h1:.2}"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         // COND-09: Check provider health and emit escalation signals.
         if let Some(ref tracker) = self.provider_health {
             if let Some(provider) = extract_provider(stream) {
@@ -243,14 +316,25 @@ impl Conductor {
             }
         }
 
-        // Apply escalation policy.
-        let decision = self.policy.evaluate(&watcher_outputs, ctx);
+        // Apply escalation policy. If compound patterns escalated to Critical,
+        // override the policy decision.
+        let mut decision = self.policy.evaluate(&watcher_outputs, ctx);
+        if compound_patterns
+            .iter()
+            .any(|p| p.escalated_severity == Severity::Critical)
+            && decision.is_continue()
+        {
+            decision = ConductorDecision::restart(
+                "pattern-detector",
+                "compound pattern detected at critical severity",
+            );
+        }
 
         // Record failures in circuit breaker.
         if let ConductorDecision::Fail { watcher, reason } = &decision {
-            if let Some(plan_id) = extract_plan_id(stream) {
+            if let Some(pid) = plan_id {
                 self.circuit_breaker.record_failure(
-                    &plan_id,
+                    &pid,
                     format!("{watcher}: {reason}"),
                     ctx.now_ms,
                 );
@@ -258,6 +342,14 @@ impl Conductor {
         }
 
         decision.with_signals(signals)
+    }
+
+    /// Access the pattern detector (e.g. for inspection or testing).
+    pub fn with_pattern_detector<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut PatternDetector) -> R,
+    {
+        f(&mut self.pattern_detector.lock())
     }
 }
 

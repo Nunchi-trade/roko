@@ -54,7 +54,9 @@ pub mod pattern_detector;
 pub use roko_core::{CognitiveSignal, ConductorDecision, ConductorEvaluation, PhaseKind, PlanPhase};
 
 // Re-export primary types from this crate.
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState, FailureRecord};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerState, FailureRecord, HoltForecaster, ProactiveTripSignal,
+};
 pub use conductor::{Conductor, RoutingBias};
 pub use diagnosis::{
     Diagnosis, DiagnosisEngine, DiagnosisResult, ErrorCategory, ErrorPattern, SuggestedIntervention,

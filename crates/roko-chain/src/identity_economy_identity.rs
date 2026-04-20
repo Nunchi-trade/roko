@@ -157,10 +157,158 @@ pub struct PersonalizedPageRank {
 }
 
 impl PersonalizedPageRank {
-    /// Compute trust propagation over the interaction graph.
-    pub fn compute(&self, _graph: &InteractionGraph) -> HashMap<u256, f64> {
-        todo!("Phase 2+: compute personalized PageRank scores for passport trust")
+    /// Compute personalized PageRank trust scores over an interaction graph.
+    ///
+    /// Iterates until convergence (`max_delta < epsilon`) or `max_iterations`
+    /// is reached. Seed nodes receive a teleport share of `alpha`; remaining
+    /// `(1-alpha)` mass propagates along weighted edges.
+    pub fn compute(&self, graph: &InteractionGraph) -> HashMap<u256, f64> {
+        if graph.nodes.is_empty() {
+            return HashMap::new();
+        }
+
+        let n = graph.nodes.len();
+
+        // Build outgoing-weight sums for normalizing edges.
+        let mut out_weight: HashMap<u256, f64> = HashMap::new();
+        for &(from, _, w) in &graph.edges {
+            *out_weight.entry(from).or_insert(0.0) += w;
+        }
+
+        // Uniform initialisation.
+        let mut scores: HashMap<u256, f64> =
+            graph.nodes.iter().map(|id| (*id, 1.0 / n as f64)).collect();
+
+        let seed_val = if self.seed_set.is_empty() {
+            0.0
+        } else {
+            1.0 / self.seed_set.len() as f64
+        };
+
+        for _ in 0..self.max_iterations {
+            let mut new_scores: HashMap<u256, f64> = HashMap::with_capacity(n);
+
+            for &node in &graph.nodes {
+                // Teleport component: non-zero only for seed nodes.
+                let seed_component = if self.seed_set.contains(&node) {
+                    self.alpha * seed_val
+                } else {
+                    0.0
+                };
+
+                // Neighbour propagation — sum over in-edges.
+                let neighbor_sum: f64 = graph
+                    .edges
+                    .iter()
+                    .filter(|(_, to, _)| *to == node)
+                    .map(|(from, _, w)| {
+                        let from_score = scores.get(from).copied().unwrap_or(0.0);
+                        let out_w = out_weight.get(from).copied().unwrap_or(1.0);
+                        from_score * (w / out_w)
+                    })
+                    .sum();
+
+                new_scores.insert(node, seed_component + (1.0 - self.alpha) * neighbor_sum);
+            }
+
+            let max_delta = graph
+                .nodes
+                .iter()
+                .map(|n| {
+                    (new_scores.get(n).copied().unwrap_or(0.0)
+                        - scores.get(n).copied().unwrap_or(0.0))
+                    .abs()
+                })
+                .fold(0.0_f64, f64::max);
+
+            scores = new_scores;
+            if max_delta < self.epsilon {
+                break;
+            }
+        }
+
+        scores
     }
+}
+
+impl SybilRankDetector {
+    /// Propagate trust from seed nodes for `walk_length` steps, then flag
+    /// nodes whose final trust is below `threshold` as potential Sybils.
+    pub fn detect(&self, graph: &InteractionGraph) -> SybilScanResult {
+        if graph.nodes.is_empty() {
+            return SybilScanResult::default();
+        }
+
+        let n = graph.nodes.len();
+
+        // Build outgoing-weight sums for normalizing edges.
+        let mut out_weight: HashMap<u256, f64> = HashMap::new();
+        for &(from, _, w) in &graph.edges {
+            *out_weight.entry(from).or_insert(0.0) += w;
+        }
+
+        // Initialise trust: uniform budget on seed nodes, zero elsewhere.
+        let seed_budget = if self.trust_seed.is_empty() {
+            0.0
+        } else {
+            1.0 / self.trust_seed.len() as f64
+        };
+        let mut trust: HashMap<u256, f64> = graph
+            .nodes
+            .iter()
+            .map(|&id| {
+                let t = if self.trust_seed.contains(&id) {
+                    seed_budget
+                } else {
+                    0.0
+                };
+                (id, t)
+            })
+            .collect();
+
+        // Propagate for walk_length steps (O(log n) recommended).
+        for _ in 0..self.walk_length {
+            let mut new_trust: HashMap<u256, f64> =
+                graph.nodes.iter().map(|&id| (id, 0.0)).collect();
+            for &(from, to, w) in &graph.edges {
+                let from_trust = trust.get(&from).copied().unwrap_or(0.0);
+                let out_w = out_weight.get(&from).copied().unwrap_or(1.0);
+                *new_trust.entry(to).or_insert(0.0) += from_trust * (w / out_w);
+            }
+            trust = new_trust;
+        }
+
+        // Flag nodes below threshold.
+        let flagged_agents: Vec<u256> = graph
+            .nodes
+            .iter()
+            .filter(|id| trust.get(id).copied().unwrap_or(0.0) < self.threshold)
+            .copied()
+            .collect();
+        let honest_region_size = n - flagged_agents.len();
+
+        SybilScanResult {
+            flagged_agents,
+            clusters: Vec::new(), // cluster detection done via detect_collusion_rings
+            honest_region_size,
+            scan_timestamp: 0,
+        }
+    }
+}
+
+/// Detect collusion rings: clusters with high internal density but few
+/// external connections suggest coordinated Sybil behaviour.
+///
+/// Criteria: `internal_edge_density > 0.5` **and**
+/// `external_edge_count < members.len() * 2`.
+pub fn detect_collusion_rings(clusters: &[SybilCluster]) -> Vec<&SybilCluster> {
+    clusters
+        .iter()
+        .filter(|c| {
+            c.internal_edge_density > 0.5
+                && (c.external_edge_count as usize) < c.members.len() * 2
+        })
+        .collect()
 }
 
 /// Placeholder interaction graph for trust propagation.
@@ -280,6 +428,53 @@ pub struct ReputationTrack {
     pub last_feedback_block: u64,
     /// Encoded discipline state for the domain.
     pub discipline_state: u8,
+}
+
+impl ReputationTrack {
+    /// Return the score as an `f64` in the range `[0.0, 1.0]`.
+    pub fn score_f64(&self) -> f64 {
+        f64::from(self.score) / 1000.0
+    }
+
+    /// Apply an EMA reputation update.
+    ///
+    /// `observation` is in `[0.0, 1.0]`. Adaptive alpha =
+    /// `min(0.3, 2/(feedback_count+1))`. On cold start (first observation)
+    /// alpha = 1.0 so the first observation sets the initial score.
+    /// `now_block` is the current block number used for timestamping.
+    pub fn update_reputation(&mut self, observation: f64, now_block: u64) {
+        let obs = observation.clamp(0.0, 1.0);
+        let alpha = if self.feedback_count == 0 {
+            1.0
+        } else {
+            (2.0 / (self.feedback_count as f64 + 1.0)).min(0.3)
+        };
+        let old = self.score_f64();
+        let new_score = alpha * obs + (1.0 - alpha) * old;
+        self.score = (new_score * 1000.0).round().min(1000.0) as u16;
+        self.feedback_count += 1;
+        self.last_feedback_block = now_block;
+    }
+
+    /// Return the reputation score decayed toward the 0.5 baseline using a
+    /// 30-day half-life. `now_secs` and `last_updated_secs` are wall-clock
+    /// seconds.
+    pub fn decayed_score(&self, now_secs: u64, last_updated_secs: u64) -> f64 {
+        let days_since =
+            now_secs.saturating_sub(last_updated_secs) as f64 / 86_400.0;
+        // 30-day half-life: decay factor = exp(-ln2 * days / 30)
+        let decay = (-0.693_147_18 * days_since / 30.0).exp();
+        let s = self.score_f64();
+        0.5 + (s - 0.5) * decay
+    }
+
+    /// Reputation multiplier: `0.1 + 2.9 * R^1.7`.
+    ///
+    /// Maps a reputation in `[0, 1]` to a multiplier in `[0.1, 3.0]`, used
+    /// by Vickrey auction scoring and dynamic pricing.
+    pub fn reputation_multiplier(&self) -> f64 {
+        0.1 + 2.9 * self.score_f64().powf(1.7)
+    }
 }
 
 /// Slash record attached to a Korai passport.
@@ -930,4 +1125,186 @@ pub struct X402Receipt {
     pub payee: String,
     /// Settlement timestamp.
     pub settled_at: u64,
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // IDECON-01: EMA reputation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reputation_cold_start_sets_initial() {
+        let mut t = ReputationTrack::default();
+        t.update_reputation(0.8, 100);
+        assert_eq!(t.score, 800); // cold start alpha=1.0
+        assert_eq!(t.feedback_count, 1);
+        assert_eq!(t.last_feedback_block, 100);
+    }
+
+    #[test]
+    fn reputation_ema_blends() {
+        let mut t = ReputationTrack::default();
+        // Cold start
+        t.update_reputation(1.0, 1);
+        assert_eq!(t.score, 1000);
+        // Second observation: alpha = min(0.3, 2/2) = min(0.3, 1.0) = 0.3
+        // new = 0.3 * 0.0 + 0.7 * 1.0 = 0.7
+        t.update_reputation(0.0, 2);
+        assert_eq!(t.score, 700);
+    }
+
+    #[test]
+    fn reputation_alpha_caps_at_03() {
+        let mut t = ReputationTrack {
+            feedback_count: 100,
+            score: 500,
+            ..Default::default()
+        };
+        // alpha = min(0.3, 2/101) = min(0.3, ~0.0198) = ~0.0198
+        t.update_reputation(1.0, 200);
+        // Small alpha means small move: 0.0198 * 1.0 + 0.9802 * 0.5 ~ 0.51
+        assert!(t.score_f64() > 0.5 && t.score_f64() < 0.55);
+    }
+
+    #[test]
+    fn decayed_score_at_zero_days() {
+        let t = ReputationTrack {
+            score: 800,
+            ..Default::default()
+        };
+        let d = t.decayed_score(1000, 1000);
+        assert!((d - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decayed_score_at_30_days_halves_delta() {
+        let t = ReputationTrack {
+            score: 1000,
+            ..Default::default()
+        };
+        let d = t.decayed_score(30 * 86_400, 0);
+        // After 30 days: 0.5 + (1.0 - 0.5) * 0.5 = 0.75
+        assert!((d - 0.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn reputation_multiplier_boundaries() {
+        let low = ReputationTrack {
+            score: 0,
+            ..Default::default()
+        };
+        let high = ReputationTrack {
+            score: 1000,
+            ..Default::default()
+        };
+        assert!((low.reputation_multiplier() - 0.1).abs() < 1e-9);
+        assert!((high.reputation_multiplier() - 3.0).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-06: PersonalizedPageRank
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ppr_empty_graph() {
+        let ppr = PersonalizedPageRank {
+            alpha: 0.15,
+            seed_set: vec![],
+            max_iterations: 100,
+            epsilon: 1e-6,
+        };
+        let graph = InteractionGraph::default();
+        let scores = ppr.compute(&graph);
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn ppr_seed_gets_highest_score() {
+        let ppr = PersonalizedPageRank {
+            alpha: 0.15,
+            seed_set: vec![1],
+            max_iterations: 100,
+            epsilon: 1e-9,
+        };
+        let graph = InteractionGraph {
+            nodes: vec![1, 2, 3],
+            edges: vec![
+                (1, 2, 1.0),
+                (2, 3, 1.0),
+                (3, 1, 1.0),
+            ],
+        };
+        let scores = ppr.compute(&graph);
+        assert!(scores[&1] > scores[&2]);
+        assert!(scores[&1] > scores[&3]);
+    }
+
+    #[test]
+    fn ppr_all_scores_nonneg() {
+        let ppr = PersonalizedPageRank {
+            alpha: 0.15,
+            seed_set: vec![1, 2],
+            max_iterations: 50,
+            epsilon: 1e-6,
+        };
+        let graph = InteractionGraph {
+            nodes: vec![1, 2, 3],
+            edges: vec![(1, 2, 1.0), (2, 3, 1.0)],
+        };
+        let scores = ppr.compute(&graph);
+        for s in scores.values() {
+            assert!(*s >= 0.0, "PPR score must be non-negative");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-06: SybilRank
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sybil_rank_flags_disconnected_nodes() {
+        let detector = SybilRankDetector {
+            walk_length: 4, // even, so trust ends back at the seed
+            trust_seed: vec![1],
+            threshold: 0.01,
+        };
+        // Cycle so trust flows back to seed after even-length walk.
+        let graph = InteractionGraph {
+            nodes: vec![1, 2, 99],
+            edges: vec![(1, 2, 1.0), (2, 1, 1.0)],
+        };
+        let result = detector.detect(&graph);
+        // Node 99 is disconnected, should be flagged.
+        assert!(result.flagged_agents.contains(&99));
+        // Node 1 is a seed and retains trust -- not flagged.
+        assert!(!result.flagged_agents.contains(&1));
+    }
+
+    #[test]
+    fn collusion_ring_detection() {
+        let clusters = vec![
+            SybilCluster {
+                members: vec![10, 11, 12],
+                internal_edge_density: 0.8,
+                external_edge_count: 1, // < 3*2 = 6
+                estimated_sybil_probability: 0.0,
+            },
+            SybilCluster {
+                members: vec![20, 21],
+                internal_edge_density: 0.2, // below 0.5
+                external_edge_count: 10,
+                estimated_sybil_probability: 0.0,
+            },
+        ];
+        let rings = detect_collusion_rings(&clusters);
+        assert_eq!(rings.len(), 1);
+        assert!(rings[0].members.contains(&10));
+    }
 }

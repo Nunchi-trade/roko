@@ -629,6 +629,18 @@ pub struct BidderContext {
     pub prediction_accuracy: f32,
     /// Number of code symbols available.
     pub code_symbol_count: usize,
+    // ── INT-17: Technical analysis signals ──────────────────────────────
+    /// Build pass rate from recent build history (0.0-1.0).
+    /// Fed from `CodingOracle` observations.
+    pub build_pass_rate: f64,
+    /// Test pass rate from recent test history (0.0-1.0).
+    /// Fed from `CodingOracle` observations.
+    pub test_pass_rate: f64,
+    /// Complexity trend: positive means increasing complexity (higher risk).
+    /// Derived from `CodingOracle` complexity observations.
+    pub complexity_trend: f64,
+    /// Whether a build/test regression was detected (quality degradation).
+    pub regression_detected: bool,
 }
 
 impl BidderContext {
@@ -837,25 +849,58 @@ impl ContextBidder for TaskContextBidder {
     }
 }
 
-/// Oracle predictions bidder: bids for calibration data context.
+/// Oracle predictions bidder: bids for calibration data and technical
+/// analysis context (INT-17).
+///
+/// In addition to the base prediction accuracy signal, this bidder now
+/// considers technical analysis signals from the `CodingOracle`:
+/// - Build/test pass rate regression boosts bid value
+/// - Rising complexity trend increases the context budget
+/// - Detected regression triggers an additional high-priority candidate
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OraclePredictionsBidder;
 
 impl ContextBidder for OraclePredictionsBidder {
     fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
-        // Only bid when prediction accuracy is low enough to warrant inclusion.
-        if ctx.prediction_accuracy > 0.9 {
-            return Vec::new();
+        let mut candidates = Vec::new();
+
+        // Base calibration candidate: bid when prediction accuracy is low.
+        if ctx.prediction_accuracy <= 0.9 {
+            let expected_value = (1.0 - ctx.prediction_accuracy as f64).clamp(0.2, 0.8);
+            candidates.push(ContextCandidate::new(
+                SubsystemId::OraclePredictions,
+                ContextCategory::OraclePredictions,
+                192,
+                expected_value,
+                ctx.urgency(),
+                "oracle prediction calibration",
+            ));
         }
-        let expected_value = (1.0 - ctx.prediction_accuracy as f64).clamp(0.2, 0.8);
-        vec![ContextCandidate::new(
-            SubsystemId::OraclePredictions,
-            ContextCategory::OraclePredictions,
-            192,
-            expected_value,
-            ctx.urgency(),
-            "oracle prediction calibration",
-        )]
+
+        // INT-17: Technical analysis signals from CodingOracle.
+        // Build/test regression: when pass rates drop below 0.8, inject
+        // build quality context to help the agent avoid known failure patterns.
+        let quality_risk = 1.0 - (ctx.build_pass_rate.min(ctx.test_pass_rate));
+        if quality_risk > 0.2 || ctx.regression_detected {
+            let regression_value = if ctx.regression_detected {
+                0.9 // High priority for detected regressions
+            } else {
+                quality_risk.clamp(0.3, 0.7)
+            };
+            // Scale token budget by complexity trend: rising complexity
+            // needs more context for the agent to navigate safely.
+            let budget = 128 + (ctx.complexity_trend.max(0.0) * 64.0).min(128.0) as usize;
+            candidates.push(ContextCandidate::new(
+                SubsystemId::OraclePredictions,
+                ContextCategory::OraclePredictions,
+                budget,
+                regression_value,
+                ctx.urgency(),
+                "technical analysis: build/test quality signals",
+            ));
+        }
+
+        candidates
     }
 
     fn subsystem_id(&self) -> SubsystemId {
@@ -1886,18 +1931,54 @@ mod tests {
     #[test]
     fn oracle_bidder_bids_when_accuracy_low() {
         let bidder = OraclePredictionsBidder;
+        // Low accuracy + healthy build/test rates => only calibration candidate.
         let low_acc = BidderContext {
             prediction_accuracy: 0.5,
+            build_pass_rate: 1.0,
+            test_pass_rate: 1.0,
             ..Default::default()
         };
         let candidates = bidder.generate_candidates(&low_acc);
         assert_eq!(candidates.len(), 1);
 
+        // High accuracy + healthy rates => no candidates.
         let high_acc = BidderContext {
             prediction_accuracy: 0.95,
+            build_pass_rate: 1.0,
+            test_pass_rate: 1.0,
             ..Default::default()
         };
         assert!(bidder.generate_candidates(&high_acc).is_empty());
+    }
+
+    #[test]
+    fn oracle_bidder_adds_tech_analysis_on_regression() {
+        let bidder = OraclePredictionsBidder;
+        // High accuracy but regression detected => tech analysis candidate.
+        let regression = BidderContext {
+            prediction_accuracy: 0.95,
+            build_pass_rate: 0.6,
+            test_pass_rate: 0.9,
+            regression_detected: true,
+            ..Default::default()
+        };
+        let candidates = bidder.generate_candidates(&regression);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].content_summary.contains("technical analysis"));
+    }
+
+    #[test]
+    fn oracle_bidder_both_calibration_and_tech_analysis() {
+        let bidder = OraclePredictionsBidder;
+        // Low accuracy AND low build rate => both candidates.
+        let both = BidderContext {
+            prediction_accuracy: 0.5,
+            build_pass_rate: 0.5,
+            test_pass_rate: 0.9,
+            ..Default::default()
+        };
+        let candidates = bidder.generate_candidates(&both);
+        assert_eq!(candidates.len(), 2);
     }
 
     #[test]

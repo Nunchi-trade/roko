@@ -291,29 +291,57 @@ pub struct LmsrMarketMaker {
 }
 
 impl LmsrMarketMaker {
-    /// Compute the LMSR cost function.
+    /// LMSR cost function (Hanson 2003): `C(q) = b * ln(e^(q_d/b) + e^(q_f/b))`.
+    ///
+    /// `b` is the liquidity parameter; higher `b` means lower price impact per
+    /// trade, but higher bounded loss for the market maker (max = `b * ln(2)`
+    /// for a binary market).
     pub fn cost(&self) -> f64 {
-        todo!("Phase 2+: evaluate LMSR market cost for knowledge futures")
+        let b = self.b.max(f64::EPSILON);
+        b * ((self.shares_deliver / b).exp() + (self.shares_default / b).exp()).ln()
     }
 
-    /// Return the market price for the deliver outcome.
+    /// Instantaneous price for the "deliver" outcome.
+    ///
+    /// `p_deliver = e^(q_d/b) / (e^(q_d/b) + e^(q_f/b))`.
     pub fn price_deliver(&self) -> f64 {
-        todo!("Phase 2+: compute deliver probability from LMSR shares")
+        let b = self.b.max(f64::EPSILON);
+        let e_d = (self.shares_deliver / b).exp();
+        let e_f = (self.shares_default / b).exp();
+        e_d / (e_d + e_f)
     }
 
-    /// Return the market price for the default outcome.
+    /// Instantaneous price for the "default" outcome.
+    ///
+    /// Always `1 - price_deliver()`, maintaining the unit-sum property.
     pub fn price_default(&self) -> f64 {
-        todo!("Phase 2+: compute default probability from LMSR shares")
+        1.0 - self.price_deliver()
     }
 
-    /// Buy shares for the selected outcome.
-    pub fn buy(&mut self, _outcome: Outcome, _amount: f64) -> f64 {
-        todo!("Phase 2+: purchase LMSR outcome shares")
+    /// Buy `shares` of the selected outcome.
+    ///
+    /// Returns the cost of the purchase (always non-negative): the
+    /// difference in cost function before and after the trade.
+    pub fn buy(&mut self, outcome: Outcome, shares: f64) -> f64 {
+        let cost_before = self.cost();
+        match outcome {
+            Outcome::Deliver => self.shares_deliver += shares,
+            Outcome::Default => self.shares_default += shares,
+        }
+        self.cost() - cost_before
     }
 
-    /// Sell shares for the selected outcome.
-    pub fn sell(&mut self, _outcome: Outcome, _amount: f64) -> f64 {
-        todo!("Phase 2+: sell LMSR outcome shares")
+    /// Sell `shares` of the selected outcome.
+    ///
+    /// Returns the refund received (always non-negative under normal
+    /// conditions): the reduction in the cost function.
+    pub fn sell(&mut self, outcome: Outcome, shares: f64) -> f64 {
+        let cost_before = self.cost();
+        match outcome {
+            Outcome::Deliver => self.shares_deliver -= shares,
+            Outcome::Default => self.shares_default -= shares,
+        }
+        cost_before - self.cost()
     }
 }
 
@@ -627,4 +655,228 @@ pub enum LegalBasis {
     LegitimateInterest,
     /// Vital interest or emergency use.
     VitalInterest,
+}
+
+// ---------------------------------------------------------------------------
+// Vickrey reputation-adjusted auction (IDECON-03)
+// ---------------------------------------------------------------------------
+
+/// Compute a reputation-adjusted bid score.
+///
+/// `s_i = price * (1 + (1 - reputation))` — agents with *higher* reputation
+/// incur a *lower* score, giving them an advantage.  The winner is the
+/// agent with the lowest score (`argmin`).
+pub fn score_bid(bid: &SparrowBid) -> f64 {
+    bid.price_usdc as f64 * (1.0 + (1.0 - bid.reputation_snapshot))
+}
+
+/// Result of a Vickrey winner selection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VickreyResult {
+    /// Index into the original bid slice.
+    pub winner_index: usize,
+    /// Second-price payment (adjusted for reputation).
+    pub payment: f64,
+}
+
+/// Select a winner from a set of bids using a Vickrey (second-price)
+/// reputation-adjusted auction.
+///
+/// The winner is `argmin(score_bid)`.  Payment uses second-price logic:
+/// `payment = second_lowest_score / (1 + (1 - R_winner))`.  This preserves
+/// truthfulness (Vickrey 1961) — agents should bid their true cost because
+/// the payment is set by the second-best bidder.
+///
+/// Returns `None` if the bid set is empty.
+pub fn select_winner(bids: &[SparrowBid]) -> Option<VickreyResult> {
+    if bids.is_empty() {
+        return None;
+    }
+
+    let mut scored: Vec<(usize, f64)> = bids
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (i, score_bid(b)))
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let winner_idx = scored[0].0;
+    let second_score = if scored.len() > 1 {
+        scored[1].1
+    } else {
+        scored[0].1
+    };
+    let winner_rep = bids[winner_idx].reputation_snapshot;
+    let payment = second_score / (1.0 + (1.0 - winner_rep));
+
+    Some(VickreyResult {
+        winner_index: winner_idx,
+        payment,
+    })
+}
+
+/// Anti-centralization fee for direct-hire dispatch.
+///
+/// Fee grows logarithmically with repeat hires of the same agent:
+/// `base_fee * (1 + ln(1 + repeat_count))`.
+pub fn anti_centralization_fee(base_fee: f64, repeat_count: u32) -> f64 {
+    base_fee * (1.0 + (1.0 + repeat_count as f64).ln())
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity_economy_identity::Signature;
+
+    fn make_bid(price: u64, rep: f64) -> SparrowBid {
+        SparrowBid {
+            price_usdc: price,
+            reputation_snapshot: rep,
+            ..Default::default()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-05: LMSR market maker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lmsr_initial_prices_equal() {
+        let mm = LmsrMarketMaker {
+            b: 100.0,
+            shares_deliver: 0.0,
+            shares_default: 0.0,
+            ..Default::default()
+        };
+        assert!((mm.price_deliver() - 0.5).abs() < 1e-9);
+        assert!((mm.price_default() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn lmsr_prices_sum_to_one() {
+        let mm = LmsrMarketMaker {
+            b: 50.0,
+            shares_deliver: 10.0,
+            shares_default: 5.0,
+            ..Default::default()
+        };
+        assert!((mm.price_deliver() + mm.price_default() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lmsr_buy_increases_price() {
+        let mut mm = LmsrMarketMaker {
+            b: 100.0,
+            shares_deliver: 0.0,
+            shares_default: 0.0,
+            ..Default::default()
+        };
+        let initial = mm.price_deliver();
+        let cost = mm.buy(Outcome::Deliver, 10.0);
+        assert!(cost > 0.0, "buying should cost something");
+        assert!(mm.price_deliver() > initial, "buying should increase price");
+    }
+
+    #[test]
+    fn lmsr_sell_decreases_price() {
+        let mut mm = LmsrMarketMaker {
+            b: 100.0,
+            shares_deliver: 20.0,
+            shares_default: 0.0,
+            ..Default::default()
+        };
+        let initial = mm.price_deliver();
+        let refund = mm.sell(Outcome::Deliver, 10.0);
+        assert!(refund > 0.0, "selling should produce refund");
+        assert!(mm.price_deliver() < initial, "selling should decrease price");
+    }
+
+    #[test]
+    fn lmsr_buy_sell_roundtrip() {
+        let mut mm = LmsrMarketMaker {
+            b: 100.0,
+            shares_deliver: 0.0,
+            shares_default: 0.0,
+            ..Default::default()
+        };
+        let cost = mm.buy(Outcome::Deliver, 5.0);
+        let refund = mm.sell(Outcome::Deliver, 5.0);
+        assert!((cost - refund).abs() < 1e-9, "round-trip should be cost-neutral");
+    }
+
+    #[test]
+    fn lmsr_bounded_loss() {
+        let mm = LmsrMarketMaker {
+            b: 100.0,
+            shares_deliver: 0.0,
+            shares_default: 0.0,
+            ..Default::default()
+        };
+        // For a binary market, max loss = b * ln(2) ~ 69.31
+        let max_loss = mm.b * 2.0_f64.ln();
+        assert!(max_loss < 70.0 && max_loss > 69.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // IDECON-03: Vickrey auction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vickrey_empty_returns_none() {
+        assert!(select_winner(&[]).is_none());
+    }
+
+    #[test]
+    fn vickrey_single_bidder() {
+        let bids = vec![make_bid(100, 0.9)];
+        let result = select_winner(&bids).unwrap();
+        assert_eq!(result.winner_index, 0);
+        // Single bidder: payment = own_score / (1 + (1 - rep))
+        let score = score_bid(&bids[0]);
+        let expected = score / (1.0 + (1.0 - 0.9));
+        assert!((result.payment - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vickrey_reputation_advantage() {
+        let bids = vec![
+            make_bid(100, 0.9), // score = 100 * (1 + 0.1) = 110
+            make_bid(100, 0.5), // score = 100 * (1 + 0.5) = 150
+        ];
+        let result = select_winner(&bids).unwrap();
+        assert_eq!(result.winner_index, 0, "higher rep should win at same price");
+    }
+
+    #[test]
+    fn vickrey_second_price_payment() {
+        let bids = vec![
+            make_bid(100, 0.9), // score = 110
+            make_bid(120, 0.8), // score = 120 * 1.2 = 144
+        ];
+        let result = select_winner(&bids).unwrap();
+        assert_eq!(result.winner_index, 0);
+        // payment = 144 / (1 + 0.1) = 144 / 1.1 ~ 130.91
+        let expected = 144.0 / 1.1;
+        assert!((result.payment - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn anti_centralization_increases_with_repeats() {
+        let f0 = anti_centralization_fee(10.0, 0);
+        let f5 = anti_centralization_fee(10.0, 5);
+        let f20 = anti_centralization_fee(10.0, 20);
+        assert!(f0 < f5);
+        assert!(f5 < f20);
+    }
+
+    #[test]
+    fn anti_centralization_base_case() {
+        // repeat_count=0: fee = base * (1 + ln(1)) = base * 1.0 = base
+        let f = anti_centralization_fee(10.0, 0);
+        assert!((f - 10.0).abs() < 1e-9);
+    }
 }

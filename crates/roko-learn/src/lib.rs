@@ -64,6 +64,8 @@
 
 /// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
 pub mod adas;
+/// HDC-based adversarial signal detection with attack prototype library (TA-10).
+pub mod adversarial;
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
@@ -127,5 +129,8 @@ pub mod routing_extras;
 pub mod routing_log;
 pub mod runtime_feedback;
 pub mod section_effect;
+/// Evolutionary signal population dynamics: replicator dynamics, Hebbian
+/// learning, and Fisher variance monitoring (TA-07).
+pub mod signal_metabolism;
 pub mod skill_library;
 pub mod task_metric;
