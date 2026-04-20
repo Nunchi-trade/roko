@@ -96,6 +96,24 @@ pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 60.0;
 /// in rapidly evolving codebases do become stale relatively quickly.
 pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 14.0;
 
+// ─── On-chain half-life constants (spec-aligned, in blocks) ─────────
+
+/// On-chain block time assumption: 1 block every 2 seconds.
+pub const BLOCKS_PER_DAY: u64 = 43_200;
+
+/// On-chain half-life for Insight entries: ~7 days (1,512,000 blocks at 2s/block).
+pub const INSIGHT_HALF_LIFE_BLOCKS: u64 = 7 * BLOCKS_PER_DAY;
+/// On-chain half-life for Heuristic entries: ~15 days.
+pub const HEURISTIC_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+/// On-chain half-life for Warning entries: ~3 minutes (90 blocks at 2s/block).
+pub const WARNING_HALF_LIFE_BLOCKS: u64 = 90;
+/// On-chain half-life for CausalLink entries: ~15 days.
+pub const CAUSAL_LINK_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+/// On-chain half-life for StrategyFragment entries: ~15 days.
+pub const STRATEGY_FRAGMENT_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+/// On-chain half-life for AntiKnowledge entries: ~15 days.
+pub const ANTI_KNOWLEDGE_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+
 /// Semantic category for a knowledge item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -141,7 +141,7 @@ Also see (`docs/08-chain/21-isfr-clearing-settlement.md` lines 1-244):
 - [x] Add discipline state check (reject Quarantine/Revoked)
 - [x] Add rate bounds validation (|rate| <= 0.1)
 - [x] Add component sum validation (components must sum to rate within tolerance)
-- [ ] Implement CRPS proper scoring rule for evaluating distribution predictions
+- [x] Implement CRPS proper scoring rule for evaluating distribution predictions (done in P1-01: `roko_core::prediction::crps` module with Gaussian, empirical, uniform variants)
 
 ---
 
@@ -365,7 +365,7 @@ design decision, not an accidental divergence.
 
 **What needs to change**:
 - [x] Document the intentional difference between on-chain (spec) and off-chain (roko-neuro) half-lives
-- [ ] Add on-chain half-life constants matching the spec for the chain domain
+- [x] Add on-chain half-life constants matching the spec for the chain domain (added INSIGHT/HEURISTIC/WARNING/CAUSAL_LINK/STRATEGY_FRAGMENT/ANTI_KNOWLEDGE_HALF_LIFE_BLOCKS constants in roko-neuro)
 - [x] Fix Warning half-life: 7 days is orders of magnitude longer than the spec's 3 minutes -- this likely IS wrong even for off-chain
 
 ---
@@ -748,9 +748,9 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 - [ ] **P1-32: Counterfactual imagination returns placeholders** — The imagination module exists but returns stub data, not actual alternative trajectories.
 
-- [ ] **P1-33: EmotionalProvenance struct exists but is dead code** — Has average_pad, discovery_emotion, validation_arc, emotional_diversity fields but is never populated or read.
+- [x] **P1-33: EmotionalProvenance struct exists but is dead code** — FIXED in P0-25: dream cycle's threat_warning_entries now populates emotional_provenance from source episode tags. Also added `from_tags()` factory and `compute_diversity()` in P1-29. No longer dead code.
 
-- [ ] **P1-34: ValidationArc enum exists but is dead code** — Redemptive/Contaminating/Stable/Progressive variants defined but never computed.
+- [x] **P1-34: ValidationArc enum exists but is dead code** — Now used in `emotional_consolidation_boost()` which applies arc-specific multipliers (Redemptive 1.06x, Progressive 1.04x, Contaminating 0.94x). The arc can be set via `EmotionalProvenance`. Not dead code.
 
 ### Chain & Financial Layer (P0-level)
 
