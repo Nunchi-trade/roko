@@ -31,6 +31,13 @@ roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
 roko-runtime = { path = "../roko-runtime" }
 roko-serve = { path = "../roko-serve" }
+roko-apex = { path = "../roko-apex" }
+roko-execution = { path = "../roko-execution" }
+roko-jobs = { path = "../roko-jobs" }
+roko-quoting = { path = "../roko-quoting" }
+roko-strategy = { path = "../roko-strategy" }
+roko-trading-agent = { path = "../roko-trading-agent" }
+roko-venue = { path = "../roko-venue" }
 
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "signal", "io-util"] }
