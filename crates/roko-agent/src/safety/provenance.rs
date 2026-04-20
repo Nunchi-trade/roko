@@ -16,10 +16,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::safety::authz::AuthorizationEvidence;
 
-/// Trust label carried by an input or action lineage.
+/// Trust label carried by an input or action lineage in the custody layer.
+///
+/// This is the **action-centric** taint classification for custody logging —
+/// it classifies where an input came from (external fetch, plugin, user, etc.).
+///
+/// For the **signal-level** taint (hallucination tracking, stale data, propagation),
+/// see `roko_core::Taint` which is the canonical provenance-layer type.
+///
+/// These two serve different architectural layers:
+/// - `CustodyTaint`: local safety decision (should this action be restricted?)
+/// - `roko_core::Taint`: global signal lineage (should downstream consumers trust this?)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Taint {
+pub enum CustodyTaint {
     /// No active taint.
     None,
     /// Data came directly from a human operator or user.
@@ -32,11 +42,35 @@ pub enum Taint {
     LegacyImport,
 }
 
-impl Taint {
+/// Backwards-compatible type alias.
+pub type Taint = CustodyTaint;
+
+impl CustodyTaint {
     /// Returns `true` when the label denotes untrusted or review-worthy input.
     #[must_use]
     pub const fn is_active(&self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Convert to the canonical `roko_core::Taint` for signal-level tracking.
+    ///
+    /// This bridges the custody layer to the provenance layer when a custody
+    /// event needs to propagate taint information into the signal graph.
+    #[must_use]
+    pub fn to_signal_taint(&self) -> roko_core::Taint {
+        match self {
+            Self::None => roko_core::Taint::Clean,
+            Self::UserInput => roko_core::Taint::UserInput {
+                detail: "custody: user input".into(),
+            },
+            Self::ExternalFetch(url) => roko_core::Taint::UnverifiedSource {
+                detail: format!("custody: external fetch from {url}"),
+            },
+            Self::ThirdPartyPlugin(name) => roko_core::Taint::UnverifiedSource {
+                detail: format!("custody: third-party plugin {name}"),
+            },
+            Self::LegacyImport => roko_core::Taint::Custom("custody: legacy import".into()),
+        }
     }
 }
 

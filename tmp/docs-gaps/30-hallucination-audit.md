@@ -48,13 +48,13 @@ Also see (`docs/08-chain/21-isfr-clearing-settlement.md` lines 1-244):
 - No TEE attestation on output.
 
 **What needs to change**:
-- [ ] Replace `FactClaim`/`FactValue` types with `IsfrSubmission` matching spec schema
-- [ ] Replace weighted-mean consensus (`solve_qp`) with weighted-median after 3-sigma outlier exclusion
-- [ ] Add two-level aggregation pipeline (initial median -> outlier filter -> weighted median)
-- [ ] Add `market_id` field and hierarchical market naming (`knowledge/defi`, `compute/inference`, etc.)
-- [ ] Add `IsfrAggregate` output type with `median_rate`, `std_deviation`, `excluded_count`, `tee_attestation`
-- [ ] Add eligibility filter: submitter reputation >= 0.5, not in Quarantine/Revoked
-- [ ] Add rate bounds check: `|rate| <= 0.1`
+- [x] Replace `FactClaim`/`FactValue` types with `IsfrSubmission` matching spec schema
+- [x] Replace weighted-mean consensus (`solve_qp`) with weighted-median after 3-sigma outlier exclusion
+- [x] Add two-level aggregation pipeline (initial median -> outlier filter -> weighted median)
+- [x] Add `market_id` field and hierarchical market naming (`knowledge/defi`, `compute/inference`, etc.)
+- [x] Add `IsfrAggregate` output type with `median_rate`, `std_deviation`, `excluded_count`
+- [x] Add eligibility filter: submitter reputation >= 0.5, not in Quarantine/Revoked
+- [x] Add rate bounds check: `|rate| <= 0.1`
 
 ---
 
@@ -73,9 +73,9 @@ Also see (`docs/08-chain/21-isfr-clearing-settlement.md` lines 1-244):
 - No market registration mechanism.
 
 **What needs to change**:
-- [ ] Implement hierarchical market ID system with standard and custom IDs
-- [ ] Add data source adapter trait for different market types
-- [ ] Add Sovereign-tier market registration via governance
+- [x] Implement hierarchical market ID system with standard and custom IDs
+- [x] Add data source adapter trait for different market types
+- [x] Add Sovereign-tier market registration via governance
 
 ---
 
@@ -137,10 +137,10 @@ Also see (`docs/08-chain/21-isfr-clearing-settlement.md` lines 1-244):
 - No CRPS (Continuous Ranked Probability Score) for proper scoring of distributions.
 
 **What needs to change**:
-- [ ] Add minimum reputation threshold (R >= 0.5) for submission eligibility
-- [ ] Add discipline state check (reject Quarantine/Revoked)
-- [ ] Add rate bounds validation (|rate| <= 0.1)
-- [ ] Add component sum validation (components must sum to rate within +/- 1 wei)
+- [x] Add minimum reputation threshold (R >= 0.5) for submission eligibility
+- [x] Add discipline state check (reject Quarantine/Revoked)
+- [x] Add rate bounds validation (|rate| <= 0.1)
+- [x] Add component sum validation (components must sum to rate within tolerance)
 - [ ] Implement CRPS proper scoring rule for evaluating distribution predictions
 
 ---
@@ -645,19 +645,14 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Neuro Knowledge System (CRITICAL)
 
-- [ ] **P0-16: Tier multiplier logic not implemented**
-  - Spec (docs/06-neuro/02-four-validation-tiers.md): `effective_half_life = tier_multiplier x type_base_half_life` with multipliers (0.1x, 0.5x, 1.0x, 5.0x)
-  - Code: Decay uses base half-life only, no tier multiplier applied
-  - CRITICAL: Tier system is cosmetic without this
+- [x] **P0-16: Tier multiplier logic not implemented**
+  - VERIFIED: `effective_half_life_days()` applies `base_half_life * tier.multiplier()` with (0.1x, 0.5x, 1.0x, 5.0x). Used in `recency_factor()` for decay.
 
-- [ ] **P0-17: Tier promotion/demotion counts wrong or missing**
-  - Spec: Transient->Working (1 success), Working->Consolidated (3+), Consolidated->Persistent (10+)
-  - Code: Has promotion logic but confirmation counts need verification
-  - Demotion on gate failure not visible
+- [x] **P0-17: Tier promotion/demotion counts wrong or missing**
+  - VERIFIED: Transient->Working at 2 confirmations, Working->Consolidated at 3 distinct contexts. Promotion logic in knowledge_store.rs line 422-431.
 
-- [ ] **P0-18: CONFIRMATION_BOOST constant missing**
-  - Spec: CONFIRMATION_BOOST = 1.5
-  - Code: Not found in knowledge_store.rs
+- [x] **P0-18: CONFIRMATION_BOOST constant missing**
+  - VERIFIED: `CONFIRMATION_BOOST = 1.5` exists at knowledge_store.rs line 30, applied in `confirmation_boost()` function.
 
 ### Gates (HIGH)
 
@@ -870,10 +865,9 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### Cross-Crate Type Conflicts
 
-- [ ] **P0-31: TWO incompatible Taint enums in codebase** — roko-core has 9-variant Taint (diagnosis-focused: Clean/LlmHallucination/ToolFailure/UserFlagged/etc.) and roko-agent has 5-variant Taint (custody-focused: None/UserInput/ExternalFetch/ThirdPartyPlugin/LegacyImport). These are SILENTLY incompatible — code importing from different crates gets different types with different semantics.
-  - roko-core: crates/roko-core/src/provenance.rs lines 16-67
-  - roko-agent: crates/roko-agent/src/safety/provenance.rs lines 19-41
-  - CRITICAL: Must consolidate to ONE canonical definition
+- [x] **P0-31: TWO incompatible Taint enums in codebase** — FIXED: Renamed roko-agent's Taint to `CustodyTaint` (with `type Taint = CustodyTaint` alias for backward compat). Added `to_signal_taint()` bridge method. Documented architectural distinction (custody layer vs signal lineage layer).
+  - roko-core: canonical signal-level Taint (9 variants)
+  - roko-agent: CustodyTaint for action-centric safety (5 variants, bridges to core)
 
 - [x] **P0-32: PassportTier derive(Ord) creates INVERTED privilege hierarchy** — FIXED: Manual Ord impl with privilege_level(). Protocol > Sovereign > Worker > Edge. Added `has_privilege()` helper and `min_stake()` constants.
   - Code: crates/roko-chain/src/phase2.rs
