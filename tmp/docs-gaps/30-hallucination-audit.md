@@ -430,9 +430,13 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-08: Shapley-value attribution
 
-- [ ] **Spec** (`bardo-backup/tmp/agent-chain-new/05-token-economics.md`): Fair credit attribution using Shapley values for distributing rewards among contributing agents.
-- **Code**: No Shapley value computation anywhere in `crates/`. No `shapley`, `shapley_value`, or `Shapley` identifiers found.
-- **Fix**: Implement `shapley_attribution(contributions: &[AgentContribution]) -> Vec<(AgentId, f64)>` for reward distribution.
+- [x] **Spec** (`bardo-backup/tmp/agent-chain-new/05-token-economics.md`): Fair credit attribution using Shapley values.
+- **FIXED**: Implemented `roko_learn::shapley` module with:
+  - `shapley_exact(n, v)` — exact O(2^n * n) computation for small groups
+  - `shapley_monte_carlo(n, v, samples, seed)` — scalable approximation
+  - `shapley_attribution(agent_ids, v, samples)` — high-level API with named results
+  - `Coalition` bitmask type with set operations
+  - 10 tests verifying game-theoretic axioms (efficiency, symmetry, null player, additivity)
 
 ### P1-09: ADAS meta-learning
 

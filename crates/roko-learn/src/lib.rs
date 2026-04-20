@@ -139,6 +139,8 @@ pub mod routing_extras;
 pub mod routing_log;
 pub mod runtime_feedback;
 pub mod section_effect;
+/// Shapley-value attribution for fair credit distribution among agents (P1-08).
+pub mod shapley;
 /// Evolutionary signal population dynamics: replicator dynamics, Hebbian
 /// learning, and Fisher variance monitoring (TA-07).
 pub mod signal_metabolism;
