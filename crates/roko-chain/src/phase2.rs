@@ -800,6 +800,27 @@ pub struct AgentPassport {
     pub tier: PassportTier,
     /// Historical slashing events.
     pub slash_history: Vec<SlashRecord>,
+    /// Service endpoints for agent discovery (P1-05).
+    ///
+    /// Each endpoint describes a service this agent offers, with a type
+    /// (e.g., "inference", "code-review") and a URL.
+    pub service_endpoints: Vec<ServiceEndpoint>,
+    /// Runtime fingerprint for ventriloquist defense (P1-05).
+    ///
+    /// Hash of the agent's runtime environment (model version, tool versions,
+    /// MCP config hash) to detect unauthorized prompt/runtime swaps.
+    pub runtime_fingerprint: Option<Hash>,
+}
+
+/// A typed service endpoint on an agent passport.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServiceEndpoint {
+    /// Service type (e.g., "inference", "code-review", "research").
+    pub service_type: String,
+    /// URL or address where the service is accessible.
+    pub url: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
 }
 
 /// EMA-smoothed per-domain reputation score.
