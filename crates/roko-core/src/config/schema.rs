@@ -442,7 +442,21 @@ impl RokoConfig {
         let _ = writeln!(out, "# -- Knowledge demurrage --");
         let _ = writeln!(out, "[demurrage]");
         let _ = writeln!(out, "rate_per_hour = {}", cfg.demurrage.rate_per_hour);
-        let _ = writeln!(out, "min_balance = {}\n", cfg.demurrage.min_balance);
+        let _ = writeln!(out, "min_balance = {}", cfg.demurrage.min_balance);
+        let _ = writeln!(out, "freeze_threshold = {}", cfg.demurrage.freeze_threshold);
+        let _ = writeln!(out, "thaw_balance = {}", cfg.demurrage.thaw_balance);
+        let _ = writeln!(out, "max_balance = {}", cfg.demurrage.max_balance);
+        let _ = writeln!(out, "death_threshold = {}", cfg.demurrage.death_threshold);
+        let _ = writeln!(
+            out,
+            "freeze_before_delete = {}",
+            cfg.demurrage.freeze_before_delete
+        );
+        let _ = writeln!(
+            out,
+            "gc_interval_secs = {}\n",
+            cfg.demurrage.gc_interval_secs
+        );
     }
 
     fn write_example_attention(out: &mut String, cfg: &Self) {
@@ -2783,12 +2797,34 @@ impl Default for LearningConfig {
 #[allow(clippy::derive_partial_eq_without_eq)] // contains f64
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DemurrageConfig {
-    /// Exponential decay rate per hour applied to playbook rule balances.
+    /// Exponential decay rate per hour applied to knowledge entry balances.
     #[serde(default = "default_demurrage_rate_per_hour")]
     pub rate_per_hour: f64,
-    /// Rules with balance below this threshold are deprioritized in retrieval.
+    /// Entries with balance below this threshold are deprioritized in retrieval.
     #[serde(default = "default_demurrage_min_balance")]
     pub min_balance: f64,
+    /// Balance below which entries are frozen into cold storage.
+    #[serde(default = "default_demurrage_freeze_threshold")]
+    pub freeze_threshold: f64,
+    /// Starting balance for thawed (resurrected) entries.
+    #[serde(default = "default_demurrage_thaw_balance")]
+    pub thaw_balance: f64,
+    /// Maximum balance an entry can accumulate from reinforcement.
+    #[serde(default = "default_demurrage_max_balance")]
+    pub max_balance: f64,
+    /// How often to run demurrage GC (in seconds, 0 = manual only).
+    #[serde(default)]
+    pub gc_interval_secs: u64,
+    /// Per-kind rate multipliers (e.g., Warnings decay faster).
+    /// Keys are knowledge kind strings ("warning", "insight", etc.).
+    #[serde(default)]
+    pub kind_rate_multipliers: std::collections::HashMap<String, f64>,
+    /// Whether to freeze entries before deleting (true = preserve for resurrection).
+    #[serde(default = "default_true")]
+    pub freeze_before_delete: bool,
+    /// Death threshold: entries with recency factor below this are considered dead.
+    #[serde(default = "default_demurrage_death_threshold")]
+    pub death_threshold: f64,
 }
 
 const fn default_demurrage_rate_per_hour() -> f64 {
@@ -2799,11 +2835,34 @@ const fn default_demurrage_min_balance() -> f64 {
     0.1
 }
 
+const fn default_demurrage_freeze_threshold() -> f64 {
+    0.05
+}
+
+const fn default_demurrage_thaw_balance() -> f64 {
+    0.6
+}
+
+const fn default_demurrage_max_balance() -> f64 {
+    5.0
+}
+
+const fn default_demurrage_death_threshold() -> f64 {
+    0.01
+}
+
 impl Default for DemurrageConfig {
     fn default() -> Self {
         Self {
             rate_per_hour: default_demurrage_rate_per_hour(),
             min_balance: default_demurrage_min_balance(),
+            freeze_threshold: default_demurrage_freeze_threshold(),
+            thaw_balance: default_demurrage_thaw_balance(),
+            max_balance: default_demurrage_max_balance(),
+            gc_interval_secs: 0,
+            kind_rate_multipliers: std::collections::HashMap::new(),
+            freeze_before_delete: true,
+            death_threshold: default_demurrage_death_threshold(),
         }
     }
 }

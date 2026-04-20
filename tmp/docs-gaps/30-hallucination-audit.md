@@ -840,7 +840,10 @@ be good ideas that need spec updates, or they may be accidental additions.
   - `arity()`, `constituents()`, `is_compound()` helpers
   - 6 new tests for factory, containment, matching, subset, iteration
 
-- [ ] **P1-44: Demurrage config section entirely absent from code** — Doc 20-configuration-schema.md describes [demurrage] with 9 parameters. Not in RokoConfig.
+- [x] **P1-44: Demurrage config section entirely absent from code** — FIXED: Expanded DemurrageConfig from 2 to 9 parameters:
+  rate_per_hour, min_balance, freeze_threshold, thaw_balance, max_balance,
+  gc_interval_secs, kind_rate_multipliers (HashMap), freeze_before_delete, death_threshold.
+  Updated example config writer. All 116 config tests pass.
 
 - [ ] **P1-45: Oneirography is stubs only** — PRD described 6 art forms, PAD-reactive auctions, NFT minting, self-appraisal. Only image generation request types exist.
   - Spec: bardo-backup/prd/22-oneirography/00-overview.md
