@@ -548,6 +548,80 @@ pub trait AffectWeightedQuery {
         pad: &PadVector,
         limit: usize,
     ) -> Vec<ScoredEntry>;
+
+    /// Query entries that are semantically relevant but emotionally **contrarian**.
+    ///
+    /// Flips the pleasure axis of the current PAD to retrieve mood-opposite
+    /// entries. Used by the contrarian injection system (P0-21) to prevent
+    /// depressive rumination loops.
+    fn query_contrarian(
+        &self,
+        query_embedding: &[f32],
+        pad: &PadVector,
+        limit: usize,
+    ) -> Vec<ScoredEntry> {
+        // Default: flip pleasure to retrieve mood-opposite entries.
+        let contrarian_pad = PadVector {
+            pleasure: -pad.pleasure,
+            arousal: pad.arousal,
+            dominance: pad.dominance,
+        };
+        self.query_with_affect(query_embedding, &contrarian_pad, limit)
+    }
+}
+
+/// Helper for contrarian retrieval: compute the mood-opposite PAD vector.
+///
+/// Flips the pleasure axis while preserving arousal and dominance.
+/// An anxious agent (negative pleasure) retrieves confident memories;
+/// an overconfident agent retrieves cautionary memories.
+#[must_use]
+pub fn contrarian_pad(pad: &PadVector) -> PadVector {
+    PadVector {
+        pleasure: -pad.pleasure,
+        arousal: pad.arousal,
+        dominance: pad.dominance,
+    }
+}
+
+/// Blend congruent and contrarian results based on the contrarian tracker.
+///
+/// This is the primary integration point: call this from your retrieval path
+/// instead of directly calling `query_with_affect`.
+///
+/// If the tracker says we need more contrarian retrievals, replaces some
+/// congruent results with mood-opposite ones.
+pub fn blend_with_contrarian<Q: AffectWeightedQuery>(
+    store: &Q,
+    query_embedding: &[f32],
+    pad: &PadVector,
+    limit: usize,
+    tracker: &ContrarianTracker,
+    current_tick: u64,
+) -> (Vec<ScoredEntry>, bool) {
+    let mut results = store.query_with_affect(query_embedding, pad, limit);
+    let was_contrarian = if tracker.should_inject(current_tick) && !results.is_empty() {
+        // Replace ~15% of results with contrarian entries.
+        let contrarian_count = (limit as f64 * 0.15).ceil().max(1.0) as usize;
+        let contrarian = store.query_contrarian(query_embedding, pad, contrarian_count);
+
+        // Replace the lowest-scored congruent entries with contrarian ones.
+        if !contrarian.is_empty() {
+            results.sort_by(|a, b| {
+                a.combined_score
+                    .partial_cmp(&b.combined_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let replace_count = contrarian.len().min(results.len());
+            for (i, c) in contrarian.into_iter().take(replace_count).enumerate() {
+                results[i] = c;
+            }
+        }
+        true
+    } else {
+        false
+    };
+    (results, was_contrarian)
 }
 
 /// Domain-specific registration of a strategy-space layout.
