@@ -712,8 +712,8 @@ be good ideas that need spec updates, or they may be accidental additions.
 - [x] **P1-19: Provider health circuit breaker not filtering candidates**
   - VERIFIED: `healthy_model_slugs()` calls `provider_health.filter_arms_or_best()` at orchestrate.rs:12780-12784 before model selection.
 
-- [ ] **P1-20: Pareto frontier refresh interval not enforced**
-  - Spec says recompute every 50 observations, no interval constant found
+- [x] **P1-20: Pareto frontier refresh interval not enforced**
+  - VERIFIED: `PARETO_RECOMPUTE_INTERVAL = 50` at cascade_router.rs:249. `refresh_pareto_frontier_if_needed()` enforces bucket-based refresh every 50 observations.
 
 ### Safety Docs (HIGH - spec quality)
 
@@ -925,11 +925,11 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 - [ ] **P1-58: No catalytic score tracking for autocatalytic knowledge networks** — Spec (agent-chain-new/13-exponential-growth.md) requires tracking how many new entries each entry enabled. When avg catalytic score > 1.5, network becomes self-sustaining. Not implemented.
 
-- [ ] **P1-59: Context assembly missing four-factor composite weighting** — Spec (agent-chain-new/07-context-assembly.md) requires: HDC similarity (40%) + pheromone weight (30%) + PF utility (20%) + freshness (10%). Code uses simpler scoring without explicit weight factors.
+- [x] **P1-59: Context assembly missing four-factor composite weighting** — FIXED: Added `ContextAssemblyWeights` struct with spec-aligned defaults: HDC 40%, keyword 30%, PF utility 20%, freshness 10%. `composite()` method computes weighted score.
 
-- [ ] **P1-60: Context assembly missing 10-20% cross-domain diversity bonus** — Spec requires deliberately including cross-domain entries for serendipitous discoveries. Not implemented.
+- [x] **P1-60: Context assembly missing 10-20% cross-domain diversity bonus** — FIXED: `ContextAssemblyWeights` includes `cross_domain_bonus: 0.15` (15%). Entries from different domains get multiplied by `(1 + bonus)` for serendipitous discovery.
 
-- [ ] **P1-61: Context assembly missing three-tier injection** — Spec requires: Tier 1 (Warning/Insight) compact inject, Tier 2 (Heuristic/StrategyFragment) relevant include, Tier 3 (CausalLink/AntiKnowledge) on-demand mid-task. Code doesn't differentiate tiers during assembly.
+- [x] **P1-61: Context assembly missing three-tier injection** — FIXED: Added `injection_tier(kind) -> u8` with Tier 1 (Warning/Insight: always inject), Tier 2 (Heuristic/StrategyFragment: if relevant), Tier 3 (CausalLink/AntiKnowledge: on-demand).
 
 ### From shared PRD specs
 

@@ -174,6 +174,89 @@ pub struct KnowledgeQueryHit {
     pub breakdown: KnowledgeQueryBreakdown,
 }
 
+/// Context assembly weights for scoring knowledge entries during retrieval (P1-59).
+///
+/// Per spec (agent-chain-new/07-context-assembly.md):
+/// - HDC similarity: 40%
+/// - Pheromone/keyword weight: 30%
+/// - Predictive Foraging utility: 20%
+/// - Freshness/recency: 10%
+///
+/// Also supports:
+/// - Cross-domain diversity bonus (P1-60): 10-20% bonus for entries from different domains
+/// - Three-tier injection (P1-61): Warning/Insight get priority, CausalLink/AntiKnowledge on-demand
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextAssemblyWeights {
+    /// Weight for HDC similarity score [0..1]. Default 0.40.
+    pub hdc_similarity: f64,
+    /// Weight for keyword/pheromone relevance [0..1]. Default 0.30.
+    pub keyword_relevance: f64,
+    /// Weight for predictive foraging utility [0..1]. Default 0.20.
+    pub pf_utility: f64,
+    /// Weight for freshness/recency [0..1]. Default 0.10.
+    pub freshness: f64,
+    /// Cross-domain diversity bonus [0..1]. Entries whose tags don't overlap
+    /// with the majority get this fractional boost. Default 0.15.
+    pub cross_domain_bonus: f64,
+    /// Whether to apply three-tier injection ordering.
+    pub tier_injection: bool,
+}
+
+impl Default for ContextAssemblyWeights {
+    fn default() -> Self {
+        Self {
+            hdc_similarity: 0.40,
+            keyword_relevance: 0.30,
+            pf_utility: 0.20,
+            freshness: 0.10,
+            cross_domain_bonus: 0.15,
+            tier_injection: true,
+        }
+    }
+}
+
+impl ContextAssemblyWeights {
+    /// Compute the weighted composite score for a knowledge entry.
+    ///
+    /// `keyword`: keyword/pheromone relevance score
+    /// `hdc`: HDC similarity score (0.0 if not available)
+    /// `recency`: freshness/recency factor
+    /// `utility`: predictive foraging utility (confidence_weight as proxy)
+    /// `is_cross_domain`: whether this entry is from a different domain than the query
+    pub fn composite(
+        &self,
+        keyword: f64,
+        hdc: f64,
+        recency: f64,
+        utility: f64,
+        is_cross_domain: bool,
+    ) -> f64 {
+        let base = self.hdc_similarity * hdc
+            + self.keyword_relevance * keyword
+            + self.pf_utility * utility
+            + self.freshness * recency;
+
+        if is_cross_domain {
+            base * (1.0 + self.cross_domain_bonus)
+        } else {
+            base
+        }
+    }
+
+    /// Sort knowledge entries by three-tier injection priority (P1-61).
+    ///
+    /// Tier 1 (compact inject): Warning, Insight — always included first
+    /// Tier 2 (relevant include): Heuristic, StrategyFragment — included if relevant
+    /// Tier 3 (on-demand): CausalLink, AntiKnowledge — included only when specifically needed
+    pub fn injection_tier(kind: KnowledgeKind) -> u8 {
+        match kind {
+            KnowledgeKind::Warning | KnowledgeKind::Insight => 1, // Always inject
+            KnowledgeKind::Heuristic | KnowledgeKind::StrategyFragment => 2, // If relevant
+            KnowledgeKind::CausalLink | KnowledgeKind::AntiKnowledge => 3, // On demand
+        }
+    }
+}
+
 /// Versioned header written as the first line of a backup JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupHeader {
