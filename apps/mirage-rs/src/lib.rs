@@ -75,6 +75,9 @@ pub mod scenario;
 #[cfg(feature = "chain")]
 pub mod chain;
 
+/// Custom revm precompiles (HDC at `0xA0C`). Gated behind the `chain` feature.
+pub mod precompiles;
+
 /// JSON-RPC bindings for the chain extensions.
 ///
 /// Registered on the mirage server when a [`chain_rpc::ChainContext`] is
