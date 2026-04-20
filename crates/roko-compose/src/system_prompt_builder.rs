@@ -73,6 +73,8 @@ pub struct SystemPromptBuilder {
     relevant_skills: Vec<Skill>,
     /// Layer 6: Relevant playbooks — reusable prior task sequences.
     relevant_playbooks: Vec<Playbook>,
+    /// Layer 6b: Tool usage hints from learned profiles (LEARN-12).
+    tool_hints: Option<String>,
     /// Layer 7: Anti-patterns — things the agent must NOT do.
     anti_patterns: Vec<String>,
     /// Layer 8: Affect guidance — current emotional tone and focus.
@@ -134,6 +136,7 @@ impl SystemPromptBuilder {
             tools: None,
             relevant_skills: Vec::new(),
             relevant_playbooks: Vec::new(),
+            tool_hints: None,
             anti_patterns: Vec::new(),
             affect_state: None,
             cache_markers: false,
@@ -196,6 +199,19 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_playbooks(mut self, playbooks: &[Playbook]) -> Self {
         self.relevant_playbooks = playbooks.to_vec();
+        self
+    }
+
+    /// Set layer 6b: tool usage hints from learned profiles (LEARN-12).
+    ///
+    /// These hints are injected between Skills and Anti-patterns to guide
+    /// the agent toward effective tool sequences for the current task type.
+    #[must_use]
+    pub fn with_tool_hints(mut self, hints: impl Into<String>) -> Self {
+        let hints = normalize_owned(hints);
+        if !hints.is_empty() {
+            self.tool_hints = Some(hints);
+        }
         self
     }
 
@@ -448,6 +464,20 @@ impl SystemPromptBuilder {
         // Layer 6: Relevant Techniques
         if let Some(skills) = self.relevant_techniques_section() {
             sections.push(skills);
+        }
+
+        // Layer 6b: Tool Usage Hints (LEARN-12)
+        if let Some(ref hints) = self.tool_hints {
+            if let Some(section) = self.apply_budget_profile(
+                PromptSection::new("tool_hints", hints.clone())
+                    .with_priority(
+                        self.effective_priority("tool_hints", SectionPriority::Low),
+                    )
+                    .with_cache_layer(CacheLayer::Plan)
+                    .with_placement(Placement::Middle),
+            ) {
+                sections.push(section);
+            }
         }
 
         // Layer 7: Anti-Patterns

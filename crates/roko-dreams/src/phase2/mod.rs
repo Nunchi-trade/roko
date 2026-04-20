@@ -28,7 +28,8 @@ pub use advanced::{
     ComputationalMicrostate, ConstitutionalPrinciple, ConstitutionalSelfCritique, DreamJournal,
     DreamJournalEntry, DreamTrendAnalysis, InsightEnvironmentSnapshot, LucidDreamMonitor,
     NeuroinformedLucidMonitor, NightmareClass, NightmareContainment, NightmareDecision,
-    NightmareDetector, NightmareReport, PrincipleSeverity, TemporalValidityTracker,
+    NightmareDetector, NightmareReport, PrincipleSeverity, ScreeningVerdict, StageResult,
+    TemporalValidityTracker,
 };
 pub use cycle::{
     DreamOutcomeEvent, DreamPhase, DreamQualityDashboard, DreamQualityTrend, ExtendedDreamPhase,
@@ -59,8 +60,8 @@ pub use integration::{
     FleetDreamCoordinator, SharedDreamInsight, SynapticRenormalization,
 };
 pub use oneirography::{
-    AgentStateVector, ArtQualityAssessment, AuctionParams, AuctionType, ImageGenProvider,
-    PortfolioAnalytics, SelfAppraisalAction,
+    AgentStateVector, ArtQualityAssessment, AuctionParams, AuctionType, DreamArt, ImageGenProvider,
+    OneirographyConfig, OneirographyPipeline, PortfolioAnalytics, SelfAppraisalAction,
 };
 pub use rendering::{AnimationType, BorderStyle, DreamRenderConfig, PhaseVisualSpec};
 pub use replay::{
@@ -73,7 +74,10 @@ pub use shared::{
     EvolutionaryStrategy, HdcVector, Hypothesis, ImageGenRequest, ImageGenResult, InsightRecord,
     NeuroDigest, NeuroDigestEntry, PatternRecord, PrivacyLevel, ThreatTier,
 };
-pub use sleep_time::{PrecomputedSummary, SleepTimePrecompute};
+pub use sleep_time::{
+    DreamBudgetTracker, DreamComputeBudget, DreamPhaseKind, PhaseAllocations, PrecomputedSummary,
+    SleepTimePrecompute, SleepwalkerMode,
+};
 pub use synthesis::{
     CounterfactualDiversityConfig, CounterfactualSet, GlobalCounterfactual,
     GlobalCounterfactualConfig, KMedoidsConfig, PlausibilityReport, PlausibilityScorer,

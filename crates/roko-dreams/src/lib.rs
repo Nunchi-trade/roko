@@ -61,9 +61,9 @@ pub use replay::{
 };
 pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use runner::{
-    DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine, DreamHeartbeatPolicy,
-    DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner, DreamRuntimeControls,
-    DreamSchedulePolicy, DreamTrigger, Episode, Insight, IntensiveMode,
+    BusPulseTriggerConfig, DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine,
+    DreamHeartbeatPolicy, DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner,
+    DreamRuntimeControls, DreamSchedulePolicy, DreamTrigger, Episode, Insight, IntensiveMode,
     build_dream_review_dispatcher,
 };
 pub use rehearsal::{RehearsalOutcome, RehearsalReport, rehearse_threats};

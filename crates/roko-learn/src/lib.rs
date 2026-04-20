@@ -83,6 +83,8 @@ pub mod context_pack_cache;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
+/// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
+pub mod calibration_policy;
 /// Curriculum ordering helpers for task scheduling.
 pub mod curriculum;
 pub mod drift;
@@ -106,6 +108,8 @@ pub mod latency;
 pub mod local_reward;
 pub mod model_experiment;
 pub mod model_router;
+/// Domain-specific Oracle implementations (Chain, Coding, Research) and witness verification.
+pub mod oracles;
 pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
@@ -115,6 +119,8 @@ pub mod prompt_experiment;
 pub mod provider_health;
 pub mod quality_judge;
 pub mod regression;
+/// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
+pub mod research_pipeline;
 /// Lookahead and calibration shells around the shipped cascade router.
 pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.

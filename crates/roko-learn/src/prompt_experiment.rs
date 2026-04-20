@@ -557,6 +557,35 @@ impl ExperimentStore {
         Ok(map)
     }
 
+    /// Promote all concluded experiment winners to the static config overrides
+    /// file (INT-10: Experiments -> Static config).
+    ///
+    /// Returns the number of winners promoted. Only winners with confidence
+    /// >= 0.95 are written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the static-overrides file cannot be written.
+    pub fn promote_all_to_config(&self) -> io::Result<usize> {
+        self.promote_all_to_config_at(Path::new(DEFAULT_STATIC_OVERRIDES_PATH))
+    }
+
+    /// Promote all concluded experiment winners to a specific path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the overrides file cannot be written.
+    pub fn promote_all_to_config_at(&self, path: &Path) -> io::Result<usize> {
+        let winners = self.concluded_winners();
+        let promotable: Vec<_> = winners
+            .into_iter()
+            .filter(|w| w.confidence >= 0.95)
+            .collect();
+        let count = promotable.len();
+        self.apply_winners_to(&promotable, path)?;
+        Ok(count)
+    }
+
     /// Record an outcome by `variant_id` (searches all experiments).
     pub fn record_outcome(&mut self, variant_id: &str, success: bool) {
         for experiment in self.experiments.values_mut() {

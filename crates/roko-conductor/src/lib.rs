@@ -45,6 +45,10 @@ pub mod threshold_learner;
 pub mod watchers;
 /// Yerkes-Dodson pressure-performance framework (COND-04).
 pub mod yerkes_dodson;
+/// Federated conductor hierarchy — L1 turn → L4 fleet (COND-05).
+pub mod federation;
+/// Complex event pattern detection with temporal hysteresis (COND-07).
+pub mod pattern_detector;
 
 // Re-export core types for convenience.
 pub use roko_core::{CognitiveSignal, ConductorDecision, ConductorEvaluation, PhaseKind, PlanPhase};

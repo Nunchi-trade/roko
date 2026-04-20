@@ -100,6 +100,26 @@ pub struct RokoConfig {
     #[serde(default)]
     pub demurrage: DemurrageConfig,
 
+    /// Attention token budget allocation and context window management.
+    #[serde(default)]
+    pub attention: AttentionConfig,
+
+    /// Anomaly detection thresholds and quarantine settings.
+    #[serde(default)]
+    pub immune: ImmuneConfig,
+
+    /// Time horizon preferences and planning depth.
+    #[serde(default)]
+    pub temporal: TemporalConfig,
+
+    /// Goal hierarchy, priority weights, and completion criteria.
+    #[serde(default)]
+    pub goals: GoalsConfig,
+
+    /// Compute budget, cost caps per tier.
+    #[serde(default)]
+    pub energy: EnergyConfig,
+
     /// Terminal UI preferences.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -163,6 +183,11 @@ impl Default for RokoConfig {
             watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
             demurrage: DemurrageConfig::default(),
+            attention: AttentionConfig::default(),
+            immune: ImmuneConfig::default(),
+            temporal: TemporalConfig::default(),
+            goals: GoalsConfig::default(),
+            energy: EnergyConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
             scheduler: SchedulerConfig::default(),
@@ -406,6 +431,101 @@ impl RokoConfig {
             out,
             "min_balance = {}\n",
             cfg.demurrage.min_balance
+        );
+    }
+
+    fn write_example_attention(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Attention budget allocation --");
+        let _ = writeln!(out, "[attention]");
+        let _ = writeln!(
+            out,
+            "max_tokens_per_layer = {}",
+            cfg.attention.max_tokens_per_layer
+        );
+        let _ = writeln!(
+            out,
+            "utilization_target = {}",
+            cfg.attention.utilization_target
+        );
+        let _ = writeln!(
+            out,
+            "auction_enabled = {}",
+            cfg.attention.auction_enabled
+        );
+        let _ = writeln!(
+            out,
+            "task_reserve_tokens = {}\n",
+            cfg.attention.task_reserve_tokens
+        );
+    }
+
+    fn write_example_immune(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Anomaly detection / immune system --");
+        let _ = writeln!(out, "[immune]");
+        let _ = writeln!(
+            out,
+            "quarantine_threshold = {}",
+            cfg.immune.quarantine_threshold
+        );
+        let _ = writeln!(
+            out,
+            "max_quarantined = {}",
+            cfg.immune.max_quarantined
+        );
+        let _ = writeln!(out, "auto_reject = {}", cfg.immune.auto_reject);
+        let _ = writeln!(
+            out,
+            "taint_levels = {:?}\n",
+            cfg.immune.taint_levels
+        );
+    }
+
+    fn write_example_temporal(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Temporal planning --");
+        let _ = writeln!(out, "[temporal]");
+        let _ = writeln!(out, "max_depth = {}", cfg.temporal.max_depth);
+        let _ = writeln!(out, "epoch_secs = {}", cfg.temporal.epoch_secs);
+        let _ = writeln!(
+            out,
+            "enforce_allen_relations = {}\n",
+            cfg.temporal.enforce_allen_relations
+        );
+    }
+
+    fn write_example_goals(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Goal hierarchy --");
+        let _ = writeln!(out, "[goals]");
+        let _ = writeln!(out, "max_active = {}", cfg.goals.max_active);
+        let _ = writeln!(
+            out,
+            "correctness_weight = {}",
+            cfg.goals.correctness_weight
+        );
+        let _ = writeln!(
+            out,
+            "completion_threshold = {}",
+            cfg.goals.completion_threshold
+        );
+        let _ = writeln!(
+            out,
+            "prune_threshold = {}\n",
+            cfg.goals.prune_threshold
+        );
+    }
+
+    fn write_example_energy(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Compute budget / energy --");
+        let _ = writeln!(out, "[energy]");
+        let _ = writeln!(out, "pool_usd = {}", cfg.energy.pool_usd);
+        let _ = writeln!(
+            out,
+            "per_task_cap_usd = {}",
+            cfg.energy.per_task_cap_usd
+        );
+        let _ = writeln!(
+            out,
+            "metabolism_rate = {}\n",
+            cfg.energy.metabolism_rate
         );
     }
 
@@ -739,6 +859,11 @@ impl RokoConfig {
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
         Self::write_example_demurrage(&mut out, &cfg);
+        Self::write_example_attention(&mut out, &cfg);
+        Self::write_example_immune(&mut out, &cfg);
+        Self::write_example_temporal(&mut out, &cfg);
+        Self::write_example_goals(&mut out, &cfg);
+        Self::write_example_energy(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
         Self::write_example_scheduler(&mut out, &cfg);
         Self::write_example_webhooks(&mut out, &cfg);
@@ -2242,6 +2367,227 @@ impl Default for DemurrageConfig {
         Self {
             rate_per_hour: default_demurrage_rate_per_hour(),
             min_balance: default_demurrage_min_balance(),
+        }
+    }
+}
+
+// ---- [attention] ---------------------------------------------------------
+
+/// Attention token budget allocation and context window management.
+///
+/// Controls how the runtime distributes token budget across prompt layers
+/// and manages context window pressure.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttentionConfig {
+    /// Maximum tokens to allocate per prompt layer (0 = unlimited).
+    #[serde(default = "default_attention_max_tokens_per_layer")]
+    pub max_tokens_per_layer: usize,
+    /// Context window utilization target as a fraction in `[0.0, 1.0]`.
+    #[serde(default = "default_attention_utilization_target")]
+    pub utilization_target: f64,
+    /// Enable attention auction where layers bid for token budget.
+    #[serde(default)]
+    pub auction_enabled: bool,
+    /// Minimum tokens reserved for task context regardless of auction.
+    #[serde(default = "default_attention_task_reserve")]
+    pub task_reserve_tokens: usize,
+}
+
+const fn default_attention_max_tokens_per_layer() -> usize {
+    4096
+}
+
+const fn default_attention_utilization_target() -> f64 {
+    0.85
+}
+
+const fn default_attention_task_reserve() -> usize {
+    512
+}
+
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens_per_layer: default_attention_max_tokens_per_layer(),
+            utilization_target: default_attention_utilization_target(),
+            auction_enabled: false,
+            task_reserve_tokens: default_attention_task_reserve(),
+        }
+    }
+}
+
+// ---- [immune] ------------------------------------------------------------
+
+/// Anomaly detection thresholds and quarantine settings.
+///
+/// Configures the cognitive immune system that detects anomalous outputs,
+/// quarantines suspect results, and classifies taint levels.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImmuneConfig {
+    /// Anomaly score threshold above which outputs are quarantined.
+    #[serde(default = "default_immune_quarantine_threshold")]
+    pub quarantine_threshold: f64,
+    /// Maximum number of quarantined items before triggering escalation.
+    #[serde(default = "default_immune_max_quarantined")]
+    pub max_quarantined: usize,
+    /// Whether to auto-reject quarantined outputs or hold for review.
+    #[serde(default)]
+    pub auto_reject: bool,
+    /// Taint classification levels: low, medium, high.
+    #[serde(default = "default_immune_taint_levels")]
+    pub taint_levels: Vec<String>,
+}
+
+const fn default_immune_quarantine_threshold() -> f64 {
+    0.8
+}
+
+const fn default_immune_max_quarantined() -> usize {
+    50
+}
+
+fn default_immune_taint_levels() -> Vec<String> {
+    vec![
+        "low".to_string(),
+        "medium".to_string(),
+        "high".to_string(),
+    ]
+}
+
+impl Default for ImmuneConfig {
+    fn default() -> Self {
+        Self {
+            quarantine_threshold: default_immune_quarantine_threshold(),
+            max_quarantined: default_immune_max_quarantined(),
+            auto_reject: false,
+            taint_levels: default_immune_taint_levels(),
+        }
+    }
+}
+
+// ---- [temporal] ----------------------------------------------------------
+
+/// Time horizon preferences and planning depth configuration.
+///
+/// Controls how deep the planner looks ahead and how temporal relations
+/// between tasks are evaluated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TemporalConfig {
+    /// Maximum planning depth (number of future task levels to consider).
+    #[serde(default = "default_temporal_max_depth")]
+    pub max_depth: usize,
+    /// Default epoch duration in seconds for batching temporal events.
+    #[serde(default = "default_temporal_epoch_secs")]
+    pub epoch_secs: u64,
+    /// Whether to enforce Allen temporal relations between dependent tasks.
+    #[serde(default = "default_true")]
+    pub enforce_allen_relations: bool,
+}
+
+const fn default_temporal_max_depth() -> usize {
+    5
+}
+
+const fn default_temporal_epoch_secs() -> u64 {
+    3600
+}
+
+impl Default for TemporalConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: default_temporal_max_depth(),
+            epoch_secs: default_temporal_epoch_secs(),
+            enforce_allen_relations: true,
+        }
+    }
+}
+
+// ---- [goals] -------------------------------------------------------------
+
+/// Goal hierarchy configuration with priority weights and completion criteria.
+///
+/// Controls how goals are ranked, pruned, and when they are considered complete.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GoalsConfig {
+    /// Maximum number of active goals at any level of the hierarchy.
+    #[serde(default = "default_goals_max_active")]
+    pub max_active: usize,
+    /// Priority weight for correctness vs. speed tradeoff in `[0.0, 1.0]`.
+    /// Higher values favor correctness.
+    #[serde(default = "default_goals_correctness_weight")]
+    pub correctness_weight: f64,
+    /// Minimum completion ratio in `[0.0, 1.0]` for a goal to be considered done.
+    #[serde(default = "default_goals_completion_threshold")]
+    pub completion_threshold: f64,
+    /// Prune goals with priority below this value.
+    #[serde(default = "default_goals_prune_threshold")]
+    pub prune_threshold: f64,
+}
+
+const fn default_goals_max_active() -> usize {
+    10
+}
+
+const fn default_goals_correctness_weight() -> f64 {
+    0.7
+}
+
+const fn default_goals_completion_threshold() -> f64 {
+    0.95
+}
+
+const fn default_goals_prune_threshold() -> f64 {
+    0.1
+}
+
+impl Default for GoalsConfig {
+    fn default() -> Self {
+        Self {
+            max_active: default_goals_max_active(),
+            correctness_weight: default_goals_correctness_weight(),
+            completion_threshold: default_goals_completion_threshold(),
+            prune_threshold: default_goals_prune_threshold(),
+        }
+    }
+}
+
+// ---- [energy] ------------------------------------------------------------
+
+/// Compute budget and cost caps per model tier.
+///
+/// Controls how much compute budget is available and how costs are capped
+/// across different model tiers (cheap, standard, premium).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EnergyConfig {
+    /// Total compute budget pool in USD.
+    #[serde(default = "default_energy_pool_usd")]
+    pub pool_usd: f64,
+    /// Per-task cost cap in USD (0.0 = no cap).
+    #[serde(default)]
+    pub per_task_cap_usd: f64,
+    /// Per-tier cost multipliers keyed by tier name (e.g., "cheap": 0.5).
+    #[serde(default)]
+    pub tier_caps: HashMap<String, f64>,
+    /// Metabolism rate: fraction of budget replenished per hour.
+    #[serde(default = "default_energy_metabolism_rate")]
+    pub metabolism_rate: f64,
+}
+
+const fn default_energy_pool_usd() -> f64 {
+    50.0
+}
+
+const fn default_energy_metabolism_rate() -> f64 {
+    0.1
+}
+
+impl Default for EnergyConfig {
+    fn default() -> Self {
+        Self {
+            pool_usd: default_energy_pool_usd(),
+            per_task_cap_usd: 0.0,
+            tier_caps: HashMap::new(),
+            metabolism_rate: default_energy_metabolism_rate(),
         }
     }
 }
@@ -4076,6 +4422,11 @@ port = 3000
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
         assert!(example.contains("[demurrage]"));
+        assert!(example.contains("[attention]"));
+        assert!(example.contains("[immune]"));
+        assert!(example.contains("[temporal]"));
+        assert!(example.contains("[goals]"));
+        assert!(example.contains("[energy]"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[serve]"));
         assert!(example.contains("[serve.auth]"));

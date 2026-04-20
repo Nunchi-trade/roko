@@ -1,9 +1,199 @@
-//! Phase 2 sleep-time compute stubs.
+//! Phase 2 sleep-time compute and dream budget allocation.
 
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+// ── Dream compute budget (DREAM-12) ─────────────────────────────────────
+
+/// Per-phase budget distribution for dream compute (DREAM-12).
+///
+/// Allocates the total dream budget across dream phases:
+/// Hypnagogia 10%, NREM 30%, REM 50%, Integration 0%, Evolution 10%.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamComputeBudget {
+    /// Total daily inference budget in USD.
+    pub inference_daily_usd: f64,
+    /// Fraction of daily budget allocated to dreaming (default 0.15 = 15%).
+    pub dream_fraction: f64,
+    /// Per-phase budget fractions (must sum to 1.0).
+    pub phase_allocations: PhaseAllocations,
+}
+
+impl Default for DreamComputeBudget {
+    fn default() -> Self {
+        Self {
+            inference_daily_usd: 10.0,
+            dream_fraction: 0.15,
+            phase_allocations: PhaseAllocations::default(),
+        }
+    }
+}
+
+impl DreamComputeBudget {
+    /// Total dream budget in USD for this cycle.
+    #[must_use]
+    pub fn total_dream_budget_usd(&self) -> f64 {
+        self.inference_daily_usd * self.dream_fraction
+    }
+
+    /// Budget for a specific phase.
+    #[must_use]
+    pub fn phase_budget_usd(&self, phase: DreamPhaseKind) -> f64 {
+        let fraction = match phase {
+            DreamPhaseKind::Hypnagogia => self.phase_allocations.hypnagogia,
+            DreamPhaseKind::Nrem => self.phase_allocations.nrem,
+            DreamPhaseKind::Rem => self.phase_allocations.rem,
+            DreamPhaseKind::Integration => self.phase_allocations.integration,
+            DreamPhaseKind::Evolution => self.phase_allocations.evolution,
+        };
+        self.total_dream_budget_usd() * fraction
+    }
+}
+
+/// Per-phase allocation fractions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseAllocations {
+    /// Hypnagogia fraction (default 0.10).
+    pub hypnagogia: f64,
+    /// NREM fraction (default 0.30).
+    pub nrem: f64,
+    /// REM fraction (default 0.50).
+    pub rem: f64,
+    /// Integration fraction (default 0.00 — pure computation).
+    pub integration: f64,
+    /// Evolution fraction (default 0.10).
+    pub evolution: f64,
+}
+
+impl Default for PhaseAllocations {
+    fn default() -> Self {
+        Self {
+            hypnagogia: 0.10,
+            nrem: 0.30,
+            rem: 0.50,
+            integration: 0.0,
+            evolution: 0.10,
+        }
+    }
+}
+
+/// Dream phase kinds for budget allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DreamPhaseKind {
+    /// Hypnagogia (creative onset).
+    Hypnagogia,
+    /// NREM (replay).
+    Nrem,
+    /// REM (imagination).
+    Rem,
+    /// Integration (pure computation, no model calls).
+    Integration,
+    /// Evolution (MAP-Elites).
+    Evolution,
+}
+
+/// Tracks spend within a dream cycle for budget enforcement (DREAM-12).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamBudgetTracker {
+    /// Budget configuration.
+    pub budget: DreamComputeBudget,
+    /// Per-phase spend so far.
+    pub phase_spend: std::collections::HashMap<String, f64>,
+    /// Total spend so far.
+    pub total_spend_usd: f64,
+}
+
+impl DreamBudgetTracker {
+    /// Create a new tracker from a budget configuration.
+    #[must_use]
+    pub fn new(budget: DreamComputeBudget) -> Self {
+        Self {
+            budget,
+            phase_spend: std::collections::HashMap::new(),
+            total_spend_usd: 0.0,
+        }
+    }
+
+    /// Record spend for a phase. Returns true if the phase budget is exhausted.
+    pub fn record_spend(&mut self, phase: DreamPhaseKind, amount_usd: f64) -> bool {
+        let key = format!("{phase:?}");
+        *self.phase_spend.entry(key).or_default() += amount_usd;
+        self.total_spend_usd += amount_usd;
+        self.is_phase_exhausted(phase)
+    }
+
+    /// Check if a phase's budget is exhausted.
+    #[must_use]
+    pub fn is_phase_exhausted(&self, phase: DreamPhaseKind) -> bool {
+        let key = format!("{phase:?}");
+        let spent = self.phase_spend.get(&key).copied().unwrap_or(0.0);
+        spent >= self.budget.phase_budget_usd(phase)
+    }
+
+    /// Check if the total dream budget is exhausted.
+    #[must_use]
+    pub fn is_total_exhausted(&self) -> bool {
+        self.total_spend_usd >= self.budget.total_dream_budget_usd()
+    }
+}
+
+/// Sleepwalker mode: reduced-capability state during dreaming (DREAM-12).
+///
+/// When active, the agent responds only to urgent interrupts (process
+/// supervisor events, critical errors) via a minimal perception-decision loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepwalkerMode {
+    /// Normal operation — full agent capabilities.
+    Awake,
+    /// Dreaming — only urgent signals processed.
+    Dreaming {
+        /// Types of signals that can wake the agent from dreaming.
+        urgent_signal_types: Vec<String>,
+    },
+}
+
+impl Default for SleepwalkerMode {
+    fn default() -> Self {
+        Self::Awake
+    }
+}
+
+impl SleepwalkerMode {
+    /// Create a dreaming state with default urgent signal types.
+    #[must_use]
+    pub fn dreaming() -> Self {
+        Self::Dreaming {
+            urgent_signal_types: vec![
+                "process_crash".to_string(),
+                "critical_error".to_string(),
+                "operator_interrupt".to_string(),
+            ],
+        }
+    }
+
+    /// Check if a signal type is urgent enough to interrupt dreaming.
+    #[must_use]
+    pub fn is_urgent(&self, signal_type: &str) -> bool {
+        match self {
+            Self::Awake => true,
+            Self::Dreaming {
+                urgent_signal_types,
+            } => urgent_signal_types
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(signal_type)),
+        }
+    }
+
+    /// Whether the agent is currently dreaming.
+    #[must_use]
+    pub const fn is_dreaming(&self) -> bool {
+        matches!(self, Self::Dreaming { .. })
+    }
+}
 
 /// Sleep-time pre-computation settings for predictable query patterns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

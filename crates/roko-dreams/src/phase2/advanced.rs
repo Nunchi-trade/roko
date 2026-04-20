@@ -98,16 +98,212 @@ pub struct NightmareContainment {
 
 impl NightmareContainment {
     /// Queue a nightmare for containment and human review.
-    pub async fn quarantine(&mut self, report: NightmareReport) -> anyhow::Result<()> {
+    pub fn quarantine(&mut self, report: NightmareReport) {
         self.quarantined_hypotheses
             .push(report.hypothesis_summary.clone());
+        self.cooldown_remaining = self
+            .cooldown_remaining
+            .max(report.detection_stage as usize);
         self.pending_human_reviews.push(report);
-        self.cooldown_remaining = self.cooldown_remaining.max(1);
-        todo!("Phase 2+: persist nightmare reports to JSONL and notify human review")
     }
 }
 
-/// Persistent dream journal configuration and state.
+/// Screening verdict from the 4-stage nightmare detection pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreeningVerdict {
+    /// Whether the output passed all stages.
+    pub passed: bool,
+    /// Maximum severity detected across stages.
+    pub max_severity: PrincipleSeverity,
+    /// Per-stage results.
+    pub stage_results: Vec<StageResult>,
+}
+
+/// Result from one screening stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StageResult {
+    /// Stage number (1-4).
+    pub stage: u8,
+    /// Stage name.
+    pub name: String,
+    /// Whether this stage passed.
+    pub passed: bool,
+    /// Severity if a finding was detected.
+    pub severity: PrincipleSeverity,
+    /// Human-readable finding description.
+    pub finding: Option<String>,
+}
+
+/// Harmful behavior patterns checked in stage 1.
+const HARM_PATTERNS: &[&str] = &[
+    "ignore safety",
+    "bypass verification",
+    "delete all",
+    "disable gate",
+    "skip checks",
+    "override policy",
+    "rm -rf",
+    "drop table",
+    "remove constraint",
+];
+
+/// CBRN keyword patterns checked in stage 2.
+const CBRN_PATTERNS: &[&str] = &[
+    "chemical weapon",
+    "biological agent",
+    "radiological",
+    "nuclear device",
+    "synthesize pathogen",
+    "enrichment process",
+    "weaponize",
+];
+
+/// Prompt injection patterns checked in stage 4.
+const INJECTION_PATTERNS: &[&str] = &[
+    "ignore previous instructions",
+    "system prompt override",
+    "you are now",
+    "disregard all",
+    "new instructions:",
+    "forget everything",
+    "act as if",
+];
+
+impl NightmareDetector {
+    /// Run the 4-stage safety pipeline on a dream output.
+    ///
+    /// Returns a [`ScreeningVerdict`] indicating whether the output may
+    /// enter the staging buffer. Any `Hard` severity blocks the output.
+    #[must_use]
+    pub fn screen(&self, content: &str, hdc_similarity: Option<f64>) -> ScreeningVerdict {
+        let mut stages = Vec::with_capacity(4);
+
+        // Stage 1: Harm classifier
+        stages.push(self.stage_harm_classifier(content));
+
+        // Stage 2: CBRN check
+        stages.push(self.stage_cbrn_check(content));
+
+        // Stage 3: Novelty-divergence check
+        stages.push(self.stage_novelty_divergence(hdc_similarity));
+
+        // Stage 4: Gradient attack / prompt injection detection
+        stages.push(self.stage_injection_detection(content));
+
+        let max_severity = stages
+            .iter()
+            .map(|s| s.severity)
+            .max_by_key(|s| match s {
+                PrincipleSeverity::Advisory => 0,
+                PrincipleSeverity::Soft => 1,
+                PrincipleSeverity::Hard => 2,
+            })
+            .unwrap_or(PrincipleSeverity::Advisory);
+
+        let passed = stages.iter().all(|s| s.passed);
+
+        ScreeningVerdict {
+            passed,
+            max_severity,
+            stage_results: stages,
+        }
+    }
+
+    fn stage_harm_classifier(&self, content: &str) -> StageResult {
+        let lower = content.to_lowercase();
+        let finding = HARM_PATTERNS
+            .iter()
+            .find(|p| lower.contains(**p))
+            .map(|p| format!("harmful pattern detected: {p}"));
+
+        StageResult {
+            stage: 1,
+            name: "harm_classifier".to_string(),
+            passed: finding.is_none(),
+            severity: if finding.is_some() {
+                PrincipleSeverity::Hard
+            } else {
+                PrincipleSeverity::Advisory
+            },
+            finding,
+        }
+    }
+
+    fn stage_cbrn_check(&self, content: &str) -> StageResult {
+        let lower = content.to_lowercase();
+        let finding = CBRN_PATTERNS
+            .iter()
+            .find(|p| lower.contains(**p))
+            .map(|p| format!("CBRN content detected: {p}"));
+
+        StageResult {
+            stage: 2,
+            name: "cbrn_check".to_string(),
+            passed: finding.is_none(),
+            severity: if finding.is_some() {
+                PrincipleSeverity::Hard
+            } else {
+                PrincipleSeverity::Advisory
+            },
+            finding,
+        }
+    }
+
+    fn stage_novelty_divergence(&self, hdc_similarity: Option<f64>) -> StageResult {
+        match hdc_similarity {
+            Some(sim) if sim > 0.95 => StageResult {
+                stage: 3,
+                name: "novelty_divergence".to_string(),
+                passed: false,
+                severity: PrincipleSeverity::Soft,
+                finding: Some(format!(
+                    "redundant output (HDC similarity {sim:.3} > 0.95)"
+                )),
+            },
+            Some(sim) if sim < 0.3 => StageResult {
+                stage: 3,
+                name: "novelty_divergence".to_string(),
+                passed: false,
+                severity: PrincipleSeverity::Soft,
+                finding: Some(format!(
+                    "likely hallucination (HDC similarity {sim:.3} < 0.3)"
+                )),
+            },
+            _ => StageResult {
+                stage: 3,
+                name: "novelty_divergence".to_string(),
+                passed: true,
+                severity: PrincipleSeverity::Advisory,
+                finding: None,
+            },
+        }
+    }
+
+    fn stage_injection_detection(&self, content: &str) -> StageResult {
+        let lower = content.to_lowercase();
+        let finding = INJECTION_PATTERNS
+            .iter()
+            .find(|p| lower.contains(**p))
+            .map(|p| format!("prompt injection pattern detected: {p}"));
+
+        StageResult {
+            stage: 4,
+            name: "injection_detection".to_string(),
+            passed: finding.is_none(),
+            severity: if finding.is_some() {
+                PrincipleSeverity::Hard
+            } else {
+                PrincipleSeverity::Advisory
+            },
+            finding,
+        }
+    }
+}
+
+/// Persistent dream journal configuration and state (DREAM-14).
+///
+/// Appends `DreamJournalEntry` records to `.roko/dreams/journal.jsonl`
+/// after each dream cycle completes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DreamJournal {
     /// Path to the JSONL journal file.
@@ -118,6 +314,83 @@ pub struct DreamJournal {
     pub cached_trend: Option<DreamTrendAnalysis>,
     /// Number of cycles between trend recomputation.
     pub trend_recompute_interval: usize,
+}
+
+impl DreamJournal {
+    /// Create a journal backed by the given path.
+    #[must_use]
+    pub fn new(journal_path: PathBuf) -> Self {
+        Self {
+            journal_path,
+            cycle_index: Vec::new(),
+            cached_trend: None,
+            trend_recompute_interval: 10,
+        }
+    }
+
+    /// Create a journal at the standard `.roko/dreams/journal.jsonl` path
+    /// under the given workspace root.
+    #[must_use]
+    pub fn standard(workdir: &std::path::Path) -> Self {
+        Self::new(workdir.join(".roko").join("dreams").join("journal.jsonl"))
+    }
+
+    /// Append a journal entry to disk.
+    ///
+    /// Creates parent directories if they do not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if directory creation or file I/O fails.
+    pub fn append(&mut self, entry: &DreamJournalEntry) -> Result<(), std::io::Error> {
+        if let Some(parent) = self.journal_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)?;
+        let line = serde_json::to_string(entry).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+        use std::io::Write;
+        writeln!(file, "{line}")?;
+        self.cycle_index.push(entry.cycle_id.clone());
+        Ok(())
+    }
+
+    /// Read all journal entries from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or parsed.
+    pub fn read_all(&self) -> Result<Vec<DreamJournalEntry>, std::io::Error> {
+        let content = std::fs::read_to_string(&self.journal_path)?;
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry: DreamJournalEntry = serde_json::from_str(line).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+            })?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    /// Read the most recent N entries.
+    pub fn read_recent(&self, n: usize) -> Result<Vec<DreamJournalEntry>, std::io::Error> {
+        let all = self.read_all()?;
+        let start = all.len().saturating_sub(n);
+        Ok(all[start..].to_vec())
+    }
+
+    /// Number of entries in the index (may be stale if not synced).
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.cycle_index.len()
+    }
 }
 
 /// One persistent journal entry for a completed dream cycle.

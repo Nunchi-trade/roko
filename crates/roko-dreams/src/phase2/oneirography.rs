@@ -327,6 +327,117 @@ impl ArtQualityAssessment {
     }
 }
 
+/// Configuration for the oneirography pipeline (DREAM-13).
+///
+/// Controls dream-to-image generation. Disabled by default; opt-in via
+/// `[oneirography]` section in roko.toml.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OneirographyConfig {
+    /// Whether the pipeline is enabled (default false).
+    pub enabled: bool,
+    /// Image generation provider identifier.
+    pub provider: String,
+    /// Number of image variants to generate per dream cycle.
+    pub variants: usize,
+    /// Base reserve price for affect-reactive auctions.
+    pub base_reserve: f64,
+    /// Base auction duration in seconds.
+    pub base_duration_seconds: u64,
+}
+
+impl Default for OneirographyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "disabled".to_string(),
+            variants: 3,
+            base_reserve: 0.01,
+            base_duration_seconds: 3600,
+        }
+    }
+}
+
+/// Dream art artifact produced by the oneirography pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DreamArt {
+    /// Unique artifact identifier.
+    pub art_id: String,
+    /// Dream cycle that produced this artifact.
+    pub cycle_id: String,
+    /// Image generation result from the provider.
+    pub image: ImageGenResult,
+    /// PAD vector at generation time.
+    pub pad: [f32; 3],
+    /// Auction parameters derived from PAD.
+    pub auction: AuctionParams,
+    /// Self-appraisal score (0.0 - 1.0).
+    pub self_appraisal_score: f64,
+    /// Timestamp of creation.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Pipeline for generating dream art from cycle reports (DREAM-13).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OneirographyPipeline {
+    /// Pipeline configuration.
+    pub config: OneirographyConfig,
+}
+
+impl OneirographyPipeline {
+    /// Create a new pipeline from configuration.
+    #[must_use]
+    pub fn new(config: OneirographyConfig) -> Self {
+        Self { config }
+    }
+
+    /// Generate an image prompt from a dream cycle report summary.
+    #[must_use]
+    pub fn generate_prompt(
+        &self,
+        cycle_summary: &str,
+        pad: PadVector,
+        causal_discoveries: &[String],
+    ) -> String {
+        let mood = if pad.pleasure > 0.3 {
+            "luminous, warm"
+        } else if pad.pleasure < -0.3 {
+            "dark, somber"
+        } else {
+            "neutral, contemplative"
+        };
+        let energy = if pad.arousal > 0.3 {
+            "dynamic, swirling"
+        } else {
+            "calm, still"
+        };
+
+        let discoveries = if causal_discoveries.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Key discoveries: {}.",
+                causal_discoveries.join("; ")
+            )
+        };
+
+        format!(
+            "Abstract digital art representing an AI's dream cycle. \
+             Mood: {mood}. Energy: {energy}. \
+             Dream summary: {cycle_summary}.{discoveries} \
+             Style: algorithmic, generative, data-driven."
+        )
+    }
+
+    /// Score an art piece for self-appraisal.
+    #[must_use]
+    pub fn self_appraise(&self, art: &DreamArt) -> f64 {
+        // Composite of image quality and emotional resonance.
+        let quality = art.image.quality_score.clamp(0.0, 1.0);
+        let emotional_resonance = f64::from(((art.pad[0] + 1.0) / 2.0).clamp(0.0, 1.0));
+        quality * 0.6 + emotional_resonance * 0.4
+    }
+}
+
 /// Aggregated analytics for the dream-art portfolio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PortfolioAnalytics {

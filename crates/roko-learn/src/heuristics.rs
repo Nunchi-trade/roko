@@ -40,7 +40,7 @@ pub type Role = String;
 pub type Hypothesis = String;
 
 /// Provenance descriptor for a paper-backed heuristic source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PaperProvenance {
     /// Imported from a local curated note or paper archive.
     LocalNote(String),
@@ -49,7 +49,7 @@ pub enum PaperProvenance {
 }
 
 /// Replication status for a paper-backed claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReplicationStatus {
     /// No local replication trials have run yet.
     Unknown,
@@ -65,7 +65,7 @@ pub enum ReplicationStatus {
 ///
 /// The docs call for trials, confirmations, violations, Brier score, a
 /// last-trial timestamp, and a confidence interval.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Calibration {
     /// Number of times the heuristic was actually tested.
     pub trials: u32,
@@ -103,7 +103,7 @@ impl Default for Calibration {
 }
 
 /// Paper-backed source record for a research-informed heuristic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Paper {
     /// Stable paper identifier.
     pub id: PaperId,
@@ -144,12 +144,12 @@ impl Paper {
 }
 
 /// Matchable condition used to select heuristics and falsifiers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Predicate {
     /// Match on a detected programming language.
     LanguageIs(Language),
-    /// Match on a path-like glob pattern.
-    FileMatches(Glob),
+    /// Match on a path-like glob pattern (stored as the pattern string).
+    FileMatches(String),
     /// Match when a tool is available.
     ToolAvailable(ToolId),
     /// Match when a gate has recently failed.
@@ -179,8 +179,13 @@ impl Predicate {
     }
 
     /// Create a file-matching predicate from a glob pattern.
+    ///
+    /// Validates the pattern at construction time and stores the string form
+    /// so that the predicate is cheaply serializable.
     pub fn file_matches(pattern: impl AsRef<str>) -> Result<Self, globset::Error> {
-        Ok(Self::FileMatches(Glob::new(pattern.as_ref())?))
+        // Validate that the pattern is well-formed.
+        Glob::new(pattern.as_ref())?;
+        Ok(Self::FileMatches(pattern.as_ref().to_owned()))
     }
 
     /// Create a tool-availability predicate.
@@ -230,7 +235,7 @@ impl Predicate {
 }
 
 /// Reusable claim with conditions, prediction, fingerprint, and receipts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Heuristic {
     /// Stable heuristic identifier.
     pub id: HeuristicId,
@@ -283,7 +288,7 @@ impl Heuristic {
 }
 
 /// Testable claim derived from a paper-backed source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
     /// Parent paper identifier.
     pub paper: PaperId,
@@ -329,7 +334,7 @@ pub trait Calibrator {
 }
 
 /// Outcome of calibrating a heuristic against an episode.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// The heuristic's prediction held.
     Confirmed,
@@ -346,7 +351,7 @@ pub enum Verdict {
 }
 
 /// A cluster of heuristics that tends to co-occur in successful episodes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Worldview {
     /// Stable worldview identifier.
     pub id: String,
@@ -375,7 +380,7 @@ impl Worldview {
 }
 
 /// A pair of heuristics with incompatible predictions for the same situation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Dissonance {
     /// The two competing heuristics.
     pub heuristics: [HeuristicId; 2],
@@ -402,7 +407,7 @@ impl Dissonance {
 }
 
 /// Runtime replication evidence comparing paper and local effects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReplicationLedger {
     /// Claim tracked by the ledger.
     pub claim: ClaimId,

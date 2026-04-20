@@ -1618,6 +1618,38 @@ impl CascadeRouter {
         }
     }
 
+    /// Route a context through the cascade, applying conductor routing bias
+    /// directly without going through the orchestrator (INT-09).
+    ///
+    /// Callers should convert the conductor's `RoutingBias` into this crate's
+    /// [`RoutingBias`] before calling. The bias filters deprioritized models
+    /// from the candidate set and biases remaining scores.
+    pub fn route_with_bias(
+        &self,
+        ctx: &RoutingContext,
+        bias: &RoutingBias,
+    ) -> CascadeModel {
+        // Filter out deprioritized candidates.
+        let candidates: Vec<String> = self
+            .model_slugs
+            .iter()
+            .filter(|slug| {
+                !bias
+                    .deprioritize
+                    .iter()
+                    .any(|d| slugs_match(slug, d))
+            })
+            .cloned()
+            .collect();
+
+        if candidates.is_empty() {
+            // Fall back to unfiltered routing if everything was deprioritized.
+            return self.route(ctx);
+        }
+
+        self.route_with_cfactor_among(ctx, &candidates, None, None)
+    }
+
     /// Load static routing overrides from a JSON map of role labels to model slugs.
     ///
     /// Returns the number of overrides applied.
@@ -4859,7 +4891,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut cascade = CascadeRouter::new(test_slugs());
+        let cascade = CascadeRouter::new(test_slugs());
         let applied = cascade.load_static_overrides(&path).unwrap();
         assert_eq!(applied, 1);
 

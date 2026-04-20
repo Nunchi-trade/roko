@@ -138,7 +138,11 @@ impl CurriculumScheduler {
     }
 }
 
-/// Aggregate tool-usage profile observed during a curriculum phase.
+/// Aggregate tool-usage profile keyed by (role, task_category).
+///
+/// Tracks which tool sequences lead to successful outcomes and which
+/// tools are low-value. Profiles can be mined from episode data and
+/// injected into agent prompts as tool hints (LEARN-12).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolUsageProfile {
     /// Tool name.
@@ -147,24 +151,133 @@ pub struct ToolUsageProfile {
     pub usage_count: u64,
     /// Empirical success rate for uses of this tool.
     pub success_rate: f64,
+    /// Average calls per episode for this tool.
+    pub calls_per_episode: f64,
+    /// Contribution to task success (pass rate delta when tool is used vs not).
+    pub contribution_to_success: f64,
+    /// Total tokens consumed by this tool's results.
+    pub tokens_consumed: u64,
 }
 
 /// Frequent sequence of tool calls observed in successful tasks.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolSequencePattern {
     /// Ordered tool names in the sequence.
     pub tools: Vec<String>,
     /// Number of tasks that exhibited the sequence.
     pub support_count: u32,
+    /// Lift: pass rate with pattern vs pass rate without pattern.
+    /// Values > 1.0 indicate the pattern is associated with success.
+    pub lift: f64,
 }
 
 /// Advisory warning surfaced during curriculum analysis.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolWarning {
     /// Tool the warning applies to.
     pub tool_name: String,
     /// Human-readable warning message.
     pub message: String,
+    /// Average calls per episode.
+    pub calls_per_episode: f64,
+    /// Contribution to task success.
+    pub contribution_to_success: f64,
+    /// Total tokens consumed.
+    pub tokens_consumed: u64,
+}
+
+/// Aggregated tool usage data for a (role, task_category) pair.
+///
+/// Used to generate prompt hints about effective tool sequences.
+#[derive(Debug, Clone, Default)]
+pub struct RoleToolProfile {
+    /// Role identifier.
+    pub role: String,
+    /// Task category.
+    pub category: String,
+    /// Per-tool aggregate stats.
+    pub tools: Vec<ToolUsageProfile>,
+    /// Successful tool sequence patterns with lift > 1.0.
+    pub successful_patterns: Vec<ToolSequencePattern>,
+    /// Warnings about low-value tools.
+    pub warnings: Vec<ToolWarning>,
+}
+
+impl RoleToolProfile {
+    /// Format the top tool sequence patterns as prompt hints.
+    ///
+    /// Returns a natural language description suitable for injection into
+    /// a system prompt. Includes up to `max_hints` patterns.
+    #[must_use]
+    pub fn format_hints(&self, max_hints: usize) -> String {
+        if self.successful_patterns.is_empty() && self.warnings.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = Vec::new();
+
+        // Successful patterns.
+        let patterns: Vec<_> = self
+            .successful_patterns
+            .iter()
+            .filter(|p| p.lift > 1.0 && p.support_count >= 3)
+            .take(max_hints)
+            .collect();
+
+        if !patterns.is_empty() {
+            lines.push(format!(
+                "## Tool Usage Hints ({}:{})",
+                self.role, self.category
+            ));
+            lines.push(String::new());
+            lines.push("Successful approaches typically use:".to_string());
+            for pattern in &patterns {
+                let sequence = pattern.tools.join(" -> ");
+                lines.push(format!(
+                    "- {} (seen in {} tasks, {:.0}% lift)",
+                    sequence,
+                    pattern.support_count,
+                    (pattern.lift - 1.0) * 100.0
+                ));
+            }
+        }
+
+        // Low-value tool warnings.
+        let warnings: Vec<_> = self
+            .warnings
+            .iter()
+            .filter(|w| w.contribution_to_success < 0.1 && w.calls_per_episode > 3.0)
+            .take(3)
+            .collect();
+
+        if !warnings.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("Low-value tools (consider reducing usage):".to_string());
+            for w in &warnings {
+                lines.push(format!(
+                    "- {} ({:.1} calls/episode, {:.0}% contribution)",
+                    w.tool_name,
+                    w.calls_per_episode,
+                    w.contribution_to_success * 100.0
+                ));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    /// Extract tool sequence trigrams from an ordered tool call list.
+    ///
+    /// Returns all contiguous 3-tool subsequences.
+    #[must_use]
+    pub fn extract_trigrams(tools: &[String]) -> Vec<Vec<String>> {
+        if tools.len() < 3 {
+            return vec![tools.to_vec()];
+        }
+        tools.windows(3).map(|w| w.to_vec()).collect()
+    }
 }
 
 /// Reorder tasks according to the chosen curriculum strategy.

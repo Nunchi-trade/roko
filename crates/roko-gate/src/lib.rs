@@ -54,6 +54,8 @@ pub mod feedback;
 pub mod gate_pipeline;
 pub mod generated;
 pub mod generated_test_gate;
+/// Multi-gate joint anomaly detection via Hotelling's T-squared (GATE-08).
+pub mod hotelling;
 pub mod integration_gate;
 pub mod llm_judge_gate;
 pub mod payload;
@@ -80,6 +82,7 @@ pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
+pub use hotelling::{HotellingDetector, JointAnomalyResult};
 pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
 pub use generated::{GateError, GateGenerator, GeneratedCheck};
 pub use payload::{BuildSystem, GatePayload, TestSelector};

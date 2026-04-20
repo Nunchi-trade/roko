@@ -13,7 +13,7 @@ use super::schema::{
     DemurrageConfig, DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig,
     PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride,
     RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, TuiConfig, WatcherConfig,
-    WebhooksConfig,
+    WebhooksConfig, AttentionConfig, ImmuneConfig, TemporalConfig, GoalsConfig, EnergyConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -124,6 +124,11 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         deploy: DeployConfig::default(),
         perplexity: PerplexityConfig::default(),
         gemini: GeminiConfig::default(),
+        attention: AttentionConfig::default(),
+        immune: ImmuneConfig::default(),
+        temporal: TemporalConfig::default(),
+        goals: GoalsConfig::default(),
+        energy: EnergyConfig::default(),
     }
 }
 

@@ -592,3 +592,478 @@ impl Default for ContextGovernor {
         Self::new(Self::default_budgets())
     }
 }
+
+/// Runs the VCG attention auction with carryover-budget modulation.
+///
+/// This extends [`run_attention_auction`] by applying per-subsystem budget
+/// multipliers from [`AttentionBudget`]. Subsystems that have been losing
+/// auctions accumulate credit and bid more aggressively; winners are debited.
+///
+/// The auction records all bids (winners and losers) in an [`AuctionRound`]
+/// for diagnostics and persistence.
+pub fn run_attention_auction_with_budget(
+    candidates: &[ContextCandidate],
+    budget_tokens: usize,
+    pad: &PadVector,
+    attention_budget: &mut AttentionBudget,
+    tick_id: u64,
+    tier: InferenceTier,
+) -> AuctionRound {
+    // Compute modulated bids.
+    let mut scored: Vec<(usize, f64, f64, f64)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, candidate)| {
+            let affect_mult = candidate.affect_multiplier(pad);
+            let carryover_mult = attention_budget.bid_multiplier(candidate.subsystem_id);
+            let final_bid = candidate.base_bid() * affect_mult * carryover_mult;
+            (idx, final_bid, affect_mult, carryover_mult)
+        })
+        .collect();
+
+    scored.sort_by(|(a_idx, a_bid, _, _), (b_idx, b_bid, _, _)| {
+        b_bid
+            .total_cmp(a_bid)
+            .then_with(|| tiebreak(&candidates[*a_idx], &candidates[*b_idx]))
+    });
+
+    // Greedy allocation.
+    let mut remaining = budget_tokens;
+    let mut winning_set: HashSet<usize> = HashSet::new();
+    let mut allocations = Vec::new();
+
+    for &(candidate_idx, bid, _, _) in &scored {
+        if remaining == 0 {
+            break;
+        }
+
+        let candidate = &candidates[candidate_idx];
+        let tokens_allocated = candidate.token_count.min(remaining);
+        if tokens_allocated == 0 {
+            continue;
+        }
+
+        winning_set.insert(candidate_idx);
+        remaining = remaining.saturating_sub(tokens_allocated);
+
+        // VCG payment: the next excluded bid.
+        let payment = if remaining == 0 {
+            scored
+                .iter()
+                .find(|(idx, _, _, _)| !winning_set.contains(idx))
+                .map_or(0.0, |(_, next_bid, _, _)| *next_bid)
+        } else {
+            0.0
+        };
+
+        allocations.push(ContextAllocation::new(
+            candidate_idx,
+            tokens_allocated,
+            bid,
+            payment,
+        ));
+    }
+
+    // Update carryover budget.
+    attention_budget.apply_auction_results(&allocations, candidates);
+
+    // Build bid results for the full round record.
+    let bids: Vec<BidResult> = scored
+        .iter()
+        .map(|&(idx, _final_bid, affect_mult, carryover_mult)| {
+            let candidate = &candidates[idx];
+            let alloc = allocations.iter().find(|a| a.candidate_idx == idx);
+            BidResult::new(
+                candidate.subsystem_id,
+                candidate.category,
+                candidate.expected_value,
+                candidate.urgency,
+                affect_mult,
+                carryover_mult,
+                alloc.map_or(0.0, |a| a.payment),
+                candidate.token_count,
+                alloc.map_or(0, |a| a.tokens_allocated),
+                alloc.is_some(),
+                candidate.content_summary.clone(),
+            )
+        })
+        .collect();
+
+    AuctionRound::new(
+        tick_id,
+        chrono::Utc::now(),
+        tier,
+        budget_tokens,
+        *pad,
+        bids,
+    )
+}
+
+// ─── POMDP heartbeat decision ──────────────────────────────────────────
+
+/// Observation signal consumed by the heartbeat POMDP.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HeartbeatObservation {
+    /// Aggregate prediction error from probes.
+    pub prediction_error: f32,
+    /// Number of anomalous probes.
+    pub anomaly_count: u32,
+    /// World-model drift.
+    pub drift: f32,
+    /// Current environmental regime.
+    pub regime: crate::heartbeat::Regime,
+    /// Whether any gate failure occurred in the last tick.
+    pub gate_failure: bool,
+}
+
+/// POMDP action space for heartbeat governance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatAction {
+    /// Continue at the current tick rate.
+    Maintain,
+    /// Speed up gamma ticks (higher attention).
+    Accelerate,
+    /// Slow down gamma ticks (lower attention).
+    Decelerate,
+    /// Trigger a theta reflective tick early.
+    TriggerTheta,
+    /// Enter delta consolidation.
+    TriggerDelta,
+}
+
+/// Belief state for the heartbeat POMDP.
+///
+/// Uses a simplified 5-state model: [calm, normal, volatile, crisis, recovery]
+/// with observation likelihoods derived from probe outputs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeartbeatBelief {
+    /// Probability distribution over [calm, normal, volatile, crisis, recovery].
+    pub state_probs: [f64; 5],
+    /// Number of updates applied.
+    pub updates: u64,
+}
+
+impl Default for HeartbeatBelief {
+    fn default() -> Self {
+        Self {
+            state_probs: [0.2; 5],
+            updates: 0,
+        }
+    }
+}
+
+impl HeartbeatBelief {
+    /// Update belief state from a new observation using Bayesian filtering.
+    pub fn update(&mut self, obs: &HeartbeatObservation) {
+        let likelihoods = observation_likelihoods(obs);
+        for (prob, likelihood) in self.state_probs.iter_mut().zip(likelihoods.iter()) {
+            *prob *= likelihood;
+        }
+        self.normalize();
+        self.updates += 1;
+    }
+
+    /// Select the best heartbeat action by minimizing expected free energy.
+    #[must_use]
+    pub fn select_action(&self) -> HeartbeatAction {
+        let actions = [
+            HeartbeatAction::Maintain,
+            HeartbeatAction::Accelerate,
+            HeartbeatAction::Decelerate,
+            HeartbeatAction::TriggerTheta,
+            HeartbeatAction::TriggerDelta,
+        ];
+
+        actions
+            .into_iter()
+            .min_by(|a, b| {
+                self.expected_free_energy(*a)
+                    .partial_cmp(&self.expected_free_energy(*b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(HeartbeatAction::Maintain)
+    }
+
+    /// Expected free energy for an action given the current belief.
+    fn expected_free_energy(&self, action: HeartbeatAction) -> f64 {
+        let [calm, normal, volatile, crisis, recovery] = self.state_probs;
+
+        // Risk: probability of being in a bad state without adequate response.
+        let risk = match action {
+            HeartbeatAction::Maintain => crisis * 0.8 + volatile * 0.3,
+            HeartbeatAction::Accelerate => crisis * 0.2 + volatile * 0.1,
+            HeartbeatAction::Decelerate => crisis * 1.0 + volatile * 0.6 + normal * 0.1,
+            HeartbeatAction::TriggerTheta => crisis * 0.4 + volatile * 0.2,
+            HeartbeatAction::TriggerDelta => crisis * 0.5 + volatile * 0.4,
+        };
+
+        // Cost: resource expenditure.
+        let cost = match action {
+            HeartbeatAction::Maintain => 0.1,
+            HeartbeatAction::Accelerate => 0.3,
+            HeartbeatAction::Decelerate => 0.05,
+            HeartbeatAction::TriggerTheta => 0.2,
+            HeartbeatAction::TriggerDelta => 0.15,
+        };
+
+        // Efficiency: unnecessary action in calm/recovery states is waste.
+        let waste = match action {
+            HeartbeatAction::Accelerate => (calm + recovery) * 0.4,
+            HeartbeatAction::TriggerTheta => calm * 0.3,
+            HeartbeatAction::TriggerDelta => (calm + normal) * 0.2,
+            _ => 0.0,
+        };
+
+        risk + cost + waste
+    }
+
+    fn normalize(&mut self) {
+        let total: f64 = self.state_probs.iter().sum();
+        if total <= 0.0 || !total.is_finite() {
+            self.state_probs = [0.2; 5];
+            return;
+        }
+        for prob in &mut self.state_probs {
+            *prob = (*prob / total).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// Compute observation likelihoods for [calm, normal, volatile, crisis, recovery].
+fn observation_likelihoods(obs: &HeartbeatObservation) -> [f64; 5] {
+    let error = obs.prediction_error as f64;
+    let drift = obs.drift as f64;
+    let anomalies = obs.anomaly_count as f64;
+    let gate_fail = if obs.gate_failure { 1.0 } else { 0.0 };
+
+    // Higher error/drift/anomalies -> more likely volatile/crisis.
+    let calm_likelihood = ((1.0 - error) * (1.0 - drift) * (1.0 - gate_fail))
+        .clamp(0.01, 1.0)
+        * (1.0 / (1.0 + anomalies));
+    let normal_likelihood = (0.7 - error * 0.3).clamp(0.01, 1.0);
+    let volatile_likelihood = (error * 0.5 + drift * 0.3 + anomalies * 0.1).clamp(0.01, 1.0);
+    let crisis_likelihood =
+        (error * 0.7 + drift * 0.5 + gate_fail * 0.5 + anomalies * 0.15).clamp(0.01, 1.0);
+    let recovery_likelihood = match obs.regime {
+        crate::heartbeat::Regime::Calm => 0.3,
+        crate::heartbeat::Regime::Normal => 0.2,
+        crate::heartbeat::Regime::Volatile => 0.1,
+        crate::heartbeat::Regime::Crisis => 0.05,
+    };
+
+    [
+        calm_likelihood,
+        normal_likelihood,
+        volatile_likelihood,
+        crisis_likelihood,
+        recovery_likelihood,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn neutral_pad() -> PadVector {
+        PadVector::neutral()
+    }
+
+    #[test]
+    fn empty_candidates_produce_empty_allocations() {
+        let allocations = run_attention_auction(&[], 1000, &neutral_pad());
+        assert!(allocations.is_empty());
+    }
+
+    #[test]
+    fn single_candidate_gets_full_allocation() {
+        let candidates = vec![ContextCandidate::new(
+            SubsystemId::Neuro,
+            ContextCategory::Knowledge,
+            500,
+            0.8,
+            1.0,
+            "neuro memory",
+        )];
+        let allocations = run_attention_auction(&candidates, 1000, &neutral_pad());
+        assert_eq!(allocations.len(), 1);
+        assert_eq!(allocations[0].tokens_allocated, 500);
+        assert_eq!(allocations[0].payment, 0.0);
+    }
+
+    #[test]
+    fn vcg_payment_equals_excluded_bid() {
+        let candidates = vec![
+            ContextCandidate::new(
+                SubsystemId::Neuro,
+                ContextCategory::Knowledge,
+                800,
+                0.9,
+                1.0,
+                "neuro",
+            ),
+            ContextCandidate::new(
+                SubsystemId::Daimon,
+                ContextCategory::Affect,
+                800,
+                0.5,
+                1.0,
+                "daimon",
+            ),
+        ];
+        let allocations = run_attention_auction(&candidates, 800, &neutral_pad());
+        assert_eq!(allocations.len(), 1);
+        // Winner pays the loser's bid.
+        assert!((allocations[0].payment - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn carryover_budget_modulates_bids() {
+        let subsystems = vec![SubsystemId::Neuro, SubsystemId::Daimon];
+        let mut budget = AttentionBudget::new(&subsystems);
+
+        let candidates = vec![
+            ContextCandidate::new(
+                SubsystemId::Neuro,
+                ContextCategory::Knowledge,
+                500,
+                0.8,
+                1.0,
+                "neuro",
+            ),
+            ContextCandidate::new(
+                SubsystemId::Daimon,
+                ContextCategory::Affect,
+                500,
+                0.7,
+                1.0,
+                "daimon",
+            ),
+        ];
+
+        let round = run_attention_auction_with_budget(
+            &candidates,
+            1000,
+            &neutral_pad(),
+            &mut budget,
+            1,
+            InferenceTier::T1,
+        );
+
+        assert_eq!(round.total_candidates, 2);
+        assert!(round.winners > 0);
+        assert!(round.tokens_used > 0);
+    }
+
+    #[test]
+    fn attention_budget_tracks_balances() {
+        let subsystems = vec![SubsystemId::Neuro, SubsystemId::Daimon];
+        let mut budget = AttentionBudget::new(&subsystems);
+
+        assert_eq!(budget.balance(SubsystemId::Neuro), 0.0);
+        assert!((budget.bid_multiplier(SubsystemId::Neuro) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn heartbeat_belief_update_shifts_distribution() {
+        let mut belief = HeartbeatBelief::default();
+        let before = belief.state_probs;
+
+        let obs = HeartbeatObservation {
+            prediction_error: 0.8,
+            anomaly_count: 3,
+            drift: 0.6,
+            regime: crate::heartbeat::Regime::Volatile,
+            gate_failure: true,
+        };
+        belief.update(&obs);
+
+        assert_ne!(belief.state_probs, before);
+        // Crisis/volatile probability should increase.
+        assert!(belief.state_probs[3] > belief.state_probs[0]); // crisis > calm
+        assert!((belief.state_probs.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn heartbeat_pomdp_accelerates_in_crisis() {
+        let mut belief = HeartbeatBelief::default();
+        // Push toward crisis.
+        for _ in 0..5 {
+            belief.update(&HeartbeatObservation {
+                prediction_error: 0.9,
+                anomaly_count: 5,
+                drift: 0.8,
+                regime: crate::heartbeat::Regime::Crisis,
+                gate_failure: true,
+            });
+        }
+
+        let action = belief.select_action();
+        assert_eq!(action, HeartbeatAction::Accelerate);
+    }
+
+    #[test]
+    fn heartbeat_pomdp_decelerates_in_calm() {
+        let mut belief = HeartbeatBelief::default();
+        // Push toward calm.
+        for _ in 0..5 {
+            belief.update(&HeartbeatObservation {
+                prediction_error: 0.05,
+                anomaly_count: 0,
+                drift: 0.02,
+                regime: crate::heartbeat::Regime::Calm,
+                gate_failure: false,
+            });
+        }
+
+        let action = belief.select_action();
+        assert!(
+            action == HeartbeatAction::Decelerate || action == HeartbeatAction::Maintain,
+            "Expected Decelerate or Maintain in calm, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn context_governor_default_budgets() {
+        let governor = ContextGovernor::default();
+        assert_eq!(governor.budget_for_tier(InferenceTier::T0), 0);
+        assert_eq!(governor.budget_for_tier(InferenceTier::T1), 4_000);
+        assert_eq!(governor.budget_for_tier(InferenceTier::T2), 32_000);
+    }
+
+    #[test]
+    fn context_governor_complexity_scaling() {
+        let governor = ContextGovernor::default();
+        let low = governor.adjusted_budget(InferenceTier::T1, 0.0);
+        let high = governor.adjusted_budget(InferenceTier::T1, 1.0);
+        assert!(high > low);
+    }
+
+    #[test]
+    fn auction_round_snapshot_consistency() {
+        let bids = vec![BidResult::new(
+            SubsystemId::Neuro,
+            ContextCategory::Knowledge,
+            0.8,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            500,
+            500,
+            true,
+            "test",
+        )];
+        let round = AuctionRound::new(
+            1,
+            chrono::Utc::now(),
+            InferenceTier::T1,
+            1000,
+            PadVector::neutral(),
+            bids,
+        );
+        assert_eq!(round.winners, 1);
+        assert_eq!(round.tokens_used, 500);
+        assert_eq!(round.tokens_remaining, 500);
+    }
+}

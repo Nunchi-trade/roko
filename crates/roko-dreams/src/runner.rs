@@ -216,7 +216,7 @@ impl DreamBudget {
 }
 
 /// Dream scheduling trigger kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DreamTrigger {
     /// Idle gap between task dispatches.
@@ -227,18 +227,62 @@ pub enum DreamTrigger {
     Manual,
     /// Accumulated episode count since last dream.
     EpisodeCount,
+    /// Bus-reactive trigger from a high-value engram (DREAM-09).
+    BusPulse {
+        /// Hash or ID of the engram that triggered the dream.
+        #[serde(default)]
+        engram_hash: String,
+    },
 }
 
 impl DreamTrigger {
     /// Stable lowercase label.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Scheduled => "scheduled",
             Self::Manual => "manual",
             Self::EpisodeCount => "episode_count",
+            Self::BusPulse { .. } => "bus_pulse",
         }
+    }
+}
+
+/// Criteria for determining whether an engram is "dream-worthy" (DREAM-09).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BusPulseTriggerConfig {
+    /// Minimum engram score to trigger a dream (default 0.7).
+    pub min_score: f64,
+    /// Minimum interval between bus-triggered dreams (default 30 minutes).
+    pub min_interval_secs: u64,
+    /// Engram kinds that can trigger dreams.
+    pub trigger_kinds: Vec<String>,
+}
+
+impl Default for BusPulseTriggerConfig {
+    fn default() -> Self {
+        Self {
+            min_score: 0.7,
+            min_interval_secs: 1800,
+            trigger_kinds: vec![
+                "gate_verdict".to_string(),
+                "episode_complete".to_string(),
+                "knowledge_ingested".to_string(),
+            ],
+        }
+    }
+}
+
+impl BusPulseTriggerConfig {
+    /// Check if an engram with the given score and kind qualifies as dream-worthy.
+    #[must_use]
+    pub fn is_dream_worthy(&self, score: f64, kind: &str) -> bool {
+        score >= self.min_score
+            && self
+                .trigger_kinds
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(kind))
     }
 }
 
@@ -325,11 +369,12 @@ impl DreamSchedulePolicy {
 
     /// Determine whether a trigger kind is allowed under the current policy.
     #[must_use]
-    pub fn allows(&self, trigger: DreamTrigger) -> bool {
+    pub fn allows(&self, trigger: &DreamTrigger) -> bool {
         match trigger {
             DreamTrigger::Idle | DreamTrigger::Scheduled => self.enabled,
             DreamTrigger::Manual => self.manual_enabled,
             DreamTrigger::EpisodeCount => self.enabled && self.episode_count_trigger > 0,
+            DreamTrigger::BusPulse { .. } => self.enabled,
         }
     }
 
@@ -337,7 +382,7 @@ impl DreamSchedulePolicy {
     #[must_use]
     pub fn trigger_delay(
         &self,
-        trigger: DreamTrigger,
+        trigger: &DreamTrigger,
         report: Option<&DreamReport>,
         budget: Option<&DreamBudget>,
         now: DateTime<Utc>,
@@ -350,6 +395,7 @@ impl DreamSchedulePolicy {
             DreamTrigger::Scheduled => self.cron_delay(now),
             DreamTrigger::Manual => Some(Duration::ZERO),
             DreamTrigger::EpisodeCount => Some(Duration::ZERO),
+            DreamTrigger::BusPulse { .. } => Some(Duration::ZERO),
         }
     }
 }
@@ -640,7 +686,7 @@ impl DreamRunner {
 
     /// Resolve the delay for a specific trigger kind.
     #[must_use]
-    pub fn trigger_delay(&self, trigger: DreamTrigger) -> Option<Duration> {
+    pub fn trigger_delay(&self, trigger: &DreamTrigger) -> Option<Duration> {
         if !self.config.auto_dream {
             return None;
         }
@@ -770,7 +816,7 @@ impl DreamEngine for DreamRunner {
 
         let latest_episode = heartbeat.latest_episode_at?;
         let idle_delay = self.controls.schedule.trigger_delay(
-            DreamTrigger::Idle,
+            &DreamTrigger::Idle,
             last_report.as_ref(),
             self.controls.budget.as_ref(),
             now,
@@ -778,7 +824,7 @@ impl DreamEngine for DreamRunner {
         let idle_fire_at = latest_episode + chrono::Duration::from_std(idle_delay).ok()?;
         let mut target = idle_fire_at;
         if let Some(cron_delay) = self.controls.schedule.trigger_delay(
-            DreamTrigger::Scheduled,
+            &DreamTrigger::Scheduled,
             last_report.as_ref(),
             self.controls.budget.as_ref(),
             now,
@@ -1030,7 +1076,7 @@ mod tests {
     #[test]
     fn schedule_manual_trigger_is_allowed() {
         let policy = DreamSchedulePolicy::default();
-        let delay = policy.trigger_delay(DreamTrigger::Manual, None, None, Utc::now());
+        let delay = policy.trigger_delay(&DreamTrigger::Manual, None, None, Utc::now());
         assert_eq!(delay, Some(Duration::ZERO));
     }
 
@@ -1044,7 +1090,7 @@ mod tests {
             .expect("timestamp")
             .with_timezone(&Utc);
 
-        let delay = policy.trigger_delay(DreamTrigger::Scheduled, None, None, now);
+        let delay = policy.trigger_delay(&DreamTrigger::Scheduled, None, None, now);
 
         assert_eq!(delay, Some(Duration::from_secs(45)));
     }

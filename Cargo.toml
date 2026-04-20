@@ -120,8 +120,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 blake3 = "1"
 
-# Testing
+# Testing & benchmarks
 proptest = "1.10"
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
