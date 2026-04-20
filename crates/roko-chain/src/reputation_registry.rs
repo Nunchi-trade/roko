@@ -239,6 +239,177 @@ impl DomainReputation {
     }
 }
 
+// ─── Recovery Tracking ──────────────────────────────────────────────
+
+/// Tracks recovery progress for agents in Probation or Suspended discipline states.
+///
+/// Per spec (docs/08-chain/14-reputation-system-7-domain.md lines 128-141):
+/// - **Probation recovery**: 10 jobs with average feedback >= 0.6
+/// - **Suspension recovery**: 90-day waiting period + 2x domain stake + verification challenge passed
+/// - **Ban appeal**: governance vote after 365 days
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryTracker {
+    /// Jobs completed during current recovery attempt.
+    pub recovery_jobs: Vec<RecoveryJob>,
+    /// When the agent entered the current discipline state (unix secs).
+    pub state_entered_at: u64,
+    /// Whether the agent has posted the required recovery stake (2x for Suspension).
+    pub recovery_stake_posted: bool,
+    /// Whether the verification challenge has been passed (for Suspension).
+    pub verification_passed: bool,
+}
+
+/// A job completed during the recovery period.
+#[derive(Debug, Clone)]
+pub struct RecoveryJob {
+    /// Feedback quality score for this job [0.0, 1.0].
+    pub feedback: f64,
+    /// Timestamp when the job was completed.
+    pub completed_at: u64,
+}
+
+/// Requirements for recovery from a discipline state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryRequirements {
+    /// Minimum jobs needed.
+    pub min_jobs: usize,
+    /// Minimum average feedback across recovery jobs.
+    pub min_avg_feedback: f64,
+    /// Waiting period in seconds (0 for Probation).
+    pub waiting_period_secs: u64,
+    /// Whether recovery stake is required.
+    pub requires_stake: bool,
+    /// Whether verification challenge is required.
+    pub requires_verification: bool,
+}
+
+impl RecoveryRequirements {
+    /// Requirements for recovering from Probation.
+    pub fn for_probation() -> Self {
+        Self {
+            min_jobs: 10,
+            min_avg_feedback: 0.6,
+            waiting_period_secs: 0,
+            requires_stake: false,
+            requires_verification: false,
+        }
+    }
+
+    /// Requirements for recovering from Suspension.
+    pub fn for_suspension() -> Self {
+        Self {
+            min_jobs: 0,
+            min_avg_feedback: 0.0,
+            waiting_period_secs: 90 * 24 * 3600, // 90 days
+            requires_stake: true,
+            requires_verification: true,
+        }
+    }
+}
+
+/// Result of checking recovery eligibility.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecoveryStatus {
+    /// Recovery conditions met — agent can be restored to GoodStanding.
+    Eligible,
+    /// Still waiting for time requirement.
+    WaitingPeriod {
+        /// Seconds remaining.
+        remaining_secs: u64,
+    },
+    /// Need more qualifying jobs.
+    NeedMoreJobs {
+        /// Current count.
+        current: usize,
+        /// Required count.
+        required: usize,
+    },
+    /// Average feedback too low.
+    FeedbackTooLow {
+        /// Current average.
+        current_avg: f64,
+        /// Required minimum.
+        required: f64,
+    },
+    /// Recovery stake not posted.
+    NeedStake,
+    /// Verification challenge not passed.
+    NeedVerification,
+    /// Not in a recoverable state.
+    NotApplicable,
+}
+
+impl RecoveryTracker {
+    /// Record a completed job during recovery.
+    pub fn record_job(&mut self, feedback: f64, now: u64) {
+        self.recovery_jobs.push(RecoveryJob {
+            feedback: feedback.clamp(0.0, 1.0),
+            completed_at: now,
+        });
+    }
+
+    /// Average feedback across recovery jobs.
+    pub fn avg_feedback(&self) -> f64 {
+        if self.recovery_jobs.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.recovery_jobs.iter().map(|j| j.feedback).sum();
+        sum / self.recovery_jobs.len() as f64
+    }
+
+    /// Check if recovery requirements are met.
+    pub fn check(&self, reqs: &RecoveryRequirements, now: u64) -> RecoveryStatus {
+        // Check waiting period.
+        if reqs.waiting_period_secs > 0 {
+            let elapsed = now.saturating_sub(self.state_entered_at);
+            if elapsed < reqs.waiting_period_secs {
+                return RecoveryStatus::WaitingPeriod {
+                    remaining_secs: reqs.waiting_period_secs - elapsed,
+                };
+            }
+        }
+
+        // Check stake requirement.
+        if reqs.requires_stake && !self.recovery_stake_posted {
+            return RecoveryStatus::NeedStake;
+        }
+
+        // Check verification requirement.
+        if reqs.requires_verification && !self.verification_passed {
+            return RecoveryStatus::NeedVerification;
+        }
+
+        // Check job count.
+        if self.recovery_jobs.len() < reqs.min_jobs {
+            return RecoveryStatus::NeedMoreJobs {
+                current: self.recovery_jobs.len(),
+                required: reqs.min_jobs,
+            };
+        }
+
+        // Check average feedback.
+        if reqs.min_avg_feedback > 0.0 {
+            let avg = self.avg_feedback();
+            if avg < reqs.min_avg_feedback {
+                return RecoveryStatus::FeedbackTooLow {
+                    current_avg: avg,
+                    required: reqs.min_avg_feedback,
+                };
+            }
+        }
+
+        RecoveryStatus::Eligible
+    }
+
+    /// Reset the tracker (after successful recovery or new discipline transition).
+    pub fn reset(&mut self, now: u64) {
+        self.recovery_jobs.clear();
+        self.state_entered_at = now;
+        self.recovery_stake_posted = false;
+        self.verification_passed = false;
+    }
+}
+
 /// Per-agent reputation profile across all 7 domains.
 #[derive(Debug, Clone)]
 pub struct AgentReputation {
@@ -248,6 +419,8 @@ pub struct AgentReputation {
     discipline_override: Option<DisciplineState>,
     /// Active feedback weight dilutions (from collusion detection).
     pub feedback_dilutions: Vec<FeedbackDilution>,
+    /// Recovery progress tracker.
+    pub recovery: RecoveryTracker,
 }
 
 impl AgentReputation {
@@ -261,6 +434,7 @@ impl AgentReputation {
             domains,
             discipline_override: None,
             feedback_dilutions: Vec::new(),
+            recovery: RecoveryTracker::default(),
         }
     }
 
@@ -436,6 +610,63 @@ impl ReputationRegistry {
     pub fn ban_agent(&mut self, passport_id: u256) {
         if let Some(agent) = self.records.get_mut(&passport_id) {
             agent.discipline_override = Some(DisciplineState::Banned);
+        }
+    }
+
+    /// Record a recovery job for an agent (completed during probation/suspension).
+    pub fn record_recovery_job(&mut self, passport_id: u256, feedback: f64, now: u64) {
+        if let Some(agent) = self.records.get_mut(&passport_id) {
+            agent.recovery.record_job(feedback, now);
+        }
+    }
+
+    /// Post recovery stake for a suspended agent (2x domain stake).
+    pub fn post_recovery_stake(&mut self, passport_id: u256) {
+        if let Some(agent) = self.records.get_mut(&passport_id) {
+            agent.recovery.recovery_stake_posted = true;
+        }
+    }
+
+    /// Record verification challenge passed for a suspended agent.
+    pub fn pass_verification_challenge(&mut self, passport_id: u256) {
+        if let Some(agent) = self.records.get_mut(&passport_id) {
+            agent.recovery.verification_passed = true;
+        }
+    }
+
+    /// Check recovery status for an agent.
+    pub fn recovery_status(&self, passport_id: u256, now: u64) -> RecoveryStatus {
+        let Some(agent) = self.records.get(&passport_id) else {
+            return RecoveryStatus::NotApplicable;
+        };
+
+        let state = agent.discipline_state(now);
+        match state {
+            DisciplineState::Probation => agent
+                .recovery
+                .check(&RecoveryRequirements::for_probation(), now),
+            DisciplineState::Suspended => agent
+                .recovery
+                .check(&RecoveryRequirements::for_suspension(), now),
+            _ => RecoveryStatus::NotApplicable,
+        }
+    }
+
+    /// Attempt to recover an agent from Probation or Suspension.
+    ///
+    /// Returns `true` if recovery was successful and the agent was restored to GoodStanding.
+    pub fn attempt_recovery(&mut self, passport_id: u256, now: u64) -> bool {
+        let status = self.recovery_status(passport_id, now);
+        if status != RecoveryStatus::Eligible {
+            return false;
+        }
+
+        if let Some(agent) = self.records.get_mut(&passport_id) {
+            agent.discipline_override = Some(DisciplineState::GoodStanding);
+            agent.recovery.reset(now);
+            true
+        } else {
+            false
         }
     }
 
@@ -750,6 +981,139 @@ mod tests {
         assert_eq!(
             registry.discipline_state(1, now),
             DisciplineState::Suspended
+        );
+    }
+
+    // ─── Recovery tests ─────────────────────────────────────────────
+
+    #[test]
+    fn probation_recovery_requires_10_jobs_with_good_feedback() {
+        let mut registry = ReputationRegistry::new();
+        let now = 1_000_000;
+        registry.register_agent(1, now);
+
+        // Push into Probation (score < 0.4).
+        for _ in 0..30 {
+            registry.submit_feedback(1, "operations", 0.25, now);
+        }
+        assert_eq!(
+            registry.discipline_state(1, now),
+            DisciplineState::Probation
+        );
+
+        // Not enough recovery jobs yet.
+        for i in 0..5 {
+            registry.record_recovery_job(1, 0.7, now + i);
+        }
+        assert!(matches!(
+            registry.recovery_status(1, now + 5),
+            RecoveryStatus::NeedMoreJobs {
+                current: 5,
+                required: 10
+            }
+        ));
+
+        // Complete 10 jobs with good feedback.
+        for i in 5..10 {
+            registry.record_recovery_job(1, 0.7, now + i);
+        }
+        assert_eq!(
+            registry.recovery_status(1, now + 10),
+            RecoveryStatus::Eligible
+        );
+
+        // Recover.
+        assert!(registry.attempt_recovery(1, now + 10));
+        assert_eq!(
+            registry.discipline_state(1, now + 10),
+            DisciplineState::GoodStanding
+        );
+    }
+
+    #[test]
+    fn probation_recovery_rejects_low_feedback() {
+        let mut registry = ReputationRegistry::new();
+        let now = 1_000_000;
+        registry.register_agent(1, now);
+
+        // Push into Probation.
+        for _ in 0..30 {
+            registry.submit_feedback(1, "operations", 0.25, now);
+        }
+
+        // 10 jobs but feedback too low (< 0.6).
+        for i in 0..10 {
+            registry.record_recovery_job(1, 0.4, now + i);
+        }
+        assert!(matches!(
+            registry.recovery_status(1, now + 10),
+            RecoveryStatus::FeedbackTooLow { .. }
+        ));
+        assert!(!registry.attempt_recovery(1, now + 10));
+    }
+
+    #[test]
+    fn suspension_recovery_requires_wait_stake_and_verification() {
+        let mut registry = ReputationRegistry::new();
+        let now = 1_000_000;
+        registry.register_agent(1, now);
+
+        // Force Suspended via override (simulates governance or automatic transition
+        // that persists beyond score recovery).
+        if let Some(agent) = registry.records.get_mut(&1) {
+            agent.discipline_override = Some(DisciplineState::Suspended);
+            agent.recovery.state_entered_at = now;
+        }
+        assert_eq!(
+            registry.discipline_state(1, now),
+            DisciplineState::Suspended
+        );
+
+        // Before 90 days: waiting period not met.
+        let before_90 = now + 80 * 24 * 3600;
+        assert!(matches!(
+            registry.recovery_status(1, before_90),
+            RecoveryStatus::WaitingPeriod { .. }
+        ));
+
+        // After 90 days but no stake.
+        let after_90 = now + 91 * 24 * 3600;
+        assert_eq!(
+            registry.recovery_status(1, after_90),
+            RecoveryStatus::NeedStake
+        );
+
+        // Post stake.
+        registry.post_recovery_stake(1);
+        assert_eq!(
+            registry.recovery_status(1, after_90),
+            RecoveryStatus::NeedVerification
+        );
+
+        // Pass verification.
+        registry.pass_verification_challenge(1);
+        assert_eq!(
+            registry.recovery_status(1, after_90),
+            RecoveryStatus::Eligible
+        );
+
+        // Recover.
+        assert!(registry.attempt_recovery(1, after_90));
+        assert_eq!(
+            registry.discipline_state(1, after_90),
+            DisciplineState::GoodStanding
+        );
+    }
+
+    #[test]
+    fn recovery_not_applicable_for_good_standing() {
+        let mut registry = ReputationRegistry::new();
+        let now = 1_000_000;
+        registry.register_agent(1, now);
+
+        assert_eq!(
+            registry.recovery_status(1, now),
+            RecoveryStatus::NotApplicable
         );
     }
 }

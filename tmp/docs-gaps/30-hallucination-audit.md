@@ -539,9 +539,13 @@ needed for the full vision.
 
 ### P2-12: Reputation recovery mechanisms
 
-- [ ] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` lines 128-141): Recovery from Probation requires 10 jobs with avg feedback >= 0.6. Recovery from Suspension requires 90-day wait + 2x domain stake + verification challenge.
-- **Code** (`crates/roko-chain/src/reputation_registry.rs`): Has `DisciplineState` enum but no recovery logic, no job counting for recovery, no verification challenge.
-- **Fix**: Implement recovery state machine with job counting and verification gates.
+- [x] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` lines 128-141): Recovery mechanisms.
+- **FIXED**: Implemented `RecoveryTracker` with full spec-aligned logic:
+  - Probation recovery: 10 jobs with avg feedback >= 0.6
+  - Suspension recovery: 90-day wait + recovery stake + verification challenge
+  - `RecoveryStatus` enum: Eligible/WaitingPeriod/NeedMoreJobs/FeedbackTooLow/NeedStake/NeedVerification
+  - `attempt_recovery()` restores to GoodStanding when all conditions met
+  - 4 tests covering probation recovery, low-feedback rejection, suspension recovery, and not-applicable
 
 ### P2-13: Governance amnesty for bans
 
