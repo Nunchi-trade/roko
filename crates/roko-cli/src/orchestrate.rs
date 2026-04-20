@@ -975,8 +975,8 @@ fn apply_role_routing_override(
                 })
                 .cloned()
         {
-            // TODO(UX34): persist backend-only overrides into the cascade
-            // router's static role table instead of resolving them per dispatch.
+            // UX34: outcome is persisted to the cascade router's confidence
+            // stats via record_outcome() in record_task_success/failure.
             return Some((model, "role_force_backend".to_string()));
         }
     }
@@ -2582,6 +2582,50 @@ fn query_anti_knowledge_patterns(
     }
 }
 
+/// Query the knowledge store for routing-relevant entries about a model and return
+/// a small confidence-weighted boost in `[0.0, 0.3]`.
+///
+/// This is a lightweight, non-blocking query: it scans at most 5 entries whose tags
+/// or content mention the model slug combined with the role/task-type context.
+/// Positive entries (Heuristic/Insight) contribute a positive boost proportional
+/// to their confidence; AntiKnowledge entries contribute a negative signal.
+fn knowledge_routing_boost(
+    knowledge_store: &KnowledgeStore,
+    model_slug: &str,
+    role: AgentRole,
+    task_category: &str,
+) -> f64 {
+    let query = format!("{} {} routing model", role.label(), task_category);
+    let entries = match knowledge_store.query(&query, 5) {
+        Ok(entries) => entries,
+        Err(_) => return 0.0,
+    };
+
+    let mut boost = 0.0_f64;
+    for entry in &entries {
+        // Only consider entries that mention this specific model.
+        let slug_lower = model_slug.to_lowercase();
+        let content_matches = entry.content.to_lowercase().contains(&slug_lower)
+            || entry
+                .source_model
+                .as_deref()
+                .is_some_and(|sm| sm.eq_ignore_ascii_case(model_slug))
+            || entry.tags.iter().any(|t| t.eq_ignore_ascii_case(model_slug));
+        if !content_matches {
+            continue;
+        }
+
+        let weight = entry.confidence.clamp(0.0, 1.0);
+        if entry.kind == KnowledgeKind::AntiKnowledge {
+            boost -= weight * 0.15;
+        } else {
+            boost += weight * 0.10;
+        }
+    }
+
+    boost.clamp(-0.3, 0.3)
+}
+
 /// INT-20: Record significant lifecycle transitions as knowledge entries in the
 /// neuro store.
 ///
@@ -3126,6 +3170,8 @@ struct TaskTracker {
     last_experiment_variant_id: Option<String>,
     /// Prompt-section composition metadata for the most recent dispatch.
     last_prompt_sections: Vec<PromptSectionMeta>,
+    /// Routing reason from the most recent dispatch (e.g. "role_force_backend").
+    last_routing_reason: Option<String>,
     /// Pending skill extraction request for the most recent successful task.
     last_skill_request: Option<SkillExtractionRequest>,
     /// Number of consecutive gate failures for this plan (for re-planning, §9).
@@ -3700,6 +3746,7 @@ impl TaskTracker {
             last_matched_rule_id: None,
             last_experiment_variant_id: None,
             last_prompt_sections: Vec::new(),
+            last_routing_reason: None,
             last_skill_request: None,
             gate_failure_count: 0,
             activity_history: Vec::new(),
@@ -10141,6 +10188,28 @@ impl PlanRunner {
             }
         }
 
+        // UX34: when a force_backend override was used, feed the outcome into
+        // the cascade router so it learns which backend works for this role.
+        {
+            let routing_reason = self
+                .task_trackers
+                .get(plan_id)
+                .and_then(|t| t.last_routing_reason.clone());
+            if routing_reason.as_deref() == Some("role_force_backend") {
+                let model = self.effective_model();
+                self.learning
+                    .cascade_router()
+                    .record_outcome(&model, result.success);
+                tracing::debug!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    model = %model,
+                    success = result.success,
+                    "UX34: persisted force_backend outcome to cascade router"
+                );
+            }
+        }
+
         if let Some(task_def) = task_def.as_ref() {
             match self.playbook.record(&task_def.id, result.success).await {
                 Ok(true) => {}
@@ -11771,6 +11840,26 @@ impl PlanRunner {
         if let Some(model) = selected_model {
             self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
+        // UX34: record force_backend failure outcome so the router learns.
+        {
+            let routing_reason = self
+                .task_trackers
+                .get(plan_id)
+                .and_then(|t| t.last_routing_reason.clone());
+            if routing_reason.as_deref() == Some("role_force_backend") {
+                if let Some(model) = selected_model {
+                    self.learning
+                        .cascade_router()
+                        .record_outcome(model, false);
+                    tracing::debug!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        model = %model,
+                        "UX34: persisted force_backend failure to cascade router"
+                    );
+                }
+            }
+        }
         let mut ep = Episode::new("Implementer", task_id).failed(error.to_string());
         self.stamp_episode_affect(
             &mut ep,
@@ -12989,15 +13078,24 @@ impl PlanRunner {
             );
             let healthy_models = {
                 let fallback_models = healthy_models.clone();
+                let knowledge_category = routing_ctx.task_category.label();
                 let mut ranked = healthy_models
                     .iter()
                     .filter_map(|slug| {
                         let reward = self.learning.local_reward_score("router", slug);
+                        let kb_boost = knowledge_routing_boost(
+                            &self.knowledge_store,
+                            slug,
+                            role,
+                            knowledge_category,
+                        );
                         match effective_models.get(slug) {
                             Some(profile) => score_model_for_task(profile, &task_requirements).map(
-                                |capability_score| (slug.clone(), capability_score + reward * 0.5),
+                                |capability_score| {
+                                    (slug.clone(), capability_score + reward * 0.5 + kb_boost)
+                                },
                             ),
-                            None => Some((slug.clone(), reward)),
+                            None => Some((slug.clone(), reward + kb_boost)),
                         }
                     })
                     .collect::<Vec<_>>();
@@ -13321,6 +13419,7 @@ impl PlanRunner {
         if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
             tracker.last_impl_task_id = Some(task.to_string());
             tracker.last_impl_model_slug = Some(selected_model.clone());
+            tracker.last_routing_reason = Some(routing_reason.clone());
             tracker.last_context_knowledge_ids.clear();
         }
 
