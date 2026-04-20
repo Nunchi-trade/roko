@@ -709,9 +709,13 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 - [x] **P0-22: Emotional consolidation bias lost** — FIXED: `emotional_consolidation_boost()` now implements McGaugh 2004 arousal-based priority: `boost *= 1.0 + arousal * 0.30` (up to 1.3x at max arousal). High-arousal episodes are consolidated with higher priority.
 
-- [ ] **P0-23: Life review pipeline lost** — Butler 1963: retrieve top-20 emotional memories, detect turning points (PAD distance 0.5), classify narrative arc (Redemptive/Contaminating/Progressive/Tragic/Stable per McAdams). Completely absent.
-  - Spec: bardo-backup/prd/03-daimon/ (mortality section)
-  - Code: not found
+- [x] **P0-23: Life review pipeline lost** — FIXED: Implemented `roko_daimon::life_review` module:
+  - `review()` pipeline: retrieve top-N memories by arousal, detect turning points, classify arc
+  - `TurningPoint`: PAD Euclidean distance > 0.5 between consecutive memories
+  - `NarrativeArc`: Redemptive/Contaminating/Progressive/Tragic/Stable per McAdams
+  - `EmotionalTrajectory`: start/end pleasure, mean PAD, turn counts
+  - `LifeReviewConfig`: top_memories (20), turning_point_threshold (0.5), min_arousal (0.3)
+  - 5 tests covering arousal selection, turning points, and all arc classifications
 
 - [ ] **P0-24: Behavioral phases (Camel/Lion/Child metamorphosis) lost** — Nietzsche three metamorphoses mapped to vitality. Replaced with generic BehavioralState enum.
   - Spec: bardo-backup/prd/03-daimon/

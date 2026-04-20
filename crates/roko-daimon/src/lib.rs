@@ -41,6 +41,9 @@ use std::collections::{HashMap, HashSet};
 
 /// Emergent goal structures -- goals that emerge from behavior patterns.
 pub mod goals;
+/// Life review pipeline: Butler 1963 emotional memory retrieval, turning
+/// point detection, and McAdams narrative arc classification (P0-23).
+pub mod life_review;
 mod phase2_stubs;
 /// Somatic TA integration: somatic marker bias for oracle predictions,
 /// IIT Phi metric, and PID synergy detection (TA-11).
