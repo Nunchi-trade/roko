@@ -340,7 +340,12 @@ port = 4567
             .expect("read body");
         let payload: ReloadResponse = serde_json::from_slice(&body).expect("parse reload response");
         assert!(payload.success);
-        assert!(payload.warnings.is_empty());
+        // [server] is a non-hot-reloadable section, so a restart warning is expected.
+        assert!(
+            payload.warnings.iter().any(|w| w.contains("server")),
+            "expected a restart warning for [server] change, got: {:?}",
+            payload.warnings
+        );
         assert!(!payload.timestamp.is_empty());
     }
 }

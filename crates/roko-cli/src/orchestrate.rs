@@ -77,13 +77,13 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, TestGate,
-    VerdictPublisher,
+    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, SearchHit,
+    SearchOracle, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     feedback_for_agent,
     gate_pipeline::GatePipeline,
     generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate},
-    llm_judge_gate::JudgePayload,
+    llm_judge_gate::{JudgeOracle, JudgePayload},
     payload::{BuildSystem, GatePayload},
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
@@ -336,8 +336,8 @@ async fn load_cfactor_source(workdir: &Path) -> Option<Arc<StaticCFactorSource>>
             gate_pass_rate: current.components.gate_pass_rate,
             turn_taking_equality: current.components.turn_taking_equality,
             social_perceptiveness: current.components.social_perceptiveness,
-            citation_reciprocity: 0.0, // TODO: wire from Bus citation tracker
-            delivery_rate: 0.0,        // TODO: wire from Bus delivery confirmation
+            citation_reciprocity: current.components.knowledge_integration_rate,
+            delivery_rate: current.components.information_flow_rate,
             hdc_diversity: current.components.hdc_diversity,
             episode_count: current.episode_count,
             top_positive_contributors,
@@ -3547,6 +3547,114 @@ impl GeneratedArtifactStore for FsGeneratedArtifactStore {
             return None;
         }
         std::fs::read(self.artifact_dir().join(relative)).ok()
+    }
+}
+
+// ─── Gate Oracle Adapters ────────────────────────────────────────────────
+
+/// Adapts [`PerplexitySearchClient`] to the [`SearchOracle`] trait expected
+/// by `FactCheckGate`. Each `search` call issues a single-query batch and
+/// maps results to [`SearchHit`]s.
+struct PerplexitySearchOracle {
+    client: PerplexitySearchClient,
+}
+
+impl PerplexitySearchOracle {
+    fn new(api_key: &str) -> Self {
+        Self {
+            client: PerplexitySearchClient::new(api_key),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchOracle for PerplexitySearchOracle {
+    async fn search(&self, query: &str) -> Result<Vec<SearchHit>, String> {
+        use roko_agent::perplexity::SearchQuery;
+        let q = SearchQuery {
+            query: query.to_string(),
+            ..Default::default()
+        };
+        let responses = self
+            .client
+            .search_batch(&[q])
+            .await
+            .map_err(|e| e.to_string())?;
+        let hits: Vec<SearchHit> = responses
+            .into_iter()
+            .flat_map(|resp| resp.results)
+            .map(|r| SearchHit { content: r.content })
+            .collect();
+        Ok(hits)
+    }
+}
+
+/// Adapts the agent dispatch infrastructure to the [`JudgeOracle`] trait
+/// expected by `LlmJudgeGate`. Spawns a lightweight agent that scores a
+/// code diff against a task description. The prompt instructs the agent to
+/// return a single floating-point score in `[0, 1]`.
+struct AgentJudgeOracle {
+    command: String,
+    exec_dir: PathBuf,
+    model: String,
+    timeout_ms: u64,
+    skip_permissions: bool,
+}
+
+#[async_trait::async_trait]
+impl JudgeOracle for AgentJudgeOracle {
+    async fn judge(&self, prompt: &str) -> Result<f32, String> {
+        let system = "You are a code quality judge. Read the task description and diff, \
+                      then output a single floating-point score between 0.0 and 1.0, \
+                      where 1.0 means the diff perfectly satisfies the task and 0.0 means \
+                      it does not at all. Output ONLY the numeric score, nothing else.";
+        let dispatch = run_prepared_agent(AgentRunConfig {
+            command: self.command.clone(),
+            exec_dir: self.exec_dir.clone(),
+            model: self.model.clone(),
+            role: "judge".to_string(),
+            timeout_ms: self.timeout_ms,
+            bare_mode: true,
+            effort: "low".to_string(),
+            system_prompt: system.to_string(),
+            allowed_tools_csv: String::new(),
+            mcp_config: None,
+            fallback_model: None,
+            env_vars: Vec::new(),
+            read_args: Vec::new(),
+            extra_args: Vec::new(),
+            resume_session: None,
+            prompt: prompt.to_string(),
+            skip_permissions: self.skip_permissions,
+        })
+        .await;
+
+        if !dispatch.result.success {
+            return Err(format!(
+                "judge agent failed: {}",
+                dispatch
+                    .result
+                    .output
+                    .body
+                    .as_text()
+                    .unwrap_or("unknown error")
+            ));
+        }
+
+        let text = dispatch
+            .result
+            .output
+            .body
+            .as_text()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        // Parse the first float found in the output.
+        let score: f32 = text
+            .split_whitespace()
+            .find_map(|tok| tok.parse::<f32>().ok())
+            .ok_or_else(|| format!("judge returned non-numeric output: {text}"))?;
+        Ok(score.clamp(0.0, 1.0))
     }
 }
 
@@ -13497,6 +13605,33 @@ impl PlanRunner {
             );
         }
 
+        // ── Inject enrichment artifacts as task context ───────────────
+        // If the enriching phase already ran for this plan, read the
+        // generated artifacts (brief, research, decomposition, etc.) and
+        // inject them so every dispatched agent benefits from the pre-
+        // computed analysis.
+        {
+            let enrichment_context = render_enrichment_artifact_context(&plan_dir, false);
+            if !enrichment_context.is_empty() {
+                let enrichment_section = apply_section_effectiveness_to_prompt_section(
+                    PromptSection::new("enrichment-artifacts", &enrichment_context)
+                        .with_priority(SectionPriority::Low)
+                        .with_placement(Placement::Middle)
+                        .with_hard_cap(4_096)
+                        .with_bidder(AttentionBidder::Research),
+                    &role_key,
+                    &section_effectiveness,
+                )
+                .into_signal()
+                .map_err(|e| anyhow!("enrichment-artifacts section: {e}"))?;
+                sections.push(enrichment_section);
+                tracing::info!(
+                    "[orchestrate] injected enrichment artifacts context ({} chars)",
+                    enrichment_context.len()
+                );
+            }
+        }
+
         sections.push(task_section);
 
         // ── Tool manifest for non-CLI agents ──────────────────────────
@@ -15105,7 +15240,66 @@ impl PlanRunner {
         if rung == 3 || rung > 6 {
             config.source_roots = Some(vec![self.workdir.clone()]);
         }
+        // GATE-07: wire fact-check oracle from Perplexity when API key is present (rung 5).
+        if rung == 5 || rung > 6 {
+            if let Some(api_key) = std::env::var("PERPLEXITY_API_KEY").ok() {
+                config.fact_check_oracle =
+                    Some(Arc::new(PerplexitySearchOracle::new(&api_key)));
+            }
+        }
+        // GATE-07: wire LLM judge oracle from agent dispatch infrastructure (rung 6).
+        if rung == 6 || rung > 6 {
+            // Prefer a lightweight model for judging; fall back to the configured default.
+            let judge_model = self
+                .config
+                .agent
+                .model
+                .as_deref()
+                .unwrap_or("claude-sonnet-4-20250514")
+                .to_string();
+            config.llm_judge_oracle = Some(Arc::new(AgentJudgeOracle {
+                command: self.config.agent.command.clone(),
+                exec_dir: self.workdir.clone(),
+                model: judge_model,
+                timeout_ms: 120_000,
+                skip_permissions: true, // internal gate call, no user approval needed
+            }));
+        }
         config
+    }
+
+    /// Enrich a [`RungExecutionConfig`] with plan-specific runtime state that
+    /// requires I/O (exec_dir, task definition) and therefore can't live in
+    /// the synchronous [`gate_rung_config`].
+    fn enrich_rung_config(
+        &self,
+        config: &mut RungExecutionConfig,
+        rung: u32,
+        exec_dir: Option<&Path>,
+        task_def: Option<&crate::task_parser::TaskDef>,
+    ) {
+        // GATE-07: wire generated_test_artifacts for rung 4.
+        if (rung == 4 || rung > 6) && config.generated_test_artifacts.is_none() {
+            if let Some(dir) = exec_dir {
+                config.generated_test_artifacts = self.generated_test_store_for(dir);
+            }
+        }
+        // GATE-07: wire integration_test_pattern from task verify steps for rung 6.
+        if (rung == 6 || rung > 6) && config.integration_test_pattern.is_none() {
+            if let Some(td) = task_def {
+                // Look for a verify step with phase "integration" and use its command.
+                if let Some(step) = td
+                    .verify
+                    .iter()
+                    .find(|v| v.phase.eq_ignore_ascii_case("integration"))
+                {
+                    config.integration_test_pattern = Some(step.command.clone());
+                    if let Some(dir) = exec_dir {
+                        config.integration_build_system = Some(BuildSystem::detect(dir));
+                    }
+                }
+            }
+        }
     }
 
     async fn run_gate_rung(
@@ -15196,15 +15390,25 @@ impl PlanRunner {
             fact_check_signal,
             llm_judge_signal,
         };
+
+        // GATE-07: Resolve exec_dir for generated-test and integration wiring.
+        let exec_dir = if let Some(pid) = plan_id {
+            self.ensure_plan_exec_dir(pid).await.ok()
+        } else {
+            Some(self.workdir.clone())
+        };
+
         if rung > 6 {
             let mut verdicts = Vec::new();
             for current_rung in 0..=6 {
-                let config = self.gate_rung_config(plan_id, current_rung);
+                let mut config = self.gate_rung_config(plan_id, current_rung);
+                self.enrich_rung_config(&mut config, current_rung, exec_dir.as_deref(), task_def);
                 verdicts.extend(run_rung(payload_sig, &ctx, current_rung, &inputs, &config).await);
             }
             return verdicts;
         }
-        let config = self.gate_rung_config(plan_id, rung);
+        let mut config = self.gate_rung_config(plan_id, rung);
+        self.enrich_rung_config(&mut config, rung, exec_dir.as_deref(), task_def);
         run_rung(payload_sig, &ctx, rung, &inputs, &config).await
     }
 

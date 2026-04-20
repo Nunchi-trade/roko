@@ -208,6 +208,13 @@ pub fn config_diff(old: &RokoConfig, new: &RokoConfig) -> Vec<ConfigChange> {
         });
     }
 
+    if old.server != new.server {
+        changes.push(ConfigChange {
+            section: ConfigSection::Other("server".into()),
+            summary: "server configuration changed (requires restart)".into(),
+        });
+    }
+
     changes
 }
 

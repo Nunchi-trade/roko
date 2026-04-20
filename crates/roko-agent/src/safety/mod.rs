@@ -403,6 +403,11 @@ impl SafetyLayer {
             monitor.check_as_tool_error(call)?;
         }
 
+        // 8. Declarative agent contract (invariants + governance rules).
+        self.contract
+            .check_pre_execution(call, ctx)
+            .map_err(|violation| violation.into_tool_error())?;
+
         Ok(())
     }
 
