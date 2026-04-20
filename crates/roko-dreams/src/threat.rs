@@ -110,6 +110,19 @@ pub fn threat_warning_entries_with_floor(
             "fmea".to_string(),
             "fta".to_string(),
         ];
+        // Transfer the most intense emotional tag from source episodes.
+        // This ensures the emotional retrieval boost is active for
+        // affect-congruent knowledge surfacing (P0-25).
+        let emotional_tag = episodes
+            .iter()
+            .filter(|ep| source_episodes.contains(&ep.id))
+            .filter_map(|ep| ep.emotional_tag.as_ref())
+            .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+            .cloned();
+        let emotional_provenance = emotional_tag
+            .as_ref()
+            .map(roko_neuro::EmotionalProvenance::from_tag);
+
         out.push(KnowledgeEntry {
             id: threat_entry_id(&threat, &source_episodes, &tags),
             kind: KnowledgeKind::Warning,
@@ -126,8 +139,8 @@ pub fn threat_warning_entries_with_floor(
             created_at,
             half_life_days: KnowledgeKind::Warning.default_half_life_days(),
             tier: KnowledgeTier::Working,
-            emotional_tag: None,
-            emotional_provenance: None,
+            emotional_tag,
+            emotional_provenance,
             hdc_vector: None,
 
             confirmation_count: 0,

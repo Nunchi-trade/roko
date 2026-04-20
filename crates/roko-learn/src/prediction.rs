@@ -388,6 +388,305 @@ impl PredictionCalibrationSource for CalibrationTracker {
     }
 }
 
+// ─── Residual Corrector (P0-33) ─────────────────────────────────────
+
+/// Circular buffer with O(1) streaming statistics for residual tracking.
+///
+/// Maintains the last `capacity` residuals with running sum and sum-of-squares
+/// for instant mean, variance, and coverage computation.
+#[derive(Debug, Clone)]
+pub struct ResidualBuffer {
+    /// Ring buffer of residual values.
+    values: Vec<f64>,
+    /// Next write position (wraps around).
+    write_idx: usize,
+    /// Number of values inserted (may exceed capacity; used for stats).
+    count: usize,
+    /// Running sum for O(1) mean.
+    sum: f64,
+    /// Running sum of squares for O(1) variance.
+    sum_sq: f64,
+    /// Buffer capacity (default 200).
+    capacity: usize,
+}
+
+impl ResidualBuffer {
+    /// Create a new buffer with the given capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(capacity),
+            write_idx: 0,
+            count: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Push a new residual value. O(1) amortized.
+    pub fn push(&mut self, value: f64) {
+        if self.values.len() < self.capacity {
+            // Buffer not yet full — just append.
+            self.values.push(value);
+            self.sum += value;
+            self.sum_sq += value * value;
+        } else {
+            // Buffer full — overwrite oldest and adjust running sums.
+            let old = self.values[self.write_idx];
+            self.sum -= old;
+            self.sum_sq -= old * old;
+            self.values[self.write_idx] = value;
+            self.sum += value;
+            self.sum_sq += value * value;
+        }
+        self.write_idx = (self.write_idx + 1) % self.capacity;
+        self.count += 1;
+    }
+
+    /// Number of values currently in the buffer (up to capacity).
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Mean residual. O(1).
+    pub fn mean(&self) -> f64 {
+        if self.values.is_empty() {
+            0.0
+        } else {
+            self.sum / self.values.len() as f64
+        }
+    }
+
+    /// Variance of residuals. O(1).
+    pub fn variance(&self) -> f64 {
+        let n = self.values.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mean = self.mean();
+        (self.sum_sq / n as f64 - mean * mean).max(0.0)
+    }
+
+    /// Standard deviation of residuals.
+    pub fn std_dev(&self) -> f64 {
+        self.variance().sqrt()
+    }
+
+    /// Fraction of residuals within the given half-width of zero.
+    ///
+    /// Coverage = count(|residual| <= half_width) / total.
+    pub fn coverage_rate(&self, half_width: f64) -> f64 {
+        if self.values.is_empty() {
+            return 0.0;
+        }
+        let within = self.values.iter().filter(|r| r.abs() <= half_width).count();
+        within as f64 / self.values.len() as f64
+    }
+
+    /// Total number of values ever inserted (including overwritten).
+    pub fn total_count(&self) -> usize {
+        self.count
+    }
+}
+
+impl Default for ResidualBuffer {
+    fn default() -> Self {
+        Self::new(200)
+    }
+}
+
+/// A corrected prediction with adjusted center and interval width.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrectedPrediction {
+    /// Bias-corrected center value.
+    pub center: f64,
+    /// Calibrated interval half-width.
+    pub half_width: f64,
+    /// Original uncorrected center.
+    pub original_center: f64,
+    /// Original uncorrected half-width.
+    pub original_half_width: f64,
+    /// Difficulty weight applied to this prediction.
+    pub difficulty_weight: f64,
+}
+
+/// Residual corrector for predictive foraging.
+///
+/// Maintains per-key circular buffers and applies two corrections:
+/// 1. **Bias correction**: `center -= mean_residual` (removes systematic over/under-prediction)
+/// 2. **Interval calibration**: adjusts width toward target coverage (default 85%)
+///
+/// Keys are `(category, context, metric)` triples, allowing different correction
+/// parameters for different types of predictions.
+///
+/// Per spec (agent-chain-new/08-predictive-foraging.md lines 186-267).
+#[derive(Debug, Clone)]
+pub struct ResidualCorrector {
+    /// Per-key residual buffers.
+    buffers: HashMap<(String, String, String), ResidualBuffer>,
+    /// Target coverage rate for interval calibration.
+    pub target_coverage: f64,
+    /// Buffer capacity per key.
+    pub buffer_capacity: usize,
+    /// Width adjustment rate (how fast intervals expand/contract).
+    pub width_adjust_rate: f64,
+    /// Coverage tolerance band (hysteresis to prevent oscillation).
+    pub coverage_tolerance: f64,
+}
+
+impl ResidualCorrector {
+    /// Create a new corrector with default settings (85% target coverage, 200-element buffers).
+    pub fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+            target_coverage: 0.85,
+            buffer_capacity: 200,
+            width_adjust_rate: 0.05,
+            coverage_tolerance: 0.05,
+        }
+    }
+
+    /// Create with custom target coverage.
+    pub fn with_target_coverage(mut self, target: f64) -> Self {
+        self.target_coverage = target.clamp(0.5, 0.99);
+        self
+    }
+
+    /// Create with custom buffer capacity.
+    pub fn with_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.buffer_capacity = capacity.max(10);
+        self
+    }
+
+    /// Record a residual observation for the given key.
+    ///
+    /// `residual = predicted - actual` (positive = overprediction).
+    pub fn record(&mut self, category: &str, context: &str, metric: &str, residual: f64) {
+        let key = (
+            category.to_string(),
+            context.to_string(),
+            metric.to_string(),
+        );
+        let buffer = self
+            .buffers
+            .entry(key)
+            .or_insert_with(|| ResidualBuffer::new(self.buffer_capacity));
+        buffer.push(residual);
+    }
+
+    /// Get the buffer for a specific key, if it exists.
+    pub fn buffer(&self, category: &str, context: &str, metric: &str) -> Option<&ResidualBuffer> {
+        let key = (
+            category.to_string(),
+            context.to_string(),
+            metric.to_string(),
+        );
+        self.buffers.get(&key)
+    }
+
+    /// Apply bias correction and interval calibration to a prediction.
+    ///
+    /// Returns a `CorrectedPrediction` with adjusted center and width.
+    pub fn correct(
+        &self,
+        category: &str,
+        context: &str,
+        metric: &str,
+        center: f64,
+        half_width: f64,
+    ) -> CorrectedPrediction {
+        let key = (
+            category.to_string(),
+            context.to_string(),
+            metric.to_string(),
+        );
+
+        let Some(buffer) = self.buffers.get(&key) else {
+            // No history — return uncorrected.
+            return CorrectedPrediction {
+                center,
+                half_width,
+                original_center: center,
+                original_half_width: half_width,
+                difficulty_weight: 1.0,
+            };
+        };
+
+        if buffer.len() < 5 {
+            // Not enough data for reliable correction.
+            return CorrectedPrediction {
+                center,
+                half_width,
+                original_center: center,
+                original_half_width: half_width,
+                difficulty_weight: 1.0,
+            };
+        }
+
+        // Step 1: Bias correction — subtract mean residual from center.
+        let bias = buffer.mean();
+        let corrected_center = center - bias;
+
+        // Step 2: Interval width calibration toward target coverage.
+        let coverage = buffer.coverage_rate(half_width);
+        let corrected_width = if coverage < self.target_coverage - self.coverage_tolerance {
+            // Under-covering: widen interval.
+            half_width * (1.0 + self.width_adjust_rate)
+        } else if coverage > self.target_coverage + self.coverage_tolerance * 2.0 {
+            // Over-covering: narrow interval (slower than widening to be conservative).
+            half_width * (1.0 - self.width_adjust_rate)
+        } else {
+            half_width
+        };
+
+        // Step 3: Difficulty weighting.
+        // Higher variance = harder to predict = higher weight for this observation.
+        let category_variance = buffer.variance();
+        let novelty = 1.0 / (buffer.len() as f64).sqrt(); // Fewer samples = more novel
+        let tightness = if corrected_width > 0.0 {
+            1.0 / corrected_width
+        } else {
+            1.0
+        };
+        let difficulty_weight = (category_variance * novelty * tightness).clamp(0.1, 10.0);
+
+        CorrectedPrediction {
+            center: corrected_center,
+            half_width: corrected_width.max(0.01),
+            original_center: center,
+            original_half_width: half_width,
+            difficulty_weight,
+        }
+    }
+
+    /// Number of tracked keys.
+    pub fn key_count(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Total observations across all buffers.
+    pub fn total_observations(&self) -> usize {
+        self.buffers.values().map(|b| b.total_count()).sum()
+    }
+
+    /// Mean bias for a specific key (0.0 if not tracked).
+    pub fn mean_bias(&self, category: &str, context: &str, metric: &str) -> f64 {
+        self.buffer(category, context, metric)
+            .map_or(0.0, ResidualBuffer::mean)
+    }
+}
+
+impl Default for ResidualCorrector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn tail_window(values: &[f64]) -> &[f64] {
     let window = values.len().clamp(1, 16);
     &values[values.len() - window..]
@@ -447,7 +746,8 @@ fn fallback_stage_probability(record: &RoutingDecisionLog) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CalibrationTracker, PredictionRecord, fallback_stage_probability, selected_probability,
+        CalibrationTracker, PredictionRecord, ResidualBuffer, ResidualCorrector,
+        fallback_stage_probability, selected_probability,
     };
     use crate::routing_log::{CandidateEntry, RoutingDecisionLog};
 
@@ -700,5 +1000,117 @@ mod tests {
             tracker.record_residual("model-a", "impl", 0.15);
         }
         assert!((tracker.arithmetic_corrector("model-a", "impl") - 0.15).abs() < 1e-10);
+    }
+
+    // ─── ResidualBuffer tests ───────────────────────────────────────
+
+    #[test]
+    fn residual_buffer_basic_stats() {
+        let mut buf = ResidualBuffer::new(100);
+        for i in 0..10 {
+            buf.push(i as f64);
+        }
+        assert_eq!(buf.len(), 10);
+        assert!((buf.mean() - 4.5).abs() < 1e-10);
+        assert!(buf.variance() > 0.0);
+    }
+
+    #[test]
+    fn residual_buffer_wraps_correctly() {
+        let mut buf = ResidualBuffer::new(5);
+        for i in 0..10 {
+            buf.push(i as f64);
+        }
+        // Should only contain [5, 6, 7, 8, 9].
+        assert_eq!(buf.len(), 5);
+        assert!((buf.mean() - 7.0).abs() < 1e-10);
+        assert_eq!(buf.total_count(), 10);
+    }
+
+    #[test]
+    fn residual_buffer_coverage() {
+        let mut buf = ResidualBuffer::new(100);
+        // 85 values within 0.5, 15 outside.
+        for _ in 0..85 {
+            buf.push(0.3);
+        }
+        for _ in 0..15 {
+            buf.push(2.0);
+        }
+        let cov = buf.coverage_rate(0.5);
+        assert!(
+            (cov - 0.85).abs() < 0.01,
+            "coverage should be ~0.85, got {cov}"
+        );
+    }
+
+    // ─── ResidualCorrector tests ────────────────────────────────────
+
+    #[test]
+    fn corrector_removes_systematic_bias() {
+        let mut corrector = ResidualCorrector::new();
+
+        // Consistently overpredicting by 0.1.
+        for _ in 0..50 {
+            corrector.record("impl", "plan-a", "success", 0.1);
+        }
+
+        let result = corrector.correct("impl", "plan-a", "success", 0.8, 0.2);
+        // Center should be reduced by ~0.1 (the mean bias).
+        assert!(
+            (result.center - 0.7).abs() < 0.02,
+            "bias correction should reduce center: got {}",
+            result.center
+        );
+    }
+
+    #[test]
+    fn corrector_widens_undercovering_intervals() {
+        let mut corrector = ResidualCorrector::new();
+
+        // Large residuals that exceed the interval → undercovering.
+        for _ in 0..50 {
+            corrector.record("impl", "plan-a", "cost", 0.5); // Way outside typical interval
+        }
+
+        let result = corrector.correct("impl", "plan-a", "cost", 1.0, 0.2);
+        assert!(
+            result.half_width > 0.2,
+            "should widen interval when undercovering: got {}",
+            result.half_width
+        );
+    }
+
+    #[test]
+    fn corrector_returns_uncorrected_for_unknown_key() {
+        let corrector = ResidualCorrector::new();
+        let result = corrector.correct("unknown", "ctx", "metric", 0.5, 0.1);
+        assert!((result.center - 0.5).abs() < f64::EPSILON);
+        assert!((result.half_width - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn corrector_difficulty_weight_increases_with_variance() {
+        let mut low_var = ResidualCorrector::new();
+        let mut high_var = ResidualCorrector::new();
+
+        // Low variance residuals.
+        for _ in 0..50 {
+            low_var.record("a", "b", "c", 0.01);
+        }
+        // High variance residuals.
+        for i in 0..50 {
+            high_var.record("a", "b", "c", if i % 2 == 0 { 0.5 } else { -0.5 });
+        }
+
+        let low = low_var.correct("a", "b", "c", 0.5, 0.3);
+        let high = high_var.correct("a", "b", "c", 0.5, 0.3);
+
+        assert!(
+            high.difficulty_weight > low.difficulty_weight,
+            "high variance should have higher difficulty: {} vs {}",
+            high.difficulty_weight,
+            low.difficulty_weight
+        );
     }
 }

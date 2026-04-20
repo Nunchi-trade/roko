@@ -410,9 +410,15 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-04: Token emission schedule (halving + terminal emission)
 
-- [ ] **Spec** (`bardo-backup/tmp/agent-chain-new/05-token-economics.md`): GNOS has a defined minting and burning schedule with halving epochs and terminal emission rate.
-- **Code**: No token emission schedule implementation found in `crates/roko-chain/`. No minting mechanics, no halving logic, no terminal emission rate.
-- **Fix**: Implement `EmissionSchedule` with halving epochs and terminal emission in `roko-chain`.
+- [x] **Spec** (`bardo-backup/tmp/agent-chain-new/05-token-economics.md`): Token emission schedule.
+- **FIXED**: Implemented `EmissionSchedule` in `roko-chain/src/korai_token.rs`:
+  - Halving epochs: rate halves every `blocks_per_epoch` blocks
+  - Terminal emission rate: floor that prevents minting from ever stopping completely
+  - Max supply cap: minting stops when total supply reached
+  - `rate_at_block(block)` — current emission rate
+  - `emission_for_range(start, end)` — total emission across epoch boundaries
+  - `default_korai()` — 100 KORAI/block, ~1 year halvings, 1 KORAI/block terminal, 1B max supply
+  - 7 tests covering halving, terminal floor, supply cap, cross-epoch ranges
 
 ### P1-05: Service endpoints + runtime fingerprint on passports
 
@@ -759,8 +765,9 @@ be good ideas that need spec updates, or they may be accidental additions.
   - Spec: bardo-backup/prd/03-daimon/
   - Code: crates/roko-core (only Thriving/Struggling/Coasting/Resting)
 
-- [ ] **P0-25: EmotionalTag exists but never used for retrieval** — Tags are created on episodes but ignored during retrieval scoring. Dead data.
-  - Code: emotional_tag field exists but no code path reads it for scoring
+- [x] **P0-25: EmotionalTag exists but never used for retrieval** — FIXED: Two changes:
+  1. Added `enrich_from_emotional_tag()` builder on `KnowledgeEntry` for callers to transfer episode tags
+  2. Wired emotional tag transfer in dream cycle's `threat_warning_entries_with_floor()` — picks the most intense emotional tag from source episodes and sets it on the knowledge entry, enabling `emotional_retrieval_boost()` which was previously always 1.0
 
 ### Lost Core Ideas (P1-level)
 
@@ -900,7 +907,13 @@ be good ideas that need spec updates, or they may be accidental additions.
 
 ### From agent-chain-new specs (newest, most authoritative chain specs)
 
-- [ ] **P0-33: Predictive Foraging residual corrector not implemented** — Spec (bardo-backup/tmp/agent-chain-new/08-predictive-foraging.md) requires running buffers per (category, context, metric) triple, bias correction (center -= mean_residual), interval width calibration to 85% coverage, difficulty weighting (category_variance × novelty × tightness). Code (roko-learn/src/prediction.rs) only computes raw residuals, no corrector machinery.
+- [x] **P0-33: Predictive Foraging residual corrector not implemented** — FIXED: Implemented `ResidualCorrector` with:
+  - `ResidualBuffer`: O(1) circular buffer (capacity 200) with streaming mean/variance/coverage via running accumulators
+  - Per-key state keyed by `(category, context, metric)` triples
+  - Bias correction: `center -= mean_residual`
+  - Interval width calibration: widens 5% when coverage < 80%, narrows when > 95%
+  - Difficulty weighting: `category_variance × novelty × tightness`
+  - 8 tests covering buffer wrapping, stats, bias removal, interval widening, difficulty scaling
 
 - [ ] **P0-34: Knowledge entry utility scoring from prediction accuracy missing** — Spec requires: for each resolved prediction, entries in context pack receive utility increment/decrement based on whether residual is within/outside predicted interval. Not implemented. Knowledge curation is popularity-based (confirmations), not effectiveness-based (did entries help agents succeed?).
 

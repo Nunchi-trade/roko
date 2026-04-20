@@ -429,3 +429,229 @@ mod tests {
         assert_eq!(token.transfers().len(), 2);
     }
 }
+
+// ─── Emission Schedule (P1-04) ──────────────────────────────────────
+
+/// KORAI token emission schedule with halving epochs and terminal emission.
+///
+/// Per spec (agent-chain-new/05-token-economics.md): KORAI has a defined
+/// minting schedule where emission rate halves every epoch, asymptotically
+/// approaching a terminal emission rate that provides perpetual low-level
+/// incentives.
+///
+/// ## Schedule
+///
+/// ```text
+/// Epoch 0:  base_emission_per_block (e.g., 100 KORAI/block)
+/// Epoch 1:  base / 2
+/// Epoch 2:  base / 4
+/// ...
+/// Epoch N:  max(base / 2^N, terminal_rate)
+/// ```
+///
+/// The terminal emission rate (e.g., 1 KORAI/block) ensures the system
+/// never fully stops minting, providing ongoing incentives for validators
+/// and workers even after most supply is distributed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmissionSchedule {
+    /// Base emission per block at epoch 0.
+    pub base_emission_per_block: f64,
+    /// Number of blocks per halving epoch.
+    pub blocks_per_epoch: u64,
+    /// Minimum emission per block (never goes below this).
+    pub terminal_rate: f64,
+    /// Maximum total supply (minting stops when reached).
+    pub max_supply: f64,
+    /// Total minted so far.
+    pub total_minted: f64,
+}
+
+impl EmissionSchedule {
+    /// Create a new emission schedule.
+    pub fn new(
+        base_emission_per_block: f64,
+        blocks_per_epoch: u64,
+        terminal_rate: f64,
+        max_supply: f64,
+    ) -> Self {
+        Self {
+            base_emission_per_block: base_emission_per_block.max(0.0),
+            blocks_per_epoch: blocks_per_epoch.max(1),
+            terminal_rate: terminal_rate.max(0.0),
+            max_supply: max_supply.max(0.0),
+            total_minted: 0.0,
+        }
+    }
+
+    /// Default KORAI emission schedule.
+    ///
+    /// - 100 KORAI/block initial rate
+    /// - 2,628,000 blocks/epoch (~1 year at 12s blocks)
+    /// - 1 KORAI/block terminal rate
+    /// - 1 billion max supply
+    pub fn default_korai() -> Self {
+        Self::new(
+            100.0,           // 100 KORAI per block
+            2_628_000,       // ~1 year per halving epoch
+            1.0,             // 1 KORAI/block terminal
+            1_000_000_000.0, // 1B max supply
+        )
+    }
+
+    /// Compute which epoch a given block number falls in.
+    pub fn epoch_for_block(&self, block: u64) -> u64 {
+        block / self.blocks_per_epoch
+    }
+
+    /// Emission rate at a given block number.
+    ///
+    /// Rate halves each epoch, floored at terminal_rate.
+    /// Returns 0 if max supply has been reached.
+    pub fn rate_at_block(&self, block: u64) -> f64 {
+        if self.total_minted >= self.max_supply {
+            return 0.0;
+        }
+
+        let epoch = self.epoch_for_block(block);
+        let halving_factor = 0.5_f64.powi(epoch as i32);
+        let rate = self.base_emission_per_block * halving_factor;
+        rate.max(self.terminal_rate)
+    }
+
+    /// Compute total emission for a range of blocks.
+    ///
+    /// Handles epoch boundaries correctly by computing each epoch's
+    /// contribution separately.
+    pub fn emission_for_range(&self, start_block: u64, end_block: u64) -> f64 {
+        if start_block >= end_block {
+            return 0.0;
+        }
+
+        let mut total = 0.0;
+        let mut block = start_block;
+
+        while block < end_block {
+            let epoch = self.epoch_for_block(block);
+            let epoch_end = (epoch + 1) * self.blocks_per_epoch;
+            let range_end = end_block.min(epoch_end);
+            let blocks_in_range = range_end - block;
+
+            let rate = self.rate_at_block(block);
+            total += rate * blocks_in_range as f64;
+            block = range_end;
+        }
+
+        // Cap at remaining supply.
+        let remaining = (self.max_supply - self.total_minted).max(0.0);
+        total.min(remaining)
+    }
+
+    /// Record minted tokens (call after actual minting).
+    pub fn record_mint(&mut self, amount: f64) {
+        self.total_minted += amount;
+    }
+
+    /// Fraction of max supply that has been minted.
+    pub fn supply_fraction(&self) -> f64 {
+        if self.max_supply <= 0.0 {
+            return 1.0;
+        }
+        (self.total_minted / self.max_supply).min(1.0)
+    }
+
+    /// Remaining supply available for minting.
+    pub fn remaining_supply(&self) -> f64 {
+        (self.max_supply - self.total_minted).max(0.0)
+    }
+
+    /// Estimated blocks until max supply is exhausted at current rate.
+    pub fn estimated_blocks_remaining(&self, current_block: u64) -> Option<u64> {
+        let rate = self.rate_at_block(current_block);
+        if rate <= 0.0 {
+            return None;
+        }
+        let remaining = self.remaining_supply();
+        Some((remaining / rate) as u64)
+    }
+}
+
+#[cfg(test)]
+mod emission_tests {
+    use super::*;
+
+    #[test]
+    fn default_korai_schedule() {
+        let schedule = EmissionSchedule::default_korai();
+        assert!((schedule.base_emission_per_block - 100.0).abs() < f64::EPSILON);
+        assert!((schedule.terminal_rate - 1.0).abs() < f64::EPSILON);
+        assert_eq!(schedule.blocks_per_epoch, 2_628_000);
+    }
+
+    #[test]
+    fn rate_halves_each_epoch() {
+        let schedule = EmissionSchedule::new(100.0, 1000, 0.1, 1e9);
+
+        assert!((schedule.rate_at_block(0) - 100.0).abs() < f64::EPSILON); // Epoch 0
+        assert!((schedule.rate_at_block(1000) - 50.0).abs() < f64::EPSILON); // Epoch 1
+        assert!((schedule.rate_at_block(2000) - 25.0).abs() < f64::EPSILON); // Epoch 2
+        assert!((schedule.rate_at_block(3000) - 12.5).abs() < f64::EPSILON); // Epoch 3
+    }
+
+    #[test]
+    fn terminal_rate_is_floor() {
+        let schedule = EmissionSchedule::new(100.0, 100, 5.0, 1e9);
+
+        // After many halvings, rate should not go below terminal.
+        let rate = schedule.rate_at_block(10_000); // Epoch 100 → 100 * 0.5^100 ≈ 0
+        assert!(
+            (rate - 5.0).abs() < f64::EPSILON,
+            "rate should be terminal 5.0, got {rate}"
+        );
+    }
+
+    #[test]
+    fn emission_stops_at_max_supply() {
+        let mut schedule = EmissionSchedule::new(100.0, 1000, 1.0, 500.0);
+        schedule.record_mint(500.0);
+
+        assert_eq!(schedule.rate_at_block(0), 0.0);
+        assert!((schedule.supply_fraction() - 1.0).abs() < f64::EPSILON);
+        assert!((schedule.remaining_supply()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn emission_for_range_spans_epochs() {
+        let schedule = EmissionSchedule::new(100.0, 100, 1.0, 1e9);
+
+        // First 100 blocks (epoch 0): 100 * 100 = 10,000
+        let e0 = schedule.emission_for_range(0, 100);
+        assert!((e0 - 10_000.0).abs() < 1.0);
+
+        // Blocks 100-200 (epoch 1): 50 * 100 = 5,000
+        let e1 = schedule.emission_for_range(100, 200);
+        assert!((e1 - 5_000.0).abs() < 1.0);
+
+        // Span across boundary: blocks 50-150
+        // 50 blocks at 100/block + 50 blocks at 50/block = 5000 + 2500 = 7500
+        let cross = schedule.emission_for_range(50, 150);
+        assert!((cross - 7_500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn emission_capped_by_remaining_supply() {
+        let mut schedule = EmissionSchedule::new(100.0, 1000, 1.0, 200.0);
+        schedule.record_mint(150.0);
+
+        // Only 50 remaining, even though 100 blocks * 100/block = 10,000
+        let emission = schedule.emission_for_range(0, 100);
+        assert!((emission - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn estimated_blocks_remaining() {
+        let schedule = EmissionSchedule::new(10.0, 1000, 1.0, 1000.0);
+        let est = schedule.estimated_blocks_remaining(0).unwrap();
+        // 1000 supply / 10 per block = 100 blocks
+        assert_eq!(est, 100);
+    }
+}

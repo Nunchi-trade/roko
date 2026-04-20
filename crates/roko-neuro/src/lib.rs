@@ -460,6 +460,23 @@ impl KnowledgeEntry {
         self.emotional_consolidation_boost()
     }
 
+    /// Enrich this entry with emotional metadata from a source episode.
+    ///
+    /// Call this when creating knowledge entries from episodes to ensure
+    /// the emotional retrieval boost is active (otherwise `emotional_tag`
+    /// stays `None` and the boost is always 1.0).
+    ///
+    /// If the entry already has an `emotional_tag`, this is a no-op.
+    pub fn enrich_from_emotional_tag(&mut self, tag: EmotionalTag) {
+        if self.emotional_tag.is_none() {
+            // Build provenance from the tag if not already present.
+            if self.emotional_provenance.is_none() {
+                self.emotional_provenance = Some(EmotionalProvenance::from_tag(&tag));
+            }
+            self.emotional_tag = Some(tag);
+        }
+    }
+
     /// NEURO-10: Apply a reinforcement signal to bump this entry's balance.
     ///
     /// The bump is `signal.base_value() * (1.0 + novelty)` where `novelty`
